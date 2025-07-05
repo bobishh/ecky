@@ -512,8 +512,26 @@ fn default_macro_dialect() -> MacroDialect {
 }
 
 pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
-    let trimmed = macro_code.trim();
-    if trimmed.starts_with("(model") || trimmed.starts_with("(scene") {
+    // Strip ;; comment lines so a header like
+    //   ;; Disable for build123d/FreeCAD fallback.
+    // does not cause an Ecky (.ecky) source to be misclassified as Build123d.
+    let stripped: String = macro_code
+        .lines()
+        .filter(|line| !line.trim_start().starts_with(";;"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = stripped.trim();
+    // Ecky source is Lisp-like: (model ...), (scene ...), or (define-component ...)
+    // can appear anywhere (define-component blocks often precede the model block).
+    // Check for these forms before the build123d keyword, because Ecky comments
+    // or strings may contain "build123d".
+    let is_ecky = trimmed.starts_with("(model")
+        || trimmed.starts_with("(scene")
+        || trimmed.starts_with("(define-component")
+        || trimmed.contains("\n(model ")
+        || trimmed.contains("\n(scene ")
+        || trimmed.contains("\n(define-component ");
+    if is_ecky {
         MacroDialect::EckyIrV0
     } else if trimmed.contains("build123d") {
         MacroDialect::Build123d
@@ -4569,5 +4587,33 @@ mod tests {
         let decoded: RuntimeCapabilities =
             serde_json::from_value(legacy).expect("deserialize legacy capability alias");
         assert!(decoded.ecky_rust.available);
+    }
+
+    #[test]
+    fn infer_macro_dialect_ecky_with_comment_header() {
+        // Ecky source that starts with ;; comments and contains the word
+        // "build123d" inside those comments must still be inferred as
+        // EckyIrV0, not Build123d.
+        let code = ";; iPhone 17e reinforced TPU case
+\
+;; wall-pattern requires the direct Rust/OCCT backend.
+\
+;; Disable for build123d/FreeCAD fallback.
+
+\
+(define-component frame
+  ((number w 31.0))
+  (box w w 1))
+
+\
+(model
+  (params
+    (number x 10))
+  (part main (box x x x)))";
+        assert_eq!(
+            infer_macro_dialect_from_code(code),
+            MacroDialect::EckyIrV0,
+            "Ecky source with ;; comment header containing 'build123d' must infer EckyIrV0"
+        );
     }
 }

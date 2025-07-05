@@ -442,28 +442,17 @@ pub(super) fn resolve_macro_authoring_context(
 
 pub(super) fn first_version_authoring_context(
     state: &AppState,
-    macro_dialect: &MacroDialect,
+    _macro_dialect: &MacroDialect,
     requested_geometry_backend: Option<crate::models::GeometryBackend>,
 ) -> MacroAuthoringContext {
-    match infer_macro_source_language(macro_dialect) {
-        crate::models::SourceLanguage::LegacyPython => MacroAuthoringContext {
-            source_language: crate::models::SourceLanguage::EckyIrV0,
-            geometry_backend: requested_geometry_backend.unwrap_or_else(|| {
-                let fallback = configured_authoring_context(state);
-                fallback.geometry_backend
-            }),
-        },
-        crate::models::SourceLanguage::Build123d => MacroAuthoringContext {
-            source_language: crate::models::SourceLanguage::Build123d,
-            geometry_backend: crate::models::GeometryBackend::Build123d,
-        },
-        crate::models::SourceLanguage::EckyIrV0 => {
-            let fallback = configured_authoring_context(state);
-            MacroAuthoringContext {
-                source_language: crate::models::SourceLanguage::EckyIrV0,
-                geometry_backend: requested_geometry_backend.unwrap_or(fallback.geometry_backend),
-            }
-        }
+    // Config owns the source language and geometry backend for new threads.
+    // The macro_dialect is only used for param parsing downstream, not for
+    // backend selection — config is authoritative so switching the engine
+    // in settings immediately affects every new render.
+    let fallback = configured_authoring_context(state);
+    MacroAuthoringContext {
+        source_language: fallback.source_language,
+        geometry_backend: requested_geometry_backend.unwrap_or(fallback.geometry_backend),
     }
 }
 

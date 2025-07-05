@@ -171,19 +171,54 @@ fn macro_replacement_authoring_context_rejects_source_language_change() {
 }
 
 #[test]
+fn first_version_authoring_context_uses_config_defaults_for_new_thread() {
+    let conn = crate::db::init_db(&test_db_path("mcp-first-version-config")).expect("db");
+    let mut config = test_config();
+    config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
+    config.default_geometry_backend = crate::models::GeometryBackend::EckyRust;
+    let state = AppState::new(config, None, conn);
+
+    // A new thread has no versions — the first render must use the config's
+    // source language and geometry backend, NOT derive them from the macro
+    // dialect (which can be misinferred from comment text).
+    let base = first_version_authoring_context(&state, &MacroDialect::EckyIrV0, None);
+    assert_eq!(
+        base.source_language,
+        crate::models::SourceLanguage::EckyIrV0
+    );
+    assert_eq!(base.geometry_backend, crate::models::GeometryBackend::EckyRust);
+
+    // Explicit per-render request still wins.
+    let base_explicit = first_version_authoring_context(
+        &state,
+        &MacroDialect::EckyIrV0,
+        Some(crate::models::GeometryBackend::Freecad),
+    );
+    assert_eq!(
+        base_explicit.source_language,
+        crate::models::SourceLanguage::EckyIrV0
+    );
+    assert_eq!(
+        base_explicit.geometry_backend,
+        crate::models::GeometryBackend::Freecad
+    );
+}
+
+#[test]
 fn first_version_authoring_context_rejects_raw_freecad_by_policy() {
     let conn = crate::db::init_db(&test_db_path("mcp-first-version-policy")).expect("db");
-    let state = AppState::new(test_config(), None, conn);
+    let mut config = test_config();
+    // Simulate a user who has switched to Ecky native — the modern default.
+    config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
+    config.default_geometry_backend = crate::models::GeometryBackend::EckyRust;
+    let state = AppState::new(config, None, conn);
     let base = first_version_authoring_context(&state, &MacroDialect::Legacy, None);
 
     assert_eq!(
         base.source_language,
         crate::models::SourceLanguage::EckyIrV0
     );
-    assert_eq!(
-        base.geometry_backend,
-        crate::models::GeometryBackend::Freecad
-    );
+    assert_eq!(base.geometry_backend, crate::models::GeometryBackend::EckyRust);
 
     let err = resolve_macro_authoring_context(
         base.source_language,
