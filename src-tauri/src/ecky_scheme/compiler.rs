@@ -130,6 +130,10 @@ pub fn try_compile_to_legacy_source(source: &str) -> Option<AppResult<String>> {
 pub fn try_compile_to_core_program(source: &str) -> Option<AppResult<CoreProgram>> {
     match compile_to_core_program(source) {
         Ok(program) => Some(Ok(program)),
+        // Parse errors (syntax) are genuine and must never be swallowed by
+        // legacy fallback — they mean the source is malformed, not that it
+        // uses a different dialect.
+        Err(err) if err.kind == CompilerErrorKind::Parse => Some(Err(core_err_to_app(err))),
         Err(err) if should_fallback_to_legacy(source, &core_err_to_app(err.clone())) => None,
         Err(err) => Some(Err(core_err_to_app(err))),
     }
@@ -398,6 +402,7 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
     let mut in_string = false;
     let mut escaped = false;
     let mut in_comment = false;
+    let mut open_paren_offsets: Vec<usize> = Vec::new();
 
     for (offset, ch) in source.char_indices() {
         if in_comment {
@@ -424,6 +429,7 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
             '(' => {
                 depth += 1;
                 list_forms += 1;
+                open_paren_offsets.push(offset);
                 if depth > ECKY_SOURCE_MAX_PAREN_DEPTH {
                     return Err(source_budget_error(format!(
                         "Ecky source nesting depth is too high before Steel lowering: depth {} at byte {} exceeds limit {}.",
@@ -441,10 +447,11 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
                 if depth == 0 {
                     return Err(CompilerError::new(
                         CompilerErrorKind::Parse,
-                        format!("Unexpected `)` at byte {offset}."),
+                        format!("Unexpected `)` at byte {offset} (line {}).", byte_to_line(source, offset)),
                     ));
                 }
                 depth -= 1;
+                open_paren_offsets.pop();
             }
             _ => {}
         }
@@ -458,13 +465,34 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
     }
 
     if depth != 0 {
+        let last_open = open_paren_offsets.last().copied().unwrap_or(0);
+        let line = byte_to_line(source, last_open);
+        let context = source_line_at(source, last_open);
         return Err(CompilerError::new(
             CompilerErrorKind::Parse,
-            "Unclosed `(` in Ecky source.",
+            format!(
+                "Unclosed `(` in Ecky source. {depth} unmatched opening paren(s). Last unclosed `(` at line {line}: {context}",
+            ),
         ));
     }
 
     Ok(())
+}
+
+fn byte_to_line(source: &str, byte_offset: usize) -> usize {
+    source[..byte_offset.min(source.len())]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count()
+        + 1
+}
+
+fn source_line_at(source: &str, byte_offset: usize) -> String {
+    let start = source[..byte_offset.min(source.len())].rfind('\n').map_or(0, |p| p + 1);
+    let end = source[byte_offset.min(source.len())..]
+        .find('\n')
+        .map_or(source.len(), |p| byte_offset + p);
+    source[start..end].trim().to_string()
 }
 
 fn source_budget_error(message: String) -> CompilerError {
