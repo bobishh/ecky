@@ -141,10 +141,7 @@ pub fn probe_direct_occt_runtime(app: &dyn PathResolver) -> RuntimeBackendCapabi
         let output = Command::new(&runner).arg("--version").output();
         return match output {
             Ok(output) if output.status.success() => available_capability(
-                format!(
-                    "Runner ready at {}; native-required op support is verified at render time.",
-                    runner.display()
-                ),
+                "available".to_string(),
                 Some(runner.display().to_string()),
             ),
             Ok(output) => unavailable_capability(format!(
@@ -663,11 +660,7 @@ mod tests {
         let capability = probe_direct_occt_runtime(&resolver);
 
         assert!(capability.available, "{capability:?}");
-        assert!(capability.detail.contains("Runner ready"), "{capability:?}");
-        assert!(
-            capability.detail.contains("verified at render time"),
-            "{capability:?}"
-        );
+        assert_eq!(capability.detail, "available", "{capability:?}");
         assert_eq!(
             capability.path.as_deref(),
             Some(runner.to_string_lossy().as_ref())
@@ -715,7 +708,7 @@ mod tests {
         let capability = probe_direct_occt_runtime(&resolver);
 
         assert!(capability.available, "{capability:?}");
-        assert!(capability.detail.contains("Runner ready"), "{capability:?}");
+        assert_eq!(capability.detail, "available", "{capability:?}");
     }
 
     #[test]

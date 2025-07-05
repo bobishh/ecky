@@ -708,25 +708,23 @@ fn direct_occt_plan_diagnostic(macro_code: &str, parameters: &DesignParams) -> R
     let macro_code = macro_code.to_string();
     let parameters = parameters.clone();
     run_direct_occt_with_large_stack("plan", move || {
-        let Some(program) = crate::ecky_scheme::try_compile_to_core_program(&macro_code) else {
-            return Err(AppError::validation(
-                "Source did not compile to Core IR before Direct OCCT planning.",
-            ));
+        let program = match crate::ecky_scheme::try_compile_to_core_program(&macro_code) {
+            Some(Ok(program)) => program,
+            Some(Err(err)) => {
+                return Err(AppError::validation(format_nested_app_error(&err)));
+            }
+            None => {
+                return Err(AppError::validation(
+                    "Source did not compile to Core IR.",
+                ));
+            }
         };
-        let program = program.map_err(|err| {
-            AppError::validation(format!(
-                "Core IR compile failed before Direct OCCT planning. {}",
-                format_nested_app_error(&err)
-            ))
-        })?;
         crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, &parameters)
             .map(|_| ())
     })
     .map_err(|err| {
         let message = format_nested_app_error(&err);
-        if message.starts_with("Source did not compile")
-            || message.starts_with("Core IR compile failed")
-        {
+        if message.starts_with("Source did not compile") {
             message
         } else {
             format!("Direct OCCT planner rejected model. {}", message)
@@ -909,13 +907,14 @@ fn render_model_unlocked(
     };
     let result = match dispatch_backend {
         GeometryBackend::EckyRust => {
-            // Explicit native requests are Direct OCCT only: real OCCT success
-            // or the real OCCT error, never a silently degraded mesh artifact.
-            // The one sanctioned mesh path is a redirect: a Build123d/FreeCAD
-            // request whose source uses mesh-only ops (`wall-pattern`) lands
-            // here because the Rust mesh renderer is the designated handler
-            // for those ops.
-            let mesh_only_redirect = resolved_backend != GeometryBackend::EckyRust;
+            // Direct OCCT handles BRep ops; the Rust mesh renderer handles
+            // mesh-only ops like `wall-pattern`. When a source uses mesh-only
+            // ops, the mesh renderer is the designated handler regardless of
+            // which config backend was selected.
+            let uses_mesh_only_ops = effective_dialect == MacroDialect::EckyIrV0
+                && crate::ecky_ir::source_uses_ecky_rust_only_cad_ops(macro_code);
+            let mesh_only_redirect =
+                resolved_backend != GeometryBackend::EckyRust || uses_mesh_only_ops;
             let uses_direct_occt_required = effective_dialect == MacroDialect::EckyIrV0
                 && crate::ecky_ir::source_uses_direct_occt_required_cad_ops(macro_code);
             let direct_occt_plan_detail = if effective_dialect == MacroDialect::EckyIrV0 {
@@ -947,13 +946,9 @@ fn render_model_unlocked(
                 Ok(None) => {
                     if uses_direct_occt_required {
                         Err(attach_diagnostic_context(
-                            unsupported_required_direct_occt_error(format!(
-                            "EckyRust/direct OCCT did not produce a native bundle for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`. {}",
-                            direct_occt_capability
-                                .as_ref()
-                                .map(|capability| capability.detail.as_str())
-                                .unwrap_or("Direct OCCT availability not probed.")
-                            )),
+                            unsupported_required_direct_occt_error(
+                                "Direct OCCT did not produce a native bundle for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`.".to_string()
+                            ),
                             Some(macro_code),
                             parameters,
                             Some("export:direct-occt"),
@@ -965,31 +960,12 @@ fn render_model_unlocked(
                             previous_manifest,
                             app,
                         )
-                    } else if direct_occt_ready && direct_occt_plannable {
-                        Err(attach_diagnostic_context(
-                            blocked_direct_occt_native_error(format!(
-                            "Direct OCCT runtime reported ready and planned this model, but native export returned no bundle. {}",
-                            direct_occt_capability
-                                .as_ref()
-                                .map(|capability| capability.detail.as_str())
-                                .unwrap_or("Direct OCCT availability not probed.")
-                            )),
-                            Some(macro_code),
-                            parameters,
-                            Some("export:direct-occt"),
-                        ))
                     } else {
                         let planner_detail = direct_occt_plan_detail
                             .as_deref()
                             .unwrap_or("Direct OCCT planner reason unavailable.");
                         Err(attach_diagnostic_context(
-                            blocked_direct_occt_native_error(format!(
-                            "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}. Planner blocker: {planner_detail} Next step: switch backend away from native for unsupported ops or rewrite source to a Direct OCCT-supported shape plan. {}",
-                            direct_occt_capability
-                                .as_ref()
-                                .map(|capability| capability.detail.as_str())
-                                .unwrap_or("Direct OCCT availability not probed.")
-                            )),
+                            blocked_direct_occt_native_error(planner_detail.to_string()),
                             Some(macro_code),
                             parameters,
                             Some("plan:direct-occt"),
@@ -1024,15 +1000,13 @@ fn render_model_unlocked(
                     } else {
                         let mut details = if direct_occt_ready && direct_occt_plannable {
                             String::from(
-                                "Direct OCCT runtime reported ready and planned this model, but native export failed.",
+                                "Direct OCCT native render failed.",
                             )
                         } else {
-                            let planner_detail = direct_occt_plan_detail
+                            direct_occt_plan_detail
                                 .as_deref()
-                                .unwrap_or("Direct OCCT planner reason unavailable.");
-                            format!(
-                                "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}. Planner blocker: {planner_detail} Next step: switch backend away from native for unsupported ops or rewrite source to a Direct OCCT-supported shape plan."
-                            )
+                                .unwrap_or("Direct OCCT render failed.")
+                                .to_string()
                         };
                         details.push(' ');
                         details.push_str(&err.to_string());
@@ -2093,12 +2067,12 @@ endsolid sample
     }
 
     #[tokio::test]
-    async fn ecky_rust_request_fails_closed_when_direct_occt_cannot_export_operation() {
+    async fn ecky_rust_request_routes_wall_pattern_to_mesh_renderer() {
         let root = temp_root("direct-fallback");
         let resolver = TestResolver { root: root.clone() };
         let state = test_state(&root);
 
-        let err = render_model(
+        let bundle = render_model(
             r#"(model
                 (part body
                   (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
@@ -2111,23 +2085,15 @@ endsolid sample
             &resolver,
         )
         .await
-        .expect_err("native backend should fail closed without Direct OCCT support");
+        .expect("native backend should route wall-pattern to mesh renderer");
 
-        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
         assert!(
-            diagnostic.contains("Direct OCCT")
-                || diagnostic.contains("Native backend requires Direct OCCT"),
-            "unexpected error: {err:?}"
+            !bundle.preview_stl_path.is_empty(),
+            "mesh renderer must produce a preview STL: {bundle:?}"
         );
         assert!(
-            diagnostic.contains("wall-pattern")
-                || diagnostic.contains("Planner blocker")
-                || diagnostic.contains("Direct OCCT adapter first surface does not support"),
-            "planner reason must be surfaced: {err:?}"
-        );
-        assert!(
-            !diagnostic.contains("not supported by current `.ecky` runtime"),
-            "must not fall through to mesh runtime: {err:?}"
+            !bundle.viewer_assets.is_empty(),
+            "mesh renderer must produce viewer assets: {bundle:?}"
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -2222,7 +2188,7 @@ exit 5
         assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
         let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
         assert!(
-            diagnostic.contains("Direct OCCT") && diagnostic.contains("No mesh fallback"),
+            diagnostic.contains("Direct OCCT"),
             "unexpected error: {err:?}"
         );
 
@@ -2879,7 +2845,7 @@ exit 5
         assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
         let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
         assert!(
-            diagnostic.contains("Direct OCCT") && diagnostic.contains("No mesh fallback"),
+            diagnostic.contains("Direct OCCT"),
             "unexpected error: {err:?}"
         );
 
@@ -2924,7 +2890,7 @@ exit 5
         assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
         let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
         assert!(
-            diagnostic.contains("Direct OCCT") && diagnostic.contains("No mesh fallback"),
+            diagnostic.contains("Direct OCCT"),
             "unexpected error: {err:?}"
         );
 
