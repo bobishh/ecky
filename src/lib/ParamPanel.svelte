@@ -94,7 +94,7 @@
   }
 
   function update(key, value) {
-    localParams[key] = value;
+    localParams = { ...localParams, [key]: value };
     if (live && onchange) {
       onchange({ [key]: value });
     }
@@ -150,7 +150,7 @@
     {#if !editing}
       <div class="live-apply-group">
         <label class="live-toggle" title="Update geometry immediately on every change">
-          <input type="checkbox" bind:checked={live} />
+          <input class="ui-checkbox" type="checkbox" bind:checked={live} />
           <span>LIVE</span>
         </label>
         <button 
@@ -197,7 +197,7 @@
               />
             </div>
             <label class="freeze-toggle" title="Freeze value and move to bottom">
-              <input type="checkbox" bind:checked={field.freezed} />
+              <input class="ui-checkbox ui-checkbox-sm" type="checkbox" bind:checked={field.freezed} />
               <span>❄️</span>
             </label>
             <button class="btn btn-xs btn-ghost" onclick={() => removeField(i)}>✕</button>
@@ -263,6 +263,7 @@
             <div class="checkbox-group">
               <input 
                 id={field.key}
+                class="ui-checkbox"
                 type="checkbox" 
                 checked={localParams[field.key]}
                 onchange={(e) => update(field.key, e.target.checked)}
@@ -403,6 +404,57 @@
     font-size: 0.65rem;
     color: var(--secondary);
     font-weight: bold;
+  }
+
+  .ui-checkbox {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    display: inline-grid;
+    place-content: center;
+    cursor: pointer;
+    margin: 0;
+  }
+
+  .ui-checkbox::after {
+    content: '';
+    width: 8px;
+    height: 8px;
+    background: var(--secondary);
+    transform: scale(0);
+    transition: transform 0.12s ease-in-out;
+  }
+
+  .ui-checkbox:checked {
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 16%, var(--bg-200));
+  }
+
+  .ui-checkbox:checked::after {
+    transform: scale(1);
+  }
+
+  .ui-checkbox:focus-visible {
+    outline: 1px solid var(--primary);
+    outline-offset: 1px;
+  }
+
+  .ui-checkbox:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .ui-checkbox-sm {
+    width: 12px;
+    height: 12px;
+  }
+
+  .ui-checkbox-sm::after {
+    width: 6px;
+    height: 6px;
   }
 
   .auto-field {

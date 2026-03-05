@@ -1,5 +1,15 @@
 use crate::models::{Engine, DesignOutput};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IntentClassification {
+    pub intent: String, // "question" | "design"
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub response: String,
+}
 
 pub async fn generate_design(engine: &Engine, prompt: &String, images: Vec<String>) -> Result<DesignOutput, String> {
     let client = reqwest::Client::builder()
@@ -12,6 +22,79 @@ pub async fn generate_design(engine: &Engine, prompt: &String, images: Vec<Strin
         "gemini" => call_gemini(&client, engine, prompt, images).await,
         _ => Err(format!("Unsupported provider: {}", engine.provider)),
     }
+}
+
+pub async fn classify_intent(engine: &Engine, prompt: &str, context: Option<&str>) -> Result<IntentClassification, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let light_model = if engine.light_model.trim().is_empty() {
+        engine.model.as_str()
+    } else {
+        engine.light_model.as_str()
+    };
+
+    let classifier_system = r#"Return ONLY JSON with fields:
+1) "intent": "question" or "design"
+2) "confidence": number in [0, 1]
+3) "response": text reply.
+
+Choose "question" when user asks to explain, inspect, compare, clarify, or asks "why/how/what" about existing design/code.
+Choose "design" when user asks to create/change/add/remove geometry, parameters, dimensions, connectors, or regenerate output.
+
+If intent is "question", "response" must directly answer the user's question in 1-4 concise sentences using the provided current design context when relevant.
+If intent is "design", "response" must be one short routing sentence for the assistant bubble.
+"#;
+
+    let classifier_user = if let Some(context) = context.filter(|c| !c.trim().is_empty()) {
+        format!("CURRENT DESIGN CONTEXT:\n{}\n\nUSER REQUEST:\n{}", context, prompt)
+    } else {
+        format!("USER REQUEST:\n{}", prompt)
+    };
+
+    let raw: serde_json::Value = match engine.provider.as_str() {
+        "openai" | "ollama" => {
+            call_openai_json_object(
+                &client,
+                engine,
+                light_model,
+                classifier_system,
+                &classifier_user,
+            )
+            .await?
+        }
+        "gemini" => {
+            call_gemini_json_object(
+                &client,
+                engine,
+                light_model,
+                classifier_system,
+                &classifier_user,
+            )
+            .await?
+        }
+        _ => return Err(format!("Unsupported provider: {}", engine.provider)),
+    };
+
+    let mut parsed: IntentClassification =
+        serde_json::from_value(raw).map_err(|e| format!("Intent parse error: {}", e))?;
+    parsed.intent = parsed.intent.to_lowercase();
+    if parsed.intent != "question" && parsed.intent != "design" {
+        parsed.intent = "design".to_string();
+    }
+    if !(0.0..=1.0).contains(&parsed.confidence) {
+        parsed.confidence = 0.5;
+    }
+    if parsed.response.trim().is_empty() {
+        parsed.response = if parsed.intent == "question" {
+            "Thinking not deep enough. Treating this as a question.".to_string()
+        } else {
+            "Intent looks like a design change request.".to_string()
+        };
+    }
+    Ok(parsed)
 }
 
 pub async fn list_models(provider: &str, api_key: &str, base_url: &str) -> Result<Vec<String>, String> {
@@ -93,6 +176,49 @@ async fn call_openai_compatible(client: &reqwest::Client, engine: &Engine, promp
     
     let clean_content = clean_json_text(content);
     serde_json::from_str::<DesignOutput>(&clean_content).map_err(|_| content.to_string())
+}
+
+async fn call_openai_json_object(
+    client: &reqwest::Client,
+    engine: &Engine,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str
+) -> Result<serde_json::Value, String> {
+    let url = if engine.base_url.is_empty() {
+        "https://api.openai.com/v1/chat/completions".to_string()
+    } else {
+        engine.base_url.clone()
+    };
+
+    let payload = json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt }
+        ],
+        "response_format": { "type": "json_object" }
+    });
+
+    let mut request = client.post(&url).json(&payload);
+    if !engine.api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", engine.api_key));
+    }
+
+    let response = request.send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(format!("OpenAI Error {}: {}", status, body));
+    }
+
+    let res_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let content = res_json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("Model response had no text content")?;
+    let clean_content = clean_json_text(content);
+    serde_json::from_str::<serde_json::Value>(&clean_content).map_err(|_| content.to_string())
 }
 
 async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String, images: Vec<String>) -> Result<DesignOutput, String> {
@@ -184,6 +310,49 @@ async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String,
         eprintln!("[GEMINI DEBUG] Raw text was: {}", text);
         text.to_string()
     })
+}
+
+async fn call_gemini_json_object(
+    client: &reqwest::Client,
+    engine: &Engine,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str
+) -> Result<serde_json::Value, String> {
+    let url = if engine.base_url.is_empty() {
+        format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model, engine.api_key
+        )
+    } else {
+        engine.base_url.clone()
+    };
+
+    let payload = json!({
+        "systemInstruction": {
+            "parts": [{ "text": system_prompt }]
+        },
+        "contents": [{
+            "role": "user",
+            "parts": [{ "text": user_prompt }]
+        }],
+        "generationConfig": { "responseMimeType": "application/json" }
+    });
+
+    let response = client.post(&url).json(&payload).send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(format!("Gemini Error {}: {}", status, body));
+    }
+
+    let res_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let text = res_json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .ok_or("Gemini response had no text content")?;
+    let clean_text = clean_json_text(text);
+    serde_json::from_str::<serde_json::Value>(&clean_text).map_err(|_| text.to_string())
 }
 
 async fn fetch_openai_models(client: &reqwest::Client, api_key: &str, base_url: &str) -> Result<Vec<String>, String> {

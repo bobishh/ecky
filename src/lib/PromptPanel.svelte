@@ -26,7 +26,7 @@
       const selected = await open({
         multiple: true,
         filters: [
-          { name: 'Images & CAD', extensions: ['png', 'jpg', 'jpeg', 'stl', 'step', 'stp'] }
+          { name: 'Images, CAD & Macros', extensions: ['png', 'jpg', 'jpeg', 'stl', 'step', 'stp', 'py', 'fcmacro'] }
         ]
       });
 
@@ -68,7 +68,11 @@
   }
 
   const currentVersion = $derived(currentVersionIndex >= 0 ? versions[currentVersionIndex] : null);
-  const currentUserMsg = $derived(currentVersion ? messages.find(m => m.timestamp <= currentVersion.timestamp && m.role === 'user') : null);
+  const promptTrail = $derived.by(() => {
+    if (!currentVersion) return [];
+    return messages.filter(m => m.role === 'user' && m.timestamp <= currentVersion.timestamp);
+  });
+  const currentUserMsg = $derived(promptTrail.length > 0 ? promptTrail[promptTrail.length - 1] : null);
 
   let detailsOpen = $state(false);
 
@@ -112,8 +116,20 @@
       <details class="version-details" bind:open={detailsOpen}>
         <summary>Prompt Details: {currentVersion.output.title}</summary>
         <div class="details-content">
-          <div class="meta">Requested: {formatDate(currentUserMsg.timestamp)}</div>
+          <div class="meta">Latest request in this version path: {formatDate(currentUserMsg.timestamp)}</div>
           <div class="query">"{currentUserMsg.content}"</div>
+          {#if promptTrail.length > 1}
+            <div class="trail-header">Prompt Trail</div>
+            <div class="trail-list">
+              {#each promptTrail as msg, i}
+                <div class="trail-item">
+                  <span class="trail-index">#{i + 1}</span>
+                  <span class="trail-time">{formatDate(msg.timestamp)}</span>
+                  <div class="trail-query">"{msg.content}"</div>
+                </div>
+              {/each}
+            </div>
+          {/if}
         </div>
       </details>
     {/if}
@@ -357,6 +373,46 @@
     color: var(--text);
     white-space: pre-wrap;
     font-style: italic;
+  }
+
+  .trail-header {
+    margin-top: 10px;
+    margin-bottom: 6px;
+    font-size: 0.62rem;
+    color: var(--secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: bold;
+  }
+
+  .trail-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .trail-item {
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    padding: 6px 8px;
+  }
+
+  .trail-index {
+    font-size: 0.6rem;
+    color: var(--secondary);
+    margin-right: 8px;
+  }
+
+  .trail-time {
+    font-size: 0.6rem;
+    color: var(--text-dim);
+  }
+
+  .trail-query {
+    margin-top: 4px;
+    font-size: 0.7rem;
+    color: var(--text);
+    white-space: pre-wrap;
   }
 
   .input-area {

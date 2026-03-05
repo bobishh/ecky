@@ -17,6 +17,7 @@
   let macroCode = $state('');
   let stlUrl = $state(null);
   let isGenerating = $state(false);
+  let isFreecadRunning = $state(false);
   let status = $state('System ready.');
   let error = $state(null);
   
@@ -50,69 +51,116 @@
   let cookingStartTime = $state(null);
   let cookingElapsed = $state(0);
   let cookingPhrase = $state('');
-  let phraseKey = $state(0);
+  let isLightReasoning = $state(false);
+  let isQuestionFlow = $state(false);
   let cookingInterval = $state(null);
   let phraseInterval = $state(null);
   let audioCtx = $state(null);
   let audioNodes = $state([]);
-  let isMuted = $state(false);
   let masterGain = $state(null);
   let nowSeconds = $state(Math.floor(Date.now() / 1000));
+  let isBooting = $state(true);
+  let bootStartTime = $state(Date.now());
+  let bootElapsed = $state(0);
+  let bootInterval = $state(null);
   let dismissedBubbleText = $state('');
+  let lastAdvisorBubble = $state('');
+  let lastAdvisorQuestion = $state('');
+  let lastAssistantMessageId = $state(null);
+  let generationInFlight = $state(false);
 
   const COOKING_PHRASES = [
-    "Heating up the tensor cores...",
-    "Defrosting the latent space...",
-    "Rotating the probability distribution...",
-    "Microwaving your geometry at 2.45 GHz...",
-    "BRep nuclei reaching critical temperature...",
-    "Agitating water molecules in the weight matrix...",
-    "Turntable spinning at 6 RPM (Revolutions Per Manifold)...",
-    "Reticulating splines in a convection field...",
-    "CAUTION: Contents may be topologically hot...",
-    "Nuking the mesh from orbit...",
-    "Electromagnetic radiation applied to your prompt...",
-    "Standing wave pattern detected in the hidden layers...",
-    "The magnetron hums its ancient song...",
-    "Popcorn mode: ON (kernel expansion imminent)...",
-    "Do NOT open the door. The geometry is still raw inside...",
-    "Detected sparks. Someone put foil in the embeddings...",
-    "Thawing frozen parameters from last session...",
-    "Power level: MAXIMUM OVERTHINKING...",
+    "Packing constraints and dimensions into a fresh build plan.",
+    "Tracing connector paths and locking wall thickness.",
+    "Balancing tolerances so parts print clean and snap right.",
+    "Checking manifold integrity and shell continuity.",
+    "Projecting cuts and bores onto stable reference axes.",
+    "Compiling a safer BRep sequence for FreeCAD execution.",
+    "Revalidating clearances to avoid accidental intersections.",
+    "Aligning param ranges with current geometry intent.",
+    "Running edge cleanup before final mesh output.",
+    "Rebuilding topology around your latest parameter edits.",
+    "Testing the draft against connector and ring constraints.",
+    "Folding your prompt into deterministic CAD operations.",
+    "Re-centering the model logic for repeatable renders.",
+    "Converting design intent into executable macro steps.",
+    "Running a precision pass on radii and offsets.",
+    "Preparing an STL with cleaner normals and contours.",
+    "Applying a no-leak sanity check on mating surfaces.",
+    "Synchronizing UI controls with generated geometry state.",
+    "Cross-checking dimensions against the active version.",
+    "Running a small overthinking cycle for better reliability.",
     "Timer set to ∞. Please wait.",
-    "Your CAD is being irradiated with good vibes...",
-    "Cooking instructions unclear. Generating anyway...",
+    "Your CAD is being irradiated with good vibes.",
+    "Cooking instructions unclear. Generating anyway.",
     "The mesh will be hot. Use oven mitts when handling normals.",
+    "Calibrating final passes...",
+    "Keeping features printable while preserving your intent."
   ];
 
-  function pickPhrase() {
-    cookingPhrase = COOKING_PHRASES[Math.floor(Math.random() * COOKING_PHRASES.length)];
-    phraseKey++;
+  const LIGHT_REASONING_PHRASES = [
+    "Thinking not deep enough. Deciding if this is a question or a geometry change.",
+    "Running a quick intent check before heavy generation.",
+    "Light pass active: classifying request type.",
+    "Checking whether to explain or to modify geometry.",
+    "Fast reasoning mode: routing request."
+  ];
+
+  function pickPhrase(pool = COOKING_PHRASES) {
+    cookingPhrase = pool[Math.floor(Math.random() * pool.length)];
   }
 
-  function toggleMute() {
-    isMuted = !isMuted;
-    if (masterGain) {
-      masterGain.gain.value = isMuted ? 0 : 1;
-    }
+  function startBootPreloader() {
+    isBooting = true;
+    bootStartTime = Date.now();
+    bootElapsed = 0;
+    clearInterval(bootInterval);
+    bootInterval = setInterval(() => {
+      bootElapsed = Math.floor((Date.now() - bootStartTime) / 1000);
+    }, 1000);
+  }
+
+  function stopBootPreloader() {
+    isBooting = false;
+    clearInterval(bootInterval);
+    bootInterval = null;
+  }
+
+  function startLightReasoning() {
+    isLightReasoning = true;
+    clearInterval(phraseInterval);
+    phraseInterval = null;
+    pickPhrase(LIGHT_REASONING_PHRASES);
+    phraseInterval = setInterval(() => pickPhrase(LIGHT_REASONING_PHRASES), 2600);
+  }
+
+  function stopLightReasoning() {
+    isLightReasoning = false;
+    clearInterval(phraseInterval);
+    phraseInterval = null;
   }
 
   function startCooking() {
+    isLightReasoning = false;
+    clearInterval(cookingInterval);
+    clearInterval(phraseInterval);
+    cookingInterval = null;
+    phraseInterval = null;
     cookingStartTime = Date.now();
     cookingElapsed = 0;
-    pickPhrase();
+    pickPhrase(COOKING_PHRASES);
 
     cookingInterval = setInterval(() => {
       cookingElapsed = Math.floor((Date.now() - cookingStartTime) / 1000);
     }, 1000);
 
-    phraseInterval = setInterval(pickPhrase, 4000);
+    phraseInterval = setInterval(() => pickPhrase(COOKING_PHRASES), 4000);
 
     // Web Audio: gentle microwave fan hum (filtered noise + soft sine)
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       masterGain = audioCtx.createGain();
-      masterGain.gain.value = isMuted ? 0 : 1;
+      masterGain.gain.value = 1;
       masterGain.connect(audioCtx.destination);
 
       const humAssetId = config.microwave?.hum_id;
@@ -235,9 +283,21 @@
 
   // Derived active thread
   const activeThread = $derived(history.find(t => t.id === activeThreadId));
+  function getPairedQuestionForAssistant(thread, assistantMessage, maxLen = 520) {
+    if (!thread?.messages?.length || !assistantMessage?.id) return '';
+    const assistantIndex = thread.messages.findIndex(m => m.id === assistantMessage.id);
+    if (assistantIndex <= 0) return '';
+    const previousMessage = thread.messages[assistantIndex - 1];
+    if (previousMessage?.role !== 'user') return '';
+    return clampText(previousMessage.content || '', maxLen);
+  }
+
   const latestAssistantMessage = $derived.by(() => {
     if (!activeThread?.messages?.length) return null;
     return [...activeThread.messages].reverse().find(m => m.role === 'assistant') ?? null;
+  });
+  const latestAssistantQuestion = $derived.by(() => {
+    return getPairedQuestionForAssistant(activeThread, latestAssistantMessage, 520);
   });
 
   function clampText(text, max = 120) {
@@ -252,7 +312,18 @@
     const outputTitle = latestAssistantMessage.output?.title;
     const content = latestAssistantMessage.content;
     const text = outputResponse || (outputTitle ? `Generated: ${outputTitle}` : content);
-    return clampText(text, 240);
+    return clampText(text, 900);
+  });
+
+  $effect(() => {
+    const msgId = latestAssistantMessage?.id;
+    if (!msgId || msgId === lastAssistantMessageId) return;
+    lastAssistantMessageId = msgId;
+    if (assistantBubble) {
+      lastAdvisorBubble = assistantBubble;
+      lastAdvisorQuestion = latestAssistantQuestion;
+      dismissedBubbleText = '';
+    }
   });
 
   const assistantFresh = $derived.by(() => {
@@ -262,6 +333,9 @@
 
   const genieMode = $derived.by(() => {
     if (error) return 'error';
+    if (isLightReasoning) return 'light';
+    if (isFreecadRunning) return 'rendering';
+    if (isGenerating && isQuestionFlow) return 'light';
     if (isGenerating) return 'thinking';
     if (assistantFresh) return 'speaking';
     return 'idle';
@@ -269,15 +343,26 @@
 
   const genieBubbleRaw = $derived.by(() => {
     if (error) return clampText(error, 240);
-    if (isGenerating) return clampText('Synthesizing geometry...', 240);
-    if (assistantFresh && assistantBubble) return assistantBubble;
-    return clampText(status, 140);
+    if (isLightReasoning) return clampText(cookingPhrase || 'Thinking not deep enough.', 240);
+    if (isFreecadRunning) return clampText('FreeCAD is crunching geometry...', 240);
+    if (isGenerating && isQuestionFlow) return clampText(cookingPhrase || 'Thinking not deep enough.', 240);
+    if (isGenerating) return clampText(cookingPhrase || 'Synthesizing geometry.', 240);
+    if (assistantBubble) return assistantBubble;
+    if (lastAdvisorBubble) return lastAdvisorBubble;
+    return '';
   });
 
   const genieBubble = $derived.by(() => {
     if (!genieBubbleRaw) return '';
     if (dismissedBubbleText === genieBubbleRaw) return '';
     return genieBubbleRaw;
+  });
+
+  const genieQuestion = $derived.by(() => {
+    if (!genieBubble) return '';
+    if (assistantBubble && genieBubble === assistantBubble) return latestAssistantQuestion;
+    if (lastAdvisorBubble && genieBubble === lastAdvisorBubble) return lastAdvisorQuestion;
+    return '';
   });
 
   function dismissGenieBubble() {
@@ -305,20 +390,31 @@
       nowSeconds = Math.floor(Date.now() / 1000);
     }, 1000);
 
-    void Promise.all([
-      loadConfig(),
-      restoreLastDesign(),
-      loadHistory()
-    ]);
+    void (async () => {
+      startBootPreloader();
+      try {
+        await loadConfig();
+        await loadHistory();
+        await restoreLastDesign();
+      } finally {
+        stopBootPreloader();
+      }
+    })();
 
     return () => {
       clearInterval(timer);
+      clearInterval(bootInterval);
     };
   });
 
   async function loadHistory() {
     try {
-      history = await invoke('get_history');
+      const freshHistory = await invoke('get_history');
+      history = freshHistory;
+      if (activeThreadId && !freshHistory.some(t => t.id === activeThreadId)) {
+        activeThreadId = null;
+        activeVersionId = null;
+      }
     } catch (e) {
       console.error("Failed to load history:", e);
     }
@@ -329,13 +425,34 @@
       const last = await invoke('get_last_design');
       if (last) {
         const [design, threadId] = last;
-        macroCode = design.macro_code;
-        uiSpec = design.ui_spec;
-        parameters = design.initial_params || {};
-        activeThreadId = threadId;
+        let restoredFromThread = false;
+
+        if (threadId) {
+          const thread = history.find(t => t.id === threadId);
+          const lastAssistantMsg = thread
+            ? [...thread.messages].reverse().find(m => m.role === 'assistant' && m.output)
+            : null;
+
+          if (lastAssistantMsg?.output) {
+            activeThreadId = threadId;
+            activeVersionId = lastAssistantMsg.id;
+            macroCode = lastAssistantMsg.output.macro_code;
+            uiSpec = lastAssistantMsg.output.ui_spec;
+            parameters = lastAssistantMsg.output.initial_params || {};
+            restoredFromThread = true;
+          }
+        }
+
+        if (!restoredFromThread) {
+          macroCode = design.macro_code;
+          uiSpec = design.ui_spec;
+          parameters = design.initial_params || {};
+          activeThreadId = threadId;
+          activeVersionId = null;
+        }
+
         status = 'Restored last design session.';
-        // Trigger render now that path is fixed
-        await handleParamChange(parameters);
+        await handleParamChange(parameters, macroCode);
       } else {
         await fetchDefaultMacro();
       }
@@ -356,10 +473,27 @@
 
   async function loadConfig() {
     try {
-      config = await invoke('get_config');
+      const loadedConfig = await invoke('get_config');
+      let configPatched = false;
+
+      // Ensure there is always a truly selected engine when engines exist.
+      if (loadedConfig.engines?.length > 0) {
+        const hasSelectedEngine = loadedConfig.engines.some(e => e.id === loadedConfig.selected_engine_id);
+        if (!hasSelectedEngine) {
+          loadedConfig.selected_engine_id = loadedConfig.engines[0].id;
+          configPatched = true;
+        }
+      }
+
+      config = loadedConfig;
+
       if (config.selected_engine_id) {
         // Initial fetch
         await fetchModels();
+      }
+
+      if (configPatched) {
+        await invoke('save_config', { config });
       }
     } catch (e) {
       error = `Config Load Error: ${e}`;
@@ -418,7 +552,15 @@
         baseUrl: selectedEngine.base_url
       });
       availableModels = models;
-      status = `Engine active: ${models.length} models available.`;
+
+      // Auto-fix model selection if empty or stale so what user sees is actually selected.
+      if (models.length > 0 && (!selectedEngine.model || !models.includes(selectedEngine.model))) {
+        selectedEngine.model = models[0];
+        await invoke('save_config', { config });
+        status = `Engine active: ${models.length} models available. Model auto-selected: ${selectedEngine.model}.`;
+      } else {
+        status = `Engine active: ${models.length} models available.`;
+      }
     } catch (e) {
       console.error("Failed to fetch models:", e);
       availableModels = [];
@@ -453,7 +595,8 @@
     } else if (isResizingHistory) {
       const sidebarRect = document.querySelector('.sidebar')?.getBoundingClientRect();
       if (sidebarRect) {
-        historyHeight = Math.max(100, Math.min(e.clientY - sidebarRect.top, sidebarRect.height - 100));
+        const heightFromBottom = sidebarRect.bottom - e.clientY;
+        historyHeight = Math.max(100, Math.min(heightFromBottom, sidebarRect.height - 100));
       }
     }
   }
@@ -464,105 +607,176 @@
     isResizingHistory = false;
   }
 
+  function buildLightReasoningContext() {
+    const context = [];
+    if (activeThread?.title) context.push(`Title: ${activeThread.title}`);
+    const currentVersion = activeThread?.messages?.find(m => m.id === activeVersionId);
+    const versionName = currentVersion?.output?.version_name;
+    if (versionName) context.push(`Version: ${versionName}`);
+    if (macroCode) context.push(`Current FreeCAD Macro:\n\`\`\`python\n${macroCode}\n\`\`\``);
+    if (uiSpec) context.push(`Current UI Spec:\n\`\`\`json\n${JSON.stringify(uiSpec, null, 2)}\n\`\`\``);
+    if (parameters && Object.keys(parameters).length > 0) {
+      context.push(`Current Parameters:\n\`\`\`json\n${JSON.stringify(parameters, null, 2)}\n\`\`\``);
+    }
+    return context.join('\n\n');
+  }
+
   async function handleGenerate(initialPrompt, attachments = []) {
-    isGenerating = true;
-    error = null;
-    startCooking();
-    let currentPrompt = initialPrompt;
-    const questionMode = isQuestionIntent(initialPrompt);
-    let maxAttempts = questionMode ? 1 : 3;
-    let attempt = 1;
-    
-    let currentImageData = null;
-    if (viewerComponent && stlUrl) {
-      currentImageData = viewerComponent.captureScreenshot();
+    if (generationInFlight || isGenerating || isLightReasoning || isFreecadRunning) {
+      console.warn('Ignoring duplicate generate request while another run is active.');
+      return;
     }
 
-    while (attempt <= maxAttempts) {
-      status = `Consulting LLM (Attempt ${attempt}/${maxAttempts})...`;
+    generationInFlight = true;
+    error = null;
+    isQuestionFlow = false;
+    try {
+      startLightReasoning();
+      const lightContext = buildLightReasoningContext();
+      let questionMode = isQuestionIntent(initialPrompt);
+      let lightResponse = '';
       try {
-        const result = await invoke('generate_design', { 
-          prompt: currentPrompt,
+        const intent = await invoke('classify_intent', { prompt: initialPrompt, threadId: activeThreadId, context: lightContext });
+        const mode = `${intent?.intent_mode ?? ''}`.toLowerCase();
+        if (mode === 'question' || mode === 'design') {
+          questionMode = mode === 'question';
+        }
+        if (intent?.response) {
+          lightResponse = `${intent.response}`.trim();
+          cookingPhrase = lightResponse;
+        }
+      } catch (intentErr) {
+        console.warn('Intent classification failed, using fallback heuristic:', intentErr);
+      }
+
+      isQuestionFlow = questionMode;
+      if (questionMode) {
+        status = 'Answering question...';
+        const questionReply = lightResponse || 'Question answered. Geometry unchanged.';
+        const result = await invoke('answer_question_light', {
+          prompt: initialPrompt,
+          response: questionReply,
           threadId: activeThreadId,
-          parentMacroCode: !activeThreadId ? macroCode : null,
-          isRetry: attempt > 1,
-          imageData: currentImageData,
-          attachments: attachments,
-          questionMode
+          titleHint: activeThread?.title || 'Question Session'
         });
-        
-        const data = result.design;
         activeThreadId = result.thread_id;
-        const questionResponse = `${data.response ?? ''}`.trim();
-        const interactionMode = `${data.interaction_mode ?? ''}`.toLowerCase();
-        const isQuestionOutput = questionMode || interactionMode === 'question';
-
         await loadHistory();
-        
-        const updatedThread = history.find(t => t.id === activeThreadId);
-        if (updatedThread) {
-          const lastMsg = [...updatedThread.messages].reverse().find(m => m.role === 'assistant' && m.output);
-          if (lastMsg) activeVersionId = lastMsg.id;
-        }
+        status = result.response || questionReply;
+        error = null;
+        return;
+      }
 
-        if (isQuestionOutput) {
-          status = questionResponse || 'Question answered. Geometry unchanged.';
-          error = null;
-          stopCooking(true);
-          break;
-        }
+      isGenerating = true;
+      startCooking();
 
-        status = 'Parsing geometry specification and UI...';
-        macroCode = data.macro_code;
-        uiSpec = data.ui_spec;
-        parameters = data.initial_params || {};
+      let currentPrompt = initialPrompt;
+      let maxAttempts = 3;
+      let attempt = 1;
+      
+      let currentImageData = null;
+      if (viewerComponent && stlUrl) {
+        currentImageData = viewerComponent.captureScreenshot();
+      }
 
-        status = 'Executing FreeCAD engine (BRep/STL)...';
+      while (attempt <= maxAttempts) {
+        status = `Consulting LLM (Attempt ${attempt}/${maxAttempts})...`;
         try {
-          const absolutePath = await invoke('render_stl', { 
-            macroCode: macroCode, 
-            parameters 
+          const result = await invoke('generate_design', { 
+            prompt: currentPrompt,
+            threadId: activeThreadId,
+            parentMacroCode: !activeThreadId ? macroCode : null,
+            isRetry: attempt > 1,
+            imageData: currentImageData,
+            attachments: attachments,
+            questionMode
           });
-          stlUrl = convertFileSrc(absolutePath);
-          status = 'Design synthesized and rendered successfully.';
-          error = null;
-          stopCooking(true);
-          break; // Success! Exit loop.
-        } catch (renderError) {
-          console.error("Render failed on attempt", attempt, renderError);
-          error = `Render Error: ${renderError}`;
           
-          if (attempt < maxAttempts) {
-            // Setup prompt for next retry
-            currentPrompt = `The previous code failed during execution in FreeCAD with this error:\n${renderError}\n\nPlease fix the python code and return the updated JSON.`;
-            attempt++;
-          } else {
-            status = 'Failed after maximum attempts.';
-            stopCooking(false);
-            // Open the code modal so user can manually edit
-            selectedCode = macroCode;
-            selectedTitle = data.title;
-            showCodeModal = true;
+          const data = result.design;
+          activeThreadId = result.thread_id;
+          const questionResponse = `${data.response ?? ''}`.trim();
+          const interactionMode = `${data.interaction_mode ?? ''}`.toLowerCase();
+          const isQuestionOutput = interactionMode === 'question';
+
+          await loadHistory();
+          
+          const updatedThread = history.find(t => t.id === activeThreadId);
+          if (updatedThread) {
+            const lastMsg = [...updatedThread.messages].reverse().find(m => m.role === 'assistant' && m.output);
+            if (lastMsg) activeVersionId = lastMsg.id;
+          }
+
+          if (isQuestionOutput) {
+            status = questionResponse || 'Question answered. Geometry unchanged.';
+            error = null;
+            stopLightReasoning();
+            stopCooking(true);
             break;
           }
+
+          status = 'Parsing geometry specification and UI...';
+          macroCode = data.macro_code;
+          uiSpec = data.ui_spec;
+          parameters = data.initial_params || {};
+
+          status = 'Executing FreeCAD engine (BRep/STL)...';
+          try {
+            isFreecadRunning = true;
+            const absolutePath = await invoke('render_stl', { 
+              macroCode: macroCode, 
+              parameters 
+            });
+            stlUrl = convertFileSrc(absolutePath);
+            status = 'Design synthesized and rendered successfully.';
+            error = null;
+            stopCooking(true);
+            break; // Success! Exit loop.
+          } catch (renderError) {
+            console.error("Render failed on attempt", attempt, renderError);
+            error = `Render Error: ${renderError}`;
+            
+            if (attempt < maxAttempts) {
+              // Setup prompt for next retry
+              currentPrompt = `The previous code failed during execution in FreeCAD with this error:\n${renderError}\n\nPlease fix the python code and return the updated JSON.`;
+              attempt++;
+            } else {
+              status = 'Failed after maximum attempts.';
+              stopCooking(false);
+              // Open the code modal so user can manually edit
+              selectedCode = macroCode;
+              selectedTitle = data.title;
+              showCodeModal = true;
+              break;
+            }
+          } finally {
+            isFreecadRunning = false;
+          }
+        } catch (e) {
+          // Handle context-preserving error
+          if (typeof e === 'string' && e.startsWith("ERR_ID:")) {
+            const [idPart, errorMsg] = e.split('|');
+            activeThreadId = idPart.replace("ERR_ID:", "");
+            error = `Generation Failed: ${errorMsg}`;
+            await loadHistory();
+          } else {
+            error = `Generation Failed: ${e}`;
+          }
+          status = 'LLM API Error.';
+          stopLightReasoning();
+          stopCooking(false);
+          break; // LLM failed entirely, don't retry FreeCAD logic
         }
-      } catch (e) {
-        // Handle context-preserving error
-        if (typeof e === 'string' && e.startsWith("ERR_ID:")) {
-          const [idPart, errorMsg] = e.split('|');
-          activeThreadId = idPart.replace("ERR_ID:", "");
-          error = `Generation Failed: ${errorMsg}`;
-          await loadHistory();
-        } else {
-          error = `Generation Failed: ${e}`;
-        }
-        status = 'LLM API Error.';
-        stopCooking(false);
-        break; // LLM failed entirely, don't retry FreeCAD logic
       }
+    } catch (e) {
+      error = `Generation Failed: ${e}`;
+      status = 'LLM API Error.';
+      stopLightReasoning();
+      stopCooking(false);
+    } finally {
+      stopLightReasoning();
+      isGenerating = false;
+      isQuestionFlow = false;
+      generationInFlight = false;
     }
-    
-    isGenerating = false;
   }
 
   async function handleParamChange(newParams, forcedCode = null) {
@@ -581,6 +795,7 @@
     
     status = 'Executing FreeCAD engine (BRep/STL)...';
     try {
+      isFreecadRunning = true;
       const absolutePath = await invoke('render_stl', { 
         macroCode: codeToUse, 
         parameters 
@@ -591,6 +806,8 @@
     } catch (e) {
       error = `Render Error: ${e}`;
       status = 'Render failed.';
+    } finally {
+      isFreecadRunning = false;
     }
   }
 
@@ -615,10 +832,16 @@
   }
 
   async function loadFromHistory(thread) {
-    activeThreadId = thread.id;
-    const lastAssistantMsg = [...thread.messages].reverse().find(m => m.role === 'assistant' && m.output);
+    const targetThreadId = thread.id;
+    activeThreadId = targetThreadId;
+    await loadHistory();
+
+    const freshThread = history.find(t => t.id === targetThreadId) || thread;
+    const lastAssistantMsg = [...freshThread.messages].reverse().find(m => m.role === 'assistant' && m.output);
     if (lastAssistantMsg) {
       await loadVersion(lastAssistantMsg);
+    } else {
+      activeVersionId = null;
     }
   }
 
@@ -642,6 +865,9 @@
     uiSpec = null;
     parameters = {};
     stlUrl = null;
+    lastAdvisorBubble = '';
+    lastAdvisorQuestion = '';
+    lastAssistantMessageId = null;
     status = 'New design session started.';
   }
 
@@ -650,7 +876,26 @@
     // but detach from the current thread
     activeThreadId = null;
     activeVersionId = null;
+    lastAdvisorBubble = '';
+    lastAdvisorQuestion = '';
+    lastAssistantMessageId = null;
     status = 'Design forked. Next generation will create a new thread.';
+  }
+
+  function getNextManualVersionName() {
+    const versionNames = (activeThread?.messages || [])
+      .filter(m => m.role === 'assistant' && m.output?.version_name)
+      .map(m => `${m.output.version_name}`);
+
+    const nums = versionNames
+      .map(name => {
+        const match = name.match(/v\s*(\d+)/i);
+        return match ? Number.parseInt(match[1], 10) : NaN;
+      })
+      .filter(Number.isFinite);
+
+    const next = nums.length > 0 ? Math.max(...nums) + 1 : (versionNames.length + 1 || 1);
+    return `V${next}`;
   }
 
   async function commitManualVersion(editedCode) {
@@ -662,6 +907,7 @@
     // Validate by rendering first
     status = "Validating manual edit...";
     try {
+      isFreecadRunning = true;
       const absolutePath = await invoke('render_stl', { 
         macroCode: editedCode, 
         parameters 
@@ -672,6 +918,7 @@
       await invoke('add_manual_version', {
         threadId: activeThreadId,
         title: activeThread?.title || "Manual Edit",
+        versionName: getNextManualVersionName(),
         macroCode: editedCode,
         parameters,
         uiSpec
@@ -692,6 +939,8 @@
     } catch (e) {
       error = `Manual Commit Failed: ${e}`;
       status = "Validation failed. Check your Python code.";
+    } finally {
+      isFreecadRunning = false;
     }
   }
 
@@ -791,30 +1040,22 @@
 
         <div class="main-workbench">
           <main class="viewport-area">
-            <Viewer bind:this={viewerComponent} {stlUrl} {isGenerating} />
+            <Viewer bind:this={viewerComponent} {stlUrl} isGenerating={isGenerating || isFreecadRunning} />
             <div class="genie-layer">
-              <VertexGenie mode={genieMode} bubble={genieBubble} label="ECKBERT" onDismiss={dismissGenieBubble} />
+              <VertexGenie
+                mode={genieMode}
+                bubble={genieBubble}
+                question={genieQuestion}
+                onDismiss={dismissGenieBubble}
+              />
             </div>
 
-            {#if isGenerating}
+            {#if isGenerating && !isQuestionFlow}
               <div class="microwave-overlay">
                 <div class="microwave-glass"></div>
                 <div class="microwave-content">
-                  <div class="microwave-turntable">
-                    <div class="turntable-plate"></div>
-                    <div class="turntable-object"></div>
-                  </div>
                   <div class="microwave-timer">{formatCookingTime(cookingElapsed)}</div>
-                  {#key phraseKey}
-                    <div class="microwave-phrase">{cookingPhrase}</div>
-                  {/key}
-                  <div class="microwave-dots">
-                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-                  </div>
                 </div>
-                <button class="mute-btn" onclick={toggleMute} title={isMuted ? 'Unmute' : 'Mute'}>
-                  {isMuted ? '🔇' : '🔊'}
-                </button>
               </div>
             {/if}
             
@@ -838,7 +1079,7 @@
             <div class="dialogue-content">
               <PromptPanel 
                 onGenerate={handleGenerate} 
-                {isGenerating} 
+                isGenerating={isGenerating || isLightReasoning}
                 messages={activeThread ? activeThread.messages : []}
                 onShowCode={openCodeModal}
                 bind:activeVersionId
@@ -850,6 +1091,19 @@
       </div>
     {/if}
   </div>
+
+  {#if isBooting}
+    <div class="boot-overlay">
+      <div class="boot-overlay__glass"></div>
+      <div class="boot-overlay__content">
+        <div class="boot-overlay__title">DRYDEMACHER</div>
+        <div class="boot-overlay__ecky">
+          <VertexGenie mode="thinking" bubble="" />
+        </div>
+        <div class="boot-overlay__status">Restoring config, history, and active workspace.</div>
+      </div>
+    </div>
+  {/if}
 
   {#if showCodeModal}
     <CodeModal 
@@ -864,6 +1118,62 @@
 <style>
   .app-page {
     position: relative;
+  }
+
+  .boot-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 300;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .boot-overlay__glass {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(74, 140, 92, 0.16), transparent 42%),
+      rgba(8, 12, 20, 0.86);
+    backdrop-filter: blur(18px) saturate(0.2);
+  }
+
+  .boot-overlay__content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    min-width: 320px;
+    padding: 20px 24px;
+    border: 2px solid color-mix(in srgb, var(--primary) 35%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg-300) 85%, transparent), var(--shadow);
+  }
+
+  .boot-overlay__title {
+    color: var(--secondary);
+    font-size: 0.82rem;
+    font-weight: bold;
+    letter-spacing: 0.14em;
+  }
+
+  .boot-overlay__ecky {
+    width: 150px;
+    height: 150px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .boot-overlay__status {
+    max-width: 420px;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    text-align: center;
+    letter-spacing: 0.03em;
   }
 
   .settings-overlay-btn {
@@ -1054,48 +1364,8 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 20px;
+    gap: 0;
     pointer-events: none;
-  }
-
-  /* Turntable */
-  .microwave-turntable {
-    position: relative;
-    width: 120px;
-    height: 120px;
-    animation: turntable-spin 4s linear infinite;
-  }
-
-  .turntable-plate {
-    position: absolute;
-    inset: 0;
-    border: 2px solid var(--bg-400);
-    border-radius: 50%;
-    opacity: 0.5;
-  }
-
-  .turntable-object {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 60px;
-    height: 22px;
-    background: var(--primary);
-    opacity: 0.6;
-    border-radius: 11px;
-    transform: translate(-50%, -50%);
-    box-shadow: 0 0 16px color-mix(in srgb, var(--primary) 30%, transparent);
-    animation: object-throb 1.5s ease-in-out infinite;
-  }
-
-  @keyframes turntable-spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  @keyframes object-throb {
-    0%, 100% { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
-    50% { opacity: 0.8; transform: translate(-50%, -50%) scale(1.08); }
   }
 
   .microwave-timer {
@@ -1105,62 +1375,5 @@
     color: var(--primary);
     letter-spacing: 0.15em;
     text-shadow: 0 0 20px color-mix(in srgb, var(--primary) 40%, transparent);
-  }
-
-  .microwave-phrase {
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--text-dim);
-    text-align: center;
-    max-width: 400px;
-    letter-spacing: 0.03em;
-    min-height: 1.5em;
-    animation: phrase-fade 4s ease-in-out forwards;
-  }
-
-  @keyframes phrase-fade {
-    0% { opacity: 0; transform: translateY(6px); }
-    12% { opacity: 1; transform: translateY(0); }
-    88% { opacity: 1; transform: translateY(0); }
-    100% { opacity: 0; transform: translateY(-6px); }
-  }
-
-  .microwave-dots {
-    display: flex;
-    gap: 6px;
-  }
-
-  .microwave-dots .dot {
-    width: 6px;
-    height: 6px;
-    background: var(--secondary);
-    border-radius: 50%;
-    animation: dot-bounce 1.4s ease-in-out infinite;
-  }
-
-  .microwave-dots .dot:nth-child(2) { animation-delay: 0.2s; }
-  .microwave-dots .dot:nth-child(3) { animation-delay: 0.4s; }
-
-  @keyframes dot-bounce {
-    0%, 80%, 100% { transform: scale(0.6); opacity: 0.3; }
-    40% { transform: scale(1); opacity: 1; }
-  }
-
-  .mute-btn {
-    position: absolute;
-    bottom: 12px;
-    right: 12px;
-    z-index: 2;
-    background: var(--bg-300);
-    border: 1px solid var(--bg-400);
-    color: var(--text);
-    font-size: 1rem;
-    padding: 4px 8px;
-    cursor: pointer;
-    pointer-events: all;
-  }
-
-  .mute-btn:hover {
-    border-color: var(--primary);
   }
 </style>

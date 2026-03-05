@@ -8,6 +8,8 @@ pub struct Engine {
     pub provider: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default)]
+    pub light_model: String,
     pub base_url: String,
     pub system_prompt: String,
 }
@@ -77,8 +79,24 @@ pub struct Message {
 pub struct Thread {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub summary: String,
     pub messages: Vec<Message>,
     pub updated_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ThreadReference {
+    pub id: String,
+    pub thread_id: String,
+    pub source_message_id: Option<String>,
+    pub ordinal: i64,
+    pub kind: String,
+    pub name: String,
+    pub content: String,
+    pub summary: String,
+    pub pinned: bool,
+    pub created_at: u64,
 }
 
 pub struct AppState {

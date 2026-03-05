@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import Dropdown from './Dropdown.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -16,6 +17,8 @@
   let audioChunks = [];
   let recordingTimer = $state(0);
   let timerInterval = null;
+  let micOptions = $state([]);
+  let selectedMicId = $state('');
 
   const providers = [
     { id: 'gemini', name: 'Google Gemini' },
@@ -65,6 +68,7 @@
       provider: 'gemini',
       api_key: '',
       model: '',
+      light_model: '',
       base_url: '',
       system_prompt: defaultPrompt
     };
@@ -73,9 +77,66 @@
     activeSection = 'engines';
   }
 
+  async function refreshMicInputs() {
+    if (!navigator?.mediaDevices) return;
+    try {
+      const temp = await navigator.mediaDevices.getUserMedia({ audio: true });
+      temp.getTracks().forEach(track => track.stop());
+    } catch (_) {
+      // Permission may already be denied or unavailable; continue best-effort enumeration.
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      micOptions = devices
+        .filter(d => d.kind === 'audioinput')
+        .map((d, i) => ({
+          id: d.deviceId,
+          name: d.label || `Microphone ${i + 1}`
+        }));
+      if (micOptions.length > 0 && !micOptions.some(m => m.id === selectedMicId)) {
+        selectedMicId = micOptions[0].id;
+      }
+    } catch (e) {
+      console.warn('Failed to enumerate microphones:', e);
+    }
+  }
+
+  async function uploadMicrowaveAudio(target) {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          { name: 'Audio Files', extensions: ['mp3', 'wav', 'webm', 'ogg', 'm4a', 'aac', 'flac'] }
+        ]
+      });
+      if (!selected) return;
+
+      const path = selected;
+      const name = path.split(/[\/\\]/).pop();
+      const ext = (name.split('.').pop() || 'WAV').toUpperCase();
+
+      const asset = await invoke('upload_asset', {
+        sourcePath: path,
+        name,
+        format: ext
+      });
+
+      config.assets = [...(config.assets || []), asset];
+      if (target === 'hum') config.microwave.hum_id = asset.id;
+      if (target === 'ding') config.microwave.ding_id = asset.id;
+      message = `Uploaded and assigned ${target.toUpperCase()} sound: ${name}`;
+    } catch (e) {
+      message = `Upload failed: ${e}`;
+    }
+  }
+
   async function startRecording(target) {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const constraints = selectedMicId
+        ? { audio: { deviceId: { exact: selectedMicId } } }
+        : { audio: true };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       mediaRecorder = new MediaRecorder(stream);
       audioChunks = [];
       recordingTarget = target;
@@ -169,6 +230,7 @@
   function handleProviderChange() {
     if (selectedEngine) {
       selectedEngine.model = '';
+      selectedEngine.light_model = '';
     }
   }
   async function resetPrompt() {
@@ -176,6 +238,14 @@
       selectedEngine.system_prompt = await invoke('get_system_prompt');
     }
   }
+
+  onMount(() => {
+    void refreshMicInputs();
+    const mediaDevices = navigator?.mediaDevices;
+    const onDeviceChange = () => { void refreshMicInputs(); };
+    mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
+    return () => mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
+  });
 </script>
 
 <div class="config-container">
@@ -223,6 +293,22 @@
         <label>MICROWAVE SOUNDS</label>
       </div>
       <div class="list-content microwave-assignments">
+        {#if micOptions.length > 1}
+          <div class="mic-device-block">
+            <span class="role-label">MIC INPUT</span>
+            <div class="mic-device-row">
+              <Dropdown
+                options={micOptions}
+                value={selectedMicId}
+                onchange={(val) => selectedMicId = val}
+                placeholder="Select microphone..."
+                disabled={isRecording}
+              />
+              <button class="btn btn-xs btn-ghost" onclick={refreshMicInputs} disabled={isRecording}>↻ RESCAN</button>
+            </div>
+          </div>
+        {/if}
+
         <div class="sound-role">
           <span class="role-label">COOKING HUM</span>
           <div class="role-actions">
@@ -231,6 +317,7 @@
             {:else}
               <button class="btn btn-xs" onclick={() => startRecording('hum')} disabled={isRecording}>🎤 RECORD</button>
             {/if}
+            <button class="btn btn-xs btn-ghost" onclick={() => uploadMicrowaveAudio('hum')} disabled={isRecording}>📁 UPLOAD HUM</button>
             {#if config.microwave?.hum_id}
               <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.hum_id = null}>✕ CLEAR</button>
             {/if}
@@ -301,8 +388,8 @@
           </div>
 
           <div class="field-row">
-            <div class="field flex-2">
-              <label for="e-model">MODEL</label>
+            <div class="field flex-1">
+              <label for="e-model">RENDER AND HEAVY REASONING</label>
               <Dropdown 
                 options={availableModels.length > 0 ? availableModels : (selectedEngine.model ? [selectedEngine.model] : [])} 
                 value={selectedEngine.model} 
@@ -311,16 +398,26 @@
               />
             </div>
             <div class="field flex-1">
-              <label for="e-baseurl">BASE URL (OPTIONAL)</label>
-              <input 
-                id="e-baseurl" 
-                type="text" 
-                value={selectedEngine.base_url} 
-                class="input-mono" 
-                placeholder="Default" 
-                oninput={(e) => selectedEngine.base_url = e.target.value}
+              <label for="e-light-model">LIGHT REASONING</label>
+              <Dropdown
+                options={availableModels.length > 0 ? availableModels : (selectedEngine.light_model ? [selectedEngine.light_model] : (selectedEngine.model ? [selectedEngine.model] : []))}
+                value={selectedEngine.light_model}
+                placeholder={isLoadingModels ? "Fetching..." : "Optional (falls back to heavy model)"}
+                onchange={(val) => selectedEngine.light_model = val}
               />
             </div>
+          </div>
+
+          <div class="field">
+            <label for="e-baseurl">BASE URL (OPTIONAL)</label>
+            <input 
+              id="e-baseurl" 
+              type="text" 
+              value={selectedEngine.base_url} 
+              class="input-mono" 
+              placeholder="Default" 
+              oninput={(e) => selectedEngine.base_url = e.target.value}
+            />
           </div>
 
           <div class="field prompt-field">
@@ -623,6 +720,24 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .mic-device-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--bg-300);
+  }
+
+  .mic-device-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .mic-device-row :global(.custom-select) {
+    flex: 1;
   }
 
   .role-label {
