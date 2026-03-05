@@ -1,7 +1,10 @@
 <script>
+  import { open } from '@tauri-apps/plugin-dialog';
+
   let { onGenerate, isGenerating = false, messages = [], onShowCode, activeVersionId = $bindable(null), onVersionChange } = $props();
 
   let prompt = $state('');
+  let attachments = $state([]); // { path: string, name: string, explanation: string, type: string }
 
   // Extract versions (pairs of user prompt + assistant output)
   const versions = $derived(messages.filter(m => m.role === 'assistant' && m.output));
@@ -12,9 +15,42 @@
 
   function submit() {
     if (onGenerate && !isGenerating && prompt.trim()) {
-      onGenerate(prompt);
+      onGenerate(prompt, attachments);
       prompt = '';
+      attachments = [];
     }
+  }
+
+  async function addAttachment() {
+    try {
+      const selected = await open({
+        multiple: true,
+        filters: [
+          { name: 'Images & CAD', extensions: ['png', 'jpg', 'jpeg', 'stl', 'step', 'stp'] }
+        ]
+      });
+
+      if (selected) {
+        const paths = Array.isArray(selected) ? selected : [selected];
+        const newAttachments = paths.map(path => {
+          const name = path.split(/[\/\\]/).pop();
+          const ext = name.split('.').pop().toLowerCase();
+          return {
+            path,
+            name,
+            explanation: '',
+            type: ['png', 'jpg', 'jpeg'].includes(ext) ? 'image' : 'cad'
+          };
+        });
+        attachments = [...attachments, ...newAttachments];
+      }
+    } catch (e) {
+      console.error('Failed to open file dialog:', e);
+    }
+  }
+
+  function removeAttachment(index) {
+    attachments = attachments.filter((_, i) => i !== index);
   }
 
   function handleKeydown(e) {
@@ -84,6 +120,25 @@
   {/if}
 
   <div class="input-area">
+    {#if attachments.length > 0}
+      <div class="attachments-list">
+        {#each attachments as att, i}
+          <div class="attachment-item">
+            <div class="att-header">
+              <span class="att-type">{att.type === 'image' ? '🖼️ IMG' : '📐 CAD'}</span>
+              <span class="att-name">{att.name}</span>
+              <button class="btn-remove" onclick={() => removeAttachment(i)}>✕</button>
+            </div>
+            <input 
+              class="input-mono att-explanation" 
+              placeholder="Explain this context (e.g. 'This is my base sketch')"
+              bind:value={att.explanation}
+            />
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <textarea 
       class="input-mono prompt-input"
       bind:value={prompt}
@@ -92,9 +147,12 @@
       spellcheck="false"
     ></textarea>
     <div class="prompt-actions">
+      <button class="btn btn-xs btn-ghost" onclick={addAttachment} title="Attach images or reference CAD files">
+        📎 ATTACH REFERENCE
+      </button>
       <button 
         class="btn btn-primary" 
-        disabled={isGenerating || !prompt.trim()} 
+        disabled={isGenerating || (!prompt.trim() && attachments.length === 0)} 
         onclick={submit}
       >
         {#if isGenerating}
@@ -115,6 +173,71 @@
     flex-direction: column;
     height: 100%;
     background: var(--bg);
+  }
+
+  .attachments-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+    max-height: 160px;
+    overflow-y: auto;
+    padding: 4px;
+    background: var(--bg-100);
+    border: 1px dashed var(--bg-300);
+  }
+
+  .attachment-item {
+    background: var(--bg-300);
+    border: 1px solid var(--bg-400);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 240px;
+    flex-shrink: 0;
+  }
+
+  .att-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.6rem;
+    font-weight: bold;
+  }
+
+  .att-type {
+    color: var(--secondary);
+    background: rgba(0,0,0,0.2);
+    padding: 1px 4px;
+  }
+
+  .att-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-dim);
+  }
+
+  .btn-remove {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+
+  .btn-remove:hover {
+    color: var(--red);
+  }
+
+  .att-explanation {
+    background: var(--bg);
+    border: 1px solid var(--bg-400);
+    color: var(--text);
+    padding: 2px 4px;
+    font-size: 0.65rem;
   }
 
   .version-nav {

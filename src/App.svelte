@@ -1,10 +1,9 @@
 <script>
   import PromptPanel from './lib/PromptPanel.svelte';
   import Viewer from './lib/Viewer.svelte';
-  import CodePanel from './lib/CodePanel.svelte';
+  import VertexGenie from './lib/VertexGenie.svelte';
   import ParamPanel from './lib/ParamPanel.svelte';
   import ConfigPanel from './lib/ConfigPanel.svelte';
-  import Dropdown from './lib/Dropdown.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { save } from '@tauri-apps/plugin-dialog';
@@ -58,6 +57,8 @@
   let audioNodes = $state([]);
   let isMuted = $state(false);
   let masterGain = $state(null);
+  let nowSeconds = $state(Math.floor(Date.now() / 1000));
+  let dismissedBubbleText = $state('');
 
   const COOKING_PHRASES = [
     "Heating up the tensor cores...",
@@ -114,45 +115,56 @@
       masterGain.gain.value = isMuted ? 0 : 1;
       masterGain.connect(audioCtx.destination);
 
-      // White/Brown noise mix for fan/ventilation sound
-      const bufferSize = audioCtx.sampleRate * 2;
-      const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-      const data = noiseBuffer.getChannelData(0);
-      let brown = 0;
-      for (let i = 0; i < bufferSize; i++) {
-        const white = Math.random() * 2 - 1;
-        brown = (brown + (0.02 * white)) / 1.02;
-        // Mix 70% brown, 30% white for a more balanced "hissing" fan
-        data[i] = (brown * 0.7 + white * 0.3) * 3.5;
+      const humAssetId = config.microwave?.hum_id;
+      const humAsset = config.assets?.find(a => a.id === humAssetId);
+
+      if (humAsset) {
+        // Use custom hum file
+        const audio = new Audio(convertFileSrc(humAsset.path));
+        audio.loop = true;
+        const source = audioCtx.createMediaElementSource(audio);
+        source.connect(masterGain);
+        audio.play();
+        audioNodes = [audio];
+      } else {
+        // Fallback to generated hum
+        const bufferSize = audioCtx.sampleRate * 2;
+        const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = noiseBuffer.getChannelData(0);
+        let brown = 0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          brown = (brown + (0.02 * white)) / 1.02;
+          data[i] = (brown * 0.7 + white * 0.3) * 3.5;
+        }
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = noiseBuffer;
+        noise.loop = true;
+
+        const noiseFilter = audioCtx.createBiquadFilter();
+        noiseFilter.type = 'lowpass';
+        noiseFilter.frequency.value = 400;
+        noiseFilter.Q.value = 0.5;
+
+        const noiseGain = audioCtx.createGain();
+        noiseGain.gain.value = 0.08;
+
+        noise.connect(noiseFilter);
+        noiseFilter.connect(noiseGain);
+        noiseGain.connect(masterGain);
+        noise.start();
+
+        const hum = audioCtx.createOscillator();
+        hum.type = 'sine';
+        hum.frequency.value = 60;
+        const humGain = audioCtx.createGain();
+        humGain.gain.value = 0.02;
+        hum.connect(humGain);
+        humGain.connect(masterGain);
+        hum.start();
+
+        audioNodes = [noise, hum];
       }
-      const noise = audioCtx.createBufferSource();
-      noise.buffer = noiseBuffer;
-      noise.loop = true;
-
-      const noiseFilter = audioCtx.createBiquadFilter();
-      noiseFilter.type = 'lowpass';
-      noiseFilter.frequency.value = 400; // a bit more open than 200
-      noiseFilter.Q.value = 0.5;
-
-      const noiseGain = audioCtx.createGain();
-      noiseGain.gain.value = 0.08;
-
-      noise.connect(noiseFilter);
-      noiseFilter.connect(noiseGain);
-      noiseGain.connect(masterGain);
-      noise.start();
-
-      // Soft 60Hz mains hum
-      const hum = audioCtx.createOscillator();
-      hum.type = 'sine';
-      hum.frequency.value = 60;
-      const humGain = audioCtx.createGain();
-      humGain.gain.value = 0.02;
-      hum.connect(humGain);
-      humGain.connect(masterGain);
-      hum.start();
-
-      audioNodes = [noise, hum];
     } catch (e) {
       console.warn('Audio not available:', e);
     }
@@ -166,27 +178,45 @@
 
     // Stop hum
     for (const node of audioNodes) {
-      try { node.stop(); } catch(e) {}
+      try { 
+        if (node instanceof HTMLMediaElement) {
+          node.pause();
+          node.currentTime = 0;
+        } else {
+          node.stop(); 
+        }
+      } catch(e) {}
     }
     audioNodes = [];
 
-    // Ding! (clean microwave beep)
+    // Ding!
     if (success && audioCtx) {
       try {
-        const now = audioCtx.currentTime;
-        const g = audioCtx.createGain();
-        g.gain.setValueAtTime(0, now);
-        g.gain.linearRampToValueAtTime(0.2, now + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
-        g.connect(masterGain);
+        const dingAssetId = config.microwave?.ding_id;
+        const dingAsset = config.assets?.find(a => a.id === dingAssetId);
 
-        const o = audioCtx.createOscillator();
-        o.type = 'sine';
-        o.frequency.setValueAtTime(1200, now);
-        o.frequency.exponentialRampToValueAtTime(1180, now + 0.8);
-        o.connect(g);
-        o.start(now);
-        o.stop(now + 0.8);
+        if (dingAsset) {
+          const ding = new Audio(convertFileSrc(dingAsset.path));
+          const source = audioCtx.createMediaElementSource(ding);
+          source.connect(masterGain);
+          ding.play();
+        } else {
+          // Fallback ding
+          const now = audioCtx.currentTime;
+          const g = audioCtx.createGain();
+          g.gain.setValueAtTime(0, now);
+          g.gain.linearRampToValueAtTime(0.2, now + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+          g.connect(masterGain);
+
+          const o = audioCtx.createOscillator();
+          o.type = 'sine';
+          o.frequency.setValueAtTime(1200, now);
+          o.frequency.exponentialRampToValueAtTime(1180, now + 0.8);
+          o.connect(g);
+          o.start(now);
+          o.stop(now + 0.8);
+        }
       } catch(e) {}
     }
 
@@ -205,13 +235,85 @@
 
   // Derived active thread
   const activeThread = $derived(history.find(t => t.id === activeThreadId));
+  const latestAssistantMessage = $derived.by(() => {
+    if (!activeThread?.messages?.length) return null;
+    return [...activeThread.messages].reverse().find(m => m.role === 'assistant') ?? null;
+  });
 
-  onMount(async () => {
-    await Promise.all([
+  function clampText(text, max = 120) {
+    const compact = `${text ?? ''}`.replace(/\s+/g, ' ').trim();
+    if (!compact) return '';
+    return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
+  }
+
+  const assistantBubble = $derived.by(() => {
+    if (!latestAssistantMessage) return '';
+    const outputResponse = latestAssistantMessage.output?.response;
+    const outputTitle = latestAssistantMessage.output?.title;
+    const content = latestAssistantMessage.content;
+    const text = outputResponse || (outputTitle ? `Generated: ${outputTitle}` : content);
+    return clampText(text, 240);
+  });
+
+  const assistantFresh = $derived.by(() => {
+    if (!latestAssistantMessage?.timestamp) return false;
+    return nowSeconds - latestAssistantMessage.timestamp <= 45;
+  });
+
+  const genieMode = $derived.by(() => {
+    if (error) return 'error';
+    if (isGenerating) return 'thinking';
+    if (assistantFresh) return 'speaking';
+    return 'idle';
+  });
+
+  const genieBubbleRaw = $derived.by(() => {
+    if (error) return clampText(error, 240);
+    if (isGenerating) return clampText('Synthesizing geometry...', 240);
+    if (assistantFresh && assistantBubble) return assistantBubble;
+    return clampText(status, 140);
+  });
+
+  const genieBubble = $derived.by(() => {
+    if (!genieBubbleRaw) return '';
+    if (dismissedBubbleText === genieBubbleRaw) return '';
+    return genieBubbleRaw;
+  });
+
+  function dismissGenieBubble() {
+    if (genieBubbleRaw) {
+      dismissedBubbleText = genieBubbleRaw;
+    }
+  }
+
+  function isQuestionIntent(promptText) {
+    const prompt = `${promptText ?? ''}`.trim().toLowerCase();
+    if (!prompt) return false;
+    if (prompt.startsWith('/ask ')) return true;
+
+    const hasQuestionSignal =
+      prompt.includes('?') ||
+      /\b(explain|why|how|what|which|walk me through|help me understand|what does|can you explain|could you explain)\b/.test(prompt);
+    const hasDesignAction =
+      /\b(generate|create|make|add|remove|change|update|increase|decrease|set|resize|extrude|fillet|chamfer|connector|diameter|length|height|width)\b/.test(prompt);
+
+    return hasQuestionSignal && !hasDesignAction;
+  }
+
+  onMount(() => {
+    const timer = setInterval(() => {
+      nowSeconds = Math.floor(Date.now() / 1000);
+    }, 1000);
+
+    void Promise.all([
       loadConfig(),
       restoreLastDesign(),
       loadHistory()
     ]);
+
+    return () => {
+      clearInterval(timer);
+    };
   });
 
   async function loadHistory() {
@@ -328,12 +430,6 @@
     }
   }
 
-  async function handleEngineChange(id) {
-    config.selected_engine_id = id;
-    await saveConfig();
-    // effect will handle fetching
-  }
-
   function startResizingWidth(e) {
     isResizingWidth = true;
     e.preventDefault();
@@ -368,12 +464,13 @@
     isResizingHistory = false;
   }
 
-  async function handleGenerate(initialPrompt) {
+  async function handleGenerate(initialPrompt, attachments = []) {
     isGenerating = true;
     error = null;
     startCooking();
     let currentPrompt = initialPrompt;
-    let maxAttempts = 3;
+    const questionMode = isQuestionIntent(initialPrompt);
+    let maxAttempts = questionMode ? 1 : 3;
     let attempt = 1;
     
     let currentImageData = null;
@@ -389,16 +486,16 @@
           threadId: activeThreadId,
           parentMacroCode: !activeThreadId ? macroCode : null,
           isRetry: attempt > 1,
-          imageData: currentImageData
+          imageData: currentImageData,
+          attachments: attachments,
+          questionMode
         });
         
         const data = result.design;
         activeThreadId = result.thread_id;
-
-        status = 'Parsing geometry specification and UI...';
-        macroCode = data.macro_code;
-        uiSpec = data.ui_spec;
-        parameters = data.initial_params || {};
+        const questionResponse = `${data.response ?? ''}`.trim();
+        const interactionMode = `${data.interaction_mode ?? ''}`.toLowerCase();
+        const isQuestionOutput = questionMode || interactionMode === 'question';
 
         await loadHistory();
         
@@ -407,6 +504,18 @@
           const lastMsg = [...updatedThread.messages].reverse().find(m => m.role === 'assistant' && m.output);
           if (lastMsg) activeVersionId = lastMsg.id;
         }
+
+        if (isQuestionOutput) {
+          status = questionResponse || 'Question answered. Geometry unchanged.';
+          error = null;
+          stopCooking(true);
+          break;
+        }
+
+        status = 'Parsing geometry specification and UI...';
+        macroCode = data.macro_code;
+        uiSpec = data.ui_spec;
+        parameters = data.initial_params || {};
 
         status = 'Executing FreeCAD engine (BRep/STL)...';
         try {
@@ -640,41 +749,9 @@
   onmouseup={stopResizing}
   onmouseleave={stopResizing}
 >
-  <div class="system-bar {error ? 'has-error' : ''}">
-    <div class="system-bar__left">
-      <span class="app-title">DRYDEMACHER</span>
-      {#if currentView === 'workbench'}
-        {#if config.engines.length > 1}
-          <div class="engine-dropdown-wrapper">
-            <Dropdown 
-              options={config.engines.map(e => ({ id: e.id, name: `${e.provider}: ${e.name}` }))} 
-              bind:value={config.selected_engine_id} 
-              onchange={handleEngineChange} 
-            />
-          </div>
-        {:else if selectedEngine}
-          <span class="engine-info {error ? 'engine-info--error' : ''}">
-            {selectedEngine.provider} {isLoadingModels ? '(connecting...)' : (error ? '(offline)' : 'active')}
-          </span>
-        {/if}
-      {/if}
-    </div>
-    <div class="system-bar__center">
-      {#if isGenerating}
-        <div class="mini-spinner"></div>
-      {/if}
-      <span 
-        class="status-text {error ? 'copyable' : ''}" 
-        onclick={() => { if (error) { navigator.clipboard.writeText(error); status = 'Error copied to clipboard.'; } }}
-        title={error || ''}
-      >{error || status}</span>
-    </div>
-    <div class="system-bar__right">
-      <button class="icon-btn" onclick={toggleConfig} title="Toggle Configuration">
-        {currentView === 'config' ? '⚒️' : '⚙️'}
-      </button>
-    </div>
-  </div>
+  <button class="settings-overlay-btn" onclick={toggleConfig} title="Toggle Configuration">
+    {currentView === 'config' ? '⚒️' : '⚙️'}
+  </button>
 
   <div class="app-container">
     {#if currentView === 'config'}
@@ -714,7 +791,10 @@
 
         <div class="main-workbench">
           <main class="viewport-area">
-            <Viewer bind:this={viewerComponent} {stlUrl} />
+            <Viewer bind:this={viewerComponent} {stlUrl} {isGenerating} />
+            <div class="genie-layer">
+              <VertexGenie mode={genieMode} bubble={genieBubble} label="ECKBERT" onDismiss={dismissGenieBubble} />
+            </div>
 
             {#if isGenerating}
               <div class="microwave-overlay">
@@ -782,30 +862,32 @@
 </div>
 
 <style>
-  .app-title {
-    font-weight: bold;
-    color: var(--primary);
-    margin-right: 16px;
-    font-size: 0.8rem;
-    letter-spacing: 0.1em;
+  .app-page {
+    position: relative;
   }
 
-  .icon-btn {
-    background: none;
-    border: none;
+  .settings-overlay-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 150;
+    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
+    border: 1px solid var(--bg-300);
     color: var(--text);
-    font-size: 1.2rem;
+    font-size: 1.05rem;
+    line-height: 1;
+    width: 34px;
+    height: 34px;
     cursor: pointer;
-    padding: 4px;
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 4px;
-    transition: background 0.2s;
+    box-shadow: var(--shadow);
   }
 
-  .icon-btn:hover {
-    background: var(--bg-300);
+  .settings-overlay-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
   }
 
   .flex-1 {
@@ -918,84 +1000,6 @@
     background: var(--primary);
   }
 
-  .system-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 12px;
-    background: var(--bg-100);
-    border-bottom: 1px solid var(--bg-300);
-    min-height: 32px;
-    user-select: none;
-  }
-
-  .system-bar.has-error {
-    background: color-mix(in srgb, var(--red) 15%, var(--bg-100));
-  }
-
-  .system-bar.has-error .status-text {
-    color: var(--red);
-  }
-
-  .status-text.copyable {
-    cursor: pointer;
-  }
-
-  .status-text.copyable:hover {
-    text-decoration: underline;
-  }
-
-  .system-bar__center {
-    flex: 1;
-    text-align: center;
-    padding: 0 20px;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  }
-
-  .engine-dropdown-wrapper {
-    width: 250px;
-  }
-
-  .mini-spinner {
-    width: 14px;
-    height: 14px;
-    border: 2px solid var(--primary);
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .status-text {
-    font-size: 0.7rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    font-family: var(--font-mono);
-    letter-spacing: 0.05em;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    display: block;
-  }
-
-  .engine-info {
-    font-size: 0.65rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    font-family: var(--font-mono);
-  }
-
-  .engine-info--error {
-    color: var(--red);
-  }
-
   .export-actions {
     display: flex;
     gap: 8px;
@@ -1012,6 +1016,15 @@
     z-index: 50;
   }
 
+  .genie-layer {
+    position: absolute;
+    left: 10px;
+    top: 10px;
+    z-index: 120;
+    pointer-events: auto;
+    max-width: min(80vw, 420px);
+  }
+
   /* Microwave cooking overlay */
   .microwave-overlay {
     position: absolute;
@@ -1025,8 +1038,8 @@
   .microwave-glass {
     position: absolute;
     inset: 0;
-    background: rgba(10, 14, 24, 0.7);
-    backdrop-filter: blur(10px) saturate(0.2);
+    background: rgba(10, 14, 24, 0.78);
+    backdrop-filter: blur(16px) saturate(0.08);
     animation: microwave-pulse 2.5s ease-in-out infinite;
   }
 

@@ -9,6 +9,14 @@
   let message = $state('');
   let activeSection = $state('engines'); // 'engines' or 'assets'
 
+  // Recording state
+  let isRecording = $state(false);
+  let recordingTarget = $state(null); // 'hum' or 'ding'
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let recordingTimer = $state(0);
+  let timerInterval = null;
+
   const providers = [
     { id: 'gemini', name: 'Google Gemini' },
     { id: 'openai', name: 'OpenAI (or Compatible)' },
@@ -16,6 +24,8 @@
   ];
 
   const formats = [
+    { id: 'MP3', name: 'MP3 (Audio)' },
+    { id: 'WAV', name: 'WAV (Audio)' },
     { id: 'STL', name: 'STL (3D Mesh)' },
     { id: 'STEP', name: 'STEP (BRep)' },
     { id: 'PNG', name: 'PNG (Reference)' },
@@ -24,6 +34,14 @@
   ];
 
   const selectedEngine = $derived(config.engines.find(e => e.id === config.selected_engine_id));
+
+  // Microwave assignments
+  if (!config.microwave) {
+    config.microwave = {
+      hum_id: null,
+      ding_id: null
+    };
+  }
 
   async function handleSave() {
     isSaving = true;
@@ -53,6 +71,60 @@
     config.engines = [...config.engines, newEngine];
     config.selected_engine_id = id;
     activeSection = 'engines';
+  }
+
+  async function startRecording(target) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      audioChunks = [];
+      recordingTarget = target;
+      recordingTimer = 0;
+
+      mediaRecorder.ondataavailable = (event) => {
+        audioChunks.push(event.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = async () => {
+          const base64data = reader.result.split(',')[1];
+          const name = `Recording: ${target.toUpperCase()} (${new Date().toLocaleTimeString()})`;
+          
+          try {
+            const asset = await invoke('save_recorded_audio', {
+              base64Data: base64data,
+              name
+            });
+            config.assets = [...(config.assets || []), asset];
+            if (target === 'hum') config.microwave.hum_id = asset.id;
+            if (target === 'ding') config.microwave.ding_id = asset.id;
+            message = `Recorded ${target} saved and assigned.`;
+          } catch (e) {
+            message = `Failed to save recording: ${e}`;
+          }
+        };
+      };
+
+      mediaRecorder.start();
+      isRecording = true;
+      timerInterval = setInterval(() => {
+        recordingTimer++;
+      }, 1000);
+    } catch (e) {
+      message = `Microphone error: ${e}`;
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder) {
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach(track => track.stop());
+    }
+    isRecording = false;
+    clearInterval(timerInterval);
   }
 
   function removeEngine(id) {
@@ -128,7 +200,7 @@
 
     <div class="sidebar-group">
       <div class="list-header">
-        <label>ASSETS / REFERENCE</label>
+        <label>GLOBAL MEDIA / SOUNDS</label>
         <button class="btn btn-xs" onclick={addAsset}>+ UPLOAD</button>
       </div>
       <div class="list-content">
@@ -142,8 +214,50 @@
           </button>
         {/each}
         {#if !config.assets || config.assets.length === 0}
-          <div class="empty-sidebar-msg">No assets uploaded.</div>
+          <div class="empty-sidebar-msg">No media uploaded.</div>
         {/if}
+      </div>
+    </div>
+    <div class="sidebar-group">
+      <div class="list-header">
+        <label>MICROWAVE SOUNDS</label>
+      </div>
+      <div class="list-content microwave-assignments">
+        <div class="sound-role">
+          <span class="role-label">COOKING HUM</span>
+          <div class="role-actions">
+            {#if isRecording && recordingTarget === 'hum'}
+              <button class="btn btn-xs btn-danger pulse" onclick={stopRecording}>⏹ STOP ({recordingTimer}s)</button>
+            {:else}
+              <button class="btn btn-xs" onclick={() => startRecording('hum')} disabled={isRecording}>🎤 RECORD</button>
+            {/if}
+            {#if config.microwave?.hum_id}
+              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.hum_id = null}>✕ CLEAR</button>
+            {/if}
+          </div>
+          {#if config.microwave?.hum_id}
+            {@const asset = config.assets?.find(a => a.id === config.microwave.hum_id)}
+            <span class="assigned-name">{asset?.name || 'Assigned'}</span>
+          {/if}
+        </div>
+
+        <div class="sound-role">
+          <span class="role-label">DONE DING</span>
+          <div class="role-actions">
+            {#if isRecording && recordingTarget === 'ding'}
+              <button class="btn btn-xs btn-danger pulse" onclick={stopRecording}>⏹ STOP ({recordingTimer}s)</button>
+            {:else}
+              <button class="btn btn-xs" onclick={() => startRecording('ding')} disabled={isRecording}>🎤 RECORD</button>
+            {/if}
+            {#if config.microwave?.ding_id}
+              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.ding_id = null}>✕ CLEAR</button>
+            {/if}
+          </div>
+          {#if config.microwave?.ding_id}
+            {@const asset = config.assets?.find(a => a.id === config.microwave.ding_id)}
+            <span class="assigned-name">{asset?.name || 'Assigned'}</span>
+          {/if}
+        </div>
       </div>
     </div>
   </aside>
@@ -240,6 +354,25 @@
               <label>FORMAT</label>
               <Dropdown options={formats} bind:value={selectedAsset.format} />
             </div>
+            
+            <div class="field">
+              <label>ASSIGN TO MICROWAVE</label>
+              <div class="assignment-buttons">
+                <button 
+                  class="btn btn-xs {config.microwave?.hum_id === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
+                  onclick={() => config.microwave.hum_id = selectedAsset.id}
+                >
+                  ASSIGN AS HUM (COOKING)
+                </button>
+                <button 
+                  class="btn btn-xs {config.microwave?.ding_id === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
+                  onclick={() => config.microwave.ding_id = selectedAsset.id}
+                >
+                  ASSIGN AS DING (DONE)
+                </button>
+              </div>
+            </div>
+
             <div class="field">
               <label>LOCAL PATH</label>
               <div class="path-display">{selectedAsset.path}</div>
@@ -249,7 +382,7 @@
             </div>
           </div>
         {:else}
-          <div class="no-engine">Select an asset to view details.</div>
+          <div class="no-engine">Select media to view details.</div>
         {/if}
       {:else}
         <div class="no-engine">
@@ -477,5 +610,55 @@
   .status-msg {
     font-size: 0.75rem;
     color: var(--secondary);
+  }
+
+  .microwave-assignments {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .sound-role {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .role-label {
+    font-size: 0.6rem;
+    font-weight: bold;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+  }
+
+  .role-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .assigned-name {
+    font-size: 0.6rem;
+    color: var(--secondary);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .btn-danger {
+    background: var(--red);
+    color: white;
+    border: none;
+  }
+
+  .pulse {
+    animation: pulse-red 1.5s infinite;
+  }
+
+  @keyframes pulse-red {
+    0% { opacity: 1; }
+    50% { opacity: 0.6; }
+    100% { opacity: 1; }
   }
 </style>

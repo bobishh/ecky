@@ -1,22 +1,31 @@
 <script>
-  let { options = [], value = $bindable(), placeholder = "Select...", onchange } = $props();
+  let { options = [], value = $bindable(), placeholder = "Select...", onchange, disabled = false } = $props();
   
   let isOpen = $state(false);
   let container;
 
-  const selectedOption = $derived(options.find(o => o.id === value) || options.find(o => o === value));
+  const selectedOption = $derived(
+    options.find(o => (typeof o === 'object' ? (o.id ?? o.value) : o) === value) ||
+    options.find(o => o === value)
+  );
   const displayLabel = $derived(
     selectedOption 
-      ? (typeof selectedOption === 'object' ? (selectedOption.name || selectedOption.id) : selectedOption)
+      ? (
+          typeof selectedOption === 'object'
+            ? (selectedOption.name || selectedOption.label || selectedOption.id || selectedOption.value)
+            : selectedOption
+        )
       : placeholder
   );
 
   function toggle() {
+    if (disabled) return;
     isOpen = !isOpen;
   }
 
   function select(option) {
-    const id = typeof option === 'object' ? option.id : option;
+    if (disabled) return;
+    const id = typeof option === 'object' ? (option.id ?? option.value) : option;
     value = id;
     isOpen = false;
     if (onchange) onchange(id);
@@ -32,8 +41,8 @@
 
 <svelte:window onclick={handleOutsideClick} />
 
-<div bind:this={container} class="custom-select {isOpen ? 'is-open' : ''}">
-  <button type="button" class="select-trigger" onclick={toggle}>
+<div bind:this={container} class="custom-select {isOpen ? 'is-open' : ''} {disabled ? 'is-disabled' : ''}">
+  <button type="button" class="select-trigger" onclick={toggle} disabled={disabled}>
     <span class="select-label">{displayLabel}</span>
     <span class="select-arrow">{isOpen ? '▲' : '▼'}</span>
   </button>
@@ -41,8 +50,8 @@
   {#if isOpen}
     <div class="select-dropdown scrollable">
       {#each options as option}
-        {@const id = typeof option === 'object' ? option.id : option}
-        {@const label = typeof option === 'object' ? (option.name || option.id) : option}
+        {@const id = typeof option === 'object' ? (option.id ?? option.value) : option}
+        {@const label = typeof option === 'object' ? (option.name || option.label || option.id || option.value) : option}
         <button 
           type="button" 
           class="select-option {value === id ? 'is-selected' : ''}"
@@ -80,6 +89,11 @@
   .custom-select.is-open .select-trigger {
     border-color: var(--primary);
     background: var(--bg-300);
+  }
+
+  .custom-select.is-disabled .select-trigger {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .select-arrow {

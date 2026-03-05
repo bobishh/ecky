@@ -1,15 +1,15 @@
 use crate::models::{Engine, DesignOutput};
 use serde_json::json;
 
-pub async fn generate_design(engine: &Engine, prompt: &String, image_data: Option<String>) -> Result<DesignOutput, String> {
+pub async fn generate_design(engine: &Engine, prompt: &String, images: Vec<String>) -> Result<DesignOutput, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     
     match engine.provider.as_str() {
-        "openai" | "ollama" => call_openai_compatible(&client, engine, prompt, image_data).await,
-        "gemini" => call_gemini(&client, engine, prompt, image_data).await,
+        "openai" | "ollama" => call_openai_compatible(&client, engine, prompt, images).await,
+        "gemini" => call_gemini(&client, engine, prompt, images).await,
         _ => Err(format!("Unsupported provider: {}", engine.provider)),
     }
 }
@@ -41,7 +41,7 @@ pub fn clean_json_text(text: &str) -> String {
     }
 }
 
-async fn call_openai_compatible(client: &reqwest::Client, engine: &Engine, prompt: &String, image_data: Option<String>) -> Result<DesignOutput, String> {
+async fn call_openai_compatible(client: &reqwest::Client, engine: &Engine, prompt: &String, images: Vec<String>) -> Result<DesignOutput, String> {
     let url = if engine.base_url.is_empty() {
         "https://api.openai.com/v1/chat/completions".to_string()
     } else {
@@ -58,7 +58,7 @@ async fn call_openai_compatible(client: &reqwest::Client, engine: &Engine, promp
         json!({ "type": "text", "text": prompt })
     ];
 
-    if let Some(b64) = image_data {
+    for b64 in images {
         user_content.push(json!({
             "type": "image_url",
             "image_url": { "url": b64 }
@@ -95,7 +95,7 @@ async fn call_openai_compatible(client: &reqwest::Client, engine: &Engine, promp
     serde_json::from_str::<DesignOutput>(&clean_content).map_err(|_| content.to_string())
 }
 
-async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String, image_data: Option<String>) -> Result<DesignOutput, String> {
+async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String, images: Vec<String>) -> Result<DesignOutput, String> {
     let url = if engine.base_url.is_empty() {
         format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", engine.model, engine.api_key)
     } else {
@@ -112,7 +112,7 @@ async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String,
         json!({ "text": prompt })
     ];
 
-    if let Some(b64_data_url) = image_data {
+    for b64_data_url in images {
         if let Some(b64) = b64_data_url.strip_prefix("data:image/jpeg;base64,") {
             parts.push(json!({
                 "inlineData": {

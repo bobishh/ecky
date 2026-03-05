@@ -1,5 +1,6 @@
 <script>
   import { invoke } from '@tauri-apps/api/core';
+  import Dropdown from './Dropdown.svelte';
 
   let { uiSpec = $bindable(null), parameters = {}, onchange, activeVersionId = null } = $props();
 
@@ -8,6 +9,7 @@
   let live = $state(false);
   let localParams = $state({ ...parameters });
   let hasPendingChanges = $derived(JSON.stringify(localParams) !== JSON.stringify(parameters));
+  let saveValuesState = $state('idle'); // idle | saving | saved
 
   $effect(() => {
     // Sync local params if parameters change from outside (e.g. version load)
@@ -104,6 +106,21 @@
     }
   }
 
+  async function saveValues() {
+    if (!activeVersionId) return;
+    saveValuesState = 'saving';
+    try {
+      await invoke('update_parameters', { messageId: activeVersionId, parameters: localParams });
+      saveValuesState = 'saved';
+      setTimeout(() => {
+        if (saveValuesState === 'saved') saveValuesState = 'idle';
+      }, 1500);
+    } catch (e) {
+      console.error('Failed to save defaults:', e);
+      saveValuesState = 'idle';
+    }
+  }
+
   function getRangeProps(field) {
     const val = localParams[field.key] || 0;
     const min = field.min !== undefined ? field.min : 0;
@@ -143,8 +160,22 @@
         >
           APPLY
         </button>
+        <button
+          class="btn btn-xs btn-ghost"
+          onclick={saveValues}
+          disabled={!activeVersionId || saveValuesState === 'saving'}
+          title={activeVersionId ? 'Persist current values as defaults for this version' : 'Generate first to persist defaults'}
+        >
+          {#if saveValuesState === 'saving'}
+            SAVING...
+          {:else if saveValuesState === 'saved'}
+            SAVED
+          {:else}
+            SAVE VALUES
+          {/if}
+        </button>
       </div>
-      <button class="btn btn-xs" onclick={startEditing} title="Edit controls">✏️ EDIT</button>
+      <button class="btn btn-xs" onclick={startEditing} title="Edit controls">✏️ EDIT CONTROLS</button>
     {:else}
       <button class="btn btn-xs" onclick={saveFields}>💾 SAVE</button>
       <button class="btn btn-xs btn-ghost" onclick={cancelEditing}>✕ CANCEL</button>
@@ -158,11 +189,13 @@
           <div class="edit-row">
             <input class="input-mono edit-input" placeholder="key" bind:value={field.key} />
             <input class="input-mono edit-input flex-2" placeholder="Label" bind:value={field.label} />
-            <select class="input-mono edit-select" bind:value={field.type}>
-              {#each getAvailableTypes(field) as t}
-                <option value={t}>{t}</option>
-              {/each}
-            </select>
+            <div class="edit-select-wrap">
+              <Dropdown
+                options={getAvailableTypes(field).map(t => ({ id: t, name: t }))}
+                bind:value={field.type}
+                placeholder="Field Type"
+              />
+            </div>
             <label class="freeze-toggle" title="Freeze value and move to bottom">
               <input type="checkbox" bind:checked={field.freezed} />
               <span>❄️</span>
@@ -219,17 +252,13 @@
               disabled={field.freezed}
             />
           {:else if field.type === 'select'}
-            <select 
-              id={field.key}
-              class="input-mono param-select"
+            <Dropdown
+              options={(field.options || []).map(option => ({ id: option.value, name: option.label }))}
               value={localParams[field.key]}
-              onchange={(e) => update(field.key, e.target.value)}
+              onchange={(val) => update(field.key, val)}
               disabled={field.freezed}
-            >
-              {#each field.options || [] as option}
-                <option value={option.value}>{option.label}</option>
-              {/each}
-            </select>
+              placeholder="Select value..."
+            />
           {:else if field.type === 'checkbox'}
             <div class="checkbox-group">
               <input 
@@ -251,27 +280,6 @@
 </div>
 
 <style>
-  .param-select {
-    width: 100%;
-    padding: 4px 8px;
-    background: var(--bg-200);
-    border: 1px solid var(--bg-300);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    outline: none;
-    cursor: pointer;
-  }
-
-  .param-select:focus:not(:disabled) {
-    border-color: var(--primary);
-  }
-
-  .param-select:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   .param-panel {
     padding: 12px;
     display: flex;
@@ -446,22 +454,15 @@
     font-size: 0.7rem;
   }
 
-  .edit-input:focus, .edit-select:focus, .edit-input-sm:focus {
+  .edit-input:focus, .edit-input-sm:focus {
     border-color: var(--primary);
     outline: none;
   }
 
   .flex-2 { flex: 2; }
 
-  .edit-select {
-    width: 80px;
-    padding: 4px 4px;
-    background: var(--bg);
-    border: 1px solid var(--bg-300);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.65rem;
-    cursor: pointer;
+  .edit-select-wrap {
+    width: 132px;
   }
 
   .edit-bounds {

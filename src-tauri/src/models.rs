@@ -21,11 +21,18 @@ pub struct Asset {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MicrowaveConfig {
+    pub hum_id: Option<String>,
+    pub ding_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub engines: Vec<Engine>,
     pub selected_engine_id: String,
     #[serde(default)]
     pub assets: Vec<Asset>,
+    pub microwave: Option<MicrowaveConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -34,6 +41,10 @@ pub struct DesignOutput {
     pub title: String,
     #[serde(default = "default_version_name")]
     pub version_name: String,
+    #[serde(default)]
+    pub response: String,
+    #[serde(default = "default_interaction_mode")]
+    pub interaction_mode: String,
     pub macro_code: String,
     pub ui_spec: serde_json::Value,
     pub initial_params: serde_json::Value,
@@ -45,6 +56,10 @@ fn default_title() -> String {
 
 fn default_version_name() -> String {
     "V1".to_string()
+}
+
+fn default_interaction_mode() -> String {
+    "design".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

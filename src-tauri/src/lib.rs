@@ -4,11 +4,12 @@ pub mod llm;
 pub mod freecad;
 
 use tauri::{State, AppHandle, Manager};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use std::fs;
 use std::sync::Mutex;
+use base64::{Engine as _, engine::general_purpose};
 
 use crate::models::{AppState, Config, Engine, DesignOutput, Message};
 
@@ -55,6 +56,14 @@ struct GenerateOutput {
     thread_id: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Attachment {
+    pub path: String,
+    pub name: String,
+    pub explanation: String,
+    pub r#type: String, // "image" or "cad"
+}
+
 #[tauri::command]
 async fn generate_design(
     prompt: String, 
@@ -62,6 +71,8 @@ async fn generate_design(
     parent_macro_code: Option<String>,
     is_retry: bool,
     image_data: Option<String>,
+    attachments: Option<Vec<Attachment>>,
+    question_mode: Option<bool>,
     state: State<'_, AppState>, 
     app: AppHandle
 ) -> Result<GenerateOutput, String> {
@@ -72,37 +83,140 @@ async fn generate_design(
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
-    // Find the thread and its context
-    let (thread_id_actual, last_macro) = {
+    let question_mode = question_mode.unwrap_or(false);
+
+    // Find the thread and its latest design context
+    let (thread_id_actual, last_output) = {
         let db = state.db.lock().unwrap();
         if let Some(tid) = thread_id.clone() {
             let messages = db::get_thread_messages(&db, &tid).unwrap_or_default();
-            let last_m = messages.iter()
+            let last_o = messages.iter()
                 .rev()
                 .find(|m| m.role == "assistant" && m.output.is_some())
-                .and_then(|m| m.output.as_ref().map(|o| o.macro_code.clone()));
-            (tid, last_m)
+                .and_then(|m| m.output.clone());
+            (tid, last_o)
         } else {
-            (Uuid::new_v4().to_string(), parent_macro_code)
+            let fallback_output = parent_macro_code.map(|code| DesignOutput {
+                title: "Untitled Design".to_string(),
+                version_name: "V1".to_string(),
+                response: String::new(),
+                interaction_mode: "design".to_string(),
+                macro_code: code,
+                ui_spec: json!({ "fields": [] }),
+                initial_params: json!({}),
+            });
+            (Uuid::new_v4().to_string(), fallback_output)
         }
     };
 
-    // Construct technical context
-    let full_prompt = format!("{}\n\n{}", prompt, TECHNICAL_SYSTEM_PROMPT);
+    // Construct technical context with attachments
+    let mut full_prompt = prompt.clone();
+    
+    if let Some(atts) = &attachments {
+        if !atts.is_empty() {
+            full_prompt.push_str("\n\nUser provided additional context/attachments:");
+            for att in atts {
+                full_prompt.push_str(&format!("\n- Attachment: {} (Type: {}, Purpose: {})", att.name, att.r#type, att.explanation));
+            }
+        }
+    }
 
-    let contextual_prompt = if let Some(code) = last_macro {
+    full_prompt = format!(
+        "{}\n\n{}\n\nUSER_INTENT_MODE: {}",
+        full_prompt,
+        TECHNICAL_SYSTEM_PROMPT,
+        if question_mode { "QUESTION_ONLY" } else { "DESIGN_EDIT" }
+    );
+
+    let contextual_prompt = if let Some(previous) = &last_output {
+        let ui_spec_json = serde_json::to_string_pretty(&previous.ui_spec).unwrap_or_else(|_| "{}".to_string());
+        let params_json = serde_json::to_string_pretty(&previous.initial_params).unwrap_or_else(|_| "{}".to_string());
         format!(
-            "a question regarding following FreeCAD Macro:\n\n```python\n{}\n```\n\nUser Question: {}", 
-            code, full_prompt
+            "CURRENT DESIGN CONTEXT
+Title: {}
+Version: {}
+
+Current FreeCAD Macro:
+```python
+{}
+```
+
+Current UI Spec:
+```json
+{}
+```
+
+Current Initial Params:
+```json
+{}
+```
+
+USER REQUEST:
+{}",
+            previous.title,
+            previous.version_name,
+            previous.macro_code,
+            ui_spec_json,
+            params_json,
+            full_prompt
         )
     } else {
         full_prompt
     };
 
-    let result: Result<DesignOutput, String> = llm::generate_design(&engine, &contextual_prompt, image_data.clone()).await;
+    // NOTE: In a more advanced version, we would also send CAD metadata 
+    // from the attachment paths to multimodal LLMs.
+    // For now, we provide the metadata/explanation and all provided images.
+
+    let mut images = Vec::new();
+    if let Some(ref main_img) = image_data {
+        images.push(main_img.clone());
+    }
+
+    if let Some(atts) = &attachments {
+        for att in atts {
+            if att.r#type == "image" {
+                if let Ok(bytes) = fs::read(&att.path) {
+                    let b64 = general_purpose::STANDARD.encode(bytes);
+                    let ext = att.path.split('.').last().unwrap_or("png").to_lowercase();
+                    let mime = if ext == "jpg" || ext == "jpeg" { "image/jpeg" } else { "image/png" };
+                    images.push(format!("data:{};base64,{}", mime, b64));
+                }
+            }
+        }
+    }
+
+    let result: Result<DesignOutput, String> = llm::generate_design(&engine, &contextual_prompt, images).await;
 
     let (status, content, output): (String, String, Option<DesignOutput>) = match result {
-        Ok(out) => ("success".to_string(), "Synthesized design output:".to_string(), Some(out)),
+        Ok(mut out) => {
+            if question_mode {
+                out.interaction_mode = "question".to_string();
+                if let Some(previous) = &last_output {
+                    // Keep geometry state stable when user is asking about the existing model.
+                    out.title = previous.title.clone();
+                    out.macro_code = previous.macro_code.clone();
+                    out.ui_spec = previous.ui_spec.clone();
+                    out.initial_params = previous.initial_params.clone();
+                }
+                if out.version_name.trim().is_empty() {
+                    out.version_name = "Q&A".to_string();
+                }
+                if out.response.trim().is_empty() {
+                    out.response = "Question answered. Geometry unchanged.".to_string();
+                }
+            } else if out.interaction_mode.trim().is_empty() {
+                out.interaction_mode = "design".to_string();
+            }
+
+            let assistant_text = if out.response.trim().is_empty() {
+                "Synthesized design output.".to_string()
+            } else {
+                out.response.clone()
+            };
+
+            ("success".to_string(), assistant_text, Some(out))
+        },
         Err(raw_body) => ("error".to_string(), format!("LLM Response (Unparsed): {}", raw_body), None)
     };
 
@@ -219,6 +333,8 @@ async fn add_manual_version(
     let output = DesignOutput {
         title: title.clone(),
         version_name,
+        response: "Manual edit committed as new version.".to_string(),
+        interaction_mode: "design".to_string(),
         macro_code,
         ui_spec,
         initial_params: parameters,
@@ -279,15 +395,24 @@ UI Guidelines:
 const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 1. "title": 2-5 words project title.
 2. "version_name": Short descriptive name for this iteration.
-3. "macro_code": FreeCAD Python code.
-4. "ui_spec": { "fields": [ { "key": string, "label": string, "type": "range"|"number"|"select"|"checkbox" } ] }
-5. "initial_params": { "key": value }
+3. "response": short end-user text for the advisor speech bubble (1-3 concise sentences).
+4. "interaction_mode": "design" or "question".
+5. "macro_code": FreeCAD Python code.
+6. "ui_spec": { "fields": [ { "key": string, "label": string, "type": "range"|"number"|"select"|"checkbox" } ] }
+7. "initial_params": { "key": value }
 
 CRITICAL RULES:
 - UNITS: ALL dimensions are in MILLIMETERS (mm).
 - UI: Focus on 'key', 'label' and 'type'. Don't worry about 'min'/'max' for ranges; the system will calculate bounds based on your 'initial_params'.
 - PARAMETERS: Access parameters directly by name (e.g. `L = connector_length`) or via `params.get("key", default)`.
 - NO BRACES: NEVER use `{var}` style interpolation inside the macro_code string.
+- If USER_INTENT_MODE is "QUESTION_ONLY":
+  - Set "interaction_mode" to "question".
+  - Use "response" to explain the current design/code.
+  - Keep "macro_code", "ui_spec", and "initial_params" aligned with the existing design context unless the user explicitly asks to modify geometry.
+- If USER_INTENT_MODE is "DESIGN_EDIT":
+  - Set "interaction_mode" to "design".
+  - Use "response" as a short summary of what changed.
 "#;
 
 #[tauri::command]
@@ -317,6 +442,33 @@ async fn upload_asset(
     })
 }
 
+#[tauri::command]
+async fn save_recorded_audio(
+    base64_data: String,
+    name: String,
+    app: AppHandle
+) -> Result<crate::models::Asset, String> {
+    let app_data_dir = app.path().app_data_dir().unwrap();
+    let assets_dir = app_data_dir.join("assets");
+    if !assets_dir.exists() {
+        fs::create_dir_all(&assets_dir).map_err(|e| e.to_string())?;
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let file_name = format!("{}.webm", id); // MediaRecorder typically outputs webm/opus
+    let target_path = assets_dir.join(&file_name);
+
+    let bytes = general_purpose::STANDARD.decode(base64_data).map_err(|e| e.to_string())?;
+    fs::write(&target_path, bytes).map_err(|e| e.to_string())?;
+
+    Ok(crate::models::Asset {
+        id,
+        name,
+        path: target_path.to_string_lossy().to_string(),
+        format: "WEBM".to_string(),
+    })
+}
+
 pub fn run() {
     let context = tauri::generate_context!();
     
@@ -334,6 +486,7 @@ pub fn run() {
         ],
         selected_engine_id: "default-gemini".to_string(),
         assets: vec![],
+        microwave: None,
     };
 
     tauri::Builder::default()
@@ -408,7 +561,8 @@ pub fn run() {
             add_manual_version,
             update_ui_spec,
             update_parameters,
-            upload_asset
+            upload_asset,
+            save_recorded_audio
         ])
         .run(context)
         .expect("error while running tauri application");

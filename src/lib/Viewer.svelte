@@ -4,7 +4,7 @@
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 
-  let { stlUrl = null } = $props();
+  let { stlUrl = null, isGenerating = false } = $props();
 
   let viewerHost;
   let scene, camera, renderer, controls, mesh;
@@ -30,6 +30,15 @@
   $effect(() => {
     if (stlUrl && scene) {
       loadStl(stlUrl);
+    }
+  });
+
+  $effect(() => {
+    if (!controls) return;
+    controls.autoRotate = isGenerating;
+    controls.autoRotateSpeed = isGenerating ? 1.8 : 0;
+    if (!isGenerating) {
+      controls.update();
     }
   });
 
