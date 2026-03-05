@@ -3,6 +3,7 @@
 Prompt-driven CAD iterator using LLMs to generate and execute FreeCAD Python macros.
 
 <img width="1520" height="1008" alt="Screenshot 2026-03-05 at 23 25 54" src="https://github.com/user-attachments/assets/7476e9ac-bd47-4d8c-b8b5-148cdcfa95e6" />
+
 ## Prerequisites
 
 - **FreeCAD:** `freecadcmd` must be installed and accessible.

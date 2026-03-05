@@ -23,6 +23,7 @@ url = "2.5"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 sha2 = "0.10.9"
 base64 = "0.22.1"
+rand = "0.8"
 
 [lib]
 name = "drydemacher_lib"

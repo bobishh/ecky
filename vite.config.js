@@ -15,5 +15,15 @@ export default defineConfig({
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     // produce sourcemaps for debug builds
     sourcemap: !!process.env.TAURI_DEBUG,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          three: ['three'],
+          editor: ['codemirror', '@codemirror/state', '@codemirror/view', '@codemirror/language', '@codemirror/lang-python', '@codemirror/theme-one-dark'],
+          vendor: ['svelte', '@tauri-apps/api', '@tauri-apps/plugin-dialog', '@tauri-apps/plugin-fs']
+        }
+      }
+    }
   },
 });
+

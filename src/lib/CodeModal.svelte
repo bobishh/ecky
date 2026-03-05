@@ -8,6 +8,18 @@
   let width = $state(1000);
   let height = $state(700);
 
+  let copyState = $state('idle'); // idle | copied
+
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(code);
+      copyState = 'copied';
+      setTimeout(() => copyState = 'idle', 2000);
+    } catch (e) {
+      console.error('Failed to copy code:', e);
+    }
+  }
+
   function handleCommit() {
     if (onCommit) onCommit(code);
   }
@@ -26,6 +38,11 @@
       <CodePanel bind:code />
     </div>
     <div class="code-modal-footer">
+      <div class="footer-left">
+        <button class="btn btn-secondary" onclick={copyCode}>
+          {copyState === 'copied' ? 'COPIED!' : 'COPY CODE'}
+        </button>
+      </div>
       <button class="btn btn-primary" onclick={handleCommit} title="Save changes as a new version in history">
         COMMIT AS NEW VERSION
       </button>
@@ -52,6 +69,12 @@
     background: var(--bg-100);
     border-top: 1px solid var(--bg-300);
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .footer-left {
+    display: flex;
+    gap: 8px;
   }
 </style>

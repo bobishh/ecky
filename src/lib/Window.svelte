@@ -80,14 +80,14 @@
   style="left: {x}px; top: {y}px; width: {width}px; height: {height}px;"
   role="dialog"
 >
-  <div class="window-header" onmousedown={handleDragStart}>
+  <div class="window-header" role="none" onmousedown={handleDragStart}>
     <span class="window-title">{title}</span>
     <button class="window-close" onclick={onclose}>&times;</button>
   </div>
   <div class="window-content">
     {@render children()}
   </div>
-  <div class="window-resize-handle" onmousedown={handleResizeStart}></div>
+  <div class="window-resize-handle" role="none" onmousedown={handleResizeStart}></div>
 </div>
 
 <style>

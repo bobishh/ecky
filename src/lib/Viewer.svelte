@@ -30,6 +30,11 @@
   $effect(() => {
     if (stlUrl && scene) {
       loadStl(stlUrl);
+    } else if (!stlUrl && mesh && scene) {
+      scene.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+      mesh = null;
     }
   });
 
@@ -49,7 +54,7 @@
     camera = new THREE.PerspectiveCamera(45, viewerHost.clientWidth / viewerHost.clientHeight, 0.1, 2000);
     camera.position.set(140, 120, 140);
 
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(viewerHost.clientWidth, viewerHost.clientHeight);
     viewerHost.appendChild(renderer.domElement);
@@ -130,12 +135,17 @@
   }
 </script>
 
-<div bind:this={viewerHost} class="viewer-host"></div>
+<div bind:this={viewerHost} class="viewer-host" class:is-blur={isGenerating}></div>
 
 <style>
   .viewer-host {
     width: 100%;
     height: 100%;
     overflow: hidden;
+    transition: filter 0.5s ease-in-out;
+  }
+
+  .is-blur {
+    filter: blur(8px) contrast(1.1) brightness(0.9);
   }
 </style>

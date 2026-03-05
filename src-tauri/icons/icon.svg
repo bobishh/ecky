@@ -1,43 +1,73 @@
 <svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <!-- Metallic Bronze Gradient -->
-    <linearGradient id="metalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#8e6d15;stop-opacity:1" />
-      <stop offset="50%" style="stop-color:#c8a620;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#5e4a0d;stop-opacity:1" />
+    <!-- Midnight theme background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1a2a44"/>
+      <stop offset="1" stop-color="#070a14"/>
     </linearGradient>
     
-    <!-- Shading filter -->
-    <filter id="innerShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="blur"/>
-      <feOffset dx="4" dy="4"/>
-      <feComposite in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1" result="shadow"/>
-      <feFlood flood-color="#000" flood-opacity="0.6"/>
-      <feComposite in2="shadow" operator="in"/>
-      <feComposite in2="SourceGraphic" operator="over"/>
+    <!-- Aura glow -->
+    <radialGradient id="aura" cx="256" cy="256" r="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4a8c5c" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#4a8c5c" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Face glow filter -->
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
     </filter>
   </defs>
 
-  <!-- Background Plate (Full bleed dark) -->
-  <rect width="512" height="512" rx="80" fill="#111524"/>
-  
-  <!-- Centered Content Group (Scaled down to 65%) -->
-  <g transform="translate(179, 154) scale(0.3)" filter="url(#innerShadow)">
-    <!-- The Base (Scaled spheres) -->
-    <circle cx="120" cy="700" r="140" fill="url(#metalGrad)" stroke="#1a1a2e" stroke-width="15"/>
-    <circle cx="400" cy="700" r="140" fill="url(#metalGrad)" stroke="#1a1a2e" stroke-width="15"/>
+  <!-- Icon Base -->
+  <rect x="0" y="0" width="512" height="512" rx="128" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="128" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+
+  <!-- Aura -->
+  <circle cx="256" cy="256" r="200" fill="url(#aura)"/>
+
+  <!-- Ecky Face (Centered) -->
+  <g transform="translate(256, 256)" filter="url(#soft)">
+    <!-- Base Mesh Head -->
+    <circle r="100" fill="#1a3a25" stroke="#4a8c5c" stroke-width="3" fill-opacity="0.85"/>
     
-    <!-- The Shaft -->
-    <rect x="160" y="200" width="200" height="550" rx="100" fill="url(#metalGrad)" stroke="#1a1a2e" stroke-width="15"/>
-    
-    <!-- The Apex -->
-    <path d="M160 250 C 160 0, 360 0, 360 250" fill="#8e6d15" stroke="#1a1a2e" stroke-width="15"/>
-    
-    <!-- Detailing / Fancy Ridges -->
-    <g stroke="#1a1a2e" stroke-width="20" fill="none" opacity="0.4">
-      <path d="M180 350 Q 260 370, 340 350"/>
-      <path d="M180 450 Q 260 470, 340 450"/>
-      <path d="M180 550 Q 260 570, 340 550"/>
+    <!-- Geometric internal lines -->
+    <g stroke="#4a8c5c" stroke-width="1.5" stroke-opacity="0.4">
+      <!-- Hexagonal vertices at ~30/90/150/etc degrees -->
+      <path d="M0,-100 L86.6,-50 L86.6,50 L0,100 L-86.6,50 L-86.6,-50 Z" fill="none"/>
+      <!-- Radial spokes -->
+      <path d="M0,-100 L0,100 M-86.6,-50 L86.6,50 M-86.6,50 L86.6,-50" fill="none"/>
+      <!-- Inner ring -->
+      <circle r="50" fill="none" stroke-dasharray="5 10"/>
+    </g>
+
+    <!-- Eyes -->
+    <g fill="#d6eddc">
+      <circle cx="-32" cy="-12" r="11"/>
+      <circle cx="32" cy="-12" r="11"/>
+    </g>
+
+    <!-- Mouth -->
+    <path d="M-28,38 Q0,55 28,38" fill="none" stroke="#d6eddc" stroke-width="9" stroke-linecap="round"/>
+
+    <!-- Glowing Nodes -->
+    <g fill="#dff9ea">
+      <circle cx="0" cy="-100" r="6"/>
+      <circle cx="86.6" cy="-50" r="6"/>
+      <circle cx="86.6" cy="50" r="6"/>
+      <circle cx="0" cy="100" r="6"/>
+      <circle cx="-86.6" cy="50" r="6"/>
+      <circle cx="-86.6" cy="-50" r="6"/>
+      <!-- Internal nodes -->
+      <circle cx="50" cy="0" r="4" fill-opacity="0.7"/>
+      <circle cx="-50" cy="0" r="4" fill-opacity="0.7"/>
+      <circle cx="0" cy="0" r="4" fill-opacity="0.4"/>
     </g>
   </g>
+  
+  <!-- Subtle top-down glass shine -->
+  <path d="M128,0 C60,0 0,60 0,128 L0,80 C0,60 60,0 128,0 Z" fill="#ffffff" fill-opacity="0.04"/>
 </svg>

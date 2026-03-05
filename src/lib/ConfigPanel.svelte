@@ -42,8 +42,11 @@
   if (!config.microwave) {
     config.microwave = {
       hum_id: null,
-      ding_id: null
+      ding_id: null,
+      muted: false
     };
+  } else if (typeof config.microwave.muted !== 'boolean') {
+    config.microwave.muted = false;
   }
 
   async function handleSave() {

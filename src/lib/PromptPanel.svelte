@@ -1,10 +1,68 @@
 <script>
   import { open } from '@tauri-apps/plugin-dialog';
+  import { onMount } from 'svelte';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
 
-  let { onGenerate, isGenerating = false, messages = [], onShowCode, activeVersionId = $bindable(null), onVersionChange } = $props();
+  let { onGenerate, isGenerating = false, messages = [], onShowCode, activeVersionId = $bindable(null), onVersionChange, onDeleteVersion } = $props();
 
   let prompt = $state('');
   let attachments = $state([]); // { path: string, name: string, explanation: string, type: string }
+  let isDragging = $state(false);
+
+  function processPaths(paths) {
+    const newAttachments = paths.map(path => {
+      const name = path.split(/[\/\\]/).pop();
+      const ext = name.split('.').pop().toLowerCase();
+      return {
+        path,
+        name,
+        explanation: '',
+        type: ['png', 'jpg', 'jpeg'].includes(ext) ? 'image' : 'cad'
+      };
+    });
+    attachments = [...attachments, ...newAttachments];
+  }
+
+  onMount(async () => {
+    // 1. Native Tauri Drag & Drop (for absolute paths)
+    const unlisten = await getCurrentWindow().onDragDropEvent((event) => {
+      if (event.payload.type === 'hover') {
+        isDragging = true;
+      } else if (event.payload.type === 'drop') {
+        isDragging = false;
+        processPaths(event.payload.paths);
+      } else if (event.payload.type === 'cancel') {
+        isDragging = false;
+      }
+    });
+
+    return () => {
+      unlisten();
+    };
+  });
+
+  // 2. Web Drag & Drop Fallback (mainly for E2E testing in browser environments)
+  function handleWebDragOver(e) {
+    e.preventDefault();
+    isDragging = true;
+  }
+
+  function handleWebDragLeave() {
+    isDragging = false;
+  }
+
+  function handleWebDrop(e) {
+    e.preventDefault();
+    isDragging = false;
+    
+    // In a real browser, we don't get absolute paths, but for E2E tests 
+    // we can simulate the 'paths' if needed or just test the UI reaction.
+    if (e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files);
+      const mockPaths = files.map(f => f.name); // Fallback to names
+      processPaths(mockPaths);
+    }
+  }
 
   // Extract versions (pairs of user prompt + assistant output)
   const versions = $derived(messages.filter(m => m.role === 'assistant' && m.output));
@@ -70,11 +128,34 @@
   const currentVersion = $derived(currentVersionIndex >= 0 ? versions[currentVersionIndex] : null);
   const promptTrail = $derived.by(() => {
     if (!currentVersion) return [];
-    return messages.filter(m => m.role === 'user' && m.timestamp <= currentVersion.timestamp);
+    const isLatest = currentVersion.id === versions[versions.length - 1]?.id;
+    if (isLatest) return messages;
+    return messages.filter(m => m.timestamp <= currentVersion.timestamp);
   });
-  const currentUserMsg = $derived(promptTrail.length > 0 ? promptTrail[promptTrail.length - 1] : null);
+  const currentUserMsg = $derived.by(() => {
+    const userMsgs = promptTrail.filter(m => m.role === 'user');
+    return userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
+  });
 
   let detailsOpen = $state(false);
+  let trailListEl = $state(null);
+
+  // Auto-scroll to bottom when opened or messages change
+  $effect(() => {
+    if (detailsOpen && trailListEl) {
+      // Use requestAnimationFrame or setTimeout to ensure DOM is updated
+      requestAnimationFrame(() => {
+        if (trailListEl) trailListEl.scrollTop = trailListEl.scrollHeight;
+      });
+    }
+  });
+
+  // Also watch for message changes while the panel is open
+  $effect(() => {
+    if (detailsOpen && messages.length && trailListEl) {
+      trailListEl.scrollTop = trailListEl.scrollHeight;
+    }
+  });
 
   function formatDate(ts) {
     return new Date(ts * 1000).toLocaleString();
@@ -83,14 +164,28 @@
   const lastMessage = $derived(messages.length > 0 ? messages[messages.length - 1] : null);
 </script>
 
-<div class="prompt-container">
+<div 
+  class="prompt-container" 
+  class:is-dragging={isDragging}
+  ondragover={handleWebDragOver}
+  ondragleave={handleWebDragLeave}
+  ondrop={handleWebDrop}
+>
+  {#if isDragging}
+    <div class="drag-overlay">
+      <div class="drag-msg">DROP TO ATTACH REFERENCES</div>
+    </div>
+  {/if}
   {#if versions.length > 0}
     <div class="version-nav">
-      <button class="nav-btn" disabled={!hasPrev} onclick={goPrev}>&larr; PREV</button>
+      <div class="nav-controls">
+        <button class="nav-btn" disabled={!hasPrev} onclick={goPrev}>&larr;</button>
+        <button class="nav-btn" disabled={!hasNext} onclick={goNext}>&rarr;</button>
+      </div>
       
       <div class="version-info">
         <div class="version-counter-group">
-          <span class="version-counter">V{currentVersionIndex + 1} OF {versions.length}</span>
+          <span class="version-counter">V {currentVersionIndex + 1} OF {versions.length}</span>
           {#if currentVersion && currentVersion.output?.version_name}
             <span class="version-name">{currentVersion.output.version_name}</span>
           {/if}
@@ -98,11 +193,10 @@
         {#if currentVersion}
           <div class="version-actions">
             <button class="code-btn" onclick={() => onShowCode(currentVersion)} title="Inspect Python Code">📜 CODE</button>
+            <button class="code-btn delete-btn" onclick={() => onDeleteVersion && onDeleteVersion(currentVersion.id)} title="Delete Version">🗑️ DEL</button>
           </div>
         {/if}
       </div>
-
-      <button class="nav-btn" disabled={!hasNext} onclick={goNext}>NEXT &rarr;</button>
     </div>
 
     {#if lastMessage && lastMessage.status === 'error'}
@@ -114,18 +208,30 @@
 
     {#if currentUserMsg && currentVersion}
       <details class="version-details" bind:open={detailsOpen}>
-        <summary>Prompt Details: {currentVersion.output.title}</summary>
+        <summary>Dialogue History for {currentVersion.output.title}</summary>
         <div class="details-content">
-          <div class="meta">Latest request in this version path: {formatDate(currentUserMsg.timestamp)}</div>
-          <div class="query">"{currentUserMsg.content}"</div>
-          {#if promptTrail.length > 1}
-            <div class="trail-header">Prompt Trail</div>
-            <div class="trail-list">
+          {#if promptTrail.length > 0}
+            <div class="trail-list" bind:this={trailListEl}>
               {#each promptTrail as msg, i}
-                <div class="trail-item">
-                  <span class="trail-index">#{i + 1}</span>
-                  <span class="trail-time">{formatDate(msg.timestamp)}</span>
-                  <div class="trail-query">"{msg.content}"</div>
+                <div class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'}">
+                  <div class="trail-header-row">
+                    <span class="trail-role">{msg.role === 'assistant' ? 'ECKY' : 'YOU'}</span>
+                    <span class="trail-time">{formatDate(msg.timestamp)}</span>
+                  </div>
+                  <div class="trail-content">
+                    {#if msg.image_data}
+                      <div class="trail-image-wrapper">
+                        <img src={msg.image_data} alt="Viewport snapshot" class="trail-image" />
+                      </div>
+                    {/if}
+                    {#if msg.role === 'assistant' && msg.output}
+                      <i>[{msg.output.interaction_mode.toUpperCase()}] {msg.output.title} ({msg.output.version_name})</i>
+                      <br/>
+                      {msg.output.response || msg.content}
+                    {:else}
+                      "{msg.content}"
+                    {/if}
+                  </div>
                 </div>
               {/each}
             </div>
@@ -159,7 +265,7 @@
       class="input-mono prompt-input"
       bind:value={prompt}
       onkeydown={handleKeydown}
-      placeholder="Type your design intent... (Cmd+Enter to send)"
+      placeholder="Type a question or design change... (Cmd+Enter to send)"
       spellcheck="false"
     ></textarea>
     <div class="prompt-actions">
@@ -172,11 +278,9 @@
         onclick={submit}
       >
         {#if isGenerating}
-          GENERATING...
-        {:else if versions.length > 0}
-          ITERATE DESIGN
+          SENDING...
         {:else}
-          GENERATE
+          SEND
         {/if}
       </button>
     </div>
@@ -189,6 +293,31 @@
     flex-direction: column;
     height: 100%;
     background: var(--bg);
+    position: relative;
+  }
+
+  .drag-overlay {
+    position: absolute;
+    inset: 0;
+    background: color-mix(in srgb, var(--primary) 15%, transparent);
+    border: 3px dashed var(--primary);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    backdrop-filter: blur(2px);
+  }
+
+  .drag-msg {
+    background: var(--bg);
+    color: var(--primary);
+    padding: 12px 24px;
+    font-family: var(--font-mono);
+    font-weight: bold;
+    border: 1px solid var(--primary);
+    letter-spacing: 0.1em;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
   }
 
   .attachments-list {
@@ -258,11 +387,17 @@
 
   .version-nav {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
     padding: 8px 12px;
     background: var(--bg-100);
     border-bottom: 1px solid var(--bg-300);
+    gap: 12px;
+  }
+
+  .nav-controls {
+    display: flex;
+    gap: 4px;
   }
 
   .nav-btn {
@@ -339,6 +474,11 @@
     color: var(--primary);
   }
 
+  .delete-btn:hover {
+    color: var(--danger, #ff4444);
+    border-color: var(--danger, #ff4444);
+  }
+
   .version-details {
     padding: 8px 12px;
     background: var(--bg-100);
@@ -389,30 +529,93 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    margin-bottom: 8px;
+    max-height: 300px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  /* Q&A Response Box Styling */
+  .qa-response-box {
+    margin: 10px 12px;
+    padding: 12px;
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
+    border: 1px solid var(--primary);
+    border-left: 4px solid var(--primary);
+  }
+
+  .qa-header {
+    font-size: 0.6rem;
+    font-weight: bold;
+    color: var(--secondary);
+    margin-bottom: 6px;
+    letter-spacing: 0.05em;
+  }
+
+  .qa-content {
+    font-size: 0.8rem;
+    color: var(--text);
+    line-height: 1.5;
+    white-space: pre-wrap;
   }
 
   .trail-item {
     border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    padding: 6px 8px;
+    padding: 6px 10px;
+    max-width: min(800px, 90%);
+    width: fit-content;
+    min-width: 200px;
   }
 
-  .trail-index {
+  .trail-user {
+    background: var(--bg-200);
+    border-left: 2px solid var(--text-dim);
+    align-self: flex-start;
+  }
+
+  .trail-assistant {
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
+    border-left: 2px solid var(--primary);
+    align-self: flex-start;
+  }
+
+  .trail-header-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
     font-size: 0.6rem;
+  }
+
+  .trail-role {
+    font-weight: bold;
     color: var(--secondary);
-    margin-right: 8px;
   }
 
   .trail-time {
-    font-size: 0.6rem;
     color: var(--text-dim);
+    font-family: var(--font-mono);
   }
 
-  .trail-query {
-    margin-top: 4px;
+  .trail-content {
     font-size: 0.7rem;
     color: var(--text);
     white-space: pre-wrap;
+    line-height: 1.4;
+  }
+
+  .trail-image-wrapper {
+    margin-bottom: 8px;
+    border: 1px solid var(--bg-400);
+    max-width: 320px;
+    background: #000;
+  }
+
+  .trail-image {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 200px;
+    object-fit: contain;
   }
 
   .input-area {

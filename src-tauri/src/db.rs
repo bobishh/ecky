@@ -3,12 +3,21 @@ use crate::models::{Thread, Message, DesignOutput, ThreadReference};
 
 pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     let conn = Connection::open(db_path)?;
+    
+    // Enable WAL mode for better concurrency and prevent "database is locked" errors
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;"
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS threads (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             summary TEXT NOT NULL DEFAULT '',
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            genie_traits TEXT
         )",
         [],
     )?;
@@ -50,6 +59,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     
     // Migrations for existing databases
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN summary TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN genie_traits TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN image_data TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'success'", []);
 
@@ -57,32 +67,38 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
 }
 
 pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
-    let mut stmt = conn.prepare("SELECT id, title, summary, updated_at FROM threads ORDER BY updated_at DESC")?;
+    let mut stmt = conn.prepare("
+        SELECT id, title, summary, updated_at, genie_traits,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND output IS NOT NULL) as v_count
+        FROM threads ORDER BY updated_at DESC
+    ")?;
     let thread_iter = stmt.query_map([], |row| {
+        let traits_str: Option<String> = row.get(4)?;
+        let genie_traits: Option<serde_json::Value> = traits_str.and_then(|s| serde_json::from_str(&s).ok());
         Ok(Thread {
             id: row.get(0)?,
             title: row.get(1)?,
             summary: row.get(2)?,
             updated_at: row.get::<_, i64>(3)? as u64,
-            messages: vec![],
+            messages: vec![], // Messages are now lazy-loaded
+            genie_traits,
+            version_count: row.get::<_, i64>(5)? as usize,
         })
     })?;
 
     let mut threads = Vec::new();
     for thread in thread_iter {
-        let mut t = thread?;
-        let messages = get_thread_messages(conn, &t.id)?;
-        t.messages = messages;
-        threads.push(t);
+        threads.push(thread?);
     }
     Ok(threads)
 }
 
-pub fn create_or_update_thread(conn: &Connection, thread_id: &str, title: &str, updated_at: u64) -> SqlResult<()> {
+pub fn create_or_update_thread(conn: &Connection, thread_id: &str, title: &str, updated_at: u64, genie_traits: Option<&serde_json::Value>) -> SqlResult<()> {
+    let traits_str = genie_traits.and_then(|t| serde_json::to_string(t).ok());
     conn.execute(
-        "INSERT INTO threads (id, title, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at",
-        params![thread_id, title, updated_at as i64],
+        "INSERT INTO threads (id, title, updated_at, genie_traits) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, genie_traits=COALESCE(excluded.genie_traits, threads.genie_traits)",
+        params![thread_id, title, updated_at as i64, traits_str],
     )?;
     Ok(())
 }
@@ -204,6 +220,13 @@ pub fn delete_thread(conn: &Connection, id: &str) -> SqlResult<()> {
     Ok(())
 }
 
+pub fn delete_message(conn: &Connection, id: &str) -> SqlResult<()> {
+    conn.execute("DELETE FROM messages WHERE id = ?", [id])?;
+    // We also delete associated thread references that originated from this message
+    conn.execute("DELETE FROM thread_references WHERE source_message_id = ?", [id])?;
+    Ok(())
+}
+
 pub fn update_message_ui_spec(conn: &Connection, message_id: &str, ui_spec: &serde_json::Value) -> SqlResult<()> {
     let output_str: Option<String> = conn.query_row(
         "SELECT output FROM messages WHERE id = ?1",
@@ -260,4 +283,86 @@ pub fn get_message_output_and_thread(conn: &Connection, message_id: &str) -> Sql
     };
 
     Ok(Some((output, thread_id)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn init_db_internal(conn: &Connection) -> SqlResult<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS threads (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL,
+                genie_traits TEXT
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'success',
+                output TEXT,
+                timestamp INTEGER NOT NULL,
+                image_data TEXT,
+                FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_ui_spec_and_params() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "test-thread";
+        let msg_id = "test-msg";
+        let now = 123456789;
+
+        create_or_update_thread(&conn, thread_id, "Test Thread", now, None).unwrap();
+
+        let initial_output = DesignOutput {
+            title: "Test".to_string(),
+            version_name: "V1".to_string(),
+            response: "".to_string(),
+            interaction_mode: "design".to_string(),
+            macro_code: "print('hi')".to_string(),
+            ui_spec: json!({"fields": []}),
+            initial_params: json!({"x": 10}),
+        };
+
+        let msg = Message {
+            id: msg_id.to_string(),
+            role: "assistant".to_string(),
+            content: "Hello".to_string(),
+            status: "success".to_string(),
+            output: Some(initial_output),
+            timestamp: now,
+            image_data: None,
+        };
+
+        add_message(&conn, thread_id, &msg).unwrap();
+
+        // Update UI Spec
+        let new_spec = json!({"fields": [{"key": "y", "type": "number"}]});
+        update_message_ui_spec(&conn, msg_id, &new_spec).unwrap();
+
+        // Update Params
+        let new_params = json!({"x": 20, "y": 5});
+        update_message_parameters(&conn, msg_id, &new_params).unwrap();
+
+        // Verify
+        let (output, tid) = get_message_output_and_thread(&conn, msg_id).unwrap().unwrap();
+        assert_eq!(tid, thread_id);
+        assert_eq!(output.ui_spec, new_spec);
+        assert_eq!(output.initial_params, new_params);
+    }
 }

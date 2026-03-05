@@ -1,7 +1,15 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
 
-  let { mode = 'idle', bubble = '', question = '', onDismiss = null } = $props();
+  let { mode = 'idle', bubble = '', question = '', onDismiss = null, traits = {}, intensity = 1.0 } = $props();
+
+  const defaultTraits = {
+    colorHue: 0,
+    vertexCount: 12,
+    jitterScale: 1.0,
+    pulseScale: 1.0
+  };
+  const t = $derived({ ...defaultTraits, ...traits });
 
   let canvas;
   let frameId = 0;
@@ -50,6 +58,11 @@
     const secondary = css.getPropertyValue('--secondary').trim() || '#c8a620';
     const red = css.getPropertyValue('--red').trim() || '#ff6b6b';
 
+    const applyHue = (color) => {
+      if (t.colorHue === 0) return color;
+      return `color-mix(in hcl, ${color}, hcl(${t.colorHue} 50 50))`;
+    };
+
     if (mode === 'error') {
       return {
         edge: red,
@@ -82,8 +95,16 @@
       };
     }
 
+    if (mode === 'repairing') {
+      return {
+        edge: '#f2bf6f',
+        node: '#fff0cf',
+        glow: 'rgba(242, 191, 111, 0.34)'
+      };
+    }
+
     return {
-      edge: primary,
+      edge: applyHue(primary),
       node: '#d6eddc',
       glow: 'rgba(74, 140, 92, 0.34)'
     };
@@ -96,23 +117,24 @@
     const isThinkingEcky = mode === 'thinking';
     const isLightEcky = mode === 'light';
     const isVoltageEcky = mode === 'rendering';
+    const isRepairEcky = mode === 'repairing';
     const isSpeakingEcky = mode === 'speaking';
     const isErrorEcky = mode === 'error';
     const profile = {
-      jitter: isThinkingEcky ? 0.45 : isLightEcky ? 0.28 : isVoltageEcky ? 1.65 : isErrorEcky ? 2.3 : isSpeakingEcky ? 1.15 : 0.65,
-      pulse: isThinkingEcky ? 0.022 : isLightEcky ? 0.014 : isVoltageEcky ? 0.075 : isSpeakingEcky ? 0.055 : isErrorEcky ? 0.06 : 0.03,
-      hover: isThinkingEcky ? 0.9 : isLightEcky ? 0.6 : isVoltageEcky ? 2.2 : isSpeakingEcky ? 1.8 : 1.4,
-      skew: isThinkingEcky ? 0.005 : isLightEcky ? 0.003 : isVoltageEcky ? 0.02 : isErrorEcky ? 0.03 : 0.015
+      jitter: (isThinkingEcky ? 0.45 : isLightEcky ? 0.28 : isRepairEcky ? 0.95 : isVoltageEcky ? 1.65 : isErrorEcky ? 2.3 : isSpeakingEcky ? 1.15 : 0.65) * intensity * t.jitterScale,
+      pulse: (isThinkingEcky ? 0.022 : isLightEcky ? 0.014 : isRepairEcky ? 0.044 : isVoltageEcky ? 0.075 : isSpeakingEcky ? 0.055 : isErrorEcky ? 0.06 : 0.03) * intensity * t.pulseScale,
+      hover: (isThinkingEcky ? 0.9 : isLightEcky ? 0.6 : isRepairEcky ? 1.3 : isVoltageEcky ? 2.2 : isSpeakingEcky ? 1.8 : 1.4) * intensity,
+      skew: isThinkingEcky ? 0.005 : isLightEcky ? 0.003 : isRepairEcky ? 0.01 : isVoltageEcky ? 0.02 : isErrorEcky ? 0.03 : 0.015
     };
 
-    const centerX = SIZE * 0.48 + Math.sin(time * (isVoltageEcky ? 2.8 : 1.45)) * (isThinkingEcky ? 0.6 : isLightEcky ? 0.45 : isVoltageEcky ? 1.7 : 1);
+    const centerX = SIZE * 0.48 + Math.sin(time * (isVoltageEcky ? 2.8 : isRepairEcky ? 2.0 : 1.45)) * (isThinkingEcky ? 0.6 : isLightEcky ? 0.45 : isRepairEcky ? 0.9 : isVoltageEcky ? 1.7 : 1);
     const centerY = SIZE * 0.58 + Math.sin(time * 2.2) * profile.hover;
-    const radiusBase = isThinkingEcky ? 25 : isLightEcky ? 27 : 32;
+    const radiusBase = isThinkingEcky ? 25 : isLightEcky ? 27 : isRepairEcky ? 29 : 32;
     const radius = radiusBase * (1 + Math.sin(time * 5.3) * profile.pulse);
     const palette = pickPalette();
     const points = [];
-    const vertexCount = isThinkingEcky ? 20 : isLightEcky ? 12 : isVoltageEcky ? 16 : isSpeakingEcky ? 14 : 12;
-    const tilt = Math.sin(time * 1.1) * (isThinkingEcky ? 0.01 : isLightEcky ? 0.008 : isVoltageEcky ? 0.035 : 0.02);
+    const vertexCount = isThinkingEcky ? 20 : (isLightEcky ? 12 : (isRepairEcky ? 15 : (isVoltageEcky ? 16 : (isSpeakingEcky ? 14 : t.vertexCount))));
+    const tilt = Math.sin(time * 1.1) * (isThinkingEcky ? 0.01 : isLightEcky ? 0.008 : isRepairEcky ? 0.018 : isVoltageEcky ? 0.035 : 0.02);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, SIZE, SIZE);
@@ -130,6 +152,8 @@
       const asym = 1 + Math.sin(i * 1.65 + time * 0.8) * profile.skew;
       const modeWarp = isVoltageEcky
         ? Math.sin(time * 4 + i * 1.2) * 0.7
+        : isRepairEcky
+          ? Math.sin(time * 3.1 + i * 0.95) * 0.35
         : isErrorEcky
           ? Math.sin(time * 2.5 + i * 0.7) * 0.9
           : 0;
@@ -146,16 +170,16 @@
 
     for (let i = 0; i < vertexCount; i++) {
       const next = (i + 1) % vertexCount;
-      const chord = (i + (isThinkingEcky ? 3 : isLightEcky ? 4 : isVoltageEcky ? 5 : 4)) % vertexCount;
+      const chord = (i + (isThinkingEcky ? 3 : isLightEcky ? 4 : isRepairEcky ? 4 : isVoltageEcky ? 5 : 4)) % vertexCount;
 
       ctx.beginPath();
       ctx.moveTo(points[i].x, points[i].y);
       ctx.lineTo(points[next].x, points[next].y);
       ctx.stroke();
 
-      const drawChord = isThinkingEcky || isLightEcky || isVoltageEcky || isErrorEcky;
+      const drawChord = isThinkingEcky || isLightEcky || isRepairEcky || isVoltageEcky || isErrorEcky;
       if (drawChord) {
-        ctx.globalAlpha = isThinkingEcky ? 0.2 : isLightEcky ? 0.12 : 0.16;
+        ctx.globalAlpha = isThinkingEcky ? 0.2 : isLightEcky ? 0.12 : isRepairEcky ? 0.14 : 0.16;
         ctx.beginPath();
         ctx.moveTo(points[i].x, points[i].y);
         ctx.lineTo(points[chord].x, points[chord].y);
@@ -164,9 +188,9 @@
       ctx.globalAlpha = 0.85;
     }
 
-    if (isThinkingEcky || isLightEcky) {
+    if (isThinkingEcky || isLightEcky || isRepairEcky) {
       ctx.globalAlpha = 0.2;
-      for (let i = 0; i < vertexCount; i += (isLightEcky ? 3 : 2)) {
+      for (let i = 0; i < vertexCount; i += (isLightEcky ? 3 : isRepairEcky ? 4 : 2)) {
         ctx.beginPath();
         ctx.moveTo(points[i].x, points[i].y);
         ctx.lineTo(centerX, centerY);
@@ -178,7 +202,7 @@
     ctx.fillStyle = palette.node;
     for (const point of points) {
       ctx.beginPath();
-      ctx.arc(point.x, point.y, isThinkingEcky ? 2.2 : isLightEcky ? 2.0 : 2.3, 0, Math.PI * 2);
+      ctx.arc(point.x, point.y, isThinkingEcky ? 2.2 : isLightEcky ? 2.0 : isRepairEcky ? 2.1 : 2.3, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -202,6 +226,17 @@
       ctx.moveTo(centerX + 5, eyeY);
       ctx.lineTo(centerX + 13, eyeY);
       ctx.stroke();
+    } else if (isRepairEcky) {
+      ctx.strokeStyle = palette.node;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(centerX - 14, eyeY);
+      ctx.lineTo(centerX - 8, eyeY + 1.5);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(centerX + 5, eyeY + 1.5);
+      ctx.lineTo(centerX + 13, eyeY - 1.5);
+      ctx.stroke();
     } else {
       ctx.save();
       ctx.translate(centerX - 11, eyeY - 1);
@@ -220,16 +255,16 @@
       ctx.restore();
     }
 
-    const mouthOpen = mode === 'speaking' ? 4 + Math.abs(Math.sin(time * 14)) * 3.5 : mode === 'error' ? 1 : isThinkingEcky ? 1.1 : isLightEcky ? 1.0 : 2.2;
+    const mouthOpen = mode === 'speaking' ? 4 + Math.abs(Math.sin(time * 14)) * 3.5 : mode === 'error' ? 1 : isRepairEcky ? 1.4 : isThinkingEcky ? 1.1 : isLightEcky ? 1.0 : 2.2;
     ctx.strokeStyle = palette.node;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    if (!isThinkingEcky && !isLightEcky) {
+    if (!isThinkingEcky && !isLightEcky && !isRepairEcky) {
       ctx.moveTo(centerX - 10, centerY + 10);
       ctx.quadraticCurveTo(centerX, centerY + 11 + mouthOpen, centerX + 10, centerY + 10);
     } else {
       ctx.moveTo(centerX - 9, centerY + 10);
-      ctx.lineTo(centerX + 9, centerY + 10);
+      ctx.lineTo(centerX + 9, centerY + 10 + (isRepairEcky ? 1.5 : 0));
     }
     ctx.stroke();
 

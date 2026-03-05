@@ -1,16 +1,21 @@
 import { test, expect } from '@playwright/test';
 
-test('app should load and show the designer tab', async ({ page }) => {
+test('app should load and show workbench by default', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('.app-project-tab--active')).toContainText('DESIGNER');
+  await expect(page.locator('text=TUNABLE PARAMETERS')).toBeVisible();
+  await expect(page.locator('text=THREAD HISTORY')).toBeVisible();
 });
 
-test('switching tabs should work', async ({ page }) => {
+test('switching between workbench and config should work', async ({ page }) => {
   await page.goto('/');
-  await page.click('text=MACRO INSPECTOR');
-  await expect(page.locator('.app-project-tab--active')).toContainText('MACRO INSPECTOR');
   
-  await page.click('text=CONFIG');
-  await expect(page.locator('.app-project-tab--active')).toContainText('CONFIG');
+  // Click settings button
+  await page.click('.settings-overlay-btn');
   await expect(page.locator('text=ENGINES')).toBeVisible();
+  await expect(page.locator('text=TUNABLE PARAMETERS')).not.toBeVisible();
+  
+  // Click settings button again to return to workbench
+  await page.click('.settings-overlay-btn');
+  await expect(page.locator('text=TUNABLE PARAMETERS')).toBeVisible();
+  await expect(page.locator('text=ENGINES')).not.toBeVisible();
 });

@@ -2,6 +2,12 @@ use crate::models::{Engine, DesignOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+fn debug_log(msg: &str) {
+    if cfg!(debug_assertions) || std::env::var("DRYDEMACHER_DEBUG").is_ok() {
+        eprintln!("[LLM] {}", msg);
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct IntentClassification {
     pub intent: String, // "question" | "design"
@@ -267,47 +273,46 @@ async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String,
         "generationConfig": { "responseMimeType": "application/json" }
     });
 
-    eprintln!("[GEMINI DEBUG] URL: {}", url.split('?').next().unwrap_or(&url));
-    eprintln!("[GEMINI DEBUG] Model: {}", engine.model);
-    eprintln!("[GEMINI DEBUG] System prompt length: {} chars", system_content.len());
-    eprintln!("[GEMINI DEBUG] User prompt length: {} chars", prompt.len());
-    eprintln!("[GEMINI DEBUG] Has image: {}", parts.len() > 1);
-    eprintln!("[GEMINI DEBUG] Payload size: {} bytes", serde_json::to_string(&payload).unwrap_or_default().len());
-    eprintln!("[GEMINI DEBUG] User prompt preview: {:.200}", prompt);
+    debug_log(&format!("URL: {}", url.split('?').next().unwrap_or(&url)));
+    debug_log(&format!("Model: {}", engine.model));
+    debug_log(&format!("System prompt length: {} chars", system_content.len()));
+    debug_log(&format!("User prompt length: {} chars", prompt.len()));
+    debug_log(&format!("Has image: {}", parts.len() > 1));
+    debug_log(&format!("Payload size: {} bytes", serde_json::to_string(&payload).unwrap_or_default().len()));
+    debug_log(&format!("User prompt preview: {:.200}", prompt));
 
     let response = client.post(&url).json(&payload).send().await.map_err(|e| {
-        eprintln!("[GEMINI DEBUG] Request SEND failed: {:?}", e);
+        eprintln!("[LLM] Request SEND failed: {:?}", e);
         e.to_string()
     })?;
     let status = response.status();
-    eprintln!("[GEMINI DEBUG] Response status: {}", status);
+    debug_log(&format!("Response status: {}", status));
     let body = response.text().await.unwrap_or_default();
 
     if !status.is_success() {
-        eprintln!("[GEMINI DEBUG] Error body: {}", body);
         return Err(format!("Gemini Error {}: {}", status, body));
     }
 
-    eprintln!("[GEMINI DEBUG] Response body length: {} chars", body.len());
-    eprintln!("[GEMINI DEBUG] Response preview: {:.500}", body);
+    debug_log(&format!("Response body length: {} chars", body.len()));
+    debug_log(&format!("Response preview: {:.500}", body));
 
     let res_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        eprintln!("[GEMINI DEBUG] JSON parse error: {}", e);
+        eprintln!("[LLM] JSON parse error: {}", e);
         e.to_string()
     })?;
     let text = res_json["candidates"][0]["content"]["parts"][0]["text"].as_str()
         .ok_or_else(|| {
-            eprintln!("[GEMINI DEBUG] No text in response. Full JSON: {}", body);
+            eprintln!("[LLM] No text in response. Full JSON: {}", body);
             "Gemini response had no text content".to_string()
         })?;
     
-    eprintln!("[GEMINI DEBUG] Extracted text length: {} chars", text.len());
+    debug_log(&format!("Extracted text length: {} chars", text.len()));
     let clean_text = clean_json_text(text);
-    eprintln!("[GEMINI DEBUG] Clean JSON preview: {:.300}", clean_text);
+    debug_log(&format!("Clean JSON preview: {:.300}", clean_text));
     
     serde_json::from_str::<DesignOutput>(&clean_text).map_err(|e| {
-        eprintln!("[GEMINI DEBUG] DesignOutput parse FAILED: {}", e);
-        eprintln!("[GEMINI DEBUG] Raw text was: {}", text);
+        eprintln!("[LLM] DesignOutput parse FAILED: {}", e);
+        eprintln!("[LLM] Raw text was: {}", text);
         text.to_string()
     })
 }
@@ -401,4 +406,44 @@ async fn fetch_gemini_models(client: &reqwest::Client, api_key: &str) -> Result<
         .filter_map(|m| m["name"].as_str().map(|s| s.replace("models/", "")))
         .collect();
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_json_text_extracts_from_markdown() {
+        let input = "```json\n{\"title\": \"Box\"}\n```";
+        let result = clean_json_text(input);
+        assert_eq!(result, "{\"title\": \"Box\"}");
+    }
+
+    #[test]
+    fn clean_json_text_returns_original_if_no_braces() {
+        let input = "no json here";
+        let result = clean_json_text(input);
+        assert_eq!(result, "no json here");
+    }
+
+    #[test]
+    fn clean_json_text_handles_nested_braces() {
+        let input = r#"{"outer": {"inner": "value"}}"#;
+        let result = clean_json_text(input);
+        assert_eq!(result, r#"{"outer": {"inner": "value"}}"#);
+    }
+
+    #[test]
+    fn clean_json_text_handles_direct_json() {
+        let input = r#"{"key": "value"}"#;
+        let result = clean_json_text(input);
+        assert_eq!(result, r#"{"key": "value"}"#);
+    }
+
+    #[test]
+    fn clean_json_text_handles_text_before_and_after() {
+        let input = "Here is the result: {\"a\": 1} hope that helps";
+        let result = clean_json_text(input);
+        assert_eq!(result, "{\"a\": 1}");
+    }
 }

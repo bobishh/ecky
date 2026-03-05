@@ -63,6 +63,45 @@ pub fn get_default_macro(app: &AppHandle) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("Failed to read default macro: {}", e))
 }
 
+const MAX_CACHE_BYTES: u64 = 500 * 1024 * 1024; // 500MB
+
+pub fn evict_cache_if_needed(cache_dir: &Path) {
+    let entries: Vec<_> = match fs::read_dir(cache_dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+
+    let mut stl_files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("stl") {
+            if let Ok(meta) = fs::metadata(&path) {
+                let size = meta.len();
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                total += size;
+                stl_files.push((path, size, modified));
+            }
+        }
+    }
+
+    if total <= MAX_CACHE_BYTES {
+        return;
+    }
+
+    stl_files.sort_by_key(|(_, _, modified)| *modified);
+
+    for (path, size, _) in &stl_files {
+        if total <= MAX_CACHE_BYTES {
+            break;
+        }
+        if fs::remove_file(path).is_ok() {
+            total -= size;
+        }
+    }
+}
+
 fn resolve_freecad_path() -> String {
     let env_cmd = std::env::var("FREECAD_CMD").unwrap_or_else(|_| "FreeCADCmd".to_string());
     if env_cmd == "FreeCADCmd" && !Path::new(&env_cmd).exists() {
