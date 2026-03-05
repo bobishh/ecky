@@ -1,0 +1,32 @@
+[package]
+name = "drydemacher"
+version = "0.1.0"
+description = "Prompt-driven 3D CAD designer"
+authors = ["Bogdan"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = ["protocol-asset"] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-dialog = "2.0"
+tauri-plugin-fs = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = "0.4"
+url = "2.5"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+sha2 = "0.10.9"
+
+[lib]
+name = "drydemacher_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "drydemacher"
+path = "src/main.rs"

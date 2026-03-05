@@ -1,0 +1,49 @@
+# Node / Frontend
+node_modules/
+dist/
+.svelte-kit/
+.vercel
+.output
+.DS_Store
+*.log
+
+# Rust / Backend
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/capabilities/
+!src-tauri/capabilities/
+!src-tauri/capabilities/default.json
+
+# Testing
+test-results/
+playwright-report/
+blob-report/
+
+# OS / IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# Temporary Tool Files
+bad_output.json
+fix_db.py
+e2e/test_prompt.txt
+test_args.py
+test_macro.py
+server/test_runner.py
+server/test_fc.py
+server/test_main.py
+server/test_env.py
+
+# Python
+__pycache__/
+*.pyc
+
+# VCS
+.git/
+.jj/
