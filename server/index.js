@@ -155,7 +155,7 @@ app.post('/api/render', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`drydemacher API listening on http://localhost:${port}`);
+  console.log(`Ecky CAD API listening on http://localhost:${port}`);
 });
 
 async function generateMacroWithModel(userPrompt) {

@@ -1,4 +1,4 @@
-# drydemacher
+# Ecky CAD
 
 Prompt-driven CAD iterator using LLMs to generate and execute FreeCAD Python macros.
 
@@ -16,7 +16,7 @@ Prompt-driven CAD iterator using LLMs to generate and execute FreeCAD Python mac
 1. Clone the repository.
 2. Install dependencies:
    ```bash
-   cd drydemacher
+   cd ecky-cad
    npm install
    ```
 3. Configure the application via the in-app settings (⚙️ icon).

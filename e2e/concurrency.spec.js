@@ -11,7 +11,7 @@ test.describe('Concurrency Isolation', () => {
           return { engines: [{ id: 'mock', name: 'Mock' }], selected_engine_id: 'mock' };
         }
         if (cmd === 'get_history') {
-          return [{ id: 'mock-thread-2', title: 'Existing Thread', updated_at: Date.now(), version_count: 1 }];
+          return [{ id: 'mock-thread-2', title: 'Existing Thread', updatedAt: Date.now(), versionCount: 1 }];
         }
         if (cmd === 'get_thread') {
           return { id: 'mock-thread-2', title: 'Existing Thread', messages: [] };
@@ -23,10 +23,10 @@ test.describe('Concurrency Isolation', () => {
             threadId: args.threadId || 'mock-thread-1',
             messageId: 'mock-msg-1',
             design: {
-              interaction_mode: 'design',
-              macro_code: 'print("mock")',
-              initial_params: {},
-              ui_spec: { fields: [] }
+              interactionMode: 'design',
+              macroCode: 'print("mock")',
+              initialParams: {},
+              uiSpec: { fields: [] }
             }
           };
         }
@@ -46,7 +46,7 @@ test.describe('Concurrency Isolation', () => {
     // Type a prompt
     const textarea = page.locator('.prompt-input');
     await textarea.fill('Build a box');
-    const sendBtn = page.locator('button:has-text("SEND")');
+    const sendBtn = page.locator('button:has-text("PROCESS")');
     await expect(sendBtn).toBeEnabled();
     await sendBtn.click();
 

@@ -146,10 +146,4 @@
     padding-left: 9px;
   }
 
-  .scrollable::-webkit-scrollbar {
-    width: 4px;
-  }
-  .scrollable::-webkit-scrollbar-thumb {
-    background: var(--bg-300);
-  }
 </style>

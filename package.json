@@ -1,16 +1,14 @@
 {
-  "name": "drydemacher",
-  "version": "0.1.0",
+  "name": "ecky-cad",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "pkill -f vite || true",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:web\"",
     "dev:web": "vite",
     "dev:server": "node server/index.js",
     "build": "vite build",
     "preview": "vite preview",
-    "pretauri": "pkill -f vite || true",
     "tauri": "tauri",
     "test:e2e": "playwright test",
     "start": "node server/index.js"

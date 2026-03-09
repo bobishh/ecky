@@ -1,20 +1,40 @@
-pub mod models;
-pub mod db;
-pub mod llm;
-pub mod freecad;
-pub mod context;
-pub mod commands;
+#![allow(unexpected_cfgs)]
 
-use tauri::Manager;
-use uuid::Uuid;
+pub mod commands;
+pub mod context;
+pub mod db;
+pub mod freecad;
+pub mod llm;
+pub mod models;
+
+use serde_json::json;
 use std::fs;
 use std::sync::Mutex;
-use serde_json::json;
+use tauri::Manager;
+use uuid::Uuid;
 
-use crate::models::{AppState, DesignOutput, ThreadReference, Attachment};
 use crate::context::*;
+use crate::models::{AppState, Attachment, DesignOutput, ThreadReference};
 
 use rand::Rng;
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn set_macos_process_name(name: &str) {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::{NSAutoreleasePool, NSString};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let _pool = NSAutoreleasePool::new(nil);
+        let process_info: id = msg_send![class!(NSProcessInfo), processInfo];
+        let ns_name = NSString::alloc(nil).init_str(name);
+        let _: () = msg_send![process_info, setProcessName: ns_name];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_macos_process_name(_name: &str) {}
 
 pub fn generate_genie_traits() -> serde_json::Value {
     let mut rng = rand::thread_rng();
@@ -84,9 +104,15 @@ pub(crate) fn summarize_reference(kind: &str, name: &str, content: &str) -> Stri
         "attachment" => "Attachment reference",
         _ => "Reference",
     };
-    let first_line = content.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let first_line = content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
     if first_line.is_empty() {
-        compact_text(&format!("{}: {}", intro, name), PINNED_REFERENCE_SUMMARY_MAX_CHARS)
+        compact_text(
+            &format!("{}: {}", intro, name),
+            PINNED_REFERENCE_SUMMARY_MAX_CHARS,
+        )
     } else {
         compact_text(
             &format!("{} [{}]: {}", intro, name, first_line.trim()),
@@ -114,7 +140,11 @@ fn extract_prompt_references(
                     kind: "python_macro".to_string(),
                     name: format!("prompt_macro_{}", idx + 1),
                     content: compact_text(&block, PINNED_REFERENCE_CONTENT_MAX_CHARS),
-                    summary: summarize_reference("python_macro", &format!("prompt_macro_{}", idx + 1), &block),
+                    summary: summarize_reference(
+                        "python_macro",
+                        &format!("prompt_macro_{}", idx + 1),
+                        &block,
+                    ),
                     pinned: true,
                     created_at,
                 });
@@ -155,8 +185,8 @@ pub(crate) fn persist_user_prompt_references(
             let ext = attachment
                 .path
                 .split('.')
-                .last()
-                .unwrap_or("")
+                .next_back()
+                .unwrap_or("png")
                 .to_lowercase();
             let is_python = matches!(ext.as_str(), "py" | "fcmacro");
             let content = if is_python {
@@ -167,7 +197,11 @@ pub(crate) fn persist_user_prompt_references(
             let summary = compact_text(
                 &format!(
                     "{} attachment [{}]: {}",
-                    if is_python { "Python macro" } else { "External" },
+                    if is_python {
+                        "Python macro"
+                    } else {
+                        "External"
+                    },
                     attachment.name,
                     attachment.explanation
                 ),
@@ -178,7 +212,11 @@ pub(crate) fn persist_user_prompt_references(
                 thread_id: thread_id.to_string(),
                 source_message_id: Some(message_id.to_string()),
                 ordinal: ordinal_offset,
-                kind: if is_python { "python_macro".to_string() } else { "attachment".to_string() },
+                kind: if is_python {
+                    "python_macro".to_string()
+                } else {
+                    "attachment".to_string()
+                },
                 name: attachment.name.clone(),
                 content: compact_text(&content, PINNED_REFERENCE_CONTENT_MAX_CHARS),
                 summary,
@@ -197,7 +235,14 @@ fn migrate_legacy_references(conn: &rusqlite::Connection) -> Result<(), String> 
     let threads = db::get_all_threads(conn).map_err(|e| e.to_string())?;
     for thread in threads {
         for message in thread.messages.iter().filter(|m| m.role == "user") {
-            persist_user_prompt_references(conn, &thread.id, &message.id, &message.content, None, message.timestamp)?;
+            persist_user_prompt_references(
+                conn,
+                &thread.id,
+                &message.id,
+                &message.content,
+                None,
+                message.timestamp,
+            )?;
         }
         if !thread.summary.trim().is_empty() {
             continue;
@@ -264,11 +309,13 @@ Macro Requirements:
 - Create at least one visible solid.
 - Do NOT use string formatting braces like `{param_name}` in the generated code to reference parameters.
 - UI Parameters are injected globally into the macro execution context. Access them directly by name (e.g., `width = frame_width`) or via the injected `params` dictionary (e.g., `width = params.get("frame_width", 90.0)`).
+- Prefer print-friendly geometry for common 3D printing workflows (FDM/SLA): avoid non-manifold solids, inaccessible trapped volumes, fragile tiny features, and extreme unsupported overhangs unless explicitly requested.
+- Keep practical wall thickness and clearances when dimensions permit.
 
 Return a JSON object with:
 1. "title": A short (2-5 words) descriptive title.
 2. "version_name": Short descriptive name for this iteration.
-3. "response": short end-user text for Ecky's speech bubble (1-3 concise sentences).
+3. "response": short end-user text for Ecky's speech bubble (1-4 concise sentences). If there are 3D printing risks, add a separate final sentence starting with `PRINTING RISKS:`.
 4. "interaction_mode": "design" or "question".
 5. "macro_code": The Python macro code.
 6. "ui_spec": { 
@@ -303,12 +350,16 @@ pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 
 CRITICAL RULES:
 - UNITS: ALL dimensions are in MILLIMETERS (mm).
+- CONTEXT PRIORITY: Any section labeled "ACTUAL CURRENT ... (AUTHORITATIVE)" is the real current state. Treat it as source of truth, not an example/template.
 - UI: Focus on 'key', 'label' and 'type'. 
   - Use 'number' for all numeric parameters. NEVER use 'range'.
   - Use 'min_from' and 'max_from' keys in the 'ui_spec' fields to link parameter boundaries to other keys (e.g., inner_radius max_from outer_radius).
   - Ensure geometry stays sane and valid across all parameter permutations.
 - PARAMETERS: Access parameters directly by name (e.g. `L = connector_length`) or via `params.get("key", default)`.
 - NO BRACES: NEVER use `{var}` style interpolation inside the macro_code string.
+- CLEANUP: You MUST remove any parameters from "ui_spec" and "initial_params" that are no longer used in the current "macro_code". Do not accumulate parameters from previous designs.
+- PRINTABILITY: Prefer geometry that is straightforward to 3D print (manifold solids, reasonable wall thickness, avoid fragile or unsupported details unless requested).
+- PRINTABILITY REPORTING: If printability risks remain, mention them explicitly at the end of "response" as a separate sentence prefixed with `PRINTING RISKS:`.
 - If USER_INTENT_MODE is "QUESTION_ONLY":
   - Set "interaction_mode" to "question".
   - Use "response" to explain the current design/code.
@@ -319,21 +370,20 @@ CRITICAL RULES:
 "#;
 
 pub fn run() {
+    set_macos_process_name("Ecky CAD");
     let context = tauri::generate_context!();
-    
+
     let default_config = crate::models::Config {
-        engines: vec![
-            crate::models::Engine {
-                id: "default-gemini".to_string(),
-                name: "Google Gemini".to_string(),
-                provider: "gemini".to_string(),
-                api_key: "".to_string(),
-                model: "gemini-2.0-flash".to_string(),
-                light_model: "gemini-2.0-flash-lite".to_string(),
-                base_url: "".to_string(),
-                system_prompt: "You are a CAD expert.".to_string(),
-            }
-        ],
+        engines: vec![crate::models::Engine {
+            id: "default-gemini".to_string(),
+            name: "Google Gemini".to_string(),
+            provider: "gemini".to_string(),
+            api_key: "".to_string(),
+            model: "gemini-2.0-flash".to_string(),
+            light_model: "gemini-2.0-flash-lite".to_string(),
+            base_url: "".to_string(),
+            system_prompt: DEFAULT_PROMPT.to_string(),
+        }],
         selected_engine_id: "default-gemini".to_string(),
         assets: vec![],
         microwave: None,
@@ -359,6 +409,21 @@ pub fn run() {
                 if let Ok(data) = fs::read_to_string(&config_path) {
                     if let Ok(c) = serde_json::from_str::<crate::models::Config>(&data) {
                         config = c;
+                    }
+                }
+            }
+            let mut should_persist_config = false;
+            for engine in config.engines.iter_mut() {
+                let prompt = engine.system_prompt.trim();
+                if prompt.is_empty() || prompt == "You are a CAD expert." {
+                    engine.system_prompt = DEFAULT_PROMPT.to_string();
+                    should_persist_config = true;
+                }
+            }
+            if should_persist_config {
+                if let Ok(data) = serde_json::to_string_pretty(&config) {
+                    if let Err(err) = fs::write(&config_path, data) {
+                        eprintln!("Failed to persist migrated config prompts: {}", err);
                     }
                 }
             }
@@ -390,7 +455,7 @@ pub fn run() {
                 config: Mutex::new(config),
                 last_design: Mutex::new(last_design),
                 last_thread_id: Mutex::new(last_thread_id),
-                db: Mutex::new(conn),
+                db: tokio::sync::Mutex::new(conn),
                 render_lock: tokio::sync::Mutex::new(()),
             });
 
@@ -406,10 +471,12 @@ pub fn run() {
             commands::history::clear_history,
             commands::history::delete_thread,
             commands::history::delete_version,
+            commands::history::restore_version,
+            commands::history::get_deleted_messages,
             commands::generation::generate_design,
-            commands::generation::commit_generated_version,
+            commands::generation::init_generation_attempt,
+            commands::generation::finalize_generation_attempt,
             commands::generation::classify_intent,
-            commands::generation::answer_question_light,
             commands::render::render_stl,
             commands::render::get_default_macro,
             commands::render::get_mess_stl_path,
@@ -417,6 +484,7 @@ pub fn run() {
             commands::design::add_manual_version,
             commands::design::update_ui_spec,
             commands::design::update_parameters,
+            commands::design::parse_macro_params,
             commands::assets::upload_asset,
             commands::assets::save_recorded_audio,
             commands::session::get_last_design,

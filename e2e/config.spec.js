@@ -9,19 +9,19 @@ test.describe('Configuration Panel', () => {
     await expect(page.locator('text=TUNABLE PARAMETERS')).toBeVisible();
 
     // Click settings button to go to config
-    await page.click('.settings-overlay-btn');
+    await page.click('button[title="Configuration"]');
     await expect(page.locator('text=ENGINES')).toBeVisible();
     await expect(page.locator('text=TUNABLE PARAMETERS')).not.toBeVisible();
 
     // Click back to workbench
-    await page.click('.settings-overlay-btn');
+    await page.click('button[title="Configuration"]');
     await expect(page.locator('text=TUNABLE PARAMETERS')).toBeVisible();
   });
 
   test('config panel shows engine section by default', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
-    await page.click('.settings-overlay-btn');
+    await page.click('button[title="Configuration"]');
     await expect(page.locator('text=ENGINES')).toBeVisible();
   });
 
@@ -30,11 +30,11 @@ test.describe('Configuration Panel', () => {
     await page.waitForTimeout(2000);
 
     // On workbench, should show gear
-    await expect(page.locator('.settings-overlay-btn')).toContainText('⚙️');
+    await expect(page.locator('button[title="Configuration"]')).toContainText('⚙️');
 
     // Go to config
-    await page.click('.settings-overlay-btn');
+    await page.click('button[title="Configuration"]');
     // On config, should show hammer
-    await expect(page.locator('.settings-overlay-btn')).toContainText('⚒️');
+    await expect(page.locator('button[title="Configuration"]')).toContainText('⚒️');
   });
 });

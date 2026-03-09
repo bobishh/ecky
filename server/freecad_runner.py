@@ -8,7 +8,7 @@ def run(macro_path, stl_path, params_dict):
     import FreeCAD as App
     import Mesh
 
-    doc = App.newDocument("Drydemacher")
+    doc = App.newDocument("EckyCAD")
 
     with open(macro_path, "r", encoding="utf-8") as f:
         code = f.read()
@@ -49,15 +49,15 @@ def run(macro_path, stl_path, params_dict):
 
 def main():
     print("RUNNER STARTED")
-    macro_path = os.environ.get("DRYDEMACHER_MACRO")
-    stl_path = os.environ.get("DRYDEMACHER_STL")
-    params_str = os.environ.get("DRYDEMACHER_PARAMS", "{}")
+    macro_path = os.environ.get("ECKYCAD_MACRO")
+    stl_path = os.environ.get("ECKYCAD_STL")
+    params_str = os.environ.get("ECKYCAD_PARAMS", "{}")
 
     print(f"MACRO: {macro_path}")
     print(f"STL: {stl_path}")
     
     if not macro_path or not stl_path:
-        print("Missing DRYDEMACHER_MACRO or DRYDEMACHER_STL environment variables.")
+        print("Missing ECKYCAD_MACRO or ECKYCAD_STL environment variables.")
         sys.exit(1)
 
     try:

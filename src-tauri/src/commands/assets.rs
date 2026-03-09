@@ -1,14 +1,14 @@
+use base64::{engine::general_purpose, Engine as _};
+use std::fs;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
-use std::fs;
-use base64::{Engine as _, engine::general_purpose};
 
 #[tauri::command]
 pub async fn upload_asset(
     source_path: String,
     name: String,
     format: String,
-    app: AppHandle
+    app: AppHandle,
 ) -> Result<crate::models::Asset, String> {
     let app_data_dir = app.path().app_data_dir().unwrap();
     let assets_dir = app_data_dir.join("assets");
@@ -34,7 +34,7 @@ pub async fn upload_asset(
 pub async fn save_recorded_audio(
     base64_data: String,
     name: String,
-    app: AppHandle
+    app: AppHandle,
 ) -> Result<crate::models::Asset, String> {
     let app_data_dir = app.path().app_data_dir().unwrap();
     let assets_dir = app_data_dir.join("assets");
@@ -46,7 +46,9 @@ pub async fn save_recorded_audio(
     let file_name = format!("{}.webm", id);
     let target_path = assets_dir.join(&file_name);
 
-    let bytes = general_purpose::STANDARD.decode(base64_data).map_err(|e| e.to_string())?;
+    let bytes = general_purpose::STANDARD
+        .decode(base64_data)
+        .map_err(|e| e.to_string())?;
     fs::write(&target_path, bytes).map_err(|e| e.to_string())?;
 
     Ok(crate::models::Asset {

@@ -10,10 +10,10 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="modal-backdrop" onclick={onclose}>
-  <div class="modal-window" onclick={e => e.stopPropagation()}>
+<div class="modal-backdrop" role="presentation" onclick={onclose}>
+  <div class="modal-window" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1" onclick={e => e.stopPropagation()} onkeydown={e => e.stopPropagation()}>
     <div class="modal-header">
-      <h3 class="modal-title">{title}</h3>
+      <h3 id="modal-title" class="modal-title">{title}</h3>
       <button class="modal-close" onclick={onclose}>&times;</button>
     </div>
     <div class="modal-body">

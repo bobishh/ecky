@@ -1,4 +1,5 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
+import type { AppConfig, AssetConfig } from '../types/domain';
 
 // ---------------------------------------------------------------------------
 // STL Cafeteria — N microwaves running concurrently
@@ -9,9 +10,13 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 let audioCtx: AudioContext | null = null;
 let masterGain: GainNode | null = null;
 
+type MicrowaveNode = AudioBufferSourceNode | OscillatorNode | HTMLMediaElement;
+type AudioCapableWindow = Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
+type MicrowaveAppConfig = AppConfig | null | undefined;
+
 // Per-microwave hum tracking: requestId → { nodes, gainNode, threadId }
 interface MicrowaveEntry {
-  nodes: (AudioBufferSourceNode | OscillatorNode | HTMLMediaElement)[];
+  nodes: MicrowaveNode[];
   gain: GainNode;
   threadId: string | null;
 }
@@ -30,7 +35,12 @@ export function ensureContext(): AudioContext | null {
     return audioCtx;
   }
   try {
-    audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const audioContextCtor =
+      window.AudioContext || (window as AudioCapableWindow).webkitAudioContext;
+    if (!audioContextCtor) {
+      return null;
+    }
+    audioCtx = new audioContextCtor();
     masterGain = audioCtx.createGain();
     masterGain.gain.value = 1;
     masterGain.connect(audioCtx.destination);
@@ -113,7 +123,7 @@ export function setAudibleThread(threadId: string | null) {
   scaleAmbientIntensity();
 }
 
-export function startMicrowaveHum(requestId: string, config: any, threadId: string | null = null) {
+export function startMicrowaveHum(requestId: string, config: MicrowaveAppConfig, threadId: string | null = null) {
   if (!config || config.microwave?.muted) return;
   if (microwaveHums.has(requestId)) return;
 
@@ -126,8 +136,8 @@ export function startMicrowaveHum(requestId: string, config: any, threadId: stri
   }
 
   const slot = microwaveHums.size;
-  const humAssetId = config.microwave?.hum_id;
-  const humAsset = config.assets?.find((a: any) => a.id === humAssetId);
+  const humAssetId = config.microwave?.humId;
+  const humAsset = config.assets?.find((a: AssetConfig) => a.id === humAssetId);
 
   // The base container gain for this microwave
   const perMicGain = ctx.createGain();
@@ -140,7 +150,7 @@ export function startMicrowaveHum(requestId: string, config: any, threadId: stri
   slotGain.gain.value = Math.max(0.03, 0.08 - slot * 0.012);
   slotGain.connect(perMicGain);
 
-  const nodes: any[] = [];
+  const nodes: MicrowaveNode[] = [];
 
   if (humAsset) {
     const audio = new Audio(convertFileSrc(humAsset.path));
@@ -248,7 +258,7 @@ export function stopMicrowaveAudio(closeContext = true) {
 }
 
 // Legacy compat — start a single hum (uses 'global' id)
-export function startMicrowaveAudio(config: any) {
+export function startMicrowaveAudio(config: MicrowaveAppConfig) {
   startMicrowaveHum('__global__', config);
 }
 
@@ -259,12 +269,12 @@ export function startMicrowaveAudio(config: any) {
 const DING_BASE_FREQ = 1200;
 const DING_FREQ_SPREAD = 80;
 
-export function playDing(config: any, slot = 0) {
-  if (!audioCtx || !masterGain || config.microwave?.muted) return;
+export function playDing(config: MicrowaveAppConfig, slot = 0) {
+  if (!audioCtx || !masterGain || config?.microwave?.muted) return;
 
   try {
-    const dingAssetId = config.microwave?.ding_id;
-    const dingAsset = config.assets?.find((a: any) => a.id === dingAssetId);
+    const dingAssetId = config?.microwave?.dingId;
+    const dingAsset = config?.assets?.find((a: AssetConfig) => a.id === dingAssetId);
 
     if (dingAsset) {
       const ding = new Audio(convertFileSrc(dingAsset.path));
@@ -293,8 +303,8 @@ export function playDing(config: any, slot = 0) {
 }
 
 // Error buzz — short dissonant tone
-export function playErrorBuzz(config: any) {
-  if (!audioCtx || !masterGain || config.microwave?.muted) return;
+export function playErrorBuzz(config: MicrowaveAppConfig) {
+  if (!audioCtx || !masterGain || config?.microwave?.muted) return;
 
   try {
     const now = audioCtx.currentTime;
@@ -318,6 +328,24 @@ export function getAudioCtx() {
   return audioCtx;
 }
 
+export function startRequestHum(requestId: string, config: MicrowaveAppConfig, threadId: string | null = null) {
+  startMicrowaveHum(requestId, config, threadId);
+}
+
+export function stopRequestHum(requestId: string, success: boolean, config: MicrowaveAppConfig, slot = 0) {
+  stopMicrowaveHum(requestId);
+  if (!config?.microwave?.muted) {
+    if (success) playDing(config, slot);
+    else playErrorBuzz(config);
+  }
+}
+
 export function getActiveMicrowaveCount(): number {
   return microwaveHums.size;
+}
+
+export function setMuted(muted: boolean) {
+  if (muted) {
+    stopMicrowaveAudio(false); // Stop all but keep context? Actually stopMicrowaveAudio closes context by default.
+  }
 }

@@ -2,12 +2,14 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import Modal from './Modal.svelte';
 
   let { onGenerate, isGenerating = false, messages = [], onShowCode, activeVersionId = $bindable(null), onVersionChange, onDeleteVersion } = $props();
 
   let prompt = $state('');
   let attachments = $state([]); // { path: string, name: string, explanation: string, type: string }
   let isDragging = $state(false);
+  let showDeleteConfirm = $state(false);
 
   function processPaths(paths) {
     const newAttachments = paths.map(path => {
@@ -23,21 +25,38 @@
     attachments = [...attachments, ...newAttachments];
   }
 
-  onMount(async () => {
+  onMount(() => {
+    let unlisten = null;
+    const tauriBridge = typeof window !== 'undefined' ? window.__TAURI_INTERNALS__ : null;
+    const hasTauriWindow = tauriBridge && typeof tauriBridge.metadata === 'object';
+    if (!hasTauriWindow) {
+      return () => {};
+    }
     // 1. Native Tauri Drag & Drop (for absolute paths)
-    const unlisten = await getCurrentWindow().onDragDropEvent((event) => {
-      if (event.payload.type === 'hover') {
-        isDragging = true;
-      } else if (event.payload.type === 'drop') {
-        isDragging = false;
-        processPaths(event.payload.paths);
-      } else if (event.payload.type === 'cancel') {
-        isDragging = false;
-      }
-    });
+    try {
+      getCurrentWindow()
+        .onDragDropEvent((event) => {
+          if (event.payload.type === 'hover') {
+            isDragging = true;
+          } else if (event.payload.type === 'drop') {
+            isDragging = false;
+            processPaths(event.payload.paths);
+          } else if (event.payload.type === 'cancel') {
+            isDragging = false;
+          }
+        })
+        .then((cleanup) => {
+          unlisten = cleanup;
+        })
+        .catch((e) => {
+          console.error('Failed to wire Tauri drag-drop listener:', e);
+        });
+    } catch (e) {
+      console.warn('Tauri drag-drop bridge unavailable:', e);
+    }
 
     return () => {
-      unlisten();
+      unlisten?.();
     };
   });
 
@@ -71,12 +90,29 @@
   const hasPrev = $derived(currentVersionIndex > 0);
   const hasNext = $derived(currentVersionIndex >= 0 && currentVersionIndex < versions.length - 1);
 
+  let isSubmitting = $state(false);
+
   function submit() {
-    if (onGenerate && !isGenerating && prompt.trim()) {
-      onGenerate(prompt, attachments);
+    if (onGenerate && !isGenerating && !isSubmitting && (prompt.trim() || attachments.length > 0)) {
+      isSubmitting = true;
+      const currentPrompt = prompt;
+      const currentAttachments = [...attachments];
+      
       prompt = '';
       attachments = [];
+      
+      onGenerate(currentPrompt, currentAttachments).finally(() => {
+        isSubmitting = false;
+      });
     }
+  }
+
+  function retryFailedPrompt() {
+    if (!onGenerate || !failedPromptForRetry || isGenerating || isSubmitting) return;
+    isSubmitting = true;
+    onGenerate(failedPromptForRetry, []).finally(() => {
+      isSubmitting = false;
+    });
   }
 
   async function addAttachment() {
@@ -125,6 +161,13 @@
     if (hasNext && onVersionChange) onVersionChange(versions[currentVersionIndex + 1]);
   }
 
+  function executeDelete() {
+    if (onDeleteVersion && currentVersion) {
+      onDeleteVersion(currentVersion.id);
+      showDeleteConfirm = false;
+    }
+  }
+
   const currentVersion = $derived(currentVersionIndex >= 0 ? versions[currentVersionIndex] : null);
   const promptTrail = $derived.by(() => {
     if (!currentVersion) return [];
@@ -162,6 +205,17 @@
   }
 
   const lastMessage = $derived(messages.length > 0 ? messages[messages.length - 1] : null);
+  const failedPromptForRetry = $derived.by(() => {
+    if (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.status !== 'error') return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role === 'user' && msg.timestamp <= lastMessage.timestamp) {
+        const text = `${msg.content ?? ''}`.trim();
+        if (text) return text;
+      }
+    }
+    return null;
+  });
 </script>
 
 <div 
@@ -170,6 +224,8 @@
   ondragover={handleWebDragOver}
   ondragleave={handleWebDragLeave}
   ondrop={handleWebDrop}
+  role="region"
+  aria-label="Prompt panel"
 >
   {#if isDragging}
     <div class="drag-overlay">
@@ -177,6 +233,18 @@
     </div>
   {/if}
   {#if versions.length > 0}
+    {#if showDeleteConfirm}
+      <Modal title="Confirm Version Purge" onclose={() => showDeleteConfirm = false}>
+        <div class="confirm-delete-body">
+          <p>Are you sure you want to delete <strong>{currentVersion?.output?.title || 'this version'}</strong>?</p>
+          <p class="warning">This specific iteration will be removed from the thread's timeline.</p>
+          <div class="confirm-actions">
+            <button class="btn btn-secondary" onclick={() => showDeleteConfirm = false}>CANCEL</button>
+            <button class="btn btn-danger" onclick={executeDelete}>DELETE VERSION</button>
+          </div>
+        </div>
+      </Modal>
+    {/if}
     <div class="version-nav">
       <div class="nav-controls">
         <button class="nav-btn" disabled={!hasPrev} onclick={goPrev}>&larr;</button>
@@ -186,14 +254,14 @@
       <div class="version-info">
         <div class="version-counter-group">
           <span class="version-counter">V {currentVersionIndex + 1} OF {versions.length}</span>
-          {#if currentVersion && currentVersion.output?.version_name}
-            <span class="version-name">{currentVersion.output.version_name}</span>
+          {#if currentVersion && currentVersion.output?.versionName}
+            <span class="version-name">{currentVersion.output.versionName}</span>
           {/if}
         </div>
         {#if currentVersion}
           <div class="version-actions">
             <button class="code-btn" onclick={() => onShowCode(currentVersion)} title="Inspect Python Code">📜 CODE</button>
-            <button class="code-btn delete-btn" onclick={() => onDeleteVersion && onDeleteVersion(currentVersion.id)} title="Delete Version">🗑️ DEL</button>
+            <button class="code-btn delete-btn" onclick={() => showDeleteConfirm = true} title="Delete Version">🗑️ DEL</button>
           </div>
         {/if}
       </div>
@@ -203,6 +271,13 @@
       <div class="error-msg-box">
         <div class="error-header">LLM GENERATION ERROR</div>
         <div class="error-content">{lastMessage.content}</div>
+        {#if failedPromptForRetry}
+          <div class="error-actions">
+            <button class="btn btn-danger" onclick={retryFailedPrompt} disabled={isGenerating || isSubmitting}>
+              {isSubmitting ? 'RETRYING...' : 'RETRY LAST FAILED REQUEST'}
+            </button>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -219,17 +294,17 @@
                     <span class="trail-time">{formatDate(msg.timestamp)}</span>
                   </div>
                   <div class="trail-content">
-                    {#if msg.image_data}
+                    {#if msg.imageData}
                       <div class="trail-image-wrapper">
-                        <img src={msg.image_data} alt="Viewport snapshot" class="trail-image" />
+                        <img src={msg.imageData} alt="Viewport snapshot" class="trail-image" />
                       </div>
                     {/if}
                     {#if msg.role === 'assistant' && msg.output}
-                      <i>[{msg.output.interaction_mode.toUpperCase()}] {msg.output.title} ({msg.output.version_name})</i>
+                      <i>[{msg.output.interactionMode.toUpperCase()}] {msg.output.title} ({msg.output.versionName})</i>
                       <br/>
                       {msg.output.response || msg.content}
                     {:else}
-                      "{msg.content}"
+                      {msg.content}
                     {/if}
                   </div>
                 </div>
@@ -261,30 +336,29 @@
       </div>
     {/if}
 
-    <textarea 
+    <textarea
       class="input-mono prompt-input"
       bind:value={prompt}
       onkeydown={handleKeydown}
-      placeholder="Type a question or design change... (Cmd+Enter to send)"
+      placeholder="Type a question or design change... (Cmd+Enter to process)"
       spellcheck="false"
     ></textarea>
     <div class="prompt-actions">
       <button class="btn btn-xs btn-ghost" onclick={addAttachment} title="Attach images or reference CAD files">
         📎 ATTACH REFERENCE
       </button>
-      <button 
-        class="btn btn-primary" 
-        disabled={isGenerating || (!prompt.trim() && attachments.length === 0)} 
+      <button
+        class="btn btn-primary"
+        disabled={isGenerating || isSubmitting || (!prompt.trim() && attachments.length === 0)}
         onclick={submit}
       >
-        {#if isGenerating}
-          SENDING...
+        {#if isGenerating || isSubmitting}
+          PROCESSING...
         {:else}
-          SEND
+          PROCESS
         {/if}
       </button>
-    </div>
-  </div>
+    </div>  </div>
 </div>
 
 <style>
@@ -487,9 +561,10 @@
   }
 
   .version-details summary {
-    cursor: pointer;
+    cursor: text;
     color: var(--text-dim);
-    user-select: none;
+    -webkit-user-select: text;
+    user-select: text;
     font-weight: bold;
   }
 
@@ -501,28 +576,8 @@
     margin-top: 8px;
     padding-left: 16px;
     border-left: 2px solid var(--bg-300);
-  }
-
-  .meta {
-    font-size: 0.65rem;
-    color: var(--text-dim);
-    margin-bottom: 4px;
-  }
-
-  .query {
-    color: var(--text);
-    white-space: pre-wrap;
-    font-style: italic;
-  }
-
-  .trail-header {
-    margin-top: 10px;
-    margin-bottom: 6px;
-    font-size: 0.62rem;
-    color: var(--secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: bold;
+    -webkit-user-select: text;
+    user-select: text;
   }
 
   .trail-list {
@@ -535,36 +590,15 @@
     padding-right: 4px;
   }
 
-  /* Q&A Response Box Styling */
-  .qa-response-box {
-    margin: 10px 12px;
-    padding: 12px;
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
-    border: 1px solid var(--primary);
-    border-left: 4px solid var(--primary);
-  }
-
-  .qa-header {
-    font-size: 0.6rem;
-    font-weight: bold;
-    color: var(--secondary);
-    margin-bottom: 6px;
-    letter-spacing: 0.05em;
-  }
-
-  .qa-content {
-    font-size: 0.8rem;
-    color: var(--text);
-    line-height: 1.5;
-    white-space: pre-wrap;
-  }
-
   .trail-item {
     border: 1px solid var(--bg-300);
     padding: 6px 10px;
     max-width: min(800px, 90%);
     width: fit-content;
     min-width: 200px;
+    cursor: text;
+    -webkit-user-select: text;
+    user-select: text;
   }
 
   .trail-user {
@@ -601,6 +635,8 @@
     color: var(--text);
     white-space: pre-wrap;
     line-height: 1.4;
+    -webkit-user-select: text;
+    user-select: text;
   }
 
   .trail-image-wrapper {
@@ -680,5 +716,61 @@
     max-height: 200px;
     overflow-y: auto;
     word-break: break-all;
+  }
+
+  .error-actions {
+    margin-top: 10px;
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  /* Shared Confirmation Styles (matching HistoryPanel) */
+  .confirm-delete-body {
+    padding: 20px;
+    font-size: 0.85rem;
+    color: var(--text);
+  }
+
+  .confirm-delete-body p {
+    margin-bottom: 12px;
+  }
+
+  .confirm-delete-body .warning {
+    color: var(--red);
+    font-weight: bold;
+  }
+
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+  }
+
+  .btn {
+    padding: 6px 16px;
+    font-size: 0.75rem;
+    font-weight: bold;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+
+  .btn-secondary {
+    background: var(--bg-300);
+    color: var(--text);
+    border-color: var(--bg-400);
+  }
+
+  .btn-secondary:hover {
+    background: var(--bg-400);
+  }
+
+  .btn-danger {
+    background: var(--red);
+    color: white;
+  }
+
+  .btn-danger:hover {
+    background: color-mix(in srgb, var(--red) 80%, black);
   }
 </style>

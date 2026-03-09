@@ -19,6 +19,7 @@
   let timerInterval = null;
   let micOptions = $state([]);
   let selectedMicId = $state('');
+  let selectedAssetId = $state('');
 
   const providers = [
     { id: 'gemini', name: 'Google Gemini' },
@@ -36,13 +37,13 @@
     { id: 'JSON', name: 'JSON (Data)' }
   ];
 
-  const selectedEngine = $derived(config.engines.find(e => e.id === config.selected_engine_id));
+  const selectedEngine = $derived(config.engines.find(e => e.id === config.selectedEngineId));
 
   // Microwave assignments
   if (!config.microwave) {
     config.microwave = {
-      hum_id: null,
-      ding_id: null,
+      humId: null,
+      dingId: null,
       muted: false
     };
   } else if (typeof config.microwave.muted !== 'boolean') {
@@ -69,14 +70,14 @@
       id,
       name: 'New Engine',
       provider: 'gemini',
-      api_key: '',
+      apiKey: '',
       model: '',
-      light_model: '',
-      base_url: '',
-      system_prompt: defaultPrompt
+      lightModel: '',
+      baseUrl: '',
+      systemPrompt: defaultPrompt
     };
     config.engines = [...config.engines, newEngine];
-    config.selected_engine_id = id;
+    config.selectedEngineId = id;
     activeSection = 'engines';
   }
 
@@ -126,8 +127,8 @@
       });
 
       config.assets = [...(config.assets || []), asset];
-      if (target === 'hum') config.microwave.hum_id = asset.id;
-      if (target === 'ding') config.microwave.ding_id = asset.id;
+      if (target === 'hum') config.microwave.humId = asset.id;
+      if (target === 'ding') config.microwave.dingId = asset.id;
       message = `Uploaded and assigned ${target.toUpperCase()} sound: ${name}`;
     } catch (e) {
       message = `Upload failed: ${e}`;
@@ -163,8 +164,8 @@
               name
             });
             config.assets = [...(config.assets || []), asset];
-            if (target === 'hum') config.microwave.hum_id = asset.id;
-            if (target === 'ding') config.microwave.ding_id = asset.id;
+            if (target === 'hum') config.microwave.humId = asset.id;
+            if (target === 'ding') config.microwave.dingId = asset.id;
             message = `Recorded ${target} saved and assigned.`;
           } catch (e) {
             message = `Failed to save recording: ${e}`;
@@ -193,8 +194,8 @@
 
   function removeEngine(id) {
     config.engines = config.engines.filter(e => e.id !== id);
-    if (config.selected_engine_id === id) {
-      config.selected_engine_id = config.engines.length > 0 ? config.engines[0].id : '';
+    if (config.selectedEngineId === id) {
+      config.selectedEngineId = config.engines.length > 0 ? config.engines[0].id : '';
     }
   }
 
@@ -219,6 +220,8 @@
         });
 
         config.assets = [...(config.assets || []), asset];
+        selectedAssetId = asset.id;
+        activeSection = 'assets';
         message = `Asset ${name} added.`;
       }
     } catch (e) {
@@ -228,17 +231,30 @@
 
   function removeAsset(id) {
     config.assets = config.assets.filter(a => a.id !== id);
+    if (selectedAssetId === id) {
+      selectedAssetId = '';
+    }
   }
 
-  function handleProviderChange() {
+  async function refreshModels() {
+    if (!onfetch) return;
+    try {
+      await onfetch();
+    } catch (e) {
+      message = `Model fetch failed: ${e}`;
+    }
+  }
+
+  async function handleProviderChange() {
     if (selectedEngine) {
       selectedEngine.model = '';
-      selectedEngine.light_model = '';
+      selectedEngine.lightModel = '';
     }
+    await refreshModels();
   }
   async function resetPrompt() {
     if (selectedEngine) {
-      selectedEngine.system_prompt = await invoke('get_system_prompt');
+      selectedEngine.systemPrompt = await invoke('get_system_prompt');
     }
   }
 
@@ -255,14 +271,14 @@
   <aside class="config-sidebar">
     <div class="sidebar-group">
       <div class="list-header">
-        <label>ENGINES</label>
+        <span>ENGINES</span>
         <button class="btn btn-xs" onclick={addEngine}>+ ADD</button>
       </div>
       <div class="list-content">
         {#each config.engines as engine}
           <button 
-            class="engine-item {activeSection === 'engines' && config.selected_engine_id === engine.id ? 'active' : ''}"
-            onclick={() => { config.selected_engine_id = engine.id; activeSection = 'engines'; }}
+            class="engine-item {activeSection === 'engines' && config.selectedEngineId === engine.id ? 'active' : ''}"
+            onclick={() => { config.selectedEngineId = engine.id; activeSection = 'engines'; }}
           >
             <span class="engine-name">{engine.name || '(unnamed)'}</span>
             <span class="engine-provider">{engine.provider}</span>
@@ -273,14 +289,14 @@
 
     <div class="sidebar-group">
       <div class="list-header">
-        <label>GLOBAL MEDIA / SOUNDS</label>
+        <span>GLOBAL MEDIA / SOUNDS</span>
         <button class="btn btn-xs" onclick={addAsset}>+ UPLOAD</button>
       </div>
       <div class="list-content">
         {#each (config.assets || []) as asset}
           <button 
-            class="engine-item {activeSection === 'assets' && config.selected_asset_id === asset.id ? 'active' : ''}"
-            onclick={() => { config.selected_asset_id = asset.id; activeSection = 'assets'; }}
+            class="engine-item {activeSection === 'assets' && selectedAssetId === asset.id ? 'active' : ''}"
+            onclick={() => { selectedAssetId = asset.id; activeSection = 'assets'; }}
           >
             <span class="engine-name">{asset.name}</span>
             <span class="engine-provider">{asset.format}</span>
@@ -293,7 +309,7 @@
     </div>
     <div class="sidebar-group">
       <div class="list-header">
-        <label>MICROWAVE SOUNDS</label>
+        <span>MICROWAVE SOUNDS</span>
       </div>
       <div class="list-content microwave-assignments">
         {#if micOptions.length > 1}
@@ -321,12 +337,12 @@
               <button class="btn btn-xs" onclick={() => startRecording('hum')} disabled={isRecording}>🎤 RECORD</button>
             {/if}
             <button class="btn btn-xs btn-ghost" onclick={() => uploadMicrowaveAudio('hum')} disabled={isRecording}>📁 UPLOAD HUM</button>
-            {#if config.microwave?.hum_id}
-              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.hum_id = null}>✕ CLEAR</button>
+            {#if config.microwave?.humId}
+              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.humId = null}>✕ CLEAR</button>
             {/if}
           </div>
-          {#if config.microwave?.hum_id}
-            {@const asset = config.assets?.find(a => a.id === config.microwave.hum_id)}
+          {#if config.microwave?.humId}
+            {@const asset = config.assets?.find(a => a.id === config.microwave.humId)}
             <span class="assigned-name">{asset?.name || 'Assigned'}</span>
           {/if}
         </div>
@@ -339,12 +355,12 @@
             {:else}
               <button class="btn btn-xs" onclick={() => startRecording('ding')} disabled={isRecording}>🎤 RECORD</button>
             {/if}
-            {#if config.microwave?.ding_id}
-              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.ding_id = null}>✕ CLEAR</button>
+            {#if config.microwave?.dingId}
+              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.dingId = null}>✕ CLEAR</button>
             {/if}
           </div>
-          {#if config.microwave?.ding_id}
-            {@const asset = config.assets?.find(a => a.id === config.microwave.ding_id)}
+          {#if config.microwave?.dingId}
+            {@const asset = config.assets?.find(a => a.id === config.microwave.dingId)}
             <span class="assigned-name">{asset?.name || 'Assigned'}</span>
           {/if}
         </div>
@@ -373,7 +389,7 @@
               <Dropdown 
                 options={providers} 
                 value={selectedEngine.provider} 
-                onchange={(val) => { selectedEngine.provider = val; handleProviderChange(); }} 
+                onchange={async (val) => { selectedEngine.provider = val; await handleProviderChange(); }} 
               />
             </div>
           </div>
@@ -383,16 +399,22 @@
             <input 
               id="e-key" 
               type="password" 
-              value={selectedEngine.api_key} 
+              value={selectedEngine.apiKey} 
               class="input-mono" 
               placeholder="Enter API key..." 
-              oninput={(e) => selectedEngine.api_key = e.target.value}
+              oninput={(e) => selectedEngine.apiKey = e.target.value}
+              onblur={refreshModels}
             />
           </div>
 
           <div class="field-row">
             <div class="field flex-1">
-              <label for="e-model">RENDER AND HEAVY REASONING</label>
+              <div class="prompt-header">
+                <label for="e-model">RENDER AND HEAVY REASONING</label>
+                <button class="btn btn-xs btn-ghost" onclick={refreshModels} disabled={isLoadingModels}>
+                  ↻ FETCH MODELS
+                </button>
+              </div>
               <Dropdown 
                 options={availableModels.length > 0 ? availableModels : (selectedEngine.model ? [selectedEngine.model] : [])} 
                 value={selectedEngine.model} 
@@ -403,10 +425,10 @@
             <div class="field flex-1">
               <label for="e-light-model">LIGHT REASONING</label>
               <Dropdown
-                options={availableModels.length > 0 ? availableModels : (selectedEngine.light_model ? [selectedEngine.light_model] : (selectedEngine.model ? [selectedEngine.model] : []))}
-                value={selectedEngine.light_model}
+                options={availableModels.length > 0 ? availableModels : (selectedEngine.lightModel ? [selectedEngine.lightModel] : (selectedEngine.model ? [selectedEngine.model] : []))}
+                value={selectedEngine.lightModel}
                 placeholder={isLoadingModels ? "Fetching..." : "Optional (falls back to heavy model)"}
-                onchange={(val) => selectedEngine.light_model = val}
+                onchange={(val) => selectedEngine.lightModel = val}
               />
             </div>
           </div>
@@ -416,10 +438,11 @@
             <input 
               id="e-baseurl" 
               type="text" 
-              value={selectedEngine.base_url} 
+              value={selectedEngine.baseUrl} 
               class="input-mono" 
               placeholder="Default" 
-              oninput={(e) => selectedEngine.base_url = e.target.value}
+              oninput={(e) => selectedEngine.baseUrl = e.target.value}
+              onblur={refreshModels}
             />
           </div>
 
@@ -430,10 +453,10 @@
             </div>
             <textarea 
               id="e-prompt" 
-              value={selectedEngine.system_prompt} 
+              value={selectedEngine.systemPrompt} 
               class="input-mono system-prompt-input" 
               spellcheck="false"
-              oninput={(e) => selectedEngine.system_prompt = e.target.value}
+              oninput={(e) => selectedEngine.systemPrompt = e.target.value}
               placeholder="Template for LLM. Use $USER_PROMPT as placeholder for user intent."
             ></textarea>
           </div>
@@ -443,30 +466,30 @@
           </div>
         </div>
       {:else if activeSection === 'assets'}
-        {@const selectedAsset = config.assets?.find(a => a.id === config.selected_asset_id)}
+        {@const selectedAsset = config.assets?.find(a => a.id === selectedAssetId)}
         {#if selectedAsset}
           <div class="details-content">
             <div class="field">
-              <label>ASSET NAME</label>
+              <span>ASSET NAME</span>
               <input type="text" bind:value={selectedAsset.name} class="input-mono" />
             </div>
             <div class="field">
-              <label>FORMAT</label>
+              <span>FORMAT</span>
               <Dropdown options={formats} bind:value={selectedAsset.format} />
             </div>
             
             <div class="field">
-              <label>ASSIGN TO MICROWAVE</label>
+              <span>ASSIGN TO MICROWAVE</span>
               <div class="assignment-buttons">
                 <button 
-                  class="btn btn-xs {config.microwave?.hum_id === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
-                  onclick={() => config.microwave.hum_id = selectedAsset.id}
+                  class="btn btn-xs {config.microwave?.humId === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
+                  onclick={() => config.microwave.humId = selectedAsset.id}
                 >
                   ASSIGN AS HUM (COOKING)
                 </button>
                 <button 
-                  class="btn btn-xs {config.microwave?.ding_id === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
-                  onclick={() => config.microwave.ding_id = selectedAsset.id}
+                  class="btn btn-xs {config.microwave?.dingId === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
+                  onclick={() => config.microwave.dingId = selectedAsset.id}
                 >
                   ASSIGN AS DING (DONE)
                 </button>
@@ -474,7 +497,7 @@
             </div>
 
             <div class="field">
-              <label>LOCAL PATH</label>
+              <span>LOCAL PATH</span>
               <div class="path-display">{selectedAsset.path}</div>
             </div>
             <div class="danger-zone">

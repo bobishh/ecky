@@ -13,7 +13,7 @@ test.describe('Prompt Panel', () => {
   test('send button is disabled when prompt is empty', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
-    const sendBtn = page.locator('button:has-text("SEND")');
+    const sendBtn = page.locator('button:has-text("PROCESS")');
     await expect(sendBtn).toBeDisabled();
   });
 
@@ -22,7 +22,7 @@ test.describe('Prompt Panel', () => {
     await page.waitForTimeout(2000);
     const textarea = page.locator('.prompt-input');
     await textarea.fill('Create a simple box');
-    const sendBtn = page.locator('button:has-text("SEND")');
+    const sendBtn = page.locator('button:has-text("PROCESS")');
     await expect(sendBtn).toBeEnabled();
   });
 

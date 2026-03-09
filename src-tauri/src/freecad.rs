@@ -1,15 +1,22 @@
-use std::process::Command;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tauri::{AppHandle, Manager};
-use sha2::{Sha256, Digest};
 
-pub fn render(macro_code: &str, parameters: &serde_json::Value, app: &AppHandle) -> Result<String, String> {
-    let app_dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
+pub fn render(
+    macro_code: &str,
+    parameters: &serde_json::Value,
+    app: &AppHandle,
+) -> Result<String, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
-    
+
     let params_json = serde_json::to_string(parameters).map_err(|e| e.to_string())?;
-    
+
     // Create a deterministic digest based on macro code and parameters
     let mut hasher = Sha256::new();
     hasher.update(macro_code.as_bytes());
@@ -19,31 +26,40 @@ pub fn render(macro_code: &str, parameters: &serde_json::Value, app: &AppHandle)
     let digest_str = format!("{:x}", result);
 
     // Limit length to avoid path length issues, 32 chars is plenty for collision resistance here
-    let short_digest = &digest_str[..32]; 
+    let short_digest = &digest_str[..32];
 
     let macro_path = app_dir.join(format!("{}.FCMacro", short_digest));
     let stl_path = app_dir.join(format!("{}.stl", short_digest));
-    
+
     // CACHE HIT: If the STL already exists for this exact code + parameters, return it instantly.
     if stl_path.exists() {
         return Ok(stl_path.to_str().ok_or("Invalid result path")?.to_string());
     }
 
     fs::write(&macro_path, macro_code).map_err(|e| e.to_string())?;
-    
+
     let freecad_cmd = resolve_freecad_path();
     let runner_path = resolve_runner_path(app);
 
     let output = Command::new(&freecad_cmd)
         .arg(runner_path.to_str().ok_or("Invalid runner path")?)
-        .env("DRYDEMACHER_MACRO", macro_path.to_str().ok_or("Invalid macro path")?)
-        .env("DRYDEMACHER_STL", stl_path.to_str().ok_or("Invalid stl path")?)
-        .env("DRYDEMACHER_PARAMS", &params_json)
+        .env(
+            "ECKYCAD_MACRO",
+            macro_path.to_str().ok_or("Invalid macro path")?,
+        )
+        .env(
+            "ECKYCAD_STL",
+            stl_path.to_str().ok_or("Invalid stl path")?,
+        )
+        .env("ECKYCAD_PARAMS", &params_json)
         .output()
         .map_err(|e| format!("Failed to execute FreeCAD ({}): {}", freecad_cmd, e))?;
 
     if !output.status.success() {
-        return Err(format!("FreeCAD Error: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "FreeCAD Error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     Ok(stl_path.to_str().ok_or("Invalid result path")?.to_string())

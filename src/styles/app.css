@@ -52,6 +52,47 @@ html, body, #app {
   font-family: var(--font-mono);
 }
 
+/* Unified Tactical scrollbar styling across all scrollable surfaces. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--secondary) 35%, var(--bg-300)) var(--bg-200);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--bg-200) 85%, #000 15%);
+  border: 1px solid var(--bg-300);
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 24px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--secondary) 34%, var(--bg-300)) 0%,
+      color-mix(in srgb, var(--primary) 26%, var(--bg-300)) 100%
+    );
+  border: 1px solid color-mix(in srgb, var(--secondary) 38%, var(--bg-300));
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--secondary) 52%, var(--bg-300)) 0%,
+      color-mix(in srgb, var(--primary) 38%, var(--bg-300)) 100%
+    );
+  border-color: var(--secondary);
+}
+
+*::-webkit-scrollbar-corner {
+  background: color-mix(in srgb, var(--bg-200) 85%, #000 15%);
+}
+
 button,
 input,
 select,

@@ -12,7 +12,7 @@ test.describe('History Panel', () => {
   test('new thread button exists', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
-    const newBtn = page.locator('.new-thread-btn');
+    const newBtn = page.locator('button[title="Create New Thread"]');
     await expect(newBtn).toBeVisible();
   });
 

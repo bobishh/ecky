@@ -10,36 +10,71 @@
   let localParams = $state({});
   let hasPendingChanges = $derived(JSON.stringify(localParams) !== JSON.stringify(parameters));
   let saveValuesState = $state('idle'); // idle | saving | saved
+  let macroParamKeys = $state(null);
+  let macroParseSeq = 0;
 
-  let lastVersionId = $state(activeVersionId);
+  let lastVersionId = $state(null);
+
+  $effect(() => {
+    const code = `${macroCode ?? ''}`.trim();
+    const seq = ++macroParseSeq;
+
+    if (!code) {
+      macroParamKeys = null;
+      return;
+    }
+
+    (async () => {
+      try {
+        const parsed = await invoke('parse_macro_params', { macroCode: code });
+        if (seq !== macroParseSeq) return;
+        const keys = new Set();
+        for (const field of parsed?.fields || []) {
+          if (field?.key) keys.add(field.key);
+        }
+        for (const key of Object.keys(parsed?.params || {})) {
+          keys.add(key);
+        }
+        macroParamKeys = keys.size > 0 ? keys : null;
+      } catch (e) {
+        if (seq === macroParseSeq) {
+          macroParamKeys = null;
+        }
+      }
+    })();
+  });
 
   $effect(() => {
     // If we switched to a different version/thread, we must reset everything
     if (activeVersionId !== lastVersionId) {
       localParams = { ...parameters };
       lastVersionId = activeVersionId;
+      editing = false;
+      editFields = [];
       return;
     }
 
-    // Otherwise, if parameters changed from outside (e.g. LLM added new ones to the SAME version, 
-    // though usually LLM creates a new version), we only merge in keys we don't have.
-    // Or if we are NOT in live mode and NOT editing, we might want to sync if they are different?
-    // User said: "only update when user asks or LLM adds a new one"
-    const outerKeys = Object.keys(parameters);
-    const localKeys = Object.keys(localParams);
-    const missingKeys = outerKeys.filter(k => !localKeys.includes(k));
-    
-    if (missingKeys.length > 0) {
-      localParams = { ...localParams, ...Object.fromEntries(missingKeys.map(k => [k, parameters[k]])) };
+    // Same version: keep local edits intact while user has pending changes or edits controls.
+    // Otherwise, hard-sync to canonical persisted parameters (prunes stale keys).
+    if (editing || hasPendingChanges) {
+      return;
+    }
+
+    if (JSON.stringify(localParams) !== JSON.stringify(parameters)) {
+      localParams = { ...parameters };
     }
   });
 
-  // Merge: any key in localParams not covered by uiSpec.fields gets a generated "number" field
+  // Merge: each key in localParams not covered by uiSpec.fields gets a generated "number" field
   const mergedFields = $derived.by(() => {
     const specFields = uiSpec?.fields || [];
-    const declaredKeys = new Set(specFields.map(f => f.key));
+    const filteredSpecFields = macroParamKeys
+      ? specFields.filter(f => macroParamKeys.has(f.key))
+      : specFields;
+    const declaredKeys = new Set(filteredSpecFields.map(f => f.key));
     
     const extraFields = Object.entries(localParams)
+      .filter(([key]) => !macroParamKeys || macroParamKeys.has(key))
       .filter(([key]) => !declaredKeys.has(key))
       .map(([key, val]) => ({
         key,
@@ -48,7 +83,7 @@
         _auto: true,
       }));
     
-    const all = [...specFields, ...extraFields];
+    const all = [...filteredSpecFields, ...extraFields];
     // Sort: non-freezed first, then freezed
     return all.sort((a, b) => {
       if (a.freezed === b.freezed) return 0;
@@ -75,6 +110,7 @@
   }
 
   let reading = $state(false);
+  let applying = $state(false);
   let searchQuery = $state('');
 
   const filteredFields = $derived.by(() => {
@@ -95,72 +131,40 @@
     );
   });
 
-  function readFromMacro() {
-    if (!macroCode) return;
+  async function readFromMacro() {
+    if (!macroCode) {
+      console.warn('ParamPanel: macroCode is empty, skipping readFromMacro');
+      return;
+    }
     reading = true;
+    console.log('ParamPanel: invoking parse_macro_params...');
     
-    setTimeout(() => {
-      // Find the dictionary assigned to 'params' - handles both literal and dict()
-      const match = macroCode.match(/params\s*=\s*(\{[\s\S]*?\}|dict\([\s\S]*?\))/);
-      if (!match) {
-        reading = false;
-        return;
+    try {
+      const result = await invoke('parse_macro_params', { macroCode: macroCode });
+      console.log('ParamPanel: parse_macro_params result:', result);
+      const { fields, params } = result;
+
+      if (fields && fields.length > 0) {
+        editFields = fields;
+        localParams = { ...params };
+        console.log('ParamPanel: Updated editFields with', fields.length, 'fields');
+      } else {
+        console.warn('ParamPanel: parse_macro_params returned no fields');
       }
-
-      const content = match[1];
-      const isDictFunc = content.startsWith('dict');
-      
-      // Regex for "key": val or key=val
-      const entryRegex = isDictFunc 
-        ? /([a-zA-Z0-9_]+)\s*=\s*([^,)\n]+)/g
-        : /["']?([^"':\s]+)["']?\s*:\s*([^,}\n]+)/g;
-
-      let entryMatch;
-      const foundFields = [];
-      const newParams = { ...localParams };
-
-      while ((entryMatch = entryRegex.exec(content)) !== null) {
-        const key = entryMatch[1];
-        let rawVal = entryMatch[2].trim();
-        
-        let type = 'number';
-        let val = 0;
-
-        if (rawVal === 'True' || rawVal === 'False') {
-          type = 'checkbox';
-          val = rawVal === 'True';
-        } else if (rawVal.startsWith('"') || rawVal.startsWith("'")) {
-          type = 'select';
-          val = rawVal.replace(/['"]/g, '');
-        } else {
-          val = parseFloat(rawVal);
-          if (isNaN(val)) val = 0;
-        }
-
-        newParams[key] = val;
-
-        foundFields.push({
-          key,
-          label: key.replace(/[_-]/g, ' '),
-          type,
-          min: undefined,
-          max: undefined,
-          step: undefined,
-          min_from: '',
-          max_from: '',
-          freezed: false
-        });
-      }
-
-      if (foundFields.length > 0) {
-        editFields = foundFields;
-        localParams = newParams;
-      }
+    } catch (e) {
+      console.error('ParamPanel: Failed to parse macro params:', e);
+    } finally {
       reading = false;
-    }, 300);
+    }
   }
 
   async function saveFields() {
+    const parseOptionalNumber = (raw) => {
+      if (raw === null || raw === undefined || raw === '') return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : undefined;
+    };
+
     const cleaned = editFields
       .filter(f => f.key.trim())
       .map(f => {
@@ -175,9 +179,12 @@
           field.options = f.options;
         }
         if (f.type === 'range' || f.type === 'number') {
-          if (f.min !== undefined && f.min !== '') field.min = Number(f.min);
-          if (f.max !== undefined && f.max !== '') field.max = Number(f.max);
-          if (f.step !== undefined && f.step !== '') field.step = Number(f.step);
+          const parsedMin = parseOptionalNumber(f.min);
+          const parsedMax = parseOptionalNumber(f.max);
+          const parsedStep = parseOptionalNumber(f.step);
+          if (parsedMin !== undefined) field.min = parsedMin;
+          if (parsedMax !== undefined) field.max = parsedMax;
+          if (parsedStep !== undefined && parsedStep > 0) field.step = parsedStep;
           if (f.min_from) field.min_from = f.min_from;
           if (f.max_from) field.max_from = f.max_from;
         }
@@ -188,15 +195,23 @@
     uiSpec = newSpec;
 
     if (activeVersionId) {
+      console.log('ParamPanel: Saving uiSpec to messageId:', activeVersionId, newSpec);
       try {
         await invoke('update_ui_spec', { messageId: activeVersionId, uiSpec: newSpec });
+        console.log('ParamPanel: update_ui_spec success');
+        
+        // Also save parameters since readFromMacro might have updated them
+        await invoke('update_parameters', { messageId: activeVersionId, parameters: localParams });
+        console.log('ParamPanel: update_parameters success');
+        
+        // Notify parent and trigger re-render
+        if (onspecchange) onspecchange(newSpec, localParams);
+        if (onchange) await onchange(localParams);
       } catch (e) {
-        console.error('Failed to save ui_spec:', e);
+        console.error('ParamPanel: Failed to save ui_spec/params:', e);
       }
-    }
-
-    if (onspecchange) {
-      onspecchange(newSpec);
+    } else {
+      if (onspecchange) onspecchange(newSpec, localParams);
     }
 
     editing = false;
@@ -207,6 +222,7 @@
     let clampedValue = value;
     const field = mergedFields.find(f => f.key === key);
     if (field && (field.type === 'range' || field.type === 'number')) {
+      if (!Number.isFinite(value)) return;
       const props = getRangeProps(field);
       clampedValue = Math.max(props.min, Math.min(props.max, value));
     }
@@ -235,9 +251,20 @@
     }
   }
 
-  function applyChanges() {
+  async function applyChanges() {
+    if (applying) return;
+    console.log('ParamPanel: applyChanges clicked', { localParams, hasPendingChanges, live });
     if (onchange) {
-      onchange(localParams);
+      applying = true;
+      try {
+        await onchange(localParams);
+      } catch (e) {
+        console.error('ParamPanel: onchange failed', e);
+      } finally {
+        applying = false;
+      }
+    } else {
+      console.warn('ParamPanel: onchange prop is missing!');
     }
   }
 
@@ -257,7 +284,8 @@
   }
 
   function getRangeProps(field) {
-    const val = localParams[field.key] || 0;
+    const rawVal = Number(localParams[field.key]);
+    const val = Number.isFinite(rawVal) ? rawVal : 0;
     let min = field.min !== undefined ? field.min : 0;
     if (field.min_from && localParams[field.min_from] !== undefined) {
       min = localParams[field.min_from];
@@ -268,7 +296,10 @@
       max = localParams[field.max_from];
     }
 
-    const step = field.step !== undefined ? field.step : (max - min > 50 ? 1 : 0.1);
+    if (max < min) max = min;
+    if (max === min) max = min + 1;
+    const stepCandidate = field.step !== undefined ? Number(field.step) : (max - min > 50 ? 1 : 0.1);
+    const step = Number.isFinite(stepCandidate) && stepCandidate > 0 ? stepCandidate : 1;
     return { min, max, step };
   }
 
@@ -313,9 +344,13 @@
         <button 
           class="btn btn-xs btn-primary apply-btn" 
           onclick={applyChanges} 
-          disabled={!hasPendingChanges || live}
+          disabled={live || applying}
         >
-          APPLY
+          {#if applying}
+            APPLYING...
+          {:else}
+            APPLY
+          {/if}
         </button>
         <button
           class="btn btn-xs btn-ghost"
@@ -624,16 +659,6 @@
     border-radius: 50%;
     cursor: pointer;
     box-shadow: 0 0 5px rgba(0,0,0,0.3);
-  }
-
-  .range-number-input {
-    width: 48px;
-    padding: 2px 4px;
-    background: var(--bg-100);
-    border: 1px solid var(--bg-300);
-    color: var(--secondary);
-    font-size: 0.7rem;
-    text-align: right;
   }
 
   .range-value {

@@ -33,10 +33,10 @@ function createWorkingCopyStore() {
     loadVersion: (version, messageId) => {
       set({
         title: version.title || 'Untitled Design',
-        versionName: version.version_name || 'Working Copy',
-        macroCode: version.macro_code || '',
-        uiSpec: version.ui_spec || { fields: [] },
-        params: version.initial_params || {},
+        versionName: version.versionName || 'Working Copy',
+        macroCode: version.macroCode || '',
+        uiSpec: version.uiSpec || { fields: [] },
+        params: version.initialParams || {},
         dirty: false,
         sourceVersionId: messageId
       });

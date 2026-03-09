@@ -13,7 +13,10 @@ pub fn compact_text(text: &str, max_chars: usize) -> String {
     if compact.chars().count() <= max_chars {
         compact
     } else {
-        let mut out = compact.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+        let mut out = compact
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
         out.push('…');
         out
     }
@@ -31,13 +34,22 @@ pub fn build_thread_summary(title: &str, messages: &[Message]) -> String {
     let mut sections: Vec<String> = Vec::new();
 
     if !title.trim().is_empty() {
-        sections.push(format!("Thread: {}", compact_text(title, SUMMARY_ITEM_MAX_CHARS)));
+        sections.push(format!(
+            "Thread: {}",
+            compact_text(title, SUMMARY_ITEM_MAX_CHARS)
+        ));
     }
 
     if let Some(output) = latest_output(messages).as_ref() {
-        let mut anchor = format!("Current version anchor: {} [{}]", output.title, output.version_name);
+        let mut anchor = format!(
+            "Current version anchor: {} [{}]",
+            output.title, output.version_name
+        );
         if !output.response.trim().is_empty() {
-            anchor.push_str(&format!(" - {}", compact_text(&output.response, SUMMARY_ITEM_MAX_CHARS)));
+            anchor.push_str(&format!(
+                " - {}",
+                compact_text(&output.response, SUMMARY_ITEM_MAX_CHARS)
+            ));
         }
         sections.push(anchor);
     }
@@ -53,7 +65,10 @@ pub fn build_thread_summary(title: &str, messages: &[Message]) -> String {
         .map(|m| format!("- {}", compact_text(&m.content, SUMMARY_ITEM_MAX_CHARS)))
         .collect::<Vec<_>>();
     if !recent_user_intents.is_empty() {
-        sections.push(format!("Recent user intents:\n{}", recent_user_intents.join("\n")));
+        sections.push(format!(
+            "Recent user intents:\n{}",
+            recent_user_intents.join("\n")
+        ));
     }
 
     let recent_assistant_decisions = messages
@@ -68,16 +83,25 @@ pub fn build_thread_summary(title: &str, messages: &[Message]) -> String {
             if let Some(output) = &m.output {
                 let mut line = format!("{} [{}]", output.title, output.version_name);
                 if !output.response.trim().is_empty() {
-                    line.push_str(&format!(" - {}", compact_text(&output.response, SUMMARY_ITEM_MAX_CHARS)));
+                    line.push_str(&format!(
+                        " - {}",
+                        compact_text(&output.response, SUMMARY_ITEM_MAX_CHARS)
+                    ));
                 }
                 format!("- {}", line)
             } else {
-                format!("- Q/A: {}", compact_text(&m.content, SUMMARY_ITEM_MAX_CHARS))
+                format!(
+                    "- Q/A: {}",
+                    compact_text(&m.content, SUMMARY_ITEM_MAX_CHARS)
+                )
             }
         })
         .collect::<Vec<_>>();
     if !recent_assistant_decisions.is_empty() {
-        sections.push(format!("Recent assistant outcomes:\n{}", recent_assistant_decisions.join("\n")));
+        sections.push(format!(
+            "Recent assistant outcomes:\n{}",
+            recent_assistant_decisions.join("\n")
+        ));
     }
 
     compact_text(&sections.join("\n\n"), THREAD_SUMMARY_MAX_CHARS)
@@ -92,8 +116,16 @@ pub fn build_recent_dialogue(messages: &[Message]) -> String {
         .into_iter()
         .rev()
         .map(|m| {
-            let speaker = if m.role == "user" { "USER" } else { "ASSISTANT" };
-            format!("{}: {}", speaker, compact_text(&m.content, RECENT_DIALOGUE_ITEM_MAX_CHARS))
+            let speaker = if m.role == "user" {
+                "USER"
+            } else {
+                "ASSISTANT"
+            };
+            format!(
+                "{}: {}",
+                speaker,
+                compact_text(&m.content, RECENT_DIALOGUE_ITEM_MAX_CHARS)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -147,14 +179,22 @@ pub fn assemble_context(
             .ok()
             .flatten()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| build_thread_summary(
-                &crate::db::get_thread_title(db, &tid).ok().flatten().unwrap_or_default(),
-                &messages
-            ));
+            .unwrap_or_else(|| {
+                build_thread_summary(
+                    &crate::db::get_thread_title(db, &tid)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
+                    &messages,
+                )
+            });
         let dialogue = build_recent_dialogue(&messages);
-        let title = crate::db::get_thread_title(db, &tid).ok().flatten().unwrap_or_default();
+        let title = crate::db::get_thread_title(db, &tid)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let refs = crate::db::get_thread_references(db, &tid).unwrap_or_default();
-        
+
         PromptContext {
             thread_id: tid,
             thread_title: title,
@@ -173,7 +213,7 @@ pub fn assemble_context(
             ui_spec: serde_json::json!({ "fields": [] }),
             initial_params: serde_json::json!({}),
         });
-        
+
         PromptContext {
             thread_id: uuid::Uuid::new_v4().to_string(),
             thread_title: String::new(),
@@ -185,15 +225,25 @@ pub fn assemble_context(
     }
 }
 
-pub fn format_contextual_prompt(ctx: &PromptContext, base_prompt: &str, system_prompt: &str, intent_mode: &str) -> String {
-    let full_prompt = format!("{}\n\n{}\n\nUSER_INTENT_MODE: {}", base_prompt, system_prompt, intent_mode);
+pub fn format_contextual_prompt(
+    ctx: &PromptContext,
+    base_prompt: &str,
+    system_prompt: &str,
+    intent_mode: &str,
+) -> String {
+    let full_prompt = format!(
+        "USER REQUEST (ACTUAL)\n{}\n\nEXECUTION RULES (MANDATORY)\n{}\n\nUSER_INTENT_MODE: {}",
+        base_prompt, system_prompt, intent_mode
+    );
 
     if let Some(previous) = &ctx.last_output {
-        let ui_spec_json = serde_json::to_string_pretty(&previous.ui_spec).unwrap_or_else(|_| "{}".to_string());
-        let params_json = serde_json::to_string_pretty(&previous.initial_params).unwrap_or_else(|_| "{}".to_string());
-        
+        let ui_spec_json =
+            serde_json::to_string_pretty(&previous.ui_spec).unwrap_or_else(|_| "{}".to_string());
+        let params_json = serde_json::to_string_pretty(&previous.initial_params)
+            .unwrap_or_else(|_| "{}".to_string());
+
         format!(
-            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES\n{}\n\nCurrent FreeCAD Macro:\n```python\n{}\n```\n\nCurrent UI Spec:\n```json\n{}\n```\n\nCurrent Initial Params:\n```json\n{}\n```\n\nUSER REQUEST:\n{}",
+            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\nACTUAL CURRENT UI SPEC (AUTHORITATIVE):\n```json\n{}\n```\n\nACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):\n```json\n{}\n```\n\n{}",
             ctx.thread_title,
             previous.title,
             previous.version_name,
@@ -400,9 +450,32 @@ mod tests {
 
     #[test]
     fn latest_output_none_when_no_outputs() {
-        let messages = vec![
-            mock_message("assistant", "just text", None),
-        ];
+        let messages = vec![mock_message("assistant", "just text", None)];
         assert!(latest_output(&messages).is_none());
+    }
+
+    #[test]
+    fn format_contextual_prompt_marks_actual_state_as_authoritative() {
+        let ctx = PromptContext {
+            thread_id: "t1".to_string(),
+            thread_title: "Thread A".to_string(),
+            summary: "summary".to_string(),
+            recent_dialogue: "USER: hi".to_string(),
+            pinned_references: "ref".to_string(),
+            last_output: Some(mock_design("Lens")),
+        };
+
+        let result = format_contextual_prompt(
+            &ctx,
+            "increase throat diameter",
+            "rule block",
+            "DESIGN_EDIT",
+        );
+
+        assert!(result.contains("ACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):"));
+        assert!(result.contains("ACTUAL CURRENT UI SPEC (AUTHORITATIVE):"));
+        assert!(result.contains("ACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):"));
+        assert!(result.contains("USER REQUEST (ACTUAL)"));
+        assert!(result.contains("EXECUTION RULES (MANDATORY)"));
     }
 }

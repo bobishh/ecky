@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Drydemacher CAD",
-  "version": "0.1.0",
-  "identifier": "com.alcoholics-audacious.drydemacher-cad",
+  "productName": "Ecky CAD",
+  "version": "0.0.1",
+  "identifier": "com.alcoholics-audacious.ecky-cad",
   "build": {
     "beforeDevCommand": "npm run dev:web",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Drydemacher Workbench",
+        "title": "Ecky CAD",
         "width": 1280,
         "height": 800,
         "resizable": true,

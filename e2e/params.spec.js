@@ -2,78 +2,95 @@ import { test, expect } from '@playwright/test';
 
 test.describe('ParamPanel Persistence', () => {
   test.beforeEach(async ({ page }) => {
+    // Setup a mock to intercept Tauri commands
+    await page.addInitScript(() => {
+      window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+      window.__MOCK_HISTORY__ = [
+        {
+          id: 'thread-1',
+          title: 'Test Thread',
+          updatedAt: Date.now() / 1000,
+          versionCount: 1,
+          messages: [
+            {
+              id: 'msg-1',
+              role: 'assistant',
+              status: 'success',
+              output: {
+                title: 'Test Design',
+                versionName: 'V1',
+                macroCode: 'params = {"x": 10}',
+                uiSpec: { fields: [] },
+                initialParams: { x: 10 }
+              }
+            }
+          ]
+        }
+      ];
+      
+      let currentUiSpec = { fields: [] };
+      let currentParams = { x: 10 };
+
+      window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        console.log('[MOCK] invoke', cmd, args);
+        if (cmd === 'get_config') return { engines: [], selectedEngineId: '' };
+        if (cmd === 'get_history') return window.__MOCK_HISTORY__;
+        if (cmd === 'get_last_design') return [window.__MOCK_HISTORY__[0].messages[0].output, 'thread-1'];
+        if (cmd === 'get_thread') return window.__MOCK_HISTORY__[0];
+        
+        if (cmd === 'parse_macro_params') {
+          return {
+            fields: [{ key: 'x', label: 'x', type: 'number', freezed: false }],
+            params: { x: 10 }
+          };
+        }
+        
+        if (cmd === 'update_ui_spec') {
+          currentUiSpec = args.uiSpec;
+          return;
+        }
+        
+        if (cmd === 'update_parameters') {
+          currentParams = args.parameters;
+          return;
+        }
+
+        if (cmd === 'render_stl') return '/mock.stl';
+
+        return null;
+      };
+    });
+
     await page.goto('/');
-    // Wait for the app to boot and workbench to show
     await page.waitForSelector('.workbench');
   });
 
-  test('saving values should trigger tauri invoke and show success state', async ({ page }) => {
-    // 1. Enter some parameters if none exist, or wait for them to load
-    // Assuming we have at least one parameter field
-    const applyBtn = page.locator('.apply-btn');
-    const saveValuesBtn = page.getByRole('button', { name: /SAVE VALUES/i });
+  test('read from macro, save, switch thread, and return should keep params', async ({ page }) => {
+    // 1. Enter edit mode
+    await page.getByRole('button', { name: /EDIT CONTROLS/i }).click();
 
-    // Mocking might be hard here without actual Tauri context, 
-    // but we can check if the button goes to "SAVED" state
+    // 2. Read from macro
+    await page.getByRole('button', { name: /READ FROM MACRO/i }).click();
     
-    // Let's check if the button exists first
-    await expect(saveValuesBtn).toBeVisible();
-    
-    // We need an activeVersionId for the button to be enabled
-    // If it's disabled, we can't test the click.
-    const isDisabled = await saveValuesBtn.isDisabled();
-    if (!isDisabled) {
-      await saveValuesBtn.click();
-      await expect(page.getByText('SAVED')).toBeVisible();
-    }
-  });
+    // Check if field x appeared in edit list
+    const fieldInput = page.locator('.edit-field input[placeholder="key"]');
+    await expect(fieldInput).toHaveValue('x');
 
-  test('editing controls should persist to ui_spec', async ({ page }) => {
-    const editBtn = page.getByRole('button', { name: /EDIT CONTROLS/i });
-    await editBtn.click();
+    // 3. Save
+    await page.getByRole('button', { name: /SAVE/i }).filter({ hasText: '💾 SAVE' }).click();
 
-    const addFieldBtn = page.getByRole('button', { name: /\+ ADD FIELD/i });
-    await addFieldBtn.click();
+    // Verify it's in the UI
+    await expect(page.locator('.param-label').filter({ hasText: 'x' })).toBeVisible();
 
-    // Fill in a new field
-    const lastField = page.locator('.edit-field').last();
-    await lastField.locator('input[placeholder="key"]').fill('test_param');
-    await lastField.locator('input[placeholder="Label"]').fill('Test Param');
+    // 4. Switch to a "new session" (simulates leaving the thread)
+    await page.locator('button[title="Create New Thread"]').click();
+    await expect(page.locator('.param-label')).toHaveCount(0); // Should be empty
 
-    const saveFieldsBtn = page.getByRole('button', { name: /SAVE/i }).filter({ hasText: '💾 SAVE' });
-    await saveFieldsBtn.click();
+    // 5. Go back to the original thread (mock thread)
+    // Note: since we mock, clicking the thread in history should reload it
+    await page.locator('.history-card').first().click();
 
-    // Check if the field appeared in the list
-    await expect(page.locator('.param-label').filter({ hasText: 'TEST PARAM' })).toBeVisible();
-  });
-
-  test('newly added control survives a parameter change (render)', async ({ page }) => {
-    // 1. Add a control
-    const editBtn = page.getByRole('button', { name: /EDIT CONTROLS/i });
-    await editBtn.click();
-
-    const addFieldBtn = page.getByRole('button', { name: /\+ ADD FIELD/i });
-    await addFieldBtn.click();
-
-    const lastField = page.locator('.edit-field').last();
-    await lastField.locator('input[placeholder="key"]').fill('newly_added_param');
-    await lastField.locator('input[placeholder="Label"]').fill('Newly Added Param');
-
-    const saveFieldsBtn = page.getByRole('button', { name: /SAVE/i }).filter({ hasText: '💾 SAVE' });
-    await saveFieldsBtn.click();
-    await expect(page.locator('.param-label').filter({ hasText: 'NEWLY ADDED PARAM' })).toBeVisible();
-
-    // 2. Change a parameter to trigger a render/store update
-    // We assume there's at least one slider if any params exist
-    // If not, we can use the newly added one if it rendered as a number input
-    const newlyAddedInput = page.locator('#newly_added_param');
-    await newlyAddedInput.fill('42');
-    
-    // The change should trigger handleParamChange, which updates the store
-    // Wait a bit for the store update and re-render
-    await page.waitForTimeout(500);
-
-    // 3. Verify the control is still there
-    await expect(page.locator('.param-label').filter({ hasText: 'NEWLY ADDED PARAM' })).toBeVisible();
+    // The param should STILL be there because workingCopy should have patched it
+    await expect(page.locator('.param-label').filter({ hasText: 'x' })).toBeVisible();
   });
 });
