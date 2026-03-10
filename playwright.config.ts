@@ -23,6 +23,6 @@ export default defineConfig({
       command: 'npm run dev:server',
       url: 'http://localhost:8787/api/health',
       reuseExistingServer: true,
-    }
+    },
   ],
 });

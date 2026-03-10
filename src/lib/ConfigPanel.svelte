@@ -1,23 +1,48 @@
-<script>
+<script lang="ts">
   import { onMount } from 'svelte';
   import Dropdown from './Dropdown.svelte';
-  import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
+  import {
+    formatBackendError,
+    getSystemPrompt,
+    saveRecordedAudio,
+    uploadAsset,
+  } from './tauri/client';
+  import type { AppConfig } from './types/domain';
 
-  let { config = $bindable(), availableModels = [], isLoadingModels = false, onfetch, onsave } = $props();
+  type ActiveSection = 'engines' | 'assets';
+  type RecordingTarget = 'hum' | 'ding';
+  type MicrophoneOption = {
+    id: string;
+    name: string;
+  };
+
+  let {
+    config = $bindable(),
+    availableModels = [],
+    isLoadingModels = false,
+    onfetch,
+    onsave,
+  }: {
+    config: AppConfig;
+    availableModels?: string[];
+    isLoadingModels?: boolean;
+    onfetch?: () => Promise<void> | void;
+    onsave?: () => Promise<void> | void;
+  } = $props();
 
   let isSaving = $state(false);
   let message = $state('');
-  let activeSection = $state('engines'); // 'engines' or 'assets'
+  let activeSection = $state<ActiveSection>('engines');
 
   // Recording state
   let isRecording = $state(false);
-  let recordingTarget = $state(null); // 'hum' or 'ding'
-  let mediaRecorder = null;
-  let audioChunks = [];
+  let recordingTarget = $state<RecordingTarget | null>(null);
+  let mediaRecorder: MediaRecorder | null = null;
+  let audioChunks: Blob[] = [];
   let recordingTimer = $state(0);
-  let timerInterval = null;
-  let micOptions = $state([]);
+  let timerInterval: ReturnType<typeof setInterval> | null = null;
+  let micOptions = $state<MicrophoneOption[]>([]);
   let selectedMicId = $state('');
   let selectedAssetId = $state('');
 
@@ -39,15 +64,28 @@
 
   const selectedEngine = $derived(config.engines.find(e => e.id === config.selectedEngineId));
 
-  // Microwave assignments
-  if (!config.microwave) {
-    config.microwave = {
-      humId: null,
-      dingId: null,
-      muted: false
-    };
-  } else if (typeof config.microwave.muted !== 'boolean') {
-    config.microwave.muted = false;
+  function asString(value: string | number | null | undefined): string {
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number') return String(value);
+    return '';
+  }
+
+  function getMicrowaveConfig(): NonNullable<AppConfig['microwave']> {
+    if (!config.microwave) {
+      config.microwave = {
+        humId: null,
+        dingId: null,
+        muted: false
+      };
+    } else if (typeof config.microwave.muted !== 'boolean') {
+      config.microwave.muted = false;
+    }
+    return config.microwave;
+  }
+  const microwave = $derived.by(() => getMicrowaveConfig());
+
+  if (typeof config.freecadCmd !== 'string') {
+    config.freecadCmd = '';
   }
 
   async function handleSave() {
@@ -56,8 +94,8 @@
     try {
       if (onsave) await onsave();
       message = 'Registry saved successfully.';
-    } catch (e) {
-      message = `Error: ${e}`;
+    } catch (e: unknown) {
+      message = `Error: ${formatBackendError(e)}`;
     } finally {
       isSaving = false;
     }
@@ -65,7 +103,7 @@
 
   async function addEngine() {
     const id = `engine-${Date.now()}`;
-    const defaultPrompt = await invoke('get_system_prompt');
+    const defaultPrompt = await getSystemPrompt();
     const newEngine = {
       id,
       name: 'New Engine',
@@ -101,12 +139,12 @@
       if (micOptions.length > 0 && !micOptions.some(m => m.id === selectedMicId)) {
         selectedMicId = micOptions[0].id;
       }
-    } catch (e) {
+    } catch (e: unknown) {
       console.warn('Failed to enumerate microphones:', e);
     }
   }
 
-  async function uploadMicrowaveAudio(target) {
+  async function uploadMicrowaveAudio(target: RecordingTarget) {
     try {
       const selected = await open({
         multiple: false,
@@ -114,30 +152,31 @@
           { name: 'Audio Files', extensions: ['mp3', 'wav', 'webm', 'ogg', 'm4a', 'aac', 'flac'] }
         ]
       });
-      if (!selected) return;
+      if (typeof selected !== 'string') return;
 
       const path = selected;
-      const name = path.split(/[\/\\]/).pop();
+      const name = path.split(/[\/\\]/).pop() || path;
       const ext = (name.split('.').pop() || 'WAV').toUpperCase();
 
-      const asset = await invoke('upload_asset', {
+      const asset = await uploadAsset({
         sourcePath: path,
         name,
         format: ext
       });
 
+      const microwaveConfig = getMicrowaveConfig();
       config.assets = [...(config.assets || []), asset];
-      if (target === 'hum') config.microwave.humId = asset.id;
-      if (target === 'ding') config.microwave.dingId = asset.id;
+      if (target === 'hum') microwaveConfig.humId = asset.id;
+      if (target === 'ding') microwaveConfig.dingId = asset.id;
       message = `Uploaded and assigned ${target.toUpperCase()} sound: ${name}`;
-    } catch (e) {
-      message = `Upload failed: ${e}`;
+    } catch (e: unknown) {
+      message = `Upload failed: ${formatBackendError(e)}`;
     }
   }
 
-  async function startRecording(target) {
+  async function startRecording(target: RecordingTarget) {
     try {
-      const constraints = selectedMicId
+      const constraints: MediaStreamConstraints = selectedMicId
         ? { audio: { deviceId: { exact: selectedMicId } } }
         : { audio: true };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -155,20 +194,25 @@
         const reader = new FileReader();
         reader.readAsDataURL(audioBlob);
         reader.onloadend = async () => {
-          const base64data = reader.result.split(',')[1];
+          if (typeof reader.result !== 'string') {
+            message = 'Failed to read recording buffer.';
+            return;
+          }
+          const base64data = reader.result.split(',')[1] ?? '';
           const name = `Recording: ${target.toUpperCase()} (${new Date().toLocaleTimeString()})`;
           
           try {
-            const asset = await invoke('save_recorded_audio', {
+            const asset = await saveRecordedAudio({
               base64Data: base64data,
               name
             });
+            const microwaveConfig = getMicrowaveConfig();
             config.assets = [...(config.assets || []), asset];
-            if (target === 'hum') config.microwave.humId = asset.id;
-            if (target === 'ding') config.microwave.dingId = asset.id;
+            if (target === 'hum') microwaveConfig.humId = asset.id;
+            if (target === 'ding') microwaveConfig.dingId = asset.id;
             message = `Recorded ${target} saved and assigned.`;
-          } catch (e) {
-            message = `Failed to save recording: ${e}`;
+          } catch (e: unknown) {
+            message = `Failed to save recording: ${formatBackendError(e)}`;
           }
         };
       };
@@ -178,8 +222,8 @@
       timerInterval = setInterval(() => {
         recordingTimer++;
       }, 1000);
-    } catch (e) {
-      message = `Microphone error: ${e}`;
+    } catch (e: unknown) {
+      message = `Microphone error: ${formatBackendError(e)}`;
     }
   }
 
@@ -189,10 +233,13 @@
       mediaRecorder.stream.getTracks().forEach(track => track.stop());
     }
     isRecording = false;
-    clearInterval(timerInterval);
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
   }
 
-  function removeEngine(id) {
+  function removeEngine(id: string) {
     config.engines = config.engines.filter(e => e.id !== id);
     if (config.selectedEngineId === id) {
       config.selectedEngineId = config.engines.length > 0 ? config.engines[0].id : '';
@@ -208,12 +255,12 @@
         ]
       });
 
-      if (selected) {
+      if (typeof selected === 'string') {
         const path = selected;
-        const ext = path.split('.').pop().toUpperCase();
-        const name = path.split(/[\/\\]/).pop();
+        const ext = (path.split('.').pop() || '').toUpperCase();
+        const name = path.split(/[\/\\]/).pop() || path;
         
-        const asset = await invoke('upload_asset', {
+        const asset = await uploadAsset({
           sourcePath: path,
           name,
           format: ext
@@ -224,12 +271,12 @@
         activeSection = 'assets';
         message = `Asset ${name} added.`;
       }
-    } catch (e) {
-      message = `Upload failed: ${e}`;
+    } catch (e: unknown) {
+      message = `Upload failed: ${formatBackendError(e)}`;
     }
   }
 
-  function removeAsset(id) {
+  function removeAsset(id: string) {
     config.assets = config.assets.filter(a => a.id !== id);
     if (selectedAssetId === id) {
       selectedAssetId = '';
@@ -240,8 +287,8 @@
     if (!onfetch) return;
     try {
       await onfetch();
-    } catch (e) {
-      message = `Model fetch failed: ${e}`;
+    } catch (e: unknown) {
+      message = `Model fetch failed: ${formatBackendError(e)}`;
     }
   }
 
@@ -254,7 +301,7 @@
   }
   async function resetPrompt() {
     if (selectedEngine) {
-      selectedEngine.systemPrompt = await invoke('get_system_prompt');
+      selectedEngine.systemPrompt = await getSystemPrompt();
     }
   }
 
@@ -319,7 +366,7 @@
               <Dropdown
                 options={micOptions}
                 value={selectedMicId}
-                onchange={(val) => selectedMicId = val}
+                onchange={(val) => selectedMicId = asString(val)}
                 placeholder="Select microphone..."
                 disabled={isRecording}
               />
@@ -337,12 +384,12 @@
               <button class="btn btn-xs" onclick={() => startRecording('hum')} disabled={isRecording}>🎤 RECORD</button>
             {/if}
             <button class="btn btn-xs btn-ghost" onclick={() => uploadMicrowaveAudio('hum')} disabled={isRecording}>📁 UPLOAD HUM</button>
-            {#if config.microwave?.humId}
-              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.humId = null}>✕ CLEAR</button>
+            {#if microwave.humId}
+              <button class="btn btn-xs btn-ghost" onclick={() => microwave.humId = null}>✕ CLEAR</button>
             {/if}
           </div>
-          {#if config.microwave?.humId}
-            {@const asset = config.assets?.find(a => a.id === config.microwave.humId)}
+          {#if microwave.humId}
+            {@const asset = config.assets?.find(a => a.id === microwave.humId)}
             <span class="assigned-name">{asset?.name || 'Assigned'}</span>
           {/if}
         </div>
@@ -355,12 +402,12 @@
             {:else}
               <button class="btn btn-xs" onclick={() => startRecording('ding')} disabled={isRecording}>🎤 RECORD</button>
             {/if}
-            {#if config.microwave?.dingId}
-              <button class="btn btn-xs btn-ghost" onclick={() => config.microwave.dingId = null}>✕ CLEAR</button>
+            {#if microwave.dingId}
+              <button class="btn btn-xs btn-ghost" onclick={() => microwave.dingId = null}>✕ CLEAR</button>
             {/if}
           </div>
-          {#if config.microwave?.dingId}
-            {@const asset = config.assets?.find(a => a.id === config.microwave.dingId)}
+          {#if microwave.dingId}
+            {@const asset = config.assets?.find(a => a.id === microwave.dingId)}
             <span class="assigned-name">{asset?.name || 'Assigned'}</span>
           {/if}
         </div>
@@ -370,18 +417,34 @@
 
   <main class="engine-details">
     <div class="details-scrollable">
+      <div class="details-content">
+        <div class="field">
+          <div class="prompt-header">
+            <label for="freecad-cmd">FREECAD COMMAND / APP (GLOBAL)</label>
+            <button class="btn btn-xs btn-ghost" onclick={() => config.freecadCmd = ''}>AUTO DISCOVER</button>
+          </div>
+          <input
+            id="freecad-cmd"
+            type="text"
+            class="input-mono"
+            placeholder="/Applications/FreeCAD.app or /Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd"
+            bind:value={config.freecadCmd}
+          />
+          <div class="field-help">
+            Leave blank to auto-detect via `FREECAD_CMD`, PATH, or standard macOS FreeCAD locations.
+          </div>
+        </div>
+
       {#if activeSection === 'engines' && selectedEngine}
-        <div class="details-content">
           <div class="field-row">
             <div class="field flex-2">
               <label for="e-name">DISPLAY NAME</label>
               <input 
                 id="e-name" 
                 type="text" 
-                value={selectedEngine.name} 
                 class="input-mono" 
                 placeholder="e.g. My Gemini" 
-                oninput={(e) => selectedEngine.name = e.target.value}
+                bind:value={selectedEngine.name}
               />
             </div>
             <div class="field flex-1">
@@ -389,7 +452,7 @@
               <Dropdown 
                 options={providers} 
                 value={selectedEngine.provider} 
-                onchange={async (val) => { selectedEngine.provider = val; await handleProviderChange(); }} 
+                onchange={async (val) => { selectedEngine.provider = asString(val); await handleProviderChange(); }} 
               />
             </div>
           </div>
@@ -399,10 +462,9 @@
             <input 
               id="e-key" 
               type="password" 
-              value={selectedEngine.apiKey} 
               class="input-mono" 
               placeholder="Enter API key..." 
-              oninput={(e) => selectedEngine.apiKey = e.target.value}
+              bind:value={selectedEngine.apiKey}
               onblur={refreshModels}
             />
           </div>
@@ -419,7 +481,7 @@
                 options={availableModels.length > 0 ? availableModels : (selectedEngine.model ? [selectedEngine.model] : [])} 
                 value={selectedEngine.model} 
                 placeholder={isLoadingModels ? "Fetching..." : "Fetch models first..."} 
-                onchange={(val) => selectedEngine.model = val}
+                onchange={(val) => selectedEngine.model = asString(val)}
               />
             </div>
             <div class="field flex-1">
@@ -428,8 +490,9 @@
                 options={availableModels.length > 0 ? availableModels : (selectedEngine.lightModel ? [selectedEngine.lightModel] : (selectedEngine.model ? [selectedEngine.model] : []))}
                 value={selectedEngine.lightModel}
                 placeholder={isLoadingModels ? "Fetching..." : "Optional (falls back to heavy model)"}
-                onchange={(val) => selectedEngine.lightModel = val}
+                onchange={(val) => selectedEngine.lightModel = asString(val)}
               />
+              <div class="field-note">Used for text-only intent checks. Image-bearing requests fall back to the main model.</div>
             </div>
           </div>
 
@@ -438,10 +501,9 @@
             <input 
               id="e-baseurl" 
               type="text" 
-              value={selectedEngine.baseUrl} 
               class="input-mono" 
               placeholder="Default" 
-              oninput={(e) => selectedEngine.baseUrl = e.target.value}
+              bind:value={selectedEngine.baseUrl}
               onblur={refreshModels}
             />
           </div>
@@ -453,10 +515,9 @@
             </div>
             <textarea 
               id="e-prompt" 
-              value={selectedEngine.systemPrompt} 
               class="input-mono system-prompt-input" 
               spellcheck="false"
-              oninput={(e) => selectedEngine.systemPrompt = e.target.value}
+              bind:value={selectedEngine.systemPrompt}
               placeholder="Template for LLM. Use $USER_PROMPT as placeholder for user intent."
             ></textarea>
           </div>
@@ -464,11 +525,9 @@
           <div class="danger-zone">
             <button class="btn btn-xs btn-ghost" onclick={() => removeEngine(selectedEngine.id)}>REMOVE ENGINE</button>
           </div>
-        </div>
       {:else if activeSection === 'assets'}
         {@const selectedAsset = config.assets?.find(a => a.id === selectedAssetId)}
         {#if selectedAsset}
-          <div class="details-content">
             <div class="field">
               <span>ASSET NAME</span>
               <input type="text" bind:value={selectedAsset.name} class="input-mono" />
@@ -482,14 +541,14 @@
               <span>ASSIGN TO MICROWAVE</span>
               <div class="assignment-buttons">
                 <button 
-                  class="btn btn-xs {config.microwave?.humId === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
-                  onclick={() => config.microwave.humId = selectedAsset.id}
+                  class="btn btn-xs {microwave.humId === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
+                  onclick={() => microwave.humId = selectedAsset.id}
                 >
                   ASSIGN AS HUM (COOKING)
                 </button>
                 <button 
-                  class="btn btn-xs {config.microwave?.dingId === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
-                  onclick={() => config.microwave.dingId = selectedAsset.id}
+                  class="btn btn-xs {microwave.dingId === selectedAsset.id ? 'btn-primary' : 'btn-ghost'}"
+                  onclick={() => microwave.dingId = selectedAsset.id}
                 >
                   ASSIGN AS DING (DONE)
                 </button>
@@ -503,7 +562,6 @@
             <div class="danger-zone">
               <button class="btn btn-xs btn-ghost" onclick={() => removeAsset(selectedAsset.id)}>REMOVE ASSET</button>
             </div>
-          </div>
         {:else}
           <div class="no-engine">Select media to view details.</div>
         {/if}
@@ -513,6 +571,7 @@
           <button class="btn btn-primary" onclick={addEngine}>ADD FIRST ENGINE</button>
         </div>
       {/if}
+      </div>
     </div>
 
     <div class="config-footer">
@@ -642,6 +701,18 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .field-help {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+
+  .field-note {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    line-height: 1.35;
   }
 
   .path-display {

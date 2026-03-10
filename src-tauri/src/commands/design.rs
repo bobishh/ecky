@@ -1,49 +1,204 @@
-use serde_json::json;
-use std::fs;
+use rustpython_parser::ast::{self, Constant, Expr, Stmt};
+use rustpython_parser::{parse, Mode};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::models::{AppState, DesignOutput, Message};
+use super::session::{build_runtime_snapshot, write_last_snapshot};
+use crate::models::{
+    validate_design_output, validate_design_params, validate_model_manifest, validate_ui_spec,
+    AppError, AppResult, AppState, ArtifactBundle, DesignOutput, DesignParams, InteractionMode,
+    Message, MessageRole, MessageStatus, ModelManifest, ParamValue, ParsedParamsResult,
+    SelectOption, SelectValue, UiField, UiSpec,
+};
 use crate::{db, persist_thread_summary};
 
-use rustpython_parser::ast::{self, Stmt, Expr, Constant};
-use rustpython_parser::{parse, Mode};
+fn field_label(key: &str) -> String {
+    key.replace(['_', '-'], " ")
+}
 
-#[derive(serde::Serialize)]
-pub struct ParsedParamsResult {
-    pub fields: Vec<serde_json::Value>,
-    pub params: serde_json::Map<String, serde_json::Value>,
+fn create_field(key: &str, value: &ParamValue) -> UiField {
+    let label = field_label(key);
+    match value {
+        ParamValue::String(text) => UiField::Select {
+            key: key.to_string(),
+            label,
+            options: vec![SelectOption {
+                label: text.clone(),
+                value: SelectValue::String(text.clone()),
+            }],
+            frozen: false,
+        },
+        ParamValue::Number(_) | ParamValue::Null => UiField::Number {
+            key: key.to_string(),
+            label,
+            min: None,
+            max: None,
+            step: None,
+            min_from: None,
+            max_from: None,
+            frozen: false,
+        },
+        ParamValue::Boolean(_) => UiField::Checkbox {
+            key: key.to_string(),
+            label,
+            frozen: false,
+        },
+    }
+}
+
+fn extract_value(expr: &Expr) -> ParamValue {
+    match expr {
+        Expr::Constant(expr_const) => match &expr_const.value {
+            Constant::Str(text) => ParamValue::String(text.to_string()),
+            Constant::Int(value) => {
+                let numeric: i64 = value.try_into().unwrap_or(0);
+                ParamValue::Number(numeric as f64)
+            }
+            Constant::Float(value) => ParamValue::Number(*value),
+            Constant::Bool(value) => ParamValue::Boolean(*value),
+            Constant::None => ParamValue::Null,
+            _ => ParamValue::Number(0.0),
+        },
+        _ => ParamValue::Number(0.0),
+    }
+}
+
+fn process_params_value(value: &Expr, fields: &mut Vec<UiField>, params: &mut DesignParams) {
+    if let Expr::Dict(dict) = value {
+        for (index, key_opt) in dict.keys.iter().enumerate() {
+            if let Some(Expr::Constant(const_key)) = key_opt {
+                if let Constant::Str(key) = &const_key.value {
+                    if let Some(val_expr) = dict.values.get(index) {
+                        let inferred = extract_value(val_expr);
+                        params.insert(key.to_string(), inferred.clone());
+                        fields.push(create_field(key, &inferred));
+                    }
+                }
+            }
+        }
+    } else if let Expr::Call(call) = value {
+        if let Expr::Name(func_name) = &*call.func {
+            if func_name.id.as_str() == "dict" {
+                for keyword in &call.keywords {
+                    if let Some(arg_id) = &keyword.arg {
+                        let key = arg_id.as_str().to_string();
+                        let inferred = extract_value(&keyword.value);
+                        params.insert(key.clone(), inferred.clone());
+                        fields.push(create_field(&key, &inferred));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn scan_expr_for_params_get(expr: &Expr, fields: &mut Vec<UiField>, params: &mut DesignParams) {
+    match expr {
+        Expr::Call(call) => {
+            if let Expr::Attribute(attr) = &*call.func {
+                if let Expr::Name(obj_name) = &*attr.value {
+                    if obj_name.id.as_str() == "params" && attr.attr.as_str() == "get" {
+                        if call.args.len() >= 2 {
+                            if let Expr::Constant(const_key) = &call.args[0] {
+                                if let Constant::Str(key) = &const_key.value {
+                                    if !params.contains_key(key.as_str()) {
+                                        let inferred = extract_value(&call.args[1]);
+                                        params.insert(key.to_string(), inferred.clone());
+                                        fields.push(create_field(key, &inferred));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for arg in &call.args {
+                scan_expr_for_params_get(arg, fields, params);
+            }
+            for keyword in &call.keywords {
+                scan_expr_for_params_get(&keyword.value, fields, params);
+            }
+        }
+        Expr::BinOp(bin_op) => {
+            scan_expr_for_params_get(&bin_op.left, fields, params);
+            scan_expr_for_params_get(&bin_op.right, fields, params);
+        }
+        Expr::Dict(dict) => {
+            for value in &dict.values {
+                scan_expr_for_params_get(value, fields, params);
+            }
+        }
+        Expr::List(list) => {
+            for value in &list.elts {
+                scan_expr_for_params_get(value, fields, params);
+            }
+        }
+        Expr::Tuple(tuple) => {
+            for value in &tuple.elts {
+                scan_expr_for_params_get(value, fields, params);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_stmt_for_params_get(stmt: &Stmt, fields: &mut Vec<UiField>, params: &mut DesignParams) {
+    match stmt {
+        Stmt::Assign(assign) => scan_expr_for_params_get(&assign.value, fields, params),
+        Stmt::AnnAssign(assign) => {
+            if let Some(value) = &assign.value {
+                scan_expr_for_params_get(value, fields, params);
+            }
+        }
+        Stmt::Expr(expr) => scan_expr_for_params_get(&expr.value, fields, params),
+        Stmt::For(for_stmt) => {
+            for stmt in &for_stmt.body {
+                scan_stmt_for_params_get(stmt, fields, params);
+            }
+            scan_expr_for_params_get(&for_stmt.iter, fields, params);
+        }
+        Stmt::If(if_stmt) => {
+            for stmt in &if_stmt.body {
+                scan_stmt_for_params_get(stmt, fields, params);
+            }
+            for stmt in &if_stmt.orelse {
+                scan_stmt_for_params_get(stmt, fields, params);
+            }
+            scan_expr_for_params_get(&if_stmt.test, fields, params);
+        }
+        Stmt::With(with_stmt) => {
+            for stmt in &with_stmt.body {
+                scan_stmt_for_params_get(stmt, fields, params);
+            }
+        }
+        Stmt::FunctionDef(function) => {
+            for stmt in &function.body {
+                scan_stmt_for_params_get(stmt, fields, params);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn parse_macro_params(macro_code: String) -> ParsedParamsResult {
-    println!("Rust: parse_macro_params called with {} chars", macro_code.len());
     let mut fields = Vec::new();
-    let mut params = serde_json::Map::new();
+    let mut params = DesignParams::new();
 
     let ast = match parse(&macro_code, Mode::Module, "<embedded>") {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Rust: parse error: {:?}", e);
-            return ParsedParamsResult { fields, params };
-        }
+        Ok(parsed) => parsed,
+        Err(_) => return ParsedParamsResult { fields, params },
     };
 
     if let ast::Mod::Module(module) = ast {
         for stmt in &module.body {
-            // 1. Support 'params = { ... }' or 'params = dict(...)'
             match stmt {
                 Stmt::Assign(assign) => {
-                    let mut is_params = false;
-                    for target in &assign.targets {
-                        if let Expr::Name(name) = target {
-                            if name.id.as_str() == "params" {
-                                is_params = true;
-                                break;
-                            }
-                        }
-                    }
+                    let is_params = assign.targets.iter().any(
+                        |target| matches!(target, Expr::Name(name) if name.id.as_str() == "params"),
+                    );
                     if is_params {
                         process_params_value(&assign.value, &mut fields, &mut params);
                     }
@@ -59,161 +214,51 @@ pub fn parse_macro_params(macro_code: String) -> ParsedParamsResult {
                 }
                 _ => {}
             }
-            // 2. Scan for 'params.get("key", default)' pattern
             scan_stmt_for_params_get(stmt, &mut fields, &mut params);
         }
     }
 
-    // Deduplicate fields by key
     let mut unique_fields = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
     for field in fields {
-        if let Some(key) = field.get("key").and_then(|k| k.as_str()) {
-            if seen_keys.insert(key.to_string()) {
-                unique_fields.push(field);
-            }
+        if seen_keys.insert(field.key().to_string()) {
+            unique_fields.push(field);
         }
     }
 
-    println!("Rust: returning {} fields", unique_fields.len());
-    ParsedParamsResult { fields: unique_fields, params }
-}
-
-fn scan_stmt_for_params_get(stmt: &Stmt, fields: &mut Vec<serde_json::Value>, params: &mut serde_json::Map<String, serde_json::Value>) {
-    match stmt {
-        Stmt::Assign(a) => scan_expr_for_params_get(&a.value, fields, params),
-        Stmt::AnnAssign(a) => {
-            if let Some(v) = &a.value {
-                scan_expr_for_params_get(v, fields, params);
-            }
-        }
-        Stmt::Expr(e) => scan_expr_for_params_get(&e.value, fields, params),
-        Stmt::For(f) => {
-            for s in &f.body { scan_stmt_for_params_get(s, fields, params); }
-            scan_expr_for_params_get(&f.iter, fields, params);
-        }
-        Stmt::If(i) => {
-            for s in &i.body { scan_stmt_for_params_get(s, fields, params); }
-            for s in &i.orelse { scan_stmt_for_params_get(s, fields, params); }
-            scan_expr_for_params_get(&i.test, fields, params);
-        }
-        Stmt::With(w) => {
-            for s in &w.body { scan_stmt_for_params_get(s, fields, params); }
-        }
-        Stmt::FunctionDef(f) => {
-            for s in &f.body { scan_stmt_for_params_get(s, fields, params); }
-        }
-        _ => {}
+    ParsedParamsResult {
+        fields: unique_fields,
+        params,
     }
-}
-
-fn scan_expr_for_params_get(expr: &Expr, fields: &mut Vec<serde_json::Value>, params: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Expr::Call(call) = expr {
-        if let Expr::Attribute(attr) = &*call.func {
-            if let Expr::Name(obj_name) = &*attr.value {
-                if obj_name.id.as_str() == "params" && attr.attr.as_str() == "get" {
-                    if call.args.len() >= 2 {
-                        if let Expr::Constant(const_key) = &call.args[0] {
-                            if let Constant::Str(key_str) = &const_key.value {
-                                let (val, val_type) = extract_value(&call.args[1]);
-                                if !params.contains_key(key_str.as_str()) {
-                                    params.insert(key_str.to_string(), val);
-                                    fields.push(create_field(key_str.as_str(), &val_type));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for arg in &call.args { scan_expr_for_params_get(arg, fields, params); }
-        for kw in &call.keywords { scan_expr_for_params_get(&kw.value, fields, params); }
-    } else if let Expr::BinOp(b) = expr {
-        scan_expr_for_params_get(&b.left, fields, params);
-        scan_expr_for_params_get(&b.right, fields, params);
-    } else if let Expr::Dict(d) = expr {
-        for v in &d.values { scan_expr_for_params_get(v, fields, params); }
-    } else if let Expr::List(l) = expr {
-        for e in &l.elts { scan_expr_for_params_get(e, fields, params); }
-    } else if let Expr::Tuple(t) = expr {
-        for e in &t.elts { scan_expr_for_params_get(e, fields, params); }
-    }
-}
-
-fn process_params_value(value: &Expr, fields: &mut Vec<serde_json::Value>, params: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Expr::Dict(dict) = value {
-        println!("Rust: params is a dict literal with {} keys", dict.keys.len());
-        for (i, key_opt) in dict.keys.iter().enumerate() {
-            if let Some(Expr::Constant(const_key)) = key_opt {
-                if let Constant::Str(s) = &const_key.value {
-                    let key_str = s.to_string();
-                    if let Some(val_expr) = dict.values.get(i) {
-                        let (val, val_type) = extract_value(val_expr);
-                        params.insert(key_str.clone(), val);
-                        fields.push(create_field(&key_str, &val_type));
-                    }
-                }
-            }
-        }
-    } else if let Expr::Call(call) = value {
-        if let Expr::Name(func_name) = &*call.func {
-            if func_name.id.as_str() == "dict" {
-                println!("Rust: params is a dict() call with {} kwargs", call.keywords.len());
-                for kw in &call.keywords {
-                    if let Some(arg_id) = &kw.arg {
-                        let key_str = arg_id.as_str().to_string();
-                        let (val, val_type) = extract_value(&kw.value);
-                        params.insert(key_str.clone(), val);
-                        fields.push(create_field(&key_str, &val_type));
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn extract_value(expr: &Expr) -> (serde_json::Value, String) {
-    if let Expr::Constant(expr_const) = expr {
-        match &expr_const.value {
-            Constant::Str(s) => (json!(s.to_string()), "select".to_string()),
-            Constant::Int(i) => {
-                // Try converting BigInt to i64
-                let val: i64 = i.try_into().unwrap_or(0);
-                (json!(val), "number".to_string())
-            },
-            Constant::Float(f) => (json!(f), "number".to_string()),
-            Constant::Bool(b) => (json!(b), "checkbox".to_string()),
-            _ => (json!(0), "number".to_string()),
-        }
-    } else {
-        (json!(0), "number".to_string())
-    }
-}
-
-fn create_field(key: &str, field_type: &str) -> serde_json::Value {
-    json!({
-        "key": key,
-        "label": key.replace(['_', '-'], " "),
-        "type": field_type,
-        "min": serde_json::Value::Null,
-        "max": serde_json::Value::Null,
-        "step": serde_json::Value::Null,
-        "min_from": "",
-        "max_from": "",
-        "freezed": false
-    })
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn add_manual_version(
     thread_id: String,
     title: String,
     version_name: String,
     macro_code: String,
-    parameters: serde_json::Value,
-    ui_spec: serde_json::Value,
+    parameters: DesignParams,
+    ui_spec: UiSpec,
+    artifact_bundle: Option<ArtifactBundle>,
+    model_manifest: Option<ModelManifest>,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+    app: AppHandle,
+) -> AppResult<String> {
+    validate_ui_spec(&ui_spec)?;
+    validate_design_params(&parameters, &ui_spec)?;
+    if let Some(manifest) = model_manifest.as_ref() {
+        validate_model_manifest(manifest)?;
+        if let Some(bundle) = artifact_bundle.as_ref() {
+            if manifest.model_id != bundle.model_id {
+                return Err(AppError::validation(
+                    "Model manifest does not match artifact bundle model id.",
+                ));
+            }
+        }
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -224,27 +269,15 @@ pub async fn add_manual_version(
         title: title.clone(),
         version_name,
         response: "Manual edit committed as new version.".to_string(),
-        interaction_mode: "design".to_string(),
+        interaction_mode: InteractionMode::Design,
         macro_code,
         ui_spec,
         initial_params: parameters,
     };
-
-    let msg_id = Uuid::new_v4().to_string();
-    let msg = Message {
-        id: msg_id.clone(),
-        role: "assistant".to_string(),
-        content: "Manual edit committed as new version.".to_string(),
-        status: "success".to_string(),
-        output: Some(output),
-        image_data: None,
-        timestamp: now,
-    };
-
-    db::add_message(&db, &thread_id, &msg).map_err(|e: rusqlite::Error| e.to_string())?;
+    validate_design_output(&output)?;
 
     let thread_traits = if db::get_thread_title(&db, &thread_id)
-        .unwrap_or(None)
+        .map_err(|err| AppError::persistence(err.to_string()))?
         .is_none()
     {
         Some(crate::generate_genie_traits())
@@ -252,82 +285,211 @@ pub async fn add_manual_version(
         None
     };
     db::create_or_update_thread(&db, &thread_id, &title, now, thread_traits.as_ref())
-        .map_err(|e: rusqlite::Error| e.to_string())?;
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+
+    let msg_id = Uuid::new_v4().to_string();
+    let msg = Message {
+        id: msg_id.clone(),
+        role: MessageRole::Assistant,
+        content: "Manual edit committed as new version.".to_string(),
+        status: MessageStatus::Success,
+        output: Some(output),
+        usage: None,
+        artifact_bundle: artifact_bundle.clone(),
+        model_manifest: model_manifest.clone(),
+        image_data: None,
+        attachment_images: Vec::new(),
+        timestamp: now,
+    };
+
+    db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
     let _ = persist_thread_summary(&db, &thread_id, &title);
+    let snapshot = build_runtime_snapshot(
+        msg.output.clone(),
+        Some(thread_id.clone()),
+        Some(msg_id.clone()),
+        artifact_bundle,
+        model_manifest,
+        None,
+    );
+    {
+        let mut last = state.last_snapshot.lock().unwrap();
+        *last = Some(snapshot.clone());
+    }
+    write_last_snapshot(&app, Some(&snapshot));
 
     Ok(msg_id)
 }
 
 #[tauri::command]
-pub async fn update_ui_spec(
-    message_id: String,
-    ui_spec: serde_json::Value,
+#[specta::specta]
+pub async fn add_imported_model_version(
+    thread_id: String,
+    title: String,
+    artifact_bundle: ArtifactBundle,
+    model_manifest: ModelManifest,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<(), String> {
-    let (updated_output, updated_thread_id) = {
-        let db = state.db.lock().await;
-        db::update_message_ui_spec(&db, &message_id, &ui_spec).map_err(|e| e.to_string())?;
-        db::get_message_output_and_thread(&db, &message_id).map_err(|e| e.to_string())?
+) -> AppResult<String> {
+    validate_model_manifest(&model_manifest)?;
+    if artifact_bundle.model_id != model_manifest.model_id {
+        return Err(AppError::validation(
+            "Imported model manifest does not match artifact bundle model id.",
+        ));
     }
-    .ok_or("Message output not found for ui_spec update")?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let db = state.db.lock().await;
+
+    let thread_traits = if db::get_thread_title(&db, &thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .is_none()
+    {
+        Some(crate::generate_genie_traits())
+    } else {
+        None
+    };
+    db::create_or_update_thread(&db, &thread_id, &title, now, thread_traits.as_ref())
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+
+    let msg_id = Uuid::new_v4().to_string();
+    let label = model_manifest.document.document_label.trim();
+    let content = if label.is_empty() {
+        "Imported FreeCAD model.".to_string()
+    } else {
+        format!("Imported FreeCAD model: {}.", label)
+    };
+    let msg = Message {
+        id: msg_id.clone(),
+        role: MessageRole::Assistant,
+        content,
+        status: MessageStatus::Success,
+        output: None,
+        usage: None,
+        artifact_bundle: Some(artifact_bundle.clone()),
+        model_manifest: Some(model_manifest.clone()),
+        image_data: None,
+        attachment_images: Vec::new(),
+        timestamp: now,
+    };
+
+    db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
+    let _ = persist_thread_summary(&db, &thread_id, &title);
+    let snapshot = build_runtime_snapshot(
+        None,
+        Some(thread_id.clone()),
+        Some(msg_id.clone()),
+        Some(artifact_bundle),
+        Some(model_manifest),
+        None,
+    );
+    {
+        let mut last = state.last_snapshot.lock().unwrap();
+        *last = Some(snapshot.clone());
+    }
+    write_last_snapshot(&app, Some(&snapshot));
+
+    Ok(msg_id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_ui_spec(
+    message_id: String,
+    ui_spec: UiSpec,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<()> {
+    validate_ui_spec(&ui_spec)?;
+
+    let (updated_output, updated_thread_id, artifact_bundle, model_manifest) = {
+        let db = state.db.lock().await;
+        let (mut current_output, current_thread_id) =
+            db::get_message_output_and_thread(&db, &message_id)
+                .map_err(|err| AppError::persistence(err.to_string()))?
+                .ok_or_else(|| {
+                    AppError::not_found("Message output not found for uiSpec update.")
+                })?;
+        current_output.ui_spec = ui_spec;
+        validate_design_output(&current_output)?;
+        db::update_message_ui_spec(&db, &message_id, &current_output.ui_spec)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        let (artifact_bundle, model_manifest, _) =
+            db::get_message_runtime_and_thread(&db, &message_id)
+                .map_err(|err| AppError::persistence(err.to_string()))?
+                .unwrap_or((None, None, current_thread_id.clone()));
+        (
+            current_output,
+            current_thread_id,
+            artifact_bundle,
+            model_manifest,
+        )
+    };
 
     {
-        let mut last = state.last_design.lock().unwrap();
-        *last = Some(updated_output.clone());
-        let mut last_tid = state.last_thread_id.lock().unwrap();
-        *last_tid = Some(updated_thread_id.clone());
+        let snapshot = build_runtime_snapshot(
+            Some(updated_output.clone()),
+            Some(updated_thread_id.clone()),
+            Some(message_id.clone()),
+            artifact_bundle,
+            model_manifest,
+            None,
+        );
+        let mut last = state.last_snapshot.lock().unwrap();
+        *last = Some(snapshot.clone());
+        write_last_snapshot(&app, Some(&snapshot));
     }
-
-    let cache_path = app
-        .path()
-        .app_config_dir()
-        .unwrap()
-        .join("last_design.json");
-    let session_data = json!({
-        "design": updated_output,
-        "thread_id": Some(updated_thread_id)
-    });
-    if let Ok(json) = serde_json::to_string_pretty(&session_data) {
-        let _ = fs::write(cache_path, json);
-    }
-
     Ok(())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_parameters(
     message_id: String,
-    parameters: serde_json::Value,
+    parameters: DesignParams,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<(), String> {
-    let (updated_output, updated_thread_id) = {
+) -> AppResult<()> {
+    let (updated_output, updated_thread_id, artifact_bundle, model_manifest) = {
         let db = state.db.lock().await;
-        db::update_message_parameters(&db, &message_id, &parameters).map_err(|e| e.to_string())?;
-        db::get_message_output_and_thread(&db, &message_id).map_err(|e| e.to_string())?
-    }
-    .ok_or("Message output not found for parameter update")?;
+        let (mut current_output, current_thread_id) =
+            db::get_message_output_and_thread(&db, &message_id)
+                .map_err(|err| AppError::persistence(err.to_string()))?
+                .ok_or_else(|| {
+                    AppError::not_found("Message output not found for parameter update.")
+                })?;
+        validate_design_params(&parameters, &current_output.ui_spec)?;
+        current_output.initial_params = parameters;
+        validate_design_output(&current_output)?;
+        db::update_message_parameters(&db, &message_id, &current_output.initial_params)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        let (artifact_bundle, model_manifest, _) =
+            db::get_message_runtime_and_thread(&db, &message_id)
+                .map_err(|err| AppError::persistence(err.to_string()))?
+                .unwrap_or((None, None, current_thread_id.clone()));
+        (
+            current_output,
+            current_thread_id,
+            artifact_bundle,
+            model_manifest,
+        )
+    };
 
     {
-        let mut last = state.last_design.lock().unwrap();
-        *last = Some(updated_output.clone());
-        let mut last_tid = state.last_thread_id.lock().unwrap();
-        *last_tid = Some(updated_thread_id.clone());
+        let snapshot = build_runtime_snapshot(
+            Some(updated_output.clone()),
+            Some(updated_thread_id.clone()),
+            Some(message_id.clone()),
+            artifact_bundle,
+            model_manifest,
+            None,
+        );
+        let mut last = state.last_snapshot.lock().unwrap();
+        *last = Some(snapshot.clone());
+        write_last_snapshot(&app, Some(&snapshot));
     }
-
-    let cache_path = app
-        .path()
-        .app_config_dir()
-        .unwrap()
-        .join("last_design.json");
-    let session_data = json!({
-        "design": updated_output,
-        "thread_id": Some(updated_thread_id)
-    });
-    if let Ok(json) = serde_json::to_string_pretty(&session_data) {
-        let _ = fs::write(cache_path, json);
-    }
-
     Ok(())
 }

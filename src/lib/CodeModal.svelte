@@ -1,27 +1,59 @@
-<script>
+<script lang="ts">
   import Window from './Window.svelte';
   import CodePanel from './CodePanel.svelte';
-  let { code = $bindable(), title, onclose, onCommit } = $props();
+  let {
+    code = $bindable(''),
+    title,
+    onclose,
+    onCommit,
+  }: {
+    code?: string;
+    title: string;
+    onclose: () => void;
+    onCommit?: (code: string) => Promise<void> | void;
+  } = $props();
 
   let x = $state(100);
   let y = $state(100);
   let width = $state(1000);
   let height = $state(700);
 
-  let copyState = $state('idle'); // idle | copied
+  let copyState = $state<'idle' | 'copied'>('idle');
+  let commitState = $state<'idle' | 'committing'>('idle');
+  let commitError = $state('');
+
+  function formatCommitError(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
 
   async function copyCode() {
     try {
       await navigator.clipboard.writeText(code);
       copyState = 'copied';
       setTimeout(() => copyState = 'idle', 2000);
-    } catch (e) {
+    } catch (e: unknown) {
       console.error('Failed to copy code:', e);
     }
   }
 
-  function handleCommit() {
-    if (onCommit) onCommit(code);
+  async function handleCommit() {
+    if (!onCommit || commitState === 'committing') return;
+    commitState = 'committing';
+    commitError = '';
+    try {
+      await onCommit(code);
+    } catch (e: unknown) {
+      console.error('Failed to commit code:', e);
+      commitError = formatCommitError(e);
+    } finally {
+      commitState = 'idle';
+    }
   }
 </script>
 
@@ -42,9 +74,21 @@
         <button class="btn btn-secondary" onclick={copyCode}>
           {copyState === 'copied' ? 'COPIED!' : 'COPY CODE'}
         </button>
+        {#if commitError}
+          <div class="commit-error" title={commitError}>{commitError}</div>
+        {/if}
       </div>
-      <button class="btn btn-primary" onclick={handleCommit} title="Save changes as a new version in history">
-        COMMIT AS NEW VERSION
+      <button
+        class="btn btn-primary"
+        onclick={handleCommit}
+        disabled={commitState === 'committing'}
+        title="Save changes as a new version in history"
+      >
+        {#if commitState === 'committing'}
+          COMMITTING...
+        {:else}
+          COMMIT AS NEW VERSION
+        {/if}
       </button>
     </div>
   </div>
@@ -76,5 +120,20 @@
   .footer-left {
     display: flex;
     gap: 8px;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .commit-error {
+    max-width: 480px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--red) 72%, var(--bg-300));
+    background: color-mix(in srgb, var(--red) 14%, var(--bg-100));
+    color: var(--text);
+    font-size: 0.72rem;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

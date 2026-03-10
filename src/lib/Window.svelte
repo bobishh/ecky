@@ -1,5 +1,6 @@
-<script>
+<script lang="ts">
   import { onDestroy } from 'svelte';
+  import type { Snippet } from 'svelte';
 
   let {
     x = $bindable(100),
@@ -11,6 +12,16 @@
     title = "",
     onclose,
     children
+  }: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    minWidth?: number;
+    minHeight?: number;
+    title?: string;
+    onclose: () => void;
+    children: Snippet;
   } = $props();
 
   let dragging = $state(false);
@@ -18,8 +29,8 @@
   let dragStartOffset = $state({ x: 0, y: 0 });
   let resizeStartDim = $state({ width: 0, height: 0, x: 0, y: 0 });
 
-  function handleDragStart(event) {
-    if (event.target.closest('button')) return;
+  function handleDragStart(event: MouseEvent) {
+    if (event.target instanceof Element && event.target.closest('button')) return;
     event.stopPropagation();
 
     dragging = true;
@@ -32,7 +43,7 @@
     window.addEventListener('mouseup', endInteraction);
   }
 
-  function handleResizeStart(event) {
+  function handleResizeStart(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
 
@@ -48,7 +59,7 @@
     window.addEventListener('mouseup', endInteraction);
   }
 
-  function onGlobalMove(event) {
+  function onGlobalMove(event: MouseEvent) {
     if (dragging) {
       x = event.clientX - dragStartOffset.x;
       y = event.clientY - dragStartOffset.y;

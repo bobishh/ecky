@@ -1,32 +1,53 @@
-<script>
+<script lang="ts">
   import { onMount } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
   import { restoreVersion } from './stores/history';
+  import { formatBackendError, getDeletedMessages, hideDeletedMessage } from './tauri/client';
+  import type { DeletedMessage } from './types/domain';
 
-  let deletedMessages = $state([]);
+  let deletedMessages = $state<DeletedMessage[]>([]);
   let isLoading = $state(true);
+  let pendingActionId = $state<string | null>(null);
 
   async function loadDeleted() {
     isLoading = true;
     try {
-      deletedMessages = await invoke('get_deleted_messages');
-    } catch (e) {
-      console.error('Failed to load deleted messages:', e);
+      deletedMessages = await getDeletedMessages();
+    } catch (e: unknown) {
+      console.error('Failed to load deleted messages:', formatBackendError(e));
     } finally {
       isLoading = false;
     }
   }
 
-  async function handleRestore(id) {
-    await restoreVersion(id);
-    await loadDeleted();
+  async function handleRestore(id: string) {
+    pendingActionId = id;
+    try {
+      await restoreVersion(id);
+      await loadDeleted();
+    } finally {
+      pendingActionId = null;
+    }
   }
 
-  function formatDate(ts) {
+  async function handleHide(id: string) {
+    pendingActionId = id;
+    try {
+      await hideDeletedMessage(id);
+      deletedMessages = deletedMessages.filter((msg) => msg.id !== id);
+    } catch (e: unknown) {
+      console.error('Failed to hide deleted message:', formatBackendError(e));
+    } finally {
+      pendingActionId = null;
+    }
+  }
+
+  function formatDate(ts: number) {
     return new Date(ts * 1000).toLocaleString();
   }
 
-  onMount(loadDeleted);
+  onMount(() => {
+    void loadDeleted();
+  });
 </script>
 
 <div class="deleted-models-page">
@@ -66,7 +87,20 @@
               {msg.output?.response || msg.content.slice(0, 100)}...
             </div>
             <div class="card-actions">
-              <button class="btn btn-primary" onclick={() => handleRestore(msg.id)}>RECOVER</button>
+              <button
+                class="btn btn-ghost"
+                onclick={() => handleHide(msg.id)}
+                disabled={pendingActionId === msg.id}
+              >
+                {pendingActionId === msg.id ? 'HIDING...' : 'HIDE'}
+              </button>
+              <button
+                class="btn btn-primary"
+                onclick={() => handleRestore(msg.id)}
+                disabled={pendingActionId === msg.id}
+              >
+                {pendingActionId === msg.id ? 'WORKING...' : 'RECOVER'}
+              </button>
             </div>
           </div>
         </div>
@@ -207,6 +241,7 @@
     line-height: 1.5;
     height: 3.6em;
     overflow: hidden;
+    line-clamp: 3;
     display: -webkit-box;
     -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
@@ -214,6 +249,7 @@
 
   .card-actions {
     display: flex;
+    gap: 10px;
     justify-content: flex-end;
     margin-top: 8px;
   }
@@ -233,6 +269,22 @@
 
   .btn-primary:hover {
     background: color-mix(in srgb, var(--primary) 80%, white);
+  }
+
+  .btn-ghost {
+    background: color-mix(in srgb, var(--bg-200) 88%, black 12%);
+    border-color: var(--bg-400);
+    color: var(--text-dim);
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    border-color: var(--secondary);
+    color: var(--text);
+  }
+
+  .btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
   }
 
 </style>

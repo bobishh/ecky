@@ -1,11 +1,11 @@
-<script>
+<script lang="ts">
   import PromptPanel from './lib/PromptPanel.svelte';
   import Viewer from './lib/Viewer.svelte';
   import VertexGenie from './lib/VertexGenie.svelte';
   import DrawingOverlay from './lib/DrawingOverlay.svelte';
   import ParamPanel from './lib/ParamPanel.svelte';
   import ConfigPanel from './lib/ConfigPanel.svelte';
-  import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+  import { convertFileSrc } from '@tauri-apps/api/core';
   import { save } from '@tauri-apps/plugin-dialog';
   import { writeTextFile } from '@tauri-apps/plugin-fs';
   import { onMount } from 'svelte';
@@ -17,29 +17,143 @@
   import { startMicrowaveHum, stopMicrowaveHum, stopMicrowaveAudio, playDing, playErrorBuzz, getActiveMicrowaveCount, setAudibleThread } from './lib/audio/microwave';
   import { session } from './lib/stores/sessionStore';
   import { handleGenerate, initOrchestrator, isQuestionIntent } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion } from './lib/controllers/manualController';
-  import { loadFromHistory, deleteThread, createNewThread, forkDesign, deleteVersion, loadVersion } from './lib/stores/history';
+  import { handleParamChange, commitManualVersion, stageParamChange } from './lib/controllers/manualController';
+  import { loadFromHistory, deleteThread, createNewThread, forkDesign, deleteVersion, loadVersion, refreshHistory } from './lib/stores/history';
   import { workingCopy, isDirty } from './lib/stores/workingCopy';
   import { history, activeThreadId, activeVersionId, config, availableModels, isLoadingModels } from './lib/stores/domainState';
   import { sidebarWidth, historyHeight, dialogueHeight, showCodeModal, selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
   import { boot, saveConfig, fetchModels } from './lib/boot/restore';
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
   import { nowSeconds } from './lib/stores/timeEngine';
-  import { paramPanelState } from './lib/stores/paramPanelState';
+  import { liveApply, paramPanelState } from './lib/stores/paramPanelState';
+  import { persistLastSessionSnapshot } from './lib/modelRuntime/sessionSnapshot';
+  import {
+    buildImportedParams,
+    buildImportedPreviewTransforms,
+    buildImportedUiSpec,
+    type ImportedPreviewTransform,
+  } from './lib/modelRuntime/importedRuntime';
+  import {
+    buildSemanticPatch,
+    ensureSemanticManifest,
+    materializeControlViews,
+    resolveActiveControlViewId,
+  } from './lib/modelRuntime/semanticControls';
+  import {
+    addImportedModelVersion,
+    exportFile,
+    formatBackendError,
+    getModelManifest,
+    importFcstd,
+    saveModelManifest,
+  } from './lib/tauri/client';
+  import type {
+    DesignParams,
+    GenieTraits,
+    Message,
+    ParamValue,
+    Request,
+    UiField,
+    UiSpec,
+    ViewerAsset,
+  } from './lib/types/domain';
+  import type { MaterializedSemanticView } from './lib/modelRuntime/semanticControls';
+
+  type ViewerHandle = {
+    captureScreenshot: (overlayCanvas?: HTMLCanvasElement | null) => string | null;
+  };
+
+  type DrawingOverlayHandle = {
+    hasDrawing: () => boolean;
+    getCanvas: () => HTMLCanvasElement | null;
+    clear: () => void;
+  };
+
+  type ThreadPhase = Request['phase'] | 'idle' | 'booting';
 
   // Local reactive aliases for templates
   const phase = $derived($session.phase);
   const status = $derived($session.status);
   const error = $derived($session.error);
   const stlUrl = $derived($session.stlUrl);
+  const activeArtifactBundle = $derived($session.artifactBundle);
+  const sessionModelManifest = $derived($session.modelManifest);
+  const selectedPartId = $derived($session.selectedPartId);
 
   const isBooting = $derived(phase === 'booting');
   const isQuestionFlow = $derived(phase === 'answering');
+  const viewerAssets = $derived.by<ViewerAsset[]>(() => {
+    const assets = activeArtifactBundle?.viewerAssets || [];
+    return assets.map((asset) => ({
+      ...asset,
+      path: toAssetUrl(asset.path),
+    }));
+  });
+  const effectiveUiSpec = $derived.by<UiSpec>(() => {
+    if (($paramPanelState.uiSpec?.fields || []).length > 0) {
+      return $paramPanelState.uiSpec;
+    }
+    return buildImportedUiSpec(sessionModelManifest);
+  });
+  const effectiveParameters = $derived.by<DesignParams>(() =>
+    buildImportedParams(sessionModelManifest, $paramPanelState.params || {}, effectiveUiSpec),
+  );
+  const activeModelManifest = $derived.by(() =>
+    ensureSemanticManifest(sessionModelManifest, effectiveUiSpec, effectiveParameters),
+  );
+  const importedPreviewTransforms = $derived.by<Record<string, ImportedPreviewTransform>>(() =>
+    buildImportedPreviewTransforms(activeModelManifest, effectiveParameters),
+  );
+  const overlayPreviewOnly = $derived.by(() => {
+    if (!(activeModelManifest?.sourceKind === 'importedFcstd' && overlaySelectedPart?.editable)) {
+      return false;
+    }
+    if (!selectedPartId) return false;
+    const preview = importedPreviewTransforms[selectedPartId];
+    if (!preview) return false;
+    return (
+      Math.abs(preview.scale.x - 1) > 0.001 ||
+      Math.abs(preview.scale.y - 1) > 0.001 ||
+      Math.abs(preview.scale.z - 1) > 0.001
+    );
+  });
+  const overlaySelectedPart = $derived.by(() => {
+    if (!selectedPartId || !activeModelManifest?.parts?.length) return null;
+    return activeModelManifest.parts.find((part) => part.partId === selectedPartId) ?? null;
+  });
+  const availableControlViews = $derived.by<MaterializedSemanticView[]>(() =>
+    materializeControlViews(activeModelManifest, effectiveUiSpec, effectiveParameters),
+  );
+  let activeControlViewId = $state<string | null>(null);
+  $effect(() => {
+    activeControlViewId = resolveActiveControlViewId(
+      activeModelManifest,
+      selectedPartId,
+      activeControlViewId,
+    );
+  });
+  const activeControlView = $derived.by(() =>
+    availableControlViews.find((view) => view.viewId === activeControlViewId) ??
+    availableControlViews[0] ??
+    null,
+  );
+  const overlayControls = $derived.by(() => {
+    if (!overlaySelectedPart || !activeControlView) return [];
+    const visibleControls = activeControlView.sections
+      .filter((section) => !section.collapsed)
+      .flatMap((section) => section.controls);
+    const partScoped = visibleControls.filter((control) =>
+      (control.partIds || []).includes(overlaySelectedPart.partId),
+    );
+    const globalControls = visibleControls.filter((control) => (control.partIds || []).length === 0);
+    const preferred = partScoped.length > 0 ? [...partScoped, ...globalControls] : visibleControls;
+    return preferred.slice(0, 4);
+  });
 
-  let viewerComponent = $state(null);
-  let drawingOverlay = $state(null);
+  let viewerComponent = $state<ViewerHandle | null>(null);
+  let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
   let drawMode = $state(false);
-  let lastAssistantMessageId = $state(null);
+  let lastAssistantMessageId = $state<string | null>(null);
   let lastAdvisorBubble = $state('');
   let lastAdvisorQuestion = $state('');
   let dismissedBubbleText = $state('');
@@ -61,12 +175,13 @@
   });
 
   // Shut down audio context when idle for 2s
-  let idleTimeout;
+  let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
     if ($activeRequestCount === 0) {
       idleTimeout = setTimeout(() => stopMicrowaveAudio(true), 2000);
-    } else {
+    } else if (idleTimeout) {
       clearTimeout(idleTimeout);
+      idleTimeout = null;
     }
   });
 
@@ -75,21 +190,21 @@
     setAudibleThread($activeThreadId);
   });
 
-  function formatCookingTime(s) {
+  function formatCookingTime(s: number) {
     const m = Math.floor(s / 60);
     const sec = s % 60;
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
 
   onMount(() => {
-    boot();
+    void boot();
   });
 
   const activeThread = $derived($history.find(t => t.id === $activeThreadId));
-  const eckyTraits = $derived(activeThread?.genieTraits || {});
+  const eckyTraits = $derived<Partial<GenieTraits>>(activeThread?.genieTraits || {});
   const eckyIntensity = $derived(1.0 + Math.max(0, ($activeRequestCount - 1) * 0.25));
   const inFlightByThread = $derived.by(() => {
-    const counts = {};
+    const counts: Record<string, number> = {};
     for (const req of $allRequests) {
       if (!req?.threadId) continue;
       if (['success', 'error', 'canceled'].includes(req.phase)) continue;
@@ -128,7 +243,7 @@
     }
   });
 
-  const activeThreadHighestPhase = $derived.by(() => {
+  const activeThreadHighestPhase = $derived.by<ThreadPhase>(() => {
     if (phase === 'booting') return 'booting';
     
     // Check if there is an error specifically in this thread
@@ -180,9 +295,10 @@
     await saveConfig();
   }
 
-  function applyCompletedRequest(req) {
+  function applyCompletedRequest(req: Request) {
     if (!req?.result) return;
-    const { design, threadId, messageId, stlUrl: reqStlUrl } = req.result;
+    const { design, threadId, messageId, stlUrl: reqStlUrl, artifactBundle, modelManifest } =
+      req.result;
     if (design) {
       workingCopy.loadVersion(design, messageId);
       paramPanelState.hydrateFromVersion(design, messageId);
@@ -194,24 +310,34 @@
     if (reqStlUrl) {
       session.setStlUrl(reqStlUrl);
     }
+    if (artifactBundle || modelManifest) {
+      session.setModelRuntime(artifactBundle ?? null, modelManifest ?? null);
+    }
+    void persistLastSessionSnapshot({
+      design: design ?? null,
+      threadId,
+      messageId,
+      artifactBundle: artifactBundle ?? null,
+      modelManifest: modelManifest ?? null,
+    });
     requestQueue.setActive(req.id);
   }
 
-  function dismissRequest(id) {
+  function dismissRequest(id: string) {
     requestQueue.remove(id);
   }
 
-  function retryRequest(req) {
-    handleGenerate(req.prompt, req.attachments);
+  function retryRequest(req: Request) {
+    void handleGenerate(req.prompt, req.attachments);
     requestQueue.remove(req.id);
   }
 
-  function cancelRequest(id) {
+  function cancelRequest(id: string) {
     requestQueue.cancel(id);
   }
 
-  function phaseLabel(phase) {
-    const labels = {
+  function phaseLabel(phase: Request['phase']) {
+    const labels: Partial<Record<Request['phase'], string>> = {
       classifying: 'ROUTING',
       generating: 'LLM',
       queued_for_render: 'QUEUED',
@@ -224,17 +350,26 @@
     return labels[phase] || phase.toUpperCase();
   }
 
+  function toAssetUrl(path: string | null | undefined): string {
+    if (!path) return '';
+    try {
+      return convertFileSrc(path);
+    } catch {
+      return path;
+    }
+  }
+
   async function exportSTL() {
     if (!stlUrl) return;
     try {
       const path = await save({ filters: [{ name: 'STL 3D Model', extensions: ['stl'] }], defaultPath: 'design.stl' });
-      if (path) {
+      if (typeof path === 'string') {
         let rawPath = decodeURIComponent(stlUrl.split('?')[0].replace('asset://localhost/', '/'));
         if (!rawPath.startsWith('/') && rawPath.match(/^[a-zA-Z]:/)) {} else if (!rawPath.startsWith('/')) { rawPath = '/' + rawPath; }
-        await invoke('export_file', { sourcePath: rawPath, targetPath: path });
+        await exportFile(rawPath, path);
       }
-    } catch (e) {
-      session.setError(`Export Error: ${e}`);
+    } catch (e: unknown) {
+      session.setError(`Export Error: ${formatBackendError(e)}`);
     }
   }
 
@@ -242,22 +377,89 @@
     if (genieBubble) dismissedBubbleText = genieBubble;
   }
 
-  function startResizingWidth(e) {
+  function dismissError() {
+    session.setError(null);
+  }
+
+  function handlePartSelect(partId: string | null) {
+    session.setSelectedPartId(partId);
+    void persistLastSessionSnapshot({ selectedPartId: partId });
+  }
+
+  function handleSemanticControlChange(primitiveId: string, value: ParamValue) {
+    const nextParams = buildSemanticPatch(activeModelManifest, primitiveId, value, effectiveUiSpec);
+    if (Object.keys(nextParams).length === 0) return;
+    if ($liveApply) {
+      void handleParamChange(nextParams);
+      return;
+    }
+    stageParamChange(nextParams);
+  }
+
+  function handleSelectControlView(viewId: string | null) {
+    activeControlViewId = viewId;
+  }
+
+  async function handleImportFcstd(sourcePath: string) {
+    try {
+      session.setError(null);
+      session.setStatus('Importing FCStd...');
+      const bundle = await importFcstd(sourcePath);
+      const rawManifest = await getModelManifest(bundle.modelId);
+      const importedUiSpec = buildImportedUiSpec(rawManifest);
+      const importedParams = buildImportedParams(rawManifest, {}, importedUiSpec);
+      const manifest = ensureSemanticManifest(rawManifest, importedUiSpec, importedParams) ?? rawManifest;
+      const threadId = crypto.randomUUID();
+      const importedName = sourcePath.split(/[\\/]/).pop() || 'model.FCStd';
+      const title =
+        manifest.document.documentLabel ||
+        manifest.document.documentName ||
+        importedName.replace(/\.fcstd$/i, '');
+      const messageId = await addImportedModelVersion({
+        threadId,
+        title,
+        artifactBundle: bundle,
+        modelManifest: manifest,
+      });
+      await saveModelManifest(bundle.modelId, manifest, messageId);
+      activeThreadId.set(threadId);
+      activeVersionId.set(messageId);
+      workingCopy.reset();
+      paramPanelState.reset();
+      session.setStlUrl(toAssetUrl(bundle.previewStlPath));
+      session.setModelRuntime(bundle, manifest);
+      await refreshHistory();
+      await persistLastSessionSnapshot({
+        design: null,
+        threadId,
+        messageId,
+        artifactBundle: bundle,
+        modelManifest: manifest,
+        selectedPartId: null,
+      });
+      session.setStatus(`Imported FCStd: ${importedName}`);
+      currentView.set('workbench');
+    } catch (e: unknown) {
+      session.setError(`FCStd Import Error: ${formatBackendError(e)}`);
+    }
+  }
+
+  function startResizingWidth(e: MouseEvent) {
     isResizingWidth = true;
     e.preventDefault();
   }
 
-  function startResizingHeight(e) {
+  function startResizingHeight(e: MouseEvent) {
     isResizingHeight = true;
     e.preventDefault();
   }
 
-  function startResizingHistory(e) {
+  function startResizingHistory(e: MouseEvent) {
     isResizingHistory = true;
     e.preventDefault();
   }
 
-  function handleMouseMove(e) {
+  function handleMouseMove(e: MouseEvent) {
     if (isResizingWidth) {
       $sidebarWidth = Math.max(250, Math.min(e.clientX, window.innerWidth - 300));
     } else if (isResizingHeight) {
@@ -277,7 +479,7 @@
     isResizingHistory = false;
   }
 
-  function handleGlobalKeydown(e) {
+  function handleGlobalKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') stopResizing();
   }
 </script>
@@ -322,7 +524,14 @@
             <div class="pane-header">TUNABLE PARAMETERS</div>
             <div class="sidebar-content scrollable">
               <ParamPanel 
-                uiSpec={$paramPanelState.uiSpec} 
+                uiSpec={effectiveUiSpec} 
+                modelManifest={activeModelManifest}
+                controlViews={availableControlViews}
+                activeControlViewId={activeControlViewId}
+                onSelectControlView={handleSelectControlView}
+                onSemanticChange={handleSemanticControlChange}
+                selectedPartId={selectedPartId}
+                onSelectPart={handlePartSelect}
                 onspecchange={(spec, newParams) => {
                   paramPanelState.setUiSpec(spec);
                   workingCopy.patch({ uiSpec: spec });
@@ -331,10 +540,11 @@
                     workingCopy.patch({ params: newParams });
                   }
                 }}
-                parameters={$paramPanelState.params} 
+                parameters={effectiveParameters} 
                 macroCode={$paramPanelState.macroCode}
                 onchange={handleParamChange} 
-                activeVersionId={$paramPanelState.versionId} 
+                activeVersionId={$paramPanelState.versionId}
+                messageId={$activeVersionId}
               />
             </div>
           </div>
@@ -349,7 +559,8 @@
                 inFlightByThread={inFlightByThread}
                 onSelect={loadFromHistory} 
                 onDelete={deleteThread}
-                onNew={createNewThread} 
+                onNew={createNewThread}
+                onImportFcstd={handleImportFcstd}
               />
             </div>
           </div>
@@ -365,12 +576,29 @@
             <Viewer
               bind:this={viewerComponent}
               stlUrl={$activeThreadId || $workingCopy.macroCode ? stlUrl : null}
+              viewerAssets={viewerAssets}
+              selectedPartId={selectedPartId}
+              overlayPartLabel={overlaySelectedPart?.label ?? null}
+              overlayPartEditable={overlaySelectedPart?.editable ?? false}
+              overlayPreviewOnly={overlayPreviewOnly}
+              overlayControls={overlayControls}
+              previewTransforms={importedPreviewTransforms}
+              onOverlayChange={handleSemanticControlChange}
+              onSelectPart={handlePartSelect}
               isGenerating={$activeThreadBusy}
             />
             <DrawingOverlay bind:this={drawingOverlay} active={drawMode} />
             <div class="genie-layer">
               <VertexGenie mode={genieMode} bubble={genieBubble} onDismiss={dismissGenie} traits={eckyTraits} intensity={eckyIntensity} />
             </div>
+
+            {#if error}
+              <div class="error-banner" role="alert">
+                <div class="error-banner__label">ERROR</div>
+                <div class="error-banner__body">{error}</div>
+                <button class="error-banner__dismiss" onclick={dismissError} title="Dismiss error">✕</button>
+              </div>
+            {/if}
 
             {#if $activeThreadRequests.length > 0}
               <div class="cafeteria-strip">
@@ -497,6 +725,44 @@
   .overlay-icon-btn:hover, .settings-overlay-btn:hover { border-color: var(--primary); color: var(--primary); }
   .overlay-icon-btn.draw-active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 25%, var(--bg-100)); box-shadow: 0 0 8px var(--primary); }
   .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 120; pointer-events: auto; max-width: min(80vw, 420px); }
+  .error-banner {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 130;
+    max-width: min(46vw, 560px);
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    align-items: start;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--red) 72%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .error-banner__label {
+    color: var(--red);
+    font-size: 0.62rem;
+    font-weight: bold;
+    letter-spacing: 0.12em;
+  }
+  .error-banner__body {
+    color: var(--text);
+    font-size: 0.78rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .error-banner__dismiss {
+    border: 1px solid var(--bg-400);
+    background: var(--bg-200);
+    color: var(--text-dim);
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+  }
+  .error-banner__dismiss:hover { border-color: var(--red); color: var(--text); }
 
   /* STL Cafeteria — multi-microwave strip */
   .cafeteria-strip { position: absolute; bottom: 48px; left: 12px; right: 12px; z-index: 100; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }

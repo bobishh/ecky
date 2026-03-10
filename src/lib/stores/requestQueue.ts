@@ -79,12 +79,12 @@ function createRequestQueue() {
       update(q => {
         const existing = q.byId[id];
         if (!existing) return q;
-        const merged = { ...existing, ...changes };
+        const merged: QueuedRequest = { ...existing, ...changes };
         // Auto-compute cookingElapsed when transitioning to a terminal phase
         if (changes.phase && isTerminalPhase(changes.phase) && merged.cookingStartTime && !changes.cookingElapsed) {
           merged.cookingElapsed = Math.max(0, Math.floor(Date.now() / 1000) - Math.floor(merged.cookingStartTime / 1000));
         }
-        const next = {
+        const next: RequestQueueState = {
           ...q,
           byId: { ...q.byId, [id]: merged },
         };
@@ -111,9 +111,14 @@ function createRequestQueue() {
         const elapsed = existing.cookingStartTime
           ? Math.max(0, Math.floor(Date.now() / 1000) - Math.floor(existing.cookingStartTime / 1000))
           : 0;
-        const next = {
+        const canceledRequest: QueuedRequest = {
+          ...existing,
+          phase: 'canceled',
+          cookingElapsed: elapsed,
+        };
+        const next: RequestQueueState = {
           ...q,
-          byId: { ...q.byId, [id]: { ...existing, phase: 'canceled', cookingElapsed: elapsed } },
+          byId: { ...q.byId, [id]: canceledRequest },
         };
         profileLog('queue.cancel', {
           requestId: id,

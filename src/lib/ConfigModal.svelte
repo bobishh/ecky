@@ -1,7 +1,22 @@
-<script>
+<script lang="ts">
   import Modal from './Modal.svelte';
   import ConfigPanel from './ConfigPanel.svelte';
-  let { config = $bindable(), availableModels, isLoadingModels, onsave, onclose } = $props();
+
+  import type { AppConfig } from './types/domain';
+
+  let {
+    config = $bindable(),
+    availableModels = [],
+    isLoadingModels = false,
+    onsave,
+    onclose,
+  }: {
+    config: AppConfig;
+    availableModels?: string[];
+    isLoadingModels?: boolean;
+    onsave: () => Promise<void> | void;
+    onclose: () => void;
+  } = $props();
 
   async function handleSave() {
     await onsave();

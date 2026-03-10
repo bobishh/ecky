@@ -30,6 +30,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../server/freecad_runner.py": "server/freecad_runner.py",
+      "../templates/cache_pot_default.FCMacro": "templates/cache_pot_default.FCMacro",
+      "../templates/mess.stl": "templates/mess.stl"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

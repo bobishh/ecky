@@ -1,17 +1,31 @@
-<script>
-  let { title, onclose, children } = $props();
+<script lang="ts">
+  import type { Snippet } from 'svelte';
 
-  function handleKeydown(e) {
+  let {
+    title,
+    onclose,
+    children,
+  }: {
+    title: string;
+    onclose: () => void;
+    children: Snippet;
+  } = $props();
+
+  function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       onclose();
     }
+  }
+
+  function stopPropagation(e: Event) {
+    e.stopPropagation();
   }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="modal-backdrop" role="presentation" onclick={onclose}>
-  <div class="modal-window" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1" onclick={e => e.stopPropagation()} onkeydown={e => e.stopPropagation()}>
+  <div class="modal-window" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1" onclick={stopPropagation} onkeydown={stopPropagation}>
     <div class="modal-header">
       <h3 id="modal-title" class="modal-title">{title}</h3>
       <button class="modal-close" onclick={onclose}>&times;</button>

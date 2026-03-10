@@ -1,20 +1,48 @@
-<script>
-  let { options = [], value = $bindable(), placeholder = "Select...", onchange, disabled = false } = $props();
+<script lang="ts">
+  type DropdownPrimitive = string | number;
+  type DropdownOptionObject = {
+    id?: DropdownPrimitive;
+    value?: DropdownPrimitive;
+    name?: string;
+    label?: string;
+  };
+  type DropdownOption = DropdownPrimitive | DropdownOptionObject;
+
+  let {
+    options = [],
+    value = $bindable<DropdownPrimitive | null | undefined>(undefined),
+    placeholder = "Select...",
+    onchange,
+    disabled = false,
+  }: {
+    options?: DropdownOption[];
+    value?: DropdownPrimitive | null;
+    placeholder?: string;
+    onchange?: (value: DropdownPrimitive | undefined) => void;
+    disabled?: boolean;
+  } = $props();
   
   let isOpen = $state(false);
-  let container;
+  let container: HTMLDivElement | undefined;
+
+  function getOptionId(option: DropdownOption): DropdownPrimitive | undefined {
+    return typeof option === 'object' ? (option.id ?? option.value) : option;
+  }
+
+  function getOptionLabel(option: DropdownOption): string {
+    if (typeof option === 'object') {
+      return String(option.name || option.label || option.id || option.value || '');
+    }
+    return String(option);
+  }
 
   const selectedOption = $derived(
-    options.find(o => (typeof o === 'object' ? (o.id ?? o.value) : o) === value) ||
+    options.find((option) => getOptionId(option) === value) ||
     options.find(o => o === value)
   );
   const displayLabel = $derived(
     selectedOption 
-      ? (
-          typeof selectedOption === 'object'
-            ? (selectedOption.name || selectedOption.label || selectedOption.id || selectedOption.value)
-            : selectedOption
-        )
+      ? getOptionLabel(selectedOption)
       : placeholder
   );
 
@@ -23,17 +51,17 @@
     isOpen = !isOpen;
   }
 
-  function select(option) {
+  function select(option: DropdownOption) {
     if (disabled) return;
-    const id = typeof option === 'object' ? (option.id ?? option.value) : option;
+    const id = getOptionId(option);
     value = id;
     isOpen = false;
     if (onchange) onchange(id);
   }
 
   // Close when clicking outside
-  function handleOutsideClick(e) {
-    if (container && !container.contains(e.target)) {
+  function handleOutsideClick(e: MouseEvent) {
+    if (container && e.target instanceof Node && !container.contains(e.target)) {
       isOpen = false;
     }
   }
@@ -50,8 +78,8 @@
   {#if isOpen}
     <div class="select-dropdown scrollable">
       {#each options as option}
-        {@const id = typeof option === 'object' ? (option.id ?? option.value) : option}
-        {@const label = typeof option === 'object' ? (option.name || option.label || option.id || option.value) : option}
+        {@const id = getOptionId(option)}
+        {@const label = getOptionLabel(option)}
         <button 
           type="button" 
           class="select-option {value === id ? 'is-selected' : ''}"

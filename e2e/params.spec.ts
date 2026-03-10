@@ -55,7 +55,37 @@ test.describe('ParamPanel Persistence', () => {
           return;
         }
 
-        if (cmd === 'render_stl') return '/mock.stl';
+        if (cmd === 'render_model') {
+          return {
+            modelId: 'test-model',
+            sourceKind: 'generated',
+            contentHash: 'mock-hash',
+            fcstdPath: '/mock.FCStd',
+            manifestPath: '/mock/manifest.json',
+            previewStlPath: '/mock.stl',
+            viewerAssets: [],
+          };
+        }
+
+        if (cmd === 'get_model_manifest') {
+          return {
+            modelId: 'test-model',
+            sourceKind: 'generated',
+            document: {
+              documentName: 'Test Design',
+              documentLabel: 'Test Design',
+              objectCount: 0,
+              warnings: [],
+            },
+            parts: [],
+            parameterGroups: [],
+            selectionTargets: [],
+            warnings: [],
+            enrichmentState: { status: 'none', proposals: [] },
+          };
+        }
+
+        if (cmd === 'save_last_design') return null;
 
         return null;
       };

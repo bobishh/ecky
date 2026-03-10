@@ -1,17 +1,28 @@
-<script>
+<script lang="ts">
   import { onMount, onDestroy } from 'svelte';
 
-  let { active = false } = $props();
+  type Point = {
+    x: number;
+    y: number;
+  };
 
-  let canvasEl = $state(null);
-  let hostEl = $state(null);
+  type Stroke = {
+    color: string;
+    lineWidth: number;
+    points: Point[];
+  };
+
+  let { active = false }: { active?: boolean } = $props();
+
+  let canvasEl = $state<HTMLCanvasElement | null>(null);
+  let hostEl = $state<HTMLDivElement | null>(null);
   let isDrawing = $state(false);
   let selectedColor = $state('#ff3333');
   let selectedSize = $state(4);
-  let strokes = $state([]);
-  let currentStroke = null;
+  let strokes = $state<Stroke[]>([]);
+  let currentStroke = $state<Stroke | null>(null);
   let _dirty = false;
-  let resizeObserver;
+  let resizeObserver: ResizeObserver | undefined;
 
   const COLORS = [
     { value: '#ff3333', label: 'Red' },
@@ -26,11 +37,12 @@
     { value: 10, label: 'L' },
   ];
 
-  export function getCanvas() { return canvasEl; }
-  export function hasDrawing() { return _dirty; }
+  export function getCanvas(): HTMLCanvasElement | null { return canvasEl; }
+  export function hasDrawing(): boolean { return _dirty; }
   export function clear() {
     if (!canvasEl) return;
     const ctx = canvasEl.getContext('2d');
+    if (!ctx) return;
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
     strokes = [];
     _dirty = false;
@@ -55,7 +67,8 @@
     redrawStrokes();
   }
 
-  function getPos(e) {
+  function getPos(e: PointerEvent): Point {
+    if (!canvasEl) return { x: 0, y: 0 };
     const rect = canvasEl.getBoundingClientRect();
     const scaleX = canvasEl.width / rect.width;
     const scaleY = canvasEl.height / rect.height;
@@ -70,14 +83,15 @@
     return canvasEl.width / canvasEl.getBoundingClientRect().width;
   }
 
-  function handlePointerDown(e) {
-    if (!active) return;
+  function handlePointerDown(e: PointerEvent) {
+    if (!active || !canvasEl) return;
     isDrawing = true;
     canvasEl.setPointerCapture(e.pointerId);
     const pos = getPos(e);
     const scaledWidth = selectedSize * dprScale();
     currentStroke = { color: selectedColor, lineWidth: scaledWidth, points: [pos] };
     const ctx = canvasEl.getContext('2d');
+    if (!ctx) return;
     ctx.strokeStyle = currentStroke.color;
     ctx.lineWidth = currentStroke.lineWidth;
     ctx.lineCap = 'round';
@@ -86,11 +100,12 @@
     ctx.moveTo(pos.x, pos.y);
   }
 
-  function handlePointerMove(e) {
-    if (!isDrawing || !currentStroke) return;
+  function handlePointerMove(e: PointerEvent) {
+    if (!isDrawing || !currentStroke || !canvasEl) return;
     const pos = getPos(e);
     currentStroke.points.push(pos);
     const ctx = canvasEl.getContext('2d');
+    if (!ctx) return;
     ctx.strokeStyle = currentStroke.color;
     ctx.lineWidth = currentStroke.lineWidth;
     ctx.lineCap = 'round';
@@ -119,6 +134,7 @@
   function redrawStrokes() {
     if (!canvasEl) return;
     const ctx = canvasEl.getContext('2d');
+    if (!ctx) return;
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
     for (const stroke of strokes) {
       if (stroke.points.length < 2) continue;

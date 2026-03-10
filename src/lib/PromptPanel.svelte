@@ -1,20 +1,68 @@
-<script>
+<script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
+  import type { Attachment, Message, UsageSummary } from './types/domain';
 
-  let { onGenerate, isGenerating = false, messages = [], onShowCode, activeVersionId = $bindable(null), onVersionChange, onDeleteVersion } = $props();
+  type TauriBridgeWindow = Window & typeof globalThis & {
+    __TAURI_INTERNALS__?: {
+      metadata?: object;
+    };
+  };
+
+  type CodeVersionMessage = Message & {
+    output: NonNullable<Message['output']>;
+  };
+
+  type VersionMessage = Message & {
+    output?: Message['output'];
+    artifactBundle?: Message['artifactBundle'];
+  };
+
+  let {
+    onGenerate,
+    isGenerating = false,
+    messages = [],
+    onShowCode,
+    activeVersionId = $bindable(null),
+    onVersionChange,
+    onDeleteVersion,
+  }: {
+    onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
+    isGenerating?: boolean;
+    messages?: Message[];
+    onShowCode: (message: CodeVersionMessage) => void;
+    activeVersionId?: string | null;
+    onVersionChange?: (message: VersionMessage) => void;
+    onDeleteVersion?: (messageId: string) => void;
+  } = $props();
 
   let prompt = $state('');
-  let attachments = $state([]); // { path: string, name: string, explanation: string, type: string }
+  let attachments = $state<Attachment[]>([]);
   let isDragging = $state(false);
   let showDeleteConfirm = $state(false);
+  const hasImageAttachments = $derived(attachments.some((attachment) => attachment.type === 'image'));
 
-  function processPaths(paths) {
-    const newAttachments = paths.map(path => {
-      const name = path.split(/[\/\\]/).pop();
-      const ext = name.split('.').pop().toLowerCase();
+  function isVersionMessage(message: Message): message is VersionMessage {
+    return message.role === 'assistant' && !!(message.output || message.artifactBundle);
+  }
+
+  function versionTitle(message: VersionMessage | null | undefined) {
+    if (!message) return 'this version';
+    return (
+      message.output?.title ||
+      message.modelManifest?.document?.documentLabel ||
+      message.modelManifest?.document?.documentName ||
+      message.artifactBundle?.modelId ||
+      'Imported Model'
+    );
+  }
+
+  function processPaths(paths: string[]) {
+    const newAttachments = paths.map((path) => {
+      const name = path.split(/[\/\\]/).pop() || path;
+      const ext = (name.split('.').pop() || '').toLowerCase();
       return {
         path,
         name,
@@ -26,8 +74,8 @@
   }
 
   onMount(() => {
-    let unlisten = null;
-    const tauriBridge = typeof window !== 'undefined' ? window.__TAURI_INTERNALS__ : null;
+    let unlisten: (() => void) | null = null;
+    const tauriBridge = typeof window !== 'undefined' ? (window as TauriBridgeWindow).__TAURI_INTERNALS__ : null;
     const hasTauriWindow = tauriBridge && typeof tauriBridge.metadata === 'object';
     if (!hasTauriWindow) {
       return () => {};
@@ -36,22 +84,22 @@
     try {
       getCurrentWindow()
         .onDragDropEvent((event) => {
-          if (event.payload.type === 'hover') {
+          if (event.payload.type === 'enter' || event.payload.type === 'over') {
             isDragging = true;
           } else if (event.payload.type === 'drop') {
             isDragging = false;
             processPaths(event.payload.paths);
-          } else if (event.payload.type === 'cancel') {
+          } else if (event.payload.type === 'leave') {
             isDragging = false;
           }
         })
         .then((cleanup) => {
           unlisten = cleanup;
         })
-        .catch((e) => {
+        .catch((e: unknown) => {
           console.error('Failed to wire Tauri drag-drop listener:', e);
         });
-    } catch (e) {
+    } catch (e: unknown) {
       console.warn('Tauri drag-drop bridge unavailable:', e);
     }
 
@@ -61,7 +109,7 @@
   });
 
   // 2. Web Drag & Drop Fallback (mainly for E2E testing in browser environments)
-  function handleWebDragOver(e) {
+  function handleWebDragOver(e: DragEvent) {
     e.preventDefault();
     isDragging = true;
   }
@@ -70,21 +118,21 @@
     isDragging = false;
   }
 
-  function handleWebDrop(e) {
+  function handleWebDrop(e: DragEvent) {
     e.preventDefault();
     isDragging = false;
     
     // In a real browser, we don't get absolute paths, but for E2E tests 
     // we can simulate the 'paths' if needed or just test the UI reaction.
-    if (e.dataTransfer.files.length > 0) {
+    if (e.dataTransfer && e.dataTransfer.files.length > 0) {
       const files = Array.from(e.dataTransfer.files);
-      const mockPaths = files.map(f => f.name); // Fallback to names
+      const mockPaths = files.map((file) => file.name); // Fallback to names
       processPaths(mockPaths);
     }
   }
 
   // Extract versions (pairs of user prompt + assistant output)
-  const versions = $derived(messages.filter(m => m.role === 'assistant' && m.output));
+  const versions = $derived(messages.filter(isVersionMessage));
   
   const currentVersionIndex = $derived(versions.findIndex(v => v.id === activeVersionId));
   const hasPrev = $derived(currentVersionIndex > 0);
@@ -93,7 +141,7 @@
   let isSubmitting = $state(false);
 
   function submit() {
-    if (onGenerate && !isGenerating && !isSubmitting && (prompt.trim() || attachments.length > 0)) {
+    if (!isGenerating && !isSubmitting && (prompt.trim() || attachments.length > 0)) {
       isSubmitting = true;
       const currentPrompt = prompt;
       const currentAttachments = [...attachments];
@@ -108,7 +156,7 @@
   }
 
   function retryFailedPrompt() {
-    if (!onGenerate || !failedPromptForRetry || isGenerating || isSubmitting) return;
+    if (!failedPromptForRetry || isGenerating || isSubmitting) return;
     isSubmitting = true;
     onGenerate(failedPromptForRetry, []).finally(() => {
       isSubmitting = false;
@@ -126,9 +174,9 @@
 
       if (selected) {
         const paths = Array.isArray(selected) ? selected : [selected];
-        const newAttachments = paths.map(path => {
-          const name = path.split(/[\/\\]/).pop();
-          const ext = name.split('.').pop().toLowerCase();
+        const newAttachments = paths.map((path) => {
+          const name = path.split(/[\/\\]/).pop() || path;
+          const ext = (name.split('.').pop() || '').toLowerCase();
           return {
             path,
             name,
@@ -138,16 +186,16 @@
         });
         attachments = [...attachments, ...newAttachments];
       }
-    } catch (e) {
+    } catch (e: unknown) {
       console.error('Failed to open file dialog:', e);
     }
   }
 
-  function removeAttachment(index) {
+  function removeAttachment(index: number) {
     attachments = attachments.filter((_, i) => i !== index);
   }
 
-  function handleKeydown(e) {
+  function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && e.metaKey) {
       submit();
     }
@@ -168,6 +216,12 @@
     }
   }
 
+  function showCode(message: VersionMessage | null) {
+    if (message?.output) {
+      onShowCode(message as CodeVersionMessage);
+    }
+  }
+
   const currentVersion = $derived(currentVersionIndex >= 0 ? versions[currentVersionIndex] : null);
   const promptTrail = $derived.by(() => {
     if (!currentVersion) return [];
@@ -181,7 +235,9 @@
   });
 
   let detailsOpen = $state(false);
-  let trailListEl = $state(null);
+  let trailListEl = $state<HTMLDivElement | null>(null);
+  let copiedTrailMessageId = $state<string | null>(null);
+  let copiedTrailTimer = $state<number | null>(null);
 
   // Auto-scroll to bottom when opened or messages change
   $effect(() => {
@@ -200,11 +256,132 @@
     }
   });
 
-  function formatDate(ts) {
+  function formatDate(ts: number) {
     return new Date(ts * 1000).toLocaleString();
   }
 
+  function trailText(msg: Message) {
+    if (msg.role === 'assistant' && msg.output) {
+      return `[${msg.output.interactionMode.toUpperCase()}] ${msg.output.title} (${msg.output.versionName})\n${msg.output.response || msg.content}`;
+    }
+    return msg.content;
+  }
+
+  function trailVisuals(msg: Message) {
+    const visuals: Array<{ src: string; alt: string; label: string }> = [];
+    if (msg.imageData) {
+      visuals.push({
+        src: msg.imageData,
+        alt: msg.role === 'user' ? 'Viewport snapshot' : 'Message image',
+        label: msg.role === 'user' ? 'VIEWPORT' : 'IMAGE',
+      });
+    }
+    for (const image of msg.attachmentImages || []) {
+      visuals.push({
+        src: image,
+        alt: 'Attached reference image',
+        label: 'REFERENCE',
+      });
+    }
+    return visuals;
+  }
+
+  async function copyTrailMessage(msg: Message) {
+    const text = trailText(msg).trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      copiedTrailMessageId = msg.id;
+      if (copiedTrailTimer) clearTimeout(copiedTrailTimer);
+      copiedTrailTimer = window.setTimeout(() => {
+        copiedTrailMessageId = null;
+      }, 1200);
+    } catch (error) {
+      console.error('Failed to copy dialogue preview text:', error);
+    }
+  }
+
+  function formatTokenCount(count: number | null | undefined) {
+    const value = typeof count === 'number' ? count : 0;
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+    return `${value}`;
+  }
+
+  function formatCost(cost: number | null | undefined) {
+    if (typeof cost !== 'number' || !Number.isFinite(cost)) return '';
+    if (cost >= 1) return `$${cost.toFixed(2)}`;
+    if (cost >= 0.01) return `$${cost.toFixed(3)}`;
+    return `$${cost.toFixed(4)}`;
+  }
+
+  function mergeUsageSummary(
+    left: UsageSummary | null | undefined,
+    right: UsageSummary | null | undefined,
+  ): UsageSummary | null {
+    if (!left && !right) return null;
+    if (!left) return right ?? null;
+    if (!right) return left;
+
+    return {
+      inputTokens: (left.inputTokens ?? 0) + (right.inputTokens ?? 0),
+      outputTokens: (left.outputTokens ?? 0) + (right.outputTokens ?? 0),
+      totalTokens: (left.totalTokens ?? 0) + (right.totalTokens ?? 0),
+      cachedInputTokens: (left.cachedInputTokens ?? 0) + (right.cachedInputTokens ?? 0),
+      reasoningTokens: (left.reasoningTokens ?? 0) + (right.reasoningTokens ?? 0),
+      estimatedCostUsd:
+        typeof left.estimatedCostUsd === 'number' || typeof right.estimatedCostUsd === 'number'
+          ? (left.estimatedCostUsd ?? 0) + (right.estimatedCostUsd ?? 0)
+          : null,
+      segments: [...(left.segments || []), ...(right.segments || [])],
+    };
+  }
+
+  function usageLabel(usage: UsageSummary | null | undefined) {
+    if (!usage) return '';
+    const bits = [`${formatTokenCount(usage.totalTokens)} TOK`];
+    const cost = formatCost(usage.estimatedCostUsd);
+    if (cost) bits.push(`EST ${cost}`);
+    return bits.join(' · ');
+  }
+
+  function usageTitle(usage: UsageSummary | null | undefined) {
+    if (!usage) return '';
+    const lines = [
+      `Input: ${usage.inputTokens}`,
+      `Output: ${usage.outputTokens}`,
+      `Total: ${usage.totalTokens}`,
+    ];
+    if (usage.cachedInputTokens) lines.push(`Cached input: ${usage.cachedInputTokens}`);
+    if (usage.reasoningTokens) lines.push(`Reasoning: ${usage.reasoningTokens}`);
+    if (typeof usage.estimatedCostUsd === 'number') {
+      lines.push(`Estimated cost: ${formatCost(usage.estimatedCostUsd)}`);
+    }
+    for (const segment of usage.segments || []) {
+      const parts = [
+        segment.stage.toUpperCase(),
+        `${segment.provider}/${segment.model}`,
+        `in ${segment.inputTokens}`,
+        `out ${segment.outputTokens}`,
+      ];
+      if (typeof segment.estimatedCostUsd === 'number') {
+        parts.push(`est ${formatCost(segment.estimatedCostUsd)}`);
+      }
+      lines.push(parts.join(' · '));
+    }
+    return lines.join('\n');
+  }
+
   const lastMessage = $derived(messages.length > 0 ? messages[messages.length - 1] : null);
+  const threadUsage = $derived.by(() =>
+    messages.reduce<UsageSummary | null>(
+      (aggregate, message) => mergeUsageSummary(aggregate, message.usage),
+      null,
+    )
+  );
+  const threadUsageMessageCount = $derived(
+    messages.reduce((count, message) => count + (message.usage ? 1 : 0), 0)
+  );
   const failedPromptForRetry = $derived.by(() => {
     if (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.status !== 'error') return null;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -235,8 +412,8 @@
   {#if versions.length > 0}
     {#if showDeleteConfirm}
       <Modal title="Confirm Version Purge" onclose={() => showDeleteConfirm = false}>
-        <div class="confirm-delete-body">
-          <p>Are you sure you want to delete <strong>{currentVersion?.output?.title || 'this version'}</strong>?</p>
+          <div class="confirm-delete-body">
+          <p>Are you sure you want to delete <strong>{versionTitle(currentVersion)}</strong>?</p>
           <p class="warning">This specific iteration will be removed from the thread's timeline.</p>
           <div class="confirm-actions">
             <button class="btn btn-secondary" onclick={() => showDeleteConfirm = false}>CANCEL</button>
@@ -251,16 +428,23 @@
         <button class="nav-btn" disabled={!hasNext} onclick={goNext}>&rarr;</button>
       </div>
       
-      <div class="version-info">
-        <div class="version-counter-group">
+        <div class="version-info">
+          <div class="version-counter-group">
           <span class="version-counter">V {currentVersionIndex + 1} OF {versions.length}</span>
           {#if currentVersion && currentVersion.output?.versionName}
             <span class="version-name">{currentVersion.output.versionName}</span>
           {/if}
+          {#if currentVersion?.usage}
+            <span class="usage-chip" title={usageTitle(currentVersion.usage)}>
+              VERSION {usageLabel(currentVersion.usage)}
+            </span>
+          {/if}
         </div>
         {#if currentVersion}
           <div class="version-actions">
-            <button class="code-btn" onclick={() => onShowCode(currentVersion)} title="Inspect Python Code">📜 CODE</button>
+            {#if currentVersion.output}
+              <button class="code-btn" onclick={() => showCode(currentVersion)} title="Inspect Python Code">📜 CODE</button>
+            {/if}
             <button class="code-btn delete-btn" onclick={() => showDeleteConfirm = true} title="Delete Version">🗑️ DEL</button>
           </div>
         {/if}
@@ -281,22 +465,51 @@
       </div>
     {/if}
 
+    {#if threadUsage}
+      <div class="usage-strip" title={usageTitle(threadUsage)}>
+        THREAD TOTAL {usageLabel(threadUsage)}
+        {#if threadUsageMessageCount > 0}
+          <span class="usage-request-count">{threadUsageMessageCount} REQ</span>
+        {/if}
+      </div>
+    {/if}
+
     {#if currentUserMsg && currentVersion}
-      <details class="version-details" bind:open={detailsOpen}>
-        <summary>Dialogue History for {currentVersion.output.title}</summary>
+      <div class="version-details">
+        <button
+          class="version-details-toggle"
+          type="button"
+          aria-expanded={detailsOpen}
+          onclick={() => (detailsOpen = !detailsOpen)}
+        >
+          <span>Dialogue History for {versionTitle(currentVersion)}</span>
+          <span class="details-toggle-indicator">{detailsOpen ? '−' : '+'}</span>
+        </button>
+        {#if detailsOpen}
         <div class="details-content">
           {#if promptTrail.length > 0}
             <div class="trail-list" bind:this={trailListEl}>
               {#each promptTrail as msg, i}
+                {@const visuals = trailVisuals(msg)}
                 <div class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'}">
                   <div class="trail-header-row">
-                    <span class="trail-role">{msg.role === 'assistant' ? 'ECKY' : 'YOU'}</span>
-                    <span class="trail-time">{formatDate(msg.timestamp)}</span>
+                    <div class="trail-meta">
+                      <span class="trail-role">{msg.role === 'assistant' ? 'ECKY' : 'YOU'}</span>
+                      <span class="trail-time">{formatDate(msg.timestamp)}</span>
+                    </div>
+                    <button class="trail-copy-btn" type="button" onclick={() => copyTrailMessage(msg)}>
+                      {copiedTrailMessageId === msg.id ? 'COPIED' : 'COPY'}
+                    </button>
                   </div>
                   <div class="trail-content">
-                    {#if msg.imageData}
-                      <div class="trail-image-wrapper">
-                        <img src={msg.imageData} alt="Viewport snapshot" class="trail-image" />
+                    {#if visuals.length > 0}
+                      <div class="trail-visuals">
+                        {#each visuals as visual, visualIndex (`${msg.id}-${visual.label}-${visualIndex}`)}
+                          <div class="trail-image-wrapper">
+                            <div class="trail-image-kicker">{visual.label}</div>
+                            <img src={visual.src} alt={visual.alt} class="trail-image" />
+                          </div>
+                        {/each}
                       </div>
                     {/if}
                     {#if msg.role === 'assistant' && msg.output}
@@ -306,19 +519,28 @@
                     {:else}
                       {msg.content}
                     {/if}
+                    {#if msg.usage}
+                      <div class="trail-usage" title={usageTitle(msg.usage)}>{usageLabel(msg.usage)}</div>
+                    {/if}
                   </div>
                 </div>
               {/each}
             </div>
           {/if}
         </div>
-      </details>
+        {/if}
+      </div>
     {/if}
   {/if}
 
   <div class="input-area">
     {#if attachments.length > 0}
       <div class="attachments-list">
+        {#if hasImageAttachments}
+          <div class="attachment-hint">
+            Images go to the intent check and the design model. Add a short note so the model knows what to notice in each reference.
+          </div>
+        {/if}
         {#each attachments as att, i}
           <div class="attachment-item">
             <div class="att-header">
@@ -328,7 +550,7 @@
             </div>
             <input 
               class="input-mono att-explanation" 
-              placeholder="Explain this context (e.g. 'This is my base sketch')"
+              placeholder={att.type === 'image' ? "What should the model notice here?" : "How should this reference be used?"}
               bind:value={att.explanation}
             />
           </div>
@@ -415,6 +637,14 @@
     gap: 4px;
     width: 240px;
     flex-shrink: 0;
+  }
+
+  .attachment-hint {
+    flex: 1 0 100%;
+    color: var(--text-dim);
+    font-size: 0.64rem;
+    line-height: 1.4;
+    padding: 2px 2px 6px;
   }
 
   .att-header {
@@ -507,6 +737,7 @@
     align-items: center;
     gap: 12px;
     flex-shrink: 0;
+    flex-wrap: wrap;
   }
 
   .version-counter {
@@ -526,6 +757,33 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .usage-chip,
+  .usage-strip,
+  .trail-usage {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.06em;
+    color: var(--secondary);
+  }
+
+  .usage-chip {
+    padding: 2px 6px;
+    border: 1px solid color-mix(in srgb, var(--secondary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--secondary) 8%, var(--bg-200));
+    white-space: nowrap;
+  }
+
+  .usage-strip {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--secondary) 6%, var(--bg-100));
+  }
+
+  .usage-request-count {
+    margin-left: 10px;
+    color: var(--text-dim);
   }
 
   .version-actions {
@@ -560,16 +818,30 @@
     font-size: 0.75rem;
   }
 
-  .version-details summary {
-    cursor: text;
+  .version-details-toggle {
+    width: 100%;
+    padding: 0;
+    border: none;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
     color: var(--text-dim);
-    -webkit-user-select: text;
-    user-select: text;
     font-weight: bold;
+    text-align: left;
   }
 
-  .version-details summary:hover {
+  .version-details-toggle:hover {
     color: var(--text);
+  }
+
+  .details-toggle-indicator {
+    color: var(--secondary);
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    flex-shrink: 0;
+    margin-left: 12px;
   }
 
   .details-content {
@@ -587,6 +859,7 @@
     margin-bottom: 8px;
     max-height: 300px;
     overflow-y: auto;
+    overflow-x: hidden;
     padding-right: 4px;
   }
 
@@ -597,6 +870,12 @@
     width: fit-content;
     min-width: 200px;
     cursor: text;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  .trail-item,
+  .trail-item * {
     -webkit-user-select: text;
     user-select: text;
   }
@@ -615,9 +894,18 @@
 
   .trail-header-row {
     display: flex;
+    align-items: center;
     justify-content: space-between;
+    gap: 12px;
     margin-bottom: 4px;
     font-size: 0.6rem;
+  }
+
+  .trail-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
   }
 
   .trail-role {
@@ -630,6 +918,25 @@
     font-family: var(--font-mono);
   }
 
+  .trail-copy-btn {
+    border: 1px solid var(--bg-400);
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
+    color: var(--text-dim);
+    padding: 2px 6px;
+    font-size: 0.55rem;
+    font-family: var(--font-mono);
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    flex-shrink: 0;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .trail-copy-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
   .trail-content {
     font-size: 0.7rem;
     color: var(--text);
@@ -639,11 +946,33 @@
     user-select: text;
   }
 
-  .trail-image-wrapper {
+  .trail-usage {
+    margin-top: 8px;
+    opacity: 0.9;
+  }
+
+  .trail-visuals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-bottom: 8px;
+  }
+
+  .trail-image-wrapper {
     border: 1px solid var(--bg-400);
-    max-width: 320px;
+    width: min(320px, 100%);
     background: #000;
+    overflow: hidden;
+  }
+
+  .trail-image-kicker {
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--bg-400);
+    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
+    color: var(--secondary);
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    letter-spacing: 0.08em;
   }
 
   .trail-image {

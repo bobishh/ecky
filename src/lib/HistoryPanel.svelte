@@ -1,12 +1,42 @@
-<script>
+<script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
   import ManualImportModal from './ManualImportModal.svelte';
   import Modal from './Modal.svelte';
-  let { history, activeThreadId, inFlightByThread = {}, onSelect, onDelete, onNew } = $props();
+  import type { Thread } from './types/domain';
+
+  type NewThreadPayload =
+    | { mode: 'blank' }
+    | { mode: 'macro'; code: string; title: string };
+
+  type ThreadState = {
+    label: string;
+    className: string;
+    title: string;
+  };
+
+  let {
+    history,
+    activeThreadId,
+    inFlightByThread = {},
+    onSelect,
+    onDelete,
+    onNew,
+    onImportFcstd,
+  }: {
+    history: Thread[];
+    activeThreadId: string | null;
+    inFlightByThread?: Record<string, number>;
+    onSelect: (thread: Thread) => void;
+    onDelete: (id: string) => void;
+    onNew: (payload: NewThreadPayload) => void;
+    onImportFcstd: (sourcePath: string) => void;
+  } = $props();
 
   let searchQuery = $state('');
   let currentPage = $state(1);
   let showImport = $state(false);
-  let threadToDelete = $state(null);
+  let showNewChooser = $state(false);
+  let threadToDelete = $state<Thread | null>(null);
   const itemsPerPage = 10;
 
   const filteredHistory = $derived(
@@ -27,22 +57,45 @@
     }
   });
 
-  function formatDate(timestamp) {
+  function formatDate(timestamp: number) {
     return new Date(timestamp * 1000).toLocaleString(undefined, {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
     });
   }
 
-  function handleSearch(e) {
-    searchQuery = e.target.value;
+  function handleSearch(e: Event) {
+    searchQuery = (e.currentTarget as HTMLInputElement).value;
     currentPage = 1;
   }
 
-  function handleImport(data) {
+  function handleImport(data: { code: string; title: string }) {
+    showImport = false;
     onNew({ mode: 'macro', ...data });
   }
 
-  function confirmDelete(id) {
+  async function handleFcstdImport() {
+    showNewChooser = false;
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'FreeCAD Document', extensions: ['fcstd'] }],
+    });
+
+    if (typeof selected === 'string' && selected.trim()) {
+      onImportFcstd(selected);
+    }
+  }
+
+  function startBlankThread() {
+    showNewChooser = false;
+    onNew({ mode: 'blank' });
+  }
+
+  function startMacroImport() {
+    showNewChooser = false;
+    showImport = true;
+  }
+
+  function confirmDelete(id: string) {
     const thread = history.find(t => t.id === id);
     if (thread) {
       threadToDelete = thread;
@@ -61,16 +114,16 @@
     return !!selection && !selection.isCollapsed && selection.toString().trim().length > 0;
   }
 
-  function selectThread(thread) {
+  function selectThread(thread: Thread) {
     if (hasTextSelection()) return;
     onSelect(thread);
   }
 
-  function pluralize(count, noun) {
+  function pluralize(count: number, noun: string) {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
 
-  function getThreadState(thread) {
+  function getThreadState(thread: Thread): ThreadState {
     const inFlightCount = Number(inFlightByThread?.[thread?.id] || 0);
     const pendingCount = Number(thread?.pendingCount || 0);
     const errorCount = Number(thread?.errorCount || 0);
@@ -145,6 +198,35 @@
       </div>
     </Modal>
   {/if}
+
+  {#if showNewChooser}
+    <Modal title="Start New Thread" onclose={() => showNewChooser = false}>
+      <div class="new-thread-chooser">
+        <button class="chooser-action" onclick={startBlankThread}>
+          <span class="chooser-icon" aria-hidden="true">➕</span>
+          <span class="chooser-copy">
+            <span class="chooser-title">Blank Thread</span>
+            <span class="chooser-subtitle">Start from a fresh prompt.</span>
+          </span>
+        </button>
+        <button class="chooser-action" onclick={handleFcstdImport}>
+          <span class="chooser-icon" aria-hidden="true">📦</span>
+          <span class="chooser-copy">
+            <span class="chooser-title">Import FCStd</span>
+            <span class="chooser-subtitle">Open an existing FreeCAD document.</span>
+          </span>
+        </button>
+        <button class="chooser-action" onclick={startMacroImport}>
+          <span class="chooser-icon" aria-hidden="true">📜</span>
+          <span class="chooser-copy">
+            <span class="chooser-title">Import Macro</span>
+            <span class="chooser-subtitle">Paste or load Python/FCMacro code.</span>
+          </span>
+        </button>
+      </div>
+    </Modal>
+  {/if}
+
   <div class="history-search">
     <input 
       type="text" 
@@ -156,17 +238,11 @@
     <div class="header-actions">
       <button 
         class="header-btn" 
-        onclick={() => showImport = true} 
-        title="Import existing macro"
+        onclick={() => showNewChooser = true} 
+        title="Start a new thread"
       >
-        📜
-      </button>
-      <button 
-        class="header-btn" 
-        onclick={() => onNew({ mode: 'blank' })} 
-        title="Create New Thread"
-      >
-        ➕
+        <span class="header-btn-icon" aria-hidden="true">➕</span>
+        <span class="header-btn-label">NEW</span>
       </button>
     </div>
   </div>
@@ -269,12 +345,13 @@
     background: var(--bg-200);
     border: 1px solid var(--bg-300);
     color: var(--text);
-    font-size: 0.9rem;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0 8px;
+    gap: 6px;
+    min-width: 74px;
+    padding: 0 10px;
     transition: all 0.2s;
   }
 
@@ -282,6 +359,76 @@
     background: var(--bg-300);
     border-color: var(--primary);
     color: var(--primary);
+  }
+
+  .header-btn-icon {
+    font-size: 0.85rem;
+    line-height: 1;
+  }
+
+  .header-btn-label {
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1;
+  }
+
+  .new-thread-chooser {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+  }
+
+  .chooser-action {
+    background: var(--bg-200);
+    border: 1px solid var(--bg-300);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.2s;
+    overflow: hidden;
+  }
+
+  .chooser-action:hover {
+    border-color: var(--primary);
+    background: var(--bg-300);
+  }
+
+  .chooser-icon {
+    width: 30px;
+    flex: 0 0 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  .chooser-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .chooser-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .chooser-subtitle {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    line-height: 1.35;
   }
 
   .history-list {
@@ -407,6 +554,7 @@
     font-size: 0.65rem;
     color: var(--text);
     margin-bottom: 8px;
+    line-clamp: 2;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;

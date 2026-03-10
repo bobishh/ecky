@@ -1,9 +1,15 @@
-<script>
+<script lang="ts">
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { readTextFile } from '@tauri-apps/plugin-fs';
   import Modal from './Modal.svelte';
 
-  let { show = $bindable(false), onImport } = $props();
+  let {
+    show = $bindable(false),
+    onImport,
+  }: {
+    show?: boolean;
+    onImport: (payload: { code: string; title: string }) => void;
+  } = $props();
 
   let macroCode = $state('');
   let fileName = $state('');
@@ -14,29 +20,33 @@
         multiple: false,
         filters: [{ name: 'FreeCAD Macro', extensions: ['FCMacro', 'py'] }]
       });
-      if (selected) {
+      if (typeof selected === 'string') {
         const content = await readTextFile(selected);
         macroCode = content;
         fileName = selected.split(/[\\/]/).pop() || 'Imported Macro';
       }
-    } catch (e) {
+    } catch (e: unknown) {
       console.error('Failed to read file:', e);
     }
   }
 
   function submit() {
     onImport({ code: macroCode, title: fileName || 'Manual Import' });
-    show = false;
-    reset();
+    close();
   }
 
   function reset() {
     macroCode = '';
     fileName = '';
   }
+
+  function close() {
+    show = false;
+    reset();
+  }
 </script>
 
-<Modal bind:show title="IMPORT EXISTING MACRO" onclose={reset}>
+<Modal title="IMPORT EXISTING MACRO" onclose={close}>
   <div class="import-container">
     <div class="input-header">
       <span>PASTE PYTHON CODE OR</span>
@@ -52,7 +62,7 @@
     {/if}
 
     <div class="modal-actions">
-      <button class="btn btn-ghost" onclick={() => show = false}>CANCEL</button>
+      <button class="btn btn-ghost" onclick={close}>CANCEL</button>
       <button 
         class="btn btn-primary" 
         onclick={submit}

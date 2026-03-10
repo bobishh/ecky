@@ -4,6 +4,7 @@ version = "0.0.1"
 description = "Prompt-driven 3D CAD designer"
 authors = ["Bogdan"]
 edition = "2021"
+default-run = "ecky_cad"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
@@ -15,6 +16,9 @@ tauri-plugin-dialog = "2.0"
 tauri-plugin-fs = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+specta = { version = "2.0.0-rc.22", features = ["derive"] }
+specta-typescript = "0.0.9"
+tauri-specta = { version = "2.0.0-rc.21", features = ["derive", "typescript"] }
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1.0", features = ["v4"] }
@@ -28,6 +32,9 @@ rustpython-parser = "0.4.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"
 objc = "0.2"
+
+[dev-dependencies]
+proptest = "1.6"
 
 [lib]
 name = "ecky_cad_lib"

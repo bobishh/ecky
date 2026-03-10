@@ -1,14 +1,21 @@
-<script>
+<script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { EditorState } from '@codemirror/state';
   import { EditorView, basicSetup } from 'codemirror';
   import { python } from '@codemirror/lang-python';
   import { oneDark } from '@codemirror/theme-one-dark';
+  import type { ViewUpdate } from '@codemirror/view';
 
-  let { code = $bindable(''), onchange } = $props();
+  let {
+    code = $bindable(''),
+    onchange,
+  }: {
+    code?: string;
+    onchange?: (code: string) => void;
+  } = $props();
 
-  let editorContainer;
-  let view;
+  let editorContainer: HTMLDivElement;
+  let view: EditorView | null = null;
 
   onMount(() => {
     let startState = EditorState.create({
@@ -17,7 +24,7 @@
         basicSetup,
         python(),
         oneDark,
-        EditorView.updateListener.of((update) => {
+        EditorView.updateListener.of((update: ViewUpdate) => {
           if (update.docChanged) {
             const newCode = update.state.doc.toString();
             if (newCode !== code) {

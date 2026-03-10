@@ -1,5 +1,4 @@
 import { get } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { workingCopy } from '../stores/workingCopy';
 import { activeThreadId, activeVersionId, config } from '../stores/domainState';
@@ -9,6 +8,8 @@ import { session, syncSessionPhaseFromQueue } from '../stores/sessionStore';
 import { paramPanelState } from '../stores/paramPanelState';
 import { ensureContext, startRequestHum, stopRequestHum } from '../audio/microwave';
 import { startCookingPhraseLoop, startLightReasoningPhraseLoop, stopPhraseLoop } from '../stores/phraseEngine';
+import { persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
+import { ensureSemanticManifest } from '../modelRuntime/semanticControls';
 import type {
   AppConfig,
   Attachment,
@@ -16,8 +17,21 @@ import type {
   GenerateOutput,
   IntentDecision,
   Request,
+  UsageSummary,
 } from '../types/domain';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
+import {
+  classifyIntent,
+  finalizeGenerationAttempt,
+  formatBackendError,
+  generateDesign,
+  getModelManifest,
+  getMessStlPath,
+  initGenerationAttempt,
+  renderModel,
+  saveModelManifest,
+  saveConfig,
+} from '../tauri/client';
 
 // ---------------------------------------------------------------------------
 // Constants & Helpers
@@ -41,23 +55,43 @@ function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
   return `${phrase} Retry ${nextAttempt} of ${maxAttempts}.`;
 }
 
-export function isQuestionIntent(promptText: string): boolean {
+export function isExplicitQuestionOnlyIntent(promptText: string): boolean {
   const prompt = `${promptText ?? ''}`.trim().toLowerCase();
   if (!prompt) return false;
   if (prompt.startsWith('/ask ')) return true;
+
+  return [
+    'answer only',
+    'just answer',
+    'only answer',
+    'do not generate',
+    "don't generate",
+    'without generating',
+    'no generation',
+    'do not change the model',
+    "don't change the model",
+    'without changing the model',
+    'только ответь',
+    'только ответ',
+    'просто ответь',
+    'без генерации',
+    'не генерируй',
+    'не меняй модель',
+    'не трогай модель',
+  ].some((marker) => prompt.includes(marker));
+}
+
+export function isQuestionIntent(promptText: string): boolean {
+  const prompt = `${promptText ?? ''}`.trim().toLowerCase();
+  if (!prompt) return false;
+  if (isExplicitQuestionOnlyIntent(prompt)) return true;
   const hasQuestionSignal = prompt.includes('?') || /\b(explain|why|how|what|which)\b/.test(prompt);
   const hasDesignAction = /\b(generate|create|make|add|remove|change|update|resize)\b/.test(prompt);
   return hasQuestionSignal && !hasDesignAction;
 }
 
 function toErrorMessage(err: unknown): string {
-  if (typeof err === 'string') return err;
-  if (err instanceof Error) return err.message;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
+  return formatBackendError(err);
 }
 
 function toAssetUrl(path: string | null | undefined): string {
@@ -67,6 +101,28 @@ function toAssetUrl(path: string | null | undefined): string {
   } catch {
     return path;
   }
+}
+
+function mergeUsageSummary(
+  left: UsageSummary | null | undefined,
+  right: UsageSummary | null | undefined,
+): UsageSummary | null {
+  if (!left && !right) return null;
+  if (!left) return right ?? null;
+  if (!right) return left;
+
+  return {
+    inputTokens: (left.inputTokens ?? 0) + (right.inputTokens ?? 0),
+    outputTokens: (left.outputTokens ?? 0) + (right.outputTokens ?? 0),
+    totalTokens: (left.totalTokens ?? 0) + (right.totalTokens ?? 0),
+    cachedInputTokens: (left.cachedInputTokens ?? 0) + (right.cachedInputTokens ?? 0),
+    reasoningTokens: (left.reasoningTokens ?? 0) + (right.reasoningTokens ?? 0),
+    estimatedCostUsd:
+      typeof left.estimatedCostUsd === 'number' || typeof right.estimatedCostUsd === 'number'
+        ? (left.estimatedCostUsd ?? 0) + (right.estimatedCostUsd ?? 0)
+        : null,
+    segments: [...(left.segments || []), ...(right.segments || [])],
+  };
 }
 
 class CancelError extends Error {
@@ -152,7 +208,7 @@ export async function handleGenerate(initialPrompt: string, attachments: Attachm
   session.setError(null);
 
   // Keep backend AppState config in sync with current UI config before generation.
-  await invoke('save_config', { config: get(config) });
+  await saveConfig(get(config));
 
   // Capture screenshot with drawing overlay synchronously before clearing
   let preCapture: string | null = null;
@@ -206,7 +262,9 @@ class GenerationPipeline {
   currentScreenshot: string | null = null;
   preCapture: string | null = null;
   isQuestion: boolean = false;
+  forcedQuestionOnly: boolean = false;
   lightResponse: string = '';
+  usageSummary: UsageSummary | null = null;
 
   constructor(requestId: string) {
     this.requestId = requestId;
@@ -259,7 +317,8 @@ class GenerationPipeline {
     syncSessionPhaseFromQueue();
     startLightReasoningPhraseLoop();
 
-    this.isQuestion = isQuestionIntent(this.req.prompt);
+    this.forcedQuestionOnly = isExplicitQuestionOnlyIntent(this.req.prompt);
+    this.isQuestion = this.forcedQuestionOnly || isQuestionIntent(this.req.prompt);
 
     // Use pre-captured screenshot (with drawing overlay composited) from handleGenerate
     if (this.preCapture) {
@@ -297,7 +356,17 @@ class GenerationPipeline {
     await refreshHistory();
     this.checkCanceled();
 
-    requestQueue.patch(this.requestId, { phase: 'success', result: { design: null, threadId: this.snapshotThreadId, messageId: this.assistantMessageId || '', stlUrl: '' } });
+    requestQueue.patch(this.requestId, {
+      phase: 'success',
+      result: {
+        design: null,
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId || '',
+        stlUrl: '',
+        artifactBundle: null,
+        modelManifest: null,
+      },
+    });
     syncSessionPhaseFromQueue();
   }
 
@@ -323,7 +392,7 @@ class GenerationPipeline {
       this.updateStatus(`Consulting LLM (Attempt ${attempt}/${this.req.maxAttempts})...`);
 
       try {
-        const result = await invoke<GenerateOutput>('generate_design', {
+        const result = await generateDesign({
           prompt: currentPrompt,
           threadId: this.snapshotThreadId,
           parentMacroCode: this.snapshotParentMacroCode,
@@ -334,6 +403,7 @@ class GenerationPipeline {
           questionMode: false
         });
         this.checkCanceled();
+        this.usageSummary = mergeUsageSummary(this.usageSummary, result.usage);
 
         const data = result.design;
         const interactionMode = `${data.interactionMode ?? ''}`.toLowerCase();
@@ -349,13 +419,23 @@ class GenerationPipeline {
         this.updateStatus('Executing FreeCAD engine...');
 
         try {
-          const absolutePath = await invoke<string>('render_stl', {
-            macroCode: data.macroCode,
-            parameters: data.initialParams || {}
-          });
+          const bundle = await renderModel(data.macroCode, data.initialParams || {});
+          const rawManifest = await getModelManifest(bundle.modelId);
+          const previousManifest =
+            get(activeThreadId) === this.snapshotThreadId ? get(session).modelManifest : null;
+          const manifest =
+            ensureSemanticManifest(
+              rawManifest,
+              data.uiSpec,
+              data.initialParams || {},
+              previousManifest,
+            ) ?? rawManifest;
+          if (JSON.stringify(manifest) !== JSON.stringify(rawManifest)) {
+            await saveModelManifest(bundle.modelId, manifest);
+          }
           this.checkCanceled();
 
-          await this.commitSuccess(data, absolutePath);
+          await this.commitSuccess(data, bundle, manifest);
           return;
 
         } catch (renderError) {
@@ -384,7 +464,7 @@ class GenerationPipeline {
 
   private async initDatabaseRecord() {
     this.checkCanceled();
-    this.assistantMessageId = await invoke<string>('init_generation_attempt', {
+    this.assistantMessageId = await initGenerationAttempt({
       threadId: this.snapshotThreadId,
       prompt: this.req.prompt,
       attachments: this.req.attachments,
@@ -392,7 +472,14 @@ class GenerationPipeline {
     });
     
     requestQueue.patch(this.requestId, { 
-      result: { design: null, threadId: this.snapshotThreadId, messageId: this.assistantMessageId, stlUrl: '' } 
+      result: {
+        design: null,
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId,
+        stlUrl: '',
+        artifactBundle: null,
+        modelManifest: null,
+      } 
     });
     await refreshHistory();
   }
@@ -400,7 +487,7 @@ class GenerationPipeline {
   private async classifyIntent() {
     this.checkCanceled();
     try {
-      const intent = await invoke<IntentDecision>('classify_intent', {
+      const intent = await classifyIntent({
         prompt: this.req.prompt,
         threadId: this.snapshotThreadId,
         context: buildLightReasoningContext(),
@@ -408,9 +495,13 @@ class GenerationPipeline {
         attachments: this.req.attachments
       });
       this.checkCanceled();
+      this.usageSummary = mergeUsageSummary(this.usageSummary, intent.usage);
 
-      if (intent?.intentMode === 'question' || intent?.intentMode === 'design') {
+      if (!this.forcedQuestionOnly && (intent?.intentMode === 'question' || intent?.intentMode === 'design')) {
         this.isQuestion = intent.intentMode === 'question';
+      }
+      if (this.forcedQuestionOnly) {
+        this.isQuestion = true;
       }
       if (intent?.response) {
         this.lightResponse = intent.response;
@@ -422,12 +513,16 @@ class GenerationPipeline {
     }
   }
 
-  private async commitSuccess(data: DesignOutput, absolutePath: string | null) {
-    const stlUrlValue = toAssetUrl(absolutePath);
+  private async commitSuccess(
+    data: DesignOutput,
+    bundle: import('../types/domain').ArtifactBundle,
+    manifest: import('../types/domain').ModelManifest,
+  ) {
+    const stlUrlValue = toAssetUrl(bundle.previewStlPath);
     requestQueue.patch(this.requestId, { phase: 'committing' });
     syncSessionPhaseFromQueue();
 
-    await this.finalizeAttempt('success', data);
+    await this.finalizeAttempt('success', data, undefined, undefined, bundle, manifest);
     this.checkCanceled();
 
     if (this.isActiveThread()) {
@@ -438,15 +533,34 @@ class GenerationPipeline {
         workingCopy.loadVersion(data, this.assistantMessageId);
         paramPanelState.hydrateFromVersion(data, this.assistantMessageId);
         session.setStlUrl(stlUrlValue);
+        session.setModelRuntime(bundle, manifest);
       }
       session.setStatus('Design synthesized successfully.');
     }
     requestQueue.patch(this.requestId, { threadId: this.snapshotThreadId });
 
+    if (this.isActiveThread()) {
+      await persistLastSessionSnapshot({
+        design: data,
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId,
+        artifactBundle: bundle,
+        modelManifest: manifest,
+        selectedPartId: null,
+      });
+    }
+
     await refreshHistory();
     requestQueue.patch(this.requestId, {
       phase: 'success',
-      result: { design: data, threadId: this.snapshotThreadId, messageId: this.assistantMessageId!, stlUrl: stlUrlValue }
+      result: {
+        design: data,
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId!,
+        stlUrl: stlUrlValue,
+        artifactBundle: bundle,
+        modelManifest: manifest,
+      }
     });
     this.stopMicrowave(true);
     syncSessionPhaseFromQueue();
@@ -460,8 +574,28 @@ class GenerationPipeline {
     if (this.isActiveThread()) {
       session.setStatus(responseText);
     }
+    if (this.isActiveThread()) {
+      await persistLastSessionSnapshot({
+        design: data,
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId,
+        artifactBundle: null,
+        modelManifest: null,
+        selectedPartId: null,
+      });
+    }
     await refreshHistory();
-    requestQueue.patch(this.requestId, { phase: 'success', result: { design: data, threadId: this.snapshotThreadId, messageId: this.assistantMessageId || '', stlUrl: '' } });
+    requestQueue.patch(this.requestId, {
+      phase: 'success',
+      result: {
+        design: data,
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId || '',
+        stlUrl: '',
+        artifactBundle: null,
+        modelManifest: null,
+      },
+    });
     this.stopMicrowave(true);
     syncSessionPhaseFromQueue();
   }
@@ -501,14 +635,19 @@ class GenerationPipeline {
     status: 'success' | 'error' | 'discarded',
     design?: DesignOutput,
     errorMessage?: string,
-    responseText?: string
+    responseText?: string,
+    artifactBundle?: import('../types/domain').ArtifactBundle | null,
+    modelManifest?: import('../types/domain').ModelManifest | null,
   ) {
     if (!this.assistantMessageId) return;
     try {
-      await invoke('finalize_generation_attempt', {
+      await finalizeGenerationAttempt({
         messageId: this.assistantMessageId,
         status,
         design,
+        usage: this.usageSummary,
+        artifactBundle,
+        modelManifest,
         errorMessage,
         responseText
       });
@@ -522,8 +661,9 @@ class GenerationPipeline {
     this.updateError(`Pipeline Error: ${errText}`);
     if (this.isActiveThread()) {
       try {
-        const messPath = await invoke<string>('get_mess_stl_path');
+        const messPath = await getMessStlPath();
         session.setStlUrl(toAssetUrl(messPath));
+        session.clearModelRuntime();
       } catch (e) {
         session.setStlUrl(null);
       }
@@ -538,8 +678,9 @@ class GenerationPipeline {
     this.updateError(`Render Error: ${renderError}`);
     if (this.isActiveThread()) {
       try {
-        const messPath = await invoke<string>('get_mess_stl_path');
+        const messPath = await getMessStlPath();
         session.setStlUrl(toAssetUrl(messPath));
+        session.clearModelRuntime();
       } catch (e) {
         session.setStlUrl(null);
       }
@@ -556,8 +697,9 @@ class GenerationPipeline {
     this.updateError(`Generation Failed: ${e}`);
     if (this.isActiveThread()) {
       try {
-        const messPath = await invoke<string>('get_mess_stl_path');
+        const messPath = await getMessStlPath();
         session.setStlUrl(toAssetUrl(messPath));
+        session.clearModelRuntime();
       } catch (err) {
         session.setStlUrl(null);
       }

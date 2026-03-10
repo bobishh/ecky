@@ -1,10 +1,9 @@
 import { get } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { session } from '../stores/sessionStore';
 import { workingCopy } from '../stores/workingCopy';
 import { handleParamChange } from '../controllers/manualController';
 import { paramPanelState } from '../stores/paramPanelState';
-import type { AppConfig, DesignOutput, Thread } from '../types/domain';
 import { 
   history, 
   activeThreadId, 
@@ -13,6 +12,15 @@ import {
   availableModels,
   isLoadingModels
 } from '../stores/domainState';
+import {
+  formatBackendError,
+  getConfig,
+  getDefaultMacro,
+  getHistory,
+  getLastDesign,
+  listModels,
+  saveConfig as persistConfig,
+} from '../tauri/client';
 
 type TauriBridgeWindow = Window & typeof globalThis & {
   __TAURI_INTERNALS__?: {
@@ -24,6 +32,15 @@ function hasTauriInvokeBridge(): boolean {
   if (typeof window === 'undefined') return true;
   const bridge = (window as TauriBridgeWindow).__TAURI_INTERNALS__;
   return typeof bridge?.invoke === 'function';
+}
+
+function toAssetUrl(path: string | null | undefined): string {
+  if (!path) return '';
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return path;
+  }
 }
 
 /**
@@ -73,7 +90,7 @@ export async function boot() {
 }
 
 async function loadConfig() {
-  const loadedConfig = await invoke<AppConfig>('get_config');
+  const loadedConfig = await getConfig();
   let needsSave = false;
 
   // Normalize engines
@@ -95,6 +112,11 @@ async function loadConfig() {
     needsSave = true;
   }
 
+  if (typeof loadedConfig.freecadCmd !== 'string') {
+    loadedConfig.freecadCmd = '';
+    needsSave = true;
+  }
+
   config.set(loadedConfig);
   
   if (loadedConfig.selectedEngineId) {
@@ -105,17 +127,17 @@ async function loadConfig() {
 
   // Only write if we actually repaired/normalized something
   if (needsSave) {
-    await invoke('save_config', { config: loadedConfig });
+    await persistConfig(loadedConfig);
   }
 }
 
 export async function saveConfig() {
   const currentConfig = get(config);
   try {
-    await invoke('save_config', { config: currentConfig });
+    await persistConfig(currentConfig);
     session.setStatus('Configuration saved.');
   } catch (e) {
-    session.setError(`Config Save Error: ${e}`);
+    session.setError(`Config Save Error: ${formatBackendError(e)}`);
   }
 }
 
@@ -131,32 +153,29 @@ export async function fetchModels() {
   
   isLoadingModels.set(true);
   try {
-    const modelsRaw = await invoke<unknown>('list_models', {
-      provider: selectedEngine.provider,
-      apiKey: selectedEngine.apiKey,
-      baseUrl: selectedEngine.baseUrl
-    });
-    const models = Array.isArray(modelsRaw)
-      ? modelsRaw.filter((m): m is string => typeof m === 'string')
-      : [];
+    const models = await listModels(
+      selectedEngine.provider,
+      selectedEngine.apiKey,
+      selectedEngine.baseUrl,
+    );
     availableModels.set(models);
 
     if (models.length > 0 && (!selectedEngine.model || !models.includes(selectedEngine.model))) {
       selectedEngine.model = models[0];
       config.set(currentConfig);
-      await invoke('save_config', { config: currentConfig });
+      await persistConfig(currentConfig);
     }
   } catch (e) {
     console.error("[Config] Failed to fetch models:", e);
     availableModels.set([]);
-    session.setError(`Engine Error: ${e}`); 
+    session.setError(`Engine Error: ${formatBackendError(e)}`); 
   } finally {
     isLoadingModels.set(false);
   }
 }
 
 async function loadHistory() {
-  const freshHistory = await invoke<Thread[]>('get_history');
+  const freshHistory = await getHistory();
   history.set(freshHistory);
   
   const tid = get(activeThreadId);
@@ -168,40 +187,34 @@ async function loadHistory() {
 
 async function restoreLastDesign() {
   try {
-    const lastRaw = await invoke<unknown>('get_last_design');
-    const last = normalizeLastDesign(lastRaw);
+    const last = await getLastDesign();
     if (last) {
-      const [design, threadId] = last;
-      let restoredFromThread = false;
+      const { design, threadId, messageId, artifactBundle, modelManifest, selectedPartId } = last;
 
-      if (threadId) {
-        try {
-          const thread = await invoke<Thread>('get_thread', { id: threadId });
-          const lastAssistantMsg = thread
-            ? [...thread.messages].reverse().find(m => m.role === 'assistant' && m.output)
-            : null;
+      activeThreadId.set(threadId);
+      activeVersionId.set(messageId);
 
-          if (lastAssistantMsg) {
-            activeThreadId.set(threadId);
-            activeVersionId.set(lastAssistantMsg.id);
-            workingCopy.loadVersion(lastAssistantMsg.output, lastAssistantMsg.id);
-            paramPanelState.hydrateFromVersion(lastAssistantMsg.output, lastAssistantMsg.id);
-            restoredFromThread = true;
-          }
-        } catch (e) {
-          console.warn("[Boot] Could not load full thread during restore:", e);
+      if (design) {
+        workingCopy.loadVersion(design, messageId);
+        paramPanelState.hydrateFromVersion(design, messageId);
+      } else {
+        workingCopy.reset();
+        paramPanelState.reset();
+      }
+
+      if (artifactBundle) {
+        session.setStlUrl(toAssetUrl(artifactBundle.previewStlPath));
+        session.setModelRuntime(artifactBundle, modelManifest);
+        session.setSelectedPartId(selectedPartId);
+      } else {
+        session.clearModelRuntime();
+        if (design) {
+          const panel = get(paramPanelState);
+          await handleParamChange(panel.params, panel.macroCode, false);
+        } else {
+          session.setStlUrl(null);
         }
       }
-
-      if (!restoredFromThread) {
-        workingCopy.loadVersion(design, null);
-        paramPanelState.hydrateFromVersion(design, null);
-        activeThreadId.set(threadId);
-      }
-
-      // Render preview (persist=false to avoid boot-time DB writes)
-      const panel = get(paramPanelState);
-      await handleParamChange(panel.params, panel.macroCode, false);
     } else {
       await fetchDefaultMacro();
     }
@@ -211,38 +224,9 @@ async function restoreLastDesign() {
   }
 }
 
-function normalizeLastDesign(payload: unknown): [DesignOutput, string | null] | null {
-  if (!payload) return null;
-
-  if (Array.isArray(payload)) {
-    const design = payload[0] as DesignOutput | undefined;
-    if (!design) return null;
-    const threadId = payload[1];
-    return [
-      design,
-      typeof threadId === 'string' ? threadId : null,
-    ];
-  }
-
-  if (typeof payload === 'object') {
-    const data = payload as Record<string, unknown>;
-    const design = data.design as DesignOutput | undefined;
-    if (!design) return null;
-    const threadId =
-      typeof data.threadId === 'string'
-        ? data.threadId
-        : typeof data.thread_id === 'string'
-          ? data.thread_id
-          : null;
-    return [design, threadId];
-  }
-
-  return null;
-}
-
 async function fetchDefaultMacro() {
   try {
-    const code = await invoke<string>('get_default_macro');
+    const code = await getDefaultMacro();
     if (!get(workingCopy).macroCode) {
       workingCopy.patch({ macroCode: code });
       paramPanelState.hydrate({

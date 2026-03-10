@@ -6,12 +6,16 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:web\"",
     "dev:web": "vite",
-    "dev:server": "node server/index.js",
+    "dev:server": "tsx watch server/index.ts",
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "typecheck": "svelte-check --tsconfig ./tsconfig.json && tsc --project tsconfig.node.json --noEmit",
+    "generate:contracts": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_contracts",
+    "check:contracts": "npm run generate:contracts && git diff --exit-code -- src/lib/tauri/contracts.ts",
+    "test:unit": "tsx --test src/lib/genie/**/*.test.ts",
     "test:e2e": "playwright test",
-    "start": "node server/index.js"
+    "start": "tsx server/index.ts"
   },
   "dependencies": {
     "@codemirror/lang-python": "^6.2.1",
@@ -31,8 +35,14 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@tauri-apps/cli": "^2.5.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.7.2",
+    "@types/three": "^0.183.1",
     "concurrently": "^9.2.1",
     "svelte": "^5.28.1",
+    "svelte-check": "^4.4.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
     "vite": "^6.3.5"
   }
 }

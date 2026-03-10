@@ -10,6 +10,7 @@ export const activeVersionId = writable<string | null>(null);
 export const config = writable<AppConfig>({
   engines: [],
   selectedEngineId: '',
+  freecadCmd: '',
   assets: [],
   microwave: {
     humId: null,

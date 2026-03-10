@@ -1,7 +1,8 @@
 use tauri::State;
 
 use crate::db;
-use crate::models::AppState;
+use crate::models::{AppError, AppResult, AppState, MessageRole, MessageStatus, Thread};
+use crate::persist_thread_summary;
 
 fn rust_profile_enabled() -> bool {
     std::env::var("DRY_PROFILE")
@@ -10,9 +11,11 @@ fn rust_profile_enabled() -> bool {
 }
 
 #[tauri::command]
-pub async fn get_history(state: State<'_, AppState>) -> Result<Vec<crate::models::Thread>, String> {
+#[specta::specta]
+pub async fn get_history(state: State<'_, AppState>) -> AppResult<Vec<Thread>> {
     let db = state.db.lock().await;
-    let threads = db::get_all_threads(&db).map_err(|e: rusqlite::Error| e.to_string())?;
+    let threads = db::get_all_threads(&db)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
     if rust_profile_enabled() {
         eprintln!("[RPROF] history.get_history threads={}", threads.len());
     }
@@ -20,18 +23,17 @@ pub async fn get_history(state: State<'_, AppState>) -> Result<Vec<crate::models
 }
 
 #[tauri::command]
-pub async fn get_thread(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<crate::models::Thread, String> {
+#[specta::specta]
+pub async fn get_thread(id: String, state: State<'_, AppState>) -> AppResult<Thread> {
     let db = state.db.lock().await;
     let title = db::get_thread_title(&db, &id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Thread not found")?;
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .ok_or_else(|| AppError::not_found("Thread not found."))?;
     let summary = db::get_thread_summary(&db, &id)
-        .map_err(|e| e.to_string())?
+        .map_err(|err| AppError::persistence(err.to_string()))?
         .unwrap_or_default();
-    let messages = db::get_thread_messages(&db, &id).map_err(|e| e.to_string())?;
+    let messages =
+        db::get_thread_messages(&db, &id).map_err(|err| AppError::persistence(err.to_string()))?;
     if rust_profile_enabled() {
         let image_count = messages.iter().filter(|m| m.image_data.is_some()).count();
         let image_chars: usize = messages
@@ -47,30 +49,26 @@ pub async fn get_thread(
         );
     }
 
-    let mut stmt = db
-        .prepare("SELECT genie_traits FROM threads WHERE id = ?1")
-        .map_err(|e| e.to_string())?;
-    let genie_traits_str: Option<String> = stmt
-        .query_row([&id], |row| row.get(0))
-        .map_err(|e| e.to_string())?;
-    let genie_traits: Option<serde_json::Value> =
-        genie_traits_str.and_then(|s| serde_json::from_str(&s).ok());
+    let genie_traits = db::get_thread_genie_traits(&db, &id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
 
     let updated_at = messages.last().map(|m| m.timestamp).unwrap_or(0);
     let version_count = messages
         .iter()
-        .filter(|m| m.role == "assistant" && m.output.is_some())
+        .filter(|m| {
+            m.role == MessageRole::Assistant && (m.output.is_some() || m.artifact_bundle.is_some())
+        })
         .count();
     let pending_count = messages
         .iter()
-        .filter(|m| m.role == "assistant" && m.status == "pending")
+        .filter(|m| m.role == MessageRole::Assistant && m.status == MessageStatus::Pending)
         .count();
     let error_count = messages
         .iter()
-        .filter(|m| m.role == "assistant" && m.status == "error")
+        .filter(|m| m.role == MessageRole::Assistant && m.status == MessageStatus::Error)
         .count();
 
-    Ok(crate::models::Thread {
+    Ok(Thread {
         id,
         title,
         summary,
@@ -84,33 +82,84 @@ pub async fn get_thread(
 }
 
 #[tauri::command]
-pub async fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
+#[specta::specta]
+pub async fn clear_history(state: State<'_, AppState>) -> AppResult<()> {
     let db = state.db.lock().await;
-    db::clear_history(&db).map_err(|e: rusqlite::Error| e.to_string())
+    db::clear_history(&db).map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
 }
 
 #[tauri::command]
-pub async fn delete_thread(id: String, state: State<'_, AppState>) -> Result<(), String> {
+#[specta::specta]
+pub async fn delete_thread(id: String, state: State<'_, AppState>) -> AppResult<()> {
     let db = state.db.lock().await;
-    db::delete_thread(&db, &id).map_err(|e: rusqlite::Error| e.to_string())
+    db::delete_thread(&db, &id)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
 }
 
 #[tauri::command]
-pub async fn delete_version(message_id: String, state: State<'_, AppState>) -> Result<(), String> {
+#[specta::specta]
+pub async fn delete_version(message_id: String, state: State<'_, AppState>) -> AppResult<()> {
     let db = state.db.lock().await;
-    db::delete_message(&db, &message_id).map_err(|e: rusqlite::Error| e.to_string())
+    let thread_id = db::delete_version_cluster(&db, &message_id)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
+
+    if let Some(thread_id) = thread_id {
+        let title = db::get_thread_title(&db, &thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+            .unwrap_or_default();
+        if db::has_visible_messages(&db, &thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+        {
+            let _ = persist_thread_summary(&db, &thread_id, &title);
+        } else {
+            db::update_thread_summary(&db, &thread_id, "")
+                .map_err(|err| AppError::persistence(err.to_string()))?;
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn restore_version(message_id: String, state: State<'_, AppState>) -> Result<(), String> {
+#[specta::specta]
+pub async fn restore_version(message_id: String, state: State<'_, AppState>) -> AppResult<()> {
     let db = state.db.lock().await;
-    db::restore_message(&db, &message_id).map_err(|e: rusqlite::Error| e.to_string())
+    let thread_id = db::restore_version_cluster(&db, &message_id)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
+
+    if let Some(thread_id) = thread_id {
+        let title = db::get_thread_title(&db, &thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+            .unwrap_or_default();
+        if db::has_visible_messages(&db, &thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+        {
+            let _ = persist_thread_summary(&db, &thread_id, &title);
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_deleted_messages(
     state: State<'_, AppState>,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> AppResult<Vec<crate::models::DeletedMessage>> {
     let db = state.db.lock().await;
-    db::get_deleted_messages(&db).map_err(|e: rusqlite::Error| e.to_string())
+    db::get_deleted_messages(&db)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn hide_deleted_message(message_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    let db = state.db.lock().await;
+    let changed = db::hide_deleted_message(&db, &message_id)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
+    if changed {
+        Ok(())
+    } else {
+        Err(AppError::not_found("Deleted message not found or already hidden."))
+    }
 }

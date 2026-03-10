@@ -1,5 +1,11 @@
 import { get, writable } from 'svelte/store';
-import type { DesignOutput, DesignParams, UiSpec } from '../types/domain';
+import {
+  normalizeDesignParams,
+  normalizeUiSpec,
+  type DesignOutput,
+  type DesignParams,
+  type UiSpec,
+} from '../types/domain';
 
 type ParamPanelStateSnapshot = {
   versionId: string | null;
@@ -10,18 +16,6 @@ type ParamPanelStateSnapshot = {
 
 function emptyUiSpec(): UiSpec {
   return { fields: [] };
-}
-
-function normalizeUiSpec(uiSpec: unknown): UiSpec {
-  if (!uiSpec || typeof uiSpec !== 'object') return emptyUiSpec();
-  const typed = uiSpec as Partial<UiSpec>;
-  const fields = Array.isArray(typed.fields) ? typed.fields : [];
-  return { ...typed, fields } as UiSpec;
-}
-
-function normalizeParams(params: unknown): DesignParams {
-  if (!params || typeof params !== 'object' || Array.isArray(params)) return {};
-  return { ...(params as DesignParams) };
 }
 
 const initialState: ParamPanelStateSnapshot = {
@@ -51,7 +45,7 @@ function createParamPanelState() {
         versionId: payload.versionId ?? null,
         macroCode: payload.macroCode ?? '',
         uiSpec: normalizeUiSpec(payload.uiSpec),
-        params: normalizeParams(payload.params)
+        params: normalizeDesignParams(payload.params)
       });
     },
 
@@ -60,7 +54,7 @@ function createParamPanelState() {
         versionId: versionId ?? null,
         macroCode: design?.macroCode ?? '',
         uiSpec: normalizeUiSpec(design?.uiSpec),
-        params: normalizeParams(design?.initialParams)
+        params: normalizeDesignParams(design?.initialParams)
       });
     },
 
@@ -77,7 +71,7 @@ function createParamPanelState() {
     },
 
     setParams(params: DesignParams) {
-      update(s => ({ ...s, params: normalizeParams(params) }));
+      update(s => ({ ...s, params: normalizeDesignParams(params) }));
     },
 
     patchParams(partialParams: DesignParams) {
@@ -85,7 +79,7 @@ function createParamPanelState() {
         ...s,
         params: {
           ...s.params,
-          ...normalizeParams(partialParams)
+          ...normalizeDesignParams(partialParams)
         }
       }));
     }
@@ -93,6 +87,7 @@ function createParamPanelState() {
 }
 
 export const paramPanelState = createParamPanelState();
+export const liveApply = writable(false);
 
 export function getParamPanelSnapshot() {
   return get(paramPanelState);

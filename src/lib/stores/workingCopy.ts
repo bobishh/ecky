@@ -1,72 +1,83 @@
-import { writable, derived, get } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
 
-/**
- * @typedef {Object} WorkingCopy
- * @property {string} title
- * @property {string} versionName
- * @property {string} macroCode
- * @property {Object} uiSpec
- * @property {Object} params
- * @property {boolean} dirty
- * @property {string|null} sourceVersionId
- */
+import {
+  normalizeDesignOutput,
+  normalizeDesignParams,
+  normalizeUiSpec,
+  type DesignOutput,
+  type DesignParams,
+  type UiSpec,
+} from '../types/domain';
 
-function createWorkingCopyStore() {
-  const initialState = {
+export interface WorkingCopyState {
+  title: string;
+  versionName: string;
+  macroCode: string;
+  uiSpec: UiSpec;
+  params: DesignParams;
+  dirty: boolean;
+  sourceVersionId: string | null;
+}
+
+type WorkingCopyPatch = Partial<Omit<WorkingCopyState, 'dirty'>> & {
+  dirty?: boolean;
+};
+
+function createInitialState(): WorkingCopyState {
+  return {
     title: '',
     versionName: '',
     macroCode: '',
     uiSpec: { fields: [] },
     params: {},
     dirty: false,
-    sourceVersionId: null
+    sourceVersionId: null,
   };
+}
 
-  const { subscribe, set, update } = writable(initialState);
+function createWorkingCopyStore() {
+  const initialState = createInitialState();
+  const { subscribe, set, update } = writable<WorkingCopyState>(initialState);
 
   return {
     subscribe,
-    /**
-     * Updates the working copy from a persisted version.
-     * Marks it as not dirty.
-     */
-    loadVersion: (version, messageId) => {
+
+    loadVersion(version: DesignOutput, messageId: string | null) {
+      const normalized = normalizeDesignOutput(version);
       set({
-        title: version.title || 'Untitled Design',
-        versionName: version.versionName || 'Working Copy',
-        macroCode: version.macroCode || '',
-        uiSpec: version.uiSpec || { fields: [] },
-        params: version.initialParams || {},
+        title: normalized.title,
+        versionName: normalized.versionName,
+        macroCode: normalized.macroCode,
+        uiSpec: normalizeUiSpec(normalized.uiSpec),
+        params: normalizeDesignParams(normalized.initialParams),
         dirty: false,
-        sourceVersionId: messageId
+        sourceVersionId: messageId,
       });
     },
-    /**
-     * Merges partial updates into the working copy.
-     * Marks it as dirty.
-     */
-    patch: (changes) => {
-      update(state => ({
+
+    patch(changes: WorkingCopyPatch) {
+      update((state) => ({
         ...state,
         ...changes,
-        dirty: true
+        uiSpec: changes.uiSpec ? normalizeUiSpec(changes.uiSpec) : state.uiSpec,
+        params: changes.params ? normalizeDesignParams(changes.params) : state.params,
+        dirty: changes.dirty ?? true,
       }));
     },
-    /**
-     * Specifically for parameter updates.
-     */
-    updateParams: (newParams) => {
-      update(state => ({
+
+    updateParams(newParams: DesignParams) {
+      update((state) => ({
         ...state,
-        params: { ...state.params, ...newParams },
-        dirty: true
+        params: { ...state.params, ...normalizeDesignParams(newParams) },
+        dirty: true,
       }));
     },
-    reset: () => set(initialState)
+
+    reset() {
+      set(createInitialState());
+    },
   };
 }
 
 export const workingCopy = createWorkingCopyStore();
-
-// Helper derived stores for UI
-export const isDirty = derived(workingCopy, $wc => $wc.dirty);
+export const isDirty = derived(workingCopy, ($workingCopy) => $workingCopy.dirty);

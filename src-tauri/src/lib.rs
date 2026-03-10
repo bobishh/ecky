@@ -1,20 +1,23 @@
 #![allow(unexpected_cfgs)]
 
+pub mod bindings;
 pub mod commands;
 pub mod context;
+pub mod contracts;
 pub mod db;
 pub mod freecad;
 pub mod llm;
 pub mod models;
 
-use serde_json::json;
 use std::fs;
 use std::sync::Mutex;
 use tauri::Manager;
 use uuid::Uuid;
 
 use crate::context::*;
-use crate::models::{AppState, Attachment, DesignOutput, ThreadReference};
+use crate::models::{
+    AppState, Attachment, DesignOutput, GenieTraits, LastDesignSnapshot, ThreadReference,
+};
 
 use rand::Rng;
 
@@ -36,15 +39,9 @@ fn set_macos_process_name(name: &str) {
 #[cfg(not(target_os = "macos"))]
 fn set_macos_process_name(_name: &str) {}
 
-pub fn generate_genie_traits() -> serde_json::Value {
+pub fn generate_genie_traits() -> GenieTraits {
     let mut rng = rand::thread_rng();
-    json!({
-        "seed": rng.gen::<u32>(),
-        "colorHue": rng.gen_range(0.0..360.0),
-        "vertexCount": rng.gen_range(10..31),
-        "jitterScale": rng.gen_range(0.5..1.5),
-        "pulseScale": rng.gen_range(0.5..1.5),
-    })
+    GenieTraits::from_seed(rng.gen::<u32>())
 }
 
 pub(crate) fn extract_code_blocks(text: &str) -> Vec<String> {
@@ -234,7 +231,11 @@ pub(crate) fn persist_user_prompt_references(
 fn migrate_legacy_references(conn: &rusqlite::Connection) -> Result<(), String> {
     let threads = db::get_all_threads(conn).map_err(|e| e.to_string())?;
     for thread in threads {
-        for message in thread.messages.iter().filter(|m| m.role == "user") {
+        for message in thread
+            .messages
+            .iter()
+            .filter(|m| m.role == crate::models::MessageRole::User)
+        {
             persist_user_prompt_references(
                 conn,
                 &thread.id,
@@ -258,14 +259,49 @@ pub(crate) fn persist_thread_summary(
     thread_id: &str,
     title: &str,
 ) -> Result<String, String> {
-    let messages = db::get_thread_messages(conn, thread_id).map_err(|e| e.to_string())?;
+    let messages =
+        db::get_thread_messages_for_context(conn, thread_id).map_err(|e| e.to_string())?;
     let summary = build_thread_summary(title, &messages);
     db::update_thread_summary(conn, thread_id, &summary).map_err(|e| e.to_string())?;
     Ok(summary)
 }
 
+pub(crate) fn is_explicit_question_only_request(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    p.starts_with("/ask ")
+        || [
+            "answer only",
+            "just answer",
+            "only answer",
+            "do not generate",
+            "don't generate",
+            "without generating",
+            "no generation",
+            "do not change the model",
+            "don't change the model",
+            "without changing the model",
+            "только ответь",
+            "только ответ",
+            "просто ответь",
+            "без генерации",
+            "не генерируй",
+            "не меняй модель",
+            "не трогай модель",
+        ]
+        .iter()
+        .any(|marker| p.contains(marker))
+}
+
 pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
     let p = prompt.to_lowercase();
+    if is_explicit_question_only_request(prompt) {
+        return models::IntentDecision {
+            intent_mode: "question".to_string(),
+            confidence: 0.95,
+            response: "Answering the question without generating geometry.".to_string(),
+            usage: None,
+        };
+    }
     let has_question_signal = p.contains('?')
         || p.contains("explain")
         || p.contains("why")
@@ -288,12 +324,14 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             intent_mode: "question".to_string(),
             confidence: 0.55,
             response: "Thinking not deep enough. This looks like a question.".to_string(),
+            usage: None,
         }
     } else {
         models::IntentDecision {
             intent_mode: "design".to_string(),
             confidence: 0.55,
             response: "This looks like a geometry change request.".to_string(),
+            usage: None,
         }
     }
 }
@@ -372,6 +410,7 @@ CRITICAL RULES:
 pub fn run() {
     set_macos_process_name("Ecky CAD");
     let context = tauri::generate_context!();
+    let builder = crate::bindings::builder();
 
     let default_config = crate::models::Config {
         engines: vec![crate::models::Engine {
@@ -385,6 +424,7 @@ pub fn run() {
             system_prompt: DEFAULT_PROMPT.to_string(),
         }],
         selected_engine_id: "default-gemini".to_string(),
+        freecad_cmd: String::new(),
         assets: vec![],
         microwave: None,
     };
@@ -428,21 +468,21 @@ pub fn run() {
                 }
             }
 
-            let mut last_design = None;
-            let mut last_thread_id = None;
+            let mut last_snapshot = None;
             let last_path = config_dir.join("last_design.json");
             if last_path.exists() {
                 if let Ok(data) = fs::read_to_string(&last_path) {
-                    #[derive(serde::Deserialize)]
-                    struct LastSession {
-                        design: DesignOutput,
-                        thread_id: Option<String>,
-                    }
-                    if let Ok(session) = serde_json::from_str::<LastSession>(&data) {
-                        last_design = Some(session.design);
-                        last_thread_id = session.thread_id;
+                    if let Ok(session) = serde_json::from_str::<LastDesignSnapshot>(&data) {
+                        last_snapshot = Some(session);
                     } else if let Ok(design) = serde_json::from_str::<DesignOutput>(&data) {
-                        last_design = Some(design);
+                        last_snapshot = Some(LastDesignSnapshot {
+                            design: Some(design),
+                            thread_id: None,
+                            message_id: None,
+                            artifact_bundle: None,
+                            model_manifest: None,
+                            selected_part_id: None,
+                        });
                     }
                 }
             }
@@ -453,42 +493,14 @@ pub fn run() {
 
             app.manage(AppState {
                 config: Mutex::new(config),
-                last_design: Mutex::new(last_design),
-                last_thread_id: Mutex::new(last_thread_id),
+                last_snapshot: Mutex::new(last_snapshot),
                 db: tokio::sync::Mutex::new(conn),
                 render_lock: tokio::sync::Mutex::new(()),
             });
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::config::get_config,
-            commands::config::save_config,
-            commands::config::get_system_prompt,
-            commands::config::list_models,
-            commands::history::get_history,
-            commands::history::get_thread,
-            commands::history::clear_history,
-            commands::history::delete_thread,
-            commands::history::delete_version,
-            commands::history::restore_version,
-            commands::history::get_deleted_messages,
-            commands::generation::generate_design,
-            commands::generation::init_generation_attempt,
-            commands::generation::finalize_generation_attempt,
-            commands::generation::classify_intent,
-            commands::render::render_stl,
-            commands::render::get_default_macro,
-            commands::render::get_mess_stl_path,
-            commands::render::export_file,
-            commands::design::add_manual_version,
-            commands::design::update_ui_spec,
-            commands::design::update_parameters,
-            commands::design::parse_macro_params,
-            commands::assets::upload_asset,
-            commands::assets::save_recorded_audio,
-            commands::session::get_last_design,
-        ])
+        .invoke_handler(builder.invoke_handler())
         .run(context)
         .expect("error while running tauri application");
 }
@@ -602,5 +614,22 @@ mod tests {
         let result = summarize_reference("something_else", "ref", "content");
         assert!(result.contains("Reference"));
         assert!(result.contains("ref"));
+    }
+
+    #[test]
+    fn generate_genie_traits_returns_v2_profile() {
+        let traits = generate_genie_traits();
+        assert_eq!(traits.version, crate::models::GENIE_TRAITS_VERSION);
+        assert!(traits.seed > 0);
+        assert!((10..=24).contains(&traits.vertex_count));
+    }
+
+    #[test]
+    fn explicit_question_only_markers_force_question_mode() {
+        assert!(is_explicit_question_only_request("answer only: why is this thin?"));
+        assert!(is_explicit_question_only_request("только ответь, почему тут дырка?"));
+
+        let fallback = fallback_intent("just answer, do not generate anything");
+        assert_eq!(fallback.intent_mode, "question");
     }
 }

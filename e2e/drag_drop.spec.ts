@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import path from 'path';
 
 test.describe('Drag and Drop', () => {
   test.beforeEach(async ({ page }) => {
@@ -14,6 +13,7 @@ test.describe('Drag and Drop', () => {
     // Trigger dragover via web event
     await page.evaluate(() => {
       const container = document.querySelector('.prompt-container');
+      if (!container) return;
       const dragOverEvent = new DragEvent('dragover', {
         bubbles: true,
         cancelable: true,
@@ -30,6 +30,7 @@ test.describe('Drag and Drop', () => {
     // Trigger dragleave
     await page.evaluate(() => {
       const container = document.querySelector('.prompt-container');
+      if (!container) return;
       const dragLeaveEvent = new DragEvent('dragleave', {
         bubbles: true,
         cancelable: true
@@ -47,6 +48,7 @@ test.describe('Drag and Drop', () => {
     // but our component handles the fallback to filename which is enough to test the UI.
     await page.evaluate(() => {
       const container = document.querySelector('.prompt-container');
+      if (!container) return;
       const dataTransfer = new DataTransfer();
       const file = new File([''], 'test-image.jpg', { type: 'image/jpeg' });
       dataTransfer.items.add(file);
@@ -68,6 +70,7 @@ test.describe('Drag and Drop', () => {
   test('dropping a CAD file adds it correctly', async ({ page }) => {
     await page.evaluate(() => {
       const container = document.querySelector('.prompt-container');
+      if (!container) return;
       const dataTransfer = new DataTransfer();
       const file = new File([''], 'part.stl', { type: 'application/sla' });
       dataTransfer.items.add(file);

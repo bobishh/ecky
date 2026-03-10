@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { requestQueue } from './requestQueue';
+import type { ArtifactBundle, ModelManifest } from '../types/domain';
 
 export type SessionPhase = 
   | 'booting'
@@ -17,6 +18,9 @@ function createSessionStore() {
     status: 'System ready.',
     error: null as string | null,
     stlUrl: null as string | null,
+    artifactBundle: null as ArtifactBundle | null,
+    modelManifest: null as ModelManifest | null,
+    selectedPartId: null as string | null,
     isManual: false as boolean,
     repairMessage: '' as string,
     cookingPhrase: '' as string,
@@ -29,7 +33,30 @@ function createSessionStore() {
     setPhase: (p: SessionPhase) => update(s => ({ ...s, phase: p })),
     setStatus: (msg: string) => update(s => ({ ...s, status: msg })),
     setError: (err: string | null) => update(s => ({ ...s, error: err })),
-    setStlUrl: (url: string | null) => update(s => ({ ...s, stlUrl: url })),
+    setStlUrl: (url: string | null) =>
+      update(s => ({
+        ...s,
+        stlUrl: url,
+        artifactBundle: url ? s.artifactBundle : null,
+        modelManifest: url ? s.modelManifest : null,
+        selectedPartId: url ? s.selectedPartId : null,
+      })),
+    setModelRuntime: (bundle: ArtifactBundle | null, manifest: ModelManifest | null) =>
+      update(s => {
+        const selectedPartId =
+          s.selectedPartId && manifest?.parts?.some((part) => part.partId === s.selectedPartId)
+            ? s.selectedPartId
+            : null;
+        return {
+          ...s,
+          artifactBundle: bundle,
+          modelManifest: manifest,
+          selectedPartId,
+        };
+      }),
+    setSelectedPartId: (partId: string | null) => update(s => ({ ...s, selectedPartId: partId })),
+    clearModelRuntime: () =>
+      update(s => ({ ...s, artifactBundle: null, modelManifest: null, selectedPartId: null })),
     setIsManual: (m: boolean) => update(s => ({ ...s, isManual: m })),
     setRepairMessage: (msg: string) => update(s => ({ ...s, repairMessage: msg })),
     setCookingPhrase: (msg: string) => update(s => ({ ...s, cookingPhrase: msg })),
@@ -43,6 +70,12 @@ export const phase = { subscribe: (fn: (value: SessionPhase) => void) => session
 export const status = { subscribe: (fn: (value: string) => void) => session.subscribe(s => fn(s.status)), set: session.setStatus };
 export const error = { subscribe: (fn: (value: string | null) => void) => session.subscribe(s => fn(s.error)), set: session.setError };
 export const stlUrl = { subscribe: (fn: (value: string | null) => void) => session.subscribe(s => fn(s.stlUrl)), set: session.setStlUrl };
+export const artifactBundle = { subscribe: (fn: (value: ArtifactBundle | null) => void) => session.subscribe(s => fn(s.artifactBundle)) };
+export const modelManifest = { subscribe: (fn: (value: ModelManifest | null) => void) => session.subscribe(s => fn(s.modelManifest)) };
+export const selectedPartId = {
+  subscribe: (fn: (value: string | null) => void) => session.subscribe(s => fn(s.selectedPartId)),
+  set: session.setSelectedPartId,
+};
 export const isManual = { subscribe: (fn: (value: boolean) => void) => session.subscribe(s => fn(s.isManual)) };
 
 let manualRenderActive = false;

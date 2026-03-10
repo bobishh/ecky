@@ -1,4 +1,4 @@
-use crate::models::{DesignOutput, Message, ThreadReference};
+use crate::models::{DesignOutput, InteractionMode, Message, MessageRole, ThreadReference, UiSpec};
 
 pub const THREAD_SUMMARY_MAX_CHARS: usize = 1600;
 pub const SUMMARY_ITEM_MAX_CHARS: usize = 220;
@@ -26,7 +26,7 @@ pub fn latest_output(messages: &[Message]) -> Option<DesignOutput> {
     messages
         .iter()
         .rev()
-        .find(|m| m.role == "assistant" && m.output.is_some())
+        .find(|m| m.role == MessageRole::Assistant && m.output.is_some())
         .and_then(|m| m.output.clone())
 }
 
@@ -56,7 +56,7 @@ pub fn build_thread_summary(title: &str, messages: &[Message]) -> String {
 
     let recent_user_intents = messages
         .iter()
-        .filter(|m| m.role == "user")
+        .filter(|m| m.role == MessageRole::User)
         .rev()
         .take(4)
         .collect::<Vec<_>>()
@@ -73,7 +73,7 @@ pub fn build_thread_summary(title: &str, messages: &[Message]) -> String {
 
     let recent_assistant_decisions = messages
         .iter()
-        .filter(|m| m.role == "assistant")
+        .filter(|m| m.role == MessageRole::Assistant)
         .rev()
         .take(4)
         .collect::<Vec<_>>()
@@ -116,7 +116,7 @@ pub fn build_recent_dialogue(messages: &[Message]) -> String {
         .into_iter()
         .rev()
         .map(|m| {
-            let speaker = if m.role == "user" {
+            let speaker = if m.role == MessageRole::User {
                 "USER"
             } else {
                 "ASSISTANT"
@@ -173,7 +173,7 @@ pub fn assemble_context(
     parent_macro_code: Option<String>,
 ) -> PromptContext {
     if let Some(tid) = thread_id {
-        let messages = crate::db::get_thread_messages(db, &tid).unwrap_or_default();
+        let messages = crate::db::get_thread_messages_for_context(db, &tid).unwrap_or_default();
         let last_o = latest_output(&messages);
         let summary = crate::db::get_thread_summary(db, &tid)
             .ok()
@@ -208,10 +208,10 @@ pub fn assemble_context(
             title: "Untitled Design".to_string(),
             version_name: "V1".to_string(),
             response: String::new(),
-            interaction_mode: "design".to_string(),
+            interaction_mode: InteractionMode::Design,
             macro_code: code,
-            ui_spec: serde_json::json!({ "fields": [] }),
-            initial_params: serde_json::json!({}),
+            ui_spec: UiSpec::default(),
+            initial_params: Default::default(),
         });
 
         PromptContext {
@@ -263,16 +263,20 @@ pub fn format_contextual_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{DesignOutput, Message};
+    use crate::models::{DesignOutput, Message, MessageStatus};
 
     fn mock_message(role: &str, content: &str, output: Option<DesignOutput>) -> Message {
         Message {
             id: "test-id".to_string(),
-            role: role.to_string(),
+            role: role.parse().unwrap(),
             content: content.to_string(),
-            status: "success".to_string(),
+            status: MessageStatus::Success,
             output,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
             image_data: None,
+            attachment_images: Vec::new(),
             timestamp: 1000,
         }
     }
@@ -282,10 +286,10 @@ mod tests {
             title: title.to_string(),
             version_name: "V1".to_string(),
             response: "Test response".to_string(),
-            interaction_mode: "design".to_string(),
+            interaction_mode: InteractionMode::Design,
             macro_code: "import FreeCAD".to_string(),
-            ui_spec: serde_json::json!({"fields": []}),
-            initial_params: serde_json::json!({}),
+            ui_spec: UiSpec::default(),
+            initial_params: Default::default(),
         }
     }
 
