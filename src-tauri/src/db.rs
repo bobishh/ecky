@@ -1,7 +1,7 @@
 use crate::models::{
-    upgraded_or_default_genie_traits, ArtifactBundle, DeletedMessage, DesignOutput, DesignParams,
-    GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, Thread, ThreadReference,
-    UiSpec,
+    normalize_design_output, upgraded_or_default_genie_traits, ArtifactBundle, DeletedMessage,
+    DesignOutput, DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest,
+    TargetLeaseInfo, Thread, ThreadReference, UiSpec,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 
@@ -9,6 +9,12 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 struct ThreadMessageRow {
     message: Message,
     deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LatestSuccessfulTarget {
+    pub thread_id: String,
+    pub message_id: String,
 }
 
 pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
@@ -43,6 +49,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             usage TEXT,
             artifact_bundle TEXT,
             model_manifest TEXT,
+            agent_origin TEXT,
             timestamp INTEGER NOT NULL,
             image_data TEXT,
             attachment_images TEXT,
@@ -74,6 +81,77 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_sessions (
+            session_id TEXT PRIMARY KEY,
+            client_kind TEXT NOT NULL,
+            host_label TEXT NOT NULL DEFAULT '',
+            agent_label TEXT NOT NULL,
+            llm_model_id TEXT,
+            llm_model_label TEXT,
+            thread_id TEXT,
+            message_id TEXT,
+            model_id TEXT,
+            phase TEXT NOT NULL,
+            status_text TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_drafts (
+            session_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            base_message_id TEXT NOT NULL,
+            model_id TEXT,
+            design_output TEXT NOT NULL,
+            artifact_bundle TEXT,
+            model_manifest TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (thread_id, base_message_id)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS target_leases (
+            lease_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            model_id TEXT,
+            acquired_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            host_label TEXT NOT NULL DEFAULT '',
+            agent_label TEXT NOT NULL DEFAULT ''
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_thread_visible_timestamp
+         ON messages(thread_id, timestamp DESC)
+         WHERE deleted_at IS NULL",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_thread_target_candidates
+         ON messages(thread_id, role, status, timestamp DESC)
+         WHERE deleted_at IS NULL",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_target_leases_target_expires
+         ON target_leases(thread_id, message_id, model_id, expires_at DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_target_leases_session
+         ON target_leases(session_id, expires_at DESC)",
+        [],
+    )?;
+
     // Migrations for existing databases
     let _ = conn.execute(
         "ALTER TABLE threads ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
@@ -85,13 +163,35 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN usage TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN artifact_bundle TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN model_manifest TEXT", []);
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN agent_origin TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'success'",
         [],
     );
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN deleted_at INTEGER", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN deleted_at INTEGER", []);
-    let _ = conn.execute("ALTER TABLE messages ADD COLUMN trash_hidden_at INTEGER", []);
+    let _ = conn.execute(
+        "ALTER TABLE messages ADD COLUMN trash_hidden_at INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE threads ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE agent_sessions ADD COLUMN host_label TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_sessions ADD COLUMN llm_model_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_sessions ADD COLUMN llm_model_label TEXT",
+        [],
+    );
     migrate_thread_genie_traits(&conn)?;
 
     Ok(conn)
@@ -99,6 +199,10 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
 
 fn deserialize_thread_genie_traits(thread_id: &str, raw: Option<&str>) -> GenieTraits {
     upgraded_or_default_genie_traits(thread_id, raw)
+}
+
+fn deserialize_agent_origin(raw: Option<&str>) -> Option<crate::models::AgentOrigin> {
+    raw.and_then(|json| serde_json::from_str(json).ok())
 }
 
 fn migrate_thread_genie_traits(conn: &Connection) -> SqlResult<()> {
@@ -123,27 +227,49 @@ fn migrate_thread_genie_traits(conn: &Connection) -> SqlResult<()> {
 
 pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
     let mut stmt = conn.prepare("
-        SELECT id, title, summary, updated_at, genie_traits,
+        SELECT id, title, summary,
+        COALESCE(
+            (
+                SELECT MAX(timestamp)
+                FROM messages
+                WHERE thread_id = threads.id
+                  AND deleted_at IS NULL
+                  AND status != 'discarded'
+            ),
+            updated_at
+        ) as last_used_at,
+        genie_traits,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count
-        FROM threads 
-        WHERE deleted_at IS NULL
-        ORDER BY updated_at DESC
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
+        COALESCE(status, 'active') as thread_status,
+        finalized_at,
+        pending_confirm
+        FROM threads
+        WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
+        ORDER BY last_used_at DESC, id DESC
     ")?;
     let thread_iter = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
         let traits_str: Option<String> = row.get(4)?;
+        let status_str: String = row
+            .get::<_, String>(8)
+            .unwrap_or_else(|_| "active".to_string());
         Ok(Thread {
             id: id.clone(),
             title: row.get(1)?,
             summary: row.get(2)?,
             updated_at: row.get::<_, i64>(3)? as u64,
-            messages: vec![], // Messages are now lazy-loaded
+            messages: vec![],
             genie_traits: Some(deserialize_thread_genie_traits(&id, traits_str.as_deref())),
             version_count: row.get::<_, i64>(5)? as usize,
             pending_count: row.get::<_, i64>(6)? as usize,
             error_count: row.get::<_, i64>(7)? as usize,
+            status: status_str
+                .parse()
+                .unwrap_or(crate::models::ThreadStatus::Active),
+            finalized_at: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+            pending_confirm: row.get(10)?,
         })
     })?;
 
@@ -152,6 +278,125 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         threads.push(thread?);
     }
     Ok(threads)
+}
+
+pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<Vec<Thread>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, title, summary,
+        COALESCE(
+            (
+                SELECT MAX(timestamp)
+                FROM messages
+                WHERE thread_id = threads.id
+                  AND deleted_at IS NULL
+                  AND status != 'discarded'
+            ),
+            updated_at
+        ) as last_used_at,
+        genie_traits,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
+        COALESCE(status, 'active') as thread_status,
+        finalized_at,
+        pending_confirm
+        FROM threads
+        WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
+        ORDER BY last_used_at DESC, id DESC
+        LIMIT ?1
+    ",
+    )?;
+    let thread_iter = stmt.query_map([limit as i64], |row| {
+        let id: String = row.get(0)?;
+        let traits_str: Option<String> = row.get(4)?;
+        let status_str: String = row
+            .get::<_, String>(8)
+            .unwrap_or_else(|_| "active".to_string());
+        Ok(Thread {
+            id: id.clone(),
+            title: row.get(1)?,
+            summary: row.get(2)?,
+            updated_at: row.get::<_, i64>(3)? as u64,
+            messages: vec![],
+            genie_traits: Some(deserialize_thread_genie_traits(&id, traits_str.as_deref())),
+            version_count: row.get::<_, i64>(5)? as usize,
+            pending_count: row.get::<_, i64>(6)? as usize,
+            error_count: row.get::<_, i64>(7)? as usize,
+            status: status_str
+                .parse()
+                .unwrap_or(crate::models::ThreadStatus::Active),
+            finalized_at: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+            pending_confirm: row.get(10)?,
+        })
+    })?;
+
+    let mut threads = Vec::new();
+    for thread in thread_iter {
+        threads.push(thread?);
+    }
+    Ok(threads)
+}
+
+pub fn get_latest_successful_message_id_in_thread(
+    conn: &Connection,
+    thread_id: &str,
+) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT id
+         FROM messages
+         WHERE thread_id = ?1
+           AND deleted_at IS NULL
+           AND role = 'assistant'
+           AND status = 'success'
+           AND (output IS NOT NULL OR artifact_bundle IS NOT NULL)
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 1",
+        [thread_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn get_latest_successful_target_in_most_recent_thread(
+    conn: &Connection,
+) -> SqlResult<Option<LatestSuccessfulTarget>> {
+    conn.query_row(
+        "
+        WITH recent_threads AS (
+            SELECT id,
+                   COALESCE(
+                       (
+                           SELECT MAX(timestamp)
+                           FROM messages
+                           WHERE thread_id = threads.id
+                             AND deleted_at IS NULL
+                             AND status != 'discarded'
+                       ),
+                       updated_at
+                   ) AS last_used_at
+            FROM threads
+            WHERE deleted_at IS NULL
+        )
+        SELECT m.thread_id, m.id
+        FROM messages m
+        INNER JOIN recent_threads rt ON rt.id = m.thread_id
+        WHERE m.deleted_at IS NULL
+          AND m.role = 'assistant'
+          AND m.status = 'success'
+          AND (m.output IS NOT NULL OR m.artifact_bundle IS NOT NULL)
+        ORDER BY rt.last_used_at DESC, m.timestamp DESC, m.id DESC
+        LIMIT 1
+        ",
+        [],
+        |row| {
+            Ok(LatestSuccessfulTarget {
+                thread_id: row.get(0)?,
+                message_id: row.get(1)?,
+            })
+        },
+    )
+    .optional()
 }
 
 pub fn create_or_update_thread(
@@ -197,6 +442,14 @@ pub fn update_thread_summary(conn: &Connection, thread_id: &str, summary: &str) 
     Ok(())
 }
 
+pub fn update_thread_title(conn: &Connection, thread_id: &str, title: &str) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE threads SET title = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![title, thread_id],
+    )?;
+    Ok(changed > 0)
+}
+
 pub fn get_thread_title(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
     conn.query_row(
         "SELECT title FROM threads WHERE id = ?1",
@@ -213,6 +466,114 @@ pub fn get_thread_summary(conn: &Connection, thread_id: &str) -> SqlResult<Optio
         |row| row.get(0),
     )
     .optional()
+}
+
+pub struct ThreadLifecycle {
+    pub status: crate::models::ThreadStatus,
+    pub finalized_at: Option<u64>,
+    pub pending_confirm: Option<String>,
+}
+
+pub fn get_thread_lifecycle(
+    conn: &Connection,
+    thread_id: &str,
+) -> SqlResult<Option<ThreadLifecycle>> {
+    conn.query_row(
+        "SELECT COALESCE(status, 'active'), finalized_at, pending_confirm FROM threads WHERE id = ?1",
+        [thread_id],
+        |row| {
+            let status_str: String = row.get::<_, String>(0).unwrap_or_else(|_| "active".to_string());
+            Ok(ThreadLifecycle {
+                status: status_str.parse().unwrap_or(crate::models::ThreadStatus::Active),
+                finalized_at: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                pending_confirm: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn finalize_thread(conn: &Connection, thread_id: &str, now: i64) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE threads SET status = 'finalized', finalized_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![now, thread_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn reopen_thread(conn: &Connection, thread_id: &str) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE threads SET status = 'active', finalized_at = NULL WHERE id = ?1 AND deleted_at IS NULL",
+        [thread_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
+    let mut stmt = conn.prepare("
+        SELECT id, title, summary,
+        COALESCE(
+            (
+                SELECT MAX(timestamp)
+                FROM messages
+                WHERE thread_id = threads.id
+                  AND deleted_at IS NULL
+                  AND status != 'discarded'
+            ),
+            updated_at
+        ) as last_used_at,
+        genie_traits,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
+        COALESCE(status, 'active') as thread_status,
+        finalized_at,
+        pending_confirm
+        FROM threads
+        WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'finalized'
+        ORDER BY finalized_at DESC, id DESC
+    ")?;
+    let thread_iter = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let traits_str: Option<String> = row.get(4)?;
+        let status_str: String = row
+            .get::<_, String>(8)
+            .unwrap_or_else(|_| "finalized".to_string());
+        Ok(Thread {
+            id: id.clone(),
+            title: row.get(1)?,
+            summary: row.get(2)?,
+            updated_at: row.get::<_, i64>(3)? as u64,
+            messages: vec![],
+            genie_traits: Some(deserialize_thread_genie_traits(&id, traits_str.as_deref())),
+            version_count: row.get::<_, i64>(5)? as usize,
+            pending_count: row.get::<_, i64>(6)? as usize,
+            error_count: row.get::<_, i64>(7)? as usize,
+            status: status_str
+                .parse()
+                .unwrap_or(crate::models::ThreadStatus::Finalized),
+            finalized_at: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+            pending_confirm: row.get(10)?,
+        })
+    })?;
+
+    let mut threads = Vec::new();
+    for thread in thread_iter {
+        threads.push(thread?);
+    }
+    Ok(threads)
+}
+
+pub fn set_thread_pending_confirm(
+    conn: &Connection,
+    thread_id: &str,
+    pending_confirm: Option<&str>,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE threads SET pending_confirm = ?1 WHERE id = ?2",
+        params![pending_confirm, thread_id],
+    )?;
+    Ok(())
 }
 
 pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResult<()> {
@@ -232,13 +593,17 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
         .model_manifest
         .as_ref()
         .and_then(|manifest| serde_json::to_string(manifest).ok());
+    let agent_origin_str = msg
+        .agent_origin
+        .as_ref()
+        .and_then(|origin| serde_json::to_string(origin).ok());
     let attachment_images_str = if msg.attachment_images.is_empty() {
         None
     } else {
         serde_json::to_string(&msg.attachment_images).ok()
     };
     conn.execute(
-        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, timestamp, image_data, attachment_images) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, attachment_images) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             msg.id,
             thread_id,
@@ -249,6 +614,7 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
             usage_str,
             artifact_bundle_str,
             model_manifest_str,
+            agent_origin_str,
             msg.timestamp as i64,
             msg.image_data,
             attachment_images_str,
@@ -326,12 +692,12 @@ fn load_thread_message_rows(
     include_deleted: bool,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
     let sql = if include_deleted {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, timestamp, image_data, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, attachment_images, deleted_at
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded'
          ORDER BY timestamp ASC"
     } else {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, timestamp, image_data, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, attachment_images, deleted_at
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded' AND deleted_at IS NULL
          ORDER BY timestamp ASC"
@@ -340,14 +706,17 @@ fn load_thread_message_rows(
     let mut stmt = conn.prepare(sql)?;
     let msg_iter = stmt.query_map([thread_id], |row| {
         let output_str: Option<String> = row.get(4)?;
-        let output: Option<DesignOutput> = output_str.and_then(|s| serde_json::from_str(&s).ok());
+        let output: Option<DesignOutput> =
+            output_str.and_then(|s| serde_json::from_str(&s).ok().map(normalize_design_output));
         let usage_str: Option<String> = row.get(5)?;
         let usage = usage_str.and_then(|s| serde_json::from_str(&s).ok());
         let artifact_bundle_str: Option<String> = row.get(6)?;
         let artifact_bundle = artifact_bundle_str.and_then(|s| serde_json::from_str(&s).ok());
         let model_manifest_str: Option<String> = row.get(7)?;
         let model_manifest = model_manifest_str.and_then(|s| serde_json::from_str(&s).ok());
-        let attachment_images_str: Option<String> = row.get(10)?;
+        let agent_origin_str: Option<String> = row.get(8)?;
+        let agent_origin = deserialize_agent_origin(agent_origin_str.as_deref());
+        let attachment_images_str: Option<String> = row.get(11)?;
         let attachment_images = attachment_images_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -362,11 +731,12 @@ fn load_thread_message_rows(
                 usage,
                 artifact_bundle,
                 model_manifest,
-                timestamp: row.get::<_, i64>(8)? as u64,
-                image_data: row.get(9)?,
+                agent_origin,
+                timestamp: row.get::<_, i64>(9)? as u64,
+                image_data: row.get(10)?,
                 attachment_images,
             },
-            deleted_at: row.get(11)?,
+            deleted_at: row.get(12)?,
         })
     })?;
 
@@ -411,6 +781,18 @@ pub fn get_thread_references(
 pub fn clear_history(conn: &Connection) -> SqlResult<()> {
     conn.execute("DELETE FROM threads", [])?;
     Ok(())
+}
+
+pub fn mark_interrupted_pending_messages(conn: &Connection) -> SqlResult<usize> {
+    conn.execute(
+        "UPDATE messages
+         SET status = 'error',
+             content = 'Request interrupted by app restart before provider response completed. Retry the last prompt.'
+         WHERE role = 'assistant'
+           AND status = 'pending'
+           AND deleted_at IS NULL",
+        [],
+    )
 }
 
 pub fn update_message_status_and_output(
@@ -568,7 +950,7 @@ pub fn restore_version_cluster(conn: &Connection, id: &str) -> SqlResult<Option<
 
 pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>> {
     let mut stmt = conn.prepare("
-        SELECT m.id, m.thread_id, t.title as thread_title, m.role, m.content, m.output, m.usage, m.artifact_bundle, m.model_manifest, m.timestamp, m.image_data, m.attachment_images, m.deleted_at
+        SELECT m.id, m.thread_id, t.title as thread_title, m.role, m.content, m.output, m.usage, m.artifact_bundle, m.model_manifest, m.agent_origin, m.timestamp, m.image_data, m.attachment_images, m.deleted_at
         FROM messages m
         JOIN threads t ON m.thread_id = t.id
         WHERE m.deleted_at IS NOT NULL
@@ -580,7 +962,9 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
     let iter = stmt.query_map([], |row| {
         let output_str: Option<String> = row.get(5)?;
         let output: Option<DesignOutput> = if let Some(json_str) = output_str {
-            serde_json::from_str(&json_str).ok()
+            serde_json::from_str(&json_str)
+                .ok()
+                .map(normalize_design_output)
         } else {
             None
         };
@@ -592,7 +976,9 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
         let model_manifest_str: Option<String> = row.get(8)?;
         let model_manifest =
             model_manifest_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
-        let attachment_images_str: Option<String> = row.get(11)?;
+        let agent_origin_str: Option<String> = row.get(9)?;
+        let agent_origin = deserialize_agent_origin(agent_origin_str.as_deref());
+        let attachment_images_str: Option<String> = row.get(12)?;
         let attachment_images = attachment_images_str
             .and_then(|json_str| serde_json::from_str(&json_str).ok())
             .unwrap_or_default();
@@ -607,10 +993,11 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
             usage,
             artifact_bundle,
             model_manifest,
-            timestamp: row.get::<_, i64>(9)? as u64,
-            image_data: row.get(10)?,
+            agent_origin,
+            timestamp: row.get::<_, i64>(10)? as u64,
+            image_data: row.get(11)?,
             attachment_images,
-            deleted_at: row.get::<_, i64>(12)? as u64,
+            deleted_at: row.get::<_, i64>(13)? as u64,
         })
     })?;
 
@@ -649,8 +1036,9 @@ pub fn update_message_ui_spec(
     )?;
 
     if let Some(json_str) = output_str {
-        let mut output: DesignOutput = serde_json::from_str(&json_str)
+        let parsed: DesignOutput = serde_json::from_str(&json_str)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut output: DesignOutput = normalize_design_output(parsed);
         output.ui_spec = ui_spec.clone();
         let updated = serde_json::to_string(&output)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -674,8 +1062,9 @@ pub fn update_message_parameters(
     )?;
 
     if let Some(json_str) = output_str {
-        let mut output: DesignOutput = serde_json::from_str(&json_str)
+        let parsed: DesignOutput = serde_json::from_str(&json_str)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut output: DesignOutput = normalize_design_output(parsed);
         output.initial_params = parameters.clone();
         let updated = serde_json::to_string(&output)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -690,7 +1079,7 @@ pub fn update_message_parameters(
 pub fn update_message_model_manifest(
     conn: &Connection,
     message_id: &str,
-    manifest: &ModelManifest,
+    manifest: &crate::models::ModelManifest,
 ) -> SqlResult<()> {
     let serialized = serde_json::to_string(manifest)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -704,7 +1093,7 @@ pub fn update_message_model_manifest(
 pub fn update_message_artifact_bundle(
     conn: &Connection,
     message_id: &str,
-    bundle: &ArtifactBundle,
+    bundle: &crate::models::ArtifactBundle,
 ) -> SqlResult<()> {
     let serialized = serde_json::to_string(bundle)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -729,6 +1118,375 @@ pub fn update_message_output(
     Ok(())
 }
 
+pub fn upsert_agent_session(
+    conn: &Connection,
+    session: &crate::models::AgentSession,
+) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO agent_sessions (session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(session_id) DO UPDATE SET
+            client_kind = excluded.client_kind,
+            host_label = excluded.host_label,
+            agent_label = excluded.agent_label,
+            llm_model_id = excluded.llm_model_id,
+            llm_model_label = excluded.llm_model_label,
+            thread_id = excluded.thread_id,
+            message_id = excluded.message_id,
+            model_id = excluded.model_id,
+            phase = excluded.phase,
+            status_text = excluded.status_text,
+            updated_at = excluded.updated_at",
+        params![
+            session.session_id,
+            session.client_kind,
+            session.host_label,
+            session.agent_label,
+            session.llm_model_id,
+            session.llm_model_label,
+            session.thread_id,
+            session.message_id,
+            session.model_id,
+            session.phase,
+            session.status_text,
+            session.updated_at as i64
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_agent_session(conn: &Connection, session_id: &str) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM agent_sessions WHERE session_id = ?1",
+        [session_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_active_agent_sessions(
+    conn: &Connection,
+    stale_threshold_secs: u64,
+) -> SqlResult<Vec<crate::models::AgentSession>> {
+    let now = unix_now_i64();
+    let threshold = now - (stale_threshold_secs as i64);
+
+    let mut stmt = conn.prepare(
+        "SELECT session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at
+         FROM agent_sessions
+         WHERE updated_at >= ?1
+           AND phase != 'error'
+         ORDER BY updated_at DESC"
+    )?;
+    let iter = stmt.query_map([threshold], |row| {
+        Ok(crate::models::AgentSession {
+            session_id: row.get(0)?,
+            client_kind: row.get(1)?,
+            host_label: row.get(2)?,
+            agent_label: row.get(3)?,
+            llm_model_id: row.get(4)?,
+            llm_model_label: row.get(5)?,
+            thread_id: row.get(6)?,
+            message_id: row.get(7)?,
+            model_id: row.get(8)?,
+            phase: row.get(9)?,
+            status_text: row.get(10)?,
+            updated_at: row.get::<_, i64>(11)? as u64,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for item in iter {
+        results.push(item?);
+    }
+    Ok(results)
+}
+
+/// Fetch DB records for a specific set of session IDs (used for live-session push events).
+pub fn get_sessions_by_ids(
+    conn: &Connection,
+    ids: &[String],
+) -> SqlResult<Vec<crate::models::AgentSession>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at
+         FROM agent_sessions
+         WHERE session_id IN ({})
+         ORDER BY updated_at DESC",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let iter = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+        Ok(crate::models::AgentSession {
+            session_id: row.get(0)?,
+            client_kind: row.get(1)?,
+            host_label: row.get(2)?,
+            agent_label: row.get(3)?,
+            llm_model_id: row.get(4)?,
+            llm_model_label: row.get(5)?,
+            thread_id: row.get(6)?,
+            message_id: row.get(7)?,
+            model_id: row.get(8)?,
+            phase: row.get(9)?,
+            status_text: row.get(10)?,
+            updated_at: row.get::<_, i64>(11)? as u64,
+        })
+    })?;
+    let mut results = Vec::new();
+    for item in iter {
+        results.push(item?);
+    }
+    Ok(results)
+}
+
+pub fn get_thread_last_agent_session(
+    conn: &Connection,
+    thread_id: &str,
+) -> SqlResult<Option<crate::models::AgentSession>> {
+    conn.query_row(
+        "SELECT session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at
+         FROM agent_sessions
+         WHERE thread_id = ?1
+         ORDER BY updated_at DESC
+         LIMIT 1",
+        [thread_id],
+        |row| {
+            Ok(crate::models::AgentSession {
+                session_id: row.get(0)?,
+                client_kind: row.get(1)?,
+                host_label: row.get(2)?,
+                agent_label: row.get(3)?,
+                llm_model_id: row.get(4)?,
+                llm_model_label: row.get(5)?,
+                thread_id: row.get(6)?,
+                message_id: row.get(7)?,
+                model_id: row.get(8)?,
+                phase: row.get(9)?,
+                status_text: row.get(10)?,
+                updated_at: row.get::<_, i64>(11)? as u64,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn get_thread_last_agent_session_for_agent(
+    conn: &Connection,
+    agent_label: &str,
+) -> SqlResult<Option<crate::models::AgentSession>> {
+    conn.query_row(
+        "SELECT session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at
+         FROM agent_sessions
+         WHERE agent_label = ?1
+         ORDER BY updated_at DESC
+         LIMIT 1",
+        [agent_label],
+        |row| {
+            Ok(crate::models::AgentSession {
+                session_id: row.get(0)?,
+                client_kind: row.get(1)?,
+                host_label: row.get(2)?,
+                agent_label: row.get(3)?,
+                llm_model_id: row.get(4)?,
+                llm_model_label: row.get(5)?,
+                thread_id: row.get(6)?,
+                message_id: row.get(7)?,
+                model_id: row.get(8)?,
+                phase: row.get(9)?,
+                status_text: row.get(10)?,
+                updated_at: row.get::<_, i64>(11)? as u64,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn delete_expired_target_leases(conn: &Connection) -> SqlResult<usize> {
+    conn.execute(
+        "DELETE FROM target_leases WHERE expires_at < ?1",
+        [unix_now_i64()],
+    )
+}
+
+pub fn get_active_target_lease(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+    model_id: Option<&str>,
+) -> SqlResult<Option<TargetLeaseInfo>> {
+    let _ = delete_expired_target_leases(conn)?;
+    conn.query_row(
+        "SELECT session_id, thread_id, message_id, model_id, host_label, agent_label, acquired_at, expires_at
+         FROM target_leases
+         WHERE thread_id = ?1
+           AND message_id = ?2
+           AND COALESCE(model_id, '') = COALESCE(?3, '')
+         ORDER BY expires_at DESC
+         LIMIT 1",
+        params![thread_id, message_id, model_id],
+        |row| {
+            Ok(TargetLeaseInfo {
+                session_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                message_id: row.get(2)?,
+                model_id: row.get(3)?,
+                host_label: row.get(4)?,
+                agent_label: row.get(5)?,
+                acquired_at: row.get::<_, i64>(6)? as u64,
+                expires_at: row.get::<_, i64>(7)? as u64,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn upsert_target_lease(conn: &Connection, lease: &TargetLeaseInfo) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO target_leases (lease_id, session_id, thread_id, message_id, model_id, acquired_at, expires_at, host_label, agent_label)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(lease_id) DO UPDATE SET
+            session_id = excluded.session_id,
+            thread_id = excluded.thread_id,
+            message_id = excluded.message_id,
+            model_id = excluded.model_id,
+            acquired_at = excluded.acquired_at,
+            expires_at = excluded.expires_at,
+            host_label = excluded.host_label,
+            agent_label = excluded.agent_label",
+        params![
+            format!(
+                "{}:{}:{}",
+                lease.session_id,
+                lease.message_id,
+                lease.model_id.clone().unwrap_or_default()
+            ),
+            lease.session_id,
+            lease.thread_id,
+            lease.message_id,
+            lease.model_id,
+            lease.acquired_at as i64,
+            lease.expires_at as i64,
+            lease.host_label,
+            lease.agent_label
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_target_lease(
+    conn: &Connection,
+    session_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    model_id: Option<&str>,
+) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM target_leases
+         WHERE session_id = ?1
+           AND thread_id = ?2
+           AND message_id = ?3
+           AND COALESCE(model_id, '') = COALESCE(?4, '')",
+        params![session_id, thread_id, message_id, model_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_target_leases_for_session(conn: &Connection, session_id: &str) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM target_leases WHERE session_id = ?1",
+        [session_id],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_agent_draft(conn: &Connection, draft: &crate::models::AgentDraft) -> SqlResult<()> {
+    let design_output_str = serde_json::to_string(&draft.design_output)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let artifact_bundle_str = draft
+        .artifact_bundle
+        .as_ref()
+        .and_then(|b| serde_json::to_string(b).ok());
+    let model_manifest_str = draft
+        .model_manifest
+        .as_ref()
+        .and_then(|m| serde_json::to_string(m).ok());
+
+    conn.execute(
+        "INSERT INTO agent_drafts (session_id, thread_id, base_message_id, model_id, design_output, artifact_bundle, model_manifest, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(thread_id, base_message_id) DO UPDATE SET
+            session_id = excluded.session_id,
+            model_id = excluded.model_id,
+            design_output = excluded.design_output,
+            artifact_bundle = excluded.artifact_bundle,
+            model_manifest = excluded.model_manifest,
+            updated_at = excluded.updated_at",
+        params![
+            draft.session_id,
+            draft.thread_id,
+            draft.base_message_id,
+            draft.model_id,
+            design_output_str,
+            artifact_bundle_str,
+            model_manifest_str,
+            draft.updated_at as i64
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_agent_draft(
+    conn: &Connection,
+    thread_id: &str,
+    base_message_id: &str,
+) -> SqlResult<Option<crate::models::AgentDraft>> {
+    conn.query_row(
+        "SELECT session_id, thread_id, base_message_id, model_id, design_output, artifact_bundle, model_manifest, updated_at
+         FROM agent_drafts
+         WHERE thread_id = ?1 AND base_message_id = ?2",
+        params![thread_id, base_message_id],
+        |row| {
+            let design_output_str: String = row.get(4)?;
+            let design_output: DesignOutput = serde_json::from_str(&design_output_str)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let artifact_bundle_str: Option<String> = row.get(5)?;
+            let artifact_bundle = artifact_bundle_str.and_then(|s| serde_json::from_str(&s).ok());
+            let model_manifest_str: Option<String> = row.get(6)?;
+            let model_manifest = model_manifest_str.and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(crate::models::AgentDraft {
+                session_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                base_message_id: row.get(2)?,
+                model_id: row.get(3)?,
+                design_output,
+                artifact_bundle,
+                model_manifest,
+                updated_at: row.get::<_, i64>(7)? as u64,
+            })
+        }
+    ).optional()
+}
+
+pub fn delete_agent_draft(
+    conn: &Connection,
+    thread_id: &str,
+    base_message_id: &str,
+) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM agent_drafts WHERE thread_id = ?1 AND base_message_id = ?2",
+        params![thread_id, base_message_id],
+    )?;
+    Ok(())
+}
+
 pub fn get_message_output_and_thread(
     conn: &Connection,
     message_id: &str,
@@ -749,11 +1507,21 @@ pub fn get_message_output_and_thread(
         return Ok(None);
     };
 
-    let Ok(output) = serde_json::from_str::<DesignOutput>(&json_str) else {
+    let Ok(output) = serde_json::from_str::<DesignOutput>(&json_str).map(normalize_design_output)
+    else {
         return Ok(None);
     };
 
     Ok(Some((output, thread_id)))
+}
+
+pub fn get_message_thread_id(conn: &Connection, message_id: &str) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT thread_id FROM messages WHERE id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 pub fn get_message_runtime_and_thread(
@@ -810,6 +1578,7 @@ mod tests {
                 usage TEXT,
                 artifact_bundle TEXT,
                 model_manifest TEXT,
+                agent_origin TEXT,
                 timestamp INTEGER NOT NULL,
                 image_data TEXT,
                 attachment_images TEXT,
@@ -835,6 +1604,13 @@ mod tests {
             )",
             [],
         )?;
+        // Migrations: keep in sync with init_db
+        let _ = conn.execute(
+            "ALTER TABLE threads ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
         Ok(())
     }
 
@@ -845,8 +1621,10 @@ mod tests {
             response: "".to_string(),
             interaction_mode: InteractionMode::Design,
             macro_code: "print('hi')".to_string(),
+            macro_dialect: crate::models::MacroDialect::Legacy,
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: DesignParams::from([("x".to_string(), ParamValue::Number(10.0))]),
+            post_processing: None,
         }
     }
 
@@ -870,6 +1648,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             timestamp: now,
             image_data: None,
             attachment_images: Vec::new(),
@@ -925,6 +1704,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             timestamp: 100,
             image_data: None,
             attachment_images: Vec::new(),
@@ -938,6 +1718,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             timestamp: 101,
             image_data: None,
             attachment_images: Vec::new(),
@@ -1001,6 +1782,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             timestamp: 200,
             image_data: None,
             attachment_images: Vec::new(),
@@ -1033,6 +1815,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             timestamp: 250,
             image_data: None,
             attachment_images: Vec::new(),
@@ -1066,6 +1849,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             timestamp: 300,
             image_data: Some("data:image/png;base64,viewport".to_string()),
             attachment_images: vec![
@@ -1089,6 +1873,100 @@ mod tests {
                 "data:image/png;base64,ref-2".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_get_all_threads_orders_by_latest_visible_message_timestamp() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        create_or_update_thread(&conn, "older-thread", "Older", 100, None).unwrap();
+        create_or_update_thread(&conn, "newer-thread", "Newer", 50, None).unwrap();
+
+        add_message(
+            &conn,
+            "older-thread",
+            &Message {
+                id: "older-msg".to_string(),
+                role: MessageRole::User,
+                content: "older".to_string(),
+                status: MessageStatus::Success,
+                output: None,
+                usage: None,
+                artifact_bundle: None,
+                model_manifest: None,
+                agent_origin: None,
+                timestamp: 200,
+                image_data: None,
+                attachment_images: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        add_message(
+            &conn,
+            "newer-thread",
+            &Message {
+                id: "newer-msg".to_string(),
+                role: MessageRole::User,
+                content: "newer".to_string(),
+                status: MessageStatus::Success,
+                output: None,
+                usage: None,
+                artifact_bundle: None,
+                model_manifest: None,
+                agent_origin: None,
+                timestamp: 300,
+                image_data: None,
+                attachment_images: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let threads = get_all_threads(&conn).unwrap();
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].id, "newer-thread");
+        assert_eq!(threads[0].updated_at, 300);
+        assert_eq!(threads[1].id, "older-thread");
+        assert_eq!(threads[1].updated_at, 200);
+    }
+
+    #[test]
+    fn test_mark_interrupted_pending_messages_promotes_pending_to_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        create_or_update_thread(&conn, "pending-thread", "Pending", 100, None).unwrap();
+
+        add_message(
+            &conn,
+            "pending-thread",
+            &Message {
+                id: "pending-assistant".to_string(),
+                role: MessageRole::Assistant,
+                content: "Generating...".to_string(),
+                status: MessageStatus::Pending,
+                output: None,
+                usage: None,
+                artifact_bundle: None,
+                model_manifest: None,
+                agent_origin: None,
+                timestamp: 100,
+                image_data: None,
+                attachment_images: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let changed = mark_interrupted_pending_messages(&conn).unwrap();
+        assert_eq!(changed, 1);
+
+        let messages = get_thread_messages(&conn, "pending-thread").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].status, MessageStatus::Error);
+        assert!(messages[0]
+            .content
+            .contains("Request interrupted by app restart before provider response completed"));
     }
 
     #[test]

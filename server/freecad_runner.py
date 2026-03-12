@@ -170,6 +170,13 @@ def execute_macro(macro_path, params_dict):
     with open(macro_path, "r", encoding="utf-8") as handle:
         code = handle.read()
 
+    macro_dir = os.path.dirname(macro_path)
+    if macro_dir and macro_dir not in sys.path:
+        sys.path.insert(0, macro_dir)
+    sdk_path = os.environ.get("ECKYCAD_SDK_PATH")
+    if sdk_path and sdk_path not in sys.path:
+        sys.path.insert(0, sdk_path)
+
     namespace = {"__name__": "__main__", "parameters": params_dict, "params": params_dict}
     for key, value in params_dict.items():
         namespace[key] = value

@@ -5,18 +5,24 @@ pub mod commands;
 pub mod context;
 pub mod contracts;
 pub mod db;
+pub mod displacement;
 pub mod freecad;
 pub mod llm;
+pub mod mcp;
 pub mod models;
+pub mod services;
 
 use std::fs;
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::Manager;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::context::*;
 use crate::models::{
-    AppState, Attachment, DesignOutput, GenieTraits, LastDesignSnapshot, ThreadReference,
+    AppState, Attachment, DesignOutput, GenieTraits, LastDesignSnapshot, PathResolver,
+    ThreadReference,
 };
 
 use rand::Rng;
@@ -299,6 +305,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             intent_mode: "question".to_string(),
             confidence: 0.95,
             response: "Answering the question without generating geometry.".to_string(),
+            final_response: Some("Answering the question without generating geometry.".to_string()),
             usage: None,
         };
     }
@@ -324,6 +331,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             intent_mode: "question".to_string(),
             confidence: 0.55,
             response: "Thinking not deep enough. This looks like a question.".to_string(),
+            final_response: None,
             usage: None,
         }
     } else {
@@ -331,6 +339,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             intent_mode: "design".to_string(),
             confidence: 0.55,
             response: "This looks like a geometry change request.".to_string(),
+            final_response: None,
             usage: None,
         }
     }
@@ -353,7 +362,7 @@ Macro Requirements:
 Return a JSON object with:
 1. "title": A short (2-5 words) descriptive title.
 2. "version_name": Short descriptive name for this iteration.
-3. "response": short end-user text for Ecky's speech bubble (1-4 concise sentences). If there are 3D printing risks, add a separate final sentence starting with `PRINTING RISKS:`.
+3. "response": short end-user text for Ecky Einacs's speech bubble (1-4 concise sentences). If there are 3D printing risks, add a separate final sentence starting with `PRINTING RISKS:`.
 4. "interaction_mode": "design" or "question".
 5. "macro_code": The Python macro code.
 6. "ui_spec": { 
@@ -361,7 +370,7 @@ Return a JSON object with:
        { 
          "key": string, 
          "label": string, 
-         "type": "range" | "number" | "select" | "checkbox", 
+         "type": "range" | "number" | "select" | "checkbox" | "image", 
          "min"?: number, 
          "max"?: number, 
          "step"?: number,
@@ -370,21 +379,33 @@ Return a JSON object with:
      ] 
    }
 7. "initial_params": { ... }
+8. "post_processing": {
+     "displacement"?: {
+       "image_param": string,
+       "projection": "planar" | "cylindrical" | "spherical",
+       "depth_mm": number,
+       "invert": boolean
+     }
+   }
 
 UI Guidelines:
 - Use "range" for continuous dimensions.
 - Use "select" (enums) for discrete choices. Ensure "options" are provided.
 - Use "checkbox" for boolean flags (e.g., "Show Holes"). Value will be true or false.
+- Use "image" for file uploads (e.g., lithophanes).
+
+For lithophanes or image embossing: NEVER use FreeCAD PySide or pixel manipulation in Python. Instead, output a high-tessellation base mesh from FreeCAD and provide a `post_processing.displacement` block linking to your `image` type field. The Rust backend will displace the mesh automatically.
 "#;
 
 pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 1. "title": 2-5 words project title.
 2. "version_name": Short descriptive name for this iteration.
-3. "response": short end-user text for the advisor speech bubble (1-3 concise sentences).
+3. "response": short end-user text for Ecky Einacs's speech bubble (1-3 concise sentences).
 4. "interaction_mode": "design" or "question".
 5. "macro_code": FreeCAD Python code.
-6. "ui_spec": { "fields": [ { "key": string, "label": string, "type": "range"|"number"|"select"|"checkbox" } ] }
+6. "ui_spec": { "fields": [ { "key": string, "label": string, "type": "range"|"number"|"select"|"checkbox"|"image" } ] }
 7. "initial_params": { "key": value }
+8. "post_processing": { "displacement": { "image_param": string, "projection": "planar"|"cylindrical"|"spherical", "depth_mm": number, "invert": bool } } (Optional)
 
 CRITICAL RULES:
 - UNITS: ALL dimensions are in MILLIMETERS (mm).
@@ -394,6 +415,9 @@ CRITICAL RULES:
   - Use 'min_from' and 'max_from' keys in the 'ui_spec' fields to link parameter boundaries to other keys (e.g., inner_radius max_from outer_radius).
   - Ensure geometry stays sane and valid across all parameter permutations.
 - PARAMETERS: Access parameters directly by name (e.g. `L = connector_length`) or via `params.get("key", default)`.
+- FRAMEWORK: If an "ACTUAL CURRENT CAD FRAMEWORK" block is present, follow it strictly and use the provided CAD SDK. Do not invent custom control classes or custom registries.
+- FRAMEWORK ENFORCEMENT: When using the CAD SDK, `CONTROLS` inside `macro_code` is the source of truth. The backend derives `ui_spec` and `initial_params` from `CONTROLS` and may reject malformed framework macros.
+- FRAMEWORK PARAMS: When using the CAD SDK, raw `params` access is allowed only inside `registry.bind(params)` during config bootstrap. Use `cfg` for geometry.
 - NO BRACES: NEVER use `{var}` style interpolation inside the macro_code string.
 - CLEANUP: You MUST remove any parameters from "ui_spec" and "initial_params" that are no longer used in the current "macro_code". Do not accumulate parameters from previous designs.
 - PRINTABILITY: Prefer geometry that is straightforward to 3D print (manifold solids, reasonable wall thickness, avoid fragile or unsupported details unless requested).
@@ -406,6 +430,11 @@ CRITICAL RULES:
   - Set "interaction_mode" to "design".
   - Use "response" as a short summary of what changed.
 "#;
+
+/// Minimal shell escaping: wraps in single quotes and escapes embedded single quotes.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
 
 pub fn run() {
     set_macos_process_name("Ecky CAD");
@@ -422,11 +451,15 @@ pub fn run() {
             light_model: "gemini-2.0-flash-lite".to_string(),
             base_url: "".to_string(),
             system_prompt: DEFAULT_PROMPT.to_string(),
+            enabled: false,
         }],
         selected_engine_id: "default-gemini".to_string(),
         freecad_cmd: String::new(),
         assets: vec![],
         microwave: None,
+        mcp: crate::models::McpConfig::default(),
+        has_seen_onboarding: false,
+        connection_type: None,
     };
 
     tauri::Builder::default()
@@ -489,14 +522,161 @@ pub fn run() {
 
             let db_path = config_dir.join("history.sqlite");
             let conn = db::init_db(&db_path).expect("Failed to initialize SQLite database");
+            if let Ok(interrupted) = db::mark_interrupted_pending_messages(&conn) {
+                if interrupted > 0 {
+                    eprintln!(
+                        "[BOOT] recovered {} interrupted pending request(s) as error",
+                        interrupted
+                    );
+                }
+            }
             let _ = migrate_legacy_references(&conn);
 
-            app.manage(AppState {
-                config: Mutex::new(config),
-                last_snapshot: Mutex::new(last_snapshot),
-                db: tokio::sync::Mutex::new(conn),
-                render_lock: tokio::sync::Mutex::new(()),
-            });
+            let mcp_port = config.mcp.port;
+            let auto_agents = config.mcp.auto_agents.clone();
+            let state = AppState::new(config, last_snapshot, conn);
+            app.manage(state.clone());
+
+            {
+                let resolver: Arc<dyn PathResolver + Send + Sync> = Arc::new(app.handle().clone());
+                let server_state = state.clone();
+                let server_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        if let Err(err) = crate::mcp::server::serve_http_on_port(
+                            server_state.clone(),
+                            resolver.clone(),
+                            server_handle.clone(),
+                            mcp_port,
+                        )
+                        .await
+                        {
+                            eprintln!("[MCP] HTTP server stopped: {}", err);
+                            server_state.set_mcp_status(false, Some(err.to_string()));
+                            sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        break;
+                    }
+                });
+            }
+
+            for agent in auto_agents.into_iter().filter(|a| a.enabled) {
+                let supervisor_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Wait for MCP server to be ready (up to 15s).
+                    let endpoint_url = {
+                        let mut url = String::new();
+                        for _ in 0..75 {
+                            let status = supervisor_state.mcp_status();
+                            if status.running {
+                                url = status.endpoint_url;
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                        if url.is_empty() {
+                            eprintln!("[SUPERVISOR] MCP server not ready after 15s, aborting agent {}", agent.label);
+                            return;
+                        }
+                        url
+                    };
+
+                    // Write AGENTS.md to a temp working dir so the agent has full context.
+                    let work_dir = std::env::temp_dir().join(format!("ecky-agent-{}", agent.label));
+                    if let Err(e) = std::fs::create_dir_all(&work_dir) {
+                        eprintln!("[SUPERVISOR] Failed to create work dir: {}", e);
+                    }
+                    let agents_md = format!(
+                        "# Ecky CAD Agent\n\n\
+                        ## MCP Server\n\
+                        Connect to: `{endpoint_url}`\n\n\
+                        ## Bootstrap sequence\n\
+                        1. Call the `bootstrap_ecky` MCP prompt to load system guidance.\n\
+                        2. Call `workspace_overview` to see the current design state.\n\
+                        3. Call `request_user_prompt` to greet the user and ask what they want to build or change.\n\
+                        4. Act on their response using `macro_replace_and_render` or `params_patch_and_render`.\n\
+                        5. Loop: after each action, call `request_user_prompt` again for next instruction.\n\n\
+                        ## Rules\n\
+                        - Units are millimeters.\n\
+                        - Keep macroCode, uiSpec, and parameters aligned.\n\
+                        - Prefer printable manifold solids.\n\
+                        - Call `version_save` after successful renders the user approves.\n",
+                        endpoint_url = endpoint_url,
+                    );
+                    let agents_md_path = work_dir.join("AGENTS.md");
+                    if let Err(e) = std::fs::write(&agents_md_path, &agents_md) {
+                        eprintln!("[SUPERVISOR] Failed to write AGENTS.md: {}", e);
+                    }
+
+                    // Initial prompt piped via stdin — kicks off the agent loop.
+                    let initial_prompt = format!(
+                        "You are an Ecky CAD design assistant. \
+                        Read AGENTS.md in your current directory for full instructions. \
+                        The Ecky MCP server is at {endpoint_url}. \
+                        Start now: bootstrap, overview, then ask the user what to build.",
+                        endpoint_url = endpoint_url,
+                    );
+
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                    let mut parts = vec![shell_escape(&agent.cmd)];
+                    for arg in &agent.args {
+                        parts.push(shell_escape(arg));
+                    }
+                    let cmd_str = parts.join(" ");
+
+                    let mut backoff = Duration::from_secs(2);
+                    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+                    loop {
+                        eprintln!("[SUPERVISOR] Spawning agent: {}", agent.label);
+                        let mut cmd = tokio::process::Command::new(&shell);
+                        cmd.args(["-l", "-c", &cmd_str]);
+                        cmd.current_dir(&work_dir);
+                        cmd.stdin(std::process::Stdio::piped());
+
+                        match cmd.spawn() {
+                            Err(e) => {
+                                eprintln!("[SUPERVISOR] Failed to spawn {}: {}", agent.label, e);
+                            }
+                            Ok(mut child) => {
+                                // Write initial prompt to stdin then close it.
+                                if let Some(mut stdin) = child.stdin.take() {
+                                    use tokio::io::AsyncWriteExt;
+                                    let _ = stdin.write_all(initial_prompt.as_bytes()).await;
+                                    // stdin drops here, signaling EOF to the agent.
+                                }
+                                let start = tokio::time::Instant::now();
+                                match child.wait().await {
+                                    Ok(status) => eprintln!(
+                                        "[SUPERVISOR] Agent {} exited after {}s: {}",
+                                        agent.label, start.elapsed().as_secs(), status
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "[SUPERVISOR] Agent {} wait error: {}",
+                                        agent.label, e
+                                    ),
+                                }
+                                // Short-lived run = something went wrong, apply backoff.
+                                // Long-lived run = healthy session ended, restart immediately.
+                                if start.elapsed().as_secs() < 10 {
+                                    // keep current backoff
+                                } else {
+                                    backoff = Duration::from_secs(2);
+                                }
+                            }
+                        }
+
+                        eprintln!(
+                            "[SUPERVISOR] Restarting {} in {}s",
+                            agent.label,
+                            backoff.as_secs()
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                    }
+                });
+            }
 
             Ok(())
         })
@@ -626,8 +806,12 @@ mod tests {
 
     #[test]
     fn explicit_question_only_markers_force_question_mode() {
-        assert!(is_explicit_question_only_request("answer only: why is this thin?"));
-        assert!(is_explicit_question_only_request("только ответь, почему тут дырка?"));
+        assert!(is_explicit_question_only_request(
+            "answer only: why is this thin?"
+        ));
+        assert!(is_explicit_question_only_request(
+            "только ответь, почему тут дырка?"
+        ));
 
         let fallback = fallback_intent("just answer, do not generate anything");
         assert_eq!(fallback.intent_mode, "question");

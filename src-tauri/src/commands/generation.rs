@@ -8,11 +8,12 @@ use super::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::context::*;
 use crate::models::{
     validate_design_output, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle,
-    Attachment, AttachmentKind, DesignOutput, FinalizeStatus, GenerateOutput, IntentDecision,
-    InteractionMode, Message, MessageRole, MessageStatus, ModelManifest, UsageSummary,
+    Attachment, AttachmentKind, DesignOutput, FinalizeStatus, GenerateDesignOptions,
+    GenerateOutput, IntentDecision, InteractionMode, MacroDialect, Message, MessageRole,
+    MessageStatus, ModelManifest, UiSpec, UsageSummary,
 };
 use crate::{
-    db, fallback_intent, llm, persist_thread_summary, persist_user_prompt_references,
+    db, fallback_intent, freecad, llm, persist_thread_summary, persist_user_prompt_references,
     TECHNICAL_SYSTEM_PROMPT,
 };
 
@@ -125,6 +126,40 @@ fn build_visual_input_notes(
     }
 }
 
+fn load_framework_contract(app: &AppHandle) -> Option<String> {
+    let path = freecad::resolve_resource_path(
+        app,
+        "model-runtime/cad_framework_contract.md",
+        &[
+            "../model-runtime/cad_framework_contract.md",
+            "model-runtime/cad_framework_contract.md",
+        ],
+    )
+    .ok()?;
+    fs::read_to_string(path).ok()
+}
+
+fn should_use_framework_for_generation(ctx: &PromptContext) -> bool {
+    ctx.last_output
+        .as_ref()
+        .map(|output| output.macro_dialect.is_framework())
+        .unwrap_or(true)
+}
+
+fn prepend_follow_up_context(prompt: String, follow_up_question: Option<&str>) -> String {
+    let Some(question) = follow_up_question
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return prompt;
+    };
+
+    format!(
+        "FOLLOW-UP CONTEXT (AUTHORITATIVE)\nThe assistant previously asked this unresolved clarification question:\n\"{}\"\n\nThe current user request is the answer to that question. Continue the pending design task using the user's answer. Do not repeat the same clarification question unless the new answer is still genuinely insufficient.\n\n{}",
+        question, prompt
+    )
+}
+
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -136,12 +171,36 @@ pub async fn generate_design(
     _is_retry: bool,
     image_data: Option<String>,
     attachments: Option<Vec<Attachment>>,
-    question_mode: Option<bool>,
+    options: Option<GenerateDesignOptions>,
     state: State<'_, AppState>,
-    _app: AppHandle,
+    app: AppHandle,
 ) -> AppResult<GenerateOutput> {
+    {
+        let (explicit_mcp, no_enabled_engine) = {
+            let config = state.config.lock().unwrap();
+            let explicit_mcp = config.connection_type.as_deref() == Some("mcp");
+            let no_enabled_engine = !config.engines.iter().any(|e| e.enabled);
+            (explicit_mcp, no_enabled_engine)
+        };
+
+        if explicit_mcp || no_enabled_engine {
+            let sessions = state.mcp_sessions.lock().await;
+            if sessions.is_empty() && no_enabled_engine {
+                return Err(AppError::validation(
+                    "No active engine or MCP agent found. Switch to API Key mode in Settings → Agents, or connect an agent."
+                ));
+            }
+            // In MCP mode the frontend routes user input through request_user_prompt,
+            // not through generate. If we somehow get here, do nothing.
+            return Err(AppError::validation(
+                "In MCP mode, generation is driven by your external agent.",
+            ));
+        }
+    }
     let engine = selected_engine(&state)?;
-    let question_mode = question_mode.unwrap_or(false);
+    let options = options.unwrap_or_default();
+    let question_mode = options.question_mode.unwrap_or(false);
+    let follow_up_question = options.follow_up_question;
     let ctx = {
         let db = state.db.lock().await;
         crate::context::assemble_context(&db, thread_id, working_design, parent_macro_code)
@@ -151,8 +210,21 @@ pub async fn generate_design(
     } else {
         "DESIGN_EDIT"
     };
+    let framework_enabled = should_use_framework_for_generation(&ctx);
+    let framework_contract = if framework_enabled {
+        load_framework_contract(&app)
+    } else {
+        None
+    };
+    let contextual_prompt = format_contextual_prompt(
+        &ctx,
+        &prompt,
+        TECHNICAL_SYSTEM_PROMPT,
+        intent_mode,
+        framework_contract.as_deref(),
+    );
     let contextual_prompt =
-        format_contextual_prompt(&ctx, &prompt, TECHNICAL_SYSTEM_PROMPT, intent_mode);
+        prepend_follow_up_context(contextual_prompt, follow_up_question.as_deref());
     let contextual_prompt =
         if let Some(notes) = build_visual_input_notes(image_data.as_ref(), attachments.as_ref()) {
             format!("{}\n\n{}", contextual_prompt, notes)
@@ -171,6 +243,24 @@ pub async fn generate_design(
             )
         })?;
 
+    if !question_mode {
+        if framework_enabled {
+            if let Some(parsed) =
+                crate::commands::design::derive_framework_controls(&output.data.macro_code)?
+            {
+                output.data.ui_spec = UiSpec {
+                    fields: parsed.fields.clone(),
+                };
+                output.data.initial_params = parsed.params;
+                output.data.macro_dialect = MacroDialect::CadFrameworkV1;
+            } else {
+                output.data.macro_dialect = MacroDialect::Legacy;
+            }
+        } else {
+            output.data.macro_dialect = MacroDialect::Legacy;
+        }
+    }
+
     if question_mode {
         output.data.interaction_mode = InteractionMode::Question;
         if let Some(previous) = &ctx.last_output {
@@ -179,6 +269,7 @@ pub async fn generate_design(
             output.data.macro_code = previous.macro_code.clone();
             output.data.ui_spec = previous.ui_spec.clone();
             output.data.initial_params = previous.initial_params.clone();
+            output.data.macro_dialect = previous.macro_dialect.clone();
         }
         if output.data.version_name.trim().is_empty() {
             output.data.version_name = "Q&A".to_string();
@@ -221,10 +312,13 @@ pub async fn init_generation_attempt(
             .is_none()
         {
             let traits = crate::generate_genie_traits();
-            let initial_title = if prompt.len() > 30 {
-                format!("{}...", &prompt[..27])
-            } else {
-                prompt.clone()
+            let initial_title = {
+                let chars: Vec<char> = prompt.chars().collect();
+                if chars.len() > 30 {
+                    format!("{}...", chars[..27].iter().collect::<String>())
+                } else {
+                    prompt.clone()
+                }
             };
             db::create_or_update_thread(&db, &thread_id, &initial_title, now, Some(&traits))
                 .map_err(|err| AppError::persistence(err.to_string()))?;
@@ -240,6 +334,7 @@ pub async fn init_generation_attempt(
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             image_data,
             attachment_images,
             timestamp: now,
@@ -265,6 +360,7 @@ pub async fn init_generation_attempt(
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             image_data: None,
             attachment_images: Vec::new(),
             timestamp: now + 1,
@@ -439,16 +535,54 @@ pub async fn classify_intent(
         };
     let images = prepare_images(image_data, attachments);
     match llm::classify_intent(&engine, &prompt, backend_context.as_deref(), images).await {
-        Ok(classification) => Ok(IntentDecision {
-            intent_mode: if explicit_question_only {
-                "question".to_string()
+        Ok(classification) => {
+            let llm::IntentClassification {
+                intent,
+                confidence,
+                response,
+                final_response,
+            } = classification.data;
+            let final_response = if explicit_question_only {
+                final_response.clone().or_else(|| Some(response.clone()))
             } else {
-                classification.data.intent
-            },
-            confidence: classification.data.confidence,
-            response: classification.data.response,
-            usage: classification.usage,
-        }),
+                final_response.clone()
+            };
+            Ok(IntentDecision {
+                intent_mode: if explicit_question_only {
+                    "question".to_string()
+                } else {
+                    intent
+                },
+                confidence,
+                response,
+                final_response,
+                usage: classification.usage,
+            })
+        }
         Err(_) => Ok(fallback_intent(&prompt)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepend_follow_up_context;
+
+    #[test]
+    fn prepend_follow_up_context_is_noop_when_missing() {
+        let prompt = "CURRENT DESIGN CONTEXT\n...".to_string();
+        let result = prepend_follow_up_context(prompt.clone(), None);
+        assert_eq!(result, prompt);
+    }
+
+    #[test]
+    fn prepend_follow_up_context_adds_authoritative_block() {
+        let result = prepend_follow_up_context(
+            "CURRENT DESIGN CONTEXT\n...".to_string(),
+            Some("Which side?"),
+        );
+        assert!(result.contains("FOLLOW-UP CONTEXT (AUTHORITATIVE)"));
+        assert!(result.contains("\"Which side?\""));
+        assert!(result.contains("Do not repeat the same clarification question"));
+        assert!(result.ends_with("CURRENT DESIGN CONTEXT\n..."));
     }
 }

@@ -20,3 +20,4 @@ export const config = writable<AppConfig>({
 });
 export const availableModels = writable<string[]>([]);
 export const isLoadingModels = writable<boolean>(false);
+export const freecadAvailable = writable<boolean | null>(null);

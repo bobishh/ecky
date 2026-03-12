@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { requestQueue } from './requestQueue';
-import type { ArtifactBundle, ModelManifest } from '../types/domain';
+import type { AgentDraft, ArtifactBundle, ModelManifest } from '../types/domain';
 
 export type SessionPhase = 
   | 'booting'
@@ -24,6 +24,7 @@ function createSessionStore() {
     isManual: false as boolean,
     repairMessage: '' as string,
     cookingPhrase: '' as string,
+    agentDraft: null as AgentDraft | null,
   });
 
   return {
@@ -33,6 +34,7 @@ function createSessionStore() {
     setPhase: (p: SessionPhase) => update(s => ({ ...s, phase: p })),
     setStatus: (msg: string) => update(s => ({ ...s, status: msg })),
     setError: (err: string | null) => update(s => ({ ...s, error: err })),
+    setAgentDraft: (draft: AgentDraft | null) => update(s => ({ ...s, agentDraft: draft })),
     setStlUrl: (url: string | null) =>
       update(s => ({
         ...s,

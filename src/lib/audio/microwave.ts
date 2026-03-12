@@ -1,4 +1,5 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { writable } from 'svelte/store';
 import type { AppConfig, AssetConfig } from '../types/domain';
 
 // ---------------------------------------------------------------------------
@@ -14,18 +15,29 @@ type MicrowaveNode = AudioBufferSourceNode | OscillatorNode | HTMLMediaElement;
 type AudioCapableWindow = Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
 type MicrowaveAppConfig = AppConfig | null | undefined;
 
-// Per-microwave hum tracking: requestId → { nodes, gainNode, threadId }
-interface MicrowaveEntry {
+interface MicrowaveLogicalEntry {
+  threadId: string | null;
+}
+
+interface MicrowavePlaybackEntry {
   nodes: MicrowaveNode[];
   gain: GainNode;
   threadId: string | null;
 }
-const microwaveHums: Map<string, MicrowaveEntry> = new Map();
+const microwaveEntries: Map<string, MicrowaveLogicalEntry> = new Map();
+const microwavePlayback: Map<string, MicrowavePlaybackEntry> = new Map();
+export const activeMicrowaveCount = writable(0);
 
 // Shared ambient bed (always-on low drone when ≥1 microwave active)
 let ambientNodes: (AudioBufferSourceNode | OscillatorNode)[] = [];
 let ambientGain: GainNode | null = null;
 let currentAudibleThreadId: string | null = null;
+let audioMuted = false;
+let lastKnownConfig: MicrowaveAppConfig = null;
+
+function syncActiveMicrowaveCount() {
+  activeMicrowaveCount.set(microwaveEntries.size);
+}
 
 export function ensureContext(): AudioContext | null {
   if (audioCtx) {
@@ -87,12 +99,14 @@ function stopAmbientBed() {
 
 function scaleAmbientIntensity() {
   if (!ambientGain) return;
-  const count = microwaveHums.size;
+  const count = microwavePlayback.size;
   // Scale from 0.015 (1 microwave) to 0.06 (4+ microwaves)
   let target = Math.min(0.015 + count * 0.012, 0.06);
   
   // If the active thread has no active microwaves, dim the ambient bed too
-  const hasActiveInThread = Array.from(microwaveHums.values()).some(h => h.threadId === currentAudibleThreadId);
+  const hasActiveInThread = Array.from(microwavePlayback.values()).some(
+    (entry) => entry.threadId === currentAudibleThreadId,
+  );
   if (!hasActiveInThread && count > 0) {
     target *= 0.3; // Ghostly background
   }
@@ -107,45 +121,63 @@ function scaleAmbientIntensity() {
 const HUM_BASE_FREQ = 58;
 const HUM_FREQ_SPREAD = 4; // Hz between each microwave's hum
 
-export function setAudibleThread(threadId: string | null) {
-  currentAudibleThreadId = threadId;
-  const now = audioCtx ? audioCtx.currentTime : 0;
-
-  for (const entry of microwaveHums.values()) {
-    const isAudible = entry.threadId === threadId;
-    const targetGain = isAudible ? 1.0 : 0.005; // Ghosting
-    if (audioCtx) {
-      entry.gain.gain.setTargetAtTime(targetGain, now, 0.1);
-    } else {
-      entry.gain.gain.value = targetGain;
-    }
-  }
-  scaleAmbientIntensity();
+function playbackSlotFor(requestId: string): number {
+  return Math.max(0, Array.from(microwaveEntries.keys()).indexOf(requestId));
 }
 
-export function startMicrowaveHum(requestId: string, config: MicrowaveAppConfig, threadId: string | null = null) {
-  if (!config || config.microwave?.muted) return;
-  if (microwaveHums.has(requestId)) return;
+function stopPlaybackForMicrowave(requestId: string) {
+  const entry = microwavePlayback.get(requestId);
+  if (!entry) return;
+
+  const now = audioCtx ? audioCtx.currentTime : 0;
+  if (audioCtx) {
+    entry.gain.gain.setTargetAtTime(0, now, 0.05);
+  }
+
+  setTimeout(() => {
+    for (const node of entry.nodes) {
+      try {
+        if (node instanceof HTMLMediaElement) {
+          node.pause();
+          node.currentTime = 0;
+        } else {
+          node.stop();
+        }
+      } catch (e) {}
+    }
+  }, 100);
+
+  microwavePlayback.delete(requestId);
+  scaleAmbientIntensity();
+
+  if (microwavePlayback.size === 0) {
+    stopAmbientBed();
+  }
+}
+
+function createPlaybackForMicrowave(
+  requestId: string,
+  threadId: string | null,
+  config: MicrowaveAppConfig,
+) {
+  if (audioMuted || microwavePlayback.has(requestId)) return;
 
   const ctx = ensureContext();
   if (!ctx || !masterGain) return;
 
-  // Start ambient bed on first microwave
-  if (microwaveHums.size === 0) {
+  if (microwavePlayback.size === 0) {
     startAmbientBed(ctx);
   }
 
-  const slot = microwaveHums.size;
-  const humAssetId = config.microwave?.humId;
-  const humAsset = config.assets?.find((a: AssetConfig) => a.id === humAssetId);
+  const slot = playbackSlotFor(requestId);
+  const humAssetId = config?.microwave?.humId;
+  const humAsset = config?.assets?.find((asset: AssetConfig) => asset.id === humAssetId);
 
-  // The base container gain for this microwave
   const perMicGain = ctx.createGain();
   const isAudible = threadId === currentAudibleThreadId;
-  perMicGain.gain.value = isAudible ? 1.0 : 0.005; 
+  perMicGain.gain.value = isAudible ? 1.0 : 0.005;
   perMicGain.connect(masterGain);
 
-  // Inner gain for slot-based volume scaling (avoid clipping)
   const slotGain = ctx.createGain();
   slotGain.gain.value = Math.max(0.03, 0.08 - slot * 0.012);
   slotGain.connect(perMicGain);
@@ -160,10 +192,8 @@ export function startMicrowaveHum(requestId: string, config: MicrowaveAppConfig,
     audio.play();
     nodes.push(audio);
   } else {
-    // Procedural hum: unique frequency per slot
     const freq = HUM_BASE_FREQ + slot * HUM_FREQ_SPREAD;
 
-    // Brown noise layer
     const bufferSize = ctx.sampleRate * 2;
     const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = noiseBuffer.getChannelData(0);
@@ -190,7 +220,6 @@ export function startMicrowaveHum(requestId: string, config: MicrowaveAppConfig,
     noiseGain.connect(slotGain);
     noise.start();
 
-    // Sine hum
     const hum = ctx.createOscillator();
     hum.type = 'sine';
     hum.frequency.value = freq;
@@ -203,41 +232,81 @@ export function startMicrowaveHum(requestId: string, config: MicrowaveAppConfig,
     nodes.push(noise, hum);
   }
 
-  microwaveHums.set(requestId, { nodes, gain: perMicGain, threadId });
+  microwavePlayback.set(requestId, { nodes, gain: perMicGain, threadId });
+  console.info('[Microwave] playback started', {
+    requestId,
+    threadId,
+    slot,
+    muted: audioMuted,
+    activeLogical: microwaveEntries.size,
+  });
   scaleAmbientIntensity();
 }
 
-export function stopMicrowaveHum(requestId: string) {
-  const entry = microwaveHums.get(requestId);
-  if (!entry) return;
-
-  const now = audioCtx ? audioCtx.currentTime : 0;
-  // Ramp down immediately to prevent clicking or trailing noise
-  if (audioCtx) {
-    entry.gain.gain.setTargetAtTime(0, now, 0.05);
-  }
-
-  // Delay actual node stopping slightly to allow the ramp
-  setTimeout(() => {
-    for (const node of entry.nodes) {
-      try {
-        if (node instanceof HTMLMediaElement) {
-          node.pause();
-          node.currentTime = 0;
-        } else {
-          node.stop();
-        }
-      } catch (e) {}
+function syncPlaybackToLogicalState(config: MicrowaveAppConfig = lastKnownConfig) {
+  if (audioMuted) {
+    for (const requestId of Array.from(microwavePlayback.keys())) {
+      stopPlaybackForMicrowave(requestId);
     }
-  }, 100);
-
-  microwaveHums.delete(requestId);
-  scaleAmbientIntensity();
-
-  // Kill ambient bed when last microwave stops
-  if (microwaveHums.size === 0) {
-    stopAmbientBed();
+    return;
   }
+
+  if (!config) return;
+
+  for (const [requestId, entry] of microwaveEntries.entries()) {
+    const playback = microwavePlayback.get(requestId);
+    if (playback) {
+      playback.threadId = entry.threadId;
+      continue;
+    }
+    createPlaybackForMicrowave(requestId, entry.threadId, config);
+  }
+
+  for (const requestId of Array.from(microwavePlayback.keys())) {
+    if (!microwaveEntries.has(requestId)) {
+      stopPlaybackForMicrowave(requestId);
+    }
+  }
+}
+
+export function setAudibleThread(threadId: string | null) {
+  currentAudibleThreadId = threadId;
+  const now = audioCtx ? audioCtx.currentTime : 0;
+
+  for (const entry of microwavePlayback.values()) {
+    const isAudible = entry.threadId === threadId;
+    const targetGain = isAudible ? 1.0 : 0.005; // Ghosting
+    if (audioCtx) {
+      entry.gain.gain.setTargetAtTime(targetGain, now, 0.1);
+    } else {
+      entry.gain.gain.value = targetGain;
+    }
+  }
+  scaleAmbientIntensity();
+}
+
+export function startMicrowaveHum(requestId: string, config: MicrowaveAppConfig, threadId: string | null = null) {
+  lastKnownConfig = config ?? lastKnownConfig;
+  audioMuted = Boolean(config?.microwave?.muted ?? audioMuted);
+
+  microwaveEntries.set(requestId, { threadId });
+  const playback = microwavePlayback.get(requestId);
+  if (playback) {
+    playback.threadId = threadId;
+  }
+  syncActiveMicrowaveCount();
+  syncPlaybackToLogicalState(lastKnownConfig);
+  setAudibleThread(currentAudibleThreadId);
+}
+
+export function stopMicrowaveHum(requestId: string) {
+  microwaveEntries.delete(requestId);
+  syncActiveMicrowaveCount();
+  stopPlaybackForMicrowave(requestId);
+  console.info('[Microwave] playback stopped', {
+    requestId,
+    remainingLogical: microwaveEntries.size,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -245,8 +314,8 @@ export function stopMicrowaveHum(requestId: string) {
 // ---------------------------------------------------------------------------
 
 export function stopMicrowaveAudio(closeContext = true) {
-  for (const [id] of microwaveHums) {
-    stopMicrowaveHum(id);
+  for (const requestId of Array.from(microwavePlayback.keys())) {
+    stopPlaybackForMicrowave(requestId);
   }
   stopAmbientBed();
 
@@ -254,6 +323,7 @@ export function stopMicrowaveAudio(closeContext = true) {
     try { audioCtx.close(); } catch (e) {}
     audioCtx = null;
     masterGain = null;
+    console.info('[Microwave] audio context closed');
   }
 }
 
@@ -270,7 +340,7 @@ const DING_BASE_FREQ = 1200;
 const DING_FREQ_SPREAD = 80;
 
 export function playDing(config: MicrowaveAppConfig, slot = 0) {
-  if (!audioCtx || !masterGain || config?.microwave?.muted) return;
+  if (!audioCtx || !masterGain || audioMuted || config?.microwave?.muted) return;
 
   try {
     const dingAssetId = config?.microwave?.dingId;
@@ -304,7 +374,7 @@ export function playDing(config: MicrowaveAppConfig, slot = 0) {
 
 // Error buzz — short dissonant tone
 export function playErrorBuzz(config: MicrowaveAppConfig) {
-  if (!audioCtx || !masterGain || config?.microwave?.muted) return;
+  if (!audioCtx || !masterGain || audioMuted || config?.microwave?.muted) return;
 
   try {
     const now = audioCtx.currentTime;
@@ -341,11 +411,22 @@ export function stopRequestHum(requestId: string, success: boolean, config: Micr
 }
 
 export function getActiveMicrowaveCount(): number {
-  return microwaveHums.size;
+  return microwaveEntries.size;
 }
 
-export function setMuted(muted: boolean) {
+export function setMuted(muted: boolean, config: MicrowaveAppConfig = lastKnownConfig) {
+  audioMuted = muted;
+  lastKnownConfig = config ?? lastKnownConfig;
+  console.info('[Microwave] muted state changed', {
+    muted,
+    activeLogical: microwaveEntries.size,
+    activePlayback: microwavePlayback.size,
+  });
+
   if (muted) {
-    stopMicrowaveAudio(false); // Stop all but keep context? Actually stopMicrowaveAudio closes context by default.
+    stopMicrowaveAudio(false);
+    return;
   }
+
+  syncPlaybackToLogicalState(lastKnownConfig);
 }

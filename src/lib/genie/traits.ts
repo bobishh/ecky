@@ -2,6 +2,7 @@ import type { GenieEyeStyle, GenieTraits } from '../types/domain';
 
 export type GenieMode =
   | 'idle'
+  | 'sleeping'
   | 'thinking'
   | 'light'
   | 'rendering'
@@ -11,6 +12,7 @@ export type GenieMode =
 
 type PalettePreset =
   | 'base'
+  | 'sleeping'
   | 'thinking'
   | 'light'
   | 'repairing'
@@ -206,6 +208,21 @@ export function resolveModeTraits(
   };
 
   switch (mode) {
+    case 'sleeping':
+      resolved.palettePreset = 'sleeping';
+      resolved.jitterScale *= 0.4;
+      resolved.pulseScale *= 0.6;
+      resolved.hoverScale *= 0.5;
+      resolved.warpScale *= 0.3;
+      resolved.eyeStyle = 'bar';
+      resolved.mouthStyle = 'line';
+      resolved.mouthOpenBase = 0.4;
+      resolved.mouthOpenAmplitude = 0.05;
+      resolved.chordAlpha = 0.08;
+      resolved.nodeRadius = 1.8;
+      resolved.centerOrbitAmplitude *= 0.4;
+      resolved.centerOrbitFrequency *= 0.5;
+      break;
     case 'thinking':
       resolved.palettePreset = 'thinking';
       resolved.glowHueShift += 10;

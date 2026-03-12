@@ -22,6 +22,7 @@ export type MaterializedSemanticControl = {
   primitiveId: string;
   label: string;
   kind: ControlPrimitiveKind;
+  source: ControlViewSource;
   editable: boolean;
   partIds: string[];
   order: number;
@@ -130,13 +131,14 @@ function includesToken(tokens: string[], candidates: string[]): boolean {
 function primitiveKindFromField(field: UiField): ControlPrimitiveKind {
   if (field.type === 'checkbox') return 'toggle';
   if (field.type === 'select') return 'choice';
+  if (field.type === 'image') return 'choice'; // Maps roughly to string value for now
   return 'number';
 }
 
 function inferPresentation(field: UiField, label: string): 'primary' | 'advanced' {
   const tokens = tokenize(`${field.key} ${label}`);
   if (includesToken(tokens, ADVANCED_CONTROL_WORDS)) return 'advanced';
-  if (field.type === 'checkbox' || field.type === 'select') return 'primary';
+  if (field.type === 'checkbox' || field.type === 'select' || field.type === 'image') return 'primary';
   if (includesToken(tokens, PRIMARY_CONTROL_WORDS)) return 'primary';
   return 'advanced';
 }
@@ -212,7 +214,7 @@ function readPrimitiveValue(
 
   if (!field) return rawValue ?? null;
   if (field.type === 'checkbox') return Boolean(rawValue);
-  if (field.type === 'select') return rawValue ?? null;
+  if (field.type === 'select' || field.type === 'image') return rawValue ?? null;
 
   const numeric = Number(rawValue);
   if (!Number.isFinite(numeric)) return rawValue ?? null;
@@ -232,6 +234,7 @@ function defaultPrimitiveForField(
     primitiveId: `primitive-${slugify(field.key)}`,
     label: inferPrimitiveLabel(field, parts),
     kind: primitiveKindFromField(field),
+    source: 'generated',
     partIds,
     bindings: [
       {
@@ -251,14 +254,17 @@ function mergePrimitive(
   fallback: ControlPrimitive,
   existing: ControlPrimitive | null,
   uiSpec: UiSpec,
+  validPartIds: Set<string>,
 ): ControlPrimitive {
   if (!existing) return fallback;
   const normalizedBindings = normalizeBindingsForPrimitive(existing, uiSpec);
+  const retainedPartIds = [...new Set((existing.partIds || []).filter((partId) => validPartIds.has(partId)))];
   return {
     primitiveId: existing.primitiveId || fallback.primitiveId,
     label: existing.label || fallback.label,
     kind: existing.kind || fallback.kind,
-    partIds: existing.partIds?.length ? [...new Set(existing.partIds)] : fallback.partIds,
+    source: existing.source || fallback.source,
+    partIds: retainedPartIds.length > 0 ? retainedPartIds : fallback.partIds,
     bindings: normalizedBindings.length > 0 ? normalizedBindings : fallback.bindings,
     editable: existing.editable ?? fallback.editable,
     order: typeof existing.order === 'number' ? existing.order : fallback.order,
@@ -430,6 +436,7 @@ function carryForwardPrimitives(
   defaults: ControlPrimitive[],
   previousManifest: ModelManifest | null,
 ): ControlPrimitive[] {
+  const validPartIds = new Set((manifest.parts || []).map((part) => part.partId));
   const currentBySignature = new Map<string, ControlPrimitive>();
   const currentById = new Map<string, ControlPrimitive>();
 
@@ -454,7 +461,7 @@ function carryForwardPrimitives(
     .map((primitive) => {
       const signature = bindingSignature(primitive.bindings || []);
       const existing = currentBySignature.get(signature) || currentById.get(primitive.primitiveId) || null;
-      return mergePrimitive(primitive, existing, uiSpec);
+      return mergePrimitive(primitive, existing, uiSpec, validPartIds);
     })
     .sort(sortByOrder);
 }
@@ -614,6 +621,7 @@ function materializePrimitive(
     primitiveId: primitive.primitiveId,
     label: primitive.label,
     kind: primitive.kind,
+    source: primitive.source ?? 'generated',
     editable: primitive.editable,
     partIds: primitive.partIds || [],
     order: primitive.order || 0,
@@ -662,7 +670,7 @@ export function materializeControlViews(
         scope: view.scope,
         partIds: view.partIds || [],
         isDefault: Boolean(view.default),
-        source: view.source,
+        source: view.source ?? 'generated',
         status: view.status ?? 'none',
         order: view.order ?? 0,
         sections,
@@ -693,7 +701,7 @@ export function buildPrimitivePatch(
       continue;
     }
 
-    if (field.type === 'select') {
+    if (field.type === 'select' || field.type === 'image') {
       patch[binding.parameterKey] = nextValue;
       continue;
     }

@@ -25,6 +25,7 @@ const ROOT = path.resolve(__dirname, '..');
 const OUTPUTS_DIR = path.join(ROOT, 'outputs');
 const CONFIG_FILE = path.join(ROOT, 'config.json');
 const TEMPLATE_MACRO = path.join(ROOT, 'templates', 'cache_pot_default.FCMacro');
+const CAD_SDK_SOURCE = path.join(ROOT, 'model-runtime', 'cad_sdk.py');
 const FREECAD_RUNNER = path.join(__dirname, 'freecad_runner.py');
 
 const app = express();
@@ -75,6 +76,15 @@ async function loadConfig(): Promise<void> {
     console.log('Configuration loaded from disk.');
   } catch {
     console.log('No config file found, using defaults.');
+  }
+}
+
+async function ensureCadSdk(outputDir: string): Promise<void> {
+  const target = path.join(outputDir, 'cad_sdk.py');
+  try {
+    await fs.copyFile(CAD_SDK_SOURCE, target);
+  } catch (error) {
+    console.warn('Failed to copy cad_sdk.py into outputs:', String(error));
   }
 }
 
@@ -263,6 +273,7 @@ app.post('/api/generate', async (req: ExpressRequest, res: ExpressResponse) => {
   }
 
   await fs.writeFile(macroPath, macroCode, 'utf8');
+  await ensureCadSdk(OUTPUTS_DIR);
 
   let stlUrl: string | null = null;
   let renderError: string | null = null;
@@ -306,6 +317,7 @@ app.post('/api/render', async (req: ExpressRequest, res: ExpressResponse) => {
   try {
     await fs.mkdir(OUTPUTS_DIR, { recursive: true });
     await fs.writeFile(macroPath, macroCode, 'utf8');
+    await ensureCadSdk(OUTPUTS_DIR);
     await renderStlWithFreecad(macroPath, stlPath, parameters || {});
     res.json({ ok: true, stlUrl: `/outputs/${id}.stl` });
   } catch (error) {

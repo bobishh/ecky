@@ -1,19 +1,27 @@
 import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { history, activeThreadId, activeVersionId } from './domainState';
-import { workingCopy } from './workingCopy';
+import { workingCopy, isDirty } from './workingCopy';
 import { session } from './sessionStore';
 import { handleParamChange, commitManualVersion } from '../controllers/manualController';
 import { paramPanelState } from './paramPanelState';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
 import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
-import type { Message, Thread } from '../types/domain';
+import type { AgentDraft, Message, Thread } from '../types/domain';
 import {
+  addImportedModelVersion,
+  addManualVersion,
+  deleteAgentDraft,
   deleteThread as deleteThreadCommand,
   deleteVersion as deleteVersionCommand,
+  finalizeThread as finalizeThreadCommand,
+  reopenThread as reopenThreadCommand,
+  getInventory as getInventoryCommand,
   formatBackendError,
   getHistory,
   getMessStlPath,
+  getModelManifest,
+  renameThread as renameThreadCommand,
   getThread,
   restoreVersion as restoreVersionCommand,
 } from '../tauri/client';
@@ -47,9 +55,73 @@ function versionLabel(message: Message): string {
   );
 }
 
+function hasConsistentRuntimePayload(
+  bundle: Message['artifactBundle'] | null | undefined,
+  manifest: Message['modelManifest'] | null | undefined,
+): boolean {
+  return Boolean(bundle && manifest && bundle.modelId === manifest.modelId);
+}
+
+async function resolveForkRuntimePayload(message: Message): Promise<{
+  artifactBundle: Message['artifactBundle'] | null;
+  modelManifest: Message['modelManifest'] | null;
+}> {
+  if (hasConsistentRuntimePayload(message.artifactBundle, message.modelManifest)) {
+    return {
+      artifactBundle: message.artifactBundle ?? null,
+      modelManifest: message.modelManifest ?? null,
+    };
+  }
+
+  const currentThreadId = get(activeThreadId);
+  const currentVersionId = get(activeVersionId);
+  const currentSession = get(session);
+  if (
+    message.id === currentVersionId &&
+    currentThreadId &&
+    hasConsistentRuntimePayload(currentSession.artifactBundle, currentSession.modelManifest)
+  ) {
+    return {
+      artifactBundle: currentSession.artifactBundle,
+      modelManifest: currentSession.modelManifest,
+    };
+  }
+
+  if (message.artifactBundle) {
+    try {
+      const refreshedManifest = await getModelManifest(message.artifactBundle.modelId);
+      if (message.artifactBundle.modelId === refreshedManifest.modelId) {
+        return {
+          artifactBundle: message.artifactBundle,
+          modelManifest: refreshedManifest,
+        };
+      }
+    } catch (e) {
+      console.warn('[History] Failed to refresh manifest for fork:', e);
+    }
+  }
+
+  return { artifactBundle: null, modelManifest: null };
+}
+
+export async function applyAgentDraft(draft: AgentDraft) {
+  const { designOutput, artifactBundle, modelManifest, baseMessageId } = draft;
+  workingCopy.loadVersion(designOutput, baseMessageId);
+  paramPanelState.hydrateFromVersion(designOutput, baseMessageId);
+  if (artifactBundle) {
+    session.setStlUrl(toAssetUrl(artifactBundle.previewStlPath));
+    session.setModelRuntime(artifactBundle, modelManifest ?? null);
+  }
+  session.setAgentDraft(null);
+  session.setStatus('Agent draft loaded. Review and SAVE VERSION to persist.');
+}
+
 export async function loadVersion(msg: Message | null | undefined) {
   if (!isVersionCandidate(msg)) return;
   activeVersionId.set(msg.id);
+  
+  session.setAgentDraft(null);
+
   if (msg.output) {
     workingCopy.loadVersion(msg.output, msg.id);
     paramPanelState.hydrateFromVersion(msg.output, msg.id);
@@ -71,6 +143,7 @@ export async function loadVersion(msg: Message | null | undefined) {
   }
 
   session.setStatus(`Loaded Version: ${versionLabel(msg)}`);
+
   await persistLastSessionSnapshot({
     design: msg.output ?? null,
     threadId: get(activeThreadId),
@@ -86,15 +159,15 @@ export async function loadFromHistory(thread: Thread) {
   activeThreadId.set(targetThreadId);
   
   let freshThread: Thread = thread;
-  // Lazy load messages if they aren't present
-  if (!thread.messages || thread.messages.length === 0) {
-    try {
-      freshThread = await getThread(targetThreadId);
-      // Update the thread in the history store list so we don't fetch it again
-      history.update(h => h.map(t => t.id === targetThreadId ? { ...t, messages: freshThread.messages } : t));
-    } catch (e) {
-      console.error("[History] Failed to lazy-load thread:", e);
-    }
+  try {
+    freshThread = await getThread(targetThreadId);
+    history.update((items) =>
+      items.map((candidate) =>
+        candidate.id === targetThreadId ? { ...candidate, messages: freshThread.messages } : candidate,
+      ),
+    );
+  } catch (e) {
+    console.error('[History] Failed to load thread:', e);
   }
   
   const lastAssistantMsg = [...freshThread.messages].reverse().find(isVersionCandidate);
@@ -146,6 +219,27 @@ export async function deleteThread(id: string) {
     history.set(freshHistory);
   } catch (e) {
     session.setError(`Delete Error: ${formatBackendError(e)}`);
+  }
+}
+
+export async function renameThread(id: string, title: string) {
+  const trimmed = title.trim();
+  if (!trimmed) {
+    session.setError('Rename Error: Thread title cannot be empty.');
+    return;
+  }
+
+  try {
+    await renameThreadCommand(id, trimmed);
+    history.update((items) =>
+      items.map((thread) => (thread.id === id ? { ...thread, title: trimmed } : thread)),
+    );
+    await refreshHistory();
+    if (get(activeThreadId) === id) {
+      session.setStatus(`Thread renamed to ${trimmed}.`);
+    }
+  } catch (e) {
+    session.setError(`Rename Error: ${formatBackendError(e)}`);
   }
 }
 
@@ -233,17 +327,138 @@ async function commitInitialMacro(code: string, title: string | undefined) {
   }
 }
 
-export function forkDesign() {
-  const newId = crypto.randomUUID();
-  activeThreadId.set(newId);
-  activeVersionId.set(null);
-  paramPanelState.setVersionId(null);
-  workingCopy.patch({
-    versionName: 'Forked',
-    sourceVersionId: null
-  });
-  session.setStatus('Design forked. Next generation will create a new thread.');
-  void clearLastSessionSnapshot();
+async function resolveActiveVersionMessage(): Promise<Message | null> {
+  const threadId = get(activeThreadId);
+  if (!threadId) return null;
+
+  let thread = get(history).find((candidate) => candidate.id === threadId) ?? null;
+  if (!thread?.messages?.length) {
+    try {
+      thread = await getThread(threadId);
+      history.update((items) =>
+        items.some((candidate) => candidate.id === threadId)
+          ? items.map((candidate) =>
+              candidate.id === threadId ? { ...candidate, messages: thread?.messages ?? [] } : candidate,
+            )
+          : items,
+      );
+    } catch (e) {
+      console.warn('[History] Failed to load active thread for fork:', e);
+    }
+  }
+
+  const messages = thread?.messages || [];
+  const selectedVersionId = get(activeVersionId);
+  const selectedMessage = selectedVersionId
+    ? messages.find((message) => message.id === selectedVersionId)
+    : null;
+  if (isVersionCandidate(selectedMessage)) return selectedMessage;
+  return [...messages].reverse().find(isVersionCandidate) ?? null;
+}
+
+export async function forkDesign() {
+  try {
+    const sourceMessage = await resolveActiveVersionMessage();
+    if (!sourceMessage) {
+      session.setError('Fork Error: No active version is loaded.');
+      return;
+    }
+
+    const label = versionLabel(sourceMessage);
+    const confirmed =
+      typeof window === 'undefined'
+        ? true
+        : window.confirm(`Fork "${label}" into a new thread now?`);
+    if (!confirmed) return;
+
+    const newThreadId = crypto.randomUUID();
+    let newMessageId = '';
+    const runtimePayload = await resolveForkRuntimePayload(sourceMessage);
+
+    if (sourceMessage.output) {
+      newMessageId = await addManualVersion({
+        threadId: newThreadId,
+        title: sourceMessage.output.title || label,
+        versionName: sourceMessage.output.versionName || 'Forked',
+        macroCode: sourceMessage.output.macroCode,
+        parameters: sourceMessage.output.initialParams || {},
+        uiSpec: sourceMessage.output.uiSpec,
+        artifactBundle: runtimePayload.artifactBundle ?? null,
+        modelManifest: runtimePayload.modelManifest ?? null,
+      });
+    } else if (runtimePayload.artifactBundle && runtimePayload.modelManifest) {
+      newMessageId = await addImportedModelVersion({
+        threadId: newThreadId,
+        title: label,
+        artifactBundle: runtimePayload.artifactBundle,
+        modelManifest: runtimePayload.modelManifest,
+      });
+    } else {
+      session.setError('Fork Error: Active version has no reusable payload to fork.');
+      return;
+    }
+
+    const forkedThread = await getThread(newThreadId);
+    history.update((items) => {
+      const nextItems = items.filter((item) => item.id !== newThreadId);
+      return [forkedThread, ...nextItems];
+    });
+
+    activeThreadId.set(newThreadId);
+    const forkedMessage =
+      forkedThread.messages.find((message) => message.id === newMessageId) ??
+      [...forkedThread.messages].reverse().find(isVersionCandidate) ??
+      null;
+
+    if (forkedMessage) {
+      await loadVersion(forkedMessage);
+    } else {
+      activeVersionId.set(newMessageId || null);
+    }
+
+    session.setStatus('Design forked into a new thread.');
+    paramPanelState.setVersionId(newMessageId || null);
+    await refreshHistory();
+  } catch (e) {
+    session.setError(`Fork Error: ${formatBackendError(e)}`);
+  }
+}
+
+export async function finalizeThread(id: string) {
+  try {
+    await finalizeThreadCommand(id);
+    if (get(activeThreadId) === id) {
+      activeThreadId.set(null);
+      activeVersionId.set(null);
+      workingCopy.reset();
+      paramPanelState.reset();
+      session.setStlUrl(null);
+      await clearLastSessionSnapshot();
+    }
+    await refreshHistory();
+    session.setStatus('Thread finalized and moved to inventory.');
+  } catch (e) {
+    session.setError(`Finalize Error: ${formatBackendError(e)}`);
+  }
+}
+
+export async function reopenThread(id: string) {
+  try {
+    await reopenThreadCommand(id);
+    await refreshHistory();
+    session.setStatus('Thread reopened from inventory.');
+  } catch (e) {
+    session.setError(`Reopen Error: ${formatBackendError(e)}`);
+  }
+}
+
+export async function loadInventory(): Promise<Thread[]> {
+  try {
+    return await getInventoryCommand();
+  } catch (e) {
+    console.error('[History] Failed to load inventory:', e);
+    return [];
+  }
 }
 
 export async function refreshHistory() {

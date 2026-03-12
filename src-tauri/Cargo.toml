@@ -21,13 +21,17 @@ specta-typescript = "0.0.9"
 tauri-specta = { version = "2.0.0-rc.21", features = ["derive", "typescript"] }
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
+axum = "0.8"
 uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 sha2 = "0.10.9"
 base64 = "0.22.1"
 rand = "0.8"
 regex = "1.12.3"
 rustpython-parser = "0.4.0"
+rustpython-ast = { version = "0.4.0", features = ["visitor"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"

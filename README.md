@@ -13,10 +13,9 @@ Prompt-driven CAD iterator using LLMs to generate and execute FreeCAD Python mac
 
 ## Installation
 
-1. Clone the repository.
+1. Clone the repository and `cd` into it.
 2. Install dependencies:
    ```bash
-   cd ecky-cad
    npm install
    ```
 3. Configure the application via the in-app settings (⚙️ icon).

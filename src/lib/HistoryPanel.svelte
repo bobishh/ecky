@@ -2,7 +2,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import ManualImportModal from './ManualImportModal.svelte';
   import Modal from './Modal.svelte';
-  import type { Thread } from './types/domain';
+  import type { Thread, AgentSession } from './types/domain';
 
   type NewThreadPayload =
     | { mode: 'blank' }
@@ -18,18 +18,24 @@
     history,
     activeThreadId,
     inFlightByThread = {},
+    activeAgentSessions = [],
     onSelect,
     onDelete,
+    onRename,
     onNew,
     onImportFcstd,
+    onFinalize,
   }: {
     history: Thread[];
     activeThreadId: string | null;
     inFlightByThread?: Record<string, number>;
+    activeAgentSessions?: AgentSession[];
     onSelect: (thread: Thread) => void;
     onDelete: (id: string) => void;
+    onRename: (id: string, title: string) => Promise<void> | void;
     onNew: (payload: NewThreadPayload) => void;
     onImportFcstd: (sourcePath: string) => void;
+    onFinalize?: (id: string) => void;
   } = $props();
 
   let searchQuery = $state('');
@@ -37,6 +43,9 @@
   let showImport = $state(false);
   let showNewChooser = $state(false);
   let threadToDelete = $state<Thread | null>(null);
+  let editingThreadId = $state<string | null>(null);
+  let editingTitle = $state('');
+  let renameBusy = $state(false);
   const itemsPerPage = 10;
 
   const filteredHistory = $derived(
@@ -115,16 +124,67 @@
   }
 
   function selectThread(thread: Thread) {
+    if (editingThreadId === thread.id) return;
     if (hasTextSelection()) return;
     onSelect(thread);
+  }
+
+  function startRename(thread: Thread, event?: Event) {
+    event?.stopPropagation();
+    editingThreadId = thread.id;
+    editingTitle = thread.title;
+  }
+
+  function cancelRename(event?: Event) {
+    event?.stopPropagation();
+    editingThreadId = null;
+    editingTitle = '';
+    renameBusy = false;
+  }
+
+  async function commitRename(thread: Thread, event?: Event) {
+    event?.stopPropagation();
+    if (renameBusy) return;
+    const trimmed = editingTitle.trim();
+    if (!trimmed) {
+      cancelRename();
+      return;
+    }
+    if (trimmed === thread.title.trim()) {
+      cancelRename();
+      return;
+    }
+    renameBusy = true;
+    try {
+      await onRename(thread.id, trimmed);
+      editingThreadId = null;
+      editingTitle = '';
+    } finally {
+      renameBusy = false;
+    }
   }
 
   function pluralize(count: number, noun: string) {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
 
+  function isLiveAgentPhase(phase: string) {
+    return phase !== 'idle' && phase !== 'error';
+  }
+
+  function hasImportPendingSetup(thread: Thread): boolean {
+    return thread.messages.some(
+      (m) =>
+        m.modelManifest?.sourceKind === 'importedFcstd' &&
+        m.modelManifest?.enrichmentState?.status === 'pending',
+    );
+  }
+
   function getThreadState(thread: Thread): ThreadState {
     const inFlightCount = Number(inFlightByThread?.[thread?.id] || 0);
+    const agentSession = (activeAgentSessions || []).find(
+      (s) => s.threadId === thread.id && isLiveAgentPhase(s.phase),
+    );
     const pendingCount = Number(thread?.pendingCount || 0);
     const errorCount = Number(thread?.errorCount || 0);
     const versionCount = Number(thread?.versionCount || 0);
@@ -134,6 +194,16 @@
         label: 'RUNNING',
         className: 'running',
         title: `${pluralize(inFlightCount, 'request')} currently in progress`
+      };
+    }
+
+    if (agentSession) {
+      const sessionLabel =
+        agentSession.llmModelLabel || agentSession.agentLabel || agentSession.hostLabel;
+      return {
+        label: sessionLabel.toUpperCase(),
+        className: 'agent-active',
+        title: `Active agent session: ${agentSession.hostLabel}${agentSession.llmModelLabel ? ` / ${agentSession.llmModelLabel}` : ''} (${agentSession.phase})`
       };
     }
 
@@ -255,12 +325,34 @@
         role="button"
         tabindex="0"
         onclick={() => selectThread(thread)}
-        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelect(thread); }}
+        onkeydown={(e) => { if (editingThreadId !== thread.id && (e.key === 'Enter' || e.key === ' ')) onSelect(thread); }}
       >
         <div class="card-header">
-          <span class="card-title">{thread.title}</span>
+          {#if editingThreadId === thread.id}
+            <input
+              class="card-title-input"
+              bind:value={editingTitle}
+              onclick={(e) => e.stopPropagation()}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') void commitRename(thread, e);
+                if (e.key === 'Escape') cancelRename(e);
+              }}
+            />
+          {:else}
+            <button
+              class="card-title-button"
+              onclick={(e) => startRename(thread, e)}
+              title="Rename thread"
+            >
+              <span class="card-title">{thread.title}</span>
+              <span class="card-title-pencil" aria-hidden="true">✎</span>
+            </button>
+          {/if}
           <span class="status-badge {threadState.className}" title={threadState.title}>{threadState.label}</span>
           <span class="card-date">{formatDate(thread.updatedAt)}</span>
+          {#if hasImportPendingSetup(thread)}
+            <span class="status-badge needs-setup" title="Imported model has pending parameter binding proposals">NEEDS SETUP</span>
+          {/if}
         </div>
         {#if thread.summary}
           <div class="card-summary">{thread.summary}</div>
@@ -273,13 +365,48 @@
           {/if}
         </div>
         <div class="card-actions">
-          <button 
-            class="card-btn delete" 
-            onclick={(e) => { e.stopPropagation(); confirmDelete(thread.id); }}
-            title="Delete Thread"
-          >
-            🗑️
-          </button>
+          {#if editingThreadId === thread.id}
+            <button
+              class="card-btn rename"
+              onclick={(e) => void commitRename(thread, e)}
+              disabled={renameBusy}
+              title="Save title"
+            >
+              ✓
+            </button>
+            <button
+              class="card-btn rename"
+              onclick={cancelRename}
+              disabled={renameBusy}
+              title="Cancel rename"
+            >
+              ✕
+            </button>
+          {:else}
+            <button
+              class="card-btn rename"
+              onclick={(e) => startRename(thread, e)}
+              title="Rename Thread"
+            >
+              ✎
+            </button>
+            {#if onFinalize && thread.versionCount > 0}
+              <button
+                class="card-btn finalize"
+                onclick={(e) => { e.stopPropagation(); onFinalize(thread.id); }}
+                title="Finalize — move to inventory"
+              >
+                ✓
+              </button>
+            {/if}
+            <button
+              class="card-btn delete"
+              onclick={(e) => { e.stopPropagation(); confirmDelete(thread.id); }}
+              title="Delete Thread"
+            >
+              🗑️
+            </button>
+          {/if}
         </div>
       </div>
     {:else}
@@ -452,6 +579,7 @@
   }
 
   .history-card.status-running { border-left-color: var(--primary); }
+  .history-card.status-agent-active { border-left-color: var(--secondary); }
   .history-card.status-pending { border-left-color: color-mix(in srgb, var(--secondary) 45%, var(--bg-300)); }
   .history-card.status-failed { border-left-color: var(--red); }
   .history-card.status-issues { border-left-color: var(--secondary); }
@@ -487,6 +615,51 @@
     flex: 1;
   }
 
+  .card-title-button {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: text;
+    text-align: left;
+    overflow: hidden;
+  }
+
+  .card-title-button:hover .card-title,
+  .card-title-button:hover .card-title-pencil {
+    color: var(--primary);
+  }
+
+  .card-title-button:focus-visible {
+    outline: 1px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  .card-title-pencil {
+    flex: 0 0 auto;
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    opacity: 0.75;
+  }
+
+  .card-title-input {
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--primary);
+    background: var(--bg-100);
+    color: var(--text);
+    font-size: 0.75rem;
+    font-weight: bold;
+    outline: none;
+  }
+
   .history-card.active .card-title {
     color: var(--primary);
   }
@@ -507,6 +680,13 @@
     color: var(--primary);
     background: color-mix(in srgb, var(--primary) 12%, var(--bg-100));
     animation: status-pulse 2s infinite;
+  }
+
+  .status-badge.agent-active {
+    border-color: var(--secondary);
+    color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 12%, var(--bg-100));
+    animation: status-pulse 4s infinite;
   }
 
   .status-badge.pending {
@@ -537,6 +717,13 @@
     border-color: var(--bg-400);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--bg-300) 35%, var(--bg-100));
+  }
+
+  .status-badge.needs-setup {
+    border-color: color-mix(in srgb, var(--primary) 65%, var(--bg-300));
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 15%, var(--bg-100));
+    animation: status-pulse 3s infinite;
   }
 
   @keyframes status-pulse {
@@ -597,9 +784,29 @@
     color: var(--red);
   }
 
+  .card-btn.rename {
+    border-color: color-mix(in srgb, var(--primary) 45%, var(--bg-300));
+  }
+
+  .card-btn.rename:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
   .card-btn.delete:hover {
     background: var(--red);
     color: white;
+  }
+
+  .card-btn.finalize {
+    color: var(--secondary);
+    border-color: color-mix(in srgb, var(--secondary) 45%, var(--bg-300));
+  }
+
+  .card-btn.finalize:hover {
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 20%, var(--bg-300));
+    color: var(--secondary);
   }
 
   .empty-state {

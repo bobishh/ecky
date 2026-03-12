@@ -3,10 +3,13 @@
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+  import ViewportTransmutation from './ViewportTransmutation.svelte';
   import { estimateBase64Bytes, profileLog } from './debug/profiler';
   import type { ParamValue, UiField, ViewerAsset } from './types/domain';
   import type { ImportedPreviewTransform } from './modelRuntime/importedRuntime';
   import type { MaterializedSemanticControl } from './modelRuntime/semanticControls';
+
+  type ViewportBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
 
   let {
     stlUrl = null,
@@ -18,6 +21,9 @@
     overlayControls = [],
     previewTransforms = {},
     isGenerating = false,
+    hideModelWhileBusy = false,
+    busyPhase = null,
+    busyText = null,
     onSelectPart,
     onOverlayChange,
   }: {
@@ -30,6 +36,9 @@
     overlayControls?: MaterializedSemanticControl[];
     previewTransforms?: Record<string, ImportedPreviewTransform>;
     isGenerating?: boolean;
+    hideModelWhileBusy?: boolean;
+    busyPhase?: ViewportBusyPhase;
+    busyText?: string | null;
     onSelectPart?: (partId: string | null) => void;
     onOverlayChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
   } = $props();
@@ -57,7 +66,7 @@
   let hoveredPartId = $state<string | null>(null);
   let dimensionFrame = $state<{ bottom: number; height: number; left: number; right: number; top: number; width: number } | null>(null);
   const showEditableCallouts = $derived.by(
-    () => !overlayFallback && overlayPartEditable && overlayControls.length > 0,
+    () => !hideModelWhileBusy && !overlayFallback && overlayPartEditable && overlayControls.length > 0,
   );
 
   const raycaster = new THREE.Raycaster();
@@ -134,6 +143,7 @@
   }
 
   function updateOverlayParam(primitiveId: string, value: ParamValue) {
+    if (hideModelWhileBusy) return;
     onOverlayChange?.(primitiveId, value);
   }
 
@@ -218,10 +228,21 @@
 
   $effect(() => {
     if (!controls) return;
-    controls.autoRotate = isGenerating;
-    controls.autoRotateSpeed = isGenerating ? 1.8 : 0;
-    if (!isGenerating) {
+    controls.autoRotate = isGenerating && !hideModelWhileBusy;
+    controls.autoRotateSpeed = controls.autoRotate ? 1.8 : 0;
+    if (!controls.autoRotate) {
       controls.update();
+    }
+  });
+
+  $effect(() => {
+    if (!hideModelWhileBusy) return;
+    if (hoveredPartId !== null) {
+      hoveredPartId = null;
+      applySelectionStyles();
+    }
+    if (renderer) {
+      renderer.domElement.style.cursor = 'progress';
     }
   });
 
@@ -575,11 +596,12 @@
   }
 
   function handlePointerDown(event: PointerEvent) {
+    if (hideModelWhileBusy) return;
     pointerDownAt = { x: event.clientX, y: event.clientY };
   }
 
   function hoveredPartFromEvent(event: PointerEvent): string | null {
-    if (!renderer || !camera || !modelRoot || viewerAssets.length === 0) return null;
+    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || viewerAssets.length === 0) return null;
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -613,6 +635,16 @@
   }
 
   function handlePointerMove(event: PointerEvent) {
+    if (hideModelWhileBusy) {
+      if (hoveredPartId !== null) {
+        hoveredPartId = null;
+        applySelectionStyles();
+      }
+      if (renderer) {
+        renderer.domElement.style.cursor = 'progress';
+      }
+      return;
+    }
     const nextHovered = hoveredPartFromEvent(event);
     if (nextHovered !== hoveredPartId) {
       hoveredPartId = nextHovered;
@@ -627,12 +659,12 @@
     hoveredPartId = null;
     applySelectionStyles();
     if (renderer) {
-      renderer.domElement.style.cursor = 'default';
+      renderer.domElement.style.cursor = hideModelWhileBusy ? 'progress' : 'default';
     }
   }
 
   function handlePointerUp(event: PointerEvent) {
-    if (!renderer || !camera || !modelRoot || viewerAssets.length === 0) return;
+    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || viewerAssets.length === 0) return;
     if (pointerDownAt) {
       const deltaX = Math.abs(event.clientX - pointerDownAt.x);
       const deltaY = Math.abs(event.clientY - pointerDownAt.y);
@@ -648,8 +680,8 @@
   }
 </script>
 
-<div bind:this={viewerHost} class="viewer-host" class:is-blur={isGenerating}>
-  {#if overlayVisible}
+<div bind:this={viewerHost} class="viewer-host">
+  {#if overlayVisible && !hideModelWhileBusy}
     <div class="viewer-overlay-layer">
       {#if dimensionFrame && overlayControls.length > 0}
         <div class="viewer-dimension-layer">
@@ -839,6 +871,10 @@
         </div>
       {/if}
     </div>
+  {/if}
+
+  {#if hideModelWhileBusy}
+    <ViewportTransmutation phase={busyPhase} text={busyText} />
   {/if}
 </div>
 
@@ -1324,7 +1360,4 @@
     }
   }
 
-  .is-blur {
-    filter: blur(8px) contrast(1.1) brightness(0.9);
-  }
 </style>

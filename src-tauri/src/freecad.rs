@@ -4,17 +4,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tauri::{AppHandle, Manager};
 
 use crate::models::{
     validate_model_manifest, AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata,
     EnrichmentProposal, EnrichmentStatus, ManifestBounds, ManifestEnrichmentState, ModelManifest,
-    ModelSourceKind, ParameterGroup, PartBinding, SelectionTarget, SelectionTargetKind,
-    ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    ModelSourceKind, ParameterGroup, PartBinding, PathResolver, SelectionTarget,
+    SelectionTargetKind, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 const RUNNER_RESOURCE_PATH: &str = "server/freecad_runner.py";
 const DEFAULT_MACRO_RESOURCE_PATH: &str = "templates/cache_pot_default.FCMacro";
+const CAD_SDK_RESOURCE_PATH: &str = "model-runtime/cad_sdk.py";
 const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const GENERATED_ARTIFACT_DIR: &str = "generated";
 const IMPORTED_FCSTD_ARTIFACT_DIR: &str = "imported-fcstd";
@@ -74,7 +74,7 @@ pub fn render(
     macro_code: &str,
     parameters: &DesignParams,
     configured_freecad_cmd: Option<&str>,
-    app: &AppHandle,
+    app: &dyn PathResolver,
 ) -> AppResult<String> {
     render_model(macro_code, parameters, configured_freecad_cmd, app)
         .map(|bundle| bundle.preview_stl_path)
@@ -84,7 +84,7 @@ pub fn render_model(
     macro_code: &str,
     parameters: &DesignParams,
     configured_freecad_cmd: Option<&str>,
-    app: &AppHandle,
+    app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
     let params_json =
         serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
@@ -106,6 +106,7 @@ pub fn render_model(
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
     fs::create_dir_all(&parts_dir).map_err(|err| AppError::persistence(err.to_string()))?;
     fs::write(&macro_path, macro_code).map_err(|err| AppError::persistence(err.to_string()))?;
+    ensure_runtime_sdk(app, &bundle_dir)?;
 
     run_generate_runner(
         app,
@@ -147,7 +148,7 @@ pub fn render_model(
 pub fn import_fcstd(
     source_path: &str,
     configured_freecad_cmd: Option<&str>,
-    app: &AppHandle,
+    app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
     let source_path = PathBuf::from(source_path);
     if !source_path.exists() {
@@ -227,7 +228,7 @@ pub fn apply_imported_model(
     manifest: &ModelManifest,
     parameters: &DesignParams,
     configured_freecad_cmd: Option<&str>,
-    app: &AppHandle,
+    app: &dyn PathResolver,
 ) -> AppResult<(ArtifactBundle, ModelManifest)> {
     if bundle.source_kind != ModelSourceKind::ImportedFcstd {
         return Err(AppError::validation(
@@ -291,7 +292,7 @@ pub fn apply_imported_model(
     Ok((next_bundle, next_manifest))
 }
 
-pub fn get_model_manifest(app: &AppHandle, model_id: &str) -> AppResult<ModelManifest> {
+pub fn get_model_manifest(app: &dyn PathResolver, model_id: &str) -> AppResult<ModelManifest> {
     let manifest_path = bundle_dir_from_model_id(app, model_id)?.join(MANIFEST_FILE_NAME);
     let raw = fs::read_to_string(&manifest_path).map_err(|err| {
         AppError::persistence(format!(
@@ -307,7 +308,7 @@ pub fn get_model_manifest(app: &AppHandle, model_id: &str) -> AppResult<ModelMan
 }
 
 pub fn save_model_manifest(
-    app: &AppHandle,
+    app: &dyn PathResolver,
     model_id: &str,
     manifest: &ModelManifest,
 ) -> AppResult<()> {
@@ -322,7 +323,7 @@ pub fn save_model_manifest(
     write_manifest(&manifest_path, manifest)
 }
 
-pub fn get_default_macro(app: &AppHandle) -> AppResult<String> {
+pub fn get_default_macro(app: &dyn PathResolver) -> AppResult<String> {
     let path = resolve_resource_path(
         app,
         DEFAULT_MACRO_RESOURCE_PATH,
@@ -336,11 +337,8 @@ pub fn get_default_macro(app: &AppHandle) -> AppResult<String> {
         .map_err(|err| AppError::persistence(format!("Failed to read default macro: {}", err)))
 }
 
-pub fn runtime_cache_dir(app: &AppHandle) -> AppResult<PathBuf> {
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+pub fn runtime_cache_dir(app: &dyn PathResolver) -> AppResult<PathBuf> {
+    let app_dir = app.app_data_dir();
     let runtime_root = app_dir.join(MODEL_RUNTIME_ROOT);
     fs::create_dir_all(&runtime_root).map_err(|err| AppError::persistence(err.to_string()))?;
     Ok(runtime_root)
@@ -384,15 +382,14 @@ pub fn evict_cache_if_needed(cache_dir: &Path) {
 }
 
 pub fn resolve_resource_path(
-    app: &AppHandle,
+    app: &dyn PathResolver,
     resource_path: &str,
     fallback_paths: &[&str],
 ) -> AppResult<PathBuf> {
-    let resource_dir = app.path().resource_dir().unwrap_or_default();
     let mut candidates = Vec::new();
 
-    if !resource_dir.as_os_str().is_empty() {
-        candidates.push(resource_dir.join(resource_path));
+    if let Some(path) = app.resource_path(resource_path) {
+        candidates.push(path);
     }
 
     for fallback in fallback_paths {
@@ -413,6 +410,24 @@ pub fn resolve_resource_path(
         "Required resource '{}' was not found. Checked: {}",
         resource_path, checked
     )))
+}
+
+fn ensure_runtime_sdk(app: &dyn PathResolver, bundle_dir: &Path) -> AppResult<()> {
+    let source = resolve_resource_path(
+        app,
+        CAD_SDK_RESOURCE_PATH,
+        &["../model-runtime/cad_sdk.py", "model-runtime/cad_sdk.py"],
+    )?;
+    let target = bundle_dir.join("cad_sdk.py");
+    fs::copy(&source, &target).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to copy CAD SDK from '{}' to '{}': {}",
+            source.display(),
+            target.display(),
+            err
+        ))
+    })?;
+    Ok(())
 }
 
 fn build_bundle(
@@ -840,7 +855,7 @@ fn read_runner_report(path: &Path) -> AppResult<RunnerReport> {
 }
 
 fn run_generate_runner(
-    app: &AppHandle,
+    app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
     macro_path: &Path,
     preview_stl_path: &Path,
@@ -857,12 +872,20 @@ fn run_generate_runner(
         .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
+        .env(
+            "ECKYCAD_SDK_PATH",
+            path_to_string(
+                macro_path
+                    .parent()
+                    .ok_or_else(|| AppError::internal("Macro path missing parent."))?,
+            )?,
+        )
         .env("ECKYCAD_PARAMS", params_json);
     run_command(command)
 }
 
 fn run_import_runner(
-    app: &AppHandle,
+    app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
     fcstd_path: &Path,
     preview_stl_path: &Path,
@@ -881,7 +904,7 @@ fn run_import_runner(
 }
 
 fn run_apply_import_runner(
-    app: &AppHandle,
+    app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
     fcstd_path: &Path,
     preview_stl_path: &Path,
@@ -904,7 +927,7 @@ fn run_apply_import_runner(
 }
 
 fn base_runner_command(
-    app: &AppHandle,
+    app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
 ) -> AppResult<Command> {
     let freecad_cmd = resolve_freecad_path(configured_freecad_cmd)?;
@@ -939,7 +962,7 @@ fn run_command(mut command: Command) -> AppResult<()> {
 }
 
 fn artifact_dir(
-    app: &AppHandle,
+    app: &dyn PathResolver,
     source_kind: ModelSourceKind,
     model_id: &str,
 ) -> AppResult<PathBuf> {
@@ -947,7 +970,7 @@ fn artifact_dir(
     Ok(root.join(source_kind_dir_name(source_kind)).join(model_id))
 }
 
-fn bundle_dir_from_model_id(app: &AppHandle, model_id: &str) -> AppResult<PathBuf> {
+fn bundle_dir_from_model_id(app: &dyn PathResolver, model_id: &str) -> AppResult<PathBuf> {
     let source_kind = if model_id.starts_with("generated-") {
         ModelSourceKind::Generated
     } else if model_id.starts_with("imported-fcstd-") {
@@ -968,7 +991,7 @@ fn source_kind_dir_name(source_kind: ModelSourceKind) -> &'static str {
     }
 }
 
-fn resolve_freecad_path(configured_freecad_cmd: Option<&str>) -> AppResult<PathBuf> {
+pub(crate) fn resolve_freecad_path(configured_freecad_cmd: Option<&str>) -> AppResult<PathBuf> {
     if let Some(configured_cmd) = configured_freecad_cmd {
         return Ok(normalize_freecad_cmd(configured_cmd));
     }

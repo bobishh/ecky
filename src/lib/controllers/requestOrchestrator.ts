@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { workingCopy } from '../stores/workingCopy';
-import { activeThreadId, activeVersionId, config } from '../stores/domainState';
+import { activeThreadId, activeVersionId, config, history } from '../stores/domainState';
 import { refreshHistory } from '../stores/history';
 import { requestQueue } from '../stores/requestQueue';
 import { session, syncSessionPhaseFromQueue } from '../stores/sessionStore';
@@ -20,11 +20,13 @@ import type {
   UsageSummary,
 } from '../types/domain';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
+import { detectFollowUpAnswer } from './followUpGuard';
 import {
   classifyIntent,
   finalizeGenerationAttempt,
   formatBackendError,
   generateDesign,
+  getThread,
   getModelManifest,
   getMessStlPath,
   initGenerationAttempt,
@@ -36,6 +38,16 @@ import {
 // ---------------------------------------------------------------------------
 // Constants & Helpers
 // ---------------------------------------------------------------------------
+
+const DUPLICATE_REQUEST_WINDOW_MS = 1500;
+const GENERIC_ROUTING_RESPONSE_MARKERS = [
+  'this looks like a geometry change request',
+  'intent looks like a design change request',
+  'thinking not deep enough',
+  'answering the question without generating geometry',
+  'treating this as a question',
+  'question answered. geometry unchanged',
+];
 
 const REPAIR_PHRASES = [
   "FreeCAD blinked first. Asking the LLM for a cleaner retry.",
@@ -90,6 +102,12 @@ export function isQuestionIntent(promptText: string): boolean {
   return hasQuestionSignal && !hasDesignAction;
 }
 
+function isGenericRoutingResponse(responseText: string): boolean {
+  const normalized = `${responseText ?? ''}`.trim().toLowerCase();
+  if (!normalized) return true;
+  return GENERIC_ROUTING_RESPONSE_MARKERS.some((marker) => normalized.includes(marker));
+}
+
 function toErrorMessage(err: unknown): string {
   return formatBackendError(err);
 }
@@ -123,6 +141,50 @@ function mergeUsageSummary(
         : null,
     segments: [...(left.segments || []), ...(right.segments || [])],
   };
+}
+
+function requestAttachmentSignature(attachment: Attachment): string {
+  return [
+    attachment.type || '',
+    attachment.path || '',
+    attachment.name || '',
+    attachment.explanation || '',
+  ].join('|');
+}
+
+function requestSignature(
+  prompt: string,
+  attachments: Attachment[],
+  threadId: string | null,
+): string {
+  const normalizedPrompt = `${prompt ?? ''}`.trim();
+  const attachmentSignature = attachments
+    .map(requestAttachmentSignature)
+    .sort()
+    .join('||');
+  return `${threadId ?? 'new-thread'}::${normalizedPrompt}::${attachmentSignature}`;
+}
+
+function findRecentDuplicateRequest(
+  prompt: string,
+  attachments: Attachment[],
+  threadId: string | null,
+): Request | null {
+  const now = Date.now();
+  const targetSignature = requestSignature(prompt, attachments, threadId);
+  const queue = get(requestQueue);
+
+  for (const id of queue.order) {
+    const existing = queue.byId[id];
+    if (!existing) continue;
+    if (now - existing.createdAt > DUPLICATE_REQUEST_WINDOW_MS) continue;
+    if (requestSignature(existing.prompt, existing.attachments, existing.threadId) !== targetSignature) {
+      continue;
+    }
+    return existing;
+  }
+
+  return null;
 }
 
 class CancelError extends Error {
@@ -220,7 +282,21 @@ export async function handleGenerate(initialPrompt: string, attachments: Attachm
   clearDrawing?.();
 
   const currentThreadId = get(activeThreadId);
-  const requestId = requestQueue.submit(initialPrompt, attachments, currentThreadId);
+  const currentVersionId = get(activeVersionId);
+  const currentModelId = get(session).artifactBundle?.modelId ?? null;
+  const duplicateRequest = findRecentDuplicateRequest(initialPrompt, attachments, currentThreadId);
+  if (duplicateRequest) {
+    requestQueue.setActive(duplicateRequest.id);
+    session.setStatus('Request already in flight.');
+    return duplicateRequest.id;
+  }
+  const requestId = requestQueue.submit(
+    initialPrompt,
+    attachments,
+    currentThreadId,
+    currentVersionId,
+    currentModelId,
+  );
   requestQueue.setActive(requestId);
 
   if (preCapture) {
@@ -264,7 +340,11 @@ class GenerationPipeline {
   isQuestion: boolean = false;
   forcedQuestionOnly: boolean = false;
   lightResponse: string = '';
+  finalResponse: string = '';
   usageSummary: UsageSummary | null = null;
+  routeReason: string = 'unclassified';
+  followUpQuestion: string | null = null;
+  followUpMessageId: string | null = null;
 
   constructor(requestId: string) {
     this.requestId = requestId;
@@ -319,6 +399,11 @@ class GenerationPipeline {
 
     this.forcedQuestionOnly = isExplicitQuestionOnlyIntent(this.req.prompt);
     this.isQuestion = this.forcedQuestionOnly || isQuestionIntent(this.req.prompt);
+    this.routeReason = this.forcedQuestionOnly
+      ? 'explicit-question-only marker'
+      : this.isQuestion
+        ? 'local question heuristic'
+        : 'local design heuristic';
 
     // Use pre-captured screenshot (with drawing overlay composited) from handleGenerate
     if (this.preCapture) {
@@ -335,8 +420,27 @@ class GenerationPipeline {
       screenshotMb: Number((estimateBase64Bytes(this.currentScreenshot) / (1024 * 1024)).toFixed(2)),
     });
 
+    const followUpMatched = await this.applyFollowUpAnswerGuard();
     await this.initDatabaseRecord();
-    await this.classifyIntent();
+    if (!followUpMatched) {
+      await this.classifyIntent();
+    }
+    console.info('[Pipeline] route decision', {
+      requestId: this.requestId,
+      threadId: this.snapshotThreadId,
+      finalMode: this.isQuestion ? 'question' : 'design',
+      reason: this.routeReason,
+      classifierPreview: this.lightResponse,
+      finalResponse: this.finalResponse,
+    });
+    profileLog('generate.route', {
+      requestId: this.requestId,
+      threadId: this.snapshotThreadId,
+      finalMode: this.isQuestion ? 'question' : 'design',
+      reason: this.routeReason,
+      classifierPreview: this.lightResponse,
+      finalResponse: this.finalResponse,
+    });
   }
 
   private async stepAnswerQuestion() {
@@ -344,7 +448,10 @@ class GenerationPipeline {
     requestQueue.patch(this.requestId, { phase: 'answering' });
     syncSessionPhaseFromQueue();
     
-    const questionReplyText = this.lightResponse || 'Question answered. Geometry unchanged.';
+    const questionReplyText =
+      this.finalResponse ||
+      this.lightResponse ||
+      'Question answered. Geometry unchanged.';
 
     // Finalize the existing attempt with the answer
     await this.finalizeAttempt('success', undefined, undefined, questionReplyText);
@@ -372,6 +479,12 @@ class GenerationPipeline {
 
   private async stepGenerateAndRender() {
     this.checkCanceled();
+    console.info('[Pipeline] starting generate path', {
+      requestId: this.requestId,
+      threadId: this.snapshotThreadId,
+      reason: this.routeReason,
+      prompt: this.req.prompt,
+    });
     stopPhraseLoop();
     startCookingPhraseLoop();
     requestQueue.patch(this.requestId, { cookingStartTime: Date.now() });
@@ -400,7 +513,8 @@ class GenerationPipeline {
           isRetry: attempt > 1,
           imageData: this.currentScreenshot,
           attachments: this.req.attachments,
-          questionMode: false
+          questionMode: false,
+          followUpQuestion: attempt === 1 ? this.followUpQuestion : null,
         });
         this.checkCanceled();
         this.usageSummary = mergeUsageSummary(this.usageSummary, result.usage);
@@ -497,20 +611,125 @@ class GenerationPipeline {
       this.checkCanceled();
       this.usageSummary = mergeUsageSummary(this.usageSummary, intent.usage);
 
-      if (!this.forcedQuestionOnly && (intent?.intentMode === 'question' || intent?.intentMode === 'design')) {
-        this.isQuestion = intent.intentMode === 'question';
-      }
+      const heuristicQuestion = isQuestionIntent(this.req.prompt);
+      const classifierIntent = `${intent?.intentMode ?? ''}`.trim().toLowerCase();
+      const classifierResponse = `${intent?.response ?? ''}`.trim();
+      const classifierFinalResponse = `${intent?.finalResponse ?? ''}`.trim();
+      const classifierConfidence = Number.isFinite(intent?.confidence) ? intent.confidence : 0;
+      this.finalResponse = classifierFinalResponse;
+
       if (this.forcedQuestionOnly) {
         this.isQuestion = true;
+        this.routeReason = 'explicit-question-only marker';
+      } else if (classifierFinalResponse) {
+        this.isQuestion = true;
+        this.routeReason = `classifier provided final_response (${classifierConfidence.toFixed(2)})`;
+      } else if (classifierIntent === 'question') {
+        this.isQuestion = true;
+        this.routeReason = `classifier chose question (${classifierConfidence.toFixed(2)})`;
+      } else if (classifierIntent === 'design') {
+        this.isQuestion = false;
+        this.routeReason = `classifier chose design (${classifierConfidence.toFixed(2)})`;
+      } else {
+        this.routeReason = heuristicQuestion
+          ? 'classifier fallback kept question heuristic'
+          : 'classifier fallback kept design heuristic';
       }
-      if (intent?.response) {
-        this.lightResponse = intent.response;
-        if (this.isActiveThread()) session.setCookingPhrase(this.lightResponse);
+
+      const bubbleCandidate = this.finalResponse || classifierResponse;
+      if (bubbleCandidate) {
+        this.lightResponse = classifierResponse;
+        const bubbleText =
+          this.finalResponse || this.isQuestion || !isGenericRoutingResponse(classifierResponse)
+            ? bubbleCandidate
+            : 'Routing request...';
+        if (this.isActiveThread()) session.setCookingPhrase(bubbleText);
       }
       requestQueue.patch(this.requestId, { isQuestion: this.isQuestion, lightResponse: this.lightResponse });
     } catch (e) {
       console.warn(`[Pipeline:${this.requestId}] Intent classification fallback:`, e);
+      this.routeReason = this.isQuestion
+        ? 'classifier failed; kept local question heuristic'
+        : 'classifier failed; kept local design heuristic';
     }
+  }
+
+  private async resolveThreadForFollowUpGuard(): Promise<{
+    thread: import('../types/domain').Thread | null;
+    source: 'none' | 'cached' | 'fetched' | 'fetch-failed';
+  }> {
+    if (!this.req.threadId) {
+      return { thread: null, source: 'none' };
+    }
+
+    const cachedThread = get(history).find((thread) => thread.id === this.snapshotThreadId) ?? null;
+    const hasCachedMessages = Boolean(cachedThread?.messages?.length);
+
+    try {
+      const fullThread = await getThread(this.snapshotThreadId);
+      history.update((items) => {
+        const hasExisting = items.some((thread) => thread.id === this.snapshotThreadId);
+        if (!hasExisting) {
+          return [...items, fullThread];
+        }
+        return items.map((thread) =>
+          thread.id === this.snapshotThreadId ? { ...thread, messages: fullThread.messages } : thread,
+        );
+      });
+      return { thread: fullThread, source: 'fetched' };
+    } catch (error) {
+      console.warn('[Pipeline] follow-up guard failed to load full thread', {
+        requestId: this.requestId,
+        threadId: this.snapshotThreadId,
+        error: toErrorMessage(error),
+      });
+      if (hasCachedMessages) {
+        return { thread: cachedThread, source: 'cached' };
+      }
+      return { thread: cachedThread, source: 'fetch-failed' };
+    }
+  }
+
+  private async applyFollowUpAnswerGuard(): Promise<boolean> {
+    const { thread: activeThread, source } = await this.resolveThreadForFollowUpGuard();
+    const guard = detectFollowUpAnswer({
+      promptText: this.req.prompt,
+      attachments: this.req.attachments,
+      activeThread,
+      explicitQuestionOnly: this.forcedQuestionOnly,
+    });
+
+    const details = {
+      requestId: this.requestId,
+      threadId: this.snapshotThreadId,
+      evaluated: true,
+      matched: guard.matched,
+      matchedMessageId: guard.messageId,
+      reason: guard.reason,
+      threadSource: source,
+      classifySkipped: guard.matched,
+    };
+    console.info('[Pipeline] follow-up guard', details);
+    profileLog('generate.followup_guard', details);
+
+    if (!guard.matched || !guard.question) {
+      return false;
+    }
+
+    this.followUpQuestion = guard.question;
+    this.followUpMessageId = guard.messageId;
+    this.isQuestion = false;
+    this.routeReason = 'follow-up answer to last assistant question';
+    this.lightResponse = 'Using your answer to continue the design.';
+    this.finalResponse = '';
+    if (this.isActiveThread()) {
+      session.setCookingPhrase(this.lightResponse);
+    }
+    requestQueue.patch(this.requestId, {
+      isQuestion: false,
+      lightResponse: this.lightResponse,
+    });
+    return true;
   }
 
   private async commitSuccess(

@@ -9,6 +9,8 @@ pub struct IntentClassification {
     pub confidence: f32,
     #[serde(default)]
     pub response: String,
+    #[serde(default)]
+    pub final_response: Option<String>,
 }
 
 pub enum ResponseFormat {
@@ -27,6 +29,12 @@ pub async fn generate_design(
     prompt: &str,
     images: Vec<String>,
 ) -> Result<LlmOutcome<DesignOutput>, String> {
+    if !engine.enabled {
+        return Err(format!(
+            "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
+            engine.name
+        ));
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()
@@ -79,6 +87,12 @@ pub async fn classify_intent(
     context: Option<&str>,
     images: Vec<String>,
 ) -> Result<LlmOutcome<IntentClassification>, String> {
+    if !engine.enabled {
+        return Err(format!(
+            "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
+            engine.name
+        ));
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -89,14 +103,21 @@ pub async fn classify_intent(
     let classifier_system = r#"Return ONLY JSON with fields:
 1) "intent": "question" or "design"
 2) "confidence": number in [0, 1]
-3) "response": text reply.
+3) "response": short routing/bubble text
+4) "final_response": either null or a final user-facing answer
 
 Choose "question" when user asks to explain, inspect, compare, clarify, or asks "why/how/what" about existing design/code.
 Choose "design" when user asks to create/change/add/remove geometry, parameters, dimensions, connectors, or regenerate output.
 If the user explicitly says to only answer and not generate anything, such as "answer only", "just answer", "do not generate", "только ответь", or "без генерации", always choose "question".
+If the user is asking whether something can be changed, why something behaves a certain way, what a parameter/feature does, or how to approach a change, prefer "question" if you can answer from the current context. Do NOT choose "design" just because the request mentions CAD verbs like move, resize, increase, decrease, or add.
+Only choose "design" when the user is clearly instructing you to actually perform the geometry change now.
+If the recent dialogue ends with an assistant clarification question and the new user message looks like a short direct answer to that question, prefer "design" so the pending change can continue.
+Do not ask the same clarification question again unless the new answer is still genuinely unusable.
 
-If intent is "question", "response" must directly answer the user's question in 1-4 concise sentences using the provided current design context and screenshots when relevant.
-If intent is "design", "response" must be one short routing sentence for the assistant bubble.
+If you can fully answer immediately from the provided context, set "intent" to "question" and put that final answer in "final_response".
+Use "response" for the short bubble/routing text. It can be brief even when "final_response" contains the full answer.
+If more work is still needed after classification, "final_response" must be null.
+If intent is "design", "response" must be one short routing sentence for the assistant bubble and "final_response" must be null.
 "#;
 
     let classifier_user = if let Some(context) = context.filter(|c| !c.trim().is_empty()) {
@@ -146,6 +167,14 @@ If intent is "design", "response" must be one short routing sentence for the ass
     }
     if !(0.0..=1.0).contains(&parsed.confidence) {
         parsed.confidence = 0.5;
+    }
+    parsed.final_response = parsed
+        .final_response
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if parsed.final_response.is_some() {
+        parsed.intent = "question".to_string();
     }
     if parsed.response.trim().is_empty() {
         parsed.response = if parsed.intent == "question" {
@@ -995,6 +1024,7 @@ mod tests {
             light_model: "gpt-4.1-nano".to_string(),
             base_url: String::new(),
             system_prompt: String::new(),
+            enabled: true,
         };
 
         assert_eq!(select_classifier_model(&engine, true), "gpt-4o");
@@ -1012,6 +1042,7 @@ mod tests {
             light_model: String::new(),
             base_url: String::new(),
             system_prompt: String::new(),
+            enabled: true,
         };
 
         assert_eq!(select_classifier_model(&engine, false), "gpt-4o");

@@ -10,10 +10,14 @@ export type InteractionMode = Contract.InteractionMode;
 export type FinalizeStatus = Contract.FinalizeStatus;
 export type UsageSegment = Contract.UsageSegment;
 export type UsageSummary = Contract.UsageSummary;
-export type EngineConfig = Contract.Engine;
+export type EngineConfig = Contract.Engine; // includes enabled: boolean
 export type AssetConfig = Contract.Asset;
 export type GenieEyeStyle = Contract.EyeStyle;
 export type IntentDecision = Contract.IntentDecision;
+export type AgentOrigin = Contract.AgentOrigin;
+export type AgentSession = Contract.AgentSession;
+export type AgentDraft = Contract.AgentDraft;
+export type McpServerStatus = Contract.McpServerStatus;
 export type GenerateOutput = {
   design: DesignOutput;
   threadId: string;
@@ -62,7 +66,14 @@ export type CheckboxField = {
   frozen: boolean;
 };
 
-export type UiField = RangeField | NumberField | SelectField | CheckboxField;
+export type ImageField = {
+  type: 'image';
+  key: string;
+  label: string;
+  frozen: boolean;
+};
+
+export type UiField = RangeField | NumberField | SelectField | CheckboxField | ImageField;
 export type ResolvedUiField = UiField & { _auto?: boolean };
 
 export interface UiSpec {
@@ -88,6 +99,7 @@ export interface Message {
   usage?: UsageSummary | null;
   artifactBundle?: ArtifactBundle | null;
   modelManifest?: ModelManifest | null;
+  agentOrigin?: AgentOrigin | null;
   imageData?: string | null;
   attachmentImages?: string[];
   timestamp: number;
@@ -117,6 +129,8 @@ export interface GenieTraits {
   expressiveness: number;
 }
 
+export type ThreadStatus = 'active' | 'finalized';
+
 export interface Thread {
   id: string;
   title: string;
@@ -127,6 +141,9 @@ export interface Thread {
   pendingCount: number;
   errorCount: number;
   genieTraits?: GenieTraits | null;
+  status?: ThreadStatus;
+  finalizedAt?: number | null;
+  pendingConfirm?: string | null;
 }
 
 export interface DeletedMessage {
@@ -139,6 +156,7 @@ export interface DeletedMessage {
   usage?: UsageSummary | null;
   artifactBundle?: ArtifactBundle | null;
   modelManifest?: ModelManifest | null;
+  agentOrigin?: AgentOrigin | null;
   timestamp: number;
   imageData?: string | null;
   attachmentImages?: string[];
@@ -151,12 +169,29 @@ export interface MicrowaveConfig {
   muted: boolean;
 }
 
+export interface AutoAgent {
+  id: string;
+  label: string;
+  cmd: string;
+  args: string[];
+  enabled: boolean;
+}
+
+export interface McpConfig {
+  port: number | null;
+  maxSessions: number | null;
+  autoAgents: AutoAgent[];
+}
+
 export interface AppConfig {
   engines: EngineConfig[];
   selectedEngineId: string;
   freecadCmd: string;
   assets: AssetConfig[];
   microwave: MicrowaveConfig | null;
+  mcp: McpConfig;
+  hasSeenOnboarding: boolean;
+  connectionType?: string | null;
 }
 
 export type ModelSourceKind = Contract.ModelSourceKind;
@@ -240,6 +275,8 @@ export interface Request {
   lightResponse: string;
   screenshot: string | null;
   threadId: string | null;
+  baseMessageId?: string | null;
+  baseModelId?: string | null;
   result: RequestResult | null;
   error: string | null;
   cookingStartTime: number | null;
@@ -369,6 +406,13 @@ export function normalizeUiField(field: Contract.UiField | UiField | unknown): U
         label,
         frozen,
       };
+    case 'image':
+      return {
+        type: 'image',
+        key,
+        label,
+        frozen,
+      };
     default:
       return null;
   }
@@ -426,6 +470,7 @@ export function normalizeMessage(message: Contract.Message | Message): Message {
             (message.modelManifest ?? legacy.model_manifest) as ModelManifest,
           )
         : null,
+    agentOrigin: (message.agentOrigin ?? (legacy.agent_origin as AgentOrigin | undefined)) ?? null,
     imageData: message.imageData ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
       ? [...message.attachmentImages]
@@ -506,6 +551,7 @@ export function normalizeDeletedMessage(
             (message.modelManifest ?? legacy.model_manifest) as ModelManifest,
           )
         : null,
+    agentOrigin: (message.agentOrigin ?? (legacy.agent_origin as AgentOrigin | undefined)) ?? null,
     timestamp: message.timestamp,
     imageData: message.imageData ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
@@ -532,6 +578,15 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
           muted: Boolean(config.microwave.muted),
         }
       : null,
+    mcp: config.mcp
+      ? {
+          port: config.mcp.port ?? null,
+          maxSessions: (config.mcp as any).maxSessions ?? null,
+          autoAgents: Array.isArray((config.mcp as any).autoAgents) ? [...(config.mcp as any).autoAgents] : [],
+        }
+      : { port: null, maxSessions: null, autoAgents: [] },
+    hasSeenOnboarding: Boolean(config.hasSeenOnboarding ?? legacy.has_seen_onboarding),
+    connectionType: (config as AppConfig).connectionType ?? null,
   };
 }
 
@@ -600,6 +655,16 @@ export function normalizeParsedParamsResult(
   };
 }
 
+export function normalizeAgentDraft(draft: Contract.AgentDraft | AgentDraft | null | undefined): AgentDraft | null {
+  if (!draft) return null;
+  return {
+    ...draft,
+    designOutput: normalizeDesignOutput(draft.designOutput),
+    artifactBundle: draft.artifactBundle ? normalizeArtifactBundle(draft.artifactBundle) : null,
+    modelManifest: draft.modelManifest ? normalizeModelManifest(draft.modelManifest) : null,
+  };
+}
+
 export function normalizeArtifactBundle(
   bundle: Contract.ArtifactBundle | ArtifactBundle,
 ): ArtifactBundle {
@@ -619,13 +684,21 @@ export function normalizeModelManifest(
       ? [...manifest.parameterGroups]
       : [],
     controlPrimitives: Array.isArray(manifest.controlPrimitives)
-      ? [...manifest.controlPrimitives]
+      ? manifest.controlPrimitives.map((primitive) => ({
+          ...primitive,
+          source:
+            primitive.source ??
+            (primitive.primitiveId?.startsWith('primitive-manual-') ? 'manual' : 'generated'),
+        }))
       : [],
     controlRelations: Array.isArray((manifest as Contract.ModelManifest).controlRelations)
       ? [...((manifest as Contract.ModelManifest).controlRelations || [])]
       : [],
     controlViews: Array.isArray(manifest.controlViews)
-      ? [...manifest.controlViews]
+      ? manifest.controlViews.map((view) => ({
+          ...view,
+          source: view.source ?? (view.viewId?.startsWith('view-manual-') ? 'manual' : 'generated'),
+        }))
       : [],
     advisories: Array.isArray(manifest.advisories) ? [...manifest.advisories] : [],
     selectionTargets: Array.isArray(manifest.selectionTargets)
@@ -687,6 +760,13 @@ export function toContractUiField(field: UiField): Contract.UiField {
     case 'checkbox':
       return {
         type: 'checkbox',
+        key: field.key,
+        label: field.label,
+        frozen: field.frozen,
+      };
+    case 'image':
+      return {
+        type: 'image',
         key: field.key,
         label: field.label,
         frozen: field.frozen,

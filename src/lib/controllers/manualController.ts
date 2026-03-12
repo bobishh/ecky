@@ -10,18 +10,26 @@ import { paramPanelState } from '../stores/paramPanelState';
 import { persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
 import { buildImportedSyntheticDesign } from '../modelRuntime/importedRuntime';
 import { ensureSemanticManifest } from '../modelRuntime/semanticControls';
-import type { DesignOutput, DesignParams } from '../types/domain';
+import type { DesignOutput, DesignParams, ParamValue, UiField, UiSpec } from '../types/domain';
 import {
   addManualVersion,
   applyImportedModel,
   formatBackendError,
   getModelManifest,
+  parseMacroParams,
   renderModel,
   saveModelManifest,
   updateParameters,
+  updateVersionRuntime,
 } from '../tauri/client';
 
 let latestParamRenderSeq = 0;
+
+type ManualCommitOptions = {
+  targetThreadId?: string | null;
+  activateTargetOnSuccess?: boolean;
+  successStatus?: string;
+};
 
 function toAssetUrl(path: string | null | undefined): string {
   if (!path) return '';
@@ -29,6 +37,114 @@ function toAssetUrl(path: string | null | undefined): string {
     return convertFileSrc(path);
   } catch {
     return path;
+  }
+}
+
+function fallbackParamValue(field: UiField): ParamValue {
+  switch (field.type) {
+    case 'checkbox':
+      return false;
+    case 'select':
+      return field.options[0]?.value ?? '';
+    case 'range':
+    case 'number':
+      return typeof field.min === 'number' ? field.min : 0;
+  }
+}
+
+function mergeFieldWithExisting(parsedField: UiField, existingField: UiField | undefined): UiField {
+  if (!existingField || existingField.type !== parsedField.type) {
+    return parsedField;
+  }
+
+  switch (parsedField.type) {
+    case 'checkbox':
+      {
+        const existing = existingField;
+        return {
+          ...parsedField,
+          label: existing.label || parsedField.label,
+          frozen: existing.frozen ?? parsedField.frozen,
+        };
+      }
+    case 'select':
+      {
+        const existing = existingField as Extract<UiField, { type: 'select' }>;
+        return {
+          ...parsedField,
+          label: existing.label || parsedField.label,
+          frozen: existing.frozen ?? parsedField.frozen,
+          options:
+            existing.options?.length > 0 ? existing.options : parsedField.options,
+        };
+      }
+    case 'range':
+    case 'number':
+      {
+        const existing = existingField as Extract<UiField, { type: 'range' | 'number' }>;
+        return {
+          ...parsedField,
+          label: existing.label || parsedField.label,
+          frozen: existing.frozen ?? parsedField.frozen,
+          min: existing.min ?? parsedField.min,
+          max: existing.max ?? parsedField.max,
+          step: existing.step ?? parsedField.step,
+          minFrom: existing.minFrom ?? parsedField.minFrom,
+          maxFrom: existing.maxFrom ?? parsedField.maxFrom,
+        };
+      }
+  }
+}
+
+function coerceParamValue(field: UiField, currentValue: ParamValue | undefined, parsedValue: ParamValue | undefined): ParamValue {
+  const candidate = currentValue ?? parsedValue;
+
+  switch (field.type) {
+    case 'checkbox':
+      if (typeof candidate === 'boolean') return candidate;
+      return typeof parsedValue === 'boolean' ? parsedValue : false;
+    case 'select': {
+      const optionValues = new Set((field.options || []).map((option) => option.value));
+      if (typeof candidate === 'string' && optionValues.has(candidate)) return candidate;
+      if (typeof parsedValue === 'string' && optionValues.has(parsedValue)) return parsedValue;
+      return field.options[0]?.value ?? '';
+    }
+    case 'range':
+    case 'number':
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate;
+      if (typeof parsedValue === 'number' && Number.isFinite(parsedValue)) return parsedValue;
+      return fallbackParamValue(field);
+  }
+}
+
+async function reconcileManualControls(
+  editedCode: string,
+  currentUiSpec: UiSpec,
+  currentParams: DesignParams,
+): Promise<{ uiSpec: UiSpec; params: DesignParams; parserMatched: boolean }> {
+  try {
+    const parsed = await parseMacroParams(editedCode);
+    if (!parsed.fields.length) {
+      return { uiSpec: currentUiSpec, params: currentParams, parserMatched: false };
+    }
+
+    const existingByKey = new Map(currentUiSpec.fields.map((field) => [field.key, field]));
+    const nextFields = parsed.fields.map((field) =>
+      mergeFieldWithExisting(field, existingByKey.get(field.key)),
+    );
+    const nextParams: DesignParams = {};
+    for (const field of nextFields) {
+      nextParams[field.key] = coerceParamValue(field, currentParams[field.key], parsed.params[field.key]);
+    }
+
+    return {
+      uiSpec: { fields: nextFields },
+      params: nextParams,
+      parserMatched: true,
+    };
+  } catch (error) {
+    console.warn('[ManualController] Failed to reconcile controls from edited macro:', error);
+    return { uiSpec: currentUiSpec, params: currentParams, parserMatched: false };
   }
 }
 
@@ -189,6 +305,11 @@ export async function handleParamChange(
     if (persist && sourceVersionId) {
       console.log('[ManualController] Persisting parameters to messageId:', sourceVersionId);
       try {
+        await updateVersionRuntime(sourceVersionId, bundle, manifest);
+      } catch (e) {
+        console.error('[ManualController] Failed to update version runtime:', formatBackendError(e), e);
+      }
+      try {
         await updateParameters(sourceVersionId, currentParams);
         console.log('[ManualController] update_parameters success');
         if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
@@ -219,18 +340,18 @@ export function stageParamChange(newParams: DesignParams) {
   session.setStatus('Parameters staged. Apply to rerender.');
 }
 
-export async function commitManualVersion(editedCode: string, titleOverride: string | null = null) {
+export async function commitManualVersion(
+  editedCode: string,
+  titleOverride: string | null = null,
+  options: ManualCommitOptions = {},
+) {
   const wc = get(workingCopy);
   const panel = get(paramPanelState);
   const previousThreadId = get(activeThreadId);
-  const previousVersionId = get(activeVersionId);
-  const snapshotThreadId = previousThreadId || crypto.randomUUID();
-  const createdThreadForCommit = !previousThreadId;
-
-  if (createdThreadForCommit) {
-    activeThreadId.set(snapshotThreadId);
-    activeVersionId.set(null);
-  }
+  const snapshotThreadId = options.targetThreadId || previousThreadId || crypto.randomUUID();
+  const activateTargetOnSuccess =
+    options.activateTargetOnSuccess ??
+    (!previousThreadId || snapshotThreadId !== previousThreadId);
 
   session.setStatus("Validating and committing manual edit...");
   session.setError(null);
@@ -238,12 +359,15 @@ export async function commitManualVersion(editedCode: string, titleOverride: str
     setManualRenderActive(true);
     const currentConfig = get(config);
     startMicrowaveHum('__manual__', currentConfig, snapshotThreadId);
+    const reconciled = await reconcileManualControls(editedCode, panel.uiSpec, panel.params);
+    const nextUiSpec = reconciled.uiSpec;
+    const nextParams = reconciled.params;
 
-    const bundle = await renderModel(editedCode, panel.params);
+    const bundle = await renderModel(editedCode, nextParams);
     const rawManifest = await getModelManifest(bundle.modelId);
     const previousManifest = get(session).modelManifest;
     const manifest =
-      ensureSemanticManifest(rawManifest, panel.uiSpec, panel.params, previousManifest) ??
+      ensureSemanticManifest(rawManifest, nextUiSpec, nextParams, previousManifest) ??
       rawManifest;
 
     const newMsgId = await addManualVersion({
@@ -251,8 +375,8 @@ export async function commitManualVersion(editedCode: string, titleOverride: str
       title: titleOverride || wc.title || "Manual Edit",
       versionName: "V-manual",
       macroCode: editedCode,
-      parameters: panel.params,
-      uiSpec: panel.uiSpec,
+      parameters: nextParams,
+      uiSpec: nextUiSpec,
       artifactBundle: bundle,
       modelManifest: manifest,
     });
@@ -266,9 +390,14 @@ export async function commitManualVersion(editedCode: string, titleOverride: str
       response: "Manual edit committed as new version.",
       interactionMode: "design",
       macroCode: editedCode,
-      uiSpec: panel.uiSpec,
-      initialParams: panel.params
+      uiSpec: nextUiSpec,
+      initialParams: nextParams
     };
+
+    if (activateTargetOnSuccess) {
+      activeThreadId.set(snapshotThreadId);
+      activeVersionId.set(null);
+    }
 
     if (get(activeThreadId) === snapshotThreadId) {
       session.setStlUrl(toAssetUrl(bundle.previewStlPath));
@@ -277,9 +406,14 @@ export async function commitManualVersion(editedCode: string, titleOverride: str
       paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
       activeVersionId.set(newMsgId);
       showCodeModal.set(false);
-      session.setStatus("Manual version committed.");
-      await refreshHistory();
+      session.setStatus(
+        options.successStatus ||
+          (reconciled.parserMatched
+            ? "Manual version committed. Controls resynced from macro."
+            : "Manual version committed."),
+      );
     }
+    await refreshHistory();
 
     if (get(activeThreadId) === snapshotThreadId) {
       await persistLastSessionSnapshot({
@@ -297,12 +431,27 @@ export async function commitManualVersion(editedCode: string, titleOverride: str
   } catch (e) {
     console.error('[ManualController] commitManualVersion error:', formatBackendError(e), e);
     session.setError(`Manual Commit Failed: ${formatBackendError(e)}`);
-    if (createdThreadForCommit) {
-      activeThreadId.set(previousThreadId);
-      activeVersionId.set(previousVersionId);
-    }
     stopMicrowaveHum('__manual__');
     setManualRenderActive(false);
     throw e;
   }
+}
+
+export async function forkManualVersion(
+  editedCode: string,
+  titleOverride: string | null = null,
+) {
+  const wc = get(workingCopy);
+  const label = titleOverride || wc.title || 'Manual Edit';
+  const confirmed =
+    typeof window === 'undefined'
+      ? true
+      : window.confirm(`Fork "${label}" into a new thread with this code?`);
+  if (!confirmed) return;
+
+  await commitManualVersion(editedCode, titleOverride, {
+    targetThreadId: crypto.randomUUID(),
+    activateTargetOnSuccess: true,
+    successStatus: 'Forked into a new thread.',
+  });
 }

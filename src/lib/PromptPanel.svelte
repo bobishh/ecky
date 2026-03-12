@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
-  import type { Attachment, Message, UsageSummary } from './types/domain';
+  import type { AgentOrigin, Attachment, Message, UsageSummary } from './types/domain';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -20,33 +20,128 @@
     artifactBundle?: Message['artifactBundle'];
   };
 
+  type DialogueState =
+    | { mode: 'generate' }
+    | { mode: 'mcp-idle' }
+    | { mode: 'agent-reply'; requestId: string; agentLabel: string };
+
+  type QueuedMessage = { id: string; text: string; status: 'queued' | 'delivered' };
+
   let {
     onGenerate,
     isGenerating = false,
+    freecadMissing = false,
+    dialogueState = { mode: 'generate' } as DialogueState,
+    queuedMessages = [] as QueuedMessage[],
     messages = [],
     onShowCode,
+    activeThreadId = null,
     activeVersionId = $bindable(null),
     onVersionChange,
     onDeleteVersion,
   }: {
     onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
     isGenerating?: boolean;
+    freecadMissing?: boolean;
+    dialogueState?: DialogueState;
+    queuedMessages?: QueuedMessage[];
     messages?: Message[];
     onShowCode: (message: CodeVersionMessage) => void;
+    activeThreadId?: string | null;
     activeVersionId?: string | null;
     onVersionChange?: (message: VersionMessage) => void;
     onDeleteVersion?: (messageId: string) => void;
   } = $props();
 
+  const PROMPT_DRAFTS_STORAGE_KEY = 'ecky:prompt-drafts:v1';
+  const NEW_THREAD_DRAFT_KEY = '__new__';
+  const PROMPT_DRAFT_DEBOUNCE_MS = 400;
+
   let prompt = $state('');
   let attachments = $state<Attachment[]>([]);
   let isDragging = $state(false);
   let showDeleteConfirm = $state(false);
+  let draftScopeKey = $state<string | null>(null);
+  let draftPersistTimer: number | null = null;
+  let pendingDraftWrite = $state<{ scopeKey: string; prompt: string } | null>(null);
   const hasImageAttachments = $derived(attachments.some((attachment) => attachment.type === 'image'));
+
+  function currentDraftScopeKey(threadId: string | null | undefined) {
+    const normalized = `${threadId ?? ''}`.trim();
+    return normalized || NEW_THREAD_DRAFT_KEY;
+  }
+
+  function readPromptDrafts(): Record<string, string> {
+    if (typeof localStorage === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem(PROMPT_DRAFTS_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writePromptDrafts(nextDrafts: Record<string, string>) {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(PROMPT_DRAFTS_STORAGE_KEY, JSON.stringify(nextDrafts));
+    } catch (error) {
+      console.warn('Failed to persist prompt drafts:', error);
+    }
+  }
+
+  function persistPromptDraftNow(scopeKey: string, nextPrompt: string) {
+    const drafts = readPromptDrafts();
+    const trimmedValue = `${nextPrompt ?? ''}`;
+    if (trimmedValue.trim()) {
+      drafts[scopeKey] = trimmedValue;
+    } else {
+      delete drafts[scopeKey];
+    }
+    writePromptDrafts(drafts);
+  }
+
+  function flushPendingPromptDraft() {
+    if (draftPersistTimer) {
+      clearTimeout(draftPersistTimer);
+      draftPersistTimer = null;
+    }
+    if (!pendingDraftWrite) return;
+    persistPromptDraftNow(pendingDraftWrite.scopeKey, pendingDraftWrite.prompt);
+    pendingDraftWrite = null;
+  }
+
+  function schedulePromptDraftPersist(scopeKey: string, nextPrompt: string) {
+    pendingDraftWrite = { scopeKey, prompt: nextPrompt };
+    if (draftPersistTimer) clearTimeout(draftPersistTimer);
+    draftPersistTimer = window.setTimeout(() => {
+      flushPendingPromptDraft();
+    }, PROMPT_DRAFT_DEBOUNCE_MS);
+  }
+
+  function loadPromptDraft(scopeKey: string) {
+    const drafts = readPromptDrafts();
+    prompt = drafts[scopeKey] ?? '';
+    draftScopeKey = scopeKey;
+  }
+
+  function handlePromptInput(e: Event) {
+    prompt = (e.currentTarget as HTMLTextAreaElement).value;
+    schedulePromptDraftPersist(currentDraftScopeKey(activeThreadId), prompt);
+  }
 
   function isVersionMessage(message: Message): message is VersionMessage {
     return message.role === 'assistant' && !!(message.output || message.artifactBundle);
   }
+
+  $effect(() => {
+    const nextScopeKey = currentDraftScopeKey(activeThreadId);
+    if (nextScopeKey === draftScopeKey) return;
+    flushPendingPromptDraft();
+    loadPromptDraft(nextScopeKey);
+  });
 
   function versionTitle(message: VersionMessage | null | undefined) {
     if (!message) return 'this version';
@@ -57,6 +152,16 @@
       message.artifactBundle?.modelId ||
       'Imported Model'
     );
+  }
+
+  function formatAgentOrigin(origin: AgentOrigin | null | undefined) {
+    if (!origin) return null;
+    const host = origin.hostLabel?.trim() || origin.agentLabel?.trim() || 'Agent';
+    const model = origin.llmModelLabel?.trim() || origin.llmModelId?.trim() || '';
+    if (!model || model.toLowerCase() === host.toLowerCase()) {
+      return host;
+    }
+    return `${host} · ${model}`;
   }
 
   function processPaths(paths: string[]) {
@@ -104,6 +209,7 @@
     }
 
     return () => {
+      flushPendingPromptDraft();
       unlisten?.();
     };
   });
@@ -140,27 +246,42 @@
 
   let isSubmitting = $state(false);
 
-  function submit() {
+  async function submit() {
     if (!isGenerating && !isSubmitting && (prompt.trim() || attachments.length > 0)) {
       isSubmitting = true;
-      const currentPrompt = prompt;
-      const currentAttachments = [...attachments];
-      
-      prompt = '';
-      attachments = [];
-      
-      onGenerate(currentPrompt, currentAttachments).finally(() => {
+      try {
+        const currentPrompt = prompt;
+        const currentAttachments = [...attachments];
+        const scopeKey = currentDraftScopeKey(activeThreadId);
+        
+        prompt = '';
+        attachments = [];
+        pendingDraftWrite = null;
+        if (draftPersistTimer) {
+          clearTimeout(draftPersistTimer);
+          draftPersistTimer = null;
+        }
+        persistPromptDraftNow(scopeKey, '');
+        
+        await onGenerate(currentPrompt, currentAttachments);
+      } catch (error) {
+        console.error('Failed to submit prompt:', error);
+      } finally {
         isSubmitting = false;
-      });
+      }
     }
   }
 
-  function retryFailedPrompt() {
+  async function retryFailedPrompt() {
     if (!failedPromptForRetry || isGenerating || isSubmitting) return;
     isSubmitting = true;
-    onGenerate(failedPromptForRetry, []).finally(() => {
+    try {
+      await onGenerate(failedPromptForRetry, []);
+    } catch (error) {
+      console.error('Failed to retry prompt:', error);
+    } finally {
       isSubmitting = false;
-    });
+    }
   }
 
   async function addAttachment() {
@@ -226,8 +347,9 @@
   const promptTrail = $derived.by(() => {
     if (!currentVersion) return [];
     const isLatest = currentVersion.id === versions[versions.length - 1]?.id;
-    if (isLatest) return messages;
-    return messages.filter(m => m.timestamp <= currentVersion.timestamp);
+    const base = isLatest ? messages : messages.filter(m => m.timestamp <= currentVersion.timestamp);
+    // Filter out standalone error messages (failed attempts with no output) — they pollute the trail
+    return base.filter(m => !(m.role === 'assistant' && m.status === 'error' && !m.output));
   });
   const currentUserMsg = $derived.by(() => {
     const userMsgs = promptTrail.filter(m => m.role === 'user');
@@ -439,6 +561,14 @@
               VERSION {usageLabel(currentVersion.usage)}
             </span>
           {/if}
+          {#if currentVersion?.agentOrigin}
+            <span
+              class="version-agent-badge"
+              title={`Agent-authored version via ${formatAgentOrigin(currentVersion.agentOrigin)}`}
+            >
+              {formatAgentOrigin(currentVersion.agentOrigin)}
+            </span>
+          {/if}
         </div>
         {#if currentVersion}
           <div class="version-actions">
@@ -451,7 +581,7 @@
       </div>
     </div>
 
-    {#if lastMessage && lastMessage.status === 'error'}
+    {#if lastMessage && lastMessage.status === 'error' && dialogueState.mode === 'generate'}
       <div class="error-msg-box">
         <div class="error-header">LLM GENERATION ERROR</div>
         <div class="error-content">{lastMessage.content}</div>
@@ -492,11 +622,14 @@
               {#each promptTrail as msg, i}
                 {@const visuals = trailVisuals(msg)}
                 <div class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'}">
-                  <div class="trail-header-row">
-                    <div class="trail-meta">
-                      <span class="trail-role">{msg.role === 'assistant' ? 'ECKY' : 'YOU'}</span>
-                      <span class="trail-time">{formatDate(msg.timestamp)}</span>
-                    </div>
+                    <div class="trail-header-row">
+                      <div class="trail-meta">
+                        <span class="trail-role">{msg.role === 'assistant' ? 'ECKY' : 'YOU'}</span>
+                        {#if msg.role === 'assistant' && msg.agentOrigin}
+                          <span class="trail-agent-origin">{formatAgentOrigin(msg.agentOrigin)}</span>
+                        {/if}
+                        <span class="trail-time">{formatDate(msg.timestamp)}</span>
+                      </div>
                     <button class="trail-copy-btn" type="button" onclick={() => copyTrailMessage(msg)}>
                       {copiedTrailMessageId === msg.id ? 'COPIED' : 'COPY'}
                     </button>
@@ -533,6 +666,19 @@
     {/if}
   {/if}
 
+  {#if queuedMessages.length > 0}
+    <div class="mcp-inbox">
+      {#each queuedMessages as msg (msg.id)}
+        <div class="inbox-msg inbox-msg--{msg.status}">
+          <span class="inbox-text">{msg.text}</span>
+          <span class="inbox-ticks" title={msg.status === 'delivered' ? 'Delivered to agent' : 'Queued'}>
+            {msg.status === 'delivered' ? '✓✓' : '✓'}
+          </span>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   <div class="input-area">
     {#if attachments.length > 0}
       <div class="attachments-list">
@@ -560,27 +706,41 @@
 
     <textarea
       class="input-mono prompt-input"
-      bind:value={prompt}
+      value={prompt}
+      oninput={handlePromptInput}
       onkeydown={handleKeydown}
       placeholder="Type a question or design change... (Cmd+Enter to process)"
       spellcheck="false"
     ></textarea>
+    {#if dialogueState.mode === 'mcp-idle' && queuedMessages.length === 0}
+      <div class="mcp-mode-hint">
+        Agent is not asking yet — type to queue a message
+      </div>
+    {/if}
     <div class="prompt-actions">
       <button class="btn btn-xs btn-ghost" onclick={addAttachment} title="Attach images or reference CAD files">
         📎 ATTACH REFERENCE
       </button>
       <button
         class="btn btn-primary"
-        disabled={isGenerating || isSubmitting || (!prompt.trim() && attachments.length === 0)}
+        disabled={isGenerating || isSubmitting || (dialogueState.mode === 'generate' && freecadMissing) || (!prompt.trim() && attachments.length === 0)}
         onclick={submit}
+        title={dialogueState.mode === 'generate' && freecadMissing ? 'FreeCAD not found — configure in Settings' : undefined}
       >
-        {#if isGenerating || isSubmitting}
+        {#if isSubmitting}
+          SENDING...
+        {:else if isGenerating}
           PROCESSING...
+        {:else if dialogueState.mode === 'agent-reply'}
+          SEND TO AGENT
+        {:else if dialogueState.mode === 'mcp-idle'}
+          QUEUE
         {:else}
           PROCESS
         {/if}
       </button>
-    </div>  </div>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -772,6 +932,19 @@
     padding: 2px 6px;
     border: 1px solid color-mix(in srgb, var(--secondary) 45%, var(--bg-400));
     background: color-mix(in srgb, var(--secondary) 8%, var(--bg-200));
+    white-space: nowrap;
+  }
+
+  .version-agent-badge,
+  .trail-agent-origin {
+    padding: 2px 6px;
+    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
     white-space: nowrap;
   }
 
@@ -984,18 +1157,19 @@
   }
 
   .input-area {
-    flex: 1;
+    flex-shrink: 0;
     padding: 12px;
     background: var(--bg-100);
     display: flex;
     flex-direction: column;
     gap: 8px;
-    min-height: 0;
+    min-height: 120px;
   }
 
   .prompt-input {
     flex: 1;
     width: 100%;
+    min-height: 80px;
     padding: 12px;
     background: var(--bg-200);
     border: 1px solid var(--bg-300);
@@ -1014,6 +1188,58 @@
     display: flex;
     justify-content: flex-end;
   }
+
+  .mcp-mode-hint {
+    padding: 6px 12px;
+    font-size: 0.62rem;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    text-align: center;
+  }
+
+  .mcp-inbox {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--bg-300);
+    max-height: 140px;
+    overflow-y: auto;
+  }
+
+  .inbox-msg {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .inbox-text {
+    font-size: 0.72rem;
+    padding: 5px 10px;
+    background: color-mix(in srgb, var(--primary) 15%, var(--bg-200));
+    border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--bg-300));
+    color: var(--text);
+    max-width: 85%;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+
+  .inbox-ticks {
+    font-size: 0.65rem;
+    flex-shrink: 0;
+    align-self: flex-end;
+    padding-bottom: 2px;
+  }
+
+  .inbox-msg--queued .inbox-ticks {
+    color: var(--text-dim);
+  }
+
+  .inbox-msg--delivered .inbox-ticks {
+    color: var(--primary);
+  }
+
 
   .btn-primary {
     padding: 8px 16px;

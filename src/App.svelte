@@ -14,13 +14,16 @@
   import HistoryPanel from './lib/HistoryPanel.svelte';
   import CodeModal from './lib/CodeModal.svelte';
   import DeletedModels from './lib/DeletedModels.svelte';
-  import { startMicrowaveHum, stopMicrowaveHum, stopMicrowaveAudio, playDing, playErrorBuzz, getActiveMicrowaveCount, setAudibleThread } from './lib/audio/microwave';
+  import InventoryPanel from './lib/InventoryPanel.svelte';
+  import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
+  import { activeMicrowaveCount, setMuted, stopMicrowaveAudio, setAudibleThread } from './lib/audio/microwave';
+  import { onboarding } from './lib/stores/onboarding';
   import { session } from './lib/stores/sessionStore';
   import { handleGenerate, initOrchestrator, isQuestionIntent } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion, stageParamChange } from './lib/controllers/manualController';
-  import { loadFromHistory, deleteThread, createNewThread, forkDesign, deleteVersion, loadVersion, refreshHistory } from './lib/stores/history';
+  import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange } from './lib/controllers/manualController';
+  import { applyAgentDraft, loadFromHistory, deleteThread, renameThread, createNewThread, forkDesign, deleteVersion, loadVersion, refreshHistory, finalizeThread } from './lib/stores/history';
   import { workingCopy, isDirty } from './lib/stores/workingCopy';
-  import { history, activeThreadId, activeVersionId, config, availableModels, isLoadingModels } from './lib/stores/domainState';
+  import { history, activeThreadId, activeVersionId, config, availableModels, isLoadingModels, freecadAvailable } from './lib/stores/domainState';
   import { sidebarWidth, historyHeight, dialogueHeight, showCodeModal, selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
   import { boot, saveConfig, fetchModels } from './lib/boot/restore';
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
@@ -41,13 +44,23 @@
   } from './lib/modelRuntime/semanticControls';
   import {
     addImportedModelVersion,
+    deleteAgentDraft,
     exportFile,
     formatBackendError,
+    getAgentDraft,
+    getActiveAgentSessions,
+    getThreadAgentState,
     getModelManifest,
     importFcstd,
+    resolveAgentConfirm,
+    resolveAgentPrompt,
     saveModelManifest,
+    type ThreadAgentState,
   } from './lib/tauri/client';
+  import { listen } from '@tauri-apps/api/event';
   import type {
+    AgentDraft,
+    AgentSession,
     DesignParams,
     GenieTraits,
     Message,
@@ -70,6 +83,89 @@
   };
 
   type ThreadPhase = Request['phase'] | 'idle' | 'booting';
+  type ViewerBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
+
+  function formatAgentPhase(phase: string): string {
+    return phase.replace(/_/g, ' ').toUpperCase();
+  }
+
+  function agentDraftKey(draft: AgentDraft | null | undefined): string | null {
+    if (!draft) return null;
+    return `${draft.threadId}:${draft.baseMessageId}:${draft.updatedAt}`;
+  }
+
+  function mapAgentPhaseToViewerBusy(session: AgentSession | null): ViewerBusyPhase {
+    switch (session?.phase) {
+      case 'rendering':
+      case 'restoring_version':
+        return 'rendering';
+      case 'saving_version':
+        return 'committing';
+      case 'patching_params':
+      case 'patching_macro':
+      case 'reading':
+      case 'resolving':
+        return 'generating';
+      default:
+        return null;
+    }
+  }
+
+  function formatAgentOriginLabel(origin: Message['agentOrigin'] | null | undefined): string | null {
+    if (!origin) return null;
+    const host = origin.hostLabel?.trim() || origin.agentLabel?.trim() || 'Agent';
+    const model = origin.llmModelLabel?.trim() || origin.llmModelId?.trim() || '';
+    if (!model || model.toLowerCase() === host.toLowerCase()) {
+      return host;
+    }
+    return `${host} · ${model}`;
+  }
+
+  function isActiveRequestPhase(phase: Request['phase']): boolean {
+    return !['success', 'error', 'canceled'].includes(phase);
+  }
+
+  function isModelBusyRequestPhase(phase: Request['phase']): boolean {
+    return ['generating', 'repairing', 'queued_for_render', 'rendering', 'committing'].includes(phase);
+  }
+
+  function requestMatchesViewerTarget(
+    request: Request,
+    threadId: string | null,
+    messageId: string | null,
+    modelId: string | null,
+  ): boolean {
+    if (!threadId || request.threadId !== threadId) return false;
+    if (modelId) {
+      if (request.baseModelId) return request.baseModelId === modelId;
+      if (messageId && request.baseMessageId) return request.baseMessageId === messageId;
+      return false;
+    }
+    if (messageId) {
+      if (request.baseMessageId) return request.baseMessageId === messageId;
+      return false;
+    }
+    return true;
+  }
+
+  function sessionMatchesViewerTarget(
+    candidate: AgentSession,
+    threadId: string | null,
+    messageId: string | null,
+    modelId: string | null,
+  ): boolean {
+    if (!threadId || candidate.threadId !== threadId) return false;
+    if (modelId) {
+      if (candidate.modelId) return candidate.modelId === modelId;
+      if (messageId && candidate.messageId) return candidate.messageId === messageId;
+      return false;
+    }
+    if (messageId) {
+      if (candidate.messageId) return candidate.messageId === messageId;
+      return false;
+    }
+    return true;
+  }
 
   // Local reactive aliases for templates
   const phase = $derived($session.phase);
@@ -82,6 +178,19 @@
 
   const isBooting = $derived(phase === 'booting');
   const isQuestionFlow = $derived(phase === 'answering');
+  const freecadMissing = $derived(!isBooting && $freecadAvailable === false);
+  const isMcpMode = $derived($config.connectionType === 'mcp');
+
+  type DialogueState =
+    | { mode: 'generate' }
+    | { mode: 'mcp-idle' }
+    | { mode: 'agent-reply'; requestId: string; agentLabel: string };
+
+  const dialogueState = $derived.by<DialogueState>(() => {
+    if (pendingAgentPrompt) return { mode: 'agent-reply', requestId: pendingAgentPrompt.requestId, agentLabel: pendingAgentPrompt.agentLabel };
+    if (isMcpMode && activeAgentSessions.length > 0) return { mode: 'mcp-idle' };
+    return { mode: 'generate' };
+  });
   const viewerAssets = $derived.by<ViewerAsset[]>(() => {
     const assets = activeArtifactBundle?.viewerAssets || [];
     return assets.map((asset) => ({
@@ -149,6 +258,107 @@
     const preferred = partScoped.length > 0 ? [...partScoped, ...globalControls] : visibleControls;
     return preferred.slice(0, 4);
   });
+  const suppressViewportBusyUi = $derived($showCodeModal);
+  let showEnrichmentModal = $state(false);
+  const enrichmentManifest = $derived.by(() => {
+    if (!showEnrichmentModal) return null;
+    const m = sessionModelManifest;
+    if (!m || m.sourceKind !== 'importedFcstd') return null;
+    if (m.enrichmentState?.status !== 'pending') return null;
+    return m;
+  });
+  const localViewportRequests = $derived.by<Request[]>(() => {
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    const modelId = activeArtifactBundle?.modelId ?? null;
+    return $activeThreadRequests.filter(
+      (request) =>
+        isActiveRequestPhase(request.phase) &&
+        requestMatchesViewerTarget(request, threadId, messageId, modelId),
+    );
+  });
+  const externalViewerSession = $derived.by<AgentSession | null>(() => {
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    const modelId = activeArtifactBundle?.modelId ?? null;
+    if (!threadId && !messageId && !modelId) return null;
+
+    return (
+      activeAgentSessions.find((candidate) =>
+        sessionMatchesViewerTarget(candidate, threadId, messageId, modelId),
+      ) ??
+      null
+    );
+  });
+  const externalViewerBusyPhase = $derived.by<ViewerBusyPhase>(() =>
+    mapAgentPhaseToViewerBusy(externalViewerSession),
+  );
+  const manualViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
+    if ($session.isManual && phase === 'rendering') return 'rendering';
+    return null;
+  });
+  const showViewerBusyMask = $derived.by(() => {
+    if (suppressViewportBusyUi) return false;
+    if (localViewportRequests.some((request) => isModelBusyRequestPhase(request.phase))) return true;
+    if (manualViewerBusyPhase === 'rendering') return true;
+    return externalViewerBusyPhase === 'rendering' || externalViewerBusyPhase === 'committing';
+  });
+  const localViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
+    if (localViewportRequests.some((request) => request.phase === 'committing')) return 'committing';
+    if (
+      localViewportRequests.some((request) =>
+        ['queued_for_render', 'rendering'].includes(request.phase),
+      )
+    ) {
+      return 'rendering';
+    }
+    if (localViewportRequests.some((request) => request.phase === 'repairing')) return 'repairing';
+    if (localViewportRequests.some((request) => request.phase === 'generating')) return 'generating';
+    if (manualViewerBusyPhase === 'rendering') return 'rendering';
+    return null;
+  });
+  const viewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
+    return localViewerBusyPhase ?? externalViewerBusyPhase;
+  });
+  const viewerBusyText = $derived.by<string | null>(() => {
+    switch (localViewerBusyPhase) {
+      case 'repairing':
+        return $session.repairMessage || 'Reweaving the geometry lattice.';
+      case 'rendering':
+        return 'Stabilizing the geometry into manufacturable solids.';
+      case 'committing':
+        return 'Finalizing the artifact and sealing it into the thread.';
+      case 'generating':
+        return $session.cookingPhrase || 'Preparing the next transformation.';
+      default:
+        if (!externalViewerSession || !externalViewerBusyPhase) return null;
+        if (externalViewerSession.statusText.trim()) return externalViewerSession.statusText;
+        switch (externalViewerBusyPhase) {
+          case 'rendering':
+            return `External agent ${externalViewerSession.agentLabel} is updating the model.`;
+          case 'committing':
+            return `External agent ${externalViewerSession.agentLabel} is saving a version.`;
+          case 'generating':
+            return `External agent ${externalViewerSession.agentLabel} is preparing an update.`;
+          default:
+            return null;
+        }
+    }
+  });
+  const externalViewerStatusText = $derived.by<string | null>(() => {
+    if (!externalViewerSession || !externalViewerBusyPhase) return null;
+    if (externalViewerSession.statusText.trim()) return externalViewerSession.statusText;
+    switch (externalViewerBusyPhase) {
+      case 'rendering':
+        return `External agent ${externalViewerSession.agentLabel} is updating the model.`;
+      case 'committing':
+        return `External agent ${externalViewerSession.agentLabel} is saving a version.`;
+      case 'generating':
+        return `External agent ${externalViewerSession.agentLabel} is preparing an update.`;
+      default:
+        return null;
+    }
+  });
 
   let viewerComponent = $state<ViewerHandle | null>(null);
   let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
@@ -157,6 +367,34 @@
   let lastAdvisorBubble = $state('');
   let lastAdvisorQuestion = $state('');
   let dismissedBubbleText = $state('');
+
+  let activeAgentSessions = $state<AgentSession[]>([]);
+  let lastSeenAgentDraftKey = $state<string | null>(null);
+  let genieWakeUpCount = $state(0);
+  let prevSessionCount = 0;
+
+  type PendingAgentPrompt = { requestId: string; message: string | null; agentLabel: string; sessionId: string };
+  let pendingAgentPrompt = $state<PendingAgentPrompt | null>(null);
+
+  type QueuedMessage = { id: string; text: string; status: 'queued' | 'delivered' };
+  let queuedUserMessages = $state<QueuedMessage[]>([]);
+
+  // Auto-deliver the first queued message when agent calls request_user_prompt
+  $effect(() => {
+    if (!pendingAgentPrompt) return;
+    const first = queuedUserMessages.find(m => m.status === 'queued');
+    if (!first) return;
+    const requestId = pendingAgentPrompt.requestId;
+    queuedUserMessages = queuedUserMessages.map(m => m.id === first.id ? { ...m, status: 'delivered' } : m);
+    pendingAgentPrompt = null;
+    void resolveAgentPrompt(requestId, first.text).catch(() => {});
+  });
+
+  $effect(() => {
+    const count = activeAgentSessions.length;
+    if (count > 0 && prevSessionCount === 0) genieWakeUpCount++;
+    prevSessionCount = count;
+  });
 
   let isResizingWidth = $state(false);
   let isResizingHeight = $state(false);
@@ -177,11 +415,41 @@
   // Shut down audio context when idle for 2s
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
-    if ($activeRequestCount === 0) {
-      idleTimeout = setTimeout(() => stopMicrowaveAudio(true), 2000);
-    } else if (idleTimeout) {
-      clearTimeout(idleTimeout);
-      idleTimeout = null;
+    const hasAudioActivity = $activeRequestCount > 0 || $activeMicrowaveCount > 0;
+    if (hasAudioActivity) {
+      if (idleTimeout) {
+        clearTimeout(idleTimeout);
+        idleTimeout = null;
+        console.info('[Microwave] idle shutdown canceled', {
+          activeRequests: $activeRequestCount,
+          activeMicrowaves: $activeMicrowaveCount,
+        });
+      }
+      return;
+    }
+
+    if (!idleTimeout) {
+      console.info('[Microwave] idle shutdown scheduled');
+      idleTimeout = setTimeout(() => {
+        const stillActive = get(activeRequestCount) > 0 || get(activeMicrowaveCount) > 0;
+        if (stillActive) {
+          console.info('[Microwave] idle shutdown skipped due to renewed activity', {
+            activeRequests: get(activeRequestCount),
+            activeMicrowaves: get(activeMicrowaveCount),
+          });
+          idleTimeout = null;
+          return;
+        }
+        console.info('[Microwave] idle shutdown closing audio context');
+        stopMicrowaveAudio(true);
+        idleTimeout = null;
+      }, 2000);
+    }
+  });
+
+  $effect(() => {
+    if (!isBooting && !$config.hasSeenOnboarding && !$onboarding.isActive) {
+      onboarding.start();
     }
   });
 
@@ -190,19 +458,152 @@
     setAudibleThread($activeThreadId);
   });
 
+
   function formatCookingTime(s: number) {
     const m = Math.floor(s / 60);
     const sec = s % 60;
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
 
+  // --- Agent confirmation requests ---
+  type AgentConfirmItem = { requestId: string; message: string; buttons: string[]; agentLabel: string };
+  let pendingConfirms = $state<AgentConfirmItem[]>([]);
+
+  async function answerConfirm(requestId: string, choice: string) {
+    pendingConfirms = pendingConfirms.filter(c => c.requestId !== requestId);
+    try { await resolveAgentConfirm(requestId, choice); } catch { /* already timed out */ }
+  }
+
+  async function answerAgentPrompt(requestId: string, promptText: string) {
+    pendingAgentPrompt = null;
+    try { await resolveAgentPrompt(requestId, promptText); } catch { /* already timed out */ }
+  }
+
+  async function handleDialogueSubmit(prompt: string, attachments: Attachment[]) {
+    switch (dialogueState.mode) {
+      case 'agent-reply': await answerAgentPrompt(dialogueState.requestId, prompt); break;
+      case 'generate':    await handleGenerate(prompt, attachments); break;
+      case 'mcp-idle':
+        queuedUserMessages = [...queuedUserMessages, { id: crypto.randomUUID(), text: prompt, status: 'queued' }];
+        break;
+    }
+  }
+
   onMount(() => {
     void boot();
+    // Initial fetch of agent sessions (push events only fire on changes, not on load)
+    void getActiveAgentSessions().then(sessions => { activeAgentSessions = sessions; }).catch(() => {});
+
+    const unlisten = listen<AgentConfirmItem>('agent-confirm-request', (event) => {
+      const item = event.payload;
+      if (!pendingConfirms.find(c => c.requestId === item.requestId)) {
+        pendingConfirms = [...pendingConfirms, item];
+      }
+    });
+    const unlistenPrompt = listen<PendingAgentPrompt>('agent-prompt-request', (event) => {
+      pendingAgentPrompt = event.payload;
+    });
+    const unlistenHistory = listen('history-updated', () => {
+      void refreshHistory();
+    });
+    const unlistenSessions = listen<AgentSession[]>('agent-sessions-changed', (event) => {
+      activeAgentSessions = event.payload;
+    });
+    return () => {
+      void unlisten.then(fn => fn());
+      void unlistenPrompt.then(fn => fn());
+      void unlistenHistory.then(fn => fn());
+      void unlistenSessions.then(fn => fn());
+    };
   });
 
   const activeThread = $derived($history.find(t => t.id === $activeThreadId));
+  const activeVersionMessage = $derived.by<Message | null>(() => {
+    if (!activeThread) return null;
+    return (
+      activeThread.messages.find(
+        (message) =>
+          message.id === $activeVersionId &&
+          message.role === 'assistant' &&
+          Boolean(message.output || message.artifactBundle),
+      ) ?? null
+    );
+  });
+  const activeVersionAgentLabel = $derived(formatAgentOriginLabel(activeVersionMessage?.agentOrigin));
   const eckyTraits = $derived<Partial<GenieTraits>>(activeThread?.genieTraits || {});
   const eckyIntensity = $derived(1.0 + Math.max(0, ($activeRequestCount - 1) * 0.25));
+  
+  const agentDraft = $derived($session.agentDraft);
+
+  async function loadAgentDraft() {
+    if (!agentDraft) return;
+    await applyAgentDraft(agentDraft);
+  }
+
+  async function discardAgentDraft() {
+    if (!agentDraft) return;
+    try {
+      await deleteAgentDraft(agentDraft.threadId, agentDraft.baseMessageId);
+      lastSeenAgentDraftKey = null;
+      session.setAgentDraft(null);
+    } catch (e) {
+      console.error('Failed to discard agent draft:', e);
+    }
+  }
+
+  function hasTauriIpc(): boolean {
+    if (typeof window === 'undefined') return false;
+    return typeof (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ === 'object';
+  }
+
+  async function refreshExternalAgentState() {
+    if (!hasTauriIpc()) return;
+
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    if (!threadId || !messageId) {
+      lastSeenAgentDraftKey = null;
+      const currentDraft = get(session).agentDraft as AgentDraft | null;
+      if (currentDraft) {
+        session.setAgentDraft(null);
+      }
+      return;
+    }
+
+    const draft = (await getAgentDraft(threadId, messageId)) as AgentDraft | null;
+    const nextDraftKey = agentDraftKey(draft);
+
+    if (!draft) {
+      const currentDraft = get(session).agentDraft as AgentDraft | null;
+      if (currentDraft?.threadId === threadId && currentDraft?.baseMessageId === messageId) {
+        session.setAgentDraft(null);
+      }
+      lastSeenAgentDraftKey = null;
+      return;
+    }
+
+    if (nextDraftKey === lastSeenAgentDraftKey) {
+      return;
+    }
+
+    lastSeenAgentDraftKey = nextDraftKey;
+    if (!get(isDirty)) {
+      await applyAgentDraft(draft);
+      return;
+    }
+
+    session.setAgentDraft(draft);
+    session.setStatus('External agent draft updated. Load or discard it before saving.');
+  }
+
+  $effect(() => {
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    lastSeenAgentDraftKey = null;
+    if (!threadId || !messageId) return;
+    void refreshExternalAgentState();
+  });
+
   const inFlightByThread = $derived.by(() => {
     const counts: Record<string, number> = {};
     for (const req of $allRequests) {
@@ -245,22 +646,31 @@
 
   const activeThreadHighestPhase = $derived.by<ThreadPhase>(() => {
     if (phase === 'booting') return 'booting';
-    
-    // Check if there is an error specifically in this thread
-    const threadErrors = $activeThreadRequests.filter(r => r.phase === 'error' && r.error);
+
+    const activeRequests = $activeThreadRequests.filter(
+      (request) => !['success', 'error', 'canceled'].includes(request.phase),
+    );
+    const activePhases = activeRequests.map((request) => request.phase);
+    if (activePhases.some((requestPhase) => ['rendering', 'queued_for_render', 'committing'].includes(requestPhase))) {
+      return 'rendering';
+    }
+    if (activePhases.some((requestPhase) => requestPhase === 'repairing')) return 'repairing';
+    if (activePhases.some((requestPhase) => requestPhase === 'generating')) return 'generating';
+    if (activePhases.some((requestPhase) => requestPhase === 'answering')) return 'answering';
+    if (activePhases.some((requestPhase) => requestPhase === 'classifying')) return 'classifying';
+
+    const threadErrors = $activeThreadRequests.filter((request) => request.phase === 'error' && request.error);
     if (threadErrors.length > 0) return 'error';
 
-    const reqPhases = $activeThreadRequests.map(r => r.phase);
-    if (reqPhases.some(p => ['rendering', 'queued_for_render', 'committing'].includes(p))) return 'rendering';
-    if (reqPhases.some(p => p === 'repairing')) return 'repairing';
-    if (reqPhases.some(p => p === 'generating')) return 'generating';
-    if (reqPhases.some(p => p === 'answering')) return 'answering';
-    if (reqPhases.some(p => p === 'classifying')) return 'classifying';
-    
     return 'idle';
   });
 
+  const activeConfirm = $derived(pendingConfirms[0] ?? null);
+
   const genieMode = $derived.by(() => {
+    if ($onboarding.isActive) return 'speaking';
+    if (activeConfirm) return 'speaking';
+    if (pendingAgentPrompt) return 'speaking';
     const atPhase = activeThreadHighestPhase;
     if (atPhase === 'error') return 'error';
     if (atPhase === 'repairing') return 'repairing';
@@ -268,30 +678,54 @@
     if (atPhase === 'rendering') return 'rendering';
     if (atPhase === 'generating' || atPhase === 'answering') return 'thinking';
     if (assistantFresh && !dismissedBubbleText && lastAdvisorBubble) return 'speaking';
+    if (activeAgentSessions.length > 0) return 'light';
     return 'idle';
   });
 
   const genieBubble = $derived.by(() => {
+    if ($onboarding.isActive) return $onboarding.text;
+    if (activeConfirm) return activeConfirm.message;
+    if (pendingAgentPrompt) return pendingAgentPrompt.message || `${pendingAgentPrompt.agentLabel} is waiting for your input`;
     const atPhase = activeThreadHighestPhase;
-    const threadError = $activeThreadRequests.find(r => r.phase === 'error')?.error;
-    
-    const raw = threadError || 
-               (atPhase === 'repairing' ? $session.repairMessage : null) || 
-               (['classifying', 'generating', 'answering'].includes(atPhase) ? $session.cookingPhrase : null) || 
+    const threadError =
+      atPhase === 'error'
+        ? [...$activeThreadRequests].reverse().find((request) => request.phase === 'error' && request.error)
+            ?.error
+        : null;
+
+    const raw = threadError ||
+               (atPhase === 'repairing' ? $session.repairMessage : null) ||
+               (['classifying', 'generating', 'answering'].includes(atPhase) ? $session.cookingPhrase : null) ||
                lastAdvisorBubble || '';
     return (dismissedBubbleText === raw) ? '' : raw;
   });
 
-  async function toggleMicrowaveMute() {
-    const newMuted = !($config?.microwave?.muted);
-    config.update(c => ({ 
-      ...c, 
-      microwave: { 
-        ...(c.microwave || { humId: null, dingId: null }), 
-        muted: newMuted 
-      } 
+  const genieActions = $derived.by(() => {
+    if ($onboarding.isActive) {
+      return [
+        { label: 'NEXT', onclick: () => onboarding.next() },
+        { label: 'SKIP', onclick: () => onboarding.skip() }
+      ];
+    }
+    if (!activeConfirm) return null;
+    return activeConfirm.buttons.map(btn => ({
+      label: btn,
+      onclick: () => answerConfirm(activeConfirm.requestId, btn),
     }));
-    if (newMuted) stopMicrowaveAudio(true);
+  });
+
+  async function toggleMicrowaveMute() {
+    const currentConfig = get(config);
+    const newMuted = !(currentConfig?.microwave?.muted);
+    const nextConfig = {
+      ...currentConfig,
+      microwave: {
+        ...(currentConfig?.microwave || { humId: null, dingId: null }),
+        muted: newMuted,
+      },
+    };
+    config.set(nextConfig);
+    setMuted(newMuted, nextConfig);
     await saveConfig();
   }
 
@@ -373,6 +807,19 @@
     }
   }
 
+  async function exportFCStd() {
+    const bundle = $session.artifactBundle;
+    if (!bundle?.fcstdPath) return;
+    try {
+      const path = await save({ filters: [{ name: 'FreeCAD Document', extensions: ['FCStd'] }], defaultPath: 'design.FCStd' });
+      if (typeof path === 'string') {
+        await exportFile(bundle.fcstdPath, path);
+      }
+    } catch (e: unknown) {
+      session.setError(`Export Error: ${formatBackendError(e)}`);
+    }
+  }
+
   function dismissGenie() {
     if (genieBubble) dismissedBubbleText = genieBubble;
   }
@@ -439,6 +886,9 @@
       });
       session.setStatus(`Imported FCStd: ${importedName}`);
       currentView.set('workbench');
+      if (manifest.enrichmentState?.status === 'pending') {
+        showEnrichmentModal = true;
+      }
     } catch (e: unknown) {
       session.setError(`FCStd Import Error: ${formatBackendError(e)}`);
     }
@@ -487,23 +937,25 @@
 <svelte:window onmousemove={handleMouseMove} onmouseup={stopResizing} onblur={stopResizing} onkeydown={handleGlobalKeydown} />
 
 <div class="app-page" role="application">
+  {#if $onboarding.isActive}
+    <div class="onboarding-backdrop"></div>
+  {/if}
   <div class="app-overlay-actions">
-    {#if $activeRequestCount > 0}
-      <button class="overlay-icon-btn" onclick={toggleMicrowaveMute} title="Toggle Cafeteria Hum">
-        {$config?.microwave?.muted ? '🔇' : '🔊'}
-      </button>
-    {/if}
-    {#if $currentView !== 'config'}
+    {#if $currentView === 'workbench'}
+      {#if $activeRequestCount > 0}
+        <button class="overlay-icon-btn" onclick={toggleMicrowaveMute} title="Toggle Cafeteria Hum">
+          {$config?.microwave?.muted ? '🔇' : '🔊'}
+        </button>
+      {/if}
       <button class="overlay-icon-btn" class:draw-active={drawMode} onclick={() => drawMode = !drawMode} title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}>
         ✏️
       </button>
+      <button class="settings-overlay-btn" onclick={() => currentView.set('config')} title="Configuration">⚙️</button>
+      <button class="settings-overlay-btn" onclick={() => currentView.set('trash')} title="Trash">🗑️</button>
+      <button class="settings-overlay-btn" onclick={() => currentView.set('inventory')} title="Inventory">📦</button>
+    {:else}
+      <button class="settings-overlay-btn" onclick={() => currentView.set('workbench')} title="Close">×</button>
     {/if}
-    <button class="settings-overlay-btn" onclick={() => currentView.set($currentView === 'config' ? 'workbench' : 'config')} title="Configuration">
-      {$currentView === 'config' ? '⚒️' : '⚙️'}
-    </button>
-    <button class="settings-overlay-btn" onclick={() => currentView.set($currentView === 'trash' ? 'workbench' : 'trash')} title="Trash">
-      {$currentView === 'trash' ? '⚒️' : '🗑️'}
-    </button>
   </div>
 
   <div class="app-container">
@@ -517,10 +969,12 @@
       />
     {:else if $currentView === 'trash'}
       <DeletedModels />
+    {:else if $currentView === 'inventory'}
+      <InventoryPanel />
     {:else}
       <div class="workbench">
         <aside class="sidebar" style="width: {$sidebarWidth}px">
-          <div class="sidebar-section flex-1">
+          <div class="sidebar-section flex-1" class:onboarding-highlight={$onboarding.target === 'params'}>
             <div class="pane-header">TUNABLE PARAMETERS</div>
             <div class="sidebar-content scrollable">
               <ParamPanel 
@@ -552,15 +1006,18 @@
             if (e.key === 'ArrowUp') historyHeight.set($historyHeight + 10);
             if (e.key === 'ArrowDown') historyHeight.set($historyHeight - 10);
           }}></div>
-          <div class="sidebar-section" style="height: {$historyHeight}px">
+          <div class="sidebar-section" style="height: {$historyHeight}px" class:onboarding-highlight={$onboarding.target === 'history'}>
             <div class="pane-header">THREAD HISTORY</div>
             <div class="sidebar-content scrollable">
-              <HistoryPanel history={$history} activeThreadId={$activeThreadId} 
+              <HistoryPanel history={$history} activeThreadId={$activeThreadId}
                 inFlightByThread={inFlightByThread}
-                onSelect={loadFromHistory} 
+                activeAgentSessions={activeAgentSessions}
+                onSelect={loadFromHistory}
                 onDelete={deleteThread}
+                onRename={renameThread}
                 onNew={createNewThread}
                 onImportFcstd={handleImportFcstd}
+                onFinalize={finalizeThread}
               />
             </div>
           </div>
@@ -572,10 +1029,10 @@
         }}></div>
 
         <div class="main-workbench">
-          <main class="viewport-area" role="presentation">
+          <main class="viewport-area" role="presentation" class:onboarding-highlight={$onboarding.target === 'viewport'}>
             <Viewer
               bind:this={viewerComponent}
-              stlUrl={$activeThreadId || $workingCopy.macroCode ? stlUrl : null}
+              stlUrl={$activeThreadId ? stlUrl : null}
               viewerAssets={viewerAssets}
               selectedPartId={selectedPartId}
               overlayPartLabel={overlaySelectedPart?.label ?? null}
@@ -585,18 +1042,68 @@
               previewTransforms={importedPreviewTransforms}
               onOverlayChange={handleSemanticControlChange}
               onSelectPart={handlePartSelect}
-              isGenerating={$activeThreadBusy}
+              isGenerating={viewerBusyPhase === 'generating' || viewerBusyPhase === 'repairing'}
+              hideModelWhileBusy={showViewerBusyMask}
+              busyPhase={viewerBusyPhase}
+              busyText={viewerBusyText}
             />
             <DrawingOverlay bind:this={drawingOverlay} active={drawMode} />
-            <div class="genie-layer">
-              <VertexGenie mode={genieMode} bubble={genieBubble} onDismiss={dismissGenie} traits={eckyTraits} intensity={eckyIntensity} />
+            <div class="genie-layer" class:onboarding-active={$onboarding.isActive}>
+              <VertexGenie 
+                mode={genieMode} 
+                bubble={genieBubble} 
+                onDismiss={dismissGenie} 
+                actions={genieActions} 
+                traits={eckyTraits} 
+                intensity={eckyIntensity} 
+                wakeUp={genieWakeUpCount}
+                agentConnected={activeAgentSessions.length > 0}
+              />
             </div>
 
+            {#if agentDraft}
+              <div class="agent-draft-toast">
+                <span class="toast-label">EXTERNAL AGENT DRAFT AVAILABLE FOR THIS VERSION</span>
+                <div class="toast-actions">
+                  <button class="btn btn-xs btn-primary" onclick={loadAgentDraft}>LOAD DRAFT</button>
+                  <button class="btn btn-xs btn-secondary" onclick={discardAgentDraft}>DISCARD</button>
+                </div>
+              </div>
+            {/if}
+
             {#if error}
-              <div class="error-banner" role="alert">
+              <div
+                class="error-banner"
+                role="button"
+                tabindex="0"
+                aria-label="Dismiss error"
+                onclick={dismissError}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    dismissError();
+                  }
+                }}
+              >
                 <div class="error-banner__label">ERROR</div>
                 <div class="error-banner__body">{error}</div>
-                <button class="error-banner__dismiss" onclick={dismissError} title="Dismiss error">✕</button>
+                <button
+                  class="error-banner__dismiss"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    dismissError();
+                  }}
+                  title="Dismiss error"
+                >
+                  ✕
+                </button>
+              </div>
+            {/if}
+
+            {#if freecadMissing}
+              <div class="freecad-missing-banner">
+                <div class="freecad-missing-banner__label">FREECAD NOT FOUND</div>
+                <div class="freecad-missing-banner__body">FreeCAD is required to generate models. Install it or set the path in <button class="freecad-missing-banner__settings-link" onclick={() => currentView.set('config')}>Settings</button>.</div>
               </div>
             {/if}
 
@@ -653,11 +1160,18 @@
               </div>
             {/if}
             
-            {#if $workingCopy.macroCode || stlUrl}
+
+            {#if $activeThreadId && ($workingCopy.macroCode || stlUrl)}
               <div class="viewport-overlay">
+                {#if activeVersionAgentLabel}
+                  <div class="agent-origin-chip" title={`Current model authored by ${activeVersionAgentLabel}`}>
+                    {activeVersionAgentLabel}
+                  </div>
+                {/if}
                 <div class="export-actions">
-                  <button class="btn btn-xs btn-secondary" onclick={forkDesign} title="Fork this design into a new project">🍴 FORK</button>
-                  <button class="btn btn-xs btn-primary" onclick={exportSTL} disabled={!stlUrl}>💾 STL</button>
+                  <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
+                  <button class="btn btn-xs btn-primary" onclick={exportSTL} disabled={!stlUrl || showViewerBusyMask} title="Export as STL">💾 STL</button>
+                  <button class="btn btn-xs btn-secondary" onclick={exportFCStd} disabled={!$session.artifactBundle?.fcstdPath || showViewerBusyMask} title="Export as FreeCAD document">💾 FCStd</button>
                 </div>
               </div>
             {/if}
@@ -668,15 +1182,20 @@
             if (e.key === 'ArrowDown') dialogueHeight.set($dialogueHeight - 10);
           }}></div>
 
-          <div class="dialogue-area" style="height: {$dialogueHeight}px">
+          <div class="dialogue-area" style="height: {$dialogueHeight}px" class:onboarding-highlight={$onboarding.target === 'dialogue'}>
             <div class="pane-header dialogue-header">
               DIALOGUE: {activeThread ? activeThread.title : 'New Session'}
             </div>
             <div class="dialogue-content">
               <PromptPanel
-                onGenerate={handleGenerate}
+                onGenerate={handleDialogueSubmit}
                 isGenerating={$activeThreadBusy}
-                messages={activeThread?.messages || []}                onShowCode={(m) => { selectedCode.set(m.output.macroCode); selectedTitle.set(m.output.title); showCodeModal.set(true); }}
+                freecadMissing={freecadMissing}
+                dialogueState={dialogueState}
+                queuedMessages={queuedUserMessages}
+                messages={activeThread?.messages || []}
+                activeThreadId={$activeThreadId}
+                onShowCode={(m) => { selectedCode.set(m.output.macroCode); selectedTitle.set(m.output.title); showCodeModal.set(true); }}
                 onDeleteVersion={deleteVersion}
                 bind:activeVersionId={$activeVersionId}
                 onVersionChange={loadVersion}
@@ -702,7 +1221,26 @@
   {/if}
 
   {#if $showCodeModal}
-    <CodeModal bind:code={$selectedCode} title={$selectedTitle} onCommit={commitManualVersion} onclose={() => showCodeModal.set(false)} />
+    <CodeModal
+      bind:code={$selectedCode}
+      title={$selectedTitle}
+      onCommit={commitManualVersion}
+      onFork={forkManualVersion}
+      onclose={() => showCodeModal.set(false)}
+    />
+  {/if}
+
+  {#if enrichmentManifest}
+    <ImportEnrichmentModal
+      manifest={enrichmentManifest}
+      activeVersionId={$activeVersionId}
+      onSelectPart={handlePartSelect}
+      onclose={() => showEnrichmentModal = false}
+      ondone={(updatedManifest) => {
+        session.setModelRuntime($session.artifactBundle, updatedManifest);
+        showEnrichmentModal = false;
+      }}
+    />
   {/if}
 </div>
 
@@ -716,6 +1254,17 @@
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
   .dialogue-area { flex-shrink: 0; background: var(--bg-100); display: flex; flex-direction: column; border-top: 1px solid var(--bg-300); overflow: hidden; }
   .dialogue-content { flex: 1; min-height: 0; }
+  .agent-origin-chip {
+    padding: 4px 8px;
+    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    pointer-events: none;
+  }
   .pane-header { padding: 4px 12px; background: var(--bg-200); border-bottom: 1px solid var(--bg-300); color: var(--secondary); font-size: 0.6rem; font-weight: bold; letter-spacing: 0.1em; text-transform: uppercase; }
   .scrollable { overflow-y: auto; }
   .resizer-w { width: 4px; background: var(--bg-300); cursor: col-resize; z-index: 10; flex-shrink: 0; }
@@ -740,6 +1289,11 @@
     background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
     box-shadow: var(--shadow);
     overflow: hidden;
+    cursor: pointer;
+  }
+  .error-banner:focus-visible {
+    outline: 1px solid var(--red);
+    outline-offset: 1px;
   }
   .error-banner__label {
     color: var(--red);
@@ -763,6 +1317,104 @@
     cursor: pointer;
   }
   .error-banner__dismiss:hover { border-color: var(--red); color: var(--text); }
+
+  .freecad-missing-banner {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 135;
+    max-width: min(80vw, 520px);
+    padding: 8px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: var(--bg-200);
+    border: 1px solid var(--accent);
+    pointer-events: auto;
+  }
+  .freecad-missing-banner__label {
+    color: var(--accent);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+  .freecad-missing-banner__body {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    line-height: 1.4;
+  }
+  .freecad-missing-banner__settings-link {
+    background: none;
+    border: none;
+    color: var(--primary);
+    cursor: pointer;
+    padding: 0;
+    font-size: inherit;
+    text-decoration: underline;
+  }
+
+  .agent-activity-banner {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 135;
+    max-width: min(70vw, 560px);
+    padding: 8px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border: 1px solid color-mix(in srgb, var(--primary) 68%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 92%, black 8%);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .agent-activity-banner__label {
+    color: var(--primary);
+    font-size: 0.62rem;
+    font-weight: bold;
+    letter-spacing: 0.1em;
+  }
+
+  .agent-activity-banner__body {
+    color: var(--text);
+    font-size: 0.76rem;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .agent-draft-toast {
+    position: absolute;
+    top: 72px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 140;
+    background: var(--bg-100);
+    border: 1px solid var(--secondary);
+    padding: 8px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    box-shadow: var(--shadow);
+  }
+
+  .toast-label {
+    font-size: 0.65rem;
+    font-weight: bold;
+    color: var(--secondary);
+    letter-spacing: 0.05em;
+  }
+
+  .toast-actions {
+    display: flex;
+    gap: 8px;
+  }
 
   /* STL Cafeteria — multi-microwave strip */
   .cafeteria-strip { position: absolute; bottom: 48px; left: 12px; right: 12px; z-index: 100; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
@@ -817,7 +1469,7 @@
   .mw-btn { background: var(--bg-300); border: 1px solid var(--bg-400); color: var(--text); font-size: 0.55rem; padding: 2px 6px; cursor: pointer; font-weight: bold; }
   .mw-btn:hover { border-color: var(--primary); color: var(--primary); }
   .mw-btn-cancel:hover { background: var(--red); color: white; border-color: var(--red); }
-  .viewport-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; }
+  .viewport-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   .boot-overlay { position: absolute; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; background: var(--bg); }
   .boot-overlay__glass { position: absolute; inset: 0; background: radial-gradient(circle, rgba(74, 140, 92, 0.16), transparent), rgba(8, 12, 20, 0.86); backdrop-filter: blur(18px); }
   .boot-overlay__content { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 20px; }
@@ -825,4 +1477,25 @@
   .boot-overlay__status { color: var(--text-dim); font-size: 0.7rem; }
   .flex-1 { flex: 1; }
   .sidebar-section { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
+  /* Onboarding */
+  .onboarding-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    z-index: 999;
+    pointer-events: all;
+  }
+  :global(.onboarding-highlight) {
+    position: relative !important;
+    z-index: 1000 !important;
+    box-shadow: 0 0 0 2px var(--primary), 0 0 40px rgba(74, 140, 92, 0.5) !important;
+    pointer-events: none;
+    background: var(--bg-100);
+  }
+  :global(.genie-layer.onboarding-active) {
+    z-index: 1001 !important;
+  }
+
+  /* Agent confirmation stack */
 </style>

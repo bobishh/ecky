@@ -27,18 +27,34 @@
     bubble = '',
     question = '',
     onDismiss = null,
+    actions = null,
     traits = {},
     intensity = 1.0,
+    wakeUp = 0,
+    agentConnected = true,
   }: {
     mode?: GenieMode;
     bubble?: string;
     question?: string;
     onDismiss?: (() => void) | null;
+    actions?: Array<{ label: string; onclick: () => void }> | null;
     traits?: Partial<GenieTraits> | null;
     intensity?: number;
+    wakeUp?: number;
+    agentConnected?: boolean;
   } = $props();
 
-  const profile = $derived.by(() => resolveModeTraits(traits ?? DEFAULT_GENIE_TRAITS, mode));
+  const WAKE_DUR = 650;
+  let wakeUpStartTime: number | null = null;
+
+  $effect(() => {
+    if (wakeUp > 0) wakeUpStartTime = performance.now();
+  });
+
+  const profile = $derived.by(() => {
+    const effectiveMode = agentConnected ? mode : 'sleeping';
+    return resolveModeTraits(traits ?? DEFAULT_GENIE_TRAITS, effectiveMode);
+  });
 
   let canvas: HTMLCanvasElement;
   let frameId = 0;
@@ -113,6 +129,12 @@
     const glowHue = normalizeHue(colorHue + currentProfile.glowHueShift);
 
     switch (currentProfile.palettePreset) {
+      case 'sleeping':
+        return {
+          edge: blendHue('#444', colorHue, 40, 10),
+          node: blendHue('#666', colorHue, 50, 5),
+          glow: `hsla(${normalizeHue(glowHue)}, 10%, 20%, 0.1)`,
+        };
       case 'thinking':
         return {
           edge: blendHue(primary, colorHue - 8, 62, 18),
@@ -215,15 +237,21 @@
     currentMode: GenieMode,
     palette: Palette,
   ) {
+    const now = performance.now();
+    const eyeOpenProgress =
+      wakeUpStartTime !== null
+        ? Math.min(1, (now - wakeUpStartTime) / WAKE_DUR)
+        : 1;
     const blinkPulse = Math.sin(
       time * (3.4 + currentProfile.pulseScale * 0.9) + currentProfile.seedOffsets.blink,
     );
-    const eyeBlink =
+    const eyeBlinkBase =
       currentMode === 'speaking'
         ? 0.72 + Math.abs(Math.sin(time * 9.5 + currentProfile.seedOffsets.blink)) * 0.35
         : blinkPulse > 0.965
           ? 0.18
           : 1;
+    const eyeBlink = eyeOpenProgress < 1 ? eyeOpenProgress * eyeBlinkBase : eyeBlinkBase;
 
     context.fillStyle = palette.node;
     context.strokeStyle = palette.node;
@@ -427,11 +455,13 @@
   <canvas bind:this={canvas} class="genie-canvas"></canvas>
   {#if cleanBubble}
     <div class="genie-bubble">
-      <button class="bubble-copy" type="button" onclick={copyBubbleText} aria-label="Copy advisor response">
-        {copyFeedback || 'COPY'}
-      </button>
-      <button class="bubble-close" type="button" onclick={() => onDismiss?.()} aria-label="Dismiss advisor bubble"></button>
-      <div class="bubble-speaker"><strong>ECKY:</strong></div>
+      {#if !actions?.length}
+        <button class="bubble-copy" type="button" onclick={copyBubbleText} aria-label="Copy advisor response">
+          {copyFeedback || 'COPY'}
+        </button>
+        <button class="bubble-close" type="button" onclick={() => onDismiss?.()} aria-label="Dismiss advisor bubble"></button>
+      {/if}
+      <div class="bubble-speaker"><strong>ECKY EINACS:</strong></div>
       {#if cleanQuestion}
         <div class="bubble-question-block">
           <div class="bubble-question-label">YOU ASKED</div>
@@ -439,6 +469,13 @@
         </div>
       {/if}
       <div class="bubble-text">{cleanBubble}</div>
+      {#if actions?.length}
+        <div class="bubble-actions">
+          {#each actions as action}
+            <button class="bubble-action-btn" type="button" onclick={action.onclick}>{action.label}</button>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -612,6 +649,33 @@
     color: var(--secondary);
     letter-spacing: 0.06em;
     font-size: 0.72rem;
+  }
+
+  .bubble-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, var(--bg-300) 70%, transparent);
+  }
+
+  .bubble-action-btn {
+    padding: 5px 14px;
+    background: var(--bg-300);
+    border: 1px solid var(--bg-400);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: bold;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+  }
+
+  .bubble-action-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-300));
   }
 
   @media (max-width: 960px) {

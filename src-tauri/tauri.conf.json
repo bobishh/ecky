@@ -23,7 +23,7 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**"]
+        "scope": ["$APPDATA/**", "$RESOURCE/**"]
       }
     }
   },
@@ -32,6 +32,8 @@
     "targets": "all",
     "resources": {
       "../server/freecad_runner.py": "server/freecad_runner.py",
+      "../model-runtime/cad_sdk.py": "model-runtime/cad_sdk.py",
+      "../model-runtime/cad_framework_contract.md": "model-runtime/cad_framework_contract.md",
       "../templates/cache_pot_default.FCMacro": "templates/cache_pot_default.FCMacro",
       "../templates/mess.stl": "templates/mess.stl"
     },

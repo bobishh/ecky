@@ -6,11 +6,13 @@
     title,
     onclose,
     onCommit,
+    onFork,
   }: {
     code?: string;
     title: string;
     onclose: () => void;
     onCommit?: (code: string) => Promise<void> | void;
+    onFork?: (code: string) => Promise<void> | void;
   } = $props();
 
   let x = $state(100);
@@ -19,7 +21,7 @@
   let height = $state(700);
 
   let copyState = $state<'idle' | 'copied'>('idle');
-  let commitState = $state<'idle' | 'committing'>('idle');
+  let commitState = $state<'idle' | 'committing' | 'forking'>('idle');
   let commitError = $state('');
 
   function formatCommitError(error: unknown): string {
@@ -43,13 +45,27 @@
   }
 
   async function handleCommit() {
-    if (!onCommit || commitState === 'committing') return;
+    if (!onCommit || commitState !== 'idle') return;
     commitState = 'committing';
     commitError = '';
     try {
       await onCommit(code);
     } catch (e: unknown) {
       console.error('Failed to commit code:', e);
+      commitError = formatCommitError(e);
+    } finally {
+      commitState = 'idle';
+    }
+  }
+
+  async function handleFork() {
+    if (!onFork || commitState !== 'idle') return;
+    commitState = 'forking';
+    commitError = '';
+    try {
+      await onFork(code);
+    } catch (e: unknown) {
+      console.error('Failed to fork code:', e);
       commitError = formatCommitError(e);
     } finally {
       commitState = 'idle';
@@ -78,18 +94,32 @@
           <div class="commit-error" title={commitError}>{commitError}</div>
         {/if}
       </div>
-      <button
-        class="btn btn-primary"
-        onclick={handleCommit}
-        disabled={commitState === 'committing'}
-        title="Save changes as a new version in history"
-      >
-        {#if commitState === 'committing'}
-          COMMITTING...
-        {:else}
-          COMMIT AS NEW VERSION
-        {/if}
-      </button>
+      <div class="footer-actions">
+        <button
+          class="btn btn-secondary"
+          onclick={handleFork}
+          disabled={!onFork || commitState !== 'idle'}
+          title="Fork these code changes into a new thread"
+        >
+          {#if commitState === 'forking'}
+            FORKING...
+          {:else}
+            FORK TO NEW THREAD
+          {/if}
+        </button>
+        <button
+          class="btn btn-primary"
+          onclick={handleCommit}
+          disabled={!onCommit || commitState !== 'idle'}
+          title="Save changes as a new version in history"
+        >
+          {#if commitState === 'committing'}
+            COMMITTING...
+          {:else}
+            COMMIT AS NEW VERSION
+          {/if}
+        </button>
+      </div>
     </div>
   </div>
 </Window>
@@ -115,6 +145,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
   }
 
   .footer-left {
@@ -135,5 +166,12 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .footer-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
   }
 </style>

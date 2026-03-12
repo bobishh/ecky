@@ -6,19 +6,9 @@ use super::session::write_last_snapshot;
 use crate::db;
 use crate::freecad;
 use crate::models::{
-    AppResult, AppState, ArtifactBundle, DesignOutput, DesignParams, InteractionMode,
+    AppResult, AppState, ArtifactBundle, DesignOutput, DesignParams, InteractionMode, MacroDialect,
     ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, UiField, UiSpec,
 };
-
-fn configured_freecad_cmd(state: &State<'_, AppState>) -> Option<String> {
-    let config = state.config.lock().unwrap();
-    let cmd = config.freecad_cmd.trim();
-    if cmd.is_empty() {
-        None
-    } else {
-        Some(cmd.to_string())
-    }
-}
 
 fn humanize_parameter_key(key: &str) -> String {
     key.split(|ch: char| matches!(ch, '_' | '-' | '.'))
@@ -144,9 +134,21 @@ fn build_imported_output(
         response: "Imported FreeCAD model.".to_string(),
         interaction_mode: InteractionMode::Design,
         macro_code: String::new(),
+        macro_dialect: MacroDialect::Legacy,
         ui_spec,
         initial_params,
+        post_processing: None,
     }
+}
+
+use crate::services::render::{
+    self as render_service, configured_freecad_cmd, is_freecad_available,
+};
+
+#[tauri::command]
+#[specta::specta]
+pub async fn check_freecad(state: State<'_, AppState>) -> AppResult<bool> {
+    Ok(is_freecad_available(&state))
 }
 
 #[tauri::command]
@@ -157,18 +159,7 @@ pub async fn render_stl(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<String> {
-    let _guard = state.render_lock.lock().await;
-    let result = freecad::render(
-        &macro_code,
-        &parameters,
-        configured_freecad_cmd(&state).as_deref(),
-        &app,
-    );
-    if result.is_ok() {
-        let runtime_cache_dir = freecad::runtime_cache_dir(&app)?;
-        freecad::evict_cache_if_needed(&runtime_cache_dir);
-    }
-    result
+    render_service::render_stl(&macro_code, &parameters, &state, &app).await
 }
 
 #[tauri::command]
@@ -176,21 +167,18 @@ pub async fn render_stl(
 pub async fn render_model(
     macro_code: String,
     parameters: DesignParams,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<ArtifactBundle> {
-    let _guard = state.render_lock.lock().await;
-    let result = freecad::render_model(
+    render_service::render_model(
         &macro_code,
         &parameters,
-        configured_freecad_cmd(&state).as_deref(),
+        post_processing.as_ref(),
+        &state,
         &app,
-    );
-    if result.is_ok() {
-        let runtime_cache_dir = freecad::runtime_cache_dir(&app)?;
-        freecad::evict_cache_if_needed(&runtime_cache_dir);
-    }
-    result
+    )
+    .await
 }
 
 #[tauri::command]
@@ -235,13 +223,15 @@ pub async fn apply_imported_model(
     let mut persisted_output: Option<DesignOutput> = None;
     if let Some(message_id) = message_id.as_ref() {
         let db = state.db.lock().await;
-        db::update_message_model_manifest(&db, message_id, &next_manifest)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
-        db::update_message_artifact_bundle(&db, message_id, &next_bundle)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        db::update_message_model_manifest(&db, message_id, &next_manifest).map_err(
+            |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+        )?;
+        db::update_message_artifact_bundle(&db, message_id, &next_bundle).map_err(
+            |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+        )?;
 
         let existing_output = db::get_message_output_and_thread(&db, message_id)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?
+            .map_err(|err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()))?
             .map(|(output, _)| output);
         let mut imported_output = build_imported_output(&next_manifest, existing_output.as_ref());
         imported_output.initial_params = parameters.clone();
@@ -313,12 +303,15 @@ pub async fn save_model_manifest(
 
     if let Some(message_id) = message_id.as_ref() {
         let db = state.db.lock().await;
-        db::update_message_model_manifest(&db, message_id, &manifest)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        db::update_message_model_manifest(&db, message_id, &manifest).map_err(
+            |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+        )?;
 
         if matches!(manifest.source_kind, ModelSourceKind::ImportedFcstd) {
             let existing_output = db::get_message_output_and_thread(&db, message_id)
-                .map_err(|err| crate::models::AppError::persistence(err.to_string()))?
+                .map_err(|err: rusqlite::Error| {
+                    crate::models::AppError::persistence(err.to_string())
+                })?
                 .map(|(output, _)| output);
             let imported_output = build_imported_output(&manifest, existing_output.as_ref());
             db::update_message_output(&db, message_id, &imported_output)
@@ -460,6 +453,7 @@ mod tests {
                 primitive_id: "primitive-outer-shell-size".to_string(),
                 label: "Outer Shell Size".to_string(),
                 kind: ControlPrimitiveKind::Number,
+                source: ControlViewSource::Generated,
                 part_ids: vec!["part-outer-shell".to_string()],
                 bindings: vec![PrimitiveBinding {
                     parameter_key: "outer_shell_width".to_string(),

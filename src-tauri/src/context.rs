@@ -1,4 +1,7 @@
-use crate::models::{DesignOutput, InteractionMode, Message, MessageRole, ThreadReference, UiSpec};
+use crate::models::{
+    infer_macro_dialect_from_code, DesignOutput, InteractionMode, Message, MessageRole,
+    ThreadReference, UiSpec,
+};
 
 pub const THREAD_SUMMARY_MAX_CHARS: usize = 1600;
 pub const SUMMARY_ITEM_MAX_CHARS: usize = 220;
@@ -119,7 +122,7 @@ pub fn build_recent_dialogue(messages: &[Message]) -> String {
             let speaker = if m.role == MessageRole::User {
                 "USER"
             } else {
-                "ASSISTANT"
+                "ECKY EINACS"
             };
             format!(
                 "{}: {}",
@@ -209,9 +212,11 @@ pub fn assemble_context(
             version_name: "V1".to_string(),
             response: String::new(),
             interaction_mode: InteractionMode::Design,
+            macro_dialect: infer_macro_dialect_from_code(&code),
             macro_code: code,
             ui_spec: UiSpec::default(),
             initial_params: Default::default(),
+            post_processing: None,
         });
 
         PromptContext {
@@ -230,7 +235,19 @@ pub fn format_contextual_prompt(
     base_prompt: &str,
     system_prompt: &str,
     intent_mode: &str,
+    framework_contract: Option<&str>,
 ) -> String {
+    let framework_block = framework_contract
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                "ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):\n```text\n{}\n```\n\n",
+                value
+            )
+        })
+        .unwrap_or_default();
+
     let full_prompt = format!(
         "USER REQUEST (ACTUAL)\n{}\n\nEXECUTION RULES (MANDATORY)\n{}\n\nUSER_INTENT_MODE: {}",
         base_prompt, system_prompt, intent_mode
@@ -243,7 +260,7 @@ pub fn format_contextual_prompt(
             .unwrap_or_else(|_| "{}".to_string());
 
         format!(
-            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\nACTUAL CURRENT UI SPEC (AUTHORITATIVE):\n```json\n{}\n```\n\nACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):\n```json\n{}\n```\n\n{}",
+            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\nACTUAL CURRENT UI SPEC (AUTHORITATIVE):\n```json\n{}\n```\n\nACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):\n```json\n{}\n```\n\n{}{}",
             ctx.thread_title,
             previous.title,
             previous.version_name,
@@ -253,10 +270,11 @@ pub fn format_contextual_prompt(
             previous.macro_code,
             ui_spec_json,
             params_json,
+            framework_block,
             full_prompt
         )
     } else {
-        full_prompt
+        format!("{}{}", framework_block, full_prompt)
     }
 }
 
@@ -275,6 +293,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            agent_origin: None,
             image_data: None,
             attachment_images: Vec::new(),
             timestamp: 1000,
@@ -287,9 +306,11 @@ mod tests {
             version_name: "V1".to_string(),
             response: "Test response".to_string(),
             interaction_mode: InteractionMode::Design,
+            macro_dialect: infer_macro_dialect_from_code("import FreeCAD"),
             macro_code: "import FreeCAD".to_string(),
             ui_spec: UiSpec::default(),
             initial_params: Default::default(),
+            post_processing: None,
         }
     }
 
@@ -474,11 +495,13 @@ mod tests {
             "increase throat diameter",
             "rule block",
             "DESIGN_EDIT",
+            Some("framework contract"),
         );
 
         assert!(result.contains("ACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):"));
         assert!(result.contains("ACTUAL CURRENT UI SPEC (AUTHORITATIVE):"));
         assert!(result.contains("ACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):"));
+        assert!(result.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
         assert!(result.contains("USER REQUEST (ACTUAL)"));
         assert!(result.contains("EXECUTION RULES (MANDATORY)"));
     }

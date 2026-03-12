@@ -11,9 +11,20 @@ type RequestQueueState = {
 };
 
 const TERMINAL_PHASES: RequestPhase[] = ['success', 'error', 'canceled'];
+const MODEL_ACTIVE_PHASES: RequestPhase[] = [
+  'generating',
+  'repairing',
+  'queued_for_render',
+  'rendering',
+  'committing',
+];
 
 function isTerminalPhase(phase: RequestPhase): boolean {
   return TERMINAL_PHASES.includes(phase);
+}
+
+function isModelActivePhase(phase: RequestPhase): boolean {
+  return MODEL_ACTIVE_PHASES.includes(phase);
 }
 
 function queueStats(byId: Record<string, QueuedRequest>) {
@@ -41,7 +52,13 @@ function createRequestQueue() {
   return {
     subscribe,
 
-    submit(prompt: string, attachments: Attachment[] = [], threadId: string | null = null): string {
+    submit(
+      prompt: string,
+      attachments: Attachment[] = [],
+      threadId: string | null = null,
+      baseMessageId: string | null = null,
+      baseModelId: string | null = null,
+    ): string {
       const id = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const request: QueuedRequest = {
         id,
@@ -59,6 +76,8 @@ function createRequestQueue() {
         cookingStartTime: null,
         cookingElapsed: 0,
         threadId,
+        baseMessageId,
+        baseModelId,
       };
       update(q => ({
         ...q,
@@ -210,4 +229,13 @@ export const activeThreadBusy = derived(
       r.threadId === $tid && !['success', 'error', 'canceled'].includes(r.phase)
     );
   }
+);
+
+export const activeThreadModelBusy = derived(
+  [requestQueue, activeThreadId],
+  ([$q, $tid]) => {
+    return Object.values($q.byId).some((r) =>
+      r.threadId === $tid && isModelActivePhase(r.phase),
+    );
+  },
 );

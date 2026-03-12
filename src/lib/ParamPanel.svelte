@@ -1,6 +1,7 @@
 <script lang="ts">
   import { get } from 'svelte/store';
   import Dropdown from './Dropdown.svelte';
+  import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
     parseMacroParams,
@@ -15,10 +16,12 @@
   } from './modelRuntime/semanticControls';
   import { persistLastSessionSnapshot } from './modelRuntime/sessionSnapshot';
   import { activeThreadId, history } from './stores/domainState';
+  import { refreshHistory } from './stores/history';
   import { liveApply } from './stores/paramPanelState';
   import { session } from './stores/sessionStore';
   import type {
     CheckboxField,
+    ImageField,
     AdvisoryCondition,
     AdvisorySeverity,
     ControlPrimitive,
@@ -26,6 +29,7 @@
     ControlRelationMode,
     ControlView,
     ControlViewScope,
+    ControlViewSource,
     DesignParams,
     EnrichmentProposal,
     EnrichmentStatus,
@@ -57,11 +61,13 @@
   };
   type EditableSelectField = SelectField & { _auto?: boolean };
   type EditableCheckboxField = CheckboxField & { _auto?: boolean };
+  type EditableImageField = ImageField & { _auto?: boolean };
   type EditableUiField =
     | EditableRangeField
     | EditableNumberField
     | EditableSelectField
-    | EditableCheckboxField;
+    | EditableCheckboxField
+    | EditableImageField;
   type RangeLikeField =
     | Extract<ResolvedUiField, { type: 'range' | 'number' }>
     | Extract<EditableUiField, { type: 'range' | 'number' }>;
@@ -181,6 +187,7 @@
         };
       case 'select':
       case 'checkbox':
+      case 'image':
         return { ...field };
     }
   }
@@ -345,8 +352,8 @@
     const specFields = uiSpec?.fields || [];
     const keys = macroParamKeys;
     const filteredSpecFields = keys
-      ? specFields.filter((field) => keys.has(field.key))
-      : specFields;
+      ? specFields.filter((field) => field && keys.has(field.key))
+      : specFields.filter(Boolean);
     const declaredKeys = new Set(filteredSpecFields.map((field) => field.key));
     
     const extraFields: ResolvedUiField[] = Object.entries(localParams)
@@ -403,12 +410,13 @@
     existingFields: EditableUiField[],
     parsedFields: UiField[],
   ): EditableUiField[] {
-    const merged = [...existingFields];
+    const merged = [...existingFields.filter(Boolean)];
     const seenKeys = new Set(
-      existingFields.map((field) => field.key.trim()).filter((key) => key.length > 0),
+      merged.map((field) => field.key.trim()).filter((key) => key.length > 0),
     );
 
     for (const parsedField of parsedFields) {
+      if (!parsedField) continue;
       const key = parsedField.key.trim();
       if (!key || seenKeys.has(key)) continue;
       merged.push(toEditableField(parsedField));
@@ -483,14 +491,6 @@
     return modelManifest.parts.find((part) => part.partId === localSelectedPartId) ?? null;
   });
 
-  const editablePartCount = $derived(
-    modelManifest?.parts?.filter((part) => part.editable).length ?? 0,
-  );
-
-  const inspectOnlyPartCount = $derived(
-    modelManifest?.parts?.filter((part) => !part.editable).length ?? 0,
-  );
-
   const manifestWarnings = $derived.by(() => {
     const warnings = new Set<string>();
     for (const warning of modelManifest?.warnings || []) {
@@ -504,10 +504,6 @@
 
   const enrichmentProposals = $derived<EnrichmentProposal[]>(
     modelManifest?.enrichmentState?.proposals || [],
-  );
-
-  const pendingProposalCount = $derived(
-    enrichmentProposals.filter((proposal) => proposal.status === 'pending').length,
   );
 
   const selectedGroups = $derived.by<ParameterGroup[]>(() => {
@@ -814,7 +810,24 @@
   }
 
   function isManualPrimitive(control: MaterializedSemanticControl): boolean {
-    return control.primitiveId.startsWith('primitive-manual-');
+    return control.source === 'manual';
+  }
+
+  function semanticSourceLabel(source: ControlViewSource | undefined): string {
+    switch (source) {
+      case 'llm':
+        return 'LLM';
+      case 'manual':
+        return 'MANUAL';
+      case 'inherited':
+        return 'INHERITED';
+      default:
+        return 'GENERATED';
+    }
+  }
+
+  function shouldShowSemanticSource(source: ControlViewSource | undefined): boolean {
+    return source === 'manual' || source === 'inherited' || source === 'llm';
   }
 
   function isSectionExpanded(sectionId: string, collapsedByDefault: boolean) {
@@ -856,12 +869,17 @@
     saveValuesState = 'saving';
     try {
       await updateParameters(activeVersionId, localParams);
+      // Sync in-memory state so that isDirty=true and paramPanelState reflects saved values.
+      // This prevents stale state from being used in subsequent renders or overwritten by agent drafts.
+      if (onspecchange) onspecchange(uiSpec ?? { fields: [] }, localParams);
+      await refreshHistory();
       saveValuesState = 'saved';
       setTimeout(() => {
         if (saveValuesState === 'saved') saveValuesState = 'idle';
       }, 1500);
     } catch (e: unknown) {
       console.error('Failed to save defaults:', formatBackendError(e));
+      session.setError(`Save Values Failed: ${formatBackendError(e)}`);
       saveValuesState = 'idle';
     }
   }
@@ -896,6 +914,9 @@
     if (field.type === 'select') {
       return ['select'];
     }
+    if (field.type === 'image') {
+      return ['image'];
+    }
     return ['range', 'number'];
   }
 
@@ -908,6 +929,9 @@
 
     if (field.type === 'checkbox') {
       return { tone: 'state', tag: 'STATE', glyph: '[ ]', note: 'binary latch' };
+    }
+    if (field.type === 'image') {
+      return { tone: 'state', tag: 'FILE', glyph: '[@]', note: 'asset path' };
     }
     if (field.type === 'select') {
       return { tone: 'mode', tag: 'MODE', glyph: '::', note: 'discrete set' };
@@ -1350,6 +1374,7 @@
       primitiveId: nextPrimitiveId,
       label: primitiveLabel.trim(),
       kind: primitiveKindPreview,
+      source: 'manual',
       partIds: primitiveScope === 'part' && primitivePartId ? [primitivePartId] : [],
       bindings: nextBindings,
       editable: true,
@@ -1842,32 +1867,6 @@
     </div>
   {:else}
     {#if modelManifest}
-      <div class="runtime-strip model-status-card">
-        <div class="runtime-strip__identity">
-          <div class="runtime-strip__title">{modelManifest.document.documentLabel || modelManifest.modelId}</div>
-          {#if selectedPart}
-            <div class="runtime-strip__context">{selectedPart.label}</div>
-          {/if}
-        </div>
-        <div class="runtime-strip__badges">
-          <span class="status-chip" class:status-chip-imported={modelManifest.sourceKind === 'importedFcstd'}>
-            {modelManifest.sourceKind === 'importedFcstd' ? 'IMPORTED FCSTD' : 'GENERATED'}
-          </span>
-          <span class="status-chip status-chip-editable">
-            {editablePartCount} editable
-          </span>
-          {#if inspectOnlyPartCount > 0}
-            <span class="status-chip status-chip-readonly">
-              {inspectOnlyPartCount} inspect-only
-            </span>
-          {/if}
-          {#if pendingProposalCount > 0}
-            <span class="status-chip status-chip-pending">
-              {pendingProposalCount} proposal{pendingProposalCount === 1 ? '' : 's'} pending
-            </span>
-          {/if}
-        </div>
-      </div>
       {#if manifestWarnings.length > 0}
         <div class="warning-stack">
           {#each manifestWarnings as warning}
@@ -2002,7 +2001,10 @@
               class:view-chip-active={view.viewId === activeControlViewId}
               onclick={() => onSelectControlView?.(view.viewId)}
             >
-              {view.label}
+              <span>{view.label}</span>
+              {#if shouldShowSemanticSource(view.source)}
+                <span class="semantic-source-badge">{semanticSourceLabel(view.source)}</span>
+              {/if}
             </button>
           {/each}
         </div>
@@ -2481,6 +2483,9 @@
                         <label class="param-label" for={control.primitiveId}>
                           {control.label}
                         </label>
+                        {#if shouldShowSemanticSource(control.source)}
+                          <span class="semantic-source-badge">{semanticSourceLabel(control.source)}</span>
+                        {/if}
                       </div>
                       {#if isManualPrimitive(control)}
                         <button
@@ -2623,6 +2628,26 @@
                       />
                       <span class="checkbox-status">{localParams[field.key] ? 'ON' : 'OFF'}</span>
                     </label>
+                  {:else if field.type === 'image'}
+                    <div class="image-field-wrapper">
+                      <button 
+                        class="btn param-btn" 
+                        onclick={async () => {
+                          const file = await open({
+                            multiple: false,
+                            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                          });
+                          if (typeof file === 'string') {
+                            update(field.key, file);
+                          } else if (file && file.path) {
+                            update(field.key, file.path);
+                          }
+                        }}
+                        disabled={field.frozen}
+                      >
+                        {localParams[field.key] ? String(localParams[field.key]).split(/[/\\]/).pop() : 'Select Image...'}
+                      </button>
+                    </div>
                   {/if}
                 </div>
               </div>
@@ -2691,19 +2716,38 @@
                   placeholder="Select..."
                 />
               {:else if field.type === 'checkbox'}
-                <label class="checkbox-wrapper" class:checkbox-wrapper-checked={Boolean(localParams[field.key])}>
-                  <input
-                    id={field.key}
-                    class="ui-checkbox"
-                    type="checkbox"
-                    checked={Boolean(localParams[field.key])}
-                    onchange={(e) => update(field.key, getInputChecked(e))}
-                    disabled={field.frozen}
-                  />
-                  <span class="checkbox-status">{localParams[field.key] ? 'ON' : 'OFF'}</span>
-                </label>
-              {/if}
-            </div>
+               <label class="checkbox-wrapper" class:checkbox-wrapper-checked={Boolean(localParams[field.key])}>
+                 <input
+                   id={field.key}
+                   class="ui-checkbox"
+                   type="checkbox"
+                   checked={Boolean(localParams[field.key])}
+                   onchange={(e) => update(field.key, getInputChecked(e))}
+                   disabled={field.frozen}
+                 />
+                 <span class="checkbox-status">{localParams[field.key] ? 'ON' : 'OFF'}</span>
+               </label>
+              {:else if field.type === 'image'}
+               <div class="image-field-wrapper">
+                 <button 
+                   class="btn param-btn" 
+                   onclick={async () => {
+                     const file = await open({
+                       multiple: false,
+                       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                     });
+                     if (typeof file === 'string') {
+                       update(field.key, file);
+                     } else if (file && file.path) {
+                       update(field.key, file.path);
+                     }
+                   }}
+                   disabled={field.frozen}
+                 >
+                   {localParams[field.key] ? String(localParams[field.key]).split(/[/\\]/).pop() : 'Select Image...'}
+                 </button>
+               </div>
+              {/if}            </div>
           </div>
           {/each}
         </div>
@@ -2735,9 +2779,9 @@
   .panel-toolbar {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
     border-bottom: 1px solid var(--bg-300);
-    padding-bottom: 8px;
+    padding-bottom: 10px;
     margin-bottom: 4px;
   }
 
@@ -2748,29 +2792,35 @@
 
   .search-input {
     width: 100%;
-    padding: 6px 28px 6px 10px;
+    min-height: 42px;
+    padding: 10px 36px 10px 12px;
     background: var(--bg-100);
     border: 1px solid var(--bg-300);
     color: var(--text);
-    font-size: 0.75rem;
+    font-size: 0.86rem;
+    font-weight: 600;
+    line-height: 1.2;
     outline: none;
-    transition: border-color 0.2s;
+    transition:
+      border-color 0.2s,
+      background-color 0.2s;
   }
 
   .search-input:focus {
     border-color: var(--primary);
+    background: color-mix(in srgb, var(--bg-100) 88%, var(--primary) 12%);
   }
 
   .clear-search {
     position: absolute;
-    right: 8px;
+    right: 10px;
     top: 50%;
     transform: translateY(-50%);
     background: none;
     border: none;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: 0.95rem;
     padding: 0;
     display: flex;
     align-items: center;
@@ -2796,44 +2846,6 @@
     overflow: hidden;
   }
 
-  .runtime-strip {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-200) 68%, var(--bg-100));
-    overflow: hidden;
-  }
-
-  .runtime-strip__identity {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .runtime-strip__title {
-    color: var(--text);
-    font-size: 0.76rem;
-    font-weight: 700;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .runtime-strip__context {
-    color: var(--text-dim);
-    font-size: 0.6rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .runtime-strip__badges,
   .warning-stack,
   .proposal-actions,
   .proposal-list {
@@ -2859,7 +2871,6 @@
     flex-direction: column;
   }
 
-  .status-chip,
   .warning-chip,
   .proposal-status {
     padding: 3px 6px;
@@ -2872,23 +2883,10 @@
     text-transform: uppercase;
   }
 
-  .status-chip-imported,
-  .status-chip-pending,
+  .warning-chip,
   .proposal-status-pending {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--bg-300));
     color: var(--primary);
-  }
-
-  .status-chip-editable,
-  .proposal-status-accepted {
-    border-color: color-mix(in srgb, var(--secondary) 45%, var(--bg-300));
-    color: var(--secondary);
-  }
-
-  .status-chip-readonly,
-  .proposal-status-rejected {
-    border-color: color-mix(in srgb, var(--text-dim) 45%, var(--bg-300));
-    color: var(--text-dim);
   }
 
   .warning-chip {
@@ -2898,6 +2896,16 @@
     text-transform: none;
     letter-spacing: normal;
     font-weight: 500;
+  }
+
+  .proposal-status-accepted {
+    border-color: color-mix(in srgb, var(--secondary) 45%, var(--bg-300));
+    color: var(--secondary);
+  }
+
+  .proposal-status-rejected {
+    border-color: color-mix(in srgb, var(--text-dim) 45%, var(--bg-300));
+    color: var(--text-dim);
   }
 
   .warning-chip-action {
@@ -3115,6 +3123,12 @@
     white-space: nowrap;
   }
 
+  .view-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
   .part-chip-active,
   .view-chip-active {
     border-color: var(--secondary);
@@ -3289,9 +3303,23 @@
 
   .field-title {
     display: flex;
-    flex-direction: column;
-    gap: 0;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
     min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .semantic-source-badge {
+    padding: 1px 5px;
+    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.52rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    flex-shrink: 0;
   }
 
   .param-label {

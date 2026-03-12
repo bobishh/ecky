@@ -9,9 +9,91 @@ pub const GENIE_TRAITS_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentOrigin {
+    pub host_label: String,
+    pub client_kind: String,
+    pub agent_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_label: Option<String>,
+    pub session_id: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub session_id: String,
+    pub client_kind: String,
+    pub host_label: String,
+    pub agent_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_label: Option<String>,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+    pub phase: String,
+    pub status_text: String,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraft {
+    pub session_id: String,
+    pub thread_id: String,
+    pub base_message_id: String,
+    pub model_id: Option<String>,
+    pub design_output: DesignOutput,
+    pub artifact_bundle: Option<ArtifactBundle>,
+    pub model_manifest: Option<ModelManifest>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetLeaseInfo {
+    pub session_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub host_label: String,
+    pub agent_label: String,
+    pub acquired_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadAgentState {
+    /// "none" | "active" | "waiting" | "disconnected"
+    pub connection_state: String,
+    pub agent_label: Option<String>,
+    pub llm_model_label: Option<String>,
+    pub phase: Option<String>,
+    pub status_text: Option<String>,
+    pub updated_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub running: bool,
+    pub endpoint_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_startup_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum AppErrorCode {
     Validation,
     NotFound,
+    Conflict,
     Provider,
     Persistence,
     Render,
@@ -61,6 +143,10 @@ impl AppError {
         Self::new(AppErrorCode::Provider, message)
     }
 
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(AppErrorCode::Conflict, message)
+    }
+
     pub fn persistence(message: impl Into<String>) -> Self {
         Self::new(AppErrorCode::Persistence, message)
     }
@@ -106,6 +192,10 @@ pub struct Engine {
     pub base_url: String,
     #[serde(alias = "system_prompt")]
     pub system_prompt: String,
+    /// Explicit opt-in: API calls are blocked unless this is true.
+    /// Defaults to true for backward compatibility with existing configs.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -128,6 +218,41 @@ pub struct MicrowaveConfig {
     pub muted: bool,
 }
 
+/// Whether Ecky runs the embedded MCP HTTP server.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoAgent {
+    pub id: String,
+    pub label: String,
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConfig {
+    /// HTTP port for the MCP server. Defaults to 39249.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Max concurrent agent sessions. None = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u8>,
+    /// External processes to launch on startup.
+    #[serde(default)]
+    pub auto_agents: Vec<AutoAgent>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            port: None,
+            max_sessions: None,
+            auto_agents: vec![],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -140,6 +265,12 @@ pub struct Config {
     pub assets: Vec<Asset>,
     #[serde(default)]
     pub microwave: Option<MicrowaveConfig>,
+    #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
+    pub has_seen_onboarding: bool,
+    #[serde(default)]
+    pub connection_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -467,6 +598,13 @@ pub enum UiField {
         #[serde(default, alias = "freezed")]
         frozen: bool,
     },
+    Image {
+        key: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default, alias = "freezed")]
+        frozen: bool,
+    },
 }
 
 impl UiField {
@@ -475,7 +613,8 @@ impl UiField {
             Self::Range { key, .. }
             | Self::Number { key, .. }
             | Self::Select { key, .. }
-            | Self::Checkbox { key, .. } => key,
+            | Self::Checkbox { key, .. }
+            | Self::Image { key, .. } => key,
         }
     }
 
@@ -484,7 +623,8 @@ impl UiField {
             Self::Range { label, .. }
             | Self::Number { label, .. }
             | Self::Select { label, .. }
-            | Self::Checkbox { label, .. } => label,
+            | Self::Checkbox { label, .. }
+            | Self::Image { label, .. } => label,
         }
     }
 
@@ -493,7 +633,8 @@ impl UiField {
             Self::Range { frozen, .. }
             | Self::Number { frozen, .. }
             | Self::Select { frozen, .. }
-            | Self::Checkbox { frozen, .. } => *frozen,
+            | Self::Checkbox { frozen, .. }
+            | Self::Image { frozen, .. } => *frozen,
         }
     }
 
@@ -515,6 +656,14 @@ impl UiField {
                 ParamValue::Boolean(_) => Ok(()),
                 other => Err(AppError::validation(format!(
                     "Parameter '{}' must be a boolean, received {}.",
+                    key,
+                    other.kind()
+                ))),
+            },
+            Self::Image { key, .. } => match value {
+                ParamValue::String(_) => Ok(()),
+                other => Err(AppError::validation(format!(
+                    "Parameter '{}' must be a string (file path), received {}.",
                     key,
                     other.kind()
                 ))),
@@ -575,6 +724,65 @@ impl std::str::FromStr for InteractionMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MacroDialect {
+    Legacy,
+    CadFrameworkV1,
+}
+
+impl MacroDialect {
+    pub fn is_framework(&self) -> bool {
+        matches!(self, Self::CadFrameworkV1)
+    }
+}
+
+fn default_macro_dialect() -> MacroDialect {
+    MacroDialect::Legacy
+}
+
+pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
+    let trimmed = macro_code.trim();
+    if trimmed.contains("cad_sdk") || trimmed.contains("CONTROLS") {
+        MacroDialect::CadFrameworkV1
+    } else {
+        MacroDialect::Legacy
+    }
+}
+
+pub fn normalize_design_output(mut output: DesignOutput) -> DesignOutput {
+    let inferred = infer_macro_dialect_from_code(&output.macro_code);
+    if inferred.is_framework() {
+        output.macro_dialect = inferred;
+    }
+    output
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectionType {
+    Planar,
+    Cylindrical,
+    Spherical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplacementSpec {
+    pub image_param: String,
+    pub projection: ProjectionType,
+    pub depth_mm: f64,
+    #[serde(default)]
+    pub invert: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PostProcessingSpec {
+    #[serde(default)]
+    pub displacement: Option<DisplacementSpec>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DesignOutput {
@@ -588,10 +796,14 @@ pub struct DesignOutput {
     pub interaction_mode: InteractionMode,
     #[serde(alias = "macro_code")]
     pub macro_code: String,
+    #[serde(default = "default_macro_dialect", alias = "macro_dialect")]
+    pub macro_dialect: MacroDialect,
     #[serde(default, alias = "ui_spec")]
     pub ui_spec: UiSpec,
     #[serde(default, alias = "initial_params")]
     pub initial_params: DesignParams,
+    #[serde(default, alias = "post_processing")]
+    pub post_processing: Option<PostProcessingSpec>,
 }
 
 fn default_title() -> String {
@@ -717,11 +929,59 @@ pub struct Message {
     pub artifact_bundle: Option<ArtifactBundle>,
     #[serde(default)]
     pub model_manifest: Option<ModelManifest>,
+    #[serde(default)]
+    pub agent_origin: Option<AgentOrigin>,
     #[serde(default, alias = "image_data")]
     pub image_data: Option<String>,
     #[serde(default, alias = "attachment_images")]
     pub attachment_images: Vec<String>,
     pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadStatus {
+    Active,
+    Finalized,
+}
+
+impl ThreadStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Finalized => "finalized",
+        }
+    }
+}
+
+impl std::str::FromStr for ThreadStatus {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "finalized" => Ok(Self::Finalized),
+            _ => Ok(Self::Active),
+        }
+    }
+}
+
+impl Default for ThreadStatus {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
+impl ToSql for ThreadStatus {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
+impl FromSql for ThreadStatus {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let raw = value.as_str()?;
+        Ok(raw.parse().unwrap_or(ThreadStatus::Active))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -742,6 +1002,12 @@ pub struct Thread {
     pub pending_count: usize,
     #[serde(default, alias = "error_count")]
     pub error_count: usize,
+    #[serde(default, alias = "thread_status")]
+    pub status: ThreadStatus,
+    #[serde(default, alias = "finalized_at")]
+    pub finalized_at: Option<u64>,
+    #[serde(default, alias = "pending_confirm")]
+    pub pending_confirm: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -813,6 +1079,15 @@ pub struct GenerateOutput {
     pub usage: Option<UsageSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateDesignOptions {
+    #[serde(default)]
+    pub question_mode: Option<bool>,
+    #[serde(default)]
+    pub follow_up_question: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitOutput {
@@ -827,6 +1102,8 @@ pub struct IntentDecision {
     pub intent_mode: String,
     pub confidence: f32,
     pub response: String,
+    #[serde(default)]
+    pub final_response: Option<String>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
 }
@@ -959,6 +1236,8 @@ pub struct DeletedMessage {
     pub artifact_bundle: Option<ArtifactBundle>,
     #[serde(default)]
     pub model_manifest: Option<ModelManifest>,
+    #[serde(default)]
+    pub agent_origin: Option<AgentOrigin>,
     pub timestamp: u64,
     #[serde(default, alias = "image_data")]
     pub image_data: Option<String>,
@@ -1044,6 +1323,10 @@ pub enum ControlViewSource {
     Inherited,
     Llm,
     Manual,
+}
+
+fn default_control_source() -> ControlViewSource {
+    ControlViewSource::Generated
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -1205,6 +1488,8 @@ pub struct ControlPrimitive {
     pub primitive_id: String,
     pub label: String,
     pub kind: ControlPrimitiveKind,
+    #[serde(default = "default_control_source")]
+    pub source: ControlViewSource,
     #[serde(default)]
     pub part_ids: Vec<String>,
     #[serde(default)]
@@ -1254,6 +1539,7 @@ pub struct ControlView {
     pub sections: Vec<ControlViewSection>,
     #[serde(default, rename = "default")]
     pub is_default: bool,
+    #[serde(default = "default_control_source")]
     pub source: ControlViewSource,
     #[serde(default)]
     pub status: EnrichmentStatus,
@@ -1421,7 +1707,7 @@ pub fn validate_ui_spec(ui_spec: &UiSpec) -> AppResult<()> {
                     )));
                 }
             }
-            UiField::Checkbox { .. } => {}
+            UiField::Checkbox { .. } | UiField::Image { .. } => {}
         }
     }
 
@@ -1463,7 +1749,7 @@ pub fn validate_ui_spec(ui_spec: &UiSpec) -> AppResult<()> {
                     }
                 }
             }
-            UiField::Select { .. } | UiField::Checkbox { .. } => {}
+            UiField::Select { .. } | UiField::Checkbox { .. } | UiField::Image { .. } => {}
         }
     }
 
@@ -1819,6 +2105,7 @@ mod tests {
                     primitive_id: "primitive-shell-radius".to_string(),
                     label: "Shell Radius".to_string(),
                     kind: ControlPrimitiveKind::Number,
+                    source: ControlViewSource::Generated,
                     part_ids: vec!["part-shell".to_string()],
                     bindings: vec![PrimitiveBinding {
                         parameter_key: "radius".to_string(),
@@ -1834,6 +2121,7 @@ mod tests {
                     primitive_id: "primitive-shell-radius-target".to_string(),
                     label: "Shell Radius Target".to_string(),
                     kind: ControlPrimitiveKind::Number,
+                    source: ControlViewSource::Generated,
                     part_ids: vec!["part-shell".to_string()],
                     bindings: vec![PrimitiveBinding {
                         parameter_key: "radius".to_string(),

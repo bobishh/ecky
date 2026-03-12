@@ -69,6 +69,14 @@ async deleteThread(id: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async renameThread(id: string, title: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_thread", { id, title }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async deleteVersion(messageId: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_version", { messageId }) };
@@ -101,9 +109,33 @@ async hideDeletedMessage(messageId: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async generateDesign(prompt: string, threadId: string | null, parentMacroCode: string | null, workingDesign: DesignOutput | null, isRetry: boolean, imageData: string | null, attachments: Attachment[] | null, questionMode: boolean | null) : Promise<Result<GenerateOutput, AppError>> {
+async finalizeThread(id: string) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_design", { prompt, threadId, parentMacroCode, workingDesign, isRetry, imageData, attachments, questionMode }) };
+    return { status: "ok", data: await TAURI_INVOKE("finalize_thread", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async reopenThread(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reopen_thread", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getInventory() : Promise<Result<Thread[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_inventory") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async generateDesign(prompt: string, threadId: string | null, parentMacroCode: string | null, workingDesign: DesignOutput | null, isRetry: boolean, imageData: string | null, attachments: Attachment[] | null, options: GenerateDesignOptions | null) : Promise<Result<GenerateOutput, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_design", { prompt, threadId, parentMacroCode, workingDesign, isRetry, imageData, attachments, options }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -133,6 +165,14 @@ async classifyIntent(prompt: string, threadId: string | null, context: string | 
     else return { status: "error", error: e  as any };
 }
 },
+async checkFreecad() : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_freecad") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async renderStl(macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>) : Promise<Result<string, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("render_stl", { macroCode, parameters }) };
@@ -141,9 +181,9 @@ async renderStl(macroCode: string, parameters: Partial<{ [key in string]: ParamV
     else return { status: "error", error: e  as any };
 }
 },
-async renderModel(macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>) : Promise<Result<ArtifactBundle, AppError>> {
+async renderModel(macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>, postProcessing: PostProcessingSpec | null) : Promise<Result<ArtifactBundle, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("render_model", { macroCode, parameters }) };
+    return { status: "ok", data: await TAURI_INVOKE("render_model", { macroCode, parameters, postProcessing }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -237,6 +277,14 @@ async updateParameters(messageId: string, parameters: Partial<{ [key in string]:
     else return { status: "error", error: e  as any };
 }
 },
+async updateVersionRuntime(messageId: string, artifactBundle: ArtifactBundle, modelManifest: ModelManifest) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_version_runtime", { messageId, artifactBundle, modelManifest }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async parseMacroParams(macroCode: string) : Promise<ParsedParamsResult> {
     return await TAURI_INVOKE("parse_macro_params", { macroCode });
 },
@@ -271,6 +319,73 @@ async saveLastDesign(snapshot: LastDesignSnapshot | null) : Promise<Result<null,
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getActiveAgentSessions() : Promise<Result<AgentSession[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_active_agent_sessions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getMcpServerStatus() : Promise<Result<McpServerStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_mcp_server_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getAgentDraft(threadId: string, baseMessageId: string) : Promise<Result<AgentDraft | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_agent_draft", { threadId, baseMessageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteAgentDraft(threadId: string, baseMessageId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_agent_draft", { threadId, baseMessageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Called by the frontend when the user clicks a confirmation button.
+ * Resolves the pending oneshot channel so the MCP handler can return.
+ */
+async resolveAgentConfirm(requestId: string, choice: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_confirm", { requestId, choice }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Called by the frontend when the user submits a prompt in MCP mode.
+ * Resolves the pending oneshot channel so the MCP handler can return the text.
+ */
+async resolveAgentPrompt(requestId: string, promptText: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_prompt", { requestId, promptText }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns the current agent state for the given thread — for status bar display.
+ */
+async getThreadAgentState(threadId: string) : Promise<Result<ThreadAgentState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_thread_agent_state", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -287,37 +402,66 @@ async saveLastDesign(snapshot: LastDesignSnapshot | null) : Promise<Result<null,
 export type Advisory = { advisoryId: string; label: string; severity: AdvisorySeverity; primitiveIds?: string[]; viewIds?: string[]; message: string; condition?: AdvisoryCondition; threshold?: number | null }
 export type AdvisoryCondition = "always" | "below" | "above"
 export type AdvisorySeverity = "info" | "warning"
+export type AgentDraft = { sessionId: string; threadId: string; baseMessageId: string; modelId: string | null; designOutput: DesignOutput; artifactBundle: ArtifactBundle | null; modelManifest: ModelManifest | null; updatedAt: number }
+export type AgentOrigin = { hostLabel: string; clientKind: string; agentLabel: string; llmModelId?: string | null; llmModelLabel?: string | null; sessionId: string; createdAt: number }
+export type AgentSession = { sessionId: string; clientKind: string; hostLabel: string; agentLabel: string; llmModelId?: string | null; llmModelLabel?: string | null; threadId: string | null; messageId: string | null; modelId: string | null; phase: string; statusText: string; updatedAt: number }
 export type AppError = { code: AppErrorCode; message: string; details?: string | null }
-export type AppErrorCode = "validation" | "notFound" | "provider" | "persistence" | "render" | "parse" | "internal"
+export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[] }
 export type Asset = { id: string; name: string; path: string; format: string }
 export type Attachment = { path: string; name: string; explanation: string; kind: AttachmentKind }
 export type AttachmentKind = "image" | "cad"
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null }
-export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
+/**
+ * Whether Ecky runs the embedded MCP HTTP server.
+ */
+export type AutoAgent = { id: string; label: string; cmd: string; args: string[]; enabled: boolean }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null }
+export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
 export type ControlRelation = { relationId: string; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number; enabled?: boolean }
 export type ControlRelationMode = "mirror" | "scale" | "offset"
-export type ControlView = { viewId: string; label: string; scope: ControlViewScope; partIds?: string[]; primitiveIds?: string[]; sections?: ControlViewSection[]; default?: boolean; source: ControlViewSource; status?: EnrichmentStatus; order?: number }
+export type ControlView = { viewId: string; label: string; scope: ControlViewScope; partIds?: string[]; primitiveIds?: string[]; sections?: ControlViewSection[]; default?: boolean; source?: ControlViewSource; status?: EnrichmentStatus; order?: number }
 export type ControlViewScope = "global" | "part"
 export type ControlViewSection = { sectionId: string; label: string; primitiveIds?: string[]; collapsed?: boolean }
 export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
-export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; timestamp: number; imageData?: string | null; attachmentImages?: string[]; deletedAt: number }
-export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }> }
+export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; attachmentImages?: string[]; deletedAt: number }
+export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
+export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
-export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; systemPrompt: string }
+export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; systemPrompt: string; 
+/**
+ * Explicit opt-in: API calls are blocked unless this is true.
+ * Defaults to true for backward compatibility with existing configs.
+ */
+enabled?: boolean }
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
 export type EyeStyle = "dot" | "bar" | "slant"
 export type FinalizeStatus = "success" | "error" | "discarded"
+export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null }
 export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
-export type IntentDecision = { intentMode: string; confidence: number; response: string; usage?: UsageSummary | null }
+export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
 export type InteractionMode = "design" | "question"
 export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null }
+export type MacroDialect = "legacy" | "cadFrameworkV1"
 export type ManifestBounds = { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number }
 export type ManifestEnrichmentState = { status: EnrichmentStatus; proposals?: EnrichmentProposal[] }
-export type Message = { id: string; role: MessageRole; content: string; status: MessageStatus; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; imageData?: string | null; attachmentImages?: string[]; timestamp: number }
+export type McpConfig = { 
+/**
+ * HTTP port for the MCP server. Defaults to 39249.
+ */
+port?: number | null; 
+/**
+ * Max concurrent agent sessions. None = unlimited.
+ */
+maxSessions?: number | null; 
+/**
+ * External processes to launch on startup.
+ */
+autoAgents?: AutoAgent[] }
+export type McpServerStatus = { running: boolean; endpointUrl: string; lastStartupError?: string | null }
+export type Message = { id: string; role: MessageRole; content: string; status: MessageStatus; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; imageData?: string | null; attachmentImages?: string[]; timestamp: number }
 export type MessageRole = "user" | "assistant"
 export type MessageStatus = "pending" | "success" | "error" | "discarded"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
@@ -327,13 +471,21 @@ export type ParamValue = string | number | boolean | null
 export type ParameterGroup = { groupId: string; label: string; parameterKeys?: string[]; partIds?: string[]; editable: boolean; presentation?: string | null; order?: number | null }
 export type ParsedParamsResult = { fields: UiField[]; params: Partial<{ [key in string]: ParamValue }> }
 export type PartBinding = { partId: string; freecadObjectName: string; label: string; kind: string; semanticRole?: string | null; viewerAssetPath?: string | null; viewerNodeIds?: string[]; parameterKeys?: string[]; editable: boolean; bounds?: ManifestBounds | null; volume?: number | null; area?: number | null }
+export type PostProcessingSpec = { displacement?: DisplacementSpec | null }
 export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
+export type ProjectionType = "planar" | "cylindrical" | "spherical"
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean }
 export type SelectionTargetKind = "part" | "object" | "group"
-export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; errorCount?: number }
-export type UiField = { type: "range"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "number"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "select"; key: string; label?: string; options?: SelectOption[]; frozen?: boolean } | { type: "checkbox"; key: string; label?: string; frozen?: boolean }
+export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
+export type ThreadAgentState = { 
+/**
+ * "none" | "active" | "waiting" | "disconnected"
+ */
+connectionState: string; agentLabel: string | null; llmModelLabel: string | null; phase: string | null; statusText: string | null; updatedAt: number | null }
+export type ThreadStatus = "active" | "finalized"
+export type UiField = { type: "range"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "number"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "select"; key: string; label?: string; options?: SelectOption[]; frozen?: boolean } | { type: "checkbox"; key: string; label?: string; frozen?: boolean } | { type: "image"; key: string; label?: string; frozen?: boolean }
 export type UiSpec = { fields?: UiField[] }
 export type UsageSegment = { stage: string; provider: string; model: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null }
 export type UsageSummary = { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null; segments?: UsageSegment[] }

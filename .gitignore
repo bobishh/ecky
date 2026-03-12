@@ -47,3 +47,10 @@ __pycache__/
 # VCS
 .git/
 .jj/
+
+# Agent/LLM directories
+.claude/
+.gemini/
+.cursor/
+.cursorrules
+.aider/

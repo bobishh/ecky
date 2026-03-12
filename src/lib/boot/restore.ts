@@ -1,26 +1,29 @@
 import { get } from 'svelte/store';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { session } from '../stores/sessionStore';
 import { workingCopy } from '../stores/workingCopy';
-import { handleParamChange } from '../controllers/manualController';
 import { paramPanelState } from '../stores/paramPanelState';
-import { 
-  history, 
-  activeThreadId, 
-  activeVersionId, 
+import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
+import {
+  history,
+  activeThreadId,
+  activeVersionId,
   config,
   availableModels,
-  isLoadingModels
+  isLoadingModels,
+  freecadAvailable,
 } from '../stores/domainState';
 import {
+  checkFreecad,
   formatBackendError,
   getConfig,
   getDefaultMacro,
   getHistory,
   getLastDesign,
+  getThread,
   listModels,
   saveConfig as persistConfig,
 } from '../tauri/client';
+import { loadVersion } from '../stores/history';
 
 type TauriBridgeWindow = Window & typeof globalThis & {
   __TAURI_INTERNALS__?: {
@@ -32,15 +35,6 @@ function hasTauriInvokeBridge(): boolean {
   if (typeof window === 'undefined') return true;
   const bridge = (window as TauriBridgeWindow).__TAURI_INTERNALS__;
   return typeof bridge?.invoke === 'function';
-}
-
-function toAssetUrl(path: string | null | undefined): string {
-  if (!path) return '';
-  try {
-    return convertFileSrc(path);
-  } catch {
-    return path;
-  }
 }
 
 /**
@@ -71,11 +65,14 @@ export async function boot() {
   try {
     // 1. Load Config (Idempotent)
     await loadConfig();
-    
-    // 2. Load History
+
+    // 2. Check FreeCAD availability (non-blocking, best-effort)
+    checkFreecad().then(available => freecadAvailable.set(available)).catch(() => freecadAvailable.set(false));
+
+    // 3. Load History
     await loadHistory();
-    
-    // 3. Restore Last Design (Render preview only, no persistence write)
+
+    // 4. Restore Last Design (Render preview only, no persistence write)
     await restoreLastDesign();
     
     session.setPhase('idle');
@@ -180,46 +177,56 @@ async function loadHistory() {
   
   const tid = get(activeThreadId);
   if (tid && !freshHistory.some(t => t.id === tid)) {
-    activeThreadId.set(null);
-    activeVersionId.set(null);
+    await resetToBlankSession(true);
   }
 }
 
 async function restoreLastDesign() {
   try {
     const last = await getLastDesign();
-    if (last) {
-      const { design, threadId, messageId, artifactBundle, modelManifest, selectedPartId } = last;
-
-      activeThreadId.set(threadId);
-      activeVersionId.set(messageId);
-
-      if (design) {
-        workingCopy.loadVersion(design, messageId);
-        paramPanelState.hydrateFromVersion(design, messageId);
-      } else {
-        workingCopy.reset();
-        paramPanelState.reset();
-      }
-
-      if (artifactBundle) {
-        session.setStlUrl(toAssetUrl(artifactBundle.previewStlPath));
-        session.setModelRuntime(artifactBundle, modelManifest);
-        session.setSelectedPartId(selectedPartId);
-      } else {
-        session.clearModelRuntime();
-        if (design) {
-          const panel = get(paramPanelState);
-          await handleParamChange(panel.params, panel.macroCode, false);
-        } else {
-          session.setStlUrl(null);
-        }
-      }
-    } else {
+    if (!last?.threadId || !last?.messageId) {
+      await resetToBlankSession(Boolean(last));
       await fetchDefaultMacro();
+      return;
+    }
+
+    const historyThread = get(history).find((thread) => thread.id === last.threadId);
+    if (!historyThread) {
+      await resetToBlankSession(true);
+      await fetchDefaultMacro();
+      return;
+    }
+
+    const freshThread = await getThread(last.threadId);
+    history.update((items) =>
+      items.map((thread) =>
+        thread.id === freshThread.id ? { ...thread, messages: freshThread.messages } : thread,
+      ),
+    );
+
+    const targetMessage = freshThread.messages.find(
+      (message) =>
+        message.id === last.messageId &&
+        message.role === 'assistant' &&
+        (message.output || message.artifactBundle),
+    );
+
+    if (!targetMessage) {
+      await resetToBlankSession(true);
+      await fetchDefaultMacro();
+      return;
+    }
+
+    activeThreadId.set(last.threadId);
+    await loadVersion(targetMessage);
+
+    if (last.selectedPartId) {
+      session.setSelectedPartId(last.selectedPartId);
+      await persistLastSessionSnapshot({ selectedPartId: last.selectedPartId });
     }
   } catch (e) {
     console.error("[Boot] Failed to restore last design:", e);
+    await resetToBlankSession(true);
     await fetchDefaultMacro();
   }
 }
@@ -238,5 +245,16 @@ async function fetchDefaultMacro() {
     }
   } catch (e) {
     console.error("[Boot] Failed to load default macro:", e);
+  }
+}
+
+async function resetToBlankSession(clearSnapshot: boolean) {
+  activeThreadId.set(null);
+  activeVersionId.set(null);
+  workingCopy.reset();
+  paramPanelState.reset();
+  session.setStlUrl(null);
+  if (clearSnapshot) {
+    await clearLastSessionSnapshot();
   }
 }
