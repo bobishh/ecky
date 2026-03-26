@@ -1,0 +1,57 @@
+[package]
+name = "ecky_cad"
+version = "0.0.1"
+description = "Prompt-driven 3D CAD designer"
+authors = ["Bogdan"]
+edition = "2021"
+default-run = "ecky_cad"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = ["protocol-asset"] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-dialog = "2.0"
+tauri-plugin-fs = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+specta = { version = "2.0.0-rc.22", features = ["derive"] }
+specta-typescript = "0.0.9"
+tauri-specta = { version = "2.0.0-rc.21", features = ["derive", "typescript"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+sha2 = "0.10.9"
+base64 = "0.22.1"
+rand = "0.8"
+regex = "1.12.3"
+rustpython-parser = "0.4.0"
+rustpython-ast = { version = "0.4.0", features = ["visitor"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+portable-pty = "0.9.0"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+lexpr = "0.2.7"
+csgrs = { version = "0.20.1", default-features = false, features = ["f64", "stl-io", "earcut", "offset"] }
+geo = "0.29.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.25"
+objc = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1.6"
+
+[lib]
+name = "ecky_cad_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ecky_cad"
+path = "src/main.rs"

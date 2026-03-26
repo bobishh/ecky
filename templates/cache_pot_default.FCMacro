@@ -1,0 +1,112 @@
+import math
+import FreeCAD as App
+import Part
+
+# --- DEFAULTS ---
+# These are used if 'parameters' dict is not provided by the runner
+INNER_HEIGHT = 80.0
+INNER_BOTTOM_DIAMETER = 72.0
+INNER_TOP_DIAMETER = 100.0
+RADIAL_CLEARANCE = 0.8
+WALL_THICKNESS = 1.6
+BOTTOM_THICKNESS = 1.2
+
+# Shape controls
+BELLY_AMOUNT_MM = 5.0          
+FANCINESS_INTENSITY = 0.85     
+PATTERN_DENSITY = 1.0          
+
+# --- PARAMETER OVERRIDE ---
+def get_param(name, default):
+    try:
+        # Check if 'parameters' exists in global scope (injected by runner)
+        if 'parameters' in globals() and name in globals()['parameters']:
+            return float(globals()['parameters'][name])
+        # Also check direct global injection
+        if name in globals():
+            return float(globals()[name])
+    except:
+        pass
+    return default
+
+h = get_param('inner_height', INNER_HEIGHT)
+bot_dia = get_param('inner_bot_dia', INNER_BOTTOM_DIAMETER)
+top_dia = get_param('inner_top_dia', INNER_TOP_DIAMETER)
+clearance = get_param('radial_clearance', RADIAL_CLEARANCE)
+wall = get_param('wall_thickness', WALL_THICKNESS)
+floor = get_param('bottom_thickness', BOTTOM_THICKNESS)
+
+belly = get_param('belly_amount', BELLY_AMOUNT_MM)
+fancy = get_param('fanciness', FANCINESS_INTENSITY)
+density = get_param('density', PATTERN_DENSITY)
+
+# --- LOGIC ---
+
+inner_bottom_r = bot_dia * 0.5 + clearance
+inner_top_r = top_dia * 0.5 + clearance
+
+def radius_at_u(u):
+    base = inner_bottom_r + (inner_top_r - inner_bottom_r) * u
+    bulge = belly * (math.sin(math.pi * u) ** 2)
+    return base + bulge
+
+def make_inner_cavity_solid():
+    section_count = int(24 + 20 * density)
+    wires = []
+    for i in range(section_count + 1):
+        u = i / float(section_count)
+        z = h * u
+        r = radius_at_u(u)
+        c = Part.makeCircle(r, App.Vector(0, 0, z), App.Vector(0, 0, 1))
+        wires.append(Part.Wire([c]))
+    loft = Part.makeLoft(wires, True, False, False)
+    return Part.Solid(loft) if loft.ShapeType != "Solid" else loft
+
+def make_offset_solid(shape, offset_mm):
+    try:
+        return shape.makeOffsetShape(offset_mm, 0.05, join=2, fill=True)
+    except:
+        return shape.makeOffsetShape(offset_mm, 0.1)
+
+def open_top_and_set_bottom_thickness(shell_shape):
+    span_r = max(inner_bottom_r, inner_top_r) + belly + wall + 30.0
+    span = span_r * 2.0
+    top_cut = Part.makeBox(span, span, h + 30.0, App.Vector(-span_r, -span_r, h - 0.05))
+    opened = shell_shape.cut(top_cut)
+    keep = Part.makeBox(span, span, h + floor + 40.0, App.Vector(-span_r, -span_r, -floor))
+    return opened.common(keep).translated(App.Vector(0, 0, floor))
+
+doc = App.ActiveDocument or App.newDocument("CachePotDoc")
+
+try:
+    inner = make_inner_cavity_solid()
+    outer = make_offset_solid(inner, wall)
+    shell = outer.cut(inner)
+    base_shape = open_top_and_set_bottom_thickness(shell)
+    
+    final_obj = doc.addObject("Part::Feature", "CachePotFancy")
+    final_obj.Shape = base_shape
+
+    if fancy > 0.01:
+        rows = int(15 + 15 * density)
+        strands = int(4 + round(4 * density))
+        groove_r = 0.5 + 0.7 * fancy
+        twist_turns = 0.5 + 1.5 * density
+        cutters = []
+        for j in range(rows):
+            u = (j + 0.5) / float(rows)
+            z = floor + h * (0.05 + 0.9 * u)
+            r_outer = radius_at_u(u) + wall
+            center_r = r_outer + groove_r * 0.4
+            for k in range(strands):
+                theta = (2.0 * math.pi * k / float(strands)) + (2.0 * math.pi * twist_turns * u)
+                cutters.append(Part.makeSphere(groove_r, App.Vector(center_r * math.cos(theta), center_r * math.sin(theta), z)))
+        if cutters:
+            fancy_shape = base_shape.cut(Part.makeCompound(cutters))
+            if not fancy_shape.isNull():
+                final_obj.Shape = fancy_shape
+
+except Exception as e:
+    print("Generation failed: " + str(e))
+
+doc.recompute()

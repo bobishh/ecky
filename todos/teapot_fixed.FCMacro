@@ -1,0 +1,136 @@
+import FreeCAD
+import Part
+import math
+from FreeCAD import Vector
+
+doc = FreeCAD.ActiveDocument
+if doc is None:
+    doc = FreeCAD.newDocument()
+
+# Retrieve parameters
+body_radius = float(params.get("body_radius", 60.0))
+body_height = float(params.get("body_height", 100.0))
+body_thickness = float(params.get("body_thickness", 3.0))
+base_radius = float(params.get("base_radius", 45.0))
+top_radius = float(params.get("top_radius", 40.0))
+
+spout_length = float(params.get("spout_length", 80.0))
+spout_angle = float(params.get("spout_angle", 45.0))
+spout_base_radius = float(params.get("spout_base_radius", 18.0))
+spout_tip_radius = float(params.get("spout_tip_radius", 12.0))
+
+handle_radius = float(params.get("handle_radius", 35.0))
+handle_thickness = float(params.get("handle_thickness", 8.0))
+
+show_lid = bool(params.get("show_lid", True))
+lid_height = float(params.get("lid_height", 15.0))
+knob_radius = float(params.get("knob_radius", 8.0))
+
+t = max(1.0, body_thickness)
+
+# Outer Body (Revolved Face)
+P1 = Vector(0,0,0)
+P2 = Vector(base_radius, 0, 0)
+P3 = Vector(body_radius, 0, body_height/2.0)
+P4 = Vector(top_radius, 0, body_height)
+P5 = Vector(0,0,body_height)
+
+curve = Part.BSplineCurve()
+curve.interpolate([P2, P3, P4])
+
+wire_outer = Part.Wire([
+    Part.makeLine(P1, P2),
+    curve.toShape(),
+    Part.makeLine(P4, P5),
+    Part.makeLine(P5, P1)
+])
+face_outer = Part.Face(wire_outer)
+outer_body = face_outer.revolve(Vector(0,0,0), Vector(0,0,1), 360)
+
+# Inner Body (Void to hollow out the teapot)
+P1_i = Vector(0, 0, t)
+P2_i = Vector(max(1.0, base_radius - t), 0, t)
+P3_i = Vector(max(1.0, body_radius - t), 0, body_height/2.0)
+P4_i = Vector(max(1.0, top_radius - t), 0, body_height + 5.0)
+P5_i = Vector(0, 0, body_height + 5.0)
+
+curve_i = Part.BSplineCurve()
+curve_i.interpolate([P2_i, P3_i, P4_i])
+
+wire_inner = Part.Wire([
+    Part.makeLine(P1_i, P2_i),
+    curve_i.toShape(),
+    Part.makeLine(P4_i, P5_i),
+    Part.makeLine(P5_i, P1_i)
+])
+face_inner = Part.Face(wire_inner)
+inner_body = face_inner.revolve(Vector(0,0,0), Vector(0,0,1), 360)
+
+# Spout Geometry
+spout_pos = Vector(body_radius - spout_base_radius*0.5, 0, body_height * 0.4)
+spout_rot = FreeCAD.Rotation(Vector(0,1,0), 90 - spout_angle)
+spout_placement = FreeCAD.Placement(spout_pos, spout_rot)
+
+outer_spout = Part.makeCone(spout_base_radius, spout_tip_radius, spout_length + 10)
+# Apply local offset rather than overwrite placement to sink it into the body
+outer_offset = FreeCAD.Placement(Vector(0,0,-5), FreeCAD.Rotation())
+outer_spout.Placement = spout_placement.multiply(outer_offset)
+
+inner_spout = Part.makeCone(max(1.0, spout_base_radius - t), max(1.0, spout_tip_radius - t), spout_length + 25)
+# Deeper offset ensures complete cut through inner void and beyond spout tip
+inner_offset = FreeCAD.Placement(Vector(0,0,-15), FreeCAD.Rotation())
+inner_spout.Placement = spout_placement.multiply(inner_offset)
+
+# Handle Geometry
+handle = Part.makeTorus(handle_radius, handle_thickness)
+# Position properly outside the body radius
+handle_pos = Vector(-body_radius - handle_radius * 0.6, 0, body_height * 0.5)
+handle.Placement = FreeCAD.Placement(handle_pos, FreeCAD.Rotation(Vector(1,0,0), 90))
+
+# CSG Operations: 
+full_solid = outer_body.fuse(outer_spout).fuse(handle)
+full_void = inner_body.fuse(inner_spout)
+
+teapot = full_solid.cut(full_void)
+teapot = teapot.removeSplitter()
+
+teapot_obj = doc.addObject("Part::Feature", "TeapotBody")
+teapot_obj.Shape = teapot
+if hasattr(teapot_obj, "ViewObject") and teapot_obj.ViewObject:
+    teapot_obj.ViewObject.ShapeColor = (0.8, 0.4, 0.2)
+
+# Lid Geometry
+if show_lid:
+    P_lid_top = Vector(0, 0, body_height + lid_height)
+    P_lid_mid = Vector((top_radius+2.0)/2.0, 0, body_height + lid_height*0.7)
+    P_lid_bot = Vector(top_radius+2.0, 0, body_height)
+
+    lid_spline = Part.BSplineCurve()
+    lid_spline.interpolate([P_lid_bot, P_lid_mid, P_lid_top])
+
+    lid_wire = Part.Wire([
+        lid_spline.toShape(),
+        Part.makeLine(P_lid_top, Vector(0,0,body_height)),
+        Part.makeLine(Vector(0,0,body_height), P_lid_bot)
+    ])
+    face_lid = Part.Face(lid_wire)
+    lid_dome = face_lid.revolve(Vector(0,0,0), Vector(0,0,1), 360)
+    
+    # Inner lip to seat inside the teapot
+    lip_radius = max(1.0, top_radius - t - 0.5)
+    lip = Part.makeCylinder(lip_radius, 4)
+    lip.translate(Vector(0,0,body_height - 3.5))
+    
+    # Top knob
+    knob = Part.makeSphere(knob_radius)
+    knob.translate(Vector(0,0,body_height + lid_height + knob_radius * 0.3))
+    
+    lid_solid = lid_dome.fuse(lip).fuse(knob)
+    lid_solid = lid_solid.removeSplitter()
+    
+    lid_obj = doc.addObject("Part::Feature", "TeapotLid")
+    lid_obj.Shape = lid_solid
+    if hasattr(lid_obj, "ViewObject") and lid_obj.ViewObject:
+        lid_obj.ViewObject.ShapeColor = (0.7, 0.3, 0.15)
+
+doc.recompute()
