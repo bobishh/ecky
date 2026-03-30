@@ -29,6 +29,7 @@ pub fn ecky_ir_v0_guide_text() -> &'static str {
         "- Sketch nodes: `profile` with explicit `(:outer ...)` and `(:holes ...)` loops.\n",
         "- Sketch modifiers: `offset`, `offset-rounded`.\n",
         "- Constructive nodes: `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `shell`, `wall-pattern`.\n",
+        "- Edge ops (build123d backend only): `fillet`, `chamfer`.\n",
         "- Composition: `union`, `difference`, `intersection`, `xor`.\n",
         "- Transforms: `translate`, `rotate`, `scale`, `mirror`.\n",
         "- Arrays: `linear-array`, `radial-array`, `grid-array`, `arc-array`.\n",
@@ -54,7 +55,8 @@ pub fn ecky_ir_v0_guide_text() -> &'static str {
         "  `:phase`, `:bias`, `:twistDeg`, `:seed`, `:rimFade`. All numeric options accept param references.\n",
         "- Array signatures: `(linear-array count dx dy dz mesh)`, `(grid-array rows cols dx dy mesh)`,\n",
         "  `(radial-array count step-deg radius mesh)`, `(arc-array count radius start-deg end-deg mesh)`.\n",
-        "- No generic solid `fillet/chamfer`; use rounded/bspline profiles instead.\n",
+        "- `fillet` and `chamfer`: `(fillet radius body)` for all edges, or `(fillet radius :edges top body)` for selective edges.\n",
+        "  Edge selectors: `all` (default), `top`, `bottom`, `vertical`. Requires build123d backend.\n",
         "- Do not emit a `lithophane` source node. Drive lithophane through `postProcessing.lithophaneAttachments` / the guided LITHO tab.\n",
         "- Keep `ui_spec`/`initial_params` aligned with the IR parameters.\n\n",
         "Examples:\n\n",
@@ -131,7 +133,15 @@ fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::models::Engi
 }
 
 fn default_engine_kind(state: &State<'_, AppState>) -> crate::models::EngineKind {
-    state.config.lock().unwrap().default_engine_kind.clone()
+    state.config.lock().unwrap().default_engine_kind
+}
+
+fn default_source_language(state: &State<'_, AppState>) -> crate::models::SourceLanguage {
+    state.config.lock().unwrap().default_source_language
+}
+
+fn default_geometry_backend(state: &State<'_, AppState>) -> crate::models::GeometryBackend {
+    state.config.lock().unwrap().default_geometry_backend
 }
 
 async fn resolve_generation_engine_kind(
@@ -153,6 +163,48 @@ async fn resolve_generation_engine_kind(
     }
 
     Ok(default_engine_kind(state))
+}
+
+async fn resolve_generation_source_language(
+    state: &State<'_, AppState>,
+    thread_id: Option<&str>,
+    explicit: Option<crate::models::SourceLanguage>,
+) -> AppResult<crate::models::SourceLanguage> {
+    if let Some(source_language) = explicit {
+        return Ok(source_language);
+    }
+
+    if let Some(thread_id) = thread_id {
+        let db = state.db.lock().await;
+        if let Some(source_language) = db::get_thread_source_language(&db, thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+        {
+            return Ok(source_language);
+        }
+    }
+
+    Ok(default_source_language(state))
+}
+
+async fn resolve_generation_geometry_backend(
+    state: &State<'_, AppState>,
+    thread_id: Option<&str>,
+    explicit: Option<crate::models::GeometryBackend>,
+) -> AppResult<crate::models::GeometryBackend> {
+    if let Some(geometry_backend) = explicit {
+        return Ok(geometry_backend);
+    }
+
+    if let Some(thread_id) = thread_id {
+        let db = state.db.lock().await;
+        if let Some(geometry_backend) = db::get_thread_geometry_backend(&db, thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+        {
+            return Ok(geometry_backend);
+        }
+    }
+
+    Ok(default_geometry_backend(state))
 }
 
 fn prepare_images(image_data: Option<String>, attachments: Option<Vec<Attachment>>) -> Vec<String> {
@@ -348,7 +400,12 @@ pub async fn generate_design(
     let engine = selected_engine(&state)?;
     let options = options.unwrap_or_default();
     let engine_kind =
-        resolve_generation_engine_kind(&state, thread_id.as_deref(), options.engine_kind.clone())
+        resolve_generation_engine_kind(&state, thread_id.as_deref(), options.engine_kind).await?;
+    let source_language =
+        resolve_generation_source_language(&state, thread_id.as_deref(), options.source_language)
+            .await?;
+    let geometry_backend =
+        resolve_generation_geometry_backend(&state, thread_id.as_deref(), options.geometry_backend)
             .await?;
     let question_mode = options.question_mode.unwrap_or(false);
     let follow_up_question = options.follow_up_question;
@@ -375,16 +432,16 @@ pub async fn generate_design(
         intent_mode,
         framework_contract.as_deref(),
     );
-    let contextual_prompt = if engine_kind == crate::models::EngineKind::EckyIrV0 && !question_mode
-    {
-        format!(
-            "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
-            contextual_prompt,
-            ecky_ir_v0_guide_text()
-        )
-    } else {
-        contextual_prompt
-    };
+    let contextual_prompt =
+        if source_language == crate::models::SourceLanguage::EckyIrV0 && !question_mode {
+            format!(
+                "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
+                contextual_prompt,
+                ecky_ir_v0_guide_text()
+            )
+        } else {
+            contextual_prompt
+        };
     let contextual_prompt =
         prepend_follow_up_context(contextual_prompt, follow_up_question.as_deref());
     let contextual_prompt =
@@ -421,13 +478,16 @@ pub async fn generate_design(
                 output.data.macro_dialect = MacroDialect::Legacy;
             }
         } else {
-            output.data.macro_dialect = if engine_kind == crate::models::EngineKind::EckyIrV0 {
-                MacroDialect::EckyIrV0
-            } else {
-                MacroDialect::Legacy
-            };
+            output.data.macro_dialect =
+                if source_language == crate::models::SourceLanguage::EckyIrV0 {
+                    MacroDialect::EckyIrV0
+                } else {
+                    MacroDialect::Legacy
+                };
         }
-        output.data.engine_kind = engine_kind.clone();
+        output.data.engine_kind = engine_kind;
+        output.data.source_language = source_language;
+        output.data.geometry_backend = geometry_backend;
     }
 
     if question_mode {
@@ -439,7 +499,9 @@ pub async fn generate_design(
             output.data.ui_spec = previous.ui_spec.clone();
             output.data.initial_params = previous.initial_params.clone();
             output.data.macro_dialect = previous.macro_dialect.clone();
-            output.data.engine_kind = previous.engine_kind.clone();
+            output.data.engine_kind = previous.engine_kind;
+            output.data.source_language = previous.source_language;
+            output.data.geometry_backend = previous.geometry_backend;
         }
         if output.data.version_name.trim().is_empty() {
             output.data.version_name = "Q&A".to_string();
@@ -517,10 +579,19 @@ pub async fn init_generation_attempt(
                     prompt.clone()
                 }
             };
-            db::create_or_update_thread(&db, &thread_id, &initial_title, now, Some(&traits))
-                .map_err(|err| AppError::persistence(err.to_string()))?;
-            db::update_thread_engine_kind(&db, &thread_id, default_engine_kind.clone())
-                .map_err(|err| AppError::persistence(err.to_string()))?;
+            let default_source_language = default_source_language(&state);
+            let default_geometry_backend = default_geometry_backend(&state);
+            db::create_or_update_thread(
+                &db,
+                &thread_id,
+                &initial_title,
+                now,
+                Some(&traits),
+                Some(default_engine_kind),
+                Some(default_source_language),
+                Some(default_geometry_backend),
+            )
+            .map_err(|err| AppError::persistence(err.to_string()))?;
         }
 
         let attachment_images = collect_attachment_images(attachments.as_ref());
@@ -793,6 +864,16 @@ mod tests {
                     crate::models::EngineKind::EckyIrV0
                 } else {
                     crate::models::EngineKind::Freecad
+                },
+                geometry_backend: if macro_dialect == MacroDialect::EckyIrV0 {
+                    crate::models::GeometryBackend::EckyRust
+                } else {
+                    crate::models::GeometryBackend::Freecad
+                },
+                source_language: if macro_dialect == MacroDialect::EckyIrV0 {
+                    crate::models::SourceLanguage::EckyIrV0
+                } else {
+                    crate::models::SourceLanguage::LegacyPython
                 },
                 ui_spec: UiSpec { fields: Vec::new() },
                 initial_params: Default::default(),

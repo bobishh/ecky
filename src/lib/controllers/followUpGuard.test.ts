@@ -36,6 +36,8 @@ function makeThread(messages: Message[]): Thread {
     finalizedAt: null,
     pendingConfirm: null,
     engineKind: 'freecad',
+    sourceLanguage: 'legacyPython',
+    geometryBackend: 'freecad',
   };
 }
 
@@ -82,6 +84,8 @@ test('does not match when the last assistant turn already has geometry output', 
           response: 'ok',
           interactionMode: 'design',
           macroCode: 'print(1)',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
           uiSpec: { fields: [] },
           initialParams: {},
         },

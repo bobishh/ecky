@@ -447,6 +447,8 @@ fn build_bundle(
         model_id: model_id.to_string(),
         source_kind,
         engine_kind: crate::models::EngineKind::Freecad,
+        source_language: crate::models::SourceLanguage::LegacyPython,
+        geometry_backend: crate::models::GeometryBackend::Freecad,
         content_hash: content_hash.to_string(),
         artifact_version,
         fcstd_path: path_to_string(fcstd_path)?,
@@ -583,6 +585,8 @@ fn build_manifest(
         model_id: model_id.to_string(),
         source_kind,
         engine_kind: crate::models::EngineKind::Freecad,
+        source_language: crate::models::SourceLanguage::LegacyPython,
+        geometry_backend: crate::models::GeometryBackend::Freecad,
         document: DocumentMetadata {
             document_name: if report.document_name.trim().is_empty() {
                 "EckyCAD".to_string()

@@ -24,9 +24,9 @@ use crate::ecky_ir_patterns::{
 };
 use crate::models::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
-    ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, ParameterGroup, ParsedParamsResult,
-    PartBinding, PathResolver, SelectOption, SelectValue, UiField, ViewerAsset, ViewerAssetFormat,
-    MODEL_RUNTIME_SCHEMA_VERSION,
+    GeometryBackend, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, ParameterGroup,
+    ParsedParamsResult, PartBinding, PathResolver, SelectOption, SelectValue, SourceLanguage,
+    UiField, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 const MODEL_RUNTIME_ROOT: &str = "model-runtime";
@@ -3058,6 +3058,11 @@ fn eval_geometry(value: &Value, env: &BTreeMap<String, ParamValue>) -> AppResult
             let (mesh, target) = build_wall_pattern_target(&args[1], env)?;
             Ok(Geometry::Mesh(apply_wall_pattern(&mesh, &target, &spec)?))
         }
+        "fillet" | "chamfer" => Err(unsupported(format!(
+            "Node `{}` requires the build123d backend (OCCT). \
+             Switch to the Build123d geometry backend or use rounded/bspline profiles instead.",
+            node
+        ))),
         "lithophane" => Err(unsupported(
             "Ecky IR v0 does not use a `lithophane` source node. Generate the geometry in IR and drive lithophane through postProcessing.lithophaneAttachments / the LITHO tab instead.",
         )),
@@ -3270,6 +3275,8 @@ pub fn render_model(
         model_id: model_id.clone(),
         source_kind: ModelSourceKind::Generated,
         engine_kind: EngineKind::EckyIrV0,
+        source_language: SourceLanguage::EckyIrV0,
+        geometry_backend: GeometryBackend::EckyRust,
         document: DocumentMetadata {
             document_name: "Ecky IR v0".to_string(),
             document_label: "Ecky IR v0".to_string(),
@@ -3316,6 +3323,8 @@ pub fn render_model(
         model_id,
         source_kind: ModelSourceKind::Generated,
         engine_kind: EngineKind::EckyIrV0,
+        source_language: SourceLanguage::EckyIrV0,
+        geometry_backend: GeometryBackend::EckyRust,
         content_hash: hash,
         artifact_version: 1,
         fcstd_path: String::new(),
@@ -3330,6 +3339,1092 @@ pub fn render_model(
     };
     write_bundle(&dir.join(BUNDLE_FILE_NAME), &bundle)?;
     Ok(bundle)
+}
+
+// ===========================================================================
+// Build123d lowering — Ecky IR AST → build123d Python source
+// ===========================================================================
+
+/// Lower an Ecky IR v0 source string into build123d Python code.
+///
+/// The returned string is a self-contained Python script that:
+/// - imports build123d
+/// - references a `params` dict injected by the caller (the build123d runner)
+/// - assigns `_ecky_parts = [("part_id", shape), ...]`
+///
+/// Unsupported nodes produce an explicit error rather than silently falling back.
+pub fn lower_to_build123d(source: &str) -> AppResult<String> {
+    let model = parse_model(source)?;
+    let mut lowerer = B123dLowerer::new(&model);
+    lowerer.lower_model()
+}
+
+struct B123dLowerer<'a> {
+    model: &'a IrModel,
+    lines: Vec<String>,
+    counter: usize,
+}
+
+impl<'a> B123dLowerer<'a> {
+    fn new(model: &'a IrModel) -> Self {
+        Self {
+            model,
+            lines: Vec::new(),
+            counter: 0,
+        }
+    }
+
+    fn next_var(&mut self) -> String {
+        let v = format!("_v{}", self.counter);
+        self.counter += 1;
+        v
+    }
+
+    fn emit(&mut self, line: impl Into<String>) {
+        self.lines.push(line.into());
+    }
+
+    fn param_defaults(&self) -> BTreeMap<String, ParamValue> {
+        self.model
+            .params
+            .iter()
+            .map(|p| (p.field.key().to_string(), p.default_value.clone()))
+            .collect()
+    }
+
+    fn lower_model(&mut self) -> AppResult<String> {
+        self.emit("from build123d import *");
+        self.emit("from build123d import exporters");
+        self.emit("import math");
+        self.emit("");
+
+        let defaults = self.param_defaults();
+        let parts: Vec<(String, Value)> = self
+            .model
+            .parts
+            .iter()
+            .map(|p| (p.part_id.clone(), p.expr.clone()))
+            .collect();
+        let mut part_entries: Vec<String> = Vec::new();
+        for (part_id, expr) in &parts {
+            let var = self.lower_geometry(expr, &defaults)?;
+            part_entries.push(format!("({:?}, {})", part_id, var));
+        }
+
+        self.emit("");
+        self.emit(format!("_ecky_parts = [{}]", part_entries.join(", ")));
+        Ok(self.lines.join("\n"))
+    }
+
+    fn lower_geometry_list(
+        &mut self,
+        args: &[Value],
+        defaults: &BTreeMap<String, ParamValue>,
+    ) -> AppResult<Vec<String>> {
+        args.iter()
+            .map(|arg| self.lower_geometry(arg, defaults))
+            .collect()
+    }
+
+    fn lower_points_2d_args(
+        &self,
+        value: &Value,
+        defaults: &BTreeMap<String, ParamValue>,
+    ) -> AppResult<String> {
+        let points = list_items(value, "point list")?;
+        let mut entries = Vec::new();
+        for point in &points {
+            let pair = list_items(point, "point")?;
+            if pair.len() != 2 {
+                return Err(validation("Points must be (x y) pairs."));
+            }
+            let x = lower_num(&pair[0], defaults)?;
+            let y = lower_num(&pair[1], defaults)?;
+            entries.push(format!("({x}, {y})"));
+        }
+        Ok(entries.join(", "))
+    }
+
+    fn lower_points_3d_args(
+        &self,
+        value: &Value,
+        defaults: &BTreeMap<String, ParamValue>,
+    ) -> AppResult<String> {
+        let points = list_items(value, "3D point list")?;
+        let mut entries = Vec::new();
+        for point in &points {
+            let triple = list_items(point, "3D point")?;
+            if triple.len() != 3 {
+                return Err(validation("3D points must be (x y z) triples."));
+            }
+            let x = lower_num(&triple[0], defaults)?;
+            let y = lower_num(&triple[1], defaults)?;
+            let z = lower_num(&triple[2], defaults)?;
+            entries.push(format!("({x}, {y}, {z})"));
+        }
+        Ok(entries.join(", "))
+    }
+
+    fn lower_sketch_operand(
+        &mut self,
+        value: &Value,
+        defaults: &BTreeMap<String, ParamValue>,
+    ) -> AppResult<String> {
+        if let Ok(items) = list_items(value, "sketch operand") {
+            if let Ok(node) = head_symbol(&items, "sketch operand") {
+                match node {
+                    "circle" | "rounded_rect" | "rounded-rect" | "polygon" => {
+                        return self.lower_geometry(value, defaults);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let points = self.lower_points_2d_args(value, defaults)?;
+        let var = self.next_var();
+        self.emit(format!("{var} = Polygon({points})"));
+        Ok(var)
+    }
+
+    fn lower_loop_collection(
+        &mut self,
+        value: &Value,
+        defaults: &BTreeMap<String, ParamValue>,
+    ) -> AppResult<Vec<String>> {
+        let items = list_items(value, "loop collection")?;
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let is_node = items
+            .first()
+            .and_then(|v| v.as_symbol())
+            .map(|s| !s.starts_with(':'))
+            .unwrap_or(false);
+        if is_node {
+            return Ok(vec![self.lower_sketch_operand(value, defaults)?]);
+        }
+        let is_single_loop = items
+            .first()
+            .and_then(|v| v.to_vec())
+            .map(|pair| pair.len() == 2)
+            .unwrap_or(false);
+        if is_single_loop {
+            return Ok(vec![self.lower_sketch_operand(value, defaults)?]);
+        }
+        items
+            .iter()
+            .map(|item| self.lower_sketch_operand(item, defaults))
+            .collect()
+    }
+
+    fn lower_count(
+        &self,
+        value: &Value,
+        defaults: &BTreeMap<String, ParamValue>,
+    ) -> AppResult<String> {
+        if let Some(n) = value.as_f64() {
+            return Ok(format!("{}", n.round().max(1.0) as usize));
+        }
+        let expr = lower_num(value, defaults)?;
+        Ok(format!("int({})", expr))
+    }
+
+    fn lower_geometry(
+        &mut self,
+        value: &Value,
+        defaults: &BTreeMap<String, ParamValue>,
+    ) -> AppResult<String> {
+        let items = list_items(value, "geometry node")?;
+        let node = head_symbol(&items, "geometry node")?;
+        let args = &items[1..];
+        let var = self.next_var();
+
+        match node {
+            "box" => {
+                if args.len() != 3 {
+                    return Err(validation("`box` expects width, depth, and height."));
+                }
+                let w = lower_num(&args[0], defaults)?;
+                let d = lower_num(&args[1], defaults)?;
+                let h = lower_num(&args[2], defaults)?;
+                self.emit(format!(
+                    "{var} = Box({w}, {d}, {h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                ));
+            }
+            "cylinder" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(validation("`cylinder` expects radius and height."));
+                }
+                let r = lower_num(&args[0], defaults)?;
+                let h = lower_num(&args[1], defaults)?;
+                self.emit(format!(
+                    "{var} = Cylinder({r}, {h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                ));
+            }
+            "sphere" => {
+                if args.is_empty() || args.len() > 3 {
+                    return Err(validation("`sphere` expects radius."));
+                }
+                let r = lower_num(&args[0], defaults)?;
+                self.emit(format!("{var} = Sphere({r})"));
+            }
+            "cone" => {
+                if args.len() < 3 || args.len() > 4 {
+                    return Err(validation(
+                        "`cone` expects bottom radius, top radius, and height.",
+                    ));
+                }
+                let br = lower_num(&args[0], defaults)?;
+                let tr = lower_num(&args[1], defaults)?;
+                let h = lower_num(&args[2], defaults)?;
+                self.emit(format!(
+                    "{var} = Cone({br}, {tr}, {h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                ));
+            }
+            "circle" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(validation("`circle` expects radius."));
+                }
+                let r = lower_num(&args[0], defaults)?;
+                self.emit(format!("{var} = Circle({r})"));
+            }
+            "rounded_rect" | "rounded-rect" => {
+                if args.len() < 3 || args.len() > 4 {
+                    return Err(validation(
+                        "`rounded_rect` expects width, height, and corner radius.",
+                    ));
+                }
+                let w = lower_num(&args[0], defaults)?;
+                let h = lower_num(&args[1], defaults)?;
+                let r = lower_num(&args[2], defaults)?;
+                self.emit(format!("{var} = RectangleRounded({w}, {h}, {r})"));
+            }
+            "extrude" => {
+                if args.len() != 2 {
+                    return Err(validation("`extrude` expects a sketch and height."));
+                }
+                let sketch_var = self.lower_geometry(&args[0], defaults)?;
+                let h = lower_num(&args[1], defaults)?;
+                self.emit(format!("{var} = extrude({sketch_var}, {h})"));
+            }
+            "union" => {
+                if args.len() < 2 {
+                    return Err(validation("`union` expects at least two operands."));
+                }
+                let operand_vars = self.lower_geometry_list(args, defaults)?;
+                self.emit(format!("{var} = {}", operand_vars.join(" + ")));
+            }
+            "difference" => {
+                if args.len() < 2 {
+                    return Err(validation("`difference` expects at least two operands."));
+                }
+                let operand_vars = self.lower_geometry_list(args, defaults)?;
+                self.emit(format!("{var} = {}", operand_vars.join(" - ")));
+            }
+            "intersection" => {
+                if args.len() < 2 {
+                    return Err(validation("`intersection` expects at least two operands."));
+                }
+                let operand_vars = self.lower_geometry_list(args, defaults)?;
+                self.emit(format!("{var} = {}", operand_vars.join(" & ")));
+            }
+            "translate" => {
+                if args.len() != 4 {
+                    return Err(validation(
+                        "`translate` expects x, y, z, and a geometry node.",
+                    ));
+                }
+                let x = lower_num(&args[0], defaults)?;
+                let y = lower_num(&args[1], defaults)?;
+                let z = lower_num(&args[2], defaults)?;
+                let inner = self.lower_geometry(&args[3], defaults)?;
+                self.emit(format!("{var} = Pos({x}, {y}, {z}) * {inner}"));
+            }
+            "rotate" => {
+                if args.len() != 4 {
+                    return Err(validation("`rotate` expects x, y, z, and a geometry node."));
+                }
+                let rx = lower_num(&args[0], defaults)?;
+                let ry = lower_num(&args[1], defaults)?;
+                let rz = lower_num(&args[2], defaults)?;
+                let inner = self.lower_geometry(&args[3], defaults)?;
+                self.emit(format!("{var} = Rot({rx}, {ry}, {rz}) * {inner}"));
+            }
+            "scale" => {
+                if args.len() != 4 {
+                    return Err(validation("`scale` expects x, y, z, and a geometry node."));
+                }
+                let sx = lower_num(&args[0], defaults)?;
+                let sy = lower_num(&args[1], defaults)?;
+                let sz = lower_num(&args[2], defaults)?;
+                let inner = self.lower_geometry(&args[3], defaults)?;
+                // build123d only supports uniform scale; emit a runtime guard.
+                self.emit(format!("_sx, _sy, _sz = {sx}, {sy}, {sz}"));
+                self.emit(
+                    "if not (abs(_sx - _sy) < 1e-9 and abs(_sy - _sz) < 1e-9): \
+                     raise ValueError(f'build123d lowerer: non-uniform scale not supported \
+                     ({{_sx}}, {{_sy}}, {{_sz}}).')"
+                        .to_string(),
+                );
+                self.emit(format!("{var} = {inner}.scale(_sx)"));
+            }
+            "polygon" => {
+                if args.len() != 1 {
+                    return Err(validation("`polygon` expects a single point list."));
+                }
+                let points = self.lower_points_2d_args(&args[0], defaults)?;
+                self.emit(format!("{var} = Polygon({points})"));
+            }
+            "profile" => {
+                let mut outer_vars: Vec<String> = Vec::new();
+                let mut hole_vars: Vec<String> = Vec::new();
+                for form in args {
+                    let pair = list_items(form, "profile clause")?;
+                    if pair.len() != 2 {
+                        return Err(validation(
+                            "`profile` clauses must look like `(:outer ...)` or `(:holes ...)`.",
+                        ));
+                    }
+                    let name = keyword_name(&pair[0]).ok_or_else(|| {
+                        validation(
+                            "`profile` clauses must use keywords like `:outer` and `:holes`.",
+                        )
+                    })?;
+                    match name {
+                        "outer" => {
+                            outer_vars.extend(self.lower_loop_collection(&pair[1], defaults)?);
+                        }
+                        "holes" => {
+                            hole_vars.extend(self.lower_loop_collection(&pair[1], defaults)?);
+                        }
+                        other => {
+                            return Err(validation(format!(
+                                "`profile` does not recognize clause `:{}`.",
+                                other
+                            )))
+                        }
+                    }
+                }
+                if outer_vars.is_empty() {
+                    return Err(validation("`profile` needs at least one outer loop."));
+                }
+                let mut result = outer_vars[0].clone();
+                for v in &outer_vars[1..] {
+                    let u = self.next_var();
+                    self.emit(format!("{u} = {result} + {v}"));
+                    result = u;
+                }
+                for v in &hole_vars {
+                    let d = self.next_var();
+                    self.emit(format!("{d} = {result} - {v}"));
+                    result = d;
+                }
+                self.emit(format!("{var} = {result}"));
+            }
+            "offset" | "offset-rounded" => {
+                if args.len() != 2 {
+                    return Err(validation(format!(
+                        "`{}` expects distance and a sketch.",
+                        node
+                    )));
+                }
+                let distance = lower_num(&args[0], defaults)?;
+                let sketch_var = self.lower_geometry(&args[1], defaults)?;
+                self.emit(format!("{var} = offset({sketch_var}, amount={distance})"));
+            }
+            "revolve" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(validation(
+                        "`revolve` expects a sketch, angle, and optional segments.",
+                    ));
+                }
+                let sketch_var = self.lower_geometry(&args[0], defaults)?;
+                let angle = lower_num(&args[1], defaults)?;
+                let positioned = self.next_var();
+                self.emit(format!("{positioned} = Rot(90, 0, 0) * {sketch_var}"));
+                self.emit(format!(
+                    "{var} = revolve({positioned}, axis=Axis.Z, revolution_arc={angle})"
+                ));
+            }
+            "loft" => {
+                if args.len() != 3 {
+                    return Err(validation(
+                        "`loft` expects height, bottom sketch, and top sketch.",
+                    ));
+                }
+                let height = lower_num(&args[0], defaults)?;
+                let bottom = self.lower_geometry(&args[1], defaults)?;
+                let top = self.lower_geometry(&args[2], defaults)?;
+                let top_pos = self.next_var();
+                self.emit(format!("{top_pos} = Pos(0, 0, {height}) * {top}"));
+                self.emit(format!("{var} = loft([{bottom}, {top_pos}])"));
+            }
+            "taper" => {
+                if !(args.len() == 3 || args.len() == 4) {
+                    return Err(validation(
+                        "`taper` expects height, scale, sketch or height, scale-x, scale-y, sketch.",
+                    ));
+                }
+                let height = lower_num(&args[0], defaults)?;
+                let (scale_x, scale_y, sketch_index) = if args.len() == 3 {
+                    let s = lower_num(&args[1], defaults)?;
+                    (s.clone(), s, 2usize)
+                } else {
+                    (
+                        lower_num(&args[1], defaults)?,
+                        lower_num(&args[2], defaults)?,
+                        3usize,
+                    )
+                };
+                let sketch_var = self.lower_geometry(&args[sketch_index], defaults)?;
+                let bottom = self.next_var();
+                self.emit(format!("{bottom} = {sketch_var}"));
+                let scaled = self.next_var();
+                self.emit(format!("_tsx, _tsy = {scale_x}, {scale_y}"));
+                self.emit(format!(
+                    "if abs(_tsx - _tsy) < 1e-9: {scaled} = Pos(0, 0, {height}) * {sketch_var}.scale(_tsx)"
+                ));
+                self.emit(format!(
+                    "else: raise ValueError('build123d lowerer: non-uniform taper scale not supported')"
+                ));
+                self.emit(format!("{var} = loft([{bottom}, {scaled}])"));
+            }
+            "twist" => {
+                if !(args.len() == 3 || args.len() == 4) {
+                    return Err(validation(
+                        "`twist` expects height, angle, sketch or height, angle, segments, sketch.",
+                    ));
+                }
+                let height = lower_num(&args[0], defaults)?;
+                let angle = lower_num(&args[1], defaults)?;
+                let (segments, sketch_index) = if args.len() == 3 {
+                    ("12".to_string(), 2usize)
+                } else {
+                    (self.lower_count(&args[2], defaults)?, 3usize)
+                };
+                let sketch_var = self.lower_geometry(&args[sketch_index], defaults)?;
+                let sections = self.next_var();
+                self.emit(format!(
+                    "{sections} = [Pos(0, 0, {height} * _ti / {segments}) * Rot(0, 0, {angle} * _ti / {segments}) * {sketch_var} for _ti in range({segments} + 1)]"
+                ));
+                self.emit(format!("{var} = loft({sections})"));
+            }
+            "path" => {
+                let mut point_strs = Vec::new();
+                for arg in args {
+                    let triple = list_items(arg, "3D point")?;
+                    if triple.len() != 3 {
+                        return Err(validation("3D points must be (x y z) triples."));
+                    }
+                    let x = lower_num(&triple[0], defaults)?;
+                    let y = lower_num(&triple[1], defaults)?;
+                    let z = lower_num(&triple[2], defaults)?;
+                    point_strs.push(format!("({x}, {y}, {z})"));
+                }
+                if point_strs.len() < 2 {
+                    return Err(validation("`path` expects at least two points."));
+                }
+                self.emit(format!("{var} = Polyline({})", point_strs.join(", ")));
+            }
+            "bezier-path" => {
+                if args.is_empty() {
+                    return Err(validation(
+                        "`bezier-path` expects points and optional segments.",
+                    ));
+                }
+                let points_str = self.lower_points_3d_args(&args[0], defaults)?;
+                let pts_var = self.next_var();
+                self.emit(format!("{pts_var} = [{points_str}]"));
+                self.emit(format!(
+                    "{var} = Bezier({pts_var}[0], {pts_var}[1], {pts_var}[2], {pts_var}[3])"
+                ));
+                self.emit(format!("for _bi in range(3, len({pts_var})-1, 3):"));
+                self.emit(format!(
+                    "    {var} = {var} + Bezier({pts_var}[_bi], {pts_var}[_bi+1], {pts_var}[_bi+2], {pts_var}[_bi+3])"
+                ));
+            }
+            "sweep" => {
+                if args.len() != 2 {
+                    return Err(validation("`sweep` expects a sketch and a path."));
+                }
+                let section = self.lower_geometry(&args[0], defaults)?;
+                let path_var = self.lower_geometry(&args[1], defaults)?;
+                self.emit(format!("{var} = sweep({section}, path={path_var})"));
+            }
+            "shell" => {
+                if args.len() != 2 {
+                    return Err(validation(
+                        "`shell` expects wall thickness and a geometry node.",
+                    ));
+                }
+                let wall = lower_num(&args[0], defaults)?;
+                let target_items = list_items(&args[1], "shell target")?;
+                let target_node = head_symbol(&target_items, "shell target")?;
+                let target_args = &target_items[1..];
+
+                match target_node {
+                    "cylinder" => {
+                        if target_args.len() < 2 || target_args.len() > 3 {
+                            return Err(validation(
+                                "`shell` cylinder expects radius, height, and optional segments.",
+                            ));
+                        }
+                        let r = lower_num(&target_args[0], defaults)?;
+                        let h = lower_num(&target_args[1], defaults)?;
+                        let outer = self.next_var();
+                        let inner = self.next_var();
+                        self.emit(format!(
+                            "{outer} = Cylinder({r}, {h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                        ));
+                        self.emit(format!(
+                            "{inner} = Cylinder(({r}) - ({wall}), {h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                        ));
+                        self.emit(format!("{var} = {outer} - {inner}"));
+                    }
+                    "cone" => {
+                        if target_args.len() < 3 || target_args.len() > 4 {
+                            return Err(validation(
+                                "`shell` cone expects bottom radius, top radius, height.",
+                            ));
+                        }
+                        let br = lower_num(&target_args[0], defaults)?;
+                        let tr = lower_num(&target_args[1], defaults)?;
+                        let h = lower_num(&target_args[2], defaults)?;
+                        let outer = self.next_var();
+                        let inner = self.next_var();
+                        self.emit(format!(
+                            "{outer} = Cone({br}, {tr}, {h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                        ));
+                        self.emit(format!(
+                            "{inner} = Cone(({br}) - ({wall}), ({tr}) - ({wall}), {h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                        ));
+                        self.emit(format!("{var} = {outer} - {inner}"));
+                    }
+                    "sphere" => {
+                        if target_args.is_empty() || target_args.len() > 3 {
+                            return Err(validation("`shell` sphere expects radius."));
+                        }
+                        let r = lower_num(&target_args[0], defaults)?;
+                        let outer = self.next_var();
+                        let inner = self.next_var();
+                        self.emit(format!("{outer} = Sphere({r})"));
+                        self.emit(format!("{inner} = Sphere(({r}) - ({wall}))"));
+                        self.emit(format!("{var} = {outer} - {inner}"));
+                    }
+                    "extrude" => {
+                        if target_args.len() != 2 {
+                            return Err(validation("`shell` extrude expects a sketch and height."));
+                        }
+                        let sketch_var = self.lower_geometry(&target_args[0], defaults)?;
+                        let h = lower_num(&target_args[1], defaults)?;
+                        let inner_sketch = self.next_var();
+                        self.emit(format!(
+                            "{inner_sketch} = offset({sketch_var}, amount=-({wall}))"
+                        ));
+                        let outer = self.next_var();
+                        let inner = self.next_var();
+                        self.emit(format!("{outer} = extrude({sketch_var}, {h})"));
+                        self.emit(format!("{inner} = extrude({inner_sketch}, {h})"));
+                        self.emit(format!("{var} = {outer} - {inner}"));
+                    }
+                    "revolve" => {
+                        if target_args.len() < 2 || target_args.len() > 3 {
+                            return Err(validation(
+                                "`shell` revolve expects a sketch, angle, and optional segments.",
+                            ));
+                        }
+                        let sketch_var = self.lower_geometry(&target_args[0], defaults)?;
+                        let angle = lower_num(&target_args[1], defaults)?;
+                        let inner_sketch = self.next_var();
+                        self.emit(format!(
+                            "{inner_sketch} = offset({sketch_var}, amount=-({wall}))"
+                        ));
+                        let outer_pos = self.next_var();
+                        let inner_pos = self.next_var();
+                        self.emit(format!("{outer_pos} = Rot(90, 0, 0) * {sketch_var}"));
+                        self.emit(format!("{inner_pos} = Rot(90, 0, 0) * {inner_sketch}"));
+                        let outer = self.next_var();
+                        let inner = self.next_var();
+                        self.emit(format!(
+                            "{outer} = revolve({outer_pos}, axis=Axis.Z, revolution_arc={angle})"
+                        ));
+                        self.emit(format!(
+                            "{inner} = revolve({inner_pos}, axis=Axis.Z, revolution_arc={angle})"
+                        ));
+                        self.emit(format!("{var} = {outer} - {inner}"));
+                    }
+                    "sweep" => {
+                        if target_args.len() != 2 {
+                            return Err(validation("`shell` sweep expects a sketch and a path."));
+                        }
+                        let sketch_var = self.lower_geometry(&target_args[0], defaults)?;
+                        let path_var = self.lower_geometry(&target_args[1], defaults)?;
+                        let inner_sketch = self.next_var();
+                        self.emit(format!(
+                            "{inner_sketch} = offset({sketch_var}, amount=-({wall}))"
+                        ));
+                        let outer = self.next_var();
+                        let inner = self.next_var();
+                        self.emit(format!("{outer} = sweep({sketch_var}, path={path_var})"));
+                        self.emit(format!("{inner} = sweep({inner_sketch}, path={path_var})"));
+                        self.emit(format!("{var} = {outer} - {inner}"));
+                    }
+                    "loft" => {
+                        if target_args.len() != 3 {
+                            return Err(validation(
+                                "`shell` loft expects height, bottom sketch, and top sketch.",
+                            ));
+                        }
+                        let h = lower_num(&target_args[0], defaults)?;
+                        let bottom = self.lower_geometry(&target_args[1], defaults)?;
+                        let top = self.lower_geometry(&target_args[2], defaults)?;
+                        let inner_bottom = self.next_var();
+                        let inner_top = self.next_var();
+                        self.emit(format!(
+                            "{inner_bottom} = offset({bottom}, amount=-({wall}))"
+                        ));
+                        self.emit(format!("{inner_top} = offset({top}, amount=-({wall}))"));
+                        let top_pos = self.next_var();
+                        let inner_top_pos = self.next_var();
+                        self.emit(format!("{top_pos} = Pos(0, 0, {h}) * {top}"));
+                        self.emit(format!("{inner_top_pos} = Pos(0, 0, {h}) * {inner_top}"));
+                        let outer = self.next_var();
+                        let inner = self.next_var();
+                        self.emit(format!("{outer} = loft([{bottom}, {top_pos}])"));
+                        self.emit(format!("{inner} = loft([{inner_bottom}, {inner_top_pos}])"));
+                        self.emit(format!("{var} = {outer} - {inner}"));
+                    }
+                    other => {
+                        return Err(unsupported(format!(
+                            "Node `shell` with target `{}` is not yet supported by the build123d lowerer. \
+                             Use the EckyRust backend for this model.",
+                            other
+                        )));
+                    }
+                }
+            }
+            "mirror" => {
+                if args.len() != 3 {
+                    return Err(validation(
+                        "`mirror` expects axis, offset, and a geometry node.",
+                    ));
+                }
+                let axis = parse_stringish(&args[0], "mirror axis")?;
+                let offset = lower_num(&args[1], defaults)?;
+                let inner = self.lower_geometry(&args[2], defaults)?;
+                let plane = match axis.as_str() {
+                    "x" => "Plane.YZ",
+                    "y" => "Plane.XZ",
+                    "z" => "Plane.XY",
+                    other => {
+                        return Err(validation(format!(
+                            "Unsupported mirror axis `{}`. Use `x`, `y`, or `z`.",
+                            other
+                        )));
+                    }
+                };
+                self.emit(format!(
+                    "{var} = mirror({inner}, about={plane}.offset({offset}))"
+                ));
+            }
+            "xor" => {
+                if args.len() < 2 {
+                    return Err(validation("`xor` expects at least two operands."));
+                }
+                let operand_vars = self.lower_geometry_list(args, defaults)?;
+                let sum = self.next_var();
+                self.emit(format!("{sum} = {}", operand_vars.join(" + ")));
+                let inter = self.next_var();
+                self.emit(format!("{inter} = {}", operand_vars.join(" & ")));
+                self.emit(format!("{var} = {sum} - {inter}"));
+            }
+            "linear-array" => {
+                if args.len() != 5 {
+                    return Err(validation(
+                        "`linear-array` expects count, dx, dy, dz, and a mesh.",
+                    ));
+                }
+                let count = self.lower_count(&args[0], defaults)?;
+                let dx = lower_num(&args[1], defaults)?;
+                let dy = lower_num(&args[2], defaults)?;
+                let dz = lower_num(&args[3], defaults)?;
+                let base = self.lower_geometry(&args[4], defaults)?;
+                self.emit(format!("{var} = {base}"));
+                self.emit(format!("for _li in range(1, {count}):"));
+                self.emit(format!(
+                    "    {var} = {var} + Pos({dx} * _li, {dy} * _li, {dz} * _li) * {base}"
+                ));
+            }
+            "radial-array" => {
+                if args.len() != 4 {
+                    return Err(validation(
+                        "`radial-array` expects count, step degrees, radius, and a mesh.",
+                    ));
+                }
+                let count = self.lower_count(&args[0], defaults)?;
+                let step_deg = lower_num(&args[1], defaults)?;
+                let radius = lower_num(&args[2], defaults)?;
+                let base = self.lower_geometry(&args[3], defaults)?;
+                let translated = self.next_var();
+                self.emit(format!("{translated} = Pos({radius}, 0, 0) * {base}"));
+                self.emit(format!("{var} = {translated}"));
+                self.emit(format!("for _ri in range(1, {count}):"));
+                self.emit(format!(
+                    "    {var} = {var} + Rot(0, 0, {step_deg} * _ri) * {translated}"
+                ));
+            }
+            "grid-array" => {
+                if args.len() != 5 {
+                    return Err(validation(
+                        "`grid-array` expects rows, cols, dx, dy, and a mesh.",
+                    ));
+                }
+                let rows = self.lower_count(&args[0], defaults)?;
+                let cols = self.lower_count(&args[1], defaults)?;
+                let dx = lower_num(&args[2], defaults)?;
+                let dy = lower_num(&args[3], defaults)?;
+                let base = self.lower_geometry(&args[4], defaults)?;
+                self.emit(format!("{var} = {base}"));
+                self.emit(format!("for _gr in range({rows}):"));
+                self.emit(format!("    for _gc in range({cols}):"));
+                self.emit(format!(
+                    "        if _gr != 0 or _gc != 0: {var} = {var} + Pos({dx} * _gc, {dy} * _gr, 0) * {base}"
+                ));
+            }
+            "arc-array" => {
+                if args.len() != 5 {
+                    return Err(validation(
+                        "`arc-array` expects count, radius, start degrees, end degrees, and a mesh.",
+                    ));
+                }
+                let count = self.lower_count(&args[0], defaults)?;
+                let radius = lower_num(&args[1], defaults)?;
+                let start_deg = lower_num(&args[2], defaults)?;
+                let end_deg = lower_num(&args[3], defaults)?;
+                let base = self.lower_geometry(&args[4], defaults)?;
+                self.emit(format!(
+                    "_arc_step = (({end_deg}) - ({start_deg})) / max(1, {count} - 1)"
+                ));
+                let first = self.next_var();
+                self.emit(format!(
+                    "{first} = Rot(0, 0, {start_deg}) * Pos({radius}, 0, 0) * {base}"
+                ));
+                self.emit(format!("{var} = {first}"));
+                self.emit(format!("for _ai in range(1, {count}):"));
+                self.emit(format!(
+                    "    {var} = {var} + Rot(0, 0, ({start_deg}) + _arc_step * _ai) * Pos({radius}, 0, 0) * {base}"
+                ));
+            }
+            "if" => {
+                if args.len() != 3 {
+                    return Err(validation(
+                        "`if` expects condition, then-shape, else-shape.",
+                    ));
+                }
+                let cond = lower_bool(&args[0], defaults)?;
+                let then_var = self.lower_geometry(&args[1], defaults)?;
+                let else_var = self.lower_geometry(&args[2], defaults)?;
+                self.emit(format!("{var} = {then_var} if {cond} else {else_var}"));
+            }
+            "fillet" | "chamfer" => {
+                if args.len() < 2 {
+                    return Err(validation(format!(
+                        "`{}` expects radius and a geometry node.",
+                        node
+                    )));
+                }
+                let radius = lower_num(&args[0], defaults)?;
+                let (edge_select, body_index) = if args.len() >= 4
+                    && keyword_name(&args[1])
+                        .map(|k| k == "edges")
+                        .unwrap_or(false)
+                {
+                    (parse_stringish(&args[2], "edge selection")?, 3usize)
+                } else {
+                    ("all".to_string(), 1usize)
+                };
+                if body_index >= args.len() {
+                    return Err(validation(format!(
+                        "`{}` is missing the geometry body argument.",
+                        node
+                    )));
+                }
+                let body = self.lower_geometry(&args[body_index], defaults)?;
+                let edges_expr = match edge_select.as_str() {
+                    "all" => format!("{body}.edges()"),
+                    "top" => format!("{body}.edges().group_by(Axis.Z)[-1]"),
+                    "bottom" => format!("{body}.edges().group_by(Axis.Z)[0]"),
+                    "vertical" => format!("{body}.edges().filter_by(Axis.Z)"),
+                    other => {
+                        return Err(validation(format!(
+                            "Unknown edge selector `{}`. Use `all`, `top`, `bottom`, or `vertical`.",
+                            other
+                        )));
+                    }
+                };
+                self.emit(format!("{var} = {node}({edges_expr}, {radius})"));
+            }
+            "wall-pattern" | "pattern" => {
+                return Err(unsupported(
+                    "Node `wall-pattern` is not supported by the build123d lowerer. \
+                     Use the EckyRust backend for this model.",
+                ));
+            }
+            "rounded-polygon" | "rounded_polygon" | "bspline" => {
+                return Err(unsupported(format!(
+                    "Node `{}` is not yet supported by the build123d lowerer. \
+                     Use the EckyRust backend for this model.",
+                    node
+                )));
+            }
+            other => {
+                return Err(unsupported(format!(
+                    "Node `{}` is not yet supported by the build123d lowerer. \
+                     Use the EckyRust backend for this model.",
+                    other
+                )));
+            }
+        }
+
+        Ok(var)
+    }
+}
+
+fn lower_num(value: &Value, defaults: &BTreeMap<String, ParamValue>) -> AppResult<String> {
+    if let Some(n) = value.as_f64() {
+        return Ok(fmt_f64(n));
+    }
+    if let Some(sym) = value.as_symbol() {
+        return match defaults.get(sym) {
+            Some(ParamValue::Number(d)) => {
+                Ok(format!("float(params.get({:?}, {}))", sym, fmt_f64(*d)))
+            }
+            Some(_) => Err(unsupported(format!(
+                "Symbol `{}` is not a numeric parameter.",
+                sym
+            ))),
+            None => Err(validation(format!("Unknown symbol `{}`.", sym))),
+        };
+    }
+    let items = list_items(value, "numeric expression")?;
+    let op = head_symbol(&items, "numeric expression")?;
+    let args = &items[1..];
+    match op {
+        "+" => {
+            if args.is_empty() {
+                return Ok("0.0".to_string());
+            }
+            let parts = lower_num_list(args, defaults)?;
+            Ok(format!("({})", parts.join(" + ")))
+        }
+        "-" => {
+            if args.is_empty() {
+                return Err(validation("`-` expects at least one argument."));
+            }
+            if args.len() == 1 {
+                return Ok(format!("(-{})", lower_num(&args[0], defaults)?));
+            }
+            let first = lower_num(&args[0], defaults)?;
+            let rest = lower_num_list(&args[1..], defaults)?;
+            Ok(format!("({} - {})", first, rest.join(" - ")))
+        }
+        "*" => {
+            if args.is_empty() {
+                return Ok("1.0".to_string());
+            }
+            let parts = lower_num_list(args, defaults)?;
+            Ok(format!("({})", parts.join(" * ")))
+        }
+        "/" => {
+            if args.len() != 2 {
+                return Err(validation("`/` expects exactly two arguments."));
+            }
+            let a = lower_num(&args[0], defaults)?;
+            let b = lower_num(&args[1], defaults)?;
+            Ok(format!("({a} / {b})"))
+        }
+        "min" => {
+            let parts = lower_num_list(args, defaults)?;
+            Ok(format!("min({})", parts.join(", ")))
+        }
+        "max" => {
+            let parts = lower_num_list(args, defaults)?;
+            Ok(format!("max({})", parts.join(", ")))
+        }
+        "clamp" => {
+            if args.len() != 3 {
+                return Err(validation("`clamp` expects value, min, max."));
+            }
+            let v = lower_num(&args[0], defaults)?;
+            let lo = lower_num(&args[1], defaults)?;
+            let hi = lower_num(&args[2], defaults)?;
+            Ok(format!("max({lo}, min({hi}, {v}))"))
+        }
+        "lerp" => {
+            if args.len() != 3 {
+                return Err(validation("`lerp` expects start, end, t."));
+            }
+            let s = lower_num(&args[0], defaults)?;
+            let e = lower_num(&args[1], defaults)?;
+            let t = lower_num(&args[2], defaults)?;
+            Ok(format!("(({s}) + (({e}) - ({s})) * ({t}))"))
+        }
+        "smoothstep" => {
+            if args.len() != 3 {
+                return Err(validation("`smoothstep` expects edge0, edge1, x."));
+            }
+            let e0 = lower_num(&args[0], defaults)?;
+            let e1 = lower_num(&args[1], defaults)?;
+            let x = lower_num(&args[2], defaults)?;
+            Ok(format!(
+                "(lambda _t: _t*_t*(3.0-2.0*_t))\
+                 (max(0.0, min(1.0, ({x} - {e0}) / ({e1} - {e0}))))"
+            ))
+        }
+        "sin" => {
+            if args.len() != 1 {
+                return Err(validation("`sin` expects one argument."));
+            }
+            Ok(format!("math.sin({})", lower_num(&args[0], defaults)?))
+        }
+        "cos" => {
+            if args.len() != 1 {
+                return Err(validation("`cos` expects one argument."));
+            }
+            Ok(format!("math.cos({})", lower_num(&args[0], defaults)?))
+        }
+        "tan" => {
+            if args.len() != 1 {
+                return Err(validation("`tan` expects one argument."));
+            }
+            Ok(format!("math.tan({})", lower_num(&args[0], defaults)?))
+        }
+        "abs" => {
+            if args.len() != 1 {
+                return Err(validation("`abs` expects one argument."));
+            }
+            Ok(format!("abs({})", lower_num(&args[0], defaults)?))
+        }
+        "deg" => {
+            if args.len() != 1 {
+                return Err(validation("`deg` expects one argument."));
+            }
+            Ok(format!("math.radians({})", lower_num(&args[0], defaults)?))
+        }
+        "rad" => {
+            if args.len() != 1 {
+                return Err(validation("`rad` expects one argument."));
+            }
+            Ok(format!("math.degrees({})", lower_num(&args[0], defaults)?))
+        }
+        other => Err(unsupported(format!(
+            "Numeric expression `{}` is not supported by the build123d lowerer.",
+            other
+        ))),
+    }
+}
+
+fn lower_num_list(
+    args: &[Value],
+    defaults: &BTreeMap<String, ParamValue>,
+) -> AppResult<Vec<String>> {
+    args.iter().map(|a| lower_num(a, defaults)).collect()
+}
+
+fn fmt_f64(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}.0", n as i64)
+    } else {
+        // Use Rust's default Display which gives enough precision
+        format!("{}", n)
+    }
+}
+
+fn lower_bool(value: &Value, defaults: &BTreeMap<String, ParamValue>) -> AppResult<String> {
+    if let Some(b) = value.as_bool() {
+        return Ok(if b { "True".into() } else { "False".into() });
+    }
+    if let Some(sym) = value.as_symbol() {
+        return match defaults.get(sym) {
+            Some(ParamValue::Boolean(b)) => Ok(format!(
+                "bool(params.get({:?}, {}))",
+                sym,
+                if *b { "True" } else { "False" }
+            )),
+            Some(_) => Err(unsupported(format!(
+                "Symbol `{}` is not a boolean parameter.",
+                sym
+            ))),
+            None => Err(validation(format!("Unknown symbol `{}`.", sym))),
+        };
+    }
+    let items = list_items(value, "boolean expression")?;
+    let op = head_symbol(&items, "boolean expression")?;
+    let args = &items[1..];
+    match op {
+        "not" => {
+            if args.len() != 1 {
+                return Err(validation("`not` expects one argument."));
+            }
+            Ok(format!("(not {})", lower_bool(&args[0], defaults)?))
+        }
+        "and" => {
+            let parts = args
+                .iter()
+                .map(|a| lower_bool(a, defaults))
+                .collect::<AppResult<Vec<_>>>()?;
+            Ok(format!("({})", parts.join(" and ")))
+        }
+        "or" => {
+            let parts = args
+                .iter()
+                .map(|a| lower_bool(a, defaults))
+                .collect::<AppResult<Vec<_>>>()?;
+            Ok(format!("({})", parts.join(" or ")))
+        }
+        "=" => {
+            if args.len() != 2 {
+                return Err(validation("`=` expects exactly two arguments."));
+            }
+            if let (Ok(a), Ok(b)) = (lower_num(&args[0], defaults), lower_num(&args[1], defaults)) {
+                return Ok(format!("({a} == {b})"));
+            }
+            let a = lower_stringish(&args[0], defaults)?;
+            let b = lower_stringish(&args[1], defaults)?;
+            Ok(format!("({a} == {b})"))
+        }
+        ">" | ">=" | "<" | "<=" => {
+            if args.len() != 2 {
+                return Err(validation(format!(
+                    "`{}` expects exactly two arguments.",
+                    op
+                )));
+            }
+            let a = lower_num(&args[0], defaults)?;
+            let b = lower_num(&args[1], defaults)?;
+            Ok(format!("({a} {op} {b})"))
+        }
+        other => Err(unsupported(format!(
+            "Boolean operator `{}` is not supported by the build123d lowerer.",
+            other
+        ))),
+    }
+}
+
+fn lower_stringish(value: &Value, defaults: &BTreeMap<String, ParamValue>) -> AppResult<String> {
+    if let Some(text) = value.as_str() {
+        return Ok(format!("{:?}", text));
+    }
+    if let Some(sym) = value.as_symbol() {
+        return match defaults.get(sym) {
+            Some(ParamValue::String(s)) => Ok(format!("str(params.get({:?}, {:?}))", sym, s)),
+            Some(ParamValue::Number(n)) => {
+                Ok(format!("str(params.get({:?}, {}))", sym, fmt_f64(*n)))
+            }
+            _ => Ok(format!("{:?}", sym)),
+        };
+    }
+    Err(validation("Expected a string-like value."))
 }
 
 #[cfg(test)]
@@ -3632,5 +4727,315 @@ mod tests {
 
         assert_eq!(bundle.viewer_assets.len(), 1);
         assert!(Path::new(&bundle.preview_stl_path).exists());
+    }
+
+    // ------------------------------------------------------------------
+    // Build123d lowering tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn lower_to_build123d_minimal_extrude() {
+        let src = r#"(model (part body (extrude (rounded_rect 30 20 4) 10)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("from build123d import *"), "missing import");
+        assert!(
+            code.contains("RectangleRounded(30.0, 20.0, 4.0)"),
+            "rounded_rect"
+        );
+        assert!(code.contains("extrude("), "extrude call");
+        assert!(code.contains(r#"("body","#), "part entry");
+        assert!(code.contains("_ecky_parts"), "_ecky_parts assignment");
+    }
+
+    #[test]
+    fn lower_to_build123d_difference() {
+        let src = r#"(model (part shell (difference (cylinder 10 20) (cylinder 8 20))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Cylinder(10.0, 20.0,"), "outer cylinder");
+        assert!(code.contains("Cylinder(8.0, 20.0,"), "inner cylinder");
+        assert!(code.contains(" - "), "difference operator");
+        assert!(code.contains(r#"("shell","#), "part entry");
+    }
+
+    #[test]
+    fn lower_to_build123d_param_refs() {
+        let src = r#"(model (params (number width 30) (number height 20)) (part body (extrude (rounded_rect width height 4) 10)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(
+            code.contains(r#"float(params.get("width", 30.0))"#),
+            "width param: {}",
+            code
+        );
+        assert!(
+            code.contains(r#"float(params.get("height", 20.0))"#),
+            "height param: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn lower_to_build123d_numeric_expressions() {
+        let src = r#"(model (params (number w 40)) (part body (extrude (circle (/ w 2)) 5)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(
+            code.contains(r#"float(params.get("w", 40.0)) / 2.0"#),
+            "division: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn lower_to_build123d_translate_rotate() {
+        let src = r#"(model (part body (translate 5 0 0 (rotate 0 0 45 (box 10 10 10)))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Box(10.0, 10.0, 10.0,"), "box");
+        assert!(code.contains("Rot(0.0, 0.0, 45.0)"), "rotate");
+        assert!(code.contains("Pos(5.0, 0.0, 0.0)"), "translate");
+    }
+
+    #[test]
+    fn lower_to_build123d_unsupported_node_returns_error() {
+        let src = r#"(model (part body (wall-pattern (:mode ribs :depth 1) (shell 2 (cylinder 10 20)))))"#;
+        let err = lower_to_build123d(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not supported by the build123d lowerer"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn lower_to_build123d_union_three_parts() {
+        let src = r#"(model (part compound (union (sphere 5) (cylinder 3 10) (box 4 4 4))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Sphere(5.0)"), "sphere");
+        assert!(code.contains("Cylinder(3.0, 10.0,"), "cylinder");
+        assert!(code.contains("Box(4.0, 4.0, 4.0,"), "box");
+        let plus_count = code.matches(" + ").count();
+        assert_eq!(plus_count, 2, "expected two + for three operands: {}", code);
+    }
+
+    #[test]
+    fn lower_to_build123d_shell_cylinder() {
+        let src = r#"(model (part body (shell 2 (cylinder 10 20))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Cylinder(10.0, 20.0,"), "outer cylinder");
+        assert!(code.contains("(10.0) - (2.0)"), "inner radius");
+        assert!(code.contains(" - "), "difference");
+    }
+
+    #[test]
+    fn lower_to_build123d_shell_extrude() {
+        let src = r#"(model (part body (shell 1.5 (extrude (circle 12) 20))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Circle(12.0)"), "circle");
+        assert!(code.contains("offset("), "offset for inner sketch");
+        assert!(code.contains("extrude("), "extrude");
+        assert!(code.contains(" - "), "difference");
+    }
+
+    #[test]
+    fn lower_to_build123d_revolve() {
+        let src = r#"(model (part body (revolve (polygon ((10 0) (14 0) (14 20) (10 20))) 360)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Polygon("), "polygon");
+        assert!(code.contains("Rot(90, 0, 0)"), "rotation to XZ");
+        assert!(code.contains("revolve("), "revolve call");
+        assert!(code.contains("revolution_arc=360.0"), "full revolution");
+    }
+
+    #[test]
+    fn lower_to_build123d_loft() {
+        let src = r#"(model (part body (loft 30 (circle 20) (circle 10))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Circle(20.0)"), "bottom");
+        assert!(code.contains("Circle(10.0)"), "top");
+        assert!(code.contains("Pos(0, 0, 30.0)"), "height positioning");
+        assert!(code.contains("loft("), "loft call");
+    }
+
+    #[test]
+    fn lower_to_build123d_sweep() {
+        let src = r#"(model (part body (sweep (circle 5) (path (0 0 0) (0 0 30)))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Circle(5.0)"), "section");
+        assert!(code.contains("Polyline("), "path");
+        assert!(code.contains("sweep("), "sweep call");
+    }
+
+    #[test]
+    fn lower_to_build123d_mirror() {
+        let src = r#"(model (part body (mirror x 0 (box 10 10 10))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("mirror("), "mirror call");
+        assert!(code.contains("Plane.YZ"), "YZ plane for x-axis mirror");
+    }
+
+    #[test]
+    fn lower_to_build123d_if_conditional() {
+        let src =
+            r#"(model (params (toggle cap #t)) (part body (if cap (sphere 10) (cylinder 10 20))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Sphere(10.0)"), "then branch");
+        assert!(code.contains("Cylinder(10.0, 20.0,"), "else branch");
+        assert!(code.contains("if "), "conditional");
+        assert!(code.contains("else"), "else");
+        assert!(code.contains("params.get(\"cap\""), "param ref");
+    }
+
+    #[test]
+    fn lower_to_build123d_linear_array() {
+        let src = r#"(model (part body (linear-array 4 10 0 0 (box 5 5 5))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Box(5.0, 5.0, 5.0,"), "base box");
+        assert!(code.contains("for _li in range(1, 4)"), "loop");
+        assert!(code.contains("Pos(10.0 * _li"), "positioning");
+    }
+
+    #[test]
+    fn lower_to_build123d_profile_with_holes() {
+        let src = r#"(model (part body (extrude (profile (:outer (circle 20)) (:holes (circle 10))) 10)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Circle(20.0)"), "outer circle");
+        assert!(code.contains("Circle(10.0)"), "hole circle");
+        assert!(code.contains(" - "), "hole subtraction");
+        assert!(code.contains("extrude("), "extrude");
+    }
+
+    #[test]
+    fn lower_to_build123d_polygon() {
+        let src = r#"(model (part body (extrude (polygon ((0 0) (10 0) (10 10) (0 10))) 5)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Polygon("), "polygon");
+        assert!(code.contains("(0.0, 0.0)"), "point");
+        assert!(code.contains("extrude("), "extrude");
+    }
+
+    #[test]
+    fn lower_to_build123d_xor() {
+        let src = r#"(model (part body (xor (box 10 10 10) (translate 5 5 0 (box 10 10 10)))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains(" + "), "union for xor");
+        assert!(code.contains(" & "), "intersection for xor");
+        assert!(code.contains(" - "), "difference for xor");
+    }
+
+    #[test]
+    fn lower_to_build123d_twist() {
+        let src = r#"(model (part body (twist 40 90 (circle 10))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Circle(10.0)"), "sketch");
+        assert!(code.contains("Pos(0, 0,"), "height positioning");
+        assert!(code.contains("Rot(0, 0,"), "rotation");
+        assert!(code.contains("loft("), "loft from sections");
+    }
+
+    #[test]
+    fn lower_to_build123d_trig_functions() {
+        let src = r#"(model (part body (cylinder (sin (deg 45)) 10)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("math.sin("), "sin");
+        assert!(code.contains("math.radians("), "deg → radians");
+        assert!(code.contains("import math"), "math import");
+    }
+
+    #[test]
+    fn lower_to_build123d_bezier_path() {
+        let src = r#"(model (part body (sweep (circle 3) (bezier-path ((0 0 0) (5 10 20) (10 30 40) (8 50 50))))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Bezier("), "bezier");
+        assert!(code.contains("sweep("), "sweep");
+    }
+
+    #[test]
+    fn lower_to_build123d_offset() {
+        let src = r#"(model (part body (extrude (offset 3 (circle 10)) 5)))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("offset("), "offset call");
+        assert!(code.contains("amount=3.0"), "offset amount");
+    }
+
+    #[test]
+    fn lower_to_build123d_radial_array() {
+        let src = r#"(model (part body (radial-array 6 60 20 (cylinder 3 10))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Cylinder(3.0, 10.0,"), "base");
+        assert!(code.contains("Pos(20.0, 0, 0)"), "radius offset");
+        assert!(code.contains("for _ri in range(1, 6)"), "loop");
+        assert!(code.contains("Rot(0, 0, 60.0 * _ri)"), "rotation");
+    }
+
+    #[test]
+    fn lower_to_build123d_shell_revolve() {
+        let src = r#"(model (part body (shell 2 (revolve (polygon ((10 0) (14 0) (14 20) (10 20))) 360))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Polygon("), "polygon");
+        assert!(code.contains("offset("), "inner offset");
+        assert!(code.contains("revolve("), "revolve call");
+        assert!(code.contains(" - "), "difference");
+    }
+
+    #[test]
+    fn lower_to_build123d_fillet_all_edges() {
+        let src = r#"(model (part body (fillet 2 (box 20 20 10))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(code.contains("Box(20.0, 20.0, 10.0,"), "box");
+        assert!(code.contains(".edges()"), "edge selection");
+        assert!(code.contains("fillet("), "fillet call");
+        assert!(code.contains(", 2.0)"), "radius");
+    }
+
+    #[test]
+    fn lower_to_build123d_fillet_top_edges() {
+        let src = r#"(model (part body (fillet 1.5 :edges top (box 20 20 10))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(
+            code.contains(".edges().group_by(Axis.Z)[-1]"),
+            "top edge selection: {}",
+            code
+        );
+        assert!(code.contains("fillet("), "fillet call");
+    }
+
+    #[test]
+    fn lower_to_build123d_chamfer_bottom_edges() {
+        let src = r#"(model (part body (chamfer 1 :edges bottom (cylinder 10 20))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(
+            code.contains(".edges().group_by(Axis.Z)[0]"),
+            "bottom edge selection: {}",
+            code
+        );
+        assert!(code.contains("chamfer("), "chamfer call");
+    }
+
+    #[test]
+    fn lower_to_build123d_fillet_vertical_edges() {
+        let src = r#"(model (part body (fillet 3 :edges vertical (box 30 30 20))))"#;
+        let code = lower_to_build123d(src).expect("lower");
+        assert!(
+            code.contains(".edges().filter_by(Axis.Z)"),
+            "vertical edge selection: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_evaluator_rejects_fillet_with_clear_message() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = TestResolver { root };
+        let err = render_model(
+            r#"(model (part body (fillet 2 (box 20 20 10))))"#,
+            &DesignParams::new(),
+            &resolver,
+        )
+        .expect_err("fillet unsupported on rust backend");
+        assert!(
+            err.to_string().contains("build123d"),
+            "should mention build123d: {}",
+            err
+        );
     }
 }

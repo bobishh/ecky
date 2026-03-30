@@ -28,6 +28,8 @@ export const config = writable<AppConfig>({
   hasSeenOnboarding: false,
   connectionType: null,
   defaultEngineKind: 'freecad',
+  defaultSourceLanguage: 'legacyPython',
+  defaultGeometryBackend: 'freecad',
 });
 export const availableModels = writable<string[]>([]);
 export const isLoadingModels = writable<boolean>(false);

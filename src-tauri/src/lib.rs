@@ -1,6 +1,7 @@
 #![allow(unexpected_cfgs)]
 
 pub mod bindings;
+pub mod build123d;
 pub mod commands;
 pub mod context;
 pub mod contracts;
@@ -535,6 +536,8 @@ pub fn run() {
         has_seen_onboarding: false,
         connection_type: None,
         default_engine_kind: crate::models::EngineKind::Freecad,
+        default_source_language: crate::models::SourceLanguage::LegacyPython,
+        default_geometry_backend: crate::models::GeometryBackend::Freecad,
     };
 
     let app = tauri::Builder::default()

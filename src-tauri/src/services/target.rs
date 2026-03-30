@@ -176,6 +176,8 @@ mod tests {
             macro_code: "build()".to_string(),
             macro_dialect: MacroDialect::Legacy,
             engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: BTreeMap::from([("diameter".to_string(), ParamValue::Number(130.0))]),
             post_processing: None,
@@ -189,8 +191,28 @@ mod tests {
         let resolver = TestPathResolver { root };
         let conn = crate::db::init_db(&test_db_path("target-mismatch")).expect("db");
 
-        crate::db::create_or_update_thread(&conn, "thread-1", "Thread One", 1, None).unwrap();
-        crate::db::create_or_update_thread(&conn, "thread-2", "Thread Two", 1, None).unwrap();
+        crate::db::create_or_update_thread(
+            &conn,
+            "thread-1",
+            "Thread One",
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::db::create_or_update_thread(
+            &conn,
+            "thread-2",
+            "Thread Two",
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         crate::db::add_message(
             &conn,
             "thread-1",

@@ -70,3 +70,43 @@ adjust your understanding, then proceed.
 ### Dev server (needed for Playwright)
 - `npm run dev` starts Vite + the Node server concurrently.
 - Playwright is configured to start the app automatically via `playwright.config.ts`.
+
+## Clarity
+
+Work with persistence, clarity, and evidence.
+
+### Rules
+
+1. Don't give up early.
+Exhaust reasonable approaches before concluding you are blocked.
+
+2. Ask only when asking is cheaper than checking.
+If tools, docs, code, logs, or a quick experiment can answer it faster, do that first.
+Ask the user only for preferences, missing external context, or decisions only they can make.
+
+3. Verify assumptions.
+Do not guess about behavior, versions, paths, configs, or API support. Check.
+
+4. Don't loop.
+If multiple attempts share the same core idea, stop and switch approaches.
+
+5. Prove completion.
+After changes, run the relevant test, build, request, or command. Evidence beats claims.
+
+6. Finish the surrounding work.
+Check for similar issues, regressions, dependencies, and edge cases before stopping.
+
+7. If blocked, hand off responsibly.
+State what you tried, what you ruled out, what remains unclear, and the best next step.
+
+### Reset Checklist
+
+When stuck, ask:
+
+- What have I actually tried?
+- What assumptions have I not verified?
+- What source or docs have I not read directly?
+- Am I repeating the same idea?
+- What is the simplest different approach?
+- Do I already have enough to act without asking?
+- What evidence do I have?

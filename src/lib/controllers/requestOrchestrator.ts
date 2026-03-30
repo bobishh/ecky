@@ -263,6 +263,8 @@ function buildWorkingDesignSnapshot(): DesignOutput | null {
     interactionMode: 'design',
     macroCode: wc.macroCode,
     macroDialect: wc.macroDialect ?? 'legacy',
+    sourceLanguage: wc.sourceLanguage ?? 'legacyPython',
+    geometryBackend: wc.geometryBackend ?? 'freecad',
     uiSpec: panel.uiSpec || { fields: [] },
     initialParams: panel.params || {},
     postProcessing: wc.postProcessing ?? null,

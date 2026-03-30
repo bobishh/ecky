@@ -211,6 +211,8 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: None,
             default_engine_kind: crate::models::EngineKind::Freecad,
+            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_source_language: crate::models::SourceLanguage::LegacyPython,
         }
     }
 

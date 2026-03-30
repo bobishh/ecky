@@ -211,23 +211,27 @@ pub fn assemble_context(
             last_output: working_design.or(last_o),
         }
     } else {
-        let fallback_output = parent_macro_code.map(|code| DesignOutput {
-            title: "Untitled Design".to_string(),
-            version_name: "V1".to_string(),
-            response: String::new(),
-            interaction_mode: InteractionMode::Design,
-            macro_dialect: infer_macro_dialect_from_code(&code),
-            engine_kind: if infer_macro_dialect_from_code(&code)
-                == crate::models::MacroDialect::EckyIrV0
-            {
+        let fallback_output = parent_macro_code.map(|code| {
+            let macro_dialect = infer_macro_dialect_from_code(&code);
+            let engine_kind = if macro_dialect == crate::models::MacroDialect::EckyIrV0 {
                 crate::models::EngineKind::EckyIrV0
             } else {
                 crate::models::EngineKind::Freecad
-            },
-            macro_code: code,
-            ui_spec: UiSpec::default(),
-            initial_params: Default::default(),
-            post_processing: None,
+            };
+            DesignOutput {
+                title: "Untitled Design".to_string(),
+                version_name: "V1".to_string(),
+                response: String::new(),
+                interaction_mode: InteractionMode::Design,
+                macro_dialect,
+                engine_kind,
+                source_language: engine_kind.to_source_language(),
+                geometry_backend: engine_kind.to_geometry_backend(),
+                macro_code: code,
+                ui_spec: UiSpec::default(),
+                initial_params: Default::default(),
+                post_processing: None,
+            }
         });
 
         PromptContext {
@@ -332,6 +336,8 @@ mod tests {
             interaction_mode: InteractionMode::Design,
             macro_dialect: infer_macro_dialect_from_code("import FreeCAD"),
             engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
             macro_code: "import FreeCAD".to_string(),
             ui_spec: UiSpec::default(),
             initial_params: Default::default(),

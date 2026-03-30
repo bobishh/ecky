@@ -203,6 +203,8 @@ pub struct WorkspaceOverviewTarget {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceOverviewBrief {
     pub engine_label: String,
+    pub source_language: String,
+    pub macro_dialect: String,
     pub summary: String,
     pub rules: Vec<String>,
     pub resources: Vec<String>,
@@ -311,6 +313,8 @@ pub struct TargetMetaResponse {
     pub title: String,
     pub version_name: String,
     pub model_id: Option<String>,
+    pub source_language: String,
+    pub macro_dialect: String,
     pub has_draft: bool,
     pub resolved_from: TargetResolvedFrom,
     pub ui_field_count: usize,

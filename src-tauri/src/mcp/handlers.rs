@@ -555,6 +555,9 @@ where
 }
 
 async fn drop_live_session(state: &AppState, session_id: &str) {
+    state
+        .close_prompts_for_session(session_id, "session_disconnected")
+        .await;
     state.mcp_sessions.lock().await.remove(session_id);
 }
 
@@ -641,6 +644,35 @@ async fn mark_live_session_idle(
         session.attention_kind = None;
         session.waiting_on_prompt = false;
     })
+    .await;
+}
+
+async fn settle_live_render_phase<T>(
+    state: &AppState,
+    ctx: &AgentContext,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+    model_id: Option<String>,
+    result: &AppResult<T>,
+) {
+    let (Some(thread_id), Some(message_id)) = (thread_id, message_id) else {
+        return;
+    };
+    let (phase, status_text) = match result {
+        Ok(_) => ("idle", Some("Ready.".to_string())),
+        Err(err) => ("error", Some(err.message.clone())),
+    };
+    mark_live_session_idle(
+        state,
+        ctx,
+        Some(session_target_ref(
+            thread_id.to_string(),
+            message_id.to_string(),
+            model_id,
+        )),
+        phase,
+        status_text,
+    )
     .await;
 }
 
@@ -863,7 +895,8 @@ fn summarize_user_facing_text(content: &str) -> String {
     if trimmed.len() <= 120 {
         return trimmed.to_string();
     }
-    format!("{}…", &trimmed[..119])
+    let end = trimmed.floor_char_boundary(119);
+    format!("{}…", &trimmed[..end])
 }
 
 pub async fn handle_user_confirm_request(
@@ -987,7 +1020,12 @@ pub async fn handle_request_user_prompt(
         },
     );
 
-    let (tx, rx) = oneshot::channel::<crate::contracts::ResolveAgentPromptInput>();
+    // Supersede any existing live prompt for this session before registering the new one.
+    state
+        .close_prompts_for_session(&ctx.session_id, "superseded")
+        .await;
+
+    let (tx, rx) = oneshot::channel::<Result<crate::contracts::ResolveAgentPromptInput, String>>();
 
     {
         let mut channels = state.prompt_channels.lock().await;
@@ -1101,8 +1139,33 @@ pub async fn handle_request_user_prompt(
     let prompt_input = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
         .await
     {
-        Ok(Ok(prompt_input)) => prompt_input,
+        Ok(Ok(Ok(prompt_input))) => prompt_input,
+        Ok(Ok(Err(reason))) => {
+            // close_single_prompt already released prompt_wait, emitted agent-prompt-closed,
+            // and cleared waiting_on_prompt. Just clean up managed session state.
+            mark_live_session_idle(
+                state,
+                ctx,
+                prompt_target_ref.clone(),
+                "idle",
+                Some(format!("Prompt closed ({reason}).")),
+            )
+            .await;
+            if has_managed_runtime_session(state, &ctx.session_id) {
+                runtime::mark_managed_session_active(
+                    state,
+                    &ctx.session_id,
+                    response_thread_id.clone(),
+                    ctx.llm_model_label.clone(),
+                    Some(format!("Prompt closed ({reason}).")),
+                );
+            }
+            return Err(AppError::validation(format!(
+                "Prompt closed ({reason}). If you still need input, call request_user_prompt again."
+            )));
+        }
         Ok(Err(_)) => {
+            // Sender dropped without sending — unexpected; treat like closed.
             runtime::release_prompt_wait(state, &request_id);
             emit_prompt_closed(
                 handle,
@@ -2195,12 +2258,21 @@ fn build_target_meta_response(
             crate::models::UiField::Image { .. } => acc,
         });
 
+    let is_ir = target.design_output.macro_dialect == crate::models::MacroDialect::EckyIrV0;
+    let (source_language, macro_dialect) = if is_ir {
+        ("eckyIrV0".to_string(), "eckyIrV0".to_string())
+    } else {
+        ("python".to_string(), "cadFrameworkV1".to_string())
+    };
+
     TargetMetaResponse {
         thread_id: target.thread_id.clone(),
         message_id: target.message_id.clone(),
         title: target.design_output.title.clone(),
         version_name: target.design_output.version_name.clone(),
         model_id: target.model_id(),
+        source_language,
+        macro_dialect,
         has_draft: false,
         resolved_from: map_target_resolved_from(target.resolved_from),
         ui_field_count: target.design_output.ui_spec.fields.len(),
@@ -2225,7 +2297,11 @@ fn build_target_meta_response(
             .as_ref()
             .map(|manifest| manifest.control_views.len())
             .unwrap_or(0),
-        cad_sdk_snippet: Some(include_str!("../../../model-runtime/cad_sdk.py").to_string()),
+        cad_sdk_snippet: if is_ir {
+            Some(crate::commands::generation::ecky_ir_v0_guide_text().to_string())
+        } else {
+            Some(include_str!("../../../model-runtime/cad_sdk.py").to_string())
+        },
     }
 }
 
@@ -2601,17 +2677,23 @@ pub async fn handle_params_patch_and_render(
         )
         .await;
 
-        drop(conn);
-
         let next_post_processing = req
             .post_processing
             .clone()
             .or_else(|| base_design.post_processing.clone());
+        let render_geometry_backend = resolve_patch_render_geometry_backend(
+            &conn,
+            tracked_thread_id.as_deref(),
+            &base_design,
+        )?;
+
+        drop(conn);
 
         let artifact_bundle = render::render_model(
             &base_design.macro_code,
             &healed_params,
             Some(base_design.macro_dialect.clone()),
+            render_geometry_backend,
             next_post_processing.as_ref(),
             state,
             app,
@@ -2625,6 +2707,7 @@ pub async fn handle_params_patch_and_render(
         design_output.initial_params = healed_params.clone();
         design_output.post_processing = next_post_processing;
         design_output.version_name.clear();
+        design_output.interaction_mode = InteractionMode::Tune;
 
         let save_result = save_or_update_agent_version_for_session(
             state,
@@ -2642,7 +2725,7 @@ pub async fn handle_params_patch_and_render(
                 response_text_updated: String::new(),
                 preserve_existing_title: true,
                 preserve_existing_version_name: true,
-                force_create_new_message: false,
+                force_create_new_message: true,
                 announce_created_working_version: false,
             },
         )
@@ -2660,6 +2743,16 @@ pub async fn handle_params_patch_and_render(
     }
     .await;
 
+    settle_live_render_phase(
+        state,
+        ctx,
+        tracked_thread_id.as_deref(),
+        tracked_message_id.as_deref(),
+        tracked_model_id.clone(),
+        &result,
+    )
+    .await;
+
     if let Err(err) = &result {
         let conn = state.db.lock().await;
         try_record_agent_error(
@@ -2674,6 +2767,38 @@ pub async fn handle_params_patch_and_render(
     }
 
     result
+}
+
+fn resolve_patch_render_geometry_backend(
+    conn: &rusqlite::Connection,
+    thread_id: Option<&str>,
+    base_design: &DesignOutput,
+) -> AppResult<Option<crate::models::GeometryBackend>> {
+    if base_design.macro_dialect != MacroDialect::EckyIrV0 {
+        return Ok(Some(base_design.geometry_backend));
+    }
+
+    if base_design.geometry_backend != crate::models::GeometryBackend::Freecad {
+        return Ok(Some(base_design.geometry_backend));
+    }
+
+    if let Some(thread_id) = thread_id {
+        if let Some(thread_geometry_backend) = db::get_thread_geometry_backend(conn, thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+        {
+            if thread_geometry_backend != crate::models::GeometryBackend::Freecad {
+                return Ok(Some(thread_geometry_backend));
+            }
+        }
+    }
+
+    if base_design.source_language == crate::models::SourceLanguage::EckyIrV0
+        || base_design.engine_kind == crate::models::EngineKind::EckyIrV0
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(base_design.geometry_backend))
 }
 
 pub async fn handle_macro_replace_and_render(
@@ -2733,6 +2858,8 @@ pub async fn handle_macro_replace_and_render(
                 macro_code: String::new(),
                 macro_dialect: MacroDialect::Legacy,
                 engine_kind: crate::models::EngineKind::default(),
+                source_language: crate::models::SourceLanguage::default(),
+                geometry_backend: crate::models::GeometryBackend::default(),
                 ui_spec: UiSpec { fields: vec![] },
                 initial_params: std::collections::BTreeMap::new(),
                 post_processing: None,
@@ -2945,6 +3072,7 @@ pub async fn handle_macro_replace_and_render(
             &req.macro_code,
             &initial_params,
             Some(macro_dialect.clone()),
+            None,
             next_post_processing.as_ref(),
             state,
             app,
@@ -2966,6 +3094,8 @@ pub async fn handle_macro_replace_and_render(
             macro_code: req.macro_code.clone(),
             macro_dialect,
             engine_kind,
+            source_language: engine_kind.to_source_language(),
+            geometry_backend: engine_kind.to_geometry_backend(),
             ui_spec: ui_spec.clone(),
             initial_params: initial_params.clone(),
             post_processing: next_post_processing,
@@ -2987,12 +3117,14 @@ pub async fn handle_macro_replace_and_render(
                 response_text_updated: String::new(),
                 preserve_existing_title: true,
                 preserve_existing_version_name: true,
-                force_create_new_message: false,
-                announce_created_working_version: false,
+                force_create_new_message: true,
+                // Announce the rendered version so the frontend immediately loads it.
+                announce_created_working_version: true,
             },
         )
         .await?;
         tracked_message_id = Some(save_result.message_id.clone());
+        state.emit_history_updated();
 
         Ok(MacroReplaceResponse {
             thread_id: working_thread_id,
@@ -3004,6 +3136,16 @@ pub async fn handle_macro_replace_and_render(
             model_manifest,
         })
     }
+    .await;
+
+    settle_live_render_phase(
+        state,
+        ctx,
+        tracked_thread_id.as_deref(),
+        tracked_message_id.as_deref(),
+        tracked_model_id.clone(),
+        &result,
+    )
     .await;
 
     if let Err(err) = &result {
@@ -4191,6 +4333,8 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: None,
             default_engine_kind: crate::models::EngineKind::Freecad,
+            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_source_language: crate::models::SourceLanguage::LegacyPython,
         }
     }
 
@@ -4264,6 +4408,8 @@ mod tests {
             macro_code: macro_code.to_string(),
             macro_dialect: MacroDialect::Legacy,
             engine_kind: crate::models::EngineKind::Freecad,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
             ui_spec: sample_ui_spec(),
             initial_params: sample_params(),
             post_processing: Some(crate::contracts::PostProcessingSpec {
@@ -4279,6 +4425,8 @@ mod tests {
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
             engine_kind: crate::models::EngineKind::Freecad,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
             content_hash: format!("hash-{}", model_id),
             artifact_version: 1,
             fcstd_path: format!("/tmp/{}.FCStd", model_id),
@@ -4299,6 +4447,8 @@ mod tests {
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
             engine_kind: crate::models::EngineKind::Freecad,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
             document: DocumentMetadata {
                 document_name: "Doc".to_string(),
                 document_label: "Doc".to_string(),
@@ -4388,7 +4538,8 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
+                .unwrap();
             db::add_message(
                 &conn,
                 "thread-1",
@@ -4516,7 +4667,17 @@ mod tests {
         seed_live_session(&state).await;
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-2", "Thread 2", now_secs(), None).unwrap();
+            db::create_or_update_thread(
+                &conn,
+                "thread-2",
+                "Thread 2",
+                now_secs(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         }
 
         let err = resolve_request_user_prompt_target(

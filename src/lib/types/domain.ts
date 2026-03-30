@@ -9,6 +9,8 @@ export type MessageStatus = Contract.MessageStatus;
 export type InteractionMode = Contract.InteractionMode;
 export type MessageVisualKind = Contract.MessageVisualKind;
 export type MacroDialect = Contract.MacroDialect;
+export type SourceLanguage = Contract.SourceLanguage;
+export type GeometryBackend = Contract.GeometryBackend;
 export type EngineKind = Contract.EngineKind;
 export type FinalizeStatus = Contract.FinalizeStatus;
 export type UsageSegment = Contract.UsageSegment;
@@ -93,6 +95,8 @@ export interface DesignOutput {
   macroCode: string;
   macroDialect?: MacroDialect;
   engineKind?: EngineKind;
+  sourceLanguage: SourceLanguage;
+  geometryBackend: GeometryBackend;
   uiSpec: UiSpec;
   initialParams: DesignParams;
   postProcessing?: PostProcessingSpec | null;
@@ -156,6 +160,8 @@ export interface Thread {
   finalizedAt?: number | null;
   pendingConfirm?: string | null;
   engineKind: EngineKind;
+  sourceLanguage: SourceLanguage;
+  geometryBackend: GeometryBackend;
 }
 
 export interface DeletedMessage {
@@ -213,6 +219,8 @@ export interface AppConfig {
   hasSeenOnboarding: boolean;
   connectionType?: string | null;
   defaultEngineKind: EngineKind;
+  defaultSourceLanguage: SourceLanguage;
+  defaultGeometryBackend: GeometryBackend;
 }
 
 export type ModelSourceKind = Contract.ModelSourceKind;
@@ -645,6 +653,14 @@ export function normalizeDesignOutput(
     engineKind:
       (output?.engineKind ??
         (legacy.engine_kind as EngineKind | undefined)) ?? 'freecad',
+    sourceLanguage:
+      (output?.sourceLanguage ??
+        (legacy.source_language as SourceLanguage | undefined)) ??
+      ((output?.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyIrV0' : 'legacyPython'),
+    geometryBackend:
+      (output?.geometryBackend ??
+        (legacy.geometry_backend as GeometryBackend | undefined)) ??
+      ((output?.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyRust' : 'freecad'),
     uiSpec: normalizeUiSpec(output?.uiSpec ?? legacy.ui_spec),
     initialParams: normalizeDesignParams(output?.initialParams ?? legacy.initial_params),
     postProcessing: normalizePostProcessing(
@@ -739,6 +755,12 @@ export function normalizeThread(thread: Contract.Thread | Thread): Thread {
       thread.pendingConfirm ?? (legacy.pending_confirm as string | undefined) ?? null,
     engineKind:
       thread.engineKind ?? (legacy.engine_kind as EngineKind | undefined) ?? 'freecad',
+    sourceLanguage:
+      (thread.sourceLanguage ?? (legacy.source_language as SourceLanguage | undefined)) ??
+      ((thread.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyIrV0' : 'legacyPython'),
+    geometryBackend:
+      (thread.geometryBackend ?? (legacy.geometry_backend as GeometryBackend | undefined)) ??
+      ((thread.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyRust' : 'freecad'),
   };
 }
 
@@ -827,6 +849,18 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
       (config as AppConfig).defaultEngineKind ??
       (legacy.default_engine_kind as EngineKind | undefined) ??
       'freecad',
+    defaultSourceLanguage:
+      ((config as AppConfig).defaultSourceLanguage ??
+        (legacy.default_source_language as SourceLanguage | undefined)) ??
+      (((config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind) === 'eckyIrV0'
+        ? 'eckyIrV0'
+        : 'legacyPython'),
+    defaultGeometryBackend:
+      ((config as AppConfig).defaultGeometryBackend ??
+        (legacy.default_geometry_backend as GeometryBackend | undefined)) ??
+      (((config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind) === 'eckyIrV0'
+        ? 'eckyRust'
+        : 'freecad'),
   };
 }
 

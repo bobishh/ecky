@@ -455,9 +455,25 @@ pub struct Config {
     pub connection_type: Option<String>,
     #[serde(default = "default_engine_kind")]
     pub default_engine_kind: EngineKind,
+    #[serde(default = "default_source_language")]
+    pub default_source_language: SourceLanguage,
+    #[serde(default = "default_geometry_backend")]
+    pub default_geometry_backend: GeometryBackend,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+fn default_engine_kind() -> EngineKind {
+    EngineKind::Freecad
+}
+
+fn default_source_language() -> SourceLanguage {
+    SourceLanguage::LegacyPython
+}
+
+fn default_geometry_backend() -> GeometryBackend {
+    GeometryBackend::Freecad
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum EngineKind {
     #[default]
@@ -465,11 +481,42 @@ pub enum EngineKind {
     EckyIrV0,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceLanguage {
+    #[default]
+    LegacyPython,
+    EckyIrV0,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum GeometryBackend {
+    #[default]
+    Freecad,
+    Build123d,
+    EckyRust,
+}
+
 impl EngineKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Freecad => "freecad",
             Self::EckyIrV0 => "eckyIrV0",
+        }
+    }
+
+    pub fn to_source_language(&self) -> SourceLanguage {
+        match self {
+            Self::Freecad => SourceLanguage::LegacyPython,
+            Self::EckyIrV0 => SourceLanguage::EckyIrV0,
+        }
+    }
+
+    pub fn to_geometry_backend(&self) -> GeometryBackend {
+        match self {
+            Self::Freecad => GeometryBackend::Freecad,
+            Self::EckyIrV0 => GeometryBackend::EckyRust,
         }
     }
 }
@@ -481,6 +528,50 @@ impl std::str::FromStr for EngineKind {
         match value {
             "freecad" => Ok(Self::Freecad),
             "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
+            _ => Err(()),
+        }
+    }
+}
+
+impl SourceLanguage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LegacyPython => "legacyPython",
+            Self::EckyIrV0 => "eckyIrV0",
+        }
+    }
+}
+
+impl std::str::FromStr for SourceLanguage {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "legacyPython" | "legacy_python" => Ok(Self::LegacyPython),
+            "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
+            _ => Err(()),
+        }
+    }
+}
+
+impl GeometryBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Freecad => "freecad",
+            Self::Build123d => "build123d",
+            Self::EckyRust => "eckyRust",
+        }
+    }
+}
+
+impl std::str::FromStr for GeometryBackend {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "freecad" => Ok(Self::Freecad),
+            "build123d" => Ok(Self::Build123d),
+            "eckyRust" | "ecky_rust" => Ok(Self::EckyRust),
             _ => Err(()),
         }
     }
@@ -499,8 +590,30 @@ impl FromSql for EngineKind {
     }
 }
 
-fn default_engine_kind() -> EngineKind {
-    EngineKind::Freecad
+impl ToSql for SourceLanguage {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for SourceLanguage {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let raw = value.as_str()?;
+        Ok(raw.parse().unwrap_or_default())
+    }
+}
+
+impl ToSql for GeometryBackend {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for GeometryBackend {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let raw = value.as_str()?;
+        Ok(raw.parse().unwrap_or_default())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -922,6 +1035,7 @@ impl UiField {
 pub enum InteractionMode {
     Design,
     Question,
+    Tune,
 }
 
 impl InteractionMode {
@@ -929,6 +1043,7 @@ impl InteractionMode {
         match self {
             Self::Design => "design",
             Self::Question => "question",
+            Self::Tune => "tune",
         }
     }
 }
@@ -940,6 +1055,7 @@ impl std::str::FromStr for InteractionMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "design" => Ok(Self::Design),
             "question" => Ok(Self::Question),
+            "tune" => Ok(Self::Tune),
             other => Err(AppError::validation(format!(
                 "Unknown interaction mode '{}'.",
                 other
@@ -1277,6 +1393,10 @@ pub struct DesignOutput {
     pub macro_dialect: MacroDialect,
     #[serde(default = "default_engine_kind", alias = "engine_kind")]
     pub engine_kind: EngineKind,
+    #[serde(default = "default_source_language", alias = "source_language")]
+    pub source_language: SourceLanguage,
+    #[serde(default = "default_geometry_backend", alias = "geometry_backend")]
+    pub geometry_backend: GeometryBackend,
     #[serde(default, alias = "ui_spec")]
     pub ui_spec: UiSpec,
     #[serde(default, alias = "initial_params")]
@@ -1590,6 +1710,10 @@ pub struct Thread {
     pub pending_confirm: Option<String>,
     #[serde(default = "default_engine_kind", alias = "engine_kind")]
     pub engine_kind: EngineKind,
+    #[serde(default = "default_source_language", alias = "source_language")]
+    pub source_language: SourceLanguage,
+    #[serde(default = "default_geometry_backend", alias = "geometry_backend")]
+    pub geometry_backend: GeometryBackend,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -1670,6 +1794,10 @@ pub struct GenerateDesignOptions {
     pub follow_up_question: Option<String>,
     #[serde(default)]
     pub engine_kind: Option<EngineKind>,
+    #[serde(default)]
+    pub source_language: Option<SourceLanguage>,
+    #[serde(default)]
+    pub geometry_backend: Option<GeometryBackend>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -2032,6 +2160,10 @@ pub struct ArtifactBundle {
     pub source_kind: ModelSourceKind,
     #[serde(default = "default_engine_kind")]
     pub engine_kind: EngineKind,
+    #[serde(default = "default_source_language")]
+    pub source_language: SourceLanguage,
+    #[serde(default = "default_geometry_backend")]
+    pub geometry_backend: GeometryBackend,
     pub content_hash: String,
     #[serde(default = "default_artifact_version")]
     pub artifact_version: u32,
@@ -2305,6 +2437,10 @@ pub struct ModelManifest {
     pub source_kind: ModelSourceKind,
     #[serde(default = "default_engine_kind")]
     pub engine_kind: EngineKind,
+    #[serde(default = "default_source_language")]
+    pub source_language: SourceLanguage,
+    #[serde(default = "default_geometry_backend")]
+    pub geometry_backend: GeometryBackend,
     pub document: DocumentMetadata,
     #[serde(default)]
     pub parts: Vec<PartBinding>,
@@ -3193,6 +3329,8 @@ mod tests {
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
             engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
             document: DocumentMetadata {
                 document_name: "Doc".to_string(),
                 document_label: "Doc".to_string(),
@@ -3386,6 +3524,8 @@ mod tests {
             ),
             source_kind: ModelSourceKind::Generated,
             engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
             document: DocumentMetadata {
                 document_name: "Shape".to_string(),
                 document_label: "Shape".to_string(),
@@ -3502,6 +3642,8 @@ mod tests {
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
             engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
             content_hash: "hash".to_string(),
             artifact_version: 1,
             fcstd_path: "/tmp/model.FCStd".to_string(),
@@ -3633,6 +3775,8 @@ mod tests {
             macro_code: "pass".to_string(),
             macro_dialect: MacroDialect::Legacy,
             engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
             ui_spec: UiSpec {
                 fields: vec![UiField::Number {
                     key: "width".to_string(),
@@ -3698,6 +3842,8 @@ mod tests {
             macro_code: "pass".to_string(),
             macro_dialect: MacroDialect::Legacy,
             engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
             ui_spec: UiSpec {
                 fields: vec![UiField::Image {
                     key: "image_path".to_string(),

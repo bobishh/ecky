@@ -193,6 +193,8 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: None,
             default_engine_kind: crate::models::EngineKind::Freecad,
+            default_source_language: crate::models::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::models::GeometryBackend::Freecad,
         }
     }
 
@@ -416,6 +418,8 @@ mod tests {
                     model_id: "model-snapshot".to_string(),
                     source_kind: crate::models::ModelSourceKind::Generated,
                     engine_kind: crate::models::EngineKind::Freecad,
+                    source_language: crate::models::SourceLanguage::LegacyPython,
+                    geometry_backend: crate::models::GeometryBackend::Freecad,
                     content_hash: "hash-snapshot".to_string(),
                     artifact_version: 1,
                     fcstd_path: "/tmp/model.FCStd".to_string(),

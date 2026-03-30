@@ -89,6 +89,27 @@ pub fn build_agent_origin(
     }
 }
 
+pub fn updatable_agent_message_for_request(
+    messages: &[Message],
+    session_id: &str,
+    base_message_id: &str,
+) -> Option<Message> {
+    messages
+        .iter()
+        .find(|message| {
+            message.id == base_message_id
+                && message.role == MessageRole::Assistant
+                && message.status != MessageStatus::Error
+                && (message.output.is_some() || message.artifact_bundle.is_some())
+                && message
+                    .agent_origin
+                    .as_ref()
+                    .map(|origin| origin.session_id.as_str())
+                    == Some(session_id)
+        })
+        .cloned()
+}
+
 pub fn latest_agent_message_for_session(messages: &[Message], session_id: &str) -> Option<Message> {
     messages
         .iter()
@@ -114,7 +135,7 @@ pub async fn save_or_update_agent_version_for_session(
     let SaveOrUpdateAgentVersionRequest {
         session_id,
         thread_id,
-        base_message_id: _base_message_id,
+        base_message_id,
         model_id,
         mut design_output,
         artifact_bundle,
@@ -137,10 +158,11 @@ pub async fn save_or_update_agent_version_for_session(
         let existing_agent_message = if force_create_new_message {
             None
         } else {
-            latest_agent_message_for_session(
+            updatable_agent_message_for_request(
                 &db::get_thread_messages(&conn, &thread_id)
                     .map_err(|e| AppError::persistence(e.to_string()))?,
                 &session_id,
+                &base_message_id,
             )
         };
         (stored_session, existing_agent_message)
@@ -208,6 +230,9 @@ pub async fn save_or_update_agent_version_for_session(
             &design_output.title,
             now,
             thread_traits.as_ref(),
+            Some(design_output.engine_kind),
+            Some(design_output.source_language),
+            Some(design_output.geometry_backend),
         )
         .map_err(|e| AppError::persistence(e.to_string()))?;
 
@@ -404,6 +429,8 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: None,
             default_engine_kind: crate::models::EngineKind::Freecad,
+            default_source_language: crate::models::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::models::GeometryBackend::Freecad,
         }
     }
 
@@ -416,6 +443,8 @@ mod tests {
             macro_code: macro_code.to_string(),
             macro_dialect: MacroDialect::Legacy,
             engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
             ui_spec: UiSpec {
                 fields: vec![UiField::Number {
                     key: "width".to_string(),
@@ -445,7 +474,8 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
+                .unwrap();
             db::add_message(
                 &conn,
                 "thread-1",
@@ -567,7 +597,8 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
+                .unwrap();
             db::upsert_agent_session(
                 &conn,
                 &AgentSession {
@@ -641,7 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_or_update_agent_version_updates_existing_agent_version_for_same_session() {
+    async fn save_or_update_agent_version_updates_explicit_agent_base_message_for_same_session() {
         let conn = crate::db::init_db(&test_db_path("agent-version-update")).expect("db");
         let state = AppState::new(test_config(), None, conn);
         let resolver = TestPathResolver {
@@ -652,7 +683,8 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
+                .unwrap();
             db::add_message(
                 &conn,
                 "thread-1",
@@ -727,7 +759,7 @@ mod tests {
             SaveOrUpdateAgentVersionRequest {
                 session_id: "session-1".to_string(),
                 thread_id: "thread-1".to_string(),
-                base_message_id: "base-1".to_string(),
+                base_message_id: "agent-1".to_string(),
                 model_id: None,
                 design_output: sample_design("Agent", "", "new_macro()"),
                 artifact_bundle: None,
@@ -775,5 +807,111 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(session.message_id.as_deref(), Some("agent-1"));
+    }
+
+    #[tokio::test]
+    async fn save_or_update_agent_version_does_not_overwrite_unrelated_agent_message() {
+        let conn = crate::db::init_db(&test_db_path("agent-version-no-overwrite")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let resolver = TestPathResolver {
+            root: std::env::temp_dir().join(format!("ecky-agent-version-{}", uuid::Uuid::new_v4())),
+        };
+        std::fs::create_dir_all(&resolver.root).unwrap();
+        let now = now_secs();
+
+        {
+            let conn = state.db.lock().await;
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
+                .unwrap();
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "base-1".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Base version".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_design("Base", "V-user", "base_macro()")),
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now,
+                },
+            )
+            .unwrap();
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "agent-1".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Claude created an MCP working version.".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_design("Agent", "V-mcp-keep", "old_macro()")),
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    agent_origin: Some(AgentOrigin {
+                        host_label: "Claude Code".to_string(),
+                        client_kind: "http".to_string(),
+                        agent_label: "claude".to_string(),
+                        llm_model_id: Some("claude-sonnet".to_string()),
+                        llm_model_label: Some("Claude Sonnet".to_string()),
+                        session_id: "session-1".to_string(),
+                        created_at: now,
+                    }),
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now,
+                },
+            )
+            .unwrap();
+        }
+
+        let result = save_or_update_agent_version_for_session(
+            &state,
+            &resolver,
+            SaveOrUpdateAgentVersionRequest {
+                session_id: "session-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                base_message_id: "base-1".to_string(),
+                model_id: None,
+                design_output: sample_design("Agent", "", "new_macro()"),
+                artifact_bundle: None,
+                model_manifest: None,
+                updated_at: now + 1,
+                response_text_created: "Claude created an MCP working version.".to_string(),
+                response_text_updated: "Claude updated the MCP working version.".to_string(),
+                preserve_existing_title: true,
+                preserve_existing_version_name: true,
+                force_create_new_message: false,
+                announce_created_working_version: false,
+            },
+        )
+        .await
+        .expect("create new working version");
+
+        assert!(result.created);
+        assert_ne!(result.message_id, "agent-1");
+
+        let conn = state.db.lock().await;
+        let messages = db::get_thread_messages(&conn, "thread-1").unwrap();
+        assert_eq!(messages.len(), 3);
+        let prior_agent = messages
+            .iter()
+            .find(|message| message.id == "agent-1")
+            .unwrap();
+        assert_eq!(
+            prior_agent
+                .output
+                .as_ref()
+                .map(|output| output.macro_code.as_str()),
+            Some("old_macro()")
+        );
     }
 }

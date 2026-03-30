@@ -56,7 +56,24 @@ pub async fn set_thread_engine_kind(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     let conn = state.db.lock().await;
-    history_service::set_thread_engine_kind(&conn, &id, engine_kind)
+    history_service::set_thread_authoring_context(
+        &conn,
+        &id,
+        engine_kind.to_source_language(),
+        engine_kind.to_geometry_backend(),
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_thread_authoring_context(
+    id: String,
+    source_language: crate::models::SourceLanguage,
+    geometry_backend: crate::models::GeometryBackend,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.db.lock().await;
+    history_service::set_thread_authoring_context(&conn, &id, source_language, geometry_backend)
 }
 
 #[tauri::command]

@@ -23,6 +23,8 @@ function buildWorkingDesign(): DesignOutput | null {
     interactionMode: 'design',
     macroCode: current.macroCode,
     macroDialect: current.macroDialect ?? 'legacy',
+    sourceLanguage: current.sourceLanguage ?? 'legacyPython',
+    geometryBackend: current.geometryBackend ?? 'freecad',
     uiSpec: current.uiSpec,
     initialParams: current.params,
     postProcessing: current.postProcessing ?? null,

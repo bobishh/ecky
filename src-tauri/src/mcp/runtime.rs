@@ -930,7 +930,7 @@ fn write_agent_instructions(
         4. When the user sends the first queued message:\n\
            a. Call `bootstrap_ecky` to load system guidance.\n\
            b. Call `workspace_overview` to inspect the current thread state.\n\
-           c. If the thread uses Ecky IR, read `ecky://guides/ecky-ir-v0` before writing IR.\n\
+           c. If the thread uses Ecky IR, read `ecky://guides/ecky-ir-v0` before writing IR. Treat that guide as the canonical authoring reference.\n\
            d. If `workspace_overview.defaultTarget.hasVersion` is true, call `target_meta_get`.\n\
            e. Use `target_macro_get` for macro reasoning and `target_detail_get(section=...)` \
               for exact chunks.\n\
@@ -1035,7 +1035,7 @@ fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
         absolute local files staged by Ecky; open them directly with your file/image tools \
         instead of rewriting or guessing new paths. \
         Do NOT call `bootstrap_ecky` or `workspace_overview` until the user sends the first queued message. \
-        After that, read `ecky://guides/ecky-ir-v0` when the thread uses Ecky IR. If `workspace_overview` says the thread has no saved versions yet, \
+        After that, read `ecky://guides/ecky-ir-v0` when the thread uses Ecky IR. Treat that guide as the canonical authoring reference. If `workspace_overview` says the thread has no saved versions yet, \
         use the guides plus the queued thread context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, and `target_detail_get(section=...)` \
         before falling back to `target_get`. Use `session_activity_set` / `session_activity_clear` for \
         long steps instead of relying on terminal text. At the end of each turn, save any final user-facing \
@@ -1591,27 +1591,16 @@ pub fn release_prompt_wait(
     control
 }
 
-fn clear_prompt_waits_for_agent(state: &AppState, agent_label: &str) {
-    let removed = {
-        let mut waits = state.prompt_waits.lock().unwrap();
-        let removed_ids = waits
-            .iter()
-            .filter(|(_, control)| control.agent_label == agent_label)
-            .map(|(request_id, _)| request_id.clone())
-            .collect::<Vec<_>>();
-        let mut removed = Vec::with_capacity(removed_ids.len());
-        for request_id in removed_ids {
-            if let Some(control) = waits.remove(&request_id) {
-                removed.push(control);
-            }
-        }
-        removed
-    };
-
-    for control in removed {
-        if let Some(pgid) = control.pgid {
-            resume_prompt_wait_process(pgid);
-        }
+fn close_prompts_for_agent_label_sync(state: &AppState, agent_label: &str, reason: &str) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let state = state.clone();
+        let agent_label = agent_label.to_string();
+        let reason = reason.to_string();
+        handle.block_on(async move {
+            state
+                .close_prompts_for_agent_label(&agent_label, &reason)
+                .await;
+        });
     }
 }
 
@@ -1621,7 +1610,7 @@ fn mark_agent_stopped(
     thread_id: Option<String>,
     status_text: String,
 ) {
-    clear_prompt_waits_for_agent(state, &agent.label);
+    close_prompts_for_agent_label_sync(state, &agent.label, "agent_stopped");
     mark_agent_terminal_inactive(
         state,
         agent,
@@ -1989,6 +1978,10 @@ fn clear_live_session_for_disconnect(state: &AppState, session_id: &str, status_
         let session_id = session_id.to_string();
         let status_text = status_text.to_string();
         handle.block_on(async move {
+            // Close pending prompts before removing from mcp_sessions.
+            state
+                .close_prompts_for_session(&session_id, "session_disconnected")
+                .await;
             let disconnected_session = {
                 let mut sessions = state.mcp_sessions.lock().await;
                 sessions.remove(&session_id)
@@ -3244,6 +3237,8 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: Some("mcp".to_string()),
             default_engine_kind: crate::models::EngineKind::Freecad,
+            default_source_language: crate::models::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::models::GeometryBackend::Freecad,
         }
     }
 

@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use libc;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
@@ -161,8 +163,11 @@ pub struct AppState {
     /// Pending user-confirmation requests keyed by requestId.
     pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
     /// Pending user-prompt requests keyed by requestId (agent waits for text/attachments from UI).
-    pub prompt_channels:
-        Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ResolveAgentPromptInput>>>>,
+    pub prompt_channels: Arc<
+        tokio::sync::Mutex<
+            HashMap<String, oneshot::Sender<Result<ResolveAgentPromptInput, String>>>,
+        >,
+    >,
     /// Runtime state machine for active-mode MCP agents.
     pub auto_agent_runtime: Arc<Mutex<crate::mcp::runtime::AutoAgentRuntimeRegistry>>,
     /// Maps prompt request_id → process control for agents SIGSTOP'd while waiting on the user.
@@ -252,6 +257,89 @@ impl AppState {
         let handle = self.app_handle.lock().unwrap().clone();
         if let Some(handle) = handle {
             let _ = handle.emit("history-updated", ());
+        }
+    }
+
+    /// Close a single pending prompt: SIGCONT any frozen process, send Err to unblock the handler,
+    /// clear waiting_on_prompt, and emit agent-prompt-closed to the frontend.
+    pub async fn close_single_prompt(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        thread_id: Option<String>,
+        reason: &str,
+    ) {
+        let pgid = {
+            let mut waits = self.prompt_waits.lock().unwrap();
+            waits.remove(request_id).and_then(|ctrl| ctrl.pgid)
+        };
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
+            unsafe {
+                libc::kill(-pgid, libc::SIGCONT);
+            }
+        }
+        {
+            let mut channels = self.prompt_channels.lock().await;
+            if let Some(tx) = channels.remove(request_id) {
+                let _ = tx.send(Err(reason.to_string()));
+            }
+        }
+        {
+            let mut sessions = self.mcp_sessions.lock().await;
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.waiting_on_prompt = false;
+            }
+        }
+        let handle = self.app_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            let _ = handle.emit(
+                "agent-prompt-closed",
+                serde_json::json!({
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "threadId": thread_id,
+                    "reason": reason,
+                }),
+            );
+        }
+    }
+
+    /// Close all pending prompts for a session (e.g. on disconnect or logout).
+    pub async fn close_prompts_for_session(&self, session_id: &str, reason: &str) {
+        let targets: Vec<(String, Option<String>)> = {
+            let waits = self.prompt_waits.lock().unwrap();
+            waits
+                .iter()
+                .filter(|(_, ctrl)| ctrl.session_id == session_id)
+                .map(|(req_id, ctrl)| (req_id.clone(), ctrl.thread_id.clone()))
+                .collect()
+        };
+        for (request_id, thread_id) in targets {
+            self.close_single_prompt(&request_id, session_id, thread_id, reason)
+                .await;
+        }
+    }
+
+    /// Close all pending prompts for an agent label (e.g. when the agent process is stopped).
+    pub async fn close_prompts_for_agent_label(&self, agent_label: &str, reason: &str) {
+        let targets: Vec<(String, String, Option<String>)> = {
+            let waits = self.prompt_waits.lock().unwrap();
+            waits
+                .iter()
+                .filter(|(_, ctrl)| ctrl.agent_label == agent_label)
+                .map(|(req_id, ctrl)| {
+                    (
+                        req_id.clone(),
+                        ctrl.session_id.clone(),
+                        ctrl.thread_id.clone(),
+                    )
+                })
+                .collect()
+        };
+        for (request_id, session_id, thread_id) in targets {
+            self.close_single_prompt(&request_id, &session_id, thread_id, reason)
+                .await;
         }
     }
 }

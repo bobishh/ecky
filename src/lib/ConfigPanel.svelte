@@ -875,19 +875,25 @@
         </div>
 
         <div class="field">
-          <div class="field-title">DEFAULT GENERATED MODEL ENGINE</div>
+          <div class="field-title">DEFAULT AUTHORING CONTEXT</div>
           <div class="conn-type-row">
             <button
-              class="conn-type-btn {config.defaultEngineKind === 'freecad' ? 'active' : ''}"
-              onclick={() => (config.defaultEngineKind = 'freecad')}
-            >FREECAD</button>
+              class="conn-type-btn {config.defaultSourceLanguage === 'legacyPython' ? 'active' : ''}"
+              onclick={() => { config.defaultSourceLanguage = 'legacyPython'; config.defaultGeometryBackend = 'freecad'; config.defaultEngineKind = 'freecad'; }}
+            >FREECAD PYTHON</button>
             <button
-              class="conn-type-btn {config.defaultEngineKind === 'eckyIrV0' ? 'active' : ''}"
-              onclick={() => (config.defaultEngineKind = 'eckyIrV0')}
-            >ECKY IR V0</button>
+              class="conn-type-btn {config.defaultSourceLanguage === 'eckyIrV0' ? 'active' : ''}"
+              onclick={() => {
+                config.defaultSourceLanguage = 'eckyIrV0';
+                config.defaultGeometryBackend = config.defaultGeometryBackend && config.defaultGeometryBackend !== 'freecad'
+                  ? config.defaultGeometryBackend
+                  : 'build123d';
+                config.defaultEngineKind = 'eckyIrV0';
+              }}
+            >ECKY IR</button>
           </div>
           <div class="field-help">
-            New generated threads inherit this engine by default. Imported FCStd flows stay pinned to FreeCAD.
+            New generated threads inherit this language by default. Imported FCStd flows stay pinned to FreeCAD.
           </div>
         </div>
 

@@ -37,7 +37,6 @@
     loadFromHistory,
     deleteThread,
     renameThread,
-    setThreadEngineKind,
     createNewThread,
     forkDesign,
     deleteVersion,
@@ -86,8 +85,6 @@
     visibleAgentTerminalStore,
   } from './lib/stores/agentTerminalStore';
   import {
-    compactThreadActivitySummary,
-    formatAgentActivityElapsed,
     isThreadAgentBusy,
     resolveActiveMcpBubble,
     resolveTerminalActivityMeta,
@@ -281,6 +278,21 @@
       case 'reading':
       case 'resolving':
         return 'generating';
+      default:
+        return null;
+    }
+  }
+
+  function mapThreadAgentStateToViewerBusy(
+    state: ThreadAgentState | null | undefined,
+  ): ViewerBusyPhase {
+    if (!state || state.connectionState !== 'active' || state.waitingOnPrompt || !state.busy) return null;
+    switch (state.phase) {
+      case 'rendering':
+      case 'restoring_version':
+        return 'rendering';
+      case 'saving_version':
+        return 'committing';
       default:
         return null;
     }
@@ -503,6 +515,9 @@
   const externalViewerBusyPhase = $derived.by<ViewerBusyPhase>(() =>
     mapAgentPhaseToViewerBusy(externalViewerSession),
   );
+  const threadScopedAgentBusyPhase = $derived.by<ViewerBusyPhase>(() =>
+    mapThreadAgentStateToViewerBusy(threadAgentState),
+  );
   const manualViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
     if (
       $session.isManual &&
@@ -518,6 +533,9 @@
     if (suppressViewportBusyUi) return false;
     if (localViewportRequests.some((request) => isModelBusyRequestPhase(request.phase))) return true;
     if (manualViewerBusyPhase === 'rendering') return true;
+    // Only show the agent busy mask when there's actually a model loaded to cover — skip it for
+    // first-time renders where the viewer is empty (no model to hide yet).
+    if (threadScopedAgentBusyPhase && hasRenderableModel) return true;
     return externalViewerBusyPhase === 'rendering' || externalViewerBusyPhase === 'committing';
   });
   const localViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
@@ -535,7 +553,7 @@
     return null;
   });
   const viewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
-    return localViewerBusyPhase ?? externalViewerBusyPhase;
+    return localViewerBusyPhase ?? threadScopedAgentBusyPhase ?? externalViewerBusyPhase;
   });
   const viewerBusyText = $derived.by<string | null>(() => {
     switch (localViewerBusyPhase) {
@@ -548,6 +566,20 @@
       case 'generating':
         return $session.cookingPhrase || 'Preparing the next transformation.';
       default:
+        if (threadScopedAgentBusyPhase && threadAgentState) {
+          const threadStatusText = threadAgentState.statusText?.trim() ?? '';
+          if (threadStatusText) return threadStatusText;
+          switch (threadScopedAgentBusyPhase) {
+            case 'rendering':
+              return `External agent ${threadAgentState.agentLabel} is updating the model.`;
+            case 'committing':
+              return `External agent ${threadAgentState.agentLabel} is saving a version.`;
+            case 'generating':
+              return `External agent ${threadAgentState.agentLabel} is preparing an update.`;
+            default:
+              return null;
+          }
+        }
         if (!externalViewerSession || !externalViewerBusyPhase) return null;
         if (externalViewerSession.statusText.trim()) return externalViewerSession.statusText;
         switch (externalViewerBusyPhase) {
@@ -561,51 +593,6 @@
             return null;
         }
     }
-  });
-  const activeLocalThreadRequest = $derived.by<Request | null>(() => {
-    if (!localViewportRequests.length) return null;
-    return localViewportRequests[localViewportRequests.length - 1] ?? null;
-  });
-  const dialogueActivityCard = $derived.by<{
-    agentLabel: string;
-    phase: string;
-    summary: string;
-    fullSummary: string;
-    elapsed: string | null;
-    tone: 'local' | 'agent';
-  } | null>(() => {
-    if (activeLocalThreadRequest && localViewerBusyPhase) {
-      const fullSummary = viewerBusyText ?? 'Working on the current thread.';
-      return {
-        agentLabel: 'ECKY',
-        phase: formatAgentPhase(activeLocalThreadRequest.phase),
-        summary: compactThreadActivitySummary(fullSummary),
-        fullSummary,
-        elapsed: formatAgentActivityElapsed(
-          activeLocalThreadRequest.cookingStartTime
-            ? Math.floor(activeLocalThreadRequest.cookingStartTime / 1000)
-            : null,
-          $nowSeconds,
-        ),
-        tone: 'local',
-      };
-    }
-    if (!threadAgentState || threadAgentState.connectionState === 'none') return null;
-    const summary =
-      activeMcpBubbleSummary ||
-      threadAgentState.statusText?.trim() ||
-      'Connected to the current thread.';
-    if (!summary) return null;
-    return {
-      agentLabel: threadAgentState.agentLabel?.trim() || 'AGENT',
-      phase: threadAgentState.waitingOnPrompt
-        ? 'waiting'
-        : formatAgentPhase(threadAgentState.phase ?? threadAgentState.connectionState),
-      summary: compactThreadActivitySummary(summary),
-      fullSummary: summary,
-      elapsed: formatAgentActivityElapsed(threadAgentState.activityStartedAt ?? null, $nowSeconds),
-      tone: 'agent',
-    };
   });
   const externalViewerStatusText = $derived.by<string | null>(() => {
     if (!externalViewerSession || !externalViewerBusyPhase) return null;
@@ -743,9 +730,15 @@
   // Also re-runs when $history changes so it can retry if messages arrive after the prompt opened.
   $effect(() => {
     void $history; // reactive dep — retriggers when messages arrive
-    const deliverablePrompts = pendingAgentPrompts.filter(
-      (prompt) =>
-        Boolean(prompt.threadId) && !autoDrainingPromptRequestIds.has(prompt.requestId),
+    // For each threadId, only drain the newest prompt (last in array) to avoid draining stale ones.
+    const newestPerThread = new Map<string, PendingAgentPrompt>();
+    for (const prompt of pendingAgentPrompts) {
+      if (prompt.threadId) {
+        newestPerThread.set(prompt.threadId, prompt);
+      }
+    }
+    const deliverablePrompts = [...newestPerThread.values()].filter(
+      (prompt) => !autoDrainingPromptRequestIds.has(prompt.requestId),
     );
     for (const prompt of deliverablePrompts) {
       autoDrainingPromptRequestIds.add(prompt.requestId);
@@ -1381,7 +1374,7 @@
 
   $effect(() => {
     const nextMicrowaveKey =
-      isMcpConnection && activeMcpBusy && threadAgentState?.sessionId
+      activeMcpRenderBusy && threadAgentState?.sessionId
         ? `__mcp__:${threadAgentState.sessionId}`
         : '';
     if (activeMcpMicrowaveKey && activeMcpMicrowaveKey !== nextMicrowaveKey) {
@@ -1751,17 +1744,22 @@
       }
     });
     const unlistenPrompt = listen<PendingAgentPrompt>('agent-prompt-request', (event) => {
+      // Replace any existing prompt for this session (supersede semantics), then append the new one.
       pendingAgentPrompts = [
-        ...pendingAgentPrompts.filter((prompt) => prompt.requestId !== event.payload.requestId),
+        ...pendingAgentPrompts.filter((prompt) => prompt.sessionId !== event.payload.sessionId),
         event.payload,
       ];
       void refreshThreadAgentState();
     });
     const unlistenPromptClosed = listen<ClosedAgentPrompt>('agent-prompt-closed', (event) => {
-      pendingAgentPrompts = pendingAgentPrompts.filter(
-        (prompt) => prompt.requestId !== event.payload.requestId,
-      );
-      if (event.payload.reason === 'timed_out') {
+      const { requestId, sessionId, reason } = event.payload;
+      if (reason === 'session_disconnected' || reason === 'superseded' || reason === 'agent_stopped') {
+        // Broad cleanup: remove all prompts for this session.
+        pendingAgentPrompts = pendingAgentPrompts.filter((prompt) => prompt.sessionId !== sessionId);
+      } else {
+        pendingAgentPrompts = pendingAgentPrompts.filter((prompt) => prompt.requestId !== requestId);
+      }
+      if (reason === 'timed_out') {
         session.setStatus(
           'No pending prompt request. The last request_user_prompt timed out; queued thread messages can still be picked up later.',
         );
@@ -1808,13 +1806,6 @@
   });
 
   const activeThread = $derived($history.find(t => t.id === $activeThreadId));
-  const activeThreadEngineLocked = $derived.by(() =>
-    (activeThread?.messages ?? []).some(
-      (message) =>
-        message.artifactBundle?.sourceKind === 'importedFcstd' ||
-        message.modelManifest?.sourceKind === 'importedFcstd',
-    ),
-  );
   const activeThreadConceptPreviewState = $derived.by<ConceptPreviewUiState>(() => {
     if (!$activeThreadId) return defaultConceptPreviewUiState();
     return conceptPreviewUiByThread[$activeThreadId] ?? defaultConceptPreviewUiState();
@@ -1898,6 +1889,9 @@
   const visibleAgentTerminal = $derived($visibleAgentTerminalStore);
   const activeAgentTerminalAttention = $derived($agentTerminalAttentionStore);
   const activeMcpBusy = $derived.by<boolean>(() => isMcpConnection && isThreadAgentBusy(threadAgentState));
+  const activeMcpRenderBusy = $derived.by<boolean>(
+    () => isMcpConnection && threadScopedAgentBusyPhase !== null,
+  );
   const activeMcpBubbleSummary = $derived.by<string>(() =>
     resolveActiveMcpBubble({
       threadAgentState,
@@ -2604,7 +2598,7 @@
   {/if}
   <div class="app-overlay-actions">
     {#if $currentView === 'workbench'}
-      {#if $activeRequestCount > 0}
+      {#if $activeRequestCount > 0 || $activeMicrowaveCount > 0 || activeMcpRenderBusy}
         <button class="overlay-icon-btn" onclick={toggleMicrowaveMute} title="Toggle Cafeteria Hum">
           {$config?.microwave?.muted ? '🔇' : '🔊'}
         </button>
@@ -2732,9 +2726,14 @@
                     }}
                     parameters={effectiveParameters} 
                     macroCode={$paramPanelState.macroCode}
-                    onchange={handleParamChange} 
+                    onchange={handleParamChange}
                     activeVersionId={$paramPanelState.versionId}
                     messageId={$activeVersionId}
+                    onShowCode={() => {
+                      selectedCode.set($workingCopy.macroCode);
+                      selectedTitle.set($workingCopy.title);
+                      showCodeModal.set(true);
+                    }}
                   />
                 </div>
               {/if}
@@ -3104,38 +3103,39 @@
               class:onboarding-highlight={$onboarding.target === 'dialogue'}
             >
               <div class="pane-header pane-header--with-actions dialogue-header">
-                <button
-                  class="pane-header__toggle"
-                  type="button"
-                  title={dialogueCollapsed ? 'Expand dialogue' : 'Collapse dialogue'}
-                  aria-expanded={!dialogueCollapsed}
-                  onclick={() => {
-                    dialogueCollapsed = !dialogueCollapsed;
-                  }}
-                >
-                  {dialogueCollapsed ? '▸' : '▾'}
-                </button>
-                <span class="pane-header__title">DIALOGUE: {activeThread ? activeThread.title : 'New Session'}</span>
+                <div class="pane-header__lead">
+                  <button
+                    class="pane-header__toggle"
+                    type="button"
+                    title={dialogueCollapsed ? 'Expand dialogue' : 'Collapse dialogue'}
+                    aria-expanded={!dialogueCollapsed}
+                    onclick={() => {
+                      dialogueCollapsed = !dialogueCollapsed;
+                    }}
+                  >
+                    {dialogueCollapsed ? '▸' : '▾'}
+                  </button>
+                  <span class="pane-header__title">DIALOGUE: {activeThread ? activeThread.title : 'New Session'}</span>
+                </div>
+                <div class="pane-header__actions">
+                  {#if activeVersionMessage?.output?.macroCode}
+                    <button
+                      class="pane-header__chip"
+                      type="button"
+                      title="Open code for the active version"
+                      onclick={() => {
+                        selectedCode.set(activeVersionMessage.output?.macroCode ?? '');
+                        selectedTitle.set(activeVersionMessage.output?.title ?? activeThread?.title ?? 'Code');
+                        showCodeModal.set(true);
+                      }}
+                    >
+                      CODE
+                    </button>
+                  {/if}
+                </div>
               </div>
               {#if !dialogueCollapsed}
                 <div class="dialogue-content">
-                  {#if dialogueActivityCard}
-                    <div class="thread-activity-card thread-activity-card--{dialogueActivityCard.tone}">
-                      <div class="thread-activity-card__meta">
-                        <span class="thread-activity-card__agent">{dialogueActivityCard.agentLabel}</span>
-                        <span class="thread-activity-card__phase">{dialogueActivityCard.phase}</span>
-                        {#if dialogueActivityCard.elapsed}
-                          <span class="thread-activity-card__elapsed">{dialogueActivityCard.elapsed}</span>
-                        {/if}
-                      </div>
-                      <div
-                        class="thread-activity-card__summary"
-                        title={dialogueActivityCard.fullSummary}
-                      >
-                        {dialogueActivityCard.summary}
-                      </div>
-                    </div>
-                  {/if}
                   {#key $activeThreadId ?? 'new-thread'}
                     <PromptPanel
                       onGenerate={handlePromptPanelSubmit}
@@ -3144,11 +3144,6 @@
                       dialogueState={dialogueState}
                       messages={activeThread?.messages || []}
                       activeThreadId={$activeThreadId}
-                      threadEngineKind={activeThread?.engineKind ?? $config.defaultEngineKind ?? 'freecad'}
-                      threadEngineLocked={activeThreadEngineLocked}
-                      onThreadEngineChange={(engineKind) =>
-                        $activeThreadId ? setThreadEngineKind($activeThreadId, engineKind) : undefined
-                      }
                       sendWorkspaceCapture={sendWorkspaceCaptureForActiveThread}
                       workspaceCaptureHint={workspaceCaptureHint}
                       onToggleWorkspaceCapture={setWorkspaceCaptureForActiveThread}
@@ -3485,7 +3480,8 @@
     flex-wrap: wrap;
   }
   .dialogue-area { flex-shrink: 0; min-height: 260px; background: var(--bg-100); display: flex; flex-direction: column; border-top: 1px solid var(--bg-300); overflow: hidden; }
-  .dialogue-area-collapsed { height: auto !important; }
+  .dialogue-area-collapsed { height: auto !important; min-height: 0 !important; flex: 0 0 auto; }
+  .dialogue-area-collapsed .pane-header { border-bottom: none; }
   .dialogue-content { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   .agent-origin-chip {
     padding: 4px 8px;
@@ -3513,6 +3509,7 @@
     min-width: 0;
   }
   .pane-header--with-actions { justify-content: space-between; }
+  .pane-header__lead { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
   .pane-header__title {
     min-width: 0;
     flex: 1;
@@ -3558,72 +3555,6 @@
     border-color: var(--primary);
     color: var(--primary);
     background: color-mix(in srgb, var(--primary) 14%, var(--bg-100));
-  }
-  .thread-activity-card {
-    margin: 10px 12px 0;
-    padding: 10px 12px;
-    flex-shrink: 0;
-    border: 1px solid color-mix(in srgb, var(--secondary) 30%, var(--bg-300));
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--bg-100) 86%, black 14%) 0%,
-        color-mix(in srgb, var(--bg-200) 92%, black 8%) 100%
-      );
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-400) 68%, transparent);
-    overflow: hidden;
-  }
-  .thread-activity-card--local {
-    border-color: color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--primary) 10%, var(--bg-100)) 0%,
-        color-mix(in srgb, var(--bg-200) 92%, black 8%) 100%
-      );
-  }
-  .thread-activity-card--agent {
-    border-color: color-mix(in srgb, var(--secondary) 44%, var(--bg-300));
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--secondary) 10%, var(--bg-100)) 0%,
-        color-mix(in srgb, var(--bg-200) 92%, black 8%) 100%
-      );
-  }
-  .thread-activity-card__meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 8px;
-    font-family: var(--font-mono);
-    font-size: 0.62rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-  .thread-activity-card__agent {
-    color: var(--primary);
-    font-weight: 700;
-  }
-  .thread-activity-card__phase,
-  .thread-activity-card__elapsed {
-    color: var(--text-dim);
-  }
-  .thread-activity-card__elapsed {
-    margin-left: auto;
-  }
-  .thread-activity-card__summary {
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    line-height: 1.45;
-    white-space: normal;
-    overflow: hidden;
-    display: -webkit-box;
-    line-clamp: 2;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
   }
   .scrollable { overflow-y: auto; }
   .resizer-w { width: 4px; background: var(--bg-300); cursor: col-resize; z-index: 10; flex-shrink: 0; }

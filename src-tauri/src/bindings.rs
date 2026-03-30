@@ -14,6 +14,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::history::delete_thread,
         crate::commands::history::rename_thread,
         crate::commands::history::set_thread_engine_kind,
+        crate::commands::history::set_thread_authoring_context,
         crate::commands::history::delete_version,
         crate::commands::history::restore_version,
         crate::commands::history::get_deleted_messages,

@@ -253,7 +253,12 @@
   }
 
   function engineLabel(thread: Thread): string {
-    return thread.engineKind === 'eckyIrV0' ? 'ECKY IR V0' : 'FREECAD';
+    const source = thread.sourceLanguage;
+
+    if (source === 'legacyPython') return 'FREECAD';
+    if (source === 'eckyIrV0') return 'ECKY IR';
+
+    return thread.engineKind === 'eckyIrV0' ? 'ECKY IR' : 'FREECAD';
   }
 </script>
 
@@ -339,35 +344,45 @@
         onkeydown={(e) => { if (editingThreadId !== thread.id && (e.key === 'Enter' || e.key === ' ')) onSelect(thread); }}
       >
         <div class="card-header">
-          {#if editingThreadId === thread.id}
-            <input
-              class="card-title-input"
-              bind:value={editingTitle}
-              onclick={(e) => e.stopPropagation()}
-              onkeydown={(e) => {
-                if (e.key === 'Enter') void commitRename(thread, e);
-                if (e.key === 'Escape') cancelRename(e);
-              }}
-            />
-          {:else}
-            <div class="card-title-display">
-              <span class="card-title">{thread.title}</span>
-              <span class="thread-engine-chip">{engineLabel(thread)}</span>
-            </div>
-          {/if}
-          {#if threadHasUnreadAttention(thread.id)}
-            <span class="status-badge unread" title="Agent prompt or screenshot request is waiting in this thread">UNREAD</span>
-          {/if}
-          {#if thread.queuedCount > 0}
-            <span class="status-badge queued" title={`${thread.queuedCount} queued user ${thread.queuedCount === 1 ? 'message' : 'messages'} waiting in this thread`}>
-              INBOX {thread.queuedCount}
-            </span>
-          {/if}
-          <span class="status-badge {threadState.className}" title={threadState.title}>{threadState.label}</span>
-          <span class="card-date">{formatDate(thread.updatedAt)}</span>
-          {#if hasImportPendingSetup(thread)}
-            <span class="status-badge needs-setup" title="Imported model has pending parameter binding proposals">NEEDS SETUP</span>
-          {/if}
+          <div class="card-title-row">
+            {#if editingThreadId === thread.id}
+              <input
+                class="card-title-input"
+                bind:value={editingTitle}
+                onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') void commitRename(thread, e);
+                  if (e.key === 'Escape') cancelRename(e);
+                }}
+              />
+            {:else}
+              <div
+                class="card-title-display"
+                role="button"
+                tabindex="-1"
+                title="Double-click to rename"
+                ondblclick={(e) => startRename(thread, e)}
+              >
+                <span class="card-title">{thread.title}</span>
+              </div>
+            {/if}
+            <span class="card-date">{formatDate(thread.updatedAt)}</span>
+          </div>
+          <div class="card-meta-row">
+            <span class="thread-engine-chip">{engineLabel(thread)}</span>
+            {#if threadHasUnreadAttention(thread.id)}
+              <span class="status-badge unread" title="Agent prompt or screenshot request is waiting in this thread">UNREAD</span>
+            {/if}
+            {#if thread.queuedCount > 0}
+              <span class="status-badge queued" title={`${thread.queuedCount} queued user ${thread.queuedCount === 1 ? 'message' : 'messages'} waiting in this thread`}>
+                INBOX {thread.queuedCount}
+              </span>
+            {/if}
+            <span class="status-badge {threadState.className}" title={threadState.title}>{threadState.label}</span>
+            {#if hasImportPendingSetup(thread)}
+              <span class="status-badge needs-setup" title="Imported model has pending parameter binding proposals">NEEDS SETUP</span>
+            {/if}
+          </div>
         </div>
         {#if thread.summary}
           <div class="card-summary">{thread.summary}</div>
@@ -387,7 +402,7 @@
               disabled={renameBusy}
               title="Save title"
             >
-              SAVE
+              ✓
             </button>
             <button
               class="card-btn rename"
@@ -395,16 +410,9 @@
               disabled={renameBusy}
               title="Cancel rename"
             >
-              CANCEL
+              ✕
             </button>
           {:else}
-            <button
-              class="card-btn rename"
-              onclick={(e) => startRename(thread, e)}
-              title="Rename Thread"
-            >
-              RENAME
-            </button>
             {#if onFinalize && thread.versionCount > 0}
               <button
                 class="card-btn finalize"

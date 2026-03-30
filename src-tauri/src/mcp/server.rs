@@ -90,6 +90,7 @@ struct ResolvedTargetRef {
     thread_id: String,
     message_id: String,
     model_id: Option<String>,
+    source_language: crate::models::SourceLanguage,
     preview_stl_path: Option<String>,
     viewer_assets: Vec<crate::contracts::ViewerAsset>,
     title: String,
@@ -391,6 +392,10 @@ async fn set_session_target(state: &AppState, session_id: &str, target: Option<M
 }
 
 async fn remove_session(state: &AppState, session_id: &str) -> AppResult<()> {
+    // Close pending prompts before removing the session (close_single_prompt needs the session entry).
+    state
+        .close_prompts_for_session(session_id, "session_disconnected")
+        .await;
     state.mcp_sessions.lock().await.remove(session_id);
     if crate::mcp::runtime::runtime_snapshot_by_session_id(state, session_id).is_some() {
         crate::mcp::runtime::mark_agent_disconnected_for_session(
@@ -529,6 +534,7 @@ async fn resolve_target_for_session(
         thread_id: target.thread_id,
         message_id: target.message_id,
         model_id,
+        source_language: design.source_language,
         preview_stl_path: runtime_bundle
             .as_ref()
             .map(|bundle| bundle.preview_stl_path.clone()),
@@ -837,7 +843,7 @@ fn workflow_guide_text(state: &AppState) -> String {
             "- Do not remove or bypass existing views just because the same values can be changed through raw controls.\n\n",
             "Recommended startup sequence:\n",
             "1. Read ecky://guides/system-prompt and ecky://guides/modeling-guidelines.\n",
-            "2. If the thread engine is Ecky IR v0, read ecky://guides/ecky-ir-v0 before you generate or replace macro code.\n",
+            "2. If the thread uses Ecky IR, read ecky://guides/ecky-ir-v0 before you generate or replace macro code.\n",
             "3. Read ecky://guides/cad-sdk when you need the actual helper surface instead of guessing SDK functions.\n",
             "4. Call workspace_overview.\n",
             "5. If workspace_overview says the thread has no saved versions yet, use that thread context plus the guides to create the first version instead of calling target_meta_get.\n",
@@ -854,12 +860,27 @@ fn workflow_guide_text(state: &AppState) -> String {
     )
 }
 
-fn workspace_overview_brief(state: &AppState) -> WorkspaceOverviewBrief {
-    let engine_kind = state.config.lock().unwrap().default_engine_kind.clone();
-    let is_ir = engine_kind == crate::models::EngineKind::EckyIrV0;
+fn workspace_overview_brief(
+    state: &AppState,
+    source_language: Option<crate::models::SourceLanguage>,
+) -> WorkspaceOverviewBrief {
+    let resolved_lang =
+        source_language.unwrap_or_else(|| state.config.lock().unwrap().default_source_language);
+    let is_ir = matches!(resolved_lang, crate::models::SourceLanguage::EckyIrV0);
+    let (lang_str, dialect_str) = if is_ir {
+        ("eckyIrV0".to_string(), "eckyIrV0".to_string())
+    } else {
+        ("python".to_string(), "cadFrameworkV1".to_string())
+    };
     WorkspaceOverviewBrief {
         engine_label: selected_engine_label(state),
-        summary: "Use millimeters, keep macro/uiSpec/initialParams aligned, and prefer printable manifold solids. Read the canonical Ecky resources before making broad edits.".to_string(),
+        source_language: lang_str,
+        macro_dialect: dialect_str,
+        summary: if is_ir {
+            "This thread uses Ecky IR v0. macroCode MUST be s-expression IR, NOT Python. Read ecky://guides/ecky-ir-v0 for the canonical syntax before writing any macro code.".to_string()
+        } else {
+            "Use millimeters, keep macro/uiSpec/initialParams aligned, and prefer printable manifold solids. Read the canonical Ecky resources before making broad edits.".to_string()
+        },
         rules: vec![
             "Units are millimeters.".to_string(),
             "Keep macroCode, uiSpec, and initialParams aligned.".to_string(),
@@ -881,7 +902,7 @@ fn workspace_overview_brief(state: &AppState) -> WorkspaceOverviewBrief {
             vec![
                 "Read ecky://guides/system-prompt if you have not loaded Ecky guidance yet."
                     .to_string(),
-                "Read ecky://guides/ecky-ir-v0 NOW — this thread uses the Ecky IR v0 engine. Do not write Python."
+                "Read ecky://guides/ecky-ir-v0 NOW — this thread uses Ecky IR. Do not write Python. Treat the guide as the canonical authoring syntax."
                     .to_string(),
                 "Call target_meta_get for a lightweight summary of the current editable target."
                     .to_string(),
@@ -894,7 +915,7 @@ fn workspace_overview_brief(state: &AppState) -> WorkspaceOverviewBrief {
             vec![
                 "Read ecky://guides/system-prompt if you have not loaded Ecky guidance yet."
                     .to_string(),
-                "Read ecky://guides/ecky-ir-v0 when the thread is using the Ecky IR engine."
+                "Read ecky://guides/ecky-ir-v0 when the thread is using Ecky IR. Treat it as the canonical authoring syntax."
                     .to_string(),
                 "Read ecky://guides/cad-sdk if you need the actual helper functions available in cad_sdk.py."
                     .to_string(),
@@ -1008,7 +1029,7 @@ fn resource_definitions(state: &AppState) -> Vec<Value> {
         json!({
             "uri": "ecky://guides/ecky-ir-v0",
             "name": "Ecky IR v0",
-            "description": "Canonical Ecky IR v0 syntax and modeling rules for the experimental Rust engine.",
+            "description": "Canonical Ecky IR v0 syntax and modeling rules.",
             "mimeType": "text/plain"
         }),
         json!({
@@ -1232,6 +1253,8 @@ fn tool_definitions() -> Vec<Value> {
             "name": "macro_replace_and_render",
             "description": concat!(
                 "Replace macro code and rerender a draft. ",
+                "IMPORTANT: check workspace_overview.agentBrief.sourceLanguage — if it is \"eckyIrV0\", macroCode MUST be Ecky IR s-expressions (starting with `(model ...)`), NOT Python. ",
+                "When sourceLanguage is eckyIrV0, uiSpec and parameters are auto-derived from the IR params block; you may omit them or pass them for overrides. ",
                 "uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). ",
                 "For numeric parameters, prefer number; range is legacy-only unless explicitly needed. range/number: min, max, step (numbers). ",
                 "select: options array of {label, value} objects — MUST have at least one option. ",
@@ -1900,7 +1923,10 @@ async fn dispatch_tool_call(
                     });
                     (
                         WorkspaceOverviewResponse {
-                            agent_brief: workspace_overview_brief(&server.state),
+                            agent_brief: workspace_overview_brief(
+                                &server.state,
+                                Some(target.source_language),
+                            ),
                             control_surface: workspace_control_surface(&target),
                             default_target: WorkspaceOverviewTarget {
                                 thread_id: target.thread_id.clone(),
@@ -1929,7 +1955,10 @@ async fn dispatch_tool_call(
                     let thread = crate::services::history::get_thread(&conn, &thread_id)?;
                     (
                         WorkspaceOverviewResponse {
-                            agent_brief: workspace_overview_brief(&server.state),
+                            agent_brief: workspace_overview_brief(
+                                &server.state,
+                                Some(thread.source_language),
+                            ),
                             control_surface: workspace_control_surface_for_empty_thread(&thread),
                             default_target: WorkspaceOverviewTarget {
                                 thread_id: thread.id.clone(),
@@ -2754,6 +2783,8 @@ mod tests {
                 has_seen_onboarding: true,
                 connection_type: None,
                 default_engine_kind: crate::models::EngineKind::Freecad,
+                default_source_language: crate::models::SourceLanguage::LegacyPython,
+                default_geometry_backend: crate::models::GeometryBackend::Freecad,
             },
             None,
             Connection::open_in_memory().expect("memory db"),
@@ -2817,7 +2848,7 @@ mod tests {
     fn guidance_prefers_meta_macro_and_detail_over_target_get() {
         let state = test_state();
         let workflow = workflow_guide_text(&state);
-        let brief = workspace_overview_brief(&state);
+        let brief = workspace_overview_brief(&state, Some(crate::models::SourceLanguage::EckyIrV0));
 
         assert!(workflow.contains("ecky://guides/ecky-ir-v0"));
         assert!(workflow.contains("call target_meta_get"));
@@ -2886,6 +2917,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             message_id: "message-1".to_string(),
             model_id: Some("model-1".to_string()),
+            source_language: crate::models::SourceLanguage::LegacyPython,
             preview_stl_path: Some("/tmp/model.stl".to_string()),
             viewer_assets: vec![],
             title: "Widget".to_string(),

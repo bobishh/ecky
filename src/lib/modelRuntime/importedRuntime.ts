@@ -108,6 +108,8 @@ export function buildImportedSyntheticDesign(
     macroCode: '',
     uiSpec,
     initialParams,
+    sourceLanguage: 'legacyPython',
+    geometryBackend: 'freecad',
     postProcessing: null,
   };
 }

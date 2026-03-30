@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { history, activeThreadId, activeVersionId } from './domainState';
+import { history, activeThreadId, activeVersionId, config } from './domainState';
 import { workingCopy, isDirty } from './workingCopy';
 import { session } from './sessionStore';
 import { handleParamChange, commitManualVersion } from '../controllers/manualController';
@@ -8,7 +8,7 @@ import { paramPanelState } from './paramPanelState';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
 import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
 import { inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
-import type { Message, Thread } from '../types/domain';
+import type { GeometryBackend, Message, SourceLanguage, Thread } from '../types/domain';
 import {
   addImportedModelVersion,
   addManualVersion,
@@ -22,6 +22,7 @@ import {
   getMessStlPath,
   getModelManifest,
   renameThread as renameThreadCommand,
+  setThreadAuthoringContext as setThreadAuthoringContextCommand,
   setThreadEngineKind as setThreadEngineKindCommand,
   getThread,
   restoreVersion as restoreVersionCommand,
@@ -187,7 +188,7 @@ export async function loadFromHistory(thread: Thread) {
     freshThread = await getThread(targetThreadId);
     history.update((items) =>
       items.map((candidate) =>
-        candidate.id === targetThreadId ? { ...candidate, messages: freshThread.messages } : candidate,
+        candidate.id === targetThreadId ? freshThread : candidate,
       ),
     );
   } catch (e) {
@@ -264,6 +265,37 @@ export async function renameThread(id: string, title: string) {
     }
   } catch (e) {
     session.setError(`Rename Error: ${formatBackendError(e)}`);
+  }
+}
+
+function resolveInternalGeometryBackend(
+  thread: Thread | undefined,
+  sourceLanguage: SourceLanguage,
+): GeometryBackend {
+  if (sourceLanguage === 'legacyPython') return 'freecad';
+  if (thread?.geometryBackend && thread.geometryBackend !== 'freecad') return thread.geometryBackend;
+  const defaultGeometryBackend = get(config).defaultGeometryBackend;
+  if (defaultGeometryBackend && defaultGeometryBackend !== 'freecad') return defaultGeometryBackend;
+  return 'build123d';
+}
+
+export async function setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage) {
+  try {
+    const existingThread = get(history).find((thread) => thread.id === id);
+    const geometryBackend = resolveInternalGeometryBackend(existingThread, sourceLanguage);
+    await setThreadAuthoringContextCommand(id, sourceLanguage, geometryBackend);
+    history.update((items) => {
+      if (items.some((thread) => thread.id === id)) {
+        return items.map((thread) => (thread.id === id ? { ...thread, sourceLanguage, geometryBackend } : thread));
+      }
+      return items;
+    });
+    await refreshHistory();
+    if (get(activeThreadId) === id) {
+      session.setStatus(`Authoring context updated.`);
+    }
+  } catch (e) {
+    session.setError(`Update Error: ${formatBackendError(e)}`);
   }
 }
 
@@ -538,7 +570,7 @@ export async function refreshHistory() {
           imagePayloadMb: Number((imagePayloadBytes / (1024 * 1024)).toFixed(2)),
         });
         const updatedHistory = freshHistory.map(t => 
-          t.id === tid ? { ...t, messages: fullThread.messages } : t
+          t.id === tid ? fullThread : t
         );
         history.set(updatedHistory);
       } catch (e) {

@@ -14,6 +14,49 @@ use crate::models::{
 };
 use crate::services::agent_dialogue;
 
+const HARD_BUSY_STALE_TIMEOUT_SECS: u64 = 30;
+
+fn is_hard_busy_phase(phase: &str) -> bool {
+    matches!(phase, "rendering" | "saving_version" | "restoring_version")
+}
+
+async fn clear_stale_hard_busy_session_for_thread(
+    state: &AppState,
+    thread_id: &str,
+    now: u64,
+) -> Option<String> {
+    let stale_before = now.saturating_sub(HARD_BUSY_STALE_TIMEOUT_SECS);
+    let mut sessions = state.mcp_sessions.lock().await;
+    for (session_id, session) in sessions.iter_mut() {
+        let matches_thread = session
+            .last_target
+            .as_ref()
+            .map(|target| target.thread_id.as_str())
+            == Some(thread_id)
+            || session.bound_thread_id.as_deref() == Some(thread_id);
+        let Some(phase) = session.phase.as_deref() else {
+            continue;
+        };
+        if !matches_thread
+            || !session.busy
+            || !is_hard_busy_phase(phase)
+            || session.updated_at >= stale_before
+        {
+            continue;
+        }
+        session.phase = Some("idle".to_string());
+        session.status_text = Some("Ready.".to_string());
+        session.busy = false;
+        session.activity_label = None;
+        session.activity_started_at = None;
+        session.attention_kind = None;
+        session.waiting_on_prompt = false;
+        session.updated_at = now;
+        return Some(session_id.clone());
+    }
+    None
+}
+
 fn encode_control_key(key: &str) -> Option<u8> {
     if key.eq_ignore_ascii_case("space") {
         return Some(0);
@@ -604,13 +647,24 @@ async fn queue_agent_prompt_impl(
         if let Some(title) = crate::db::get_thread_title(&conn, &thread_id)
             .map_err(|err| AppError::persistence(err.to_string()))?
         {
-            crate::db::create_or_update_thread(&conn, &thread_id, &title, now, None)
-                .map_err(|err| AppError::persistence(err.to_string()))?;
+            crate::db::create_or_update_thread(
+                &conn, &thread_id, &title, now, None, None, None, None,
+            )
+            .map_err(|err| AppError::persistence(err.to_string()))?;
         } else {
             let title = build_mcp_thread_title(&input.prompt_text, &input.attachments);
             let traits = crate::generate_genie_traits();
-            crate::db::create_or_update_thread(&conn, &thread_id, &title, now, Some(&traits))
-                .map_err(|err| AppError::persistence(err.to_string()))?;
+            crate::db::create_or_update_thread(
+                &conn,
+                &thread_id,
+                &title,
+                now,
+                Some(&traits),
+                None,
+                None,
+                None,
+            )
+            .map_err(|err| AppError::persistence(err.to_string()))?;
         }
 
         crate::db::add_message(
@@ -692,6 +746,11 @@ async fn resolve_thread_agent_state_inputs(
     state: &AppState,
     thread_id: &str,
 ) -> AppResult<runtime::ThreadAgentStateInputs> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let _ = clear_stale_hard_busy_session_for_thread(state, thread_id, now).await;
     let conn = state.db.lock().await;
     let last_session = db::get_thread_last_agent_session(&conn, thread_id)
         .map_err(|e| AppError::persistence(e.to_string()))?;
@@ -731,10 +790,7 @@ async fn resolve_thread_agent_state_inputs(
         runtime: runtime_snapshot,
         live_session,
         last_session,
-        now: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        now,
     })
 }
 
@@ -833,7 +889,7 @@ async fn resolve_agent_prompt_impl(
 
     let mut channels = state.prompt_channels.lock().await;
     if let Some(tx) = channels.remove(&request_id) {
-        let _ = tx.send(delivered_input.clone());
+        let _ = tx.send(Ok(delivered_input.clone()));
     } else {
         return Err(AppError::not_found(format!(
             "No pending prompt request with id: {}",
@@ -1064,6 +1120,8 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: None,
             default_engine_kind: crate::models::EngineKind::Freecad,
+            default_source_language: crate::models::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::models::GeometryBackend::Freecad,
         }
     }
 
@@ -1140,7 +1198,7 @@ mod tests {
         .await
         .expect("resolve agent prompt");
 
-        let delivered = rx.await.expect("prompt delivery");
+        let delivered = rx.await.expect("prompt delivery").expect("prompt ok");
         assert_eq!(delivered.prompt_text, "show outer frame");
         assert_eq!(delivered.attachments.len(), 1);
         assert_eq!(delivered.attachments[0].path, "/tmp/frame.png");
@@ -1159,8 +1217,10 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            crate::db::create_or_update_thread(&conn, "thread-1", "Thread", timestamp, None)
-                .expect("thread");
+            crate::db::create_or_update_thread(
+                &conn, "thread-1", "Thread", timestamp, None, None, None, None,
+            )
+            .expect("thread");
         }
 
         state
@@ -1196,7 +1256,7 @@ mod tests {
         .await
         .expect("resolve prompt");
 
-        let delivered = rx.await.expect("prompt delivery");
+        let delivered = rx.await.expect("prompt delivery").expect("prompt ok");
         assert_eq!(delivered.prompt_text, "Use the smoother lip.");
 
         let stored_messages = {
@@ -1253,7 +1313,7 @@ mod tests {
         .await
         .expect("resolve prompt");
 
-        let delivered = rx.await.expect("prompt delivery");
+        let delivered = rx.await.expect("prompt delivery").expect("prompt ok");
         assert_eq!(delivered.prompt_text, "Add a softer chamfer.");
         assert_eq!(
             delivered.message_id.as_deref(),
@@ -1319,7 +1379,7 @@ mod tests {
         .await
         .expect("resolve prompt batch");
 
-        let delivered = rx.await.expect("prompt delivery");
+        let delivered = rx.await.expect("prompt delivery").expect("prompt ok");
         assert_eq!(delivered.message_ids.len(), 2);
 
         let stored_messages = {

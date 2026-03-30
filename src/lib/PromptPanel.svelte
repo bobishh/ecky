@@ -4,7 +4,11 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
-  import type { Attachment, EngineKind, Message, UsageSummary } from './types/domain';
+  import type {
+    Attachment,
+    Message,
+    UsageSummary,
+  } from './types/domain';
   import {
     activeVersionTimelineIndex,
     formatTimelineAgentOrigin,
@@ -47,9 +51,6 @@
     onPinConceptPreview,
     pinnedConceptPreviewMessageId = null,
     activeThreadId = null,
-    threadEngineKind = 'freecad' as EngineKind,
-    threadEngineLocked = false,
-    onThreadEngineChange,
     sendWorkspaceCapture = false,
     workspaceCaptureHint = null,
     onToggleWorkspaceCapture,
@@ -68,9 +69,6 @@
     onPinConceptPreview?: (message: Message) => void;
     pinnedConceptPreviewMessageId?: string | null;
     activeThreadId?: string | null;
-    threadEngineKind?: EngineKind;
-    threadEngineLocked?: boolean;
-    onThreadEngineChange?: (engineKind: EngineKind) => Promise<void> | void;
     sendWorkspaceCapture?: boolean;
     workspaceCaptureHint?: string | null;
     onToggleWorkspaceCapture?: (enabled: boolean) => void;
@@ -505,7 +503,10 @@
   }
 
   function messageRoleLabel(message: Message, isVersion: boolean) {
-    if (isVersion) return 'VERSION';
+    if (isVersion) {
+      if ((message as VersionMessage).output?.interactionMode === 'question') return 'TUNE';
+      return 'VERSION';
+    }
     return message.role === 'assistant' ? 'ECKY' : 'YOU';
   }
 
@@ -519,13 +520,15 @@
     }
   }
 
-  function engineLabel(engineKind: EngineKind | null | undefined) {
-    return engineKind === 'eckyIrV0' ? 'ECKY IR V0' : 'FREECAD';
+  function engineLabel(message: VersionMessage | null | undefined) {
+    const source = message?.output?.sourceLanguage;
+
+    if (source === 'legacyPython') return 'FREECAD';
+    if (source === 'eckyIrV0') return 'ECKY IR';
+
+    return message?.output?.engineKind === 'eckyIrV0' ? 'ECKY IR' : 'FREECAD';
   }
 
-  function versionEngineKind(message: VersionMessage | null | undefined): EngineKind {
-    return message?.output?.engineKind ?? 'freecad';
-  }
 </script>
 
 <div 
@@ -564,33 +567,6 @@
     </div>
   {/if}
 
-  {#if activeThreadId}
-    <div class="engine-strip">
-      <div class="engine-strip__label">THREAD ENGINE</div>
-      <div class="engine-strip__controls">
-        <button
-          class="engine-strip__option {threadEngineKind === 'freecad' ? 'active' : ''}"
-          type="button"
-          disabled={threadEngineLocked}
-          onclick={() => onThreadEngineChange?.('freecad')}
-        >
-          FREECAD
-        </button>
-        <button
-          class="engine-strip__option {threadEngineKind === 'eckyIrV0' ? 'active' : ''}"
-          type="button"
-          disabled={threadEngineLocked}
-          onclick={() => onThreadEngineChange?.('eckyIrV0')}
-        >
-          ECKY IR V0
-        </button>
-      </div>
-      {#if threadEngineLocked}
-        <div class="engine-strip__lock">IMPORTED FCSTD THREADS STAY PINNED TO FREECAD</div>
-      {/if}
-    </div>
-  {/if}
-
   {#if versionMessages.length > 0}
     <div class="version-nav">
       <div class="version-counter-group">
@@ -620,13 +596,20 @@
           <div class="version-subtitle">{activeVersion.output.versionName}</div>
         {/if}
         {#if activeVersion}
-          <div class="version-engine">{engineLabel(versionEngineKind(activeVersion))}</div>
+          <div class="version-engine">{engineLabel(activeVersion)}</div>
         {/if}
       </div>
       {#if activeVersion}
-        <button class="trail-copy-btn delete-btn" type="button" onclick={() => (versionToDelete = activeVersion)}>
-          SKIP
-        </button>
+        <div class="version-nav__actions">
+          {#if activeVersion.output}
+            <button class="trail-copy-btn" type="button" onclick={() => showCode(activeVersion)}>
+              CODE
+            </button>
+          {/if}
+          <button class="trail-copy-btn delete-btn" type="button" title="Remove from carousel" onclick={() => (versionToDelete = activeVersion)}>
+            🗑️
+          </button>
+        </div>
       {/if}
     </div>
   {/if}
@@ -635,11 +618,12 @@
     {#each timelineMessages as msg (msg.id)}
       {@const visuals = timelineVisuals(msg, toAssetUrl)}
       {@const isVersion = isVersionMessage(msg)}
+      {@const isTuneVersion = isVersion && msg.output?.interactionMode === 'question'}
       {@const isActiveVersion = isVersion && activeVersion?.id === msg.id}
       {@const isDiscardedVersion = isVersion && msg.status === 'discarded'}
       {@const statusLabel = messageStatusLabel(msg)}
       <div
-        class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'} {isActiveVersion ? 'trail-active-version' : ''} {isDiscardedVersion ? 'trail-discarded-version' : ''} {msg.status === 'error' ? 'trail-error' : ''}"
+        class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'} {isActiveVersion ? 'trail-active-version' : ''} {isDiscardedVersion ? 'trail-discarded-version' : ''} {isTuneVersion ? 'trail-tune-version' : ''} {msg.status === 'error' ? 'trail-error' : ''}"
       >
         <div class="trail-header-row">
           <div class="trail-meta">
@@ -653,7 +637,7 @@
               <span class="version-name">{msg.output.versionName}</span>
             {/if}
             {#if isVersion}
-              <span class="version-engine-badge">{engineLabel(versionEngineKind(msg))}</span>
+              <span class="version-engine-badge">{engineLabel(msg)}</span>
             {/if}
             {#if statusLabel}
               <span class="trail-status trail-status--{msg.status}">{statusLabel}</span>
@@ -662,19 +646,21 @@
           </div>
           <div class="trail-header-actions">
             {#if isVersion}
-              {#if isDiscardedVersion}
-                <button class="trail-copy-btn" type="button" onclick={() => restoreVersionToCarousel(msg.id)}>
-                  RETURN
-                </button>
-              {:else}
-                <button
-                  class="trail-copy-btn"
-                  type="button"
-                  disabled={isActiveVersion}
-                  onclick={() => onVersionChange?.(msg)}
-                >
-                  {isActiveVersion ? 'VIEWING' : 'OPEN'}
-                </button>
+              {#if !isTuneVersion}
+                {#if isDiscardedVersion}
+                  <button class="trail-copy-btn" type="button" onclick={() => restoreVersionToCarousel(msg.id)}>
+                    RETURN
+                  </button>
+                {:else}
+                  <button
+                    class="trail-copy-btn"
+                    type="button"
+                    disabled={isActiveVersion}
+                    onclick={() => onVersionChange?.(msg)}
+                  >
+                    {isActiveVersion ? 'VIEWING' : 'OPEN'}
+                  </button>
+                {/if}
               {/if}
               {#if msg.output}
                 <button class="trail-copy-btn" type="button" onclick={() => showCode(msg)}>
@@ -682,8 +668,8 @@
                 </button>
               {/if}
               {#if !isDiscardedVersion}
-                <button class="trail-copy-btn delete-btn" type="button" onclick={() => (versionToDelete = msg)}>
-                  SKIP
+                <button class="trail-copy-btn delete-btn" type="button" title="Remove from carousel" onclick={() => (versionToDelete = msg)}>
+                  🗑️
                 </button>
               {/if}
             {/if}
@@ -774,48 +760,47 @@
       placeholder="Type a question or design change... (Cmd+Enter to process)"
       spellcheck="false"
     ></textarea>
-    {#if dialogueState.mode === 'mcp-idle' && !hasQueuedTimelineMessage}
-      <div class="mcp-mode-hint">
-        Agent is not asking yet — type to queue a message
-      </div>
-    {/if}
-    {#if dialogueState.mode !== 'generate'}
-      <label class="workspace-capture-toggle">
-        <input
-          type="checkbox"
-          checked={sendWorkspaceCapture}
-          onchange={(event) =>
-            onToggleWorkspaceCapture?.((event.currentTarget as HTMLInputElement).checked)}
-        />
-        <span>SEND WORKSPACE IF NEEDED</span>
-      </label>
-      {#if workspaceCaptureHint}
-        <div class="workspace-capture-hint">{workspaceCaptureHint}</div>
-      {/if}
-    {/if}
     <div class="prompt-actions">
-      <button class="btn btn-xs btn-ghost" onclick={addAttachment} title="Attach images or reference CAD files">
-        📎 ATTACH REFERENCE
-      </button>
-      <button
-        class="btn btn-primary"
-        disabled={isGenerating || isSubmitting || (dialogueState.mode === 'generate' && freecadMissing) || (!prompt.trim() && attachments.length === 0)}
-        onclick={submit}
-        title={dialogueState.mode === 'generate' && freecadMissing ? 'FreeCAD not found — configure in Settings' : undefined}
-      >
-        {#if isSubmitting}
-          SENDING...
-        {:else if isGenerating}
-          PROCESSING...
-        {:else if dialogueState.mode === 'agent-reply'}
-          SEND TO AGENT
-        {:else if dialogueState.mode === 'mcp-idle'}
-          QUEUE
-        {:else}
-          PROCESS
+      <div class="prompt-actions__left">
+        {#if dialogueState.mode !== 'generate'}
+          <label class="workspace-capture-toggle">
+            <input
+              type="checkbox"
+              checked={sendWorkspaceCapture}
+              onchange={(event) =>
+                onToggleWorkspaceCapture?.((event.currentTarget as HTMLInputElement).checked)}
+            />
+            <span>SEND WORKSPACE IF NEEDED</span>
+          </label>
         {/if}
-      </button>
+      </div>
+      <div class="prompt-actions__right">
+        <button class="btn btn-xs btn-ghost" onclick={addAttachment} title="Attach images or reference CAD files">
+          📎 ATTACH REFERENCE
+        </button>
+        <button
+          class="btn btn-primary"
+          disabled={isGenerating || isSubmitting || (dialogueState.mode === 'generate' && freecadMissing) || (!prompt.trim() && attachments.length === 0)}
+          onclick={submit}
+          title={dialogueState.mode === 'generate' && freecadMissing ? 'FreeCAD not found — configure in Settings' : undefined}
+        >
+          {#if isSubmitting}
+            SENDING...
+          {:else if isGenerating}
+            PROCESSING...
+          {:else if dialogueState.mode === 'agent-reply'}
+            SEND TO AGENT
+          {:else if dialogueState.mode === 'mcp-idle'}
+            QUEUE
+          {:else}
+            PROCESS
+          {/if}
+        </button>
+      </div>
     </div>
+    {#if workspaceCaptureHint && dialogueState.mode !== 'generate'}
+      <div class="workspace-capture-hint">{workspaceCaptureHint}</div>
+    {/if}
   </div>
 </div>
 
@@ -825,7 +810,7 @@
     flex-direction: column;
     flex: 1;
     height: 100%;
-    min-height: 220px;
+    min-height: 0;
     background: var(--bg);
     position: relative;
     overflow: hidden;
@@ -859,8 +844,8 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 8px;
-    max-height: 160px;
+    margin-bottom: 4px;
+    max-height: 120px;
     overflow-y: auto;
     padding: 4px;
     background: var(--bg-100);
@@ -968,62 +953,12 @@
     gap: 12px;
   }
 
-  .engine-strip {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-shrink: 0;
-    padding: 8px 12px;
-    background: color-mix(in srgb, var(--primary) 6%, var(--bg-100));
-    border-bottom: 1px solid var(--bg-300);
-    flex-wrap: wrap;
-  }
-
-  .engine-strip__label,
   .version-engine,
   .version-engine-badge {
     font-family: var(--font-mono);
     font-size: 0.62rem;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-  }
-
-  .engine-strip__label {
-    color: var(--secondary);
-    font-weight: bold;
-  }
-
-  .engine-strip__controls {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .engine-strip__option {
-    background: var(--bg-200);
-    border: 1px solid var(--bg-300);
-    color: var(--text-dim);
-    padding: 4px 8px;
-    cursor: pointer;
-    font-family: var(--font-mono);
-    font-size: 0.66rem;
-  }
-
-  .engine-strip__option.active {
-    border-color: var(--primary);
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
-  }
-
-  .engine-strip__option:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-
-  .engine-strip__lock {
-    color: var(--text-dim);
-    font-size: 0.62rem;
-    font-family: var(--font-mono);
   }
 
   .nav-controls {
@@ -1205,12 +1140,11 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-bottom: 8px;
     flex: 1;
-    min-height: 140px;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 8px 12px 4px;
+    padding: 8px 12px;
   }
 
   .trail-item {
@@ -1264,6 +1198,23 @@
   .trail-discarded-version .trail-version-title,
   .trail-discarded-version .trail-role {
     color: color-mix(in srgb, var(--text-dim) 88%, var(--secondary));
+  }
+
+  .trail-tune-version {
+    border-color: color-mix(in srgb, var(--bg-300) 70%, transparent);
+    background: color-mix(in srgb, var(--bg-100) 60%, transparent);
+    opacity: 0.82;
+  }
+
+  .trail-tune-version .trail-role {
+    color: var(--text-dim);
+    font-size: 0.65rem;
+  }
+
+  .trail-tune-version .trail-version-title,
+  .trail-tune-version .trail-content {
+    font-size: 0.8em;
+    color: var(--text-dim);
   }
 
   .trail-error {
@@ -1402,19 +1353,23 @@
   .input-area {
     flex-shrink: 0;
     border-top: 1px solid var(--bg-300);
-    padding: 12px;
+    padding: 6px 8px 8px;
     background: var(--bg-100);
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    min-height: 120px;
+    gap: 6px;
+    min-height: 0;
+    overflow: hidden;
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
   }
 
   .prompt-input {
-    flex: 1;
     width: 100%;
-    min-height: 80px;
-    padding: 12px;
+    min-height: 52px;
+    max-height: 80px;
+    padding: 8px 10px;
     background: var(--bg-200);
     border: 1px solid var(--bg-300);
     color: var(--text);
@@ -1430,18 +1385,34 @@
 
   .prompt-actions {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: nowrap;
+    min-height: 34px;
+  }
+
+  .prompt-actions__left,
+  .prompt-actions__right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .prompt-actions__right {
+    margin-left: auto;
   }
 
   .workspace-capture-toggle {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    margin-top: 8px;
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.68rem;
+    font-size: 0.64rem;
     letter-spacing: 0.08em;
+    white-space: nowrap;
   }
 
   .workspace-capture-toggle input {
@@ -1451,26 +1422,20 @@
   }
 
   .workspace-capture-hint {
-    margin-top: 4px;
     color: var(--text-dim);
-    font-size: 0.62rem;
+    font-size: 0.58rem;
     line-height: 1.35;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-
-  .mcp-mode-hint {
-    padding: 6px 12px;
-    font-size: 0.62rem;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-    text-align: center;
-  }
-
 
   .btn-primary {
     padding: 8px 16px;
     font-weight: bold;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    white-space: nowrap;
   }
 
   .error-msg-box {

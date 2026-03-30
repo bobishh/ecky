@@ -35,6 +35,8 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             updated_at INTEGER NOT NULL,
             genie_traits TEXT,
             engine_kind TEXT NOT NULL DEFAULT 'freecad',
+            source_language TEXT NOT NULL DEFAULT 'legacyPython',
+            geometry_backend TEXT NOT NULL DEFAULT 'freecad',
             deleted_at INTEGER
         )",
         [],
@@ -149,6 +151,18 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         "ALTER TABLE threads ADD COLUMN engine_kind TEXT NOT NULL DEFAULT 'freecad'",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE threads ADD COLUMN source_language TEXT NOT NULL DEFAULT 'legacyPython'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE threads ADD COLUMN geometry_backend TEXT NOT NULL DEFAULT 'freecad'",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE threads SET source_language = 'eckyIrV0', geometry_backend = 'eckyRust' WHERE engine_kind = 'eckyIrV0'",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN image_data TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN visual_kind TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN attachment_images TEXT", []);
@@ -248,7 +262,9 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
-        COALESCE(engine_kind, 'freecad')
+        COALESCE(engine_kind, 'freecad'),
+        COALESCE(source_language, 'legacyPython'),
+        COALESCE(geometry_backend, 'freecad')
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -276,6 +292,8 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
             engine_kind: row.get(12)?,
+            source_language: row.get(13)?,
+            geometry_backend: row.get(14)?,
         })
     })?;
 
@@ -308,7 +326,9 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
-        COALESCE(engine_kind, 'freecad')
+        COALESCE(engine_kind, 'freecad'),
+        COALESCE(source_language, 'legacyPython'),
+        COALESCE(geometry_backend, 'freecad')
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -338,6 +358,8 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
             engine_kind: row.get(12)?,
+            source_language: row.get(13)?,
+            geometry_backend: row.get(14)?,
         })
     })?;
 
@@ -409,18 +431,36 @@ pub fn get_latest_successful_target_in_most_recent_thread(
     .optional()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_or_update_thread(
     conn: &Connection,
     thread_id: &str,
     title: &str,
     updated_at: u64,
     genie_traits: Option<&GenieTraits>,
+    engine_kind: Option<crate::models::EngineKind>,
+    source_language: Option<crate::models::SourceLanguage>,
+    geometry_backend: Option<crate::models::GeometryBackend>,
 ) -> SqlResult<()> {
     let traits_str = genie_traits.and_then(|t| serde_json::to_string(t).ok());
     conn.execute(
-        "INSERT INTO threads (id, title, updated_at, genie_traits) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, genie_traits=COALESCE(excluded.genie_traits, threads.genie_traits)",
-        params![thread_id, title, updated_at as i64, traits_str],
+        "INSERT INTO threads (id, title, updated_at, genie_traits, engine_kind, source_language, geometry_backend) VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'freecad'), COALESCE(?6, 'legacyPython'), COALESCE(?7, 'freecad'))
+         ON CONFLICT(id) DO UPDATE SET 
+            title=excluded.title, 
+            updated_at=excluded.updated_at, 
+            genie_traits=COALESCE(excluded.genie_traits, threads.genie_traits),
+            engine_kind=COALESCE(excluded.engine_kind, threads.engine_kind),
+            source_language=COALESCE(excluded.source_language, threads.source_language),
+            geometry_backend=COALESCE(excluded.geometry_backend, threads.geometry_backend)",
+        params![
+            thread_id,
+            title,
+            updated_at as i64,
+            traits_str,
+            engine_kind,
+            source_language,
+            geometry_backend
+        ],
     )?;
     Ok(())
 }
@@ -437,14 +477,64 @@ pub fn get_thread_engine_kind(
     .optional()
 }
 
+pub fn get_thread_source_language(
+    conn: &Connection,
+    thread_id: &str,
+) -> SqlResult<Option<crate::models::SourceLanguage>> {
+    conn.query_row(
+        "SELECT COALESCE(source_language, 'legacyPython') FROM threads WHERE id = ?1",
+        [thread_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn get_thread_geometry_backend(
+    conn: &Connection,
+    thread_id: &str,
+) -> SqlResult<Option<crate::models::GeometryBackend>> {
+    conn.query_row(
+        "SELECT COALESCE(geometry_backend, 'freecad') FROM threads WHERE id = ?1",
+        [thread_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn update_thread_engine_kind(
     conn: &Connection,
     thread_id: &str,
     engine_kind: crate::models::EngineKind,
 ) -> SqlResult<bool> {
+    let source_language = engine_kind.to_source_language();
+    let geometry_backend = engine_kind.to_geometry_backend();
     let changed = conn.execute(
-        "UPDATE threads SET engine_kind = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-        params![engine_kind, thread_id],
+        "UPDATE threads SET engine_kind = ?1, source_language = ?2, geometry_backend = ?3 WHERE id = ?4 AND deleted_at IS NULL",
+        params![engine_kind, source_language, geometry_backend, thread_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn update_thread_source_language(
+    conn: &Connection,
+    thread_id: &str,
+    source_language: crate::models::SourceLanguage,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE threads SET source_language = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![source_language, thread_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn update_thread_geometry_backend(
+    conn: &Connection,
+    thread_id: &str,
+    geometry_backend: crate::models::GeometryBackend,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE threads SET geometry_backend = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![geometry_backend, thread_id],
     )?;
     Ok(changed > 0)
 }
@@ -564,7 +654,9 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
-        COALESCE(engine_kind, 'freecad')
+        COALESCE(engine_kind, 'freecad'),
+        COALESCE(source_language, 'legacyPython'),
+        COALESCE(geometry_backend, 'freecad')
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'finalized'
         ORDER BY finalized_at DESC, id DESC
@@ -592,6 +684,8 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
             engine_kind: row.get(12)?,
+            source_language: row.get(13)?,
+            geometry_backend: row.get(14)?,
         })
     })?;
 
@@ -1728,6 +1822,14 @@ mod tests {
             "ALTER TABLE threads ADD COLUMN engine_kind TEXT NOT NULL DEFAULT 'freecad'",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE threads ADD COLUMN source_language TEXT NOT NULL DEFAULT 'legacyPython'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE threads ADD COLUMN geometry_backend TEXT NOT NULL DEFAULT 'freecad'",
+            [],
+        );
         Ok(())
     }
 
@@ -1740,6 +1842,8 @@ mod tests {
             macro_code: "print('hi')".to_string(),
             macro_dialect: crate::models::MacroDialect::Legacy,
             engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: DesignParams::from([("x".to_string(), ParamValue::Number(10.0))]),
             post_processing: None,
@@ -1755,7 +1859,8 @@ mod tests {
         let msg_id = "test-msg";
         let now = 123456789;
 
-        create_or_update_thread(&conn, thread_id, "Test Thread", now, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Test Thread", now, None, None, None, None)
+            .unwrap();
 
         let msg = Message {
             id: msg_id.to_string(),
@@ -1812,7 +1917,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-1";
-        create_or_update_thread(&conn, thread_id, "Thread", 100, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Thread", 100, None, None, None, None).unwrap();
 
         let user_msg = Message {
             id: "user-1".to_string(),
@@ -1892,7 +1997,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-2";
-        create_or_update_thread(&conn, thread_id, "Manual", 200, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Manual", 200, None, None, None, None).unwrap();
 
         let assistant_msg = Message {
             id: "assistant-manual".to_string(),
@@ -1926,7 +2031,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-trash";
-        create_or_update_thread(&conn, thread_id, "Trash", 250, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Trash", 250, None, None, None, None).unwrap();
 
         let assistant_msg = Message {
             id: "assistant-trash".to_string(),
@@ -1961,7 +2066,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-images";
-        create_or_update_thread(&conn, thread_id, "Images", 300, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Images", 300, None, None, None, None).unwrap();
 
         let msg = Message {
             id: "user-images".to_string(),
@@ -2008,8 +2113,10 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        create_or_update_thread(&conn, "older-thread", "Older", 100, None).unwrap();
-        create_or_update_thread(&conn, "newer-thread", "Newer", 50, None).unwrap();
+        create_or_update_thread(&conn, "older-thread", "Older", 100, None, None, None, None)
+            .unwrap();
+        create_or_update_thread(&conn, "newer-thread", "Newer", 50, None, None, None, None)
+            .unwrap();
 
         add_message(
             &conn,
@@ -2066,7 +2173,17 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        create_or_update_thread(&conn, "pending-thread", "Pending", 100, None).unwrap();
+        create_or_update_thread(
+            &conn,
+            "pending-thread",
+            "Pending",
+            100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         add_message(
             &conn,
@@ -2105,7 +2222,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        create_or_update_thread(&conn, "thread-order", "Thread", 100, None).unwrap();
+        create_or_update_thread(&conn, "thread-order", "Thread", 100, None, None, None, None)
+            .unwrap();
 
         add_message(
             &conn,

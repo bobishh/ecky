@@ -117,6 +117,7 @@
     onchange,
     onspecchange,
     onpostprocessingchange,
+    onShowCode = undefined,
     activeVersionId = null,
     messageId = null,
     macroCode = '',
@@ -140,6 +141,7 @@
     onchange?: (params: DesignParams) => Promise<void> | void;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
     onpostprocessingchange?: (postProcessing: PostProcessingSpec | null) => void;
+    onShowCode?: () => void;
     activeVersionId?: string | null;
     messageId?: string | null;
     macroCode?: string;
@@ -2168,6 +2170,11 @@
       >
         LITHO
       </button>
+      {#if macroCode && onShowCode}
+        <button class="panel-mode-tab panel-code-btn" onclick={onShowCode} title="View macro code">
+          CODE
+        </button>
+      {/if}
     </div>
 
     {#if enrichmentProposals.length > 0 && modelManifest?.sourceKind === 'importedFcstd'}
@@ -3674,6 +3681,7 @@
     display: flex;
     gap: 6px;
     overflow: hidden;
+    align-items: center;
   }
 
   .panel-mode-tab {
@@ -3692,6 +3700,12 @@
     border-color: var(--secondary);
     background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
     color: var(--text);
+  }
+
+  .panel-code-btn {
+    margin-left: auto;
+    border-color: color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
+    color: var(--secondary);
   }
 
   .part-strip-list {

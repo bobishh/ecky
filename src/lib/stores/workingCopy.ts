@@ -3,6 +3,8 @@ import { derived, writable } from 'svelte/store';
 import {
   type EngineKind,
   type MacroDialect,
+  type SourceLanguage,
+  type GeometryBackend,
   normalizeDesignOutput,
   normalizeDesignParams,
   normalizePostProcessing,
@@ -19,6 +21,8 @@ export interface WorkingCopyState {
   macroCode: string;
   macroDialect: MacroDialect;
   engineKind: EngineKind;
+  sourceLanguage: SourceLanguage;
+  geometryBackend: GeometryBackend;
   uiSpec: UiSpec;
   params: DesignParams;
   postProcessing: PostProcessingSpec | null;
@@ -37,6 +41,8 @@ function createInitialState(): WorkingCopyState {
     macroCode: '',
     macroDialect: 'legacy',
     engineKind: 'freecad',
+    sourceLanguage: 'legacyPython',
+    geometryBackend: 'freecad',
     uiSpec: { fields: [] },
     params: {},
     postProcessing: null,
@@ -60,6 +66,8 @@ function createWorkingCopyStore() {
         macroCode: normalized.macroCode,
         macroDialect: normalized.macroDialect ?? 'legacy',
         engineKind: normalized.engineKind ?? 'freecad',
+        sourceLanguage: normalized.sourceLanguage ?? 'legacyPython',
+        geometryBackend: normalized.geometryBackend ?? 'freecad',
         uiSpec: normalizeUiSpec(normalized.uiSpec),
         params: normalizeDesignParams(normalized.initialParams),
         postProcessing: normalized.postProcessing ?? null,

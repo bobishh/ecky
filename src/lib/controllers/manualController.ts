@@ -450,6 +450,8 @@ export async function commitManualVersion(
       interactionMode: "design",
       macroCode: editedCode,
       macroDialect: bundle.engineKind === 'eckyIrV0' ? 'eckyIrV0' : wc.macroDialect ?? 'legacy',
+      sourceLanguage: bundle.sourceLanguage || (bundle.engineKind === 'eckyIrV0' ? 'eckyIrV0' : 'legacyPython'),
+      geometryBackend: bundle.geometryBackend || (bundle.engineKind === 'eckyIrV0' ? 'eckyRust' : 'freecad'),
       engineKind: bundle.engineKind,
       uiSpec: nextUiSpec,
       initialParams: nextParams,

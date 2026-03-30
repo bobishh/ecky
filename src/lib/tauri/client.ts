@@ -26,6 +26,7 @@ import {
   type DesignParams,
   type EngineKind,
   type FinalizeStatus,
+  type GeometryBackend,
   type GenerateOutput,
   type IntentDecision,
   type LastDesignSnapshot,
@@ -33,6 +34,7 @@ import {
   type ModelManifest,
   type McpServerStatus,
   type ParsedParamsResult,
+  type SourceLanguage,
   type Thread,
   type UiSpec,
   type UsageSummary,
@@ -129,6 +131,10 @@ export async function deleteThread(id: string): Promise<void> {
 
 export async function renameThread(id: string, title: string): Promise<void> {
   unwrapResult(await commands.renameThread(id, title));
+}
+
+export async function setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage, geometryBackend: GeometryBackend): Promise<void> {
+  unwrapResult(await commands.setThreadAuthoringContext(id, sourceLanguage, geometryBackend));
 }
 
 export async function setThreadEngineKind(id: string, engineKind: EngineKind): Promise<void> {

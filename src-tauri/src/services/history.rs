@@ -23,6 +23,12 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
     let engine_kind = db::get_thread_engine_kind(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .unwrap_or_default();
+    let source_language = db::get_thread_source_language(conn, id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .unwrap_or_else(|| engine_kind.to_source_language());
+    let geometry_backend = db::get_thread_geometry_backend(conn, id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .unwrap_or_else(|| engine_kind.to_geometry_backend());
 
     let updated_at = messages.last().map(|m| m.timestamp).unwrap_or(0);
     let version_count = messages
@@ -69,6 +75,8 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
         finalized_at: lifecycle.finalized_at,
         pending_confirm: lifecycle.pending_confirm,
         engine_kind,
+        source_language,
+        geometry_backend,
     })
 }
 
@@ -122,16 +130,24 @@ pub fn finalize_thread(
 
     let finalized_thread_id = Uuid::new_v4().to_string();
     let finalized_message_id = Uuid::new_v4().to_string();
+
+    let (source_language, geometry_backend) = if let Some(output) = &selected_message.output {
+        (Some(output.source_language), Some(output.geometry_backend))
+    } else {
+        (None, None)
+    };
+
     db::create_or_update_thread(
         conn,
         &finalized_thread_id,
         &title,
         now,
         genie_traits.as_ref(),
+        Some(engine_kind),
+        source_language,
+        geometry_backend,
     )
     .map_err(|err| AppError::persistence(err.to_string()))?;
-    db::update_thread_engine_kind(conn, &finalized_thread_id, engine_kind)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
     db::update_thread_summary(conn, &finalized_thread_id, &summary)
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
@@ -162,11 +178,19 @@ pub fn get_inventory(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
     db::get_inventory_threads(conn).map_err(|err| AppError::persistence(err.to_string()))
 }
 
-pub fn set_thread_engine_kind(
+pub fn set_thread_authoring_context(
     conn: &rusqlite::Connection,
     thread_id: &str,
-    engine_kind: crate::models::EngineKind,
+    source_language: crate::models::SourceLanguage,
+    geometry_backend: crate::models::GeometryBackend,
 ) -> AppResult<()> {
+    // Determine engine_kind for legacy compatibility
+    let engine_kind = if source_language == crate::models::SourceLanguage::EckyIrV0 {
+        crate::models::EngineKind::EckyIrV0
+    } else {
+        crate::models::EngineKind::Freecad
+    };
+
     if db::get_thread_title(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .is_none()
@@ -175,10 +199,20 @@ pub fn set_thread_engine_kind(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        db::create_or_update_thread(conn, thread_id, "New Thread", now, None)
-            .map_err(|err| AppError::persistence(err.to_string()))?;
+        db::create_or_update_thread(
+            conn,
+            thread_id,
+            "New Thread",
+            now,
+            None,
+            Some(engine_kind),
+            Some(source_language),
+            Some(geometry_backend),
+        )
+        .map_err(|err| AppError::persistence(err.to_string()))?;
     }
 
+    // Keep imported threads pinned to FreeCAD for now (Legacy Python)
     let messages = db::get_thread_messages_for_thread_view(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
     let is_imported = messages.iter().any(|message| {
@@ -196,19 +230,55 @@ pub fn set_thread_engine_kind(
                 .unwrap_or(false)
     });
 
-    if is_imported && engine_kind != crate::models::EngineKind::Freecad {
+    if is_imported
+        && (source_language != crate::models::SourceLanguage::LegacyPython
+            || geometry_backend != crate::models::GeometryBackend::Freecad)
+    {
         return Err(AppError::validation(
-            "Imported FCStd threads stay pinned to FreeCAD.",
+            "Imported FCStd threads stay pinned to FreeCAD (Legacy Python).",
         ));
     }
 
-    let changed = db::update_thread_engine_kind(conn, thread_id, engine_kind)
+    // Update all three fields
+    db::update_thread_engine_kind(conn, thread_id, engine_kind)
         .map_err(|err| AppError::persistence(err.to_string()))?;
-    if changed {
-        Ok(())
-    } else {
-        Err(AppError::not_found("Thread not found."))
+    db::update_thread_source_language(conn, thread_id, source_language)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    db::update_thread_geometry_backend(conn, thread_id, geometry_backend)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+
+    Ok(())
+}
+
+pub fn set_thread_engine_kind(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    engine_kind: crate::models::EngineKind,
+) -> AppResult<()> {
+    if db::get_thread_title(conn, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .is_none()
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        db::create_or_update_thread(
+            conn,
+            thread_id,
+            "New Thread",
+            now,
+            None,
+            Some(engine_kind),
+            None,
+            None,
+        )
+        .map_err(|err| AppError::persistence(err.to_string()))?;
     }
+
+    db::update_thread_engine_kind(conn, thread_id, engine_kind)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    Ok(())
 }
 
 pub fn delete_version(conn: &rusqlite::Connection, message_id: &str) -> AppResult<()> {
@@ -266,8 +336,10 @@ mod tests {
             response: String::new(),
             interaction_mode: InteractionMode::Design,
             macro_code: "print('hi')".to_string(),
-            macro_dialect: MacroDialect::Legacy,
+            macro_dialect: MacroDialect::CadFrameworkV1,
             engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: BTreeMap::new(),
             post_processing: None,
@@ -308,6 +380,9 @@ mod tests {
             "Bulb Lamp Shade",
             100,
             Some(&genie_traits),
+            None,
+            None,
+            None,
         )
         .unwrap();
         db::update_thread_summary(&conn, thread_id, "Working thread").unwrap();
@@ -359,7 +434,17 @@ mod tests {
         ));
         let conn = db::init_db(&db_path).unwrap();
 
-        db::create_or_update_thread(&conn, "thread-queued", "Queued thread", 100, None).unwrap();
+        db::create_or_update_thread(
+            &conn,
+            "thread-queued",
+            "Queued thread",
+            100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         db::add_message(
             &conn,
@@ -439,7 +524,17 @@ mod tests {
         ));
         let conn = db::init_db(&db_path).unwrap();
 
-        db::create_or_update_thread(&conn, "thread-carousel", "Bulb", 100, None).unwrap();
+        db::create_or_update_thread(
+            &conn,
+            "thread-carousel",
+            "Bulb",
+            100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let live = sample_message("msg-live", 100, "V-live");
         let discarded = sample_message("msg-discarded", 101, "V-discarded");

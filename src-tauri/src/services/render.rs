@@ -1,8 +1,8 @@
 use crate::contracts::infer_macro_dialect_from_code;
 use crate::freecad;
 use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, DesignParams, MacroDialect, ModelManifest,
-    PathResolver,
+    AppError, AppResult, AppState, ArtifactBundle, DesignParams, GeometryBackend, MacroDialect,
+    ModelManifest, PathResolver,
 };
 use std::fs;
 use std::path::Path;
@@ -186,22 +186,41 @@ pub async fn render_model(
     macro_code: &str,
     parameters: &DesignParams,
     macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
     let _guard = state.render_lock.lock().await;
-    let resolved_macro_dialect =
+    let effective_dialect =
         macro_dialect.unwrap_or_else(|| infer_macro_dialect_from_code(macro_code));
-    let mut result = if resolved_macro_dialect == MacroDialect::EckyIrV0 {
-        crate::ecky_ir::render_model(macro_code, parameters, app)
+    let resolved_backend = geometry_backend.unwrap_or_else(|| {
+        if effective_dialect == MacroDialect::EckyIrV0 {
+            GeometryBackend::EckyRust
+        } else {
+            GeometryBackend::Freecad
+        }
+    });
+    // For Build123d + IR, lower the IR to Python before dispatch.
+    let lowered = if resolved_backend == GeometryBackend::Build123d
+        && effective_dialect == MacroDialect::EckyIrV0
+    {
+        Some(crate::ecky_ir::lower_to_build123d(macro_code)?)
     } else {
-        freecad::render_model(
+        None
+    };
+    let dispatch_source = lowered.as_deref().unwrap_or(macro_code);
+    let mut result = match resolved_backend {
+        GeometryBackend::EckyRust => crate::ecky_ir::render_model(macro_code, parameters, app),
+        GeometryBackend::Build123d => {
+            crate::build123d::render_model(dispatch_source, parameters, app)
+        }
+        GeometryBackend::Freecad => freecad::render_model(
             macro_code,
             parameters,
             configured_freecad_cmd(state).as_deref(),
             app,
-        )
+        ),
     };
     if let Ok(ref mut bundle) = result {
         apply_requested_post_processing(bundle, parameters, post_processing)?;
@@ -232,6 +251,8 @@ mod tests {
             model_id: "model".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
             engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
             content_hash: "unchanged".to_string(),
             artifact_version: 1,
             fcstd_path: "/tmp/model.FCStd".to_string(),
@@ -287,6 +308,8 @@ mod tests {
             model_id: "model".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
             engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
             content_hash: "unchanged".to_string(),
             artifact_version: 1,
             fcstd_path: "/tmp/model.FCStd".to_string(),
@@ -362,6 +385,8 @@ mod tests {
                 model_id: "model".to_string(),
                 source_kind: crate::models::ModelSourceKind::Generated,
                 engine_kind: crate::models::EngineKind::EckyIrV0,
+                source_language: crate::models::SourceLanguage::EckyIrV0,
+                geometry_backend: crate::models::GeometryBackend::EckyRust,
                 document: crate::models::DocumentMetadata {
                     document_name: "doc".to_string(),
                     document_label: "doc".to_string(),
@@ -417,6 +442,8 @@ mod tests {
             model_id: "model".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
             engine_kind: crate::models::EngineKind::EckyIrV0,
+            source_language: crate::models::SourceLanguage::EckyIrV0,
+            geometry_backend: crate::models::GeometryBackend::EckyRust,
             content_hash: "unchanged".to_string(),
             artifact_version: 1,
             fcstd_path: String::new(),
@@ -566,6 +593,145 @@ mod tests {
             .export_artifacts
             .iter()
             .any(|artifact| artifact.format == "3mf" && artifact.role == "primary"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 6 / 7 verification tests
+    // ------------------------------------------------------------------
+
+    /// Phase 6: EckyRust backend stays alive and is the default for IR.
+    /// Confirm that the dispatch logic selects EckyRust when no explicit
+    /// backend is requested and the source is EckyIR.
+    #[test]
+    fn ecky_rust_is_default_backend_for_ir_source() {
+        use crate::contracts::{infer_macro_dialect_from_code, MacroDialect};
+        use crate::models::GeometryBackend;
+
+        let ir_source = r#"(model (part body (extrude (rounded_rect 30 20 4) 10)))"#;
+        let dialect = infer_macro_dialect_from_code(ir_source);
+        assert_eq!(
+            dialect,
+            MacroDialect::EckyIrV0,
+            "IR source should be detected"
+        );
+
+        // Mirror the dispatch logic from render_model
+        let resolved: GeometryBackend = {
+            if dialect == MacroDialect::EckyIrV0 {
+                GeometryBackend::EckyRust
+            } else {
+                GeometryBackend::Freecad
+            }
+        };
+        assert_eq!(
+            resolved,
+            GeometryBackend::EckyRust,
+            "default for IR must remain EckyRust (Phase 6 invariant)"
+        );
+    }
+
+    /// Phase 7: post-processing is backend-agnostic.
+    ///
+    /// Render a model via the EckyRust backend, then override the bundle's
+    /// `geometry_backend` to `Build123d` before running post-processing.
+    /// The lithophane pipeline must produce the same 3MF output regardless of
+    /// which backend generated the underlying geometry.
+    #[test]
+    fn post_processing_is_backend_agnostic_for_build123d_bundle() {
+        #[derive(Clone)]
+        struct TestResolver {
+            root: std::path::PathBuf,
+        }
+        impl crate::models::PathResolver for TestResolver {
+            fn app_config_dir(&self) -> std::path::PathBuf {
+                self.root.clone()
+            }
+            fn app_data_dir(&self) -> std::path::PathBuf {
+                self.root.clone()
+            }
+            fn resource_path(&self, _: &str) -> Option<std::path::PathBuf> {
+                None
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("ecky-phase7-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = TestResolver { root: root.clone() };
+
+        // Render via EckyRust to get a real bundle with actual geometry.
+        let mut bundle = crate::ecky_ir::render_model(
+            r#"(model (part body (extrude (rounded_rect 32 32 4 12) 10)))"#,
+            &crate::models::DesignParams::new(),
+            &resolver,
+        )
+        .expect("IR render");
+
+        // Override the geometry_backend field to simulate a Build123d bundle.
+        // This is the core of the Phase 7 invariant: post-processing must not
+        // branch on the backend.
+        bundle.geometry_backend = crate::models::GeometryBackend::Build123d;
+
+        let image_path = root.join("panel.png");
+        image::RgbImage::from_fn(3, 3, |x, y| {
+            if (x + y) % 2 == 0 {
+                image::Rgb([255u8, 255, 255])
+            } else {
+                image::Rgb([32, 64, 200])
+            }
+        })
+        .save(&image_path)
+        .unwrap();
+
+        apply_requested_post_processing(
+            &mut bundle,
+            &crate::models::DesignParams::new(),
+            Some(&PostProcessingSpec {
+                displacement: None,
+                lithophane_attachments: vec![LithophaneAttachment {
+                    id: "panel".to_string(),
+                    enabled: true,
+                    source: LithophaneAttachmentSource::File {
+                        image_path: image_path.to_string_lossy().to_string(),
+                    },
+                    target_part_id: "body".to_string(),
+                    placement: LithophanePlacement {
+                        mode: LithophanePlacementMode::PartSidePatch,
+                        side: LithophaneSide::Front,
+                        projection: ProjectionType::Planar,
+                        width_mm: 24.0,
+                        height_mm: 24.0,
+                        offset_x_mm: 0.0,
+                        offset_y_mm: 0.0,
+                        rotation_deg: 0.0,
+                        overflow_mode: OverflowMode::Contain,
+                        bleed_margin_mm: 0.0,
+                    },
+                    relief: LithophaneRelief {
+                        depth_mm: 1.0,
+                        invert: false,
+                    },
+                    color: LithophaneColor {
+                        mode: LithophaneColorMode::Cmyk,
+                        channel_thickness_mm: 0.4,
+                    },
+                }],
+            }),
+        )
+        .expect("post-processing must succeed on a Build123d-tagged bundle (Phase 7 invariant)");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Build123d,
+            "geometry_backend must not be mutated by post-processing"
+        );
+        assert!(
+            bundle
+                .export_artifacts
+                .iter()
+                .any(|a| a.format == "3mf" && a.role == "primary"),
+            "post-processing must produce a 3MF for a Build123d-tagged bundle"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

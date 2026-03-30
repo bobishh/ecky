@@ -40,7 +40,12 @@
   }
 
   function engineLabel(thread: Thread): string {
-    return thread.engineKind === 'eckyIrV0' ? 'ECKY IR V0' : 'FREECAD';
+    const source = thread.sourceLanguage;
+
+    if (source === 'legacyPython') return 'FREECAD';
+    if (source === 'eckyIrV0') return 'ECKY IR';
+
+    return thread.engineKind === 'eckyIrV0' ? 'ECKY IR' : 'FREECAD';
   }
 
   onMount(() => {

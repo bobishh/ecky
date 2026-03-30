@@ -93,6 +93,14 @@ async renameThread(id: string, title: string) : Promise<Result<null, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
+async setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage, geometryBackend: GeometryBackend) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_thread_authoring_context", { id, sourceLanguage, geometryBackend }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async setThreadEngineKind(id: string, engineKind: EngineKind) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_thread_engine_kind", { id, engineKind }) };
@@ -572,7 +580,7 @@ vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLab
 export type AppError = { code: AppErrorCode; message: string; details?: string | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
-export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
+export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
 export type Asset = { id: string; name: string; path: string; format: string }
 export type Attachment = { path: string; name: string; explanation: string; kind: AttachmentKind }
 export type AttachmentKind = "image" | "cad"
@@ -586,7 +594,7 @@ export type AutoAgent = { id: string; label: string; cmd: string; model?: string
  */
 startOnDemand?: boolean }
 export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
 export type ControlRelation = { relationId: string; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number; enabled?: boolean }
@@ -596,7 +604,7 @@ export type ControlViewScope = "global" | "part"
 export type ControlViewSection = { sectionId: string; label: string; primitiveIds?: string[]; collapsed?: boolean }
 export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
 export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
-export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
+export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
 export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; systemPrompt: string; 
@@ -605,6 +613,8 @@ export type Engine = { id: string; name: string; provider: string; apiKey: strin
  * Defaults to true for backward compatibility with existing configs.
  */
 enabled?: boolean }
+export type SourceLanguage = "legacyPython" | "eckyIrV0"
+export type GeometryBackend = "freecad" | "build123d" | "eckyRust"
 export type EngineKind = "freecad" | "eckyIrV0"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
@@ -612,7 +622,7 @@ export type ExportArtifact = { label: string; format: string; path: string; role
 export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null }
 export type EyeStyle = "dot" | "bar" | "slant"
 export type FinalizeStatus = "success" | "error" | "discarded"
-export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null; engineKind?: EngineKind | null }
+export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null; engineKind?: EngineKind | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null }
 export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
 export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
@@ -667,7 +677,7 @@ export type MessageRole = "user" | "assistant"
 export type MessageStatus = "pending" | "working" | "success" | "error" | "discarded"
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
 export type ModelSourceKind = "generated" | "importedFcstd"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
 export type ParamValue = string | number | boolean | null
@@ -687,7 +697,7 @@ export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
 export type SelectionTargetKind = "part" | "object" | "group" | "edge"
-export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null; engineKind?: EngineKind }
+export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend }
 export type ThreadAgentState = { 
 /**
  * "none" | "sleeping" | "waking" | "waiting" | "active" | "disconnected" | "error"
