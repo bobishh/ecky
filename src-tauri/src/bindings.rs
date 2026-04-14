@@ -26,6 +26,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::generation::init_generation_attempt,
         crate::commands::generation::finalize_generation_attempt,
         crate::commands::generation::classify_intent,
+        crate::commands::generation::verify_render,
+        crate::commands::generation::verify_generated_model,
         crate::commands::render::check_freecad,
         crate::commands::render::render_stl,
         crate::commands::render::render_model,

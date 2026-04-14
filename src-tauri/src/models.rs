@@ -10,6 +10,11 @@ use tokio::sync::oneshot;
 
 pub use crate::contracts::*;
 
+/// Pending user-prompt requests keyed by requestId.
+type PromptChannels = Arc<
+    tokio::sync::Mutex<HashMap<String, oneshot::Sender<Result<ResolveAgentPromptInput, String>>>>,
+>;
+
 pub trait PathResolver: Send + Sync {
     fn app_config_dir(&self) -> PathBuf;
     fn app_data_dir(&self) -> PathBuf;
@@ -163,11 +168,7 @@ pub struct AppState {
     /// Pending user-confirmation requests keyed by requestId.
     pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
     /// Pending user-prompt requests keyed by requestId (agent waits for text/attachments from UI).
-    pub prompt_channels: Arc<
-        tokio::sync::Mutex<
-            HashMap<String, oneshot::Sender<Result<ResolveAgentPromptInput, String>>>,
-        >,
-    >,
+    pub prompt_channels: PromptChannels,
     /// Runtime state machine for active-mode MCP agents.
     pub auto_agent_runtime: Arc<Mutex<crate::mcp::runtime::AutoAgentRuntimeRegistry>>,
     /// Maps prompt request_id → process control for agents SIGSTOP'd while waiting on the user.

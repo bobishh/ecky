@@ -18,10 +18,14 @@ import type {
   GenerateOutput,
   IntentDecision,
   Request,
+  StructuralMetrics,
   UsageSummary,
 } from '../types/domain';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
 import { detectFollowUpAnswer } from './followUpGuard';
+import { runStructuralCheck } from './structuralVerification';
+import { runVerificationRound } from './verificationLoop';
+import { buildAuthoringDigest } from '../llmContextDigest';
 import {
   classifyIntent,
   finalizeGenerationAttempt,
@@ -34,6 +38,8 @@ import {
   renderModel,
   saveModelManifest,
   saveConfig,
+  verifyRender,
+  verifyGeneratedModel,
 } from '../tauri/client';
 
 // ---------------------------------------------------------------------------
@@ -122,6 +128,17 @@ function toAssetUrl(path: string | null | undefined): string {
   }
 }
 
+function formatStructuralSummary(metrics: StructuralMetrics): string {
+  const lines = [`Structural checks passed.`, `Parts: ${metrics.partCount}`];
+  if (metrics.totalVolume != null) lines.push(`Volume: ${metrics.totalVolume.toFixed(2)}mm³`);
+  if (metrics.totalArea != null) lines.push(`Area: ${metrics.totalArea.toFixed(2)}mm²`);
+  if (metrics.bbox) {
+    const b = metrics.bbox;
+    lines.push(`BBox: [${b.xMin.toFixed(1)}, ${b.yMin.toFixed(1)}, ${b.zMin.toFixed(1)}] → [${b.xMax.toFixed(1)}, ${b.yMax.toFixed(1)}, ${b.zMax.toFixed(1)}]`);
+  }
+  return lines.join('\n');
+}
+
 function mergeUsageSummary(
   left: UsageSummary | null | undefined,
   right: UsageSummary | null | undefined,
@@ -201,6 +218,7 @@ class CancelError extends Error {
 
 type ViewerRef = {
   captureScreenshot: (overlayCanvas?: HTMLCanvasElement | null) => string | null;
+  captureMultiAngleScreenshots: () => string[];
 };
 
 type OpenCodeModalManual = (data: DesignOutput) => void;
@@ -227,29 +245,16 @@ export function initOrchestrator(deps: {
 // ---------------------------------------------------------------------------
 
 function buildLightReasoningContext(): string {
-  const context: string[] = [];
   const wc = get(workingCopy);
   const panel = get(paramPanelState);
-  if (wc.title) context.push(`Title: ${wc.title}`);
-  if (wc.versionName) context.push(`Version: ${wc.versionName}`);
-  if (wc.macroCode) {
-    context.push(
-      `ACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n\`\`\`python\n${wc.macroCode}\n\`\`\``
-    );
-  } else {
-    context.push('ACTUAL CURRENT FREECAD MACRO: [none in working copy]');
-  }
-  if (panel.uiSpec) {
-    context.push(
-      `ACTUAL CURRENT UI SPEC (AUTHORITATIVE):\n\`\`\`json\n${JSON.stringify(panel.uiSpec, null, 2)}\n\`\`\``
-    );
-  }
-  if (panel.params && Object.keys(panel.params).length > 0) {
-    context.push(
-      `ACTUAL CURRENT PARAMETERS (AUTHORITATIVE):\n\`\`\`json\n${JSON.stringify(panel.params, null, 2)}\n\`\`\``
-    );
-  }
-  return context.join('\n\n');
+  return buildAuthoringDigest({
+    title: wc.title,
+    versionName: wc.versionName,
+    sourceLanguage: wc.sourceLanguage,
+    uiSpec: panel.uiSpec,
+    params: panel.params,
+    modelManifest: get(session).modelManifest,
+  });
 }
 
 function buildWorkingDesignSnapshot(): DesignOutput | null {
@@ -505,6 +510,9 @@ class GenerationPipeline {
 
     let attempt = 1;
     let currentPrompt = this.req.prompt;
+    // Screenshot/VLM verification attempts (0 = disabled).
+    // Structural verification always runs regardless.
+    const maxVerifyAttempts = this.req.maxVerifyAttempts;
 
     while (attempt <= this.req.maxAttempts) {
       this.checkCanceled();
@@ -569,6 +577,94 @@ class GenerationPipeline {
             await saveModelManifest(bundle.modelId, manifest);
           }
           this.checkCanceled();
+
+          // Collect reference image paths from attachments for verification
+          const referenceImagePaths = (this.req.attachments ?? [])
+            .filter((a) => a.type === 'image')
+            .map((a) => a.path);
+
+          // ── Stage 1: Structural verification (always runs) ──────────────
+          let structuralSummary: string | null = null;
+          let structuralMetrics: StructuralMetrics | null = null;
+          {
+            this.updateStatus('Structural verification...');
+            const structResult = await runStructuralCheck({
+              modelId: bundle.modelId,
+              originalPrompt: this.req.prompt,
+              currentGenerationAttempt: attempt,
+              maxGenerationAttempts: this.req.maxAttempts,
+              verify: (modelId, prompt) => verifyGeneratedModel(modelId, prompt),
+            });
+
+            console.info('[Pipeline] structural verify:', structResult.kind);
+
+            if (structResult.kind === 'repair_needed') {
+              currentPrompt = structResult.repairPrompt;
+              attempt++;
+              if (attempt <= this.req.maxAttempts) {
+                const firstIssue = structResult.repairPrompt.split('\n').find((l: string) => l.startsWith('- [')) ?? structResult.repairPrompt.split('\n')[0];
+                if (this.isActiveThread()) session.setRepairMessage(`Structural: ${firstIssue}`);
+                this.checkCanceled();
+                continue;
+              }
+              // attempt cap hit — fall through to commit best-effort
+            } else if (structResult.kind === 'failed_terminal') {
+              console.warn('[Pipeline] structural terminal failure:', structResult.issues);
+            } else if (structResult.kind === 'structural_passed') {
+              structuralMetrics = structResult.metrics;
+              structuralSummary = formatStructuralSummary(structResult.metrics);
+            }
+            // structural_passed or structural_skipped → proceed
+            this.checkCanceled();
+          }
+
+          // ── Stage 2: Screenshot/VLM verification (gated by config) ───────
+          if (maxVerifyAttempts > 0 && viewerRef) {
+            // Give Three.js one frame to render the new STL before capturing
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+            let verifyAttempt = 0;
+            while (verifyAttempt < maxVerifyAttempts) {
+              this.checkCanceled();
+              verifyAttempt++;
+
+              requestQueue.patch(this.requestId, { phase: 'rendering' });
+              this.updateStatus(`Vision verify (${verifyAttempt}/${maxVerifyAttempts})...`);
+
+              const vResult = await runVerificationRound(verifyAttempt, {
+                originalPrompt: this.req.prompt,
+                maxVerifyAttempts,
+                currentGenerationAttempt: attempt,
+                maxGenerationAttempts: this.req.maxAttempts,
+                capture: () => viewerRef!.captureMultiAngleScreenshots(),
+                verify: (prompt, screenshots, refImages, structSummary) =>
+                  verifyRender(prompt, screenshots, refImages, structSummary),
+                referenceImages: referenceImagePaths,
+                structuralSummary,
+                structuralMetrics,
+              });
+
+              console.info('[Pipeline] vision verify:', vResult.kind);
+
+              if (vResult.kind === 'passed' || vResult.kind === 'skipped') break;
+
+              if (vResult.kind === 'repair_needed') {
+                currentPrompt = vResult.repairPrompt;
+                attempt++;
+                if (attempt > this.req.maxAttempts) break;
+                if (this.isActiveThread()) session.setRepairMessage(`Vision: ${vResult.repairPrompt.split('\n')[0]}`);
+                break; // break verify loop, continue generate loop
+              }
+
+              // failed_terminal → commit anyway
+              if (vResult.kind === 'failed_terminal') {
+                console.warn('[Pipeline] vision terminal failure:', vResult.issues);
+              }
+              break;
+            }
+            this.checkCanceled();
+          }
+          // ── End verification ──────────────────────────────────────────────
 
           await this.commitSuccess(data, bundle, manifest);
           return;

@@ -49,3 +49,55 @@ test('agentTerminalStore keeps separate sessions for the same agent and prefers 
 
   resetAgentTerminalStore();
 });
+
+test('agentTerminalStore merges pending vt deltas before the flush so active PTY output is not lost', async () => {
+  resetAgentTerminalStore();
+
+  enqueueAgentTerminalSnapshot({
+    agentId: 'gemini',
+    agentLabel: 'Gemini',
+    sessionId: 'session-a',
+    sessionNonce: 1,
+    screenText: '',
+    vtStream: '',
+    vtDelta: 'abc',
+    attentionRequired: false,
+    summary: null,
+    active: true,
+    updatedAt: 10,
+  });
+  enqueueAgentTerminalSnapshot({
+    agentId: 'gemini',
+    agentLabel: 'Gemini',
+    sessionId: 'session-a',
+    sessionNonce: 1,
+    screenText: '',
+    vtStream: '',
+    vtDelta: 'def',
+    attentionRequired: false,
+    summary: null,
+    active: true,
+    updatedAt: 11,
+  });
+  enqueueAgentTerminalSnapshot({
+    agentId: 'gemini',
+    agentLabel: 'Gemini',
+    sessionId: 'session-a',
+    sessionNonce: 1,
+    screenText: '',
+    vtStream: '',
+    vtDelta: 'ghi',
+    attentionRequired: false,
+    summary: null,
+    active: true,
+    updatedAt: 12,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 90));
+
+  const snapshot = get(visibleAgentTerminalStore);
+  assert.equal(snapshot?.sessionId, 'session-a');
+  assert.equal(snapshot?.vtStream, 'abcdefghi');
+
+  resetAgentTerminalStore();
+});

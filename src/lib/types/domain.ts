@@ -19,6 +19,14 @@ export type EngineConfig = Contract.Engine; // includes enabled: boolean
 export type AssetConfig = Contract.Asset;
 export type GenieEyeStyle = Contract.EyeStyle;
 export type IntentDecision = Contract.IntentDecision;
+export type VisualVerificationResult = Contract.VisualVerificationResult;
+export type VisualIssue = Contract.VisualIssue;
+export type VisualIssueCategory = Contract.VisualIssueCategory;
+export type StructuralVerificationResult = Contract.StructuralVerificationResult;
+export type StructuralIssue = Contract.StructuralIssue;
+export type StructuralMetrics = Contract.StructuralMetrics;
+export type VerifierStatus = Contract.VerifierStatus;
+export type VerifierSource = Contract.VerifierSource;
 export type AgentOrigin = Contract.AgentOrigin;
 export type AgentSession = Contract.AgentSession;
 export type AgentTerminalSnapshot = Contract.AgentTerminalSnapshot;
@@ -221,6 +229,8 @@ export interface AppConfig {
   defaultEngineKind: EngineKind;
   defaultSourceLanguage: SourceLanguage;
   defaultGeometryBackend: GeometryBackend;
+  maxGenerationAttempts: number;
+  maxVerifyAttempts: number;
 }
 
 export type ModelSourceKind = Contract.ModelSourceKind;
@@ -321,6 +331,7 @@ export interface Request {
   phase: RequestPhase;
   attempt: number;
   maxAttempts: number;
+  maxVerifyAttempts: number;
   isQuestion: boolean;
   lightResponse: string;
   screenshot: string | null;
@@ -861,6 +872,8 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
       (((config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind) === 'eckyIrV0'
         ? 'eckyRust'
         : 'freecad'),
+    maxGenerationAttempts: Math.max(1, Number((config as AppConfig).maxGenerationAttempts ?? (legacy as any).max_generation_attempts ?? 3) || 3),
+    maxVerifyAttempts: Math.max(0, Number((config as AppConfig).maxVerifyAttempts ?? (legacy as any).max_verify_attempts ?? 0) || 0),
   };
 }
 

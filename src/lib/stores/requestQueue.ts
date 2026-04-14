@@ -1,5 +1,6 @@
 import { writable, derived, get } from 'svelte/store';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
+import { config } from './domainState';
 import type { Attachment, Request, RequestPhase } from '../types/domain';
 
 export interface QueuedRequest extends Request {}
@@ -67,7 +68,8 @@ function createRequestQueue() {
         createdAt: Date.now(),
         phase: 'classifying',
         attempt: 1,
-        maxAttempts: 3,
+        maxAttempts: get(config)?.maxGenerationAttempts ?? 3,
+        maxVerifyAttempts: get(config)?.maxVerifyAttempts ?? 0,
         isQuestion: false,
         lightResponse: '',
         screenshot: null,

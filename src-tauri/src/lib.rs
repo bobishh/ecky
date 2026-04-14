@@ -12,6 +12,7 @@ pub mod ecky_ir_patterns;
 pub mod freecad;
 pub mod lithophane;
 pub mod llm;
+pub mod llm_context;
 pub mod mcp;
 pub mod models;
 pub mod services;
@@ -538,6 +539,8 @@ pub fn run() {
         default_engine_kind: crate::models::EngineKind::Freecad,
         default_source_language: crate::models::SourceLanguage::LegacyPython,
         default_geometry_backend: crate::models::GeometryBackend::Freecad,
+        max_generation_attempts: 3,
+        max_verify_attempts: 0,
     };
 
     let app = tauri::Builder::default()

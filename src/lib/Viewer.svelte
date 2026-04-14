@@ -9,6 +9,7 @@
   import type {
     Advisory,
     ParamValue,
+    PartBinding,
     UiField,
     ViewerAsset,
     ViewerEdgeTarget,
@@ -23,6 +24,8 @@
   } from './modelRuntime/contextualEditing';
   import type { ImportedPreviewTransform } from './modelRuntime/importedRuntime';
   import type { MaterializedSemanticControl } from './modelRuntime/semanticControls';
+  import { cycleTopologyMode, topologyModeLabel, type TopologyMode } from './viewerDisplayMode';
+  import { resolveViewerTone, type ViewerTone } from './viewerLook';
 
   type ViewportBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
 
@@ -30,10 +33,12 @@
     modelKey = null,
     stlUrl = null,
     viewerAssets = [],
+    manifestParts = [],
     edgeTargets = [],
     selectionTargets = [],
     selectedTarget = null,
     searchQuery = '',
+    outlineEnabled = true,
     selectedPartId = null,
     overlayPartLabel = null,
     overlayPartEditable = false,
@@ -47,6 +52,7 @@
     hideModelWhileBusy = false,
     busyPhase = null,
     busyText = null,
+    topologyMode = 'mesh',
     persistedCameraState = null,
     onSearchQueryChange,
     onSelectTarget,
@@ -58,10 +64,12 @@
     modelKey?: string | null;
     stlUrl?: string | null;
     viewerAssets?: ViewerAsset[];
+    manifestParts?: PartBinding[];
     edgeTargets?: ViewerEdgeTarget[];
     selectionTargets?: ContextSelectionTarget[];
     selectedTarget?: ContextSelectionTarget | null;
     searchQuery?: string;
+    outlineEnabled?: boolean;
     selectedPartId?: string | null;
     overlayPartLabel?: string | null;
     overlayPartEditable?: boolean;
@@ -75,6 +83,7 @@
     hideModelWhileBusy?: boolean;
     busyPhase?: ViewportBusyPhase;
     busyText?: string | null;
+    topologyMode?: TopologyMode;
     persistedCameraState?: ViewportCameraState | null;
     onSearchQueryChange?: (query: string) => void;
     onSelectTarget?: (target: ContextSelectionTarget | null) => void;
@@ -87,7 +96,10 @@
   type RuntimeMesh = {
     partId: string | null;
     baseBounds: THREE.Box3 | null;
+    outline: THREE.LineSegments<THREE.EdgesGeometry, THREE.LineBasicMaterial> | null;
     mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+    topology: THREE.LineSegments<THREE.WireframeGeometry, THREE.LineBasicMaterial> | null;
+    tone: ViewerTone;
   };
 
   type RuntimeEdge = {
@@ -124,8 +136,11 @@
   const viewerAssetSignature = $derived.by(() =>
     viewerAssets.map((asset) => `${asset.partId}:${asset.nodeId}:${asset.path}`).join('|'),
   );
+  const manifestPartSignature = $derived.by(() =>
+    manifestParts.map((part) => `${part.partId}:${part.label}:${part.kind}:${part.semanticRole ?? ''}`).join('|'),
+  );
   const modelLoadSignature = $derived.by(
-    () => `${modelKey ?? ''}::${stlUrl ?? ''}::${viewerAssetSignature}`,
+    () => `${modelKey ?? ''}::${stlUrl ?? ''}::${viewerAssetSignature}::${manifestPartSignature}`,
   );
   const showEditableCallouts = $derived.by(
     () => !hideModelWhileBusy && !overlayFallback && overlayPartEditable && overlayControls.length > 0,
@@ -227,6 +242,53 @@
 
   export function captureScreenshot(overlayCanvas: HTMLCanvasElement | null = null): string | null {
     return captureScreenshotDetails(overlayCanvas)?.dataUrl ?? null;
+  }
+
+  /**
+   * Capture the current model from N standard angles for vision verification.
+   * Saves and restores the camera state so the user sees no change.
+   *
+   * Angles (normalized direction vectors from model center):
+   *   0 – isometric front-right  (1, -1,  0.7)
+   *   1 – isometric back-left   (-1,  1,  0.7)
+   *   2 – front                  (0, -1,  0.2)
+   *   3 – top-down               (0,  0,   1 )
+   */
+  export function captureMultiAngleScreenshots(): string[] {
+    if (!renderer || !scene || !camera || !controls) return [];
+    const savedState = currentCameraState();
+    if (!savedState) return [];
+
+    const cx = controls.target.x;
+    const cy = controls.target.y;
+    const cz = controls.target.z;
+    const dist = camera.position.distanceTo(controls.target);
+
+    // [dx, dy, dz] — direction from center to camera, will be normalised
+    const directions: [number, number, number][] = [
+      [ 1, -1,  0.7],
+      [-1,  1,  0.7],
+      [ 0, -1,  0.2],
+      [ 0,  0,  1.0],
+    ];
+
+    const results: string[] = [];
+    for (const [dx, dy, dz] of directions) {
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      camera.position.set(
+        cx + (dx / len) * dist,
+        cy + (dy / len) * dist,
+        cz + (dz / len) * dist,
+      );
+      controls.update();
+      renderer.render(scene, camera);
+      results.push(renderer.domElement.toDataURL('image/jpeg', 0.75));
+    }
+
+    // Restore original view
+    applyCameraState(savedState);
+    renderer.render(scene, camera);
+    return results;
   }
 
   function asNumber(value: ParamValue | undefined, fallback = 0): number {
@@ -392,6 +454,12 @@
   });
 
   $effect(() => {
+    void outlineEnabled;
+    void topologyMode;
+    applySelectionStyles();
+  });
+
+  $effect(() => {
     if (!controls) return;
     controls.autoRotate = isGenerating && !hideModelWhileBusy;
     controls.autoRotateSpeed = controls.autoRotate ? 1.8 : 0;
@@ -420,6 +488,9 @@
     camera.position.set(140, 120, 140);
 
     renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(viewerHost.clientWidth, viewerHost.clientHeight);
     viewerHost.appendChild(renderer.domElement);
@@ -432,15 +503,28 @@
     controls.enableDamping = true;
     controls.addEventListener('change', emitCameraStateChange);
 
-    const hemi = new THREE.HemisphereLight(0xc7d8ff, 0x202020, 0.9);
+    const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x182032, 0.78);
     scene.add(hemi);
 
-    const dir = new THREE.DirectionalLight(0xffffff, 0.95);
-    dir.position.set(120, 180, 140);
-    scene.add(dir);
+    const key = new THREE.DirectionalLight(0xfff2dc, 1.55);
+    key.position.set(140, 190, 155);
+    scene.add(key);
+
+    const fill = new THREE.DirectionalLight(0x9ec8ff, 0.72);
+    fill.position.set(-120, 120, -90);
+    scene.add(fill);
+
+    const rim = new THREE.DirectionalLight(0xf6d39d, 0.38);
+    rim.position.set(-40, 160, 180);
+    scene.add(rim);
 
     const grid = new THREE.GridHelper(250, 24, 0x24314f, 0x18203a);
     grid.position.y = 0;
+    const gridMaterial = grid.material as THREE.Material | THREE.Material[];
+    for (const material of Array.isArray(gridMaterial) ? gridMaterial : [gridMaterial]) {
+      if ('transparent' in material) material.transparent = true;
+      if ('opacity' in material) material.opacity = 0.22;
+    }
     scene.add(grid);
 
     animate();
@@ -498,15 +582,27 @@
 
         geometry.computeVertexNormals();
         geometry.computeBoundingBox();
-        const material = createMaterial(asset.partId === selectedPartId);
+        const tone = resolveViewerTone(asset.partId, manifestParts);
+        const material = createMaterial(tone, asset.partId === selectedPartId);
         const mesh = new THREE.Mesh(geometry, material);
+        const outline = createOutline(geometry, tone, asset.partId === selectedPartId);
+        const topology = createTopologyOverlay(geometry, tone);
+        if (outline) {
+          mesh.add(outline);
+        }
+        if (topology) {
+          mesh.add(topology);
+        }
         mesh.userData.partId = asset.partId;
         mesh.userData.nodeId = asset.nodeId;
         nextRoot.add(mesh);
         nextMeshes.push({
           partId: asset.partId,
           baseBounds: geometry.boundingBox?.clone() ?? null,
+          outline,
           mesh,
+          topology,
+          tone,
         });
       }
 
@@ -551,13 +647,22 @@
 
       geometry.computeVertexNormals();
       geometry.computeBoundingBox();
-      const material = createMaterial(false);
+      const tone = resolveViewerTone(null, manifestParts);
+      const material = createMaterial(tone, false);
       const mesh = new THREE.Mesh(geometry, material);
+      const outline = createOutline(geometry, tone, false);
+      const topology = createTopologyOverlay(geometry, tone);
+      if (outline) {
+        mesh.add(outline);
+      }
+      if (topology) {
+        mesh.add(topology);
+      }
       nextRoot.add(mesh);
 
       disposeModel();
       modelRoot = nextRoot;
-      runtimeMeshes = [{ partId: null, baseBounds: geometry.boundingBox?.clone() ?? null, mesh }];
+      runtimeMeshes = [{ partId: null, baseBounds: geometry.boundingBox?.clone() ?? null, outline, mesh, topology, tone }];
       applyPreviewTransforms();
       scene.add(modelRoot);
       frameModel(modelRoot);
@@ -594,14 +699,58 @@
     controls.update();
   }
 
-  function createMaterial(isSelected: boolean) {
+  function createMaterial(tone: ViewerTone, isSelected: boolean) {
     return new THREE.MeshStandardMaterial({
-      color: isSelected ? 0xe5ca88 : 0xd2bf89,
-      emissive: isSelected ? 0x5b4120 : 0x000000,
-      emissiveIntensity: isSelected ? 0.45 : 0,
-      metalness: 0.1,
-      roughness: 0.68,
+      color: isSelected ? 0xe5ca88 : tone.color,
+      emissive: isSelected ? tone.emissive : 0x000000,
+      emissiveIntensity: isSelected ? 0.38 : 0,
+      metalness: 0.04,
+      roughness: 0.54,
     });
+  }
+
+  function createOutline(
+    geometry: THREE.BufferGeometry,
+    tone: ViewerTone,
+    isSelected: boolean,
+  ): THREE.LineSegments<THREE.EdgesGeometry, THREE.LineBasicMaterial> | null {
+    const outlineGeometry = new THREE.EdgesGeometry(geometry, 32);
+    if (outlineGeometry.getAttribute('position')?.count === 0) {
+      outlineGeometry.dispose();
+      return null;
+    }
+    return new THREE.LineSegments(
+      outlineGeometry,
+      new THREE.LineBasicMaterial({
+        color: isSelected ? 0xe5ca88 : tone.edge,
+        transparent: true,
+        opacity: isSelected ? 0.95 : 0.26,
+      }),
+    );
+  }
+
+  function createTopologyOverlay(
+    geometry: THREE.BufferGeometry,
+    tone: ViewerTone,
+  ): THREE.LineSegments<THREE.WireframeGeometry, THREE.LineBasicMaterial> | null {
+    const topologyGeometry = new THREE.WireframeGeometry(geometry);
+    if (topologyGeometry.getAttribute('position')?.count === 0) {
+      topologyGeometry.dispose();
+      return null;
+    }
+    const topology = new THREE.LineSegments(
+      topologyGeometry,
+      new THREE.LineBasicMaterial({
+        color: tone.topology,
+        transparent: true,
+        opacity: 0,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+    topology.renderOrder = 3;
+    topology.userData.ignoreRaycast = true;
+    return topology;
   }
 
   function createEdgeMaterial(isSelected: boolean, isHovered: boolean) {
@@ -660,12 +809,33 @@
       const isMeasured =
         !isSelected && !isHovered && !!entry.partId && measurementPartIds.has(entry.partId);
       entry.mesh.material.color.setHex(
-        isSelected ? 0xe5ca88 : isHovered ? 0xdbcb94 : isMeasured ? 0xd8d5aa : 0xd2bf89,
+        isSelected ? 0xe5ca88 : isHovered ? entry.tone.hoverColor : isMeasured ? entry.tone.measuredColor : entry.tone.color,
       );
       entry.mesh.material.emissive.setHex(
-        isSelected ? 0x5b4120 : isHovered ? 0x0f5146 : isMeasured ? 0x1d5e57 : 0x000000,
+        isSelected ? entry.tone.emissive : isHovered ? entry.tone.hoverEmissive : isMeasured ? entry.tone.measuredEmissive : 0x000000,
       );
-      entry.mesh.material.emissiveIntensity = isSelected ? 0.45 : isHovered ? 0.32 : isMeasured ? 0.26 : 0;
+      entry.mesh.material.emissiveIntensity = isSelected ? 0.38 : isHovered ? 0.24 : isMeasured ? 0.18 : 0;
+      if (entry.outline) {
+        entry.outline.visible = outlineEnabled || topologyMode === 'feature';
+        entry.outline.material.color.setHex(
+          isSelected || (topologyMode === 'feature' && isHovered) ? 0xe5ca88 : entry.tone.edge,
+        );
+        entry.outline.material.opacity = !entry.outline.visible
+          ? 0
+          : isSelected
+            ? 0.95
+            : topologyMode === 'feature' && isHovered
+              ? 0.72
+              : isHovered
+                ? 0.4
+                : isMeasured
+                  ? 0.34
+                  : 0.26;
+      }
+      if (entry.topology) {
+        entry.topology.visible = topologyMode === 'mesh' && isHovered;
+        entry.topology.material.opacity = topologyMode === 'mesh' && isHovered ? 0.28 : 0;
+      }
     }
 
     for (const entry of runtimeEdges) {
@@ -1417,6 +1587,7 @@
     overflow: hidden;
     transition: filter 0.5s ease-in-out;
   }
+
 
   .viewer-overlay-layer {
     position: absolute;

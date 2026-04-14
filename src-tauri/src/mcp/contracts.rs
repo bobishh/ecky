@@ -1,6 +1,7 @@
 use crate::models::{
     AgentOrigin, ArtifactBundle, ControlPrimitive, ControlView, DesignOutput, DesignParams,
-    MeasurementAnnotation, ModelManifest, TargetLeaseInfo, Thread, ThreadStatus, UiSpec,
+    MeasurementAnnotation, ModelManifest, StructuralVerificationResult, TargetLeaseInfo, Thread,
+    ThreadStatus, UiSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -157,6 +158,25 @@ pub struct ThreadListRequest {}
 pub struct ThreadListEntry {
     pub thread_id: String,
     pub title: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadListResponse {
+    pub threads: Vec<ThreadListEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMetaRequest {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMetaResponse {
+    pub thread_id: String,
+    pub title: String,
     pub updated_at: u64,
     pub version_count: usize,
     pub pending_count: usize,
@@ -169,10 +189,33 @@ pub struct ThreadListEntry {
     pub claim_owner: Option<crate::models::AgentSession>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessagesRequest {
+    pub thread_id: String,
+    pub limit: Option<usize>,
+    pub before: Option<String>,
+    pub roles: Option<Vec<String>>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadListResponse {
-    pub threads: Vec<ThreadListEntry>,
+pub struct ThreadMessageEntry {
+    pub id: String,
+    pub role: String,
+    pub status: String,
+    pub timestamp: u64,
+    pub content: String,
+    pub has_output: bool,
+    pub has_artifacts: bool,
+    pub has_manifest: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessagesResponse {
+    pub thread_id: String,
+    pub messages: Vec<ThreadMessageEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,8 +252,6 @@ pub struct WorkspaceOverviewBrief {
     pub rules: Vec<String>,
     pub resources: Vec<String>,
     pub next_steps: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cad_sdk_snippet: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,8 +368,6 @@ pub struct TargetMetaResponse {
     pub control_primitive_count: usize,
     pub control_relation_count: usize,
     pub control_view_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cad_sdk_snippet: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,7 +398,21 @@ pub enum TargetDetailSection {
     UiSpec,
     InitialParams,
     ArtifactBundle,
+    ArtifactPaths,
+    ViewerAssets,
+    ExportArtifacts,
     LatestDraft,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactBundleDigest {
+    pub model_id: String,
+    pub source_language: String,
+    pub has_preview_stl: bool,
+    pub viewer_asset_count: usize,
+    pub export_format_count: usize,
+    pub multipart: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,7 +439,13 @@ pub struct TargetDetailResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_params: Option<DesignParams>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_bundle: Option<Option<ArtifactBundle>>,
+    pub artifact_bundle: Option<Option<ArtifactBundleDigest>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_assets: Option<Vec<crate::models::ViewerAsset>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_artifacts: Option<Vec<crate::models::ExportArtifact>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_draft: Option<Option<()>>,
 }
@@ -422,9 +481,53 @@ pub struct SemanticManifestResponse {
     pub message_id: String,
     pub title: Option<String>,
     pub version_name: Option<String>,
-    pub artifact_bundle: ArtifactBundle,
-    pub model_manifest: ModelManifest,
-    pub latest_draft: Option<()>,
+    pub control_primitive_count: usize,
+    pub relation_count: usize,
+    pub view_count: usize,
+    pub advisory_count: usize,
+    pub measurement_annotation_count: usize,
+    pub part_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SemanticManifestSection {
+    ControlPrimitives,
+    ControlRelations,
+    ControlViews,
+    Advisories,
+    MeasurementAnnotations,
+    Parts,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticManifestDetailRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub section: SemanticManifestSection,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticManifestDetailResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub section: SemanticManifestSection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_primitives: Option<Vec<ControlPrimitive>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_relations: Option<Vec<crate::models::ControlRelation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_views: Option<Vec<ControlView>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisories: Option<Vec<crate::models::Advisory>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_annotations: Option<Vec<MeasurementAnnotation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<crate::models::PartBinding>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,6 +551,8 @@ pub struct ParamsPatchResponse {
     pub artifact_bundle: ArtifactBundle,
     pub model_manifest: ModelManifest,
     pub design_output: DesignOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural_verification: Option<StructuralVerificationResult>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -622,6 +727,8 @@ pub struct MacroReplaceResponse {
     pub initial_params: DesignParams,
     pub artifact_bundle: ArtifactBundle,
     pub model_manifest: ModelManifest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural_verification: Option<StructuralVerificationResult>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -777,4 +884,49 @@ pub struct SemanticManifestMutationResponse {
     pub artifact_bundle: ArtifactBundle,
     pub model_manifest: ModelManifest,
     pub agent_origin: AgentOrigin,
+}
+
+// ── Structural verification MCP ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyGeneratedModelRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+    pub original_prompt: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyGeneratedModelResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub model_id: String,
+    pub result: crate::contracts::StructuralVerificationResult,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralVerificationSummaryRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralVerificationSummaryResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub model_id: String,
+    pub passed: bool,
+    pub summary: String,
+    pub issue_count: usize,
+    pub verifier_status: crate::contracts::VerifierStatus,
+    pub verifier_source: Option<crate::contracts::VerifierSource>,
 }

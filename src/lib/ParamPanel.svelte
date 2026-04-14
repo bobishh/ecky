@@ -19,6 +19,7 @@
     type ContextSelectionTarget,
   } from './modelRuntime/contextualEditing';
   import { normalizePostProcessing } from './types/domain';
+  import { cycleTopologyMode, topologyModeLabel, type TopologyMode } from './viewerDisplayMode';
   import type {
     MaterializedSemanticControl,
     MaterializedSemanticView,
@@ -118,6 +119,9 @@
     onspecchange,
     onpostprocessingchange,
     onShowCode = undefined,
+    outlineEnabled = true,
+    topologyMode = 'mesh',
+    onViewerDisplayChange,
     activeVersionId = null,
     messageId = null,
     macroCode = '',
@@ -142,6 +146,9 @@
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
     onpostprocessingchange?: (postProcessing: PostProcessingSpec | null) => void;
     onShowCode?: () => void;
+    outlineEnabled?: boolean;
+    topologyMode?: TopologyMode;
+    onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
     activeVersionId?: string | null;
     messageId?: string | null;
     macroCode?: string;
@@ -379,6 +386,13 @@
     const related = (event as FocusEvent).relatedTarget as Node | null;
     if (current && related && current.contains(related)) return;
     onControlFocusChange?.(null);
+  }
+
+  function updateViewerDisplay(next: Partial<{ outlineEnabled: boolean; topologyMode: TopologyMode }>) {
+    onViewerDisplayChange?.({
+      outlineEnabled: next.outlineEnabled ?? outlineEnabled,
+      topologyMode: next.topologyMode ?? topologyMode,
+    });
   }
 
   $effect(() => {
@@ -2170,6 +2184,22 @@
       >
         LITHO
       </button>
+      <button
+        class="panel-mode-tab panel-mode-tab-compact"
+        class:panel-mode-tab-active={outlineEnabled}
+        onclick={() => updateViewerDisplay({ outlineEnabled: !outlineEnabled })}
+        title="Toggle part outlines in the viewport"
+      >
+        OUTLINE
+      </button>
+      <button
+        class="panel-mode-tab panel-mode-tab-compact"
+        class:panel-mode-tab-active={topologyMode !== 'off'}
+        onclick={() => updateViewerDisplay({ topologyMode: cycleTopologyMode(topologyMode) })}
+        title="Cycle topology overlay: off, feature edges, mesh wireframe"
+      >
+        {topologyModeLabel(topologyMode)}
+      </button>
       {#if macroCode && onShowCode}
         <button class="panel-mode-tab panel-code-btn" onclick={onShowCode} title="View macro code">
           CODE
@@ -3521,6 +3551,10 @@
   .search-input:focus {
     border-color: var(--primary);
     background: color-mix(in srgb, var(--bg-100) 88%, var(--primary) 12%);
+  }
+
+  .panel-mode-tab-compact {
+    white-space: nowrap;
   }
 
   .clear-search {

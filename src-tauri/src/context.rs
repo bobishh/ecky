@@ -1,6 +1,7 @@
+use crate::llm_context::{build_authoring_digest, format_authoring_digest_text};
 use crate::models::{
     infer_macro_dialect_from_code, DesignOutput, InteractionMode, Message, MessageRole,
-    ThreadReference, UiSpec,
+    ModelManifest, ThreadReference, UiSpec,
 };
 
 pub const THREAD_SUMMARY_MAX_CHARS: usize = 1600;
@@ -31,6 +32,23 @@ pub fn latest_output(messages: &[Message]) -> Option<DesignOutput> {
         .rev()
         .find(|m| m.role == MessageRole::Assistant && m.output.is_some())
         .and_then(|m| m.output.clone())
+}
+
+pub fn latest_manifest(messages: &[Message]) -> Option<ModelManifest> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant && m.model_manifest.is_some())
+        .and_then(|m| m.model_manifest.clone())
+}
+
+pub fn build_design_digest(
+    output: Option<&DesignOutput>,
+    manifest: Option<&ModelManifest>,
+) -> String {
+    output
+        .map(|design| format_authoring_digest_text(&build_authoring_digest(design, manifest, None)))
+        .unwrap_or_default()
 }
 
 pub fn build_thread_summary(title: &str, messages: &[Message]) -> String {
@@ -170,6 +188,7 @@ pub struct PromptContext {
     pub pinned_references: String,
     pub available_assets: String,
     pub last_output: Option<DesignOutput>,
+    pub design_digest: String,
 }
 
 pub fn assemble_context(
@@ -181,6 +200,7 @@ pub fn assemble_context(
     if let Some(tid) = thread_id {
         let messages = crate::db::get_thread_messages_for_context(db, &tid).unwrap_or_default();
         let last_o = latest_output(&messages);
+        let last_manifest = latest_manifest(&messages);
         let summary = crate::db::get_thread_summary(db, &tid)
             .ok()
             .flatten()
@@ -201,6 +221,9 @@ pub fn assemble_context(
             .unwrap_or_default();
         let refs = crate::db::get_thread_references(db, &tid).unwrap_or_default();
 
+        let last_output = working_design.or(last_o);
+        let design_digest = build_design_digest(last_output.as_ref(), last_manifest.as_ref());
+
         PromptContext {
             thread_id: tid,
             thread_title: title,
@@ -208,7 +231,8 @@ pub fn assemble_context(
             recent_dialogue: dialogue,
             pinned_references: build_pinned_references_block(&refs),
             available_assets: String::new(),
-            last_output: working_design.or(last_o),
+            last_output,
+            design_digest,
         }
     } else {
         let fallback_output = parent_macro_code.map(|code| {
@@ -234,6 +258,8 @@ pub fn assemble_context(
             }
         });
 
+        let last_output = working_design.or(fallback_output);
+
         PromptContext {
             thread_id: uuid::Uuid::new_v4().to_string(),
             thread_title: String::new(),
@@ -241,7 +267,8 @@ pub fn assemble_context(
             recent_dialogue: String::new(),
             pinned_references: String::new(),
             available_assets: String::new(),
-            last_output: working_design.or(fallback_output),
+            design_digest: build_design_digest(last_output.as_ref(), None),
+            last_output,
         }
     }
 }
@@ -275,13 +302,8 @@ pub fn format_contextual_prompt(
     };
 
     if let Some(previous) = &ctx.last_output {
-        let ui_spec_json =
-            serde_json::to_string_pretty(&previous.ui_spec).unwrap_or_else(|_| "{}".to_string());
-        let params_json = serde_json::to_string_pretty(&previous.initial_params)
-            .unwrap_or_else(|_| "{}".to_string());
-
         format!(
-            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\nACTUAL CURRENT UI SPEC (AUTHORITATIVE):\n```json\n{}\n```\n\nACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):\n```json\n{}\n```\n\n{}{}",
+            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\n{}{}",
             ctx.thread_title,
             previous.title,
             previous.version_name,
@@ -289,9 +311,8 @@ pub fn format_contextual_prompt(
             if ctx.recent_dialogue.trim().is_empty() { "[none]" } else { &ctx.recent_dialogue },
             if ctx.pinned_references.trim().is_empty() { "[none]" } else { &ctx.pinned_references },
             available_assets_block,
+            if ctx.design_digest.trim().is_empty() { "[none]" } else { &ctx.design_digest },
             previous.macro_code,
-            ui_spec_json,
-            params_json,
             framework_block,
             full_prompt
         )
@@ -520,6 +541,8 @@ mod tests {
             pinned_references: "ref".to_string(),
             available_assets: "- Ecky Family [PNG] path: /tmp/ecky-family.png".to_string(),
             last_output: Some(mock_design("Lens")),
+            design_digest: "Current working snapshot\nLens [V1] (legacyPython)\n\nUI fields: 0"
+                .to_string(),
         };
 
         let result = format_contextual_prompt(
@@ -531,8 +554,7 @@ mod tests {
         );
 
         assert!(result.contains("ACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):"));
-        assert!(result.contains("ACTUAL CURRENT UI SPEC (AUTHORITATIVE):"));
-        assert!(result.contains("ACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):"));
+        assert!(result.contains("ACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)"));
         assert!(result.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
         assert!(result.contains("AVAILABLE LOCAL ASSETS"));
         assert!(result.contains("USER REQUEST (ACTUAL)"));

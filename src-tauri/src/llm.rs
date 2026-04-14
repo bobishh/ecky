@@ -189,6 +189,178 @@ If intent is "design", "response" must be one short routing sentence for the ass
     })
 }
 
+/// Verify a rendered 3D model against the original user prompt using multi-angle screenshots.
+///
+/// Sends viewport screenshots (and optional reference images) to the LLM and asks whether
+/// the rendered geometry matches what the user asked for.
+/// Returns a `VisualVerificationResult` with structured issue records.
+pub async fn verify_render(
+    engine: &Engine,
+    original_prompt: &str,
+    screenshots: Vec<String>,
+    reference_images: Vec<String>,
+    structural_summary: Option<&str>,
+) -> Result<LlmOutcome<crate::contracts::VisualVerificationResult>, String> {
+    if !engine.enabled {
+        return Err(format!(
+            "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
+            engine.name
+        ));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let model = select_classifier_model(engine, true);
+
+    let reference_context = if reference_images.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nThe first {} image(s) above are REFERENCE IMAGES provided by the user showing what the model should look like. \
+            The remaining images are screenshots of the rendered result. \
+            Compare the rendered result against the reference images, checking: \
+            part count and placement, connector presence and attachment, ground contact, overall topology.",
+            reference_images.len()
+        )
+    };
+
+    let structural_context = match structural_summary {
+        Some(summary) if !summary.is_empty() => format!(
+            "\n\nSTRUCTURAL VERIFICATION CONTEXT (deterministic pre-check results):\n{}",
+            summary
+        ),
+        _ => String::new(),
+    };
+
+    let system_prompt = format!(
+        r#"You are a strict 3D CAD model verifier. The user will provide their original design request and screenshots of the rendered model.{reference_context}{structural_context}
+
+Your job: decide whether the rendered 3D model accurately represents what the user asked for.
+
+Check explicitly for:
+- Missing parts (a part that should exist according to the request is absent)
+- Floating parts (a part that should be attached/grounded is floating in mid-air)
+- Broken connectors (connecting geometry is missing, broken, or detached from the main body)
+- Reference mismatch (rendered layout or shape contradicts the reference image)
+- Topology broken (wireframe instead of solid, empty mesh, boolean failure artifacts)
+- Support/contact with the ground or main body
+- Missing connectors or half-generated attachments
+- Obvious holes or broken continuity
+
+Respond ONLY with a JSON object:
+{{
+  "passed": true|false,
+  "summary": "one sentence summary",
+  "issues": [
+    {{
+      "category": "missing_part"|"floating_part"|"connector_broken"|"reference_mismatch"|"topology_broken"|"other",
+      "description": "concise description of the specific problem",
+      "part_label": "name of the affected part, or null if unknown"
+    }}
+  ]
+}}
+
+Rules:
+- "issues" must be an empty array when passed=true.
+- Minor surface imperfections, smoothness, or triangle count differences are NOT failures.
+- A visible solid mesh that broadly matches the request shape should pass.
+- If a reference image is present and the rendered result fundamentally contradicts it in layout or part count, set passed=false.
+- If structural context reports issues, pay special attention to those areas in the screenshots."#,
+        reference_context = reference_context,
+        structural_context = structural_context
+    );
+
+    // Combine reference images first, then render screenshots
+    let mut all_images = reference_images;
+    all_images.extend(screenshots);
+
+    let user_prompt = format!(
+        "ORIGINAL USER REQUEST:\n{}\n\nDoes the rendered model match the request?",
+        original_prompt
+    );
+
+    let raw = match engine.provider.as_str() {
+        "openai" | "ollama" => {
+            call_openai_compatible(
+                &client,
+                engine,
+                model,
+                &system_prompt,
+                &user_prompt,
+                all_images,
+                "verify",
+                ResponseFormat::JsonObject,
+            )
+            .await?
+        }
+        "gemini" => {
+            call_gemini(
+                &client,
+                engine,
+                model,
+                &system_prompt,
+                &user_prompt,
+                all_images,
+                "verify",
+                ResponseFormat::JsonObject,
+            )
+            .await?
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported provider for vision verification: {}",
+                engine.provider
+            ))
+        }
+    };
+
+    let passed = raw.data["passed"].as_bool().unwrap_or(true);
+    let summary = raw.data["summary"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let issues = parse_visual_issues(&raw.data["issues"]);
+
+    Ok(LlmOutcome {
+        data: crate::contracts::VisualVerificationResult {
+            passed,
+            summary,
+            issues,
+            usage: raw.usage,
+        },
+        usage: None,
+    })
+}
+
+fn parse_visual_issues(val: &serde_json::Value) -> Vec<crate::contracts::VisualIssue> {
+    use crate::contracts::{VisualIssue, VisualIssueCategory};
+    let Some(arr) = val.as_array() else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let description = item["description"].as_str()?.trim().to_string();
+            let category = match item["category"].as_str().unwrap_or("other") {
+                "missing_part" => VisualIssueCategory::MissingPart,
+                "floating_part" => VisualIssueCategory::FloatingPart,
+                "connector_broken" => VisualIssueCategory::ConnectorBroken,
+                "reference_mismatch" => VisualIssueCategory::ReferenceMismatch,
+                "topology_broken" => VisualIssueCategory::TopologyBroken,
+                _ => VisualIssueCategory::Other,
+            };
+            let part_label = item["part_label"].as_str().map(|s| s.to_string());
+            Some(VisualIssue {
+                category,
+                description,
+                part_label,
+            })
+        })
+        .collect()
+}
+
 fn select_classifier_model(engine: &Engine, has_images: bool) -> &str {
     if has_images || engine.light_model.trim().is_empty() {
         engine.model.as_str()
@@ -1168,5 +1340,103 @@ mod tests {
         };
 
         assert_eq!(select_classifier_model(&engine, false), "gpt-4o");
+    }
+
+    // ── verify_render response parsing ───────────────────────────────────────
+
+    fn parse_visual_verification(raw_json: &str) -> crate::contracts::VisualVerificationResult {
+        let data: serde_json::Value = serde_json::from_str(raw_json).unwrap();
+        let passed = data["passed"].as_bool().unwrap_or(true);
+        let summary = data["summary"].as_str().unwrap_or("").trim().to_string();
+        let issues = super::parse_visual_issues(&data["issues"]);
+        crate::contracts::VisualVerificationResult {
+            passed,
+            summary,
+            issues,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn verify_render_parses_passing_response() {
+        let v = parse_visual_verification(
+            r#"{"passed": true, "summary": "Model matches.", "issues": []}"#,
+        );
+        assert!(v.passed);
+        assert!(v.issues.is_empty());
+    }
+
+    #[test]
+    fn verify_render_parses_failing_response_with_structured_issues() {
+        let v = parse_visual_verification(
+            r#"{
+            "passed": false,
+            "summary": "Solid body missing.",
+            "issues": [{"category": "topology_broken", "description": "Model renders as wireframe — solid body missing.", "part_label": null}]
+        }"#,
+        );
+        assert!(!v.passed);
+        assert_eq!(v.issues.len(), 1);
+        assert_eq!(
+            v.issues[0].category,
+            crate::contracts::VisualIssueCategory::TopologyBroken
+        );
+        assert!(v.issues[0].description.contains("wireframe"));
+    }
+
+    #[test]
+    fn verify_render_defaults_passed_to_true_when_field_absent() {
+        let v = parse_visual_verification(r#"{"summary": "", "issues": []}"#);
+        assert!(
+            v.passed,
+            "missing `passed` should default to true (non-blocking)"
+        );
+    }
+
+    #[test]
+    fn verify_render_unknown_category_maps_to_other() {
+        let v = parse_visual_verification(
+            r#"{
+            "passed": false,
+            "summary": "weird issue",
+            "issues": [{"category": "unknown_future_type", "description": "Something odd.", "part_label": null}]
+        }"#,
+        );
+        assert_eq!(
+            v.issues[0].category,
+            crate::contracts::VisualIssueCategory::Other
+        );
+    }
+
+    #[test]
+    fn verify_render_handles_extra_unknown_fields_gracefully() {
+        let v = parse_visual_verification(
+            r#"{"passed": true, "summary": "looks great", "issues": [], "confidence": 0.95}"#,
+        );
+        assert!(v.passed);
+    }
+
+    #[test]
+    fn verify_render_parses_multiple_issues() {
+        let v = parse_visual_verification(
+            r#"{
+            "passed": false,
+            "summary": "Two problems.",
+            "issues": [
+                {"category": "missing_part", "description": "Lid absent.", "part_label": "Lid"},
+                {"category": "floating_part", "description": "Handle floating.", "part_label": "Handle"}
+            ]
+        }"#,
+        );
+        assert_eq!(v.issues.len(), 2);
+        assert_eq!(
+            v.issues[0].category,
+            crate::contracts::VisualIssueCategory::MissingPart
+        );
+        assert_eq!(v.issues[0].part_label.as_deref(), Some("Lid"));
+        assert_eq!(
+            v.issues[1].category,
+            crate::contracts::VisualIssueCategory::FloatingPart
+        );
     }
 }

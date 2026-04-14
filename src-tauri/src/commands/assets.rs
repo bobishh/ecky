@@ -213,6 +213,8 @@ mod tests {
             default_engine_kind: crate::models::EngineKind::Freecad,
             default_geometry_backend: crate::models::GeometryBackend::Freecad,
             default_source_language: crate::models::SourceLanguage::LegacyPython,
+            max_generation_attempts: 3,
+            max_verify_attempts: 0,
         }
     }
 

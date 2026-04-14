@@ -76,6 +76,7 @@
     setWorkspaceCaptureEnabled,
     writeWorkspaceCapturePrefs,
   } from './lib/agents/workspaceCapture';
+  import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
     enqueueAgentTerminalSnapshot,
@@ -187,6 +188,7 @@
 
   type ViewerHandle = {
     captureScreenshot: (overlayCanvas?: HTMLCanvasElement | null) => string | null;
+    captureMultiAngleScreenshots: () => string[];
     captureScreenshotDetails: (overlayCanvas?: HTMLCanvasElement | null) => {
       dataUrl: string;
       width: number;
@@ -366,6 +368,8 @@
   let focusedMeasurementControl = $state<MeasurementControlFocus | null>(null);
   let lastViewportContextKey = $state<string | null>(null);
   let showViewportOverlayControls = $state(false);
+  let viewerOutlineEnabled = $state(true);
+  let viewerTopologyMode = $state<TopologyMode>('mesh');
   let sidebarCollapsed = $state(false);
   let paramPanelCollapsed = $state(false);
   let historyPanelCollapsed = $state(false);
@@ -2729,6 +2733,12 @@
                     onchange={handleParamChange}
                     activeVersionId={$paramPanelState.versionId}
                     messageId={$activeVersionId}
+                    outlineEnabled={viewerOutlineEnabled}
+                    topologyMode={viewerTopologyMode}
+                    onViewerDisplayChange={(display) => {
+                      viewerOutlineEnabled = display.outlineEnabled;
+                      viewerTopologyMode = display.topologyMode;
+                    }}
                     onShowCode={() => {
                       selectedCode.set($workingCopy.macroCode);
                       selectedTitle.set($workingCopy.title);
@@ -2818,10 +2828,12 @@
                 modelKey={currentViewportTargetKey}
                 stlUrl={$activeThreadId ? stlUrl : null}
                 viewerAssets={viewerAssets}
+                manifestParts={activeModelManifest?.parts ?? []}
                 edgeTargets={activeArtifactBundle?.edgeTargets ?? []}
                 selectionTargets={contextSelectionTargets}
                 selectedTarget={selectedTarget}
                 searchQuery={sharedContextSearchQuery}
+                outlineEnabled={viewerOutlineEnabled}
                 persistedCameraState={persistedViewportCameraState}
                 selectedPartId={selectedPartId}
                 overlayPartLabel={selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
@@ -2842,6 +2854,7 @@
                 hideModelWhileBusy={showViewerBusyMask}
                 busyPhase={viewerBusyPhase}
                 busyText={viewerBusyText}
+                topologyMode={viewerTopologyMode}
               />
             </div>
             {#if showBlueprintViewport && effectiveConceptPreviewMessage?.imageData}
@@ -3362,7 +3375,7 @@
     color: var(--primary);
     outline: none;
   }
-  .sidebar-content { flex: 1; min-height: 0; }
+  .sidebar-content { flex: 1; min-height: 0; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
   .viewer-shell {
@@ -3556,7 +3569,7 @@
     color: var(--primary);
     background: color-mix(in srgb, var(--primary) 14%, var(--bg-100));
   }
-  .scrollable { overflow-y: auto; }
+  .scrollable { min-height: 0; overflow-y: auto; overflow-x: hidden; }
   .resizer-w { width: 4px; background: var(--bg-300); cursor: col-resize; z-index: 10; flex-shrink: 0; }
   .resizer-v { height: 4px; background: var(--bg-300); cursor: row-resize; z-index: 10; flex-shrink: 0; }
   .app-overlay-actions { position: absolute; top: 10px; right: 10px; z-index: 150; display: flex; gap: 8px; }

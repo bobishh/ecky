@@ -446,7 +446,10 @@ pub fn create_or_update_thread(
     conn.execute(
         "INSERT INTO threads (id, title, updated_at, genie_traits, engine_kind, source_language, geometry_backend) VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'freecad'), COALESCE(?6, 'legacyPython'), COALESCE(?7, 'freecad'))
          ON CONFLICT(id) DO UPDATE SET 
-            title=excluded.title, 
+            title=CASE
+                WHEN threads.title IS NULL OR trim(threads.title) = '' THEN excluded.title
+                ELSE threads.title
+            END,
             updated_at=excluded.updated_at, 
             genie_traits=COALESCE(excluded.genie_traits, threads.genie_traits),
             engine_kind=COALESCE(excluded.engine_kind, threads.engine_kind),
@@ -2275,6 +2278,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["msg-a", "msg-b"]
         );
+    }
+
+    #[test]
+    fn create_or_update_thread_preserves_existing_title_on_conflict() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        create_or_update_thread(
+            &conn,
+            "thread-keep-title",
+            "Original Thread",
+            100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        create_or_update_thread(
+            &conn,
+            "thread-keep-title",
+            "Version Name Noise",
+            200,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let thread = get_all_threads(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|thread| thread.id == "thread-keep-title")
+            .expect("thread exists");
+        assert_eq!(thread.title, "Original Thread");
+        assert_eq!(thread.updated_at, 200);
     }
 
     #[test]

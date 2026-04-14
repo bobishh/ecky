@@ -762,6 +762,36 @@
           </div>
         </div>
 
+        <div class="field">
+          <label for="max-generation-attempts">MAX GENERATION ATTEMPTS</label>
+          <input
+            id="max-generation-attempts"
+            type="number"
+            class="input-mono"
+            min="1"
+            max="10"
+            bind:value={config.maxGenerationAttempts}
+          />
+          <div class="field-help">
+            Max LLM repair retries per request. Default: 3.
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="max-verify-attempts">MAX SCREENSHOT VERIFY ATTEMPTS</label>
+          <input
+            id="max-verify-attempts"
+            type="number"
+            class="input-mono"
+            min="0"
+            max="5"
+            bind:value={config.maxVerifyAttempts}
+          />
+          <div class="field-help">
+            VLM screenshot verification rounds after render. 0 = disabled (structural check always runs). Default: 0.
+          </div>
+        </div>
+
       {:else if activeSection === 'sounds'}
         <div class="field">
           <div class="field-title">MIC INPUT</div>
@@ -885,13 +915,25 @@
               class="conn-type-btn {config.defaultSourceLanguage === 'eckyIrV0' ? 'active' : ''}"
               onclick={() => {
                 config.defaultSourceLanguage = 'eckyIrV0';
-                config.defaultGeometryBackend = config.defaultGeometryBackend && config.defaultGeometryBackend !== 'freecad'
-                  ? config.defaultGeometryBackend
-                  : 'build123d';
+                if (!config.defaultGeometryBackend || config.defaultGeometryBackend === 'freecad') {
+                  config.defaultGeometryBackend = 'build123d';
+                }
                 config.defaultEngineKind = 'eckyIrV0';
               }}
             >ECKY IR</button>
           </div>
+          {#if config.defaultSourceLanguage === 'eckyIrV0'}
+            <div class="conn-type-row" style="margin-top: 6px;">
+              <button
+                class="conn-type-btn {config.defaultGeometryBackend === 'build123d' ? 'active' : ''}"
+                onclick={() => { config.defaultGeometryBackend = 'build123d'; }}
+              >BUILD123D</button>
+              <button
+                class="conn-type-btn {config.defaultGeometryBackend === 'eckyRust' ? 'active' : ''}"
+                onclick={() => { config.defaultGeometryBackend = 'eckyRust'; }}
+              >ECKY RUST</button>
+            </div>
+          {/if}
           <div class="field-help">
             New generated threads inherit this language by default. Imported FCStd flows stay pinned to FreeCAD.
           </div>

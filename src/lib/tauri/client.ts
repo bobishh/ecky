@@ -34,6 +34,8 @@ import {
   type ModelManifest,
   type McpServerStatus,
   type ParsedParamsResult,
+  type StructuralVerificationResult,
+  type VisualVerificationResult,
   type SourceLanguage,
   type Thread,
   type UiSpec,
@@ -275,6 +277,7 @@ export async function renderModel(
   macroCode: string,
   parameters: DesignParams,
   macroDialect?: MacroDialect | null,
+  geometryBackend?: GeometryBackend | null,
   postProcessing?: PostProcessingSpec | null,
 ): Promise<ArtifactBundle> {
   return normalizeArtifactBundle(
@@ -283,6 +286,7 @@ export async function renderModel(
         macroCode,
         parameters,
         macroDialect ?? null,
+        geometryBackend ?? null,
         postProcessing ?? null,
       ),
     ),
@@ -617,4 +621,22 @@ export async function wakeAutoAgent(label: string): Promise<void> {
   unwrapResult(await commands.wakeAutoAgent(label));
 }
 
+export async function verifyRender(
+  originalPrompt: string,
+  screenshots: string[],
+  referenceImagePaths: string[] = [],
+  structuralSummary: string | null = null,
+): Promise<VisualVerificationResult> {
+  return unwrapResult(await commands.verifyRender(originalPrompt, screenshots, referenceImagePaths, structuralSummary));
+}
+
+export async function verifyGeneratedModel(
+  modelId: string,
+  originalPrompt: string,
+): Promise<StructuralVerificationResult> {
+  return unwrapResult(await commands.verifyGeneratedModel(modelId, originalPrompt));
+}
+
 export type { AppLogEntry };
+export type { VisualVerificationResult };
+export type { StructuralVerificationResult };

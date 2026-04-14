@@ -303,6 +303,7 @@ export async function handleParamChange(
       codeToUse,
       currentParams,
       wc.macroDialect ?? null,
+      null,
       wc.postProcessing ?? null,
     );
     const runtime = await inspectRuntimeBundle(
@@ -410,7 +411,7 @@ export async function commitManualVersion(
     const nextUiSpec = reconciled.uiSpec;
     const nextParams = reconciled.params;
 
-    const bundle = await renderModel(editedCode, nextParams, null, wc.postProcessing ?? null);
+    const bundle = await renderModel(editedCode, nextParams, null, null, wc.postProcessing ?? null);
     const runtime = await inspectRuntimeBundle(
       bundle,
       undefined,

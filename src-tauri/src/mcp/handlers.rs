@@ -17,6 +17,8 @@ use tauri::Emitter;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+const THREAD_MESSAGE_CONTENT_MAX_CHARS: usize = 240;
+
 #[derive(Debug, Clone)]
 pub struct AgentContext {
     pub session_id: String,
@@ -80,6 +82,10 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+fn compact_message_content(content: &str) -> String {
+    crate::context::compact_text(content, THREAD_MESSAGE_CONTENT_MAX_CHARS)
 }
 
 fn configured_prompt_timeout_secs(state: &AppState, override_timeout_secs: Option<u64>) -> u64 {
@@ -1800,24 +1806,37 @@ pub async fn handle_thread_list(state: &AppState) -> AppResult<ThreadListRespons
     let conn = state.db.lock().await;
     let threads = history::get_history(&conn)?;
     drop(conn);
-    let claim_owners = claim_owners_by_thread(state).await;
     let entries = threads
         .into_iter()
         .map(|t| ThreadListEntry {
-            claim_owner: claim_owners.get(&t.id).cloned(),
             thread_id: t.id,
             title: t.title,
-            updated_at: t.updated_at,
-            version_count: t.version_count,
-            pending_count: t.pending_count,
-            queued_count: t.queued_count,
-            error_count: t.error_count,
-            status: t.status,
-            finalized_at: t.finalized_at,
         })
         .collect();
 
     Ok(ThreadListResponse { threads: entries })
+}
+
+pub async fn handle_thread_meta_get(
+    state: &AppState,
+    req: ThreadMetaRequest,
+) -> AppResult<ThreadMetaResponse> {
+    let conn = state.db.lock().await;
+    let t = history::get_thread(&conn, &req.thread_id)?;
+    drop(conn);
+    let claim_owner = claim_owner_for_thread(state, &req.thread_id).await;
+    Ok(ThreadMetaResponse {
+        thread_id: t.id,
+        title: t.title,
+        updated_at: t.updated_at,
+        version_count: t.version_count,
+        pending_count: t.pending_count,
+        queued_count: t.queued_count,
+        error_count: t.error_count,
+        status: t.status,
+        finalized_at: t.finalized_at,
+        claim_owner,
+    })
 }
 
 pub async fn handle_finalize_thread(
@@ -2140,6 +2159,68 @@ pub async fn handle_thread_get(
     })
 }
 
+pub async fn handle_thread_messages_get(
+    state: &AppState,
+    req: ThreadMessagesRequest,
+) -> AppResult<ThreadMessagesResponse> {
+    let conn = state.db.lock().await;
+    let thread = history::get_thread(&conn, &req.thread_id)?;
+    drop(conn);
+
+    let mut messages = thread.messages;
+
+    // Filter by before ID
+    if let Some(before_id) = &req.before {
+        if let Some(pos) = messages.iter().position(|m| &m.id == before_id) {
+            messages.truncate(pos);
+        }
+    }
+
+    // Filter by roles
+    if let Some(roles) = &req.roles {
+        messages.retain(|m| {
+            let role_str = serde_json::to_value(&m.role)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            roles.contains(&role_str)
+        });
+    }
+
+    // Limit
+    if let Some(limit) = req.limit {
+        let len = messages.len();
+        if len > limit {
+            messages = messages.split_off(len - limit);
+        }
+    }
+
+    let compact_messages = messages
+        .into_iter()
+        .map(|m| ThreadMessageEntry {
+            id: m.id,
+            role: serde_json::to_value(&m.role)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            status: serde_json::to_value(&m.status)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            timestamp: m.timestamp,
+            content: compact_message_content(&m.content),
+            has_output: m.output.is_some(),
+            has_artifacts: m.artifact_bundle.is_some(),
+            has_manifest: m.model_manifest.is_some(),
+        })
+        .collect();
+
+    Ok(ThreadMessagesResponse {
+        thread_id: req.thread_id,
+        messages: compact_messages,
+    })
+}
+
 pub fn handle_agent_identity_set(
     ctx: &AgentContext,
     req: AgentIdentitySetRequest,
@@ -2297,11 +2378,6 @@ fn build_target_meta_response(
             .as_ref()
             .map(|manifest| manifest.control_views.len())
             .unwrap_or(0),
-        cad_sdk_snippet: if is_ir {
-            Some(crate::commands::generation::ecky_ir_v0_guide_text().to_string())
-        } else {
-            Some(include_str!("../../../model-runtime/cad_sdk.py").to_string())
-        },
     }
 }
 
@@ -2488,20 +2564,88 @@ pub async fn handle_target_detail_get(
             "",
         )?;
 
-        let (ui_spec, initial_params, artifact_bundle, latest_draft) = match req.section {
-            TargetDetailSection::UiSpec => {
-                (Some(target.design_output.ui_spec.clone()), None, None, None)
-            }
+        let (
+            ui_spec,
+            initial_params,
+            artifact_bundle,
+            artifact_paths,
+            viewer_assets,
+            export_artifacts,
+            latest_draft,
+        ) = match req.section {
+            TargetDetailSection::UiSpec => (
+                Some(target.design_output.ui_spec.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             TargetDetailSection::InitialParams => (
                 None,
                 Some(target.design_output.initial_params.clone()),
                 None,
                 None,
+                None,
+                None,
+                None,
             ),
             TargetDetailSection::ArtifactBundle => {
-                (None, None, Some(target.artifact_bundle.clone()), None)
+                let digest = target
+                    .artifact_bundle
+                    .as_ref()
+                    .map(|b| ArtifactBundleDigest {
+                        model_id: b.model_id.clone(),
+                        source_language: serde_json::to_value(b.source_language)
+                            .ok()
+                            .and_then(|v| v.as_str().map(String::from))
+                            .unwrap_or_default(),
+                        has_preview_stl: !b.preview_stl_path.is_empty(),
+                        viewer_asset_count: b.viewer_assets.len(),
+                        export_format_count: b.export_artifacts.len(),
+                        multipart: b.viewer_assets.len() > 1,
+                    });
+                (None, None, Some(digest), None, None, None, None)
             }
-            TargetDetailSection::LatestDraft => (None, None, None, Some(None)),
+            TargetDetailSection::ArtifactPaths => {
+                let paths = target.artifact_bundle.as_ref().map(|b| {
+                    let mut p: Vec<String> = vec![b.fcstd_path.clone()];
+                    if let Some(mp) = &b.macro_path {
+                        p.insert(0, mp.clone());
+                    }
+                    if !b.preview_stl_path.is_empty() {
+                        p.push(b.preview_stl_path.clone());
+                    }
+                    p
+                });
+                (None, None, None, paths, None, None, None)
+            }
+            TargetDetailSection::ViewerAssets => (
+                None,
+                None,
+                None,
+                None,
+                target
+                    .artifact_bundle
+                    .as_ref()
+                    .map(|b| b.viewer_assets.clone()),
+                None,
+                None,
+            ),
+            TargetDetailSection::ExportArtifacts => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                target
+                    .artifact_bundle
+                    .as_ref()
+                    .map(|b| b.export_artifacts.clone()),
+                None,
+            ),
+            TargetDetailSection::LatestDraft => (None, None, None, None, None, None, Some(None)),
         };
 
         Ok(TargetDetailResponse {
@@ -2514,6 +2658,9 @@ pub async fn handle_target_detail_get(
             ui_spec,
             initial_params,
             artifact_bundle,
+            artifact_paths,
+            viewer_assets,
+            export_artifacts,
             latest_draft,
         })
     })();
@@ -2732,6 +2879,10 @@ pub async fn handle_params_patch_and_render(
         .await?;
         tracked_message_id = Some(save_result.message_id.clone());
 
+        let sv = crate::services::structural_verification::verify_structure(
+            &artifact_bundle,
+            &model_manifest,
+        );
         Ok(ParamsPatchResponse {
             thread_id: target.thread_id,
             message_id: save_result.message_id,
@@ -2739,6 +2890,7 @@ pub async fn handle_params_patch_and_render(
             artifact_bundle,
             model_manifest,
             design_output,
+            structural_verification: Some(sv),
         })
     }
     .await;
@@ -3126,6 +3278,10 @@ pub async fn handle_macro_replace_and_render(
         tracked_message_id = Some(save_result.message_id.clone());
         state.emit_history_updated();
 
+        let sv = crate::services::structural_verification::verify_structure(
+            &artifact_bundle,
+            &model_manifest,
+        );
         Ok(MacroReplaceResponse {
             thread_id: working_thread_id,
             message_id: save_result.message_id,
@@ -3134,6 +3290,7 @@ pub async fn handle_macro_replace_and_render(
             initial_params,
             artifact_bundle,
             model_manifest,
+            structural_verification: Some(sv),
         })
     }
     .await;
@@ -3685,7 +3842,7 @@ pub async fn handle_semantic_manifest_get(
             tracked_message_id.clone(),
             None,
             "reading",
-            "Reading semantic manifest.",
+            "Reading semantic manifest summary.",
         )?;
 
         let target =
@@ -3710,9 +3867,142 @@ pub async fn handle_semantic_manifest_get(
             message_id: target.message_id,
             title: Some(target.design_output.title),
             version_name: Some(target.design_output.version_name),
-            artifact_bundle: target.artifact_bundle,
-            model_manifest: target.model_manifest,
-            latest_draft: None,
+            control_primitive_count: target.model_manifest.control_primitives.len(),
+            relation_count: target.model_manifest.control_relations.len(),
+            view_count: target.model_manifest.control_views.len(),
+            advisory_count: target.model_manifest.advisories.len(),
+            measurement_annotation_count: target.model_manifest.measurement_annotations.len(),
+            part_count: target.model_manifest.parts.len(),
+        })
+    })();
+
+    if let Err(err) = &result {
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+pub async fn handle_semantic_manifest_detail_get(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: SemanticManifestDetailRequest,
+    ctx: &AgentContext,
+) -> AppResult<SemanticManifestDetailResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = None;
+
+    let result = (|| -> AppResult<SemanticManifestDetailResponse> {
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            None,
+            "reading",
+            format!(
+                "Reading semantic manifest detail section {:?}.",
+                req.section
+            ),
+        )?;
+
+        let target =
+            resolve_semantic_target(&conn, app, req.thread_id.clone(), req.message_id.clone())?;
+
+        tracked_thread_id = Some(target.thread_id.clone());
+        tracked_message_id = Some(target.message_id.clone());
+        tracked_model_id = Some(target.artifact_bundle.model_id.clone());
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            tracked_model_id.clone(),
+            "idle",
+            "",
+        )?;
+
+        let (
+            control_primitives,
+            control_relations,
+            control_views,
+            advisories,
+            measurement_annotations,
+            parts,
+        ) = match req.section {
+            SemanticManifestSection::ControlPrimitives => (
+                Some(target.model_manifest.control_primitives),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            SemanticManifestSection::ControlRelations => (
+                None,
+                Some(target.model_manifest.control_relations),
+                None,
+                None,
+                None,
+                None,
+            ),
+            SemanticManifestSection::ControlViews => (
+                None,
+                None,
+                Some(target.model_manifest.control_views),
+                None,
+                None,
+                None,
+            ),
+            SemanticManifestSection::Advisories => (
+                None,
+                None,
+                None,
+                Some(target.model_manifest.advisories),
+                None,
+                None,
+            ),
+            SemanticManifestSection::MeasurementAnnotations => (
+                None,
+                None,
+                None,
+                None,
+                Some(target.model_manifest.measurement_annotations),
+                None,
+            ),
+            SemanticManifestSection::Parts => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(target.model_manifest.parts),
+            ),
+        };
+
+        Ok(SemanticManifestDetailResponse {
+            thread_id: target.thread_id,
+            message_id: target.message_id,
+            section: req.section,
+            control_primitives,
+            control_relations,
+            control_views,
+            advisories,
+            measurement_annotations,
+            parts,
         })
     })();
 
@@ -4335,6 +4625,8 @@ mod tests {
             default_engine_kind: crate::models::EngineKind::Freecad,
             default_geometry_backend: crate::models::GeometryBackend::Freecad,
             default_source_language: crate::models::SourceLanguage::LegacyPython,
+            max_generation_attempts: 3,
+            max_verify_attempts: 0,
         }
     }
 
@@ -4730,19 +5022,13 @@ mod tests {
         assert_eq!(response.control_primitive_count, 2);
         assert_eq!(response.control_relation_count, 1);
         assert_eq!(response.control_view_count, 1);
-        assert!(
-            response
-                .cad_sdk_snippet
-                .as_deref()
-                .is_some_and(|snippet| snippet.contains("class ControlRegistry")),
-            "target meta should surface cad_sdk.py helpers for MCP agents"
-        );
 
         let value = serde_json::to_value(&response).unwrap();
         assert!(value.get("macroCode").is_none());
         assert!(value.get("artifactBundle").is_none());
         assert!(value.get("modelManifest").is_none());
         assert!(value.get("latestDraft").is_none());
+        assert!(value.get("cadSdkSnippet").is_none());
     }
 
     #[tokio::test]
@@ -5075,13 +5361,6 @@ mod tests {
 
         let list = handle_thread_list(&state).await.expect("thread list");
         assert_eq!(list.threads.len(), 1);
-        assert_eq!(
-            list.threads[0]
-                .claim_owner
-                .as_ref()
-                .map(|owner| owner.session_id.as_str()),
-            Some("session-1")
-        );
 
         let thread = handle_thread_get(
             &state,
@@ -5098,6 +5377,54 @@ mod tests {
                 .map(|owner| owner.agent_label.as_str()),
             Some("claude")
         );
+    }
+
+    #[tokio::test]
+    async fn thread_messages_get_compacts_content_and_keeps_payload_flags() {
+        let (state, _resolver) = seed_target().await;
+        let long_content = "connector ".repeat(40);
+        {
+            let conn = state.db.lock().await;
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "msg-2".to_string(),
+                    role: MessageRole::Assistant,
+                    content: long_content.clone(),
+                    status: MessageStatus::Success,
+                    output: None,
+                    usage: None,
+                    artifact_bundle: Some(sample_bundle("model-2", "preview.stl")),
+                    model_manifest: Some(sample_manifest("model-2")),
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now_secs() + 1,
+                },
+            )
+            .unwrap();
+        }
+
+        let response = handle_thread_messages_get(
+            &state,
+            ThreadMessagesRequest {
+                thread_id: "thread-1".to_string(),
+                limit: Some(1),
+                before: None,
+                roles: None,
+            },
+        )
+        .await
+        .expect("thread messages");
+
+        assert_eq!(response.messages.len(), 1);
+        assert_eq!(response.messages[0].id, "msg-2");
+        assert!(response.messages[0].content.len() < long_content.len());
+        assert!(response.messages[0].content.ends_with('…'));
+        assert!(response.messages[0].has_artifacts);
+        assert!(response.messages[0].has_manifest);
     }
 
     #[tokio::test]
@@ -5196,7 +5523,7 @@ mod tests {
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["section"], "artifactBundle");
         assert_eq!(value["artifactBundle"]["modelId"], "model-base");
-        assert_eq!(value["artifactBundle"]["previewStlPath"], "/tmp/base.stl");
+        assert_eq!(value["artifactBundle"]["hasPreviewStl"], true);
         assert!(value.get("uiSpec").is_none());
         assert!(value.get("initialParams").is_none());
         assert!(value.get("latestDraft").is_none());
@@ -5339,15 +5666,7 @@ mod tests {
         .await
         .expect("semantic manifest with measurements");
 
-        assert_eq!(response.model_manifest.measurement_annotations.len(), 1);
-        assert_eq!(
-            response.model_manifest.measurement_annotations[0].annotation_id,
-            "measurement-inner-width"
-        );
-        assert_eq!(
-            response.model_manifest.measurement_annotations[0].basis,
-            MeasurementBasis::Inner
-        );
+        assert_eq!(response.measurement_annotation_count, 1);
     }
 
     #[tokio::test]
@@ -5723,4 +6042,47 @@ mod tests {
             .into_iter()
             .all(|session| session.session_id != "session-1"));
     }
+}
+
+// ── Structural verification MCP handlers ────────────────────────────────────
+
+pub fn handle_verify_generated_model(
+    _state: &AppState,
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    model_id: &str,
+    _original_prompt: &str,
+) -> AppResult<VerifyGeneratedModelResponse> {
+    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
+    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
+    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
+    Ok(VerifyGeneratedModelResponse {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        model_id: model_id.to_string(),
+        result,
+    })
+}
+
+pub fn handle_structural_verification_summary(
+    _state: &AppState,
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    model_id: &str,
+) -> AppResult<StructuralVerificationSummaryResponse> {
+    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
+    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
+    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
+    Ok(StructuralVerificationSummaryResponse {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        model_id: model_id.to_string(),
+        passed: result.passed,
+        summary: result.summary,
+        issue_count: result.issues.len(),
+        verifier_status: result.verifier_status,
+        verifier_source: result.verifier_source,
+    })
 }

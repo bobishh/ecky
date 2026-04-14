@@ -73,6 +73,8 @@ function createDefaultConfig(): AppConfig {
     defaultEngineKind: 'freecad',
     defaultSourceLanguage: 'legacyPython',
     defaultGeometryBackend: 'freecad',
+    maxGenerationAttempts: 3,
+    maxVerifyAttempts: 0,
   };
 }
 

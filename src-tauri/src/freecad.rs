@@ -307,6 +307,12 @@ pub fn get_model_manifest(app: &dyn PathResolver, model_id: &str) -> AppResult<M
     Ok(manifest)
 }
 
+pub fn get_artifact_bundle(app: &dyn PathResolver, model_id: &str) -> AppResult<ArtifactBundle> {
+    let bundle_dir = bundle_dir_from_model_id(app, model_id)?;
+    load_cached_bundle(&bundle_dir)?
+        .ok_or_else(|| AppError::not_found(format!("No artifact bundle for model '{}'.", model_id)))
+}
+
 pub fn save_model_manifest(
     app: &dyn PathResolver,
     model_id: &str,

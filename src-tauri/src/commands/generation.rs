@@ -19,17 +19,116 @@ use crate::{
     TECHNICAL_SYSTEM_PROMPT,
 };
 
-pub fn ecky_ir_v0_guide_text() -> &'static str {
+pub fn ecky_ir_v0_guide_text(backend: crate::models::GeometryBackend) -> String {
+    match backend {
+        crate::models::GeometryBackend::Build123d => ecky_ir_v0_guide_build123d(),
+        _ => ecky_ir_v0_guide_ecky_rust(),
+    }
+}
+
+fn ecky_ir_v0_guide_build123d() -> String {
     concat!(
         "Return canonical Ecky IR v0 source as compact ASCII s-expressions in `macro_code`.\n",
-        "Start with `(model ...)`. Do not return Python.\n\n",
+        "Start with `(model ...)`. Do not return Python.\n",
+        "Active geometry backend: BUILD123D (OCCT). Produces solid, manifold geometry.\n\n",
         "Supported v0 ops:\n",
-        "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded_rect`, `circle`, `polygon`, `rounded_polygon`, `bspline`.\n",
+        "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded-rect`, `circle`, `polygon`.\n",
+        "  NOTE: `rounded-polygon` and `bspline` are NOT supported on this backend — use `polygon` with enough points or `profile` instead.\n",
+        "- Path nodes: `path` (raw 3D point list), `bezier-path` (cubic bezier chain from 3n+1 points).\n",
+        "- Sketch nodes: `profile` with explicit `(:outer ...)` and `(:holes ...)` loops.\n",
+        "- Sketch modifiers: `offset`, `offset-rounded`.\n",
+        "- Constructive nodes: `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `shell`.\n",
+        "  NOTE: `wall-pattern` is NOT supported on this backend — use the EckyRust backend for patterned surfaces.\n",
+        "- `shell` supported targets: `extrude`, `revolve`, `sweep`, `loft`, `cylinder`, `cone`, `sphere`.\n",
+        "  `shell` does NOT support `taper` or `twist` targets on this backend.\n",
+        "- Edge ops: `fillet`, `chamfer` — fully supported via OCCT.\n",
+        "- Composition: `union`, `difference`, `intersection`, `xor`.\n",
+        "- Transforms: `translate`, `rotate`, `scale`, `mirror`.\n",
+        "- Arrays: `linear-array`, `radial-array`, `grid-array`, `arc-array`.\n",
+        "- Numeric helpers: `clamp`, `lerp`, `smoothstep`, `+`, `-`, `*`, `/`, `min`, `max`, `abs`, `sin`, `cos`, `tan`, `deg`, `rad`.\n",
+        "- Boolean ops: `not`, `and`, `or`, `=` (numeric or string equality), `>`, `>=`, `<`, `<=`.\n",
+        "- Conditional: `(if bool-expr then-shape else-shape)`.\n\n",
+        "Param types:\n",
+        "- `(number key default :label \"...\" :min n :max n)` — numeric input.\n",
+        "- `(select key \"default\" :label \"...\" :options ((\"Label\" \"val\") ...))` — dropdown.\n",
+        "- `(toggle key #t :label \"...\")` — boolean checkbox; use `#t`/`#f`.\n",
+        "- `(image key \"\" :label \"...\")` — file picker; leave default empty.\n\n",
+        "Rules & Syntax:\n",
+        "- Use `(profile (:outer ((x y) ...)) (:holes (((x y) ...))))` for contour-aware sketches with holes.\n",
+        "- `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep` are all hole-aware and preserve internal cutouts.\n",
+        "- `loft` requires compatible topology (same number of loops, same vertex count per mapped loop after resampling).\n",
+        "- `revolve` and `sweep` produce solid OCCT geometry — reliable for curved shapes including domes.\n",
+        "  For a dome: `(difference (sphere r 32) (translate 0 0 (- r) (box (* 2 r) (* 2 r) r)))` or\n",
+        "  `(revolve (profile (:outer ((0 0) (r 0) ... ))) 360)`.\n",
+        "- `fillet` and `chamfer`: `(fillet radius body)` for all edges, or `(fillet radius :edges top body)` for selective edges.\n",
+        "  Edge selectors: `all` (default), `top`, `bottom`, `vertical`.\n",
+        "- Array signatures: `(linear-array count dx dy dz mesh)`, `(grid-array rows cols dx dy mesh)`,\n",
+        "  `(radial-array count step-deg radius mesh)`, `(arc-array count radius start-deg end-deg mesh)`.\n",
+        "- Do not emit a `lithophane` source node. Drive lithophane through `postProcessing.lithophaneAttachments` / the guided LITHO tab.\n",
+        "- Keep `ui_spec`/`initial_params` aligned with the IR parameters.\n\n",
+        "Examples:\n\n",
+        "Teapot spout (sweep + bezier-path):\n",
+        "(model\n",
+        "  (part spout\n",
+        "    (sweep (circle 8 16)\n",
+        "      (bezier-path ((0 0 0) (5 10 20) (10 30 40) (8 50 50)) 24))))\n\n",
+        "Parametric cylinder:\n",
+        "(model\n",
+        "  (params (number dia 40 :label \"Diameter\" :min 10 :max 120)\n",
+        "          (number h 60 :label \"Height\" :min 10 :max 200))\n",
+        "  (part body (cylinder dia h 48)))\n\n",
+        "Hollow rounded box:\n",
+        "(model\n",
+        "  (params (number w 80 :label \"Width\" :min 20 :max 200)\n",
+        "          (number wall 2.5 :label \"Wall\" :min 1 :max 8))\n",
+        "  (part body (shell wall (extrude (rounded-rect w 60 4) 50))))\n\n",
+        "Dome (hemisphere via sphere + cut):\n",
+        "(model\n",
+        "  (params (number r 30 :label \"Radius\" :min 10 :max 100))\n",
+        "  (part dome\n",
+        "    (difference (sphere r 32)\n",
+        "                (translate 0 0 (- r) (box (* 2 r) (* 2 r) r)))))\n\n",
+        "Fillet all top edges:\n",
+        "(model\n",
+        "  (params (number w 40 :label \"Width\" :min 10 :max 100)\n",
+        "          (number h 30 :label \"Height\" :min 5 :max 80))\n",
+        "  (part body (fillet 3 :edges top (box w w h))))\n\n",
+        "Radial array of spokes (step-deg = 360/count):\n",
+        "(model\n",
+        "  (params (number n 6 :label \"Count\" :min 3 :max 12))\n",
+        "  (part wheel\n",
+        "    (union (cylinder 8 4 24)\n",
+        "           (radial-array n (/ 360 n) 30 (cylinder 3 4 12)))))\n\n",
+        "Conditional cap via toggle:\n",
+        "(model\n",
+        "  (params (toggle cap #t :label \"Cap top\"))\n",
+        "  (part body\n",
+        "    (if cap\n",
+        "      (union (cylinder 20 40 32) (translate 0 0 40 (sphere 20 32)))\n",
+        "      (cylinder 20 40 32))))\n\n",
+        "Parametric ring using math:\n",
+        "(model\n",
+        "  (params (number outer 30 :label \"Outer radius\" :min 10 :max 80)\n",
+        "          (number wall 3 :label \"Wall\" :min 1 :max 10))\n",
+        "  (part ring\n",
+        "    (difference (cylinder outer 8 32)\n",
+        "                (cylinder (- outer wall) 10 32))))"
+    ).to_string()
+}
+
+fn ecky_ir_v0_guide_ecky_rust() -> String {
+    concat!(
+        "Return canonical Ecky IR v0 source as compact ASCII s-expressions in `macro_code`.\n",
+        "Start with `(model ...)`. Do not return Python.\n",
+        "Active geometry backend: ECKY RUST (CSG mesh). Experimental; good for organic shapes and wall patterns.\n\n",
+        "Supported v0 ops:\n",
+        "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded-rect`, `circle`, `polygon`, `rounded-polygon`, `bspline`.\n",
         "- Path nodes: `path` (raw 3D point list), `bezier-path` (cubic bezier chain from 3n+1 points).\n",
         "- Sketch nodes: `profile` with explicit `(:outer ...)` and `(:holes ...)` loops.\n",
         "- Sketch modifiers: `offset`, `offset-rounded`.\n",
         "- Constructive nodes: `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `shell`, `wall-pattern`.\n",
-        "- Edge ops (build123d backend only): `fillet`, `chamfer`.\n",
+        "- `shell` supported targets: `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `cylinder`, `cone`, `sphere`.\n",
+        "  `fillet` and `chamfer` are supported with native mesh approximation; prefer rounded/bspline profiles when edge continuity matters most.\n",
         "- Composition: `union`, `difference`, `intersection`, `xor`.\n",
         "- Transforms: `translate`, `rotate`, `scale`, `mirror`.\n",
         "- Arrays: `linear-array`, `radial-array`, `grid-array`, `arc-array`.\n",
@@ -47,7 +146,9 @@ pub fn ecky_ir_v0_guide_text() -> &'static str {
         "- Use `(bspline ((x y) ...) closed? samples?)` for smooth closed loops. Prefer closed `#t` loops for printable profiles.\n",
         "- `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep` are all hole-aware and preserve internal cutouts.\n",
         "- `loft` requires compatible topology (same number of loops, same vertex count per mapped loop after resampling).\n",
-        "- `shell` supports `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `cylinder`, `cone`, `sphere`.\n",
+        "- `revolve` and `sweep` use CSG mesh generation. Complex curved closed shapes (domes, U-profiles) may produce\n",
+        "  mesh artifacts — prefer primitive-based construction for domes:\n",
+        "  `(difference (sphere r 32) (translate 0 0 (- r) (box (* 2 r) (* 2 r) r)))`.\n",
         "- `wall-pattern` supports shell-surface targets and deforms the outer surface only.\n",
         "- `wall-pattern` modes: `ribs` (vertical), `rings` (horizontal), `spiral`, `diamond`, `hammered`.\n",
         "- `wall-pattern` options: `:mode` (required; literal symbol like `ribs` OR a `select` param ref), `:depth` (required, mm),\n",
@@ -55,8 +156,6 @@ pub fn ecky_ir_v0_guide_text() -> &'static str {
         "  `:phase`, `:bias`, `:twistDeg`, `:seed`, `:rimFade`. All numeric options accept param references.\n",
         "- Array signatures: `(linear-array count dx dy dz mesh)`, `(grid-array rows cols dx dy mesh)`,\n",
         "  `(radial-array count step-deg radius mesh)`, `(arc-array count radius start-deg end-deg mesh)`.\n",
-        "- `fillet` and `chamfer`: `(fillet radius body)` for all edges, or `(fillet radius :edges top body)` for selective edges.\n",
-        "  Edge selectors: `all` (default), `top`, `bottom`, `vertical`. Requires build123d backend.\n",
         "- Do not emit a `lithophane` source node. Drive lithophane through `postProcessing.lithophaneAttachments` / the guided LITHO tab.\n",
         "- Keep `ui_spec`/`initial_params` aligned with the IR parameters.\n\n",
         "Examples:\n\n",
@@ -82,7 +181,7 @@ pub fn ecky_ir_v0_guide_text() -> &'static str {
         "  (part vase\n",
         "    (wall-pattern (:mode ribs :depth 1.2 :uFreq ribs :softness 0.12)\n",
         "      (shell 2 (extrude (circle r 48) 90)))))\n\n",
-        "Extruded profile with hole:\n",
+        "Extruded profile with hole (rounded-polygon):\n",
         "(model\n",
         "  (part frame\n",
         "    (extrude\n",
@@ -110,7 +209,7 @@ pub fn ecky_ir_v0_guide_text() -> &'static str {
         "  (part ring\n",
         "    (difference (cylinder outer 8 32)\n",
         "                (cylinder (- outer wall) 10 32))))"
-    )
+    ).to_string()
 }
 
 fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::models::Engine> {
@@ -437,7 +536,7 @@ pub async fn generate_design(
             format!(
                 "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
                 contextual_prompt,
-                ecky_ir_v0_guide_text()
+                ecky_ir_v0_guide_text(geometry_backend)
             )
         } else {
             contextual_prompt
@@ -774,22 +873,10 @@ pub async fn classify_intent(
         if !ctx.pinned_references.trim().is_empty() {
             blocks.push(format!("PINNED REFERENCES\n{}", ctx.pinned_references));
         }
-        if let Some(current) = ctx.last_output.as_ref() {
-            let ui_spec_json =
-                serde_json::to_string_pretty(&current.ui_spec).unwrap_or_else(|_| "{}".to_string());
-            let params_json = serde_json::to_string_pretty(&current.initial_params)
-                .unwrap_or_else(|_| "{}".to_string());
+        if !ctx.design_digest.trim().is_empty() {
             blocks.push(format!(
-                "ACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE)\n```python\n{}\n```",
-                current.macro_code
-            ));
-            blocks.push(format!(
-                "ACTUAL CURRENT UI SPEC (AUTHORITATIVE)\n```json\n{}\n```",
-                ui_spec_json
-            ));
-            blocks.push(format!(
-                "ACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE)\n```json\n{}\n```",
-                params_json
+                "ACTUAL LIVE DESIGN DIGEST (AUTHORITATIVE)\n{}",
+                ctx.design_digest
             ));
         }
         if let Some(frontend_context) = context.as_ref().filter(|value| !value.trim().is_empty()) {
@@ -839,6 +926,65 @@ pub async fn classify_intent(
     }
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn verify_render(
+    original_prompt: String,
+    screenshots: Vec<String>,
+    reference_image_paths: Vec<String>,
+    structural_summary: Option<String>,
+    state: State<'_, AppState>,
+) -> AppResult<crate::contracts::VisualVerificationResult> {
+    let engine = selected_engine(&state)?;
+
+    // Convert reference image file paths to data URLs
+    let reference_images: Vec<String> = reference_image_paths
+        .iter()
+        .filter_map(|path| {
+            let bytes = fs::read(path).ok()?;
+            let b64 = general_purpose::STANDARD.encode(bytes);
+            let ext = path.split('.').next_back().unwrap_or("png").to_lowercase();
+            let mime = if ext == "jpg" || ext == "jpeg" {
+                "image/jpeg"
+            } else {
+                "image/png"
+            };
+            Some(format!("data:{};base64,{}", mime, b64))
+        })
+        .collect();
+
+    llm::verify_render(
+        &engine,
+        &original_prompt,
+        screenshots,
+        reference_images,
+        structural_summary.as_deref(),
+    )
+    .await
+    .map(|outcome| outcome.data)
+    .map_err(|raw_body| {
+        AppError::with_details(
+            AppErrorCode::Provider,
+            "Vision verification LLM call failed.",
+            raw_body,
+        )
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn verify_generated_model(
+    model_id: String,
+    #[allow(unused_variables)] original_prompt: String,
+    app: AppHandle,
+) -> AppResult<crate::contracts::StructuralVerificationResult> {
+    let bundle = crate::freecad::get_artifact_bundle(&app, &model_id)?;
+    let manifest = crate::freecad::get_model_manifest(&app, &model_id)?;
+    Ok(crate::services::structural_verification::verify_structure(
+        &bundle, &manifest,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{prepend_follow_up_context, should_use_framework_for_generation};
@@ -879,6 +1025,7 @@ mod tests {
                 initial_params: Default::default(),
                 post_processing: None,
             }),
+            design_digest: "Current working snapshot\nDesign [v1]".to_string(),
         }
     }
 

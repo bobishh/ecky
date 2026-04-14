@@ -93,17 +93,17 @@ async renameThread(id: string, title: string) : Promise<Result<null, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
-async setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage, geometryBackend: GeometryBackend) : Promise<Result<null, AppError>> {
+async setThreadEngineKind(id: string, engineKind: EngineKind) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("set_thread_authoring_context", { id, sourceLanguage, geometryBackend }) };
+    return { status: "ok", data: await TAURI_INVOKE("set_thread_engine_kind", { id, engineKind }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async setThreadEngineKind(id: string, engineKind: EngineKind) : Promise<Result<null, AppError>> {
+async setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage, geometryBackend: GeometryBackend) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("set_thread_engine_kind", { id, engineKind }) };
+    return { status: "ok", data: await TAURI_INVOKE("set_thread_authoring_context", { id, sourceLanguage, geometryBackend }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -197,6 +197,22 @@ async classifyIntent(prompt: string, threadId: string | null, context: string | 
     else return { status: "error", error: e  as any };
 }
 },
+async verifyRender(originalPrompt: string, screenshots: string[], referenceImagePaths: string[], structuralSummary: string | null) : Promise<Result<VisualVerificationResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("verify_render", { originalPrompt, screenshots, referenceImagePaths, structuralSummary }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async verifyGeneratedModel(modelId: string, originalPrompt: string) : Promise<Result<StructuralVerificationResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("verify_generated_model", { modelId, originalPrompt }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async checkFreecad() : Promise<Result<boolean, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_freecad") };
@@ -213,9 +229,9 @@ async renderStl(macroCode: string, parameters: Partial<{ [key in string]: ParamV
     else return { status: "error", error: e  as any };
 }
 },
-async renderModel(macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>, macroDialect: MacroDialect | null, postProcessing: PostProcessingSpec | null) : Promise<Result<ArtifactBundle, AppError>> {
+async renderModel(macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>, macroDialect: MacroDialect | null, geometryBackend: GeometryBackend | null, postProcessing: PostProcessingSpec | null) : Promise<Result<ArtifactBundle, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("render_model", { macroCode, parameters, macroDialect, postProcessing }) };
+    return { status: "ok", data: await TAURI_INVOKE("render_model", { macroCode, parameters, macroDialect, geometryBackend, postProcessing }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -594,7 +610,7 @@ export type AutoAgent = { id: string; label: string; cmd: string; model?: string
  */
 startOnDemand?: boolean }
 export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
 export type ControlRelation = { relationId: string; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number; enabled?: boolean }
@@ -613,8 +629,6 @@ export type Engine = { id: string; name: string; provider: string; apiKey: strin
  * Defaults to true for backward compatibility with existing configs.
  */
 enabled?: boolean }
-export type SourceLanguage = "legacyPython" | "eckyIrV0"
-export type GeometryBackend = "freecad" | "build123d" | "eckyRust"
 export type EngineKind = "freecad" | "eckyIrV0"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
@@ -625,8 +639,9 @@ export type FinalizeStatus = "success" | "error" | "discarded"
 export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null; engineKind?: EngineKind | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null }
 export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
+export type GeometryBackend = "freecad" | "build123d" | "eckyRust"
 export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
-export type InteractionMode = "design" | "question"
+export type InteractionMode = "design" | "question" | "tune"
 export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null }
 export type LithophaneAttachment = { id: string; enabled?: boolean; source: LithophaneAttachmentSource; targetPartId?: string; placement?: LithophanePlacement; relief?: LithophaneRelief; color?: LithophaneColor }
 export type LithophaneAttachmentSource = { kind: "file"; imagePath: string } | { kind: "param"; imageParam: string }
@@ -697,6 +712,14 @@ export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
 export type SelectionTargetKind = "part" | "object" | "group" | "edge"
+export type SourceLanguage = "legacyPython" | "eckyIrV0"
+export type StructuralIssue = { code: string; message: string; 
+/**
+ * ID of the affected part, when the issue is part-specific.
+ */
+partId?: string | null; numericPayload?: number | null }
+export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
+export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
 export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend }
 export type ThreadAgentState = { 
 /**
@@ -708,11 +731,16 @@ export type UiField = { type: "range"; key: string; label?: string; min?: number
 export type UiSpec = { fields?: UiField[] }
 export type UsageSegment = { stage: string; provider: string; model: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null }
 export type UsageSummary = { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null; segments?: UsageSegment[] }
+export type VerifierSource = "rust_structural" | "rust_plus_backend"
+export type VerifierStatus = "ok" | "ok_rust_only" | "ok_with_backend" | "skipped_unavailable" | "skipped_backend_unavailable"
 export type ViewerAsset = { partId: string; nodeId: string; objectName: string; label: string; path: string; format: ViewerAssetFormat }
 export type ViewerAssetFormat = "stl" | "gltf" | "glb"
 export type ViewerEdgePoint = { x: number; y: number; z: number }
 export type ViewerEdgeTarget = { targetId: string; partId: string; viewerNodeId: string; label: string; editable: boolean; start: ViewerEdgePoint; end: ViewerEdgePoint }
 export type ViewportCameraState = { position: [number, number, number]; target: [number, number, number]; zoom?: number | null; fov?: number | null }
+export type VisualIssue = { category: VisualIssueCategory; description: string; partLabel?: string | null }
+export type VisualIssueCategory = "missing_part" | "floating_part" | "connector_broken" | "reference_mismatch" | "topology_broken" | "other"
+export type VisualVerificationResult = { passed: boolean; summary: string; issues: VisualIssue[]; usage?: UsageSummary | null }
 
 /** tauri-specta globals **/
 

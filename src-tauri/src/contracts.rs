@@ -459,6 +459,14 @@ pub struct Config {
     pub default_source_language: SourceLanguage,
     #[serde(default = "default_geometry_backend")]
     pub default_geometry_backend: GeometryBackend,
+    #[serde(default = "default_max_generation_attempts")]
+    pub max_generation_attempts: u32,
+    #[serde(default)]
+    pub max_verify_attempts: u32,
+}
+
+fn default_max_generation_attempts() -> u32 {
+    3
 }
 
 fn default_engine_kind() -> EngineKind {
@@ -490,11 +498,13 @@ pub enum SourceLanguage {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
 pub enum GeometryBackend {
     #[default]
+    #[serde(rename = "freecad")]
     Freecad,
+    #[serde(rename = "build123d")]
     Build123d,
+    #[serde(rename = "eckyRust")]
     EckyRust,
 }
 
@@ -1819,6 +1829,121 @@ pub struct IntentDecision {
     #[serde(default)]
     pub usage: Option<UsageSummary>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderVerification {
+    /// true = model matches the prompt, no action needed
+    pub passed: bool,
+    /// human-readable description of what's wrong (empty when passed)
+    pub issues: String,
+    #[serde(default)]
+    pub usage: Option<UsageSummary>,
+}
+
+// ── Structural verification ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralVerificationResult {
+    pub passed: bool,
+    pub summary: String,
+    pub issues: Vec<StructuralIssue>,
+    pub metrics: StructuralMetrics,
+    pub verifier_status: VerifierStatus,
+    #[serde(default)]
+    pub verifier_source: Option<VerifierSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifierSource {
+    RustStructural,
+    RustPlusBackend,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralIssue {
+    pub code: String,
+    pub message: String,
+    /// ID of the affected part, when the issue is part-specific.
+    #[serde(default)]
+    pub part_id: Option<String>,
+    #[serde(default)]
+    pub numeric_payload: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralMetrics {
+    pub part_count: u32,
+    #[serde(default)]
+    pub preview_stl_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub total_volume: Option<f64>,
+    #[serde(default)]
+    pub total_area: Option<f64>,
+    #[serde(default)]
+    pub bbox: Option<ManifestBounds>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifierStatus {
+    Ok,
+    OkRustOnly,
+    OkWithBackend,
+    SkippedUnavailable,
+    SkippedBackendUnavailable,
+}
+
+// ── Visual (screenshot) verification ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisualVerificationResult {
+    pub passed: bool,
+    pub summary: String,
+    pub issues: Vec<VisualIssue>,
+    #[serde(default)]
+    pub usage: Option<UsageSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisualIssue {
+    pub category: VisualIssueCategory,
+    pub description: String,
+    #[serde(default)]
+    pub part_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualIssueCategory {
+    MissingPart,
+    FloatingPart,
+    ConnectorBroken,
+    ReferenceMismatch,
+    TopologyBroken,
+    Other,
+}
+
+impl VisualIssueCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingPart => "missing_part",
+            Self::FloatingPart => "floating_part",
+            Self::ConnectorBroken => "connector_broken",
+            Self::ReferenceMismatch => "reference_mismatch",
+            Self::TopologyBroken => "topology_broken",
+            Self::Other => "other",
+        }
+    }
+}
+
+// ── End structural verification ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]

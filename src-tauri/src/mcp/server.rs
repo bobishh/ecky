@@ -91,6 +91,7 @@ struct ResolvedTargetRef {
     message_id: String,
     model_id: Option<String>,
     source_language: crate::models::SourceLanguage,
+    geometry_backend: crate::models::GeometryBackend,
     preview_stl_path: Option<String>,
     viewer_assets: Vec<crate::contracts::ViewerAsset>,
     title: String,
@@ -535,6 +536,7 @@ async fn resolve_target_for_session(
         message_id: target.message_id,
         model_id,
         source_language: design.source_language,
+        geometry_backend: design.geometry_backend,
         preview_stl_path: runtime_bundle
             .as_ref()
             .map(|bundle| bundle.preview_stl_path.clone()),
@@ -738,21 +740,10 @@ fn target_ref_from_value(value: &Value) -> Option<McpTargetRef> {
     })
 }
 
-fn thread_list_entry(
-    thread: crate::models::Thread,
-    claim_owner: Option<crate::models::AgentSession>,
-) -> ThreadListEntry {
+fn thread_list_entry(thread: crate::models::Thread) -> ThreadListEntry {
     ThreadListEntry {
         thread_id: thread.id,
         title: thread.title,
-        updated_at: thread.updated_at,
-        version_count: thread.version_count,
-        pending_count: thread.pending_count,
-        queued_count: thread.queued_count,
-        error_count: thread.error_count,
-        status: thread.status,
-        finalized_at: thread.finalized_at,
-        claim_owner,
     }
 }
 
@@ -863,6 +854,7 @@ fn workflow_guide_text(state: &AppState) -> String {
 fn workspace_overview_brief(
     state: &AppState,
     source_language: Option<crate::models::SourceLanguage>,
+    _geometry_backend: Option<crate::models::GeometryBackend>,
 ) -> WorkspaceOverviewBrief {
     let resolved_lang =
         source_language.unwrap_or_else(|| state.config.lock().unwrap().default_source_language);
@@ -926,11 +918,6 @@ fn workspace_overview_brief(
                 "If the target has a semantic manifest, inspect existing views before creating new control groupings."
                     .to_string(),
             ]
-        },
-        cad_sdk_snippet: if is_ir {
-            Some(crate::commands::generation::ecky_ir_v0_guide_text().to_string())
-        } else {
-            Some(include_str!("../../../model-runtime/cad_sdk.py").to_string())
         },
     }
 }
@@ -1047,7 +1034,8 @@ fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
         "ecky://guides/technical-system-prompt" => Some(crate::TECHNICAL_SYSTEM_PROMPT.to_string()),
         "ecky://guides/modeling-guidelines" => Some(workflow_guide_text(state)),
         "ecky://guides/ecky-ir-v0" => {
-            Some(crate::commands::generation::ecky_ir_v0_guide_text().to_string())
+            let backend = state.config.lock().unwrap().default_geometry_backend;
+            Some(crate::commands::generation::ecky_ir_v0_guide_text(backend))
         }
         "ecky://guides/cad-sdk" => {
             Some(include_str!("../../../model-runtime/cad_sdk.py").to_string())
@@ -1145,8 +1133,33 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
+            "name": "thread_meta_get",
+            "description": "Fetch thread metadata without messages.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": { "type": "string" }
+                },
+                "required": ["threadId"]
+            }
+        }),
+        json!({
+            "name": "thread_messages_get",
+            "description": "Fetch a slice of compact messages from a thread.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": { "type": "string" },
+                    "limit": { "type": "number" },
+                    "before": { "type": "string" },
+                    "roles": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["threadId"]
+            }
+        }),
+        json!({
             "name": "thread_get",
-            "description": "Fetch a full thread with versions and runtime metadata.",
+            "description": "Fetch a full thread with versions and runtime metadata. Expensive; prefer thread_meta_get/thread_messages_get.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1191,14 +1204,14 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "target_detail_get",
-            "description": "Fetch one exact chunk of the active editable target by section. Use this instead of target_get when you only need uiSpec, params, or artifactBundle. latestDraft is deprecated and currently always null.",
+            "description": "Fetch one exact chunk of the active editable target by section. Use this instead of target_get when you only need uiSpec, params, or artifact metadata. artifactBundle returns a digest; use artifactPaths, viewerAssets, or exportArtifacts for deep detail.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" })),
                     ("section", json!({
                         "type": "string",
-                        "enum": ["uiSpec", "initialParams", "artifactBundle", "latestDraft"]
+                        "enum": ["uiSpec", "initialParams", "artifactBundle", "artifactPaths", "viewerAssets", "exportArtifacts", "latestDraft"]
                     }))
                 ],
                 &["section"],
@@ -1296,13 +1309,28 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "semantic_manifest_get",
-            "description": "Fetch the semantic manifest for the current generated-model target.",
+            "description": "Fetch a summary of the semantic manifest for the current generated-model target.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" }))
                 ],
                 &[],
+            )
+        }),
+        json!({
+            "name": "semantic_manifest_detail_get",
+            "description": "Fetch one exact chunk of the semantic manifest by section.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("section", json!({
+                        "type": "string",
+                        "enum": ["controlPrimitives", "controlRelations", "controlViews", "advisories", "measurementAnnotations", "parts"]
+                    }))
+                ],
+                &["section"],
             )
         }),
         json!({
@@ -1533,6 +1561,31 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 "required": ["threadId"]
             }
+        }),
+        json!({
+            "name": "verify_generated_model",
+            "description": "Run deterministic structural verification on the generated model for the currently bound target/thread. Returns the full structured result including pass/fail, issue codes, metrics, and verifier source. This is the authoritative first check — screenshot/VLM verification is secondary.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("modelId", json!({ "type": "string" })),
+                    ("originalPrompt", json!({ "type": "string" })),
+                ],
+                &[],
+            )
+        }),
+        json!({
+            "name": "get_structural_verification_summary",
+            "description": "Lightweight summary of the structural verification result for quick agent routing. Returns pass/fail, summary text, issue count, and verifier status without full issue details.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("modelId", json!({ "type": "string" })),
+                ],
+                &[],
+            )
         }),
     ]
 }
@@ -1899,10 +1952,7 @@ async fn dispatch_tool_call(
             let recent_threads = db::get_recent_threads_limited(&conn, 5)
                 .map_err(|e| AppError::persistence(e.to_string()))?
                 .into_iter()
-                .map(|thread| {
-                    let thread_id = thread.id.clone();
-                    thread_list_entry(thread, claim_owners.get(&thread_id).cloned())
-                })
+                .map(thread_list_entry)
                 .collect::<Vec<_>>();
 
             let _ = req_args;
@@ -1926,6 +1976,7 @@ async fn dispatch_tool_call(
                             agent_brief: workspace_overview_brief(
                                 &server.state,
                                 Some(target.source_language),
+                                Some(target.geometry_backend),
                             ),
                             control_surface: workspace_control_surface(&target),
                             default_target: WorkspaceOverviewTarget {
@@ -1958,6 +2009,7 @@ async fn dispatch_tool_call(
                             agent_brief: workspace_overview_brief(
                                 &server.state,
                                 Some(thread.source_language),
+                                Some(thread.geometry_backend),
                             ),
                             control_surface: workspace_control_surface_for_empty_thread(&thread),
                             default_target: WorkspaceOverviewTarget {
@@ -1983,6 +2035,18 @@ async fn dispatch_tool_call(
         }
         "thread_list" => {
             let response = handlers::handle_thread_list(&server.state).await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "thread_meta_get" => {
+            let req_args: ThreadMetaRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_thread_meta_get(&server.state, req_args).await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "thread_messages_get" => {
+            let req_args: ThreadMessagesRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_thread_messages_get(&server.state, req_args).await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "thread_get" => {
@@ -2758,6 +2822,56 @@ async fn dispatch_tool_call(
             let _ = server.handle.emit("history-updated", ());
             Ok((serde_json::to_value(response).unwrap(), None))
         }
+        "verify_generated_model" => {
+            let req_args: VerifyGeneratedModelRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            let model_id = req_args
+                .model_id
+                .or(target.model_id.clone())
+                .ok_or_else(|| AppError::validation("No model_id available for verification."))?;
+            let original_prompt = req_args.original_prompt.unwrap_or_default();
+            let response = handlers::handle_verify_generated_model(
+                &server.state,
+                server.app.as_ref(),
+                &target.thread_id,
+                &target.message_id,
+                &model_id,
+                &original_prompt,
+            )?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "get_structural_verification_summary" => {
+            let req_args: StructuralVerificationSummaryRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            let model_id = req_args
+                .model_id
+                .or(target.model_id.clone())
+                .ok_or_else(|| AppError::validation("No model_id available for verification."))?;
+            let response = handlers::handle_structural_verification_summary(
+                &server.state,
+                server.app.as_ref(),
+                &target.thread_id,
+                &target.message_id,
+                &model_id,
+            )?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
         _ => Err(AppError::validation(format!(
             "Unknown tool: {}",
             params.name
@@ -2785,6 +2899,8 @@ mod tests {
                 default_engine_kind: crate::models::EngineKind::Freecad,
                 default_source_language: crate::models::SourceLanguage::LegacyPython,
                 default_geometry_backend: crate::models::GeometryBackend::Freecad,
+                max_generation_attempts: 3,
+                max_verify_attempts: 0,
             },
             None,
             Connection::open_in_memory().expect("memory db"),
@@ -2848,7 +2964,11 @@ mod tests {
     fn guidance_prefers_meta_macro_and_detail_over_target_get() {
         let state = test_state();
         let workflow = workflow_guide_text(&state);
-        let brief = workspace_overview_brief(&state, Some(crate::models::SourceLanguage::EckyIrV0));
+        let brief = workspace_overview_brief(
+            &state,
+            Some(crate::models::SourceLanguage::EckyIrV0),
+            Some(crate::models::GeometryBackend::Build123d),
+        );
 
         assert!(workflow.contains("ecky://guides/ecky-ir-v0"));
         assert!(workflow.contains("call target_meta_get"));
@@ -2918,6 +3038,7 @@ mod tests {
             message_id: "message-1".to_string(),
             model_id: Some("model-1".to_string()),
             source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::EckyRust,
             preview_stl_path: Some("/tmp/model.stl".to_string()),
             viewer_assets: vec![],
             title: "Widget".to_string(),
