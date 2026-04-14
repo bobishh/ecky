@@ -1,27 +1,35 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
+  import type { WindowId } from './stores/windowStore';
+  import { bringToFront, updateRect, closeWindow, windowRegistry } from './stores/windowStore';
 
   let {
+    windowId,
     x = $bindable(100),
     y = $bindable(100),
     width = $bindable(800),
     height = $bindable(600),
+    z = 1000,
     minWidth = 400,
     minHeight = 300,
     title = "",
     hidden = false,
+    highlighted = false,
     onclose,
     children
   }: {
+    windowId?: WindowId;
     x?: number;
     y?: number;
     width?: number;
     height?: number;
+    z?: number;
     minWidth?: number;
     minHeight?: number;
     title?: string;
     hidden?: boolean;
+    highlighted?: boolean;
     onclose: () => void;
     children: Snippet;
   } = $props();
@@ -31,8 +39,21 @@
   let dragStartOffset = $state({ x: 0, y: 0 });
   let resizeStartDim = $state({ width: 0, height: 0, x: 0, y: 0 });
 
+  function clampToViewport() {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    x = Math.max(0, Math.min(x, vw - 100));
+    y = Math.max(0, Math.min(y, vh - 50));
+  }
+
+  function handlePointerDown() {
+    if (windowId) {
+      bringToFront(windowId);
+    }
+  }
+
   function handleDragStart(event: MouseEvent) {
-    if (event.target instanceof Element && event.target.closest('button')) return;
+    if (event.target instanceof Element && (event.target.closest('button') || event.target.closest('input') || event.target.closest('select'))) return;
     event.stopPropagation();
 
     dragging = true;
@@ -74,10 +95,24 @@
   }
 
   function endInteraction() {
+    const wasDragging = dragging;
+    const wasResizing = resizing;
     dragging = false;
     resizing = false;
     window.removeEventListener('mousemove', onGlobalMove);
     window.removeEventListener('mouseup', endInteraction);
+
+    if ((wasDragging || wasResizing) && windowId) {
+      clampToViewport();
+      updateRect(windowId, { x, y, width, height });
+    }
+  }
+
+  function handleClose() {
+    if (windowId) {
+      closeWindow(windowId);
+    }
+    onclose();
   }
 
   onDestroy(() => {
@@ -88,16 +123,24 @@
   });
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="window"
   class:window--hidden={hidden}
-  style="left: {x}px; top: {y}px; width: {width}px; height: {height}px;"
+  class:window--interacting={dragging || resizing}
+  class:window--highlighted={highlighted}
+  data-window-id={windowId ?? undefined}
+  style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z};"
   role="dialog"
   aria-hidden={hidden}
+  onmousedown={handlePointerDown}
 >
+  {#if dragging || resizing}
+    <div class="window-glass-pane"></div>
+  {/if}
   <div class="window-header" role="none" onmousedown={handleDragStart}>
     <span class="window-title">{title}</span>
-    <button class="window-close" onclick={onclose}>&times;</button>
+    <button class="window-close" onclick={handleClose}>&times;</button>
   </div>
   <div class="window-content">
     {@render children()}
@@ -108,12 +151,13 @@
 <style>
   .window {
     position: fixed;
-    background: var(--bg-100);
-    border: 1px solid var(--bg-300);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
+    border: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg-300) 85%, transparent), 0 8px 32px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(9px);
     display: flex;
     flex-direction: column;
-    z-index: 1000;
+    overflow: hidden;
   }
 
   .window--hidden {
@@ -122,18 +166,36 @@
     pointer-events: none;
   }
 
+  .window--interacting {
+    user-select: none;
+  }
+
+  .window--highlighted {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px var(--primary), 0 0 40px rgba(74, 140, 92, 0.5), 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  .window-glass-pane {
+    position: absolute;
+    inset: 0;
+    z-index: 9999;
+    cursor: inherit;
+  }
+
   .window-header {
     padding: 6px 10px;
     background: var(--bg-200);
-    border-bottom: 1px solid var(--bg-300);
+    border-bottom: 1px solid color-mix(in srgb, var(--primary) 20%, var(--bg-300));
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
     cursor: move;
     user-select: none;
   }
 
   .window-title {
+    font-family: var(--font-mono);
     font-size: 0.65rem;
     font-weight: bold;
     text-transform: uppercase;
@@ -152,6 +214,7 @@
     cursor: pointer;
     line-height: 1;
     padding: 0 4px;
+    flex: 0 0 auto;
   }
 
   .window-close:hover {
@@ -160,18 +223,23 @@
 
   .window-content {
     flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
-    background: var(--bg);
+    background: color-mix(in srgb, var(--bg) 95%, transparent);
   }
 
   .window-resize-handle {
     position: absolute;
-    right: 0;
-    bottom: 0;
-    width: 12px;
-    height: 12px;
+    right: 2px;
+    bottom: 2px;
+    width: 18px;
+    height: 18px;
     cursor: nwse-resize;
     background: linear-gradient(135deg, transparent 50%, var(--bg-300) 50%);
+    z-index: 3;
   }
 
   .window-resize-handle:hover {

@@ -10,6 +10,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "build123d:prepare": "bash scripts/prepare_build123d_runtime.sh",
+    "build123d:smoke": "bash scripts/smoke_build123d_only.sh",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json && tsc --project tsconfig.node.json --noEmit",
     "generate:contracts": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_contracts",
     "check:contracts": "npm run generate:contracts && git diff --exit-code -- src/lib/tauri/contracts.ts",

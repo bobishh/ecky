@@ -930,7 +930,7 @@ fn write_agent_instructions(
         4. When the user sends the first queued message:\n\
            a. Call `bootstrap_ecky` to load system guidance.\n\
            b. Call `workspace_overview` to inspect the current thread state.\n\
-           c. If the thread uses Ecky IR, read `ecky://guides/ecky-ir-v0` before writing IR. Treat that guide as the canonical authoring reference.\n\
+           c. If the thread uses sourceLanguage `eckyIrV0`, read `ecky://guides/ecky-source` before writing macro code. Compatibility labels still say `eckyIrV0`, but authored macroCode is current `.ecky` Scheme-style source.\n\
            d. If `workspace_overview.defaultTarget.hasVersion` is true, call `target_meta_get`.\n\
            e. Use `target_macro_get` for macro reasoning and `target_detail_get(section=...)` \
               for exact chunks.\n\
@@ -951,15 +951,10 @@ fn write_agent_instructions(
            `request_user_prompt`, call `mark_as_read` on any one pending user message from that \
            thread before you start. Ecky will drain the whole pending batch for that thread into \
            the current turn.\n\n\
-        ## Rules\n\
-        - Units are millimeters.\n\
-        - Keep macroCode, uiSpec, and parameters aligned.\n\
-        - Raw uiSpec/parameters remain authoritative. Semantic views sit on top of them as curated user-facing control groupings.\n\
-        - If views already exist, inspect and preserve them before inventing new control groupings.\n\
-        - Create or update views when related controls need a clearer editing context for the user, not as a replacement for raw params.\n\
-        - Do not silently delete, bypass, or orphan existing views just because the same controls are reachable through raw uiSpec.\n\
-        - Prefer printable manifold solids.\n\
-        - Call `version_save` after successful renders the user approves.\n",
+        ## Scope\n\
+        - This file is MCP runtime/process guidance only.\n\
+        - Modeling policy lives in `bootstrap_ecky`, `workspace_overview`, and the `ecky://guides/*` resources.\n\
+        - Do not treat this file as the CAD design policy source of truth.\n",
         agent_label = agent.label,
         endpoint_url = endpoint_url,
     );
@@ -1025,7 +1020,7 @@ fn build_command_args(agent: &AutoAgent, initial_prompt: Option<&str>) -> Vec<St
 fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
     format!(
         "You are an Ecky CAD design assistant. \
-        Read AGENTS.md in your current directory for full instructions. \
+        Read AGENTS.md in your current directory for MCP runtime instructions only. \
         The Ecky MCP server is at {endpoint_url}. \
         Start now: call `agent_identity_set` with `agentLabel: \"{agent_label}\"`, then \
         choose the thread you will work on via `thread_list` / `thread_get` unless Ecky already woke you from a selected thread, \
@@ -1035,7 +1030,7 @@ fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
         absolute local files staged by Ecky; open them directly with your file/image tools \
         instead of rewriting or guessing new paths. \
         Do NOT call `bootstrap_ecky` or `workspace_overview` until the user sends the first queued message. \
-        After that, read `ecky://guides/ecky-ir-v0` when the thread uses Ecky IR. Treat that guide as the canonical authoring reference. If `workspace_overview` says the thread has no saved versions yet, \
+        After that, treat `bootstrap_ecky`, `workspace_overview`, and the `ecky://guides/*` resources as the modeling policy source of truth. Read `ecky://guides/ecky-source` when the thread uses sourceLanguage `eckyIrV0`; compatibility labels still say `eckyIrV0`, but authored macroCode is current `.ecky` Scheme-style source. If `workspace_overview` says the thread has no saved versions yet, \
         use the guides plus the queued thread context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, and `target_detail_get(section=...)` \
         before falling back to `target_get`. Use `session_activity_set` / `session_activity_clear` for \
         long steps instead of relying on terminal text. At the end of each turn, save any final user-facing \

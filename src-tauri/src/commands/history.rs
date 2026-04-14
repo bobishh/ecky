@@ -1,4 +1,4 @@
-use crate::models::{AppError, AppResult, AppState, Thread};
+use crate::models::{AppError, AppResult, AppState, Message, Thread, ThreadMessagesPage};
 use crate::services::history as history_service;
 use tauri::State;
 
@@ -14,6 +14,35 @@ pub async fn get_history(state: State<'_, AppState>) -> AppResult<Vec<Thread>> {
 pub async fn get_thread(state: State<'_, AppState>, id: String) -> AppResult<Thread> {
     let conn = state.db.lock().await;
     history_service::get_thread(&conn, &id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_thread_latest_version(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> AppResult<Option<Message>> {
+    let conn = state.db.lock().await;
+    history_service::get_thread_latest_version(&conn, &thread_id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_thread_messages_page(
+    state: State<'_, AppState>,
+    thread_id: String,
+    before: Option<u64>,
+    limit: Option<usize>,
+    include_visual_payloads: bool,
+) -> AppResult<ThreadMessagesPage> {
+    let conn = state.db.lock().await;
+    history_service::get_thread_messages_page(
+        &conn,
+        &thread_id,
+        before,
+        limit,
+        include_visual_payloads,
+    )
 }
 
 #[tauri::command]
@@ -138,4 +167,36 @@ pub async fn reopen_thread(id: String, state: State<'_, AppState>) -> AppResult<
 pub async fn get_inventory(state: State<'_, AppState>) -> AppResult<Vec<Thread>> {
     let conn = state.db.lock().await;
     history_service::get_inventory(&conn)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_thread_window_layout(
+    thread_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<Option<crate::models::ThreadWindowLayout>> {
+    let conn = state.db.lock().await;
+    crate::db::get_thread_window_layout(&conn, &thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn save_thread_window_layout(
+    thread_id: String,
+    layout: crate::models::ThreadWindowLayout,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let conn = state.db.lock().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let saved = crate::db::save_thread_window_layout(&conn, &thread_id, &layout, now)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    if saved {
+        Ok(())
+    } else {
+        Err(AppError::not_found("Thread not found."))
+    }
 }

@@ -215,7 +215,7 @@
       radial-gradient(circle at 24% 28%, color-mix(in srgb, var(--tone-main) 18%, transparent) 0%, transparent 24%),
       radial-gradient(circle at 76% 34%, color-mix(in srgb, var(--tone-accent) 16%, transparent) 0%, transparent 22%),
       radial-gradient(circle at 52% 80%, color-mix(in srgb, var(--tone-main) 14%, transparent) 0%, transparent 26%);
-    animation: transmutation-fog-a 12s ease-in-out infinite alternate;
+    animation: none;
   }
 
   .viewport-transmutation__atmosphere-b {
@@ -227,7 +227,7 @@
         transparent 68%
       );
     filter: blur(18px);
-    animation: transmutation-fog-b 9s ease-in-out infinite alternate;
+    animation: none;
   }
 
   .viewport-transmutation__sweep {
@@ -243,7 +243,7 @@
       transparent 100%
     );
     transform: translateX(-120%) skewX(-24deg);
-    animation: transmutation-sweep-a 6.4s linear infinite;
+    animation: none;
   }
 
   .viewport-transmutation__sweep-b {
@@ -254,7 +254,7 @@
       transparent 100%
     );
     transform: translateY(120%) skewY(10deg);
-    animation: transmutation-sweep-b 8.8s linear infinite;
+    animation: none;
   }
 
   .viewport-transmutation__flash {
@@ -264,12 +264,12 @@
 
   .viewport-transmutation__flash-a {
     background: radial-gradient(circle at 50% 46%, color-mix(in srgb, var(--tone-core) 14%, transparent) 0%, transparent 26%);
-    animation: transmutation-flash-a 5.2s ease-in-out infinite;
+    animation: none;
   }
 
   .viewport-transmutation__flash-b {
     background: radial-gradient(circle at 50% 46%, color-mix(in srgb, white 10%, transparent) 0%, transparent 18%);
-    animation: transmutation-flash-b 7.4s ease-in-out infinite;
+    animation: none;
   }
 
   .viewport-transmutation__spark {
@@ -282,8 +282,8 @@
       0 0 10px color-mix(in srgb, var(--tone-main) 42%, transparent),
       0 0 20px color-mix(in srgb, var(--tone-accent) 18%, transparent);
     opacity: 0.18;
-    animation: transmutation-spark var(--spark-duration) ease-in-out infinite;
-    animation-delay: var(--spark-delay);
+    animation: none;
+    opacity: 0.14;
   }
 
   .viewport-transmutation__center {
@@ -305,7 +305,8 @@
     background:
       radial-gradient(circle, color-mix(in srgb, var(--tone-main) 24%, transparent) 0%, transparent 64%);
     filter: blur(18px);
-    animation: transmutation-halo 4.4s ease-in-out infinite;
+    animation: none;
+    opacity: 0.64;
   }
 
   .viewport-transmutation__sigil {
@@ -316,18 +317,16 @@
     filter:
       drop-shadow(0 0 12px color-mix(in srgb, var(--tone-main) 26%, transparent))
       drop-shadow(0 0 28px color-mix(in srgb, var(--tone-accent) 12%, transparent));
-    animation:
-      transmutation-spin 18s linear infinite,
-      transmutation-breathe 3.8s ease-in-out infinite;
+    animation: none;
   }
 
   .viewport-transmutation[data-phase='repairing'] .viewport-transmutation__sigil {
-    animation-duration: 20s, 2.7s;
+    opacity: 0.72;
   }
 
   .viewport-transmutation[data-phase='rendering'] .viewport-transmutation__sigil,
   .viewport-transmutation[data-phase='committing'] .viewport-transmutation__sigil {
-    animation-duration: 22s, 4.2s;
+    opacity: 0.78;
   }
 
   .ring,
@@ -392,147 +391,6 @@
     stroke: color-mix(in srgb, white 24%, transparent);
     stroke-width: 0.8;
     filter: drop-shadow(0 0 10px color-mix(in srgb, var(--tone-core) 42%, transparent));
-  }
-
-  @keyframes transmutation-spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  @keyframes transmutation-breathe {
-    0%,
-    100% {
-      transform: scale(0.98);
-      opacity: 0.78;
-    }
-    50% {
-      transform: scale(1.02);
-      opacity: 1;
-    }
-  }
-
-  @keyframes transmutation-halo {
-    0%,
-    100% {
-      transform: scale(0.92);
-      opacity: 0.52;
-    }
-    50% {
-      transform: scale(1.08);
-      opacity: 0.84;
-    }
-  }
-
-  @keyframes transmutation-fog-a {
-    from {
-      transform: translate3d(-2%, -1%, 0) scale(1);
-      opacity: 0.46;
-    }
-    to {
-      transform: translate3d(2%, 1.5%, 0) scale(1.08);
-      opacity: 0.72;
-    }
-  }
-
-  @keyframes transmutation-fog-b {
-    from {
-      transform: translate3d(-4%, 0, 0);
-      opacity: 0.2;
-    }
-    to {
-      transform: translate3d(3%, 3%, 0);
-      opacity: 0.44;
-    }
-  }
-
-  @keyframes transmutation-sweep-a {
-    0% {
-      transform: translateX(-120%) skewX(-24deg);
-      opacity: 0;
-    }
-    18% {
-      opacity: 0.24;
-    }
-    50% {
-      opacity: 0.48;
-    }
-    100% {
-      transform: translateX(120%) skewX(-24deg);
-      opacity: 0;
-    }
-  }
-
-  @keyframes transmutation-sweep-b {
-    0% {
-      transform: translateY(120%) skewY(10deg);
-      opacity: 0;
-    }
-    28% {
-      opacity: 0.18;
-    }
-    58% {
-      opacity: 0.36;
-    }
-    100% {
-      transform: translateY(-120%) skewY(10deg);
-      opacity: 0;
-    }
-  }
-
-  @keyframes transmutation-flash-a {
-    0%,
-    58%,
-    100% {
-      opacity: 0;
-    }
-    62% {
-      opacity: 0.1;
-    }
-    67% {
-      opacity: 0.22;
-    }
-    72% {
-      opacity: 0;
-    }
-  }
-
-  @keyframes transmutation-flash-b {
-    0%,
-    74%,
-    100% {
-      opacity: 0;
-    }
-    77% {
-      opacity: 0.08;
-    }
-    81% {
-      opacity: 0.14;
-    }
-    86% {
-      opacity: 0;
-    }
-  }
-
-  @keyframes transmutation-spark {
-    0%,
-    100% {
-      opacity: 0.08;
-      transform: translate3d(0, 0, 0) scale(0.82);
-    }
-    30% {
-      opacity: 0.72;
-      transform: translate3d(calc(var(--spark-drift) * -0.35), calc(var(--spark-drift) * -0.55), 0)
-        scale(1);
-    }
-    68% {
-      opacity: 0.26;
-      transform: translate3d(calc(var(--spark-drift) * 0.55), calc(var(--spark-drift) * -0.2), 0)
-        scale(1.14);
-    }
   }
 
   @media (max-width: 900px) {

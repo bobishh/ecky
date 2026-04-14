@@ -1,10 +1,12 @@
 use crate::db;
+use crate::freecad::resolve_resource_path;
 use crate::mcp::contracts::*;
 use crate::mcp::runtime;
 use crate::models::{
-    AgentSession, AppError, AppResult, AppState, ArtifactBundle, ControlPrimitive, ControlView,
-    ControlViewSource, DesignOutput, InteractionMode, MacroDialect, MeasurementAnnotation,
-    MeasurementAnnotationSource, ModelManifest, ModelSourceKind, PathResolver, UiSpec,
+    AgentSession, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, ControlPrimitive,
+    ControlView, ControlViewSource, DesignOutput, InteractionMode, MacroDialect,
+    MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest, ModelSourceKind,
+    PathResolver, UiSpec,
 };
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
@@ -433,7 +435,7 @@ async fn resolve_prompt_thread_context(
 
     let thread_id = target.thread_id.clone();
     let conn = state.db.lock().await;
-    let thread_title = db::get_thread_title(&conn, &thread_id)
+    let thread_title = db::get_visible_thread_title(&conn, &thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .and_then(|title| {
             let trimmed = title.trim().to_string();
@@ -450,14 +452,20 @@ async fn resolve_explicit_session_target(
 ) -> AppResult<Option<agent_dialogue::SessionThreadTarget>> {
     match (thread_id, message_id) {
         (None, None) => Ok(None),
-        (Some(thread_id), None) => Ok(Some(agent_dialogue::SessionThreadTarget {
-            thread_id,
-            message_id: None,
-            model_id,
-        })),
+        (Some(thread_id), None) => {
+            let conn = state.db.lock().await;
+            db::get_visible_thread_title(&conn, &thread_id)
+                .map_err(|err| AppError::persistence(err.to_string()))?
+                .ok_or_else(|| AppError::not_found(format!("Thread {} not found.", thread_id)))?;
+            Ok(Some(agent_dialogue::SessionThreadTarget {
+                thread_id,
+                message_id: None,
+                model_id,
+            }))
+        }
         (expected_thread_id, Some(message_id)) => {
             let conn = state.db.lock().await;
-            let actual_thread_id = db::get_message_thread_id(&conn, &message_id)
+            let actual_thread_id = db::get_visible_message_thread_id(&conn, &message_id)
                 .map_err(|err| AppError::persistence(err.to_string()))?
                 .ok_or_else(|| AppError::not_found(format!("Message {} not found.", message_id)))?;
             drop(conn);
@@ -1259,7 +1267,7 @@ pub async fn handle_mark_as_read(
 ) -> AppResult<MarkAsReadResponse> {
     let ctx = ctx.with_override(&req.identity);
     let conn = state.db.lock().await;
-    let thread_id = db::get_message_thread_id(&conn, &req.message_id)
+    let thread_id = db::get_visible_message_thread_id(&conn, &req.message_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found(format!("Message {} not found.", req.message_id)))?;
     if req
@@ -1787,7 +1795,11 @@ pub async fn handle_health_check(
         .await
         .query_row("SELECT 1", [], |_row| Ok(()))
         .is_ok();
-    let freecad_configured = render::is_freecad_available(state);
+    let runtime_capabilities = crate::runtime_capabilities::collect_runtime_capabilities(
+        render::configured_freecad_cmd(state).as_deref(),
+        app,
+    );
+    let freecad_configured = runtime_capabilities.freecad.available;
     let config_dir = app.app_config_dir();
     let db_path = config_dir
         .join("history.sqlite")
@@ -1799,7 +1811,25 @@ pub async fn handle_health_check(
         db_path,
         freecad_configured,
         db_ready,
+        runtime_capabilities,
     })
+}
+
+pub async fn handle_ui_dispatch(
+    app: &tauri::AppHandle,
+    params: UiDispatchRequest,
+) -> AppResult<UiDispatchResponse> {
+    app.emit(
+        "mcp://ui-dispatch",
+        AgentUiDispatchEvent {
+            action: params.action,
+            target: params.target,
+            value: params.value,
+        },
+    )
+    .map_err(|e| AppError::internal(format!("Failed to emit UI dispatch event: {}", e)))?;
+
+    Ok(UiDispatchResponse { success: true })
 }
 
 pub async fn handle_thread_list(state: &AppState) -> AppResult<ThreadListResponse> {
@@ -2828,11 +2858,15 @@ pub async fn handle_params_patch_and_render(
             .post_processing
             .clone()
             .or_else(|| base_design.post_processing.clone());
-        let render_geometry_backend = resolve_patch_render_geometry_backend(
-            &conn,
-            tracked_thread_id.as_deref(),
-            &base_design,
-        )?;
+        let render_geometry_backend = if let Some(explicit) = req.geometry_backend {
+            Some(explicit)
+        } else {
+            resolve_patch_render_geometry_backend(
+                &conn,
+                tracked_thread_id.as_deref(),
+                &base_design,
+            )?
+        };
 
         drop(conn);
 
@@ -2853,6 +2887,7 @@ pub async fn handle_params_patch_and_render(
         design_output.ui_spec = healed_ui_spec;
         design_output.initial_params = healed_params.clone();
         design_output.post_processing = next_post_processing;
+        design_output.geometry_backend = render_geometry_backend.unwrap_or(base_design.geometry_backend);
         design_output.version_name.clear();
         design_output.interaction_mode = InteractionMode::Tune;
 
@@ -2922,34 +2957,10 @@ pub async fn handle_params_patch_and_render(
 }
 
 fn resolve_patch_render_geometry_backend(
-    conn: &rusqlite::Connection,
-    thread_id: Option<&str>,
+    _conn: &rusqlite::Connection,
+    _thread_id: Option<&str>,
     base_design: &DesignOutput,
 ) -> AppResult<Option<crate::models::GeometryBackend>> {
-    if base_design.macro_dialect != MacroDialect::EckyIrV0 {
-        return Ok(Some(base_design.geometry_backend));
-    }
-
-    if base_design.geometry_backend != crate::models::GeometryBackend::Freecad {
-        return Ok(Some(base_design.geometry_backend));
-    }
-
-    if let Some(thread_id) = thread_id {
-        if let Some(thread_geometry_backend) = db::get_thread_geometry_backend(conn, thread_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-        {
-            if thread_geometry_backend != crate::models::GeometryBackend::Freecad {
-                return Ok(Some(thread_geometry_backend));
-            }
-        }
-    }
-
-    if base_design.source_language == crate::models::SourceLanguage::EckyIrV0
-        || base_design.engine_kind == crate::models::EngineKind::EckyIrV0
-    {
-        return Ok(None);
-    }
-
     Ok(Some(base_design.geometry_backend))
 }
 
@@ -3213,6 +3224,16 @@ pub async fn handle_macro_replace_and_render(
         )
         .await;
 
+        let render_geometry_backend = if let Some(explicit) = req.geometry_backend {
+            Some(explicit)
+        } else {
+            resolve_patch_render_geometry_backend(
+                &conn,
+                tracked_thread_id.as_deref(),
+                &base_design,
+            )?
+        };
+
         drop(conn);
 
         let next_post_processing = req
@@ -3224,7 +3245,7 @@ pub async fn handle_macro_replace_and_render(
             &req.macro_code,
             &initial_params,
             Some(macro_dialect.clone()),
-            None,
+            render_geometry_backend,
             next_post_processing.as_ref(),
             state,
             app,
@@ -3247,7 +3268,7 @@ pub async fn handle_macro_replace_and_render(
             macro_dialect,
             engine_kind,
             source_language: engine_kind.to_source_language(),
-            geometry_backend: engine_kind.to_geometry_backend(),
+            geometry_backend: render_geometry_backend.unwrap_or_else(|| engine_kind.to_geometry_backend()),
             ui_spec: ui_spec.clone(),
             initial_params: initial_params.clone(),
             post_processing: next_post_processing,
@@ -4578,6 +4599,124 @@ pub async fn handle_measurement_annotation_delete(
     result
 }
 
+// ── Structural verification MCP handlers ────────────────────────────────────
+
+pub fn handle_verify_generated_model(
+    _state: &AppState,
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    model_id: &str,
+    _original_prompt: &str,
+) -> AppResult<VerifyGeneratedModelResponse> {
+    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
+    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
+    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
+    Ok(VerifyGeneratedModelResponse {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        model_id: model_id.to_string(),
+        result,
+    })
+}
+
+pub fn handle_structural_verification_summary(
+    _state: &AppState,
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    model_id: &str,
+) -> AppResult<StructuralVerificationSummaryResponse> {
+    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
+    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
+    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
+    Ok(StructuralVerificationSummaryResponse {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        model_id: model_id.to_string(),
+        passed: result.passed,
+        summary: result.summary,
+        issue_count: result.issues.len(),
+        verifier_status: result.verifier_status,
+        verifier_source: result.verifier_source,
+    })
+}
+
+pub async fn handle_compare_models(
+    app: &dyn PathResolver,
+    req: CompareModelsRequest,
+) -> AppResult<CompareModelsResponse> {
+    let script_path = resolve_resource_path(
+        app,
+        "server/compare_metric.py",
+        &["../server/compare_metric.py", "server/compare_metric.py"],
+    )?;
+
+    let output = std::process::Command::new("python3")
+        .arg(script_path)
+        .arg(&req.ref_path)
+        .arg(&req.gen_path)
+        .output()
+        .map_err(|e| {
+            AppError::new(
+                AppErrorCode::Internal,
+                format!("Failed to execute comparison script: {}", e),
+            )
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        return Err(AppError::new(
+            AppErrorCode::Internal,
+            format!("Comparison script failed: {}\n{}", stdout, stderr),
+        ));
+    }
+
+    // Parse output lines
+    let mut ref_vol = 0.0;
+    let mut gen_vol = 0.0;
+    let mut vol_diff = 0.0;
+    let mut bb_err = 0.0;
+    let mut status = "UNKNOWN".to_string();
+
+    for line in stdout.lines() {
+        if line.starts_with("Reference Volume:") {
+            ref_vol = parse_metric(line);
+        } else if line.starts_with("Generated Volume:") {
+            gen_vol = parse_metric(line);
+        } else if line.starts_with("Volume Difference:") {
+            vol_diff = parse_metric(line);
+        } else if line.starts_with("Bounding Box Match Error:") {
+            bb_err = parse_metric(line);
+        } else if line.starts_with("Status:") {
+            status = line
+                .strip_prefix("Status: ")
+                .unwrap_or(line)
+                .trim()
+                .to_string();
+        }
+    }
+
+    Ok(CompareModelsResponse {
+        reference_volume: ref_vol,
+        generated_volume: gen_vol,
+        volume_difference_percent: vol_diff,
+        bounding_box_match_error: bb_err,
+        status,
+        details: stdout.into_owned(),
+    })
+}
+
+fn parse_metric(line: &str) -> f64 {
+    line.split(':')
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4588,7 +4727,9 @@ mod tests {
         MessageStatus, ParamValue, UiField,
     };
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
 
     struct TestPathResolver {
         root: PathBuf,
@@ -4610,6 +4751,25 @@ mod tests {
 
     fn test_db_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ecky-mcp-{}-{}", name, Uuid::new_v4()))
+    }
+
+    fn build123d_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn write_executable(path: &std::path::Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
+        }
     }
 
     fn test_config() -> Config {
@@ -4855,6 +5015,40 @@ mod tests {
         }
 
         (state, resolver)
+    }
+
+    #[tokio::test]
+    async fn health_check_includes_runtime_capabilities() {
+        let _guard = build123d_env_lock().lock().unwrap();
+        let root = std::env::temp_dir().join(format!("ecky-mcp-health-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let python = root.join("bin").join("python3");
+        write_executable(&python, "#!/bin/sh\nprintf '%s\\n' \"$0\"\nexit 0\n");
+        std::env::set_var("BUILD123D_PYTHON", &python);
+
+        let conn = crate::db::init_db(&test_db_path("health-check")).expect("db");
+        let mut config = test_config();
+        config.freecad_cmd = "/missing/freecadcmd".to_string();
+        let state = AppState::new(config, None, conn);
+        let resolver = TestPathResolver { root };
+
+        let response = handle_health_check(&state, &resolver)
+            .await
+            .expect("health check");
+
+        std::env::remove_var("BUILD123D_PYTHON");
+
+        assert!(response.db_ready);
+        assert!(!response.freecad_configured);
+        assert!(!response.runtime_capabilities.freecad.available);
+        assert!(response.runtime_capabilities.build123d.available);
+        assert_eq!(
+            response
+                .runtime_capabilities
+                .recommended_authoring_context
+                .geometry_backend,
+            crate::models::GeometryBackend::Build123d
+        );
     }
 
     async fn seed_live_session(state: &AppState) {
@@ -5377,6 +5571,54 @@ mod tests {
                 .map(|owner| owner.agent_label.as_str()),
             Some("claude")
         );
+    }
+
+    #[tokio::test]
+    async fn thread_get_rejects_deleted_thread_as_normal_mcp_thread() {
+        let (state, _resolver) = seed_target().await;
+        {
+            let conn = state.db.lock().await;
+            db::delete_thread(&conn, "thread-1").unwrap();
+        }
+
+        let list = handle_thread_list(&state).await.expect("thread list");
+        assert!(list.threads.is_empty());
+
+        let err = handle_thread_get(
+            &state,
+            ThreadGetRequest {
+                thread_id: "thread-1".to_string(),
+            },
+        )
+        .await
+        .expect_err("deleted thread should not load through normal MCP thread_get");
+
+        assert_eq!(err.code, AppErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn session_log_in_rejects_deleted_thread_target() {
+        let (state, _resolver) = seed_target().await;
+        {
+            let conn = state.db.lock().await;
+            db::delete_thread(&conn, "thread-1").unwrap();
+        }
+
+        let err = handle_session_log_in(
+            &state,
+            SessionLoginRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: None,
+                model_id: None,
+                steal_thread: false,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("deleted thread should not accept normal MCP session claim");
+
+        assert_eq!(err.code, AppErrorCode::NotFound);
     }
 
     #[tokio::test]
@@ -6042,47 +6284,4 @@ mod tests {
             .into_iter()
             .all(|session| session.session_id != "session-1"));
     }
-}
-
-// ── Structural verification MCP handlers ────────────────────────────────────
-
-pub fn handle_verify_generated_model(
-    _state: &AppState,
-    app: &dyn PathResolver,
-    thread_id: &str,
-    message_id: &str,
-    model_id: &str,
-    _original_prompt: &str,
-) -> AppResult<VerifyGeneratedModelResponse> {
-    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
-    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
-    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
-    Ok(VerifyGeneratedModelResponse {
-        thread_id: thread_id.to_string(),
-        message_id: message_id.to_string(),
-        model_id: model_id.to_string(),
-        result,
-    })
-}
-
-pub fn handle_structural_verification_summary(
-    _state: &AppState,
-    app: &dyn PathResolver,
-    thread_id: &str,
-    message_id: &str,
-    model_id: &str,
-) -> AppResult<StructuralVerificationSummaryResponse> {
-    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
-    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
-    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
-    Ok(StructuralVerificationSummaryResponse {
-        thread_id: thread_id.to_string(),
-        message_id: message_id.to_string(),
-        model_id: model_id.to_string(),
-        passed: result.passed,
-        summary: result.summary,
-        issue_count: result.issues.len(),
-        verifier_status: result.verifier_status,
-        verifier_source: result.verifier_source,
-    })
 }

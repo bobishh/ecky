@@ -40,7 +40,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     return lines.join('\n');
   }
 
-  async function setupMocks(page: Page) {
+  async function setupMocks(page: Page, options: { failCanonicalCup?: boolean } = {}) {
     const stlFixtures: Record<string, string> = {
       '/mock/output.stl': boxStl('output', [-35, 0, -20], [35, 28, 20]),
       '/mock/parts/shell.stl': boxStl('shell', [-120, 0, -42], [-10, 60, 42]),
@@ -64,7 +64,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       });
     });
 
-    await page.addInitScript(() => {
+    await page.addInitScript((mockOptions) => {
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
       window.__MOCK_THREADS__ = {};
       window.__MOCK_HISTORY__ = [];
@@ -377,6 +377,18 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           };
         }
         if (cmd === 'save_config') return null;
+        if (cmd === 'get_runtime_capabilities') {
+          return {
+            freecad: { available: true, detail: 'Ready at /mock/freecadcmd', path: '/mock/freecadcmd' },
+            build123d: { available: true, detail: 'Ready at /mock/python3', path: '/mock/python3' },
+            eckyRust: { available: true, detail: 'bundled', path: null },
+            recommendedAuthoringContext: {
+              engineKind: 'freecad',
+              sourceLanguage: 'legacyPython',
+              geometryBackend: 'freecad',
+            },
+          };
+        }
         if (cmd === 'check_freecad') return true;
         if (cmd === 'get_history') return window.__MOCK_HISTORY__;
         if (cmd === 'get_last_design') return window.__MOCK_LAST_DESIGN__;
@@ -708,7 +720,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         }
         return {};
       };
-    });
+    }, options);
   }
 
   async function gotoWorkbench(page: Page) {
@@ -956,6 +968,19 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         return calls.filter((entry: { cmd: string }) => entry.cmd === 'add_manual_version').length;
       })
       .toBeGreaterThan(0);
+  });
+
+  test('project choosers should not expose canonical cup entry', async ({ page }) => {
+    await setupMocks(page);
+    await gotoWorkbench(page);
+
+    await page.locator('button[title="New project"]').click();
+    await expect(page.getByRole('button', { name: /Canonical Cup/i })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: /\+ NEW/i }).click();
+    await expect(page.getByRole('button', { name: /Canonical Cup/i })).toHaveCount(0);
   });
 
   test('imported FCStd proposals persist after review and version reload', async ({ page }) => {

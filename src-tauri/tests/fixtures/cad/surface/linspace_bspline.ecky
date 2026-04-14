@@ -1,0 +1,24 @@
+(define (linspace-loop start step index count)
+  (if (>= index count)
+    '()
+    (cons
+      (+ start (* step index))
+      (linspace-loop start step (+ index 1) count))))
+
+(define (linspace start stop count)
+  (if (<= count 1)
+    (list start)
+    (linspace-loop start (/ (- stop start) (- count 1.0)) 0 count)))
+
+(define pi 3.14159265359)
+(define control-points
+  (map
+    (lambda (angle)
+      (list
+        (* 26 (cos (* pi (/ angle 180.0))))
+        (* 16 (sin (* pi (/ angle 180.0))))))
+    (linspace 0 315 8)))
+
+(model
+  (part body
+    (extrude (bspline control-points #t 24) 10)))

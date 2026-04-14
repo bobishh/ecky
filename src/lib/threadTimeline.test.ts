@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   activeVersionTimelineIndex,
   formatTimelineAgentOrigin,
+  isRenderableVersionTimelineMessage,
   isVersionTimelineMessage,
   threadTimelineMessages,
   timelineVisuals,
@@ -27,6 +28,19 @@ function sampleMessage(overrides: Partial<Message>): Message {
     visualKind: overrides.visualKind ?? null,
     attachmentImages: overrides.attachmentImages ?? [],
     timestamp: overrides.timestamp ?? 1,
+  };
+}
+
+function sampleArtifactBundle(modelId: string = 'model-1'): NonNullable<Message['artifactBundle']> {
+  return {
+    modelId,
+    sourceKind: 'generated',
+    contentHash: `hash-${modelId}`,
+    fcstdPath: `/tmp/${modelId}.FCStd`,
+    manifestPath: `/tmp/${modelId}.json`,
+    previewStlPath: `/tmp/${modelId}.stl`,
+    viewerAssets: [],
+    exportArtifacts: [],
   };
 }
 
@@ -72,20 +86,49 @@ test('timelineVisuals converts attachment image paths through the provided asset
 test('versionTimeline helpers identify and label assistant version messages', () => {
   const versionMessage = sampleMessage({
     role: 'assistant',
-    artifactBundle: {
-      modelId: 'model-1',
-      sourceKind: 'generated',
-      contentHash: 'hash',
-      fcstdPath: '/tmp/model.FCStd',
-      manifestPath: '/tmp/model.json',
-      previewStlPath: '/tmp/model.stl',
-      viewerAssets: [],
-      exportArtifacts: [],
-    },
+    artifactBundle: sampleArtifactBundle(),
   });
 
   assert.equal(isVersionTimelineMessage(versionMessage), true);
+  assert.equal(isRenderableVersionTimelineMessage(versionMessage), true);
   assert.equal(versionTimelineTitle(versionMessage), 'model-1');
+});
+
+test('versionTimelineMessages ignores output-only drafts and failed artifacts', () => {
+  const outputOnly = sampleMessage({
+    id: 'output-only',
+    role: 'assistant',
+    output: {
+      title: 'Draft',
+      versionName: 'V-draft',
+      response: 'draft',
+      interactionMode: 'design',
+      macroCode: '...',
+      sourceLanguage: 'legacyPython',
+      geometryBackend: 'freecad',
+      uiSpec: { fields: [] },
+      initialParams: {},
+    },
+  });
+  const failedArtifact = sampleMessage({
+    id: 'failed-artifact',
+    role: 'assistant',
+    status: 'error',
+    artifactBundle: sampleArtifactBundle('failed-model'),
+  });
+  const rendered = sampleMessage({
+    id: 'rendered',
+    role: 'assistant',
+    artifactBundle: sampleArtifactBundle('rendered-model'),
+  });
+
+  assert.equal(isVersionTimelineMessage(outputOnly), false);
+  assert.equal(isVersionTimelineMessage(failedArtifact), true);
+  assert.equal(isRenderableVersionTimelineMessage(failedArtifact), false);
+  assert.deepEqual(
+    versionTimelineMessages([outputOnly, failedArtifact, rendered]).map((message) => message.id),
+    ['rendered'],
+  );
 });
 
 test('versionTimelineMessages and activeVersionTimelineIndex keep version navigation stable', () => {
@@ -94,6 +137,7 @@ test('versionTimelineMessages and activeVersionTimelineIndex keep version naviga
     id: 'version-a',
     role: 'assistant',
     timestamp: 2,
+    artifactBundle: sampleArtifactBundle('model-a'),
     output: {
       title: 'Lamp',
       versionName: 'V-a',
@@ -110,6 +154,7 @@ test('versionTimelineMessages and activeVersionTimelineIndex keep version naviga
     id: 'version-b',
     role: 'assistant',
     timestamp: 3,
+    artifactBundle: sampleArtifactBundle('model-b'),
     output: {
       title: 'Lamp',
       versionName: 'V-b',
@@ -137,6 +182,7 @@ test('discarded version messages stay in the timeline but drop out of the carous
     id: 'version-live',
     role: 'assistant',
     timestamp: 2,
+    artifactBundle: sampleArtifactBundle('model-live'),
     output: {
       title: 'Lamp',
       versionName: 'V-live',
@@ -154,6 +200,7 @@ test('discarded version messages stay in the timeline but drop out of the carous
     role: 'assistant',
     status: 'discarded',
     timestamp: 3,
+    artifactBundle: sampleArtifactBundle('model-discarded'),
     output: {
       title: 'Lamp',
       versionName: 'V-discarded',

@@ -1166,6 +1166,31 @@ pub async fn update_version_runtime(
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn update_version_preview(
+    message_id: String,
+    image_data: String,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    if !image_data.trim_start().starts_with("data:image/") {
+        return Err(AppError::validation(
+            "Version preview must be an image data URL.",
+        ));
+    }
+
+    let db = state.db.lock().await;
+    let changed = db::update_message_image_data(&db, &message_id, &image_data)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
+    if !changed {
+        return Err(AppError::not_found(format!(
+            "Message '{}' not found for preview update.",
+            message_id
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

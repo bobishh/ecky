@@ -68,9 +68,7 @@ export function enqueueAgentTerminalSnapshot(snapshot: AgentTerminalSnapshot) {
   const previous = pendingSnapshots[snapshotKey] ?? null;
   pendingSnapshots = {
     ...pendingSnapshots,
-    [snapshotKey]: previous
-      ? mergeAgentTerminalSnapshot(previous, snapshot)
-      : snapshot,
+    [snapshotKey]: mergeAgentTerminalSnapshot(previous, snapshot),
   };
   if (flushTimer) return;
   flushTimer = setTimeout(flushPendingSnapshots, 75);

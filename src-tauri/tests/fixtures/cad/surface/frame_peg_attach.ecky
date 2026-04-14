@@ -1,0 +1,8 @@
+(model
+  (part body
+    (build
+      (shape rail (path (0 0 0) (20 0 0)))
+      (shape peg (box 4 4 4))
+      (shape end-frame (path-frame rail :at end))
+      (shape attached-peg (place end-frame peg))
+      (result attached-peg))))

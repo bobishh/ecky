@@ -69,6 +69,22 @@ async getThread(id: string) : Promise<Result<Thread, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getThreadLatestVersion(threadId: string) : Promise<Result<Message | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_thread_latest_version", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getThreadMessagesPage(threadId: string, before: number | null, limit: number | null, includeVisualPayloads: boolean) : Promise<Result<ThreadMessagesPage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_thread_messages_page", { threadId, before, limit, includeVisualPayloads }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async clearHistory() : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("clear_history") };
@@ -165,6 +181,22 @@ async getInventory() : Promise<Result<Thread[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getThreadWindowLayout(threadId: string) : Promise<Result<ThreadWindowLayout | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_thread_window_layout", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveThreadWindowLayout(threadId: string, layout: ThreadWindowLayout) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_thread_window_layout", { threadId, layout }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async generateDesign(prompt: string, threadId: string | null, parentMacroCode: string | null, workingDesign: DesignOutput | null, isRetry: boolean, imageData: string | null, attachments: Attachment[] | null, options: GenerateDesignOptions | null) : Promise<Result<GenerateOutput, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_design", { prompt, threadId, parentMacroCode, workingDesign, isRetry, imageData, attachments, options }) };
@@ -216,6 +248,14 @@ async verifyGeneratedModel(modelId: string, originalPrompt: string) : Promise<Re
 async checkFreecad() : Promise<Result<boolean, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_freecad") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getRuntimeCapabilities() : Promise<Result<RuntimeCapabilities, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_runtime_capabilities") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -352,6 +392,14 @@ async updatePostProcessing(messageId: string, postProcessing: PostProcessingSpec
 async updateVersionRuntime(messageId: string, artifactBundle: ArtifactBundle, modelManifest: ModelManifest) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_version_runtime", { messageId, artifactBundle, modelManifest }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateVersionPreview(messageId: string, imageData: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_version_preview", { messageId, imageData }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -629,7 +677,7 @@ export type Engine = { id: string; name: string; provider: string; apiKey: strin
  * Defaults to true for backward compatibility with existing configs.
  */
 enabled?: boolean }
-export type EngineKind = "freecad" | "eckyIrV0"
+export type EngineKind = "freecad" | "eckyIrV0" | "build123d"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
 export type ExportArtifact = { label: string; format: string; path: string; role: string }
@@ -651,7 +699,7 @@ export type LithophanePlacement = { mode?: LithophanePlacementMode; side?: Litho
 export type LithophanePlacementMode = "partSidePatch"
 export type LithophaneRelief = { depthMm?: number; invert?: boolean }
 export type LithophaneSide = "front" | "back" | "left" | "right" | "top" | "bottom"
-export type MacroDialect = "legacy" | "cadFrameworkV1" | "eckyIrV0"
+export type MacroDialect = "legacy" | "cadFrameworkV1" | "eckyIrV0" | "build123d"
 export type ManifestBounds = { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number }
 export type ManifestEnrichmentState = { status: EnrichmentStatus; proposals?: EnrichmentProposal[] }
 export type McpConfig = { 
@@ -708,11 +756,14 @@ export type QueuedAgentPrompt = { threadId: string; messageId: string }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
 export type ResolveAgentPromptInput = { requestId: string; promptText: string; messageIds: string[]; messageId?: string | null; attachments?: Attachment[] }
 export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: string; width: number; height: number; camera: ViewportCameraState; source: string; threadId: string; messageId: string; modelId?: string | null; includeOverlays: boolean }
+export type RuntimeAuthoringContext = { engineKind: EngineKind; sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend }
+export type RuntimeBackendCapability = { available: boolean; detail: string; path?: string | null }
+export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; eckyRust: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
 export type SelectionTargetKind = "part" | "object" | "group" | "edge"
-export type SourceLanguage = "legacyPython" | "eckyIrV0"
+export type SourceLanguage = "legacyPython" | "eckyIrV0" | "build123d"
 export type StructuralIssue = { code: string; message: string; 
 /**
  * ID of the affected part, when the issue is part-specific.
@@ -726,7 +777,10 @@ export type ThreadAgentState = {
  * "none" | "sleeping" | "waking" | "waiting" | "active" | "disconnected" | "error"
  */
 connectionState: string; agentLabel: string | null; llmModelLabel: string | null; providerKind?: string | null; sessionId?: string | null; phase: string | null; statusText: string | null; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; waitingOnPrompt?: boolean; updatedAt: number | null }
+export type ThreadMessagesPage = { messages: Message[]; nextBefore: number | null; hasMore: boolean }
 export type ThreadStatus = "active" | "finalized"
+export type ThreadWindowLayout = { schemaVersion?: number; rememberLayout?: boolean; windows: Partial<{ [key in string]: ThreadWindowState }> }
+export type ThreadWindowState = { visible: boolean; minimized?: boolean; x: number; y: number; width: number; height: number; z: number }
 export type UiField = { type: "range"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "number"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "select"; key: string; label?: string; options?: SelectOption[]; frozen?: boolean } | { type: "checkbox"; key: string; label?: string; frozen?: boolean } | { type: "image"; key: string; label?: string; frozen?: boolean }
 export type UiSpec = { fields?: UiField[] }
 export type UsageSegment = { stage: string; provider: string; model: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null }

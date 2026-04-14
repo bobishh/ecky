@@ -39,14 +39,7 @@
     });
   }
 
-  function engineLabel(thread: Thread): string {
-    const source = thread.sourceLanguage;
 
-    if (source === 'legacyPython') return 'FREECAD';
-    if (source === 'eckyIrV0') return 'ECKY IR';
-
-    return thread.engineKind === 'eckyIrV0' ? 'ECKY IR' : 'FREECAD';
-  }
 
   onMount(() => {
     void load();
@@ -80,7 +73,6 @@
             <div class="card-header">
               <div class="card-title-row">
                 <span class="card-title">{thread.title}</span>
-                <span class="engine-tag">{engineLabel(thread)}</span>
               </div>
               {#if thread.finalizedAt}
                 <span class="finalized-tag">FINALIZED {formatDate(thread.finalizedAt)}</span>
@@ -235,17 +227,6 @@
     min-width: 0;
   }
 
-  .engine-tag {
-    flex-shrink: 0;
-    padding: 2px 6px;
-    border: 1px solid color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
-    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-100));
-    color: var(--secondary);
-    font-size: 0.6rem;
-    letter-spacing: 0.06em;
-    font-family: var(--font-mono);
-    white-space: nowrap;
-  }
 
   .finalized-tag {
     font-size: 0.65rem;

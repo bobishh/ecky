@@ -1,0 +1,466 @@
+use std::fmt;
+
+macro_rules! opaque_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name(u64);
+
+        impl $name {
+            pub const fn new(raw: u64) -> Self {
+                Self(raw)
+            }
+
+            pub const fn raw(self) -> u64 {
+                self.0
+            }
+        }
+    };
+}
+
+opaque_id!(ProgramId);
+opaque_id!(PartId);
+opaque_id!(ParamId);
+opaque_id!(NodeId);
+opaque_id!(SourceFileId);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceSpan {
+    pub file: Option<SourceFileId>,
+    pub start: u32,
+    pub end: u32,
+}
+
+impl SourceSpan {
+    pub const fn new(file: Option<SourceFileId>, start: u32, end: u32) -> Self {
+        Self { file, start, end }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompilerErrorKind {
+    Parse,
+    Resolve,
+    TypeMismatch,
+    UnsupportedFeature,
+    Backend,
+    Internal,
+}
+
+impl fmt::Display for CompilerErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Parse => "parse",
+            Self::Resolve => "resolve",
+            Self::TypeMismatch => "type-mismatch",
+            Self::UnsupportedFeature => "unsupported-feature",
+            Self::Backend => "backend",
+            Self::Internal => "internal",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerError {
+    pub kind: CompilerErrorKind,
+    pub message: String,
+    pub primary_span: Option<SourceSpan>,
+    pub secondary_spans: Vec<SourceSpan>,
+    pub notes: Vec<String>,
+    pub help: Option<String>,
+}
+
+impl CompilerError {
+    pub fn new(kind: CompilerErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            primary_span: None,
+            secondary_spans: Vec::new(),
+            notes: Vec::new(),
+            help: None,
+        }
+    }
+
+    pub fn with_span(mut self, span: SourceSpan) -> Self {
+        self.primary_span = Some(span);
+        self
+    }
+
+    pub fn with_secondary_span(mut self, span: SourceSpan) -> Self {
+        self.secondary_spans.push(span);
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+}
+
+impl fmt::Display for CompilerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.kind, self.message)
+    }
+}
+
+impl std::error::Error for CompilerError {}
+
+pub type CoreResult<T> = Result<T, CompilerError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreValueKind {
+    Any,
+    Number,
+    Boolean,
+    Text,
+    List,
+    Point2,
+    Point3,
+    Sketch,
+    Path,
+    Frame,
+    Compound,
+    Solid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreSymbol {
+    Start,
+    End,
+    Xy,
+    Yz,
+    Xz,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreParameterKind {
+    Number,
+    Boolean,
+    Text,
+    Choice,
+    Image,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreParameterValue {
+    Number(f64),
+    Boolean(bool),
+    Text(String),
+    Choice(String),
+    Image(String),
+}
+
+impl CoreParameterValue {
+    pub fn kind(&self) -> CoreValueKind {
+        match self {
+            Self::Number(_) => CoreValueKind::Number,
+            Self::Boolean(_) => CoreValueKind::Boolean,
+            Self::Text(_) | Self::Choice(_) => CoreValueKind::Text,
+            Self::Image(_) => CoreValueKind::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreChoice {
+    pub label: String,
+    pub value: CoreParameterValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CoreParameterConstraints {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+    pub choices: Vec<CoreChoice>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreParameter {
+    pub id: ParamId,
+    pub key: String,
+    pub label: String,
+    pub kind: CoreParameterKind,
+    pub default_value: CoreParameterValue,
+    pub frozen: bool,
+    pub constraints: CoreParameterConstraints,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorePart {
+    pub id: PartId,
+    pub key: String,
+    pub label: String,
+    pub root: CoreNode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreProgram {
+    pub id: ProgramId,
+    pub parameters: Vec<CoreParameter>,
+    pub parts: Vec<CorePart>,
+}
+
+impl CoreProgram {
+    pub fn new(id: ProgramId, parameters: Vec<CoreParameter>, parts: Vec<CorePart>) -> Self {
+        Self {
+            id,
+            parameters,
+            parts,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreBinding {
+    pub name: String,
+    pub value: CoreNode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreShapeBinding {
+    pub name: String,
+    pub value: CoreNode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreKeywordArg {
+    pub name: String,
+    pub value: CoreNode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreLiteral {
+    Number(f64),
+    Boolean(bool),
+    Text(String),
+    Symbol(CoreSymbol),
+    Point2([f64; 2]),
+    Point3([f64; 3]),
+}
+
+impl CoreLiteral {
+    pub fn kind(&self) -> CoreValueKind {
+        match self {
+            Self::Number(_) => CoreValueKind::Number,
+            Self::Boolean(_) => CoreValueKind::Boolean,
+            Self::Text(_) => CoreValueKind::Text,
+            Self::Symbol(_) => CoreValueKind::Any,
+            Self::Point2(_) => CoreValueKind::Point2,
+            Self::Point3(_) => CoreValueKind::Point3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreReference {
+    Parameter(ParamId),
+    Part(PartId),
+    Node(NodeId),
+    Local(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CorePrimitive {
+    Box,
+    Sphere,
+    Cylinder,
+    Cone,
+    Circle,
+    Rectangle,
+    RoundedRectangle,
+    RoundedPolygon,
+    Polygon,
+    Profile,
+    MakeFace,
+    Text,
+    Svg,
+    Stl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoreBooleanOp {
+    Union,
+    Difference,
+    Intersection,
+    Xor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoreTransformOp {
+    Translate,
+    Rotate,
+    Scale,
+    Mirror,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoreSurfaceOp {
+    Extrude,
+    Revolve,
+    Loft,
+    Sweep,
+    Shell,
+    Offset,
+    Fillet,
+    Chamfer,
+    Twist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CorePathOp {
+    Polyline,
+    BezierPath,
+    Bspline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoreArrayOp {
+    LinearArray,
+    RadialArray,
+    Repeat,
+    RepeatUnion,
+    RepeatCompound,
+    RepeatPick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoreFrameOp {
+    PathFrame,
+    Place,
+    ClipBox,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoreMetaOp {
+    Group,
+    Comment,
+    Annotate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoreOperation {
+    Primitive(CorePrimitive),
+    Boolean(CoreBooleanOp),
+    Transform(CoreTransformOp),
+    Surface(CoreSurfaceOp),
+    Path(CorePathOp),
+    Array(CoreArrayOp),
+    Frame(CoreFrameOp),
+    Meta(CoreMetaOp),
+    Custom(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreNodeKind {
+    Literal(CoreLiteral),
+    Reference(CoreReference),
+    Build {
+        bindings: Vec<CoreShapeBinding>,
+        result: Box<CoreNode>,
+    },
+    Let {
+        bindings: Vec<CoreBinding>,
+        body: Box<CoreNode>,
+    },
+    If {
+        condition: Box<CoreNode>,
+        then_branch: Box<CoreNode>,
+        else_branch: Box<CoreNode>,
+    },
+    Call {
+        op: CoreOperation,
+        args: Vec<CoreNode>,
+        keywords: Vec<CoreKeywordArg>,
+    },
+    List(Vec<CoreNode>),
+    Group(Vec<CoreNode>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreNode {
+    pub id: NodeId,
+    pub kind: CoreNodeKind,
+    pub value_kind: CoreValueKind,
+    pub span: Option<SourceSpan>,
+}
+
+impl CoreNode {
+    pub fn new(id: NodeId, kind: CoreNodeKind, value_kind: CoreValueKind) -> Self {
+        Self {
+            id,
+            kind,
+            value_kind,
+            span: None,
+        }
+    }
+
+    pub fn with_span(mut self, span: SourceSpan) -> Self {
+        self.span = Some(span);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn program_clones_cleanly() {
+        let node = CoreNode::new(
+            NodeId::new(7),
+            CoreNodeKind::Literal(CoreLiteral::Number(12.0)),
+            CoreValueKind::Number,
+        );
+        let program = CoreProgram::new(
+            ProgramId::new(1),
+            vec![CoreParameter {
+                id: ParamId::new(2),
+                key: "width".into(),
+                label: "Width".into(),
+                kind: CoreParameterKind::Number,
+                default_value: CoreParameterValue::Number(12.0),
+                frozen: false,
+                constraints: CoreParameterConstraints::default(),
+            }],
+            vec![CorePart {
+                id: PartId::new(3),
+                key: "body".into(),
+                label: "Body".into(),
+                root: node,
+            }],
+        );
+        let clone = program.clone();
+        assert_eq!(program, clone);
+    }
+
+    #[test]
+    fn compiler_error_carries_span_and_help() {
+        let span = SourceSpan::new(Some(SourceFileId::new(9)), 4, 11);
+        let err = CompilerError::new(CompilerErrorKind::Resolve, "unknown symbol")
+            .with_span(span)
+            .with_note("check spelling")
+            .with_help("define the symbol first");
+        assert_eq!(err.primary_span, Some(span));
+        assert_eq!(err.notes, vec!["check spelling"]);
+        assert_eq!(err.help.as_deref(), Some("define the symbol first"));
+        assert_eq!(err.to_string(), "resolve: unknown symbol");
+    }
+
+    #[test]
+    fn literal_and_parameter_values_report_kinds() {
+        assert_eq!(
+            CoreLiteral::Point3([1.0, 2.0, 3.0]).kind(),
+            CoreValueKind::Point3
+        );
+        assert_eq!(
+            CoreParameterValue::Choice("glass".into()).kind(),
+            CoreValueKind::Text
+        );
+    }
+}

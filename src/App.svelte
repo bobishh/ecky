@@ -12,14 +12,25 @@
   import { get } from 'svelte/store';
   import { buildAgentGenieTraits } from './lib/genie/traits';
 
-  import HistoryPanel from './lib/HistoryPanel.svelte';
   import CodeModal from './lib/CodeModal.svelte';
-  import DeletedModels from './lib/DeletedModels.svelte';
-  import InventoryPanel from './lib/InventoryPanel.svelte';
   import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
+  import ManualImportModal from './lib/ManualImportModal.svelte';
   import AgentTerminalSurface from './lib/AgentTerminalSurface.svelte';
   import Modal from './lib/Modal.svelte';
   import Window from './lib/Window.svelte';
+  import ProjectSwitcher from './lib/ProjectSwitcher.svelte';
+  import {
+    windowStore,
+    windowLayoutRemembered,
+    loadLayoutForThread,
+    showWindow,
+    toggleWindow,
+    closeWindow as closeWindowStore,
+    hardFlush as hardFlushWindowLayout,
+    teardown as teardownWindowStore,
+    setThreadWindowLayoutRemembered,
+    type WindowId,
+  } from './lib/stores/windowStore';
   import {
     activeMicrowaveCount,
     setMuted,
@@ -35,20 +46,27 @@
   import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange } from './lib/controllers/manualController';
   import {
     loadFromHistory,
-    deleteThread,
-    renameThread,
     createNewThread,
     forkDesign,
     deleteVersion,
     restoreVersion,
     loadVersion,
     refreshHistory,
-    finalizeThread,
-    openInventoryThread,
+    loadOlderThreadMessages,
+    activeThreadMessagesLoading,
+    threadMessagePageState,
   } from './lib/stores/history';
   import { workingCopy, isDirty } from './lib/stores/workingCopy';
-  import { history, activeThreadId, activeVersionId, config, availableModels, isLoadingModels, freecadAvailable } from './lib/stores/domainState';
-  import { sidebarWidth, historyHeight, dialogueHeight, showCodeModal, selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
+  import {
+    historyStore as history,
+    activeThreadIdStore as activeThreadId,
+    activeVersionId,
+    config,
+    availableModels,
+    isLoadingModels,
+    runtimeCapabilities,
+  } from './lib/stores/domainState';
+  import { showCodeModal, selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
   import { boot, saveConfig, fetchModels } from './lib/boot/restore';
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
   import { nowSeconds } from './lib/stores/timeEngine';
@@ -138,6 +156,11 @@
     type ExportMode,
   } from './lib/exportOptions';
   import {
+    authoringContextFromConfig,
+    capabilityForAuthoringContext,
+  } from './lib/runtimeCapabilities';
+  import { isRenderableVersionTimelineMessage } from './lib/threadTimeline';
+  import {
     addImportedModelVersion,
     exportFile,
     exportMultipart3mf,
@@ -163,6 +186,7 @@
     saveConfig as persistBackendConfig,
     sendAgentTerminalInput,
     stopPrimaryAutoAgent,
+    updateVersionPreview,
     wakePrimaryAutoAgent,
     saveModelManifest,
     type PostProcessingSpec,
@@ -179,6 +203,7 @@
     Message,
     ParamValue,
     Request,
+    RuntimeBackendCapability,
     UiField,
     UiSpec,
     ViewerAsset,
@@ -370,14 +395,11 @@
   let showViewportOverlayControls = $state(false);
   let viewerOutlineEnabled = $state(true);
   let viewerTopologyMode = $state<TopologyMode>('mesh');
-  let sidebarCollapsed = $state(false);
-  let paramPanelCollapsed = $state(false);
-  let historyPanelCollapsed = $state(false);
-  let dialogueCollapsed = $state(false);
+  let showNewProjectChooser = $state(false);
+  let showNewProjectImport = $state(false);
 
   const isBooting = $derived(phase === 'booting');
   const isQuestionFlow = $derived(phase === 'answering');
-  const freecadMissing = $derived(!isBooting && $freecadAvailable === false);
   const isMcpConnection = $derived(usesMcpConnection($config.connectionType));
   const isActiveMcpMode = $derived(usesActiveMcpMode($config.connectionType, $config.mcp.mode));
 
@@ -622,6 +644,8 @@
   let hiddenViewerSpec = $state<HiddenViewerSpec | null>(null);
   let visibleViewerLoadNonce = $state(0);
   let hiddenViewerLoadNonce = $state(0);
+  let versionPreviewCaptureSeq = 0;
+  let lastSavedVersionPreviewKey = '';
   let cameraStateByTarget = $state<Record<string, ViewportCameraState>>({});
   let lastLiveScreenshotByTarget = $state<Record<string, ViewportScreenshotCapture>>({});
   let conceptPreviewUiByThread = $state<Record<string, ConceptPreviewUiState>>({});
@@ -638,12 +662,29 @@
   let genieWakeUpCount = $state(0);
   let lastAgentPresenceConnected = false;
   let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
-  let showAgentTerminalWindow = $state(false);
+  const terminalWindowState = $derived($windowStore.terminal);
+  const projectsWindowState = $derived($windowStore.projects);
+  const paramsWindowState = $derived($windowStore.params);
+  const dialogueWindowState = $derived($windowStore.dialogue);
+  const settingsWindowState = $derived($windowStore.settings);
+  let mountedWindows = $state<Record<WindowId, boolean>>({
+    projects: false,
+    params: false,
+    dialogue: false,
+    settings: false,
+    terminal: false,
+  });
+
+  $effect(() => {
+    const s = $windowStore;
+    for (const id of ['projects', 'params', 'dialogue', 'settings', 'terminal'] as WindowId[]) {
+      if (s[id].visible) {
+        mountedWindows[id] = true;
+      }
+    }
+  });
+
   let agentTerminalInput = $state('');
-  let agentTerminalWindowX = $state(320);
-  let agentTerminalWindowY = $state(72);
-  let agentTerminalWindowWidth = $state(760);
-  let agentTerminalWindowHeight = $state(460);
   let agentTerminalSurface = $state<{ focusTerminal: () => void } | null>(null);
   let lastAgentTerminalFocusKey = $state('');
   let lastFocusedAgentWorkingVersionKey = $state('');
@@ -867,10 +908,6 @@
   // Wake animation fires when the selected active agent asks for a prompt.
   // No startup pre-waking — genie should be idle until the primary agent actually greets.
 
-  let isResizingWidth = $state(false);
-  let isResizingHeight = $state(false);
-  let isResizingHistory = $state(false);
-
   // Initialize async design orchestrator
   initOrchestrator({
     get viewerComponent() { return viewerComponent; },
@@ -942,11 +979,74 @@
   function handleVisibleViewerLoaded() {
     visibleViewerLoadNonce += 1;
     visibleViewerWaiters = settleViewerLoadWaiters(visibleViewerWaiters, visibleViewerLoadNonce);
+    void persistVisibleVersionPreview(visibleViewerLoadNonce);
   }
 
   function handleHiddenViewerLoaded() {
     hiddenViewerLoadNonce += 1;
     hiddenViewerWaiters = settleViewerLoadWaiters(hiddenViewerWaiters, hiddenViewerLoadNonce);
+  }
+
+  function patchThreadMessagePreview(threadId: string, messageId: string, imageData: string) {
+    history.update((items) =>
+      items.map((thread) => {
+        if (thread.id !== threadId) return thread;
+        return {
+          ...thread,
+          messages: thread.messages.map((message) =>
+            message.id === messageId ? { ...message, imageData } : message,
+          ),
+        };
+      }),
+    );
+  }
+
+  async function persistVisibleVersionPreview(loadNonce: number) {
+    const threadId = get(activeThreadId);
+    const messageId = get(activeVersionId);
+    const bundle = get(session).artifactBundle;
+    const stlUrlValue = get(session).stlUrl;
+    if (!threadId || !messageId || !bundle || !stlUrlValue || !viewerComponent) return;
+
+    const previewKey = [
+      threadId,
+      messageId,
+      bundle.modelId,
+      bundle.artifactVersion,
+      bundle.contentHash,
+      stlUrlValue,
+    ].join(':');
+    if (previewKey === lastSavedVersionPreviewKey) return;
+
+    const captureSeq = ++versionPreviewCaptureSeq;
+    await tick();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    if (
+      captureSeq !== versionPreviewCaptureSeq ||
+      loadNonce !== visibleViewerLoadNonce ||
+      get(activeThreadId) !== threadId ||
+      get(activeVersionId) !== messageId ||
+      get(session).artifactBundle?.modelId !== bundle.modelId
+    ) {
+      return;
+    }
+
+    const imageData = viewerComponent?.captureScreenshot();
+    if (!imageData?.startsWith('data:image/')) return;
+
+    try {
+      await updateVersionPreview(messageId, imageData);
+      lastSavedVersionPreviewKey = previewKey;
+      patchThreadMessagePreview(threadId, messageId, imageData);
+      window.dispatchEvent(
+        new CustomEvent('ecky:version-preview-updated', {
+          detail: { threadId, messageId, imageData },
+        }),
+      );
+    } catch (error) {
+      console.warn('Failed to persist version preview:', formatBackendError(error));
+    }
   }
 
   function handleVisibleViewerCameraChange(nextCamera: ViewportCameraState) {
@@ -1165,8 +1265,7 @@
       thread.messages.find(
         (message) =>
           message.id === request.messageId &&
-          message.role === 'assistant' &&
-          Boolean(message.output || message.artifactBundle),
+          isRenderableVersionTimelineMessage(message),
       ) ?? null;
     if (!targetMessage) {
       throw new Error(`Target version ${request.messageId} is unavailable for screenshot capture.`);
@@ -1196,8 +1295,7 @@
       thread.messages.find(
         (message) =>
           message.id === event.messageId &&
-          message.role === 'assistant' &&
-          Boolean(message.output || message.artifactBundle),
+          isRenderableVersionTimelineMessage(message),
       ) ?? null;
     if (!targetMessage) return;
 
@@ -1371,9 +1469,22 @@
     }
   });
 
+  $effect(() => {
+    if (!$onboarding.isActive || !$onboarding.windowIdToOpen) return;
+    showWindow($onboarding.windowIdToOpen);
+  });
+
   // Wire thread changes to audio focus
   $effect(() => {
     setAudibleThread($activeThreadId);
+  });
+
+  // Load window layout when thread changes
+  $effect(() => {
+    const threadId = $activeThreadId;
+    if (threadId) {
+      void loadLayoutForThread(threadId);
+    }
   });
 
   $effect(() => {
@@ -1712,6 +1823,10 @@
 
   async function generateFromConceptPreview() {
     if (!effectiveConceptPreviewMessage) return;
+    if (generationUnavailableReason) {
+      session.setError(`Render Error: ${generationUnavailableReason}`);
+      return;
+    }
     const imageDataOverride =
       (await resolveBlueprintPromptImageOverride()) ?? effectiveConceptPreviewMessage.imageData ?? null;
     await handleGenerate(
@@ -1726,8 +1841,42 @@
       await handleDialogueSubmit(prompt, attachments);
       return;
     }
+    if (generationUnavailableReason) {
+      session.setError(`Render Error: ${generationUnavailableReason}`);
+      return;
+    }
     const imageDataOverride = await resolveBlueprintPromptImageOverride();
     await handleGenerate(prompt, attachments, { imageDataOverride });
+  }
+
+  function startBlankProject() {
+    showNewProjectChooser = false;
+    createNewThread({ mode: 'blank' });
+  }
+
+  async function handleTopImportFcstd() {
+    showNewProjectChooser = false;
+    if (freecadUnavailableReason) {
+      session.setError(`FCStd Import Error: ${freecadUnavailableReason}`);
+      return;
+    }
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'FreeCAD Document', extensions: ['fcstd'] }],
+    });
+    if (typeof selected === 'string' && selected.trim()) {
+      handleImportFcstd(selected);
+    }
+  }
+
+  function startMacroImport() {
+    showNewProjectChooser = false;
+    showNewProjectImport = true;
+  }
+
+  function handleTopMacroImport(data: { code: string; title: string }) {
+    createNewThread({ mode: 'macro', ...data });
+    showNewProjectImport = false;
   }
 
   onMount(() => {
@@ -1778,6 +1927,11 @@
     );
     const unlistenHistory = listen('history-updated', async () => {
       await refreshHistory();
+      const currentThreadId = get(activeThreadId);
+      if (currentThreadId) {
+        const thread = await getThread(currentThreadId);
+        upsertThreadInHistory(thread);
+      }
       void refreshThreadAgentState();
     });
     const unlistenSessions = listen<AgentSession[]>('agent-sessions-changed', (event) => {
@@ -1796,6 +1950,7 @@
       },
     );
     return () => {
+      teardownWindowStore();
       if (threadAgentPollInterval) clearInterval(threadAgentPollInterval);
       resetAgentTerminalStore();
       void unlisten.then(fn => fn());
@@ -1810,6 +1965,31 @@
   });
 
   const activeThread = $derived($history.find(t => t.id === $activeThreadId));
+  const activeAuthoringContext = $derived.by(() =>
+    activeThread
+      ? {
+          engineKind: activeThread.engineKind,
+          sourceLanguage: activeThread.sourceLanguage,
+          geometryBackend: activeThread.geometryBackend,
+        }
+      : authoringContextFromConfig($config),
+  );
+  const activeAuthoringCapability = $derived.by<RuntimeBackendCapability | null>(() =>
+    capabilityForAuthoringContext(
+      $runtimeCapabilities,
+      activeAuthoringContext.sourceLanguage,
+      activeAuthoringContext.geometryBackend,
+    ),
+  );
+  const generationUnavailableReason = $derived.by<string | null>(() => {
+    if (isBooting) return null;
+    if (!activeAuthoringCapability) return null;
+    return activeAuthoringCapability.available ? null : activeAuthoringCapability.detail;
+  });
+  const freecadUnavailableReason = $derived.by<string | null>(() => {
+    if (isBooting || !$runtimeCapabilities) return null;
+    return $runtimeCapabilities.freecad.available ? null : $runtimeCapabilities.freecad.detail;
+  });
   const activeThreadConceptPreviewState = $derived.by<ConceptPreviewUiState>(() => {
     if (!$activeThreadId) return defaultConceptPreviewUiState();
     return conceptPreviewUiByThread[$activeThreadId] ?? defaultConceptPreviewUiState();
@@ -1858,14 +2038,22 @@
       activeThread.messages.find(
         (message) =>
           message.id === $activeVersionId &&
-          message.role === 'assistant' &&
-          Boolean(message.output || message.artifactBundle),
+          isRenderableVersionTimelineMessage(message),
       ) ?? null
     );
   });
   const currentViewportTargetKey = $derived.by<string | null>(() => {
     if (!$activeThreadId || !$activeVersionId) return null;
     return viewportTargetKey($activeThreadId, $activeVersionId);
+  });
+  const currentViewerModelKey = $derived.by<string | null>(() => {
+    if (!currentViewportTargetKey) return null;
+    return [
+      currentViewportTargetKey,
+      activeArtifactBundle?.modelId ?? '',
+      activeArtifactBundle?.artifactVersion ?? '',
+      activeArtifactBundle?.contentHash ?? '',
+    ].join(':');
   });
   const persistedViewportCameraState = $derived.by<ViewportCameraState | null>(() => {
     if (!currentViewportTargetKey) return null;
@@ -2150,7 +2338,7 @@
         {
           label: 'OPEN TERMINAL',
           onclick: () => {
-            showAgentTerminalWindow = true;
+            if (!terminalWindowState.visible) toggleWindow('terminal');
           },
         },
       ];
@@ -2163,7 +2351,7 @@
         actions.push({
           label: 'OPEN TERMINAL',
           onclick: () => {
-            showAgentTerminalWindow = true;
+            if (!terminalWindowState.visible) toggleWindow('terminal');
           },
         });
       }
@@ -2424,20 +2612,13 @@
     if (genieBubble) dismissedBubbleText = genieBubble;
   }
 
-  async function handleOpenInventoryModel(id: string) {
-    const opened = await openInventoryThread(id);
-    if (opened) {
-      currentView.set('inventory-model');
-    }
-  }
-
   function dismissError() {
     session.setError(null);
   }
 
   $effect(() => {
-    if (showAgentTerminalWindow && !visibleAgentTerminal) {
-      showAgentTerminalWindow = false;
+    if (terminalWindowState.visible && !visibleAgentTerminal) {
+      closeWindowStore('terminal');
     }
   });
 
@@ -2459,7 +2640,7 @@
 
   $effect(() => {
     const snapshot = visibleAgentTerminal;
-    const focusKey = showAgentTerminalWindow && snapshot?.active
+    const focusKey = terminalWindowState.visible && snapshot?.active
       ? `${agentTerminalSessionKey(snapshot)}:${snapshot.active}`
       : '';
     if (!focusKey) {
@@ -2509,6 +2690,10 @@
 
   async function handleImportFcstd(sourcePath: string) {
     try {
+      if (freecadUnavailableReason) {
+        session.setError(`FCStd Import Error: ${freecadUnavailableReason}`);
+        return;
+      }
       session.setError(null);
       session.setStatus('Importing FCStd...');
       const bundle = await importFcstd(sourcePath);
@@ -2554,47 +2739,9 @@
     }
   }
 
-  function startResizingWidth(e: MouseEvent) {
-    isResizingWidth = true;
-    e.preventDefault();
-  }
-
-  function startResizingHeight(e: MouseEvent) {
-    isResizingHeight = true;
-    e.preventDefault();
-  }
-
-  function startResizingHistory(e: MouseEvent) {
-    isResizingHistory = true;
-    e.preventDefault();
-  }
-
-  function handleMouseMove(e: MouseEvent) {
-    if (isResizingWidth) {
-      $sidebarWidth = Math.max(250, Math.min(e.clientX, window.innerWidth - 300));
-    } else if (isResizingHeight) {
-      $dialogueHeight = Math.max(120, Math.min(window.innerHeight - e.clientY, window.innerHeight - 150));
-    } else if (isResizingHistory) {
-      const sidebarRect = document.querySelector('.sidebar')?.getBoundingClientRect();
-      if (sidebarRect) {
-        const heightFromBottom = sidebarRect.bottom - e.clientY;
-        $historyHeight = Math.max(100, Math.min(heightFromBottom, sidebarRect.height - 100));
-      }
-    }
-  }
-
-  function stopResizing() {
-    isResizingWidth = false;
-    isResizingHeight = false;
-    isResizingHistory = false;
-  }
-
-  function handleGlobalKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') stopResizing();
-  }
 </script>
 
-<svelte:window onmousemove={handleMouseMove} onmouseup={stopResizing} onblur={stopResizing} onkeydown={handleGlobalKeydown} />
+<svelte:window onbeforeunload={hardFlushWindowLayout} />
 
 <div class="app-page" role="application">
   {#if $onboarding.isActive}
@@ -2602,37 +2749,76 @@
   {/if}
   <div class="app-overlay-actions">
     {#if $currentView === 'workbench'}
-      {#if $activeRequestCount > 0 || $activeMicrowaveCount > 0 || activeMcpRenderBusy}
-        <button class="overlay-icon-btn" onclick={toggleMicrowaveMute} title="Toggle Cafeteria Hum">
-          {$config?.microwave?.muted ? '🔇' : '🔊'}
-        </button>
-      {/if}
-      {#if visibleAgentTerminal}
+      <div class="dock-group dock-group--primary">
         <button
-          class="overlay-icon-btn terminal-overlay-btn"
-          class:terminal-overlay-btn-attention={visibleAgentTerminal.attentionRequired}
-          onclick={() => {
-            showAgentTerminalWindow = true;
-          }}
-          title={
-            visibleAgentTerminal.attentionRequired
-              ? `${visibleAgentTerminal.agentLabel} needs terminal input`
-              : `Open ${visibleAgentTerminal.agentLabel} terminal`
-          }
+          class="dock-btn"
+          class:dock-btn--active={$windowStore.projects.visible}
+          class:onboarding-highlight={$onboarding.highlightTarget === 'projects'}
+          data-onboarding-target="projects"
+          onclick={() => toggleWindow('projects')}
+          title="Projects"
         >
-          >_
+          PROJECTS
         </button>
-      {/if}
-      <button class="overlay-icon-btn" class:draw-active={drawMode} onclick={() => drawMode = !drawMode} title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}>
-        ✏️
-      </button>
-      <button class="settings-overlay-btn" onclick={() => currentView.set('config')} title="Configuration">⚙️</button>
-      <button class="settings-overlay-btn" onclick={() => currentView.set('trash')} title="Trash">🗑️</button>
-      <button class="settings-overlay-btn" onclick={() => currentView.set('inventory')} title="Inventory">📦</button>
+        <button
+          class="dock-btn"
+          class:dock-btn--active={$windowStore.params.visible}
+          class:onboarding-highlight={$onboarding.highlightTarget === 'params'}
+          data-onboarding-target="params"
+          onclick={() => toggleWindow('params')}
+          title="Parameters"
+        >
+          PARAMS
+        </button>
+        <button
+          class="dock-btn"
+          class:dock-btn--active={$windowStore.dialogue.visible}
+          class:onboarding-highlight={$onboarding.highlightTarget === 'dialogue'}
+          data-onboarding-target="dialogue"
+          onclick={() => toggleWindow('dialogue')}
+          title="Dialogue"
+        >
+          DIALOGUE
+        </button>
+        <button
+          class="dock-btn dock-btn--accent"
+          onclick={() => showNewProjectChooser = true}
+          title="New project"
+        >
+          +
+        </button>
+      </div>
+      <div class="dock-group dock-group--utility">
+        {#if $activeRequestCount > 0 || $activeMicrowaveCount > 0 || activeMcpRenderBusy}
+          <button class="overlay-icon-btn" onclick={toggleMicrowaveMute} title="Toggle Cafeteria Hum">
+            {$config?.microwave?.muted ? '🔇' : '🔊'}
+          </button>
+        {/if}
+        {#if visibleAgentTerminal}
+          <button
+            class="overlay-icon-btn terminal-overlay-btn"
+            class:terminal-overlay-btn-attention={visibleAgentTerminal.attentionRequired}
+            onclick={() => {
+              if (!terminalWindowState.visible) toggleWindow('terminal');
+            }}
+            title={
+              visibleAgentTerminal.attentionRequired
+                ? `${visibleAgentTerminal.agentLabel} needs terminal input`
+                : `Open ${visibleAgentTerminal.agentLabel} terminal`
+            }
+          >
+            >_
+          </button>
+        {/if}
+        <button class="overlay-icon-btn" class:draw-active={drawMode} onclick={() => drawMode = !drawMode} title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}>
+          ✏️
+        </button>
+        <button class="settings-overlay-btn" onclick={() => toggleWindow('settings')} title="Settings">⚙️</button>
+      </div>
     {:else}
       <button
         class="settings-overlay-btn"
-        onclick={() => currentView.set($currentView === 'inventory-model' ? 'inventory' : 'workbench')}
+        onclick={() => currentView.set('workbench')}
         title="Close"
       >
         ×
@@ -2641,191 +2827,20 @@
   </div>
 
   <div class="app-container">
-    {#if $currentView === 'config'}
-      <ConfigPanel
-        bind:config={$config}
-        availableModels={$availableModels}
-        isLoadingModels={$isLoadingModels}
-        onfetch={fetchModels}
-        onsave={saveConfig}
-      />
-    {:else if $currentView === 'trash'}
-      <DeletedModels />
-    {:else if $currentView === 'inventory'}
-      <InventoryPanel onOpen={handleOpenInventoryModel} />
-    {:else}
+    {#if $currentView === 'workbench' || $currentView === 'inventory-model'}
       <div class="workbench">
-        {#if !sidebarCollapsed}
-          <aside class="sidebar" style="width: {$sidebarWidth}px">
-            <div
-              class="sidebar-section"
-              class:flex-1={!paramPanelCollapsed}
-              class:sidebar-section-collapsed={paramPanelCollapsed}
-              class:onboarding-highlight={$onboarding.target === 'params'}
-            >
-              <div class="pane-header pane-header--with-actions">
-                <button
-                  class="pane-header__toggle"
-                  type="button"
-                  title={paramPanelCollapsed ? 'Expand tunable parameters' : 'Collapse tunable parameters'}
-                  aria-expanded={!paramPanelCollapsed}
-                  onclick={() => {
-                    paramPanelCollapsed = !paramPanelCollapsed;
-                  }}
-                >
-                  {paramPanelCollapsed ? '▸' : '▾'}
-                </button>
-                <span class="pane-header__title">TUNABLE PARAMETERS</span>
-                <div class="pane-header__actions">
-                  <button
-                    class="pane-header__chip"
-                    title="Collapse left panel"
-                    type="button"
-                    onclick={() => {
-                      sidebarCollapsed = true;
-                    }}
-                  >
-                    ◂
-                  </button>
-                  <button
-                    class="pane-header__chip"
-                    class:pane-header__chip-active={showViewportOverlayControls}
-                    type="button"
-                    title={showViewportOverlayControls ? 'Hide viewport overlay controls' : 'Show viewport overlay controls'}
-                    aria-pressed={showViewportOverlayControls}
-                    onclick={() => {
-                      showViewportOverlayControls = !showViewportOverlayControls;
-                    }}
-                  >
-                    OVR
-                  </button>
-                </div>
-              </div>
-              {#if !paramPanelCollapsed}
-                <div class="sidebar-content">
-                  <ParamPanel 
-                    uiSpec={effectiveUiSpec} 
-                    modelManifest={activeModelManifest}
-                    postProcessing={$workingCopy.postProcessing ?? null}
-                    artifactBundle={activeArtifactBundle}
-                    controlViews={availableControlViews}
-                    activeControlViewId={activeControlViewId}
-                    selectedTarget={selectedTarget}
-                    bind:searchQuery={sharedContextSearchQuery}
-                    onControlFocusChange={(focus) => focusedMeasurementControl = focus}
-                    onSelectControlView={handleSelectControlView}
-                    onSemanticChange={handleSemanticControlChange}
-                    selectedPartId={selectedPartId}
-                    onSelectPart={handlePartSelect}
-                    onspecchange={(spec, newParams) => {
-                      paramPanelState.setUiSpec(spec);
-                      workingCopy.patch({ uiSpec: spec });
-                      if (newParams) {
-                        paramPanelState.setParams(newParams);
-                        workingCopy.patch({ params: newParams });
-                      }
-                    }}
-                    onpostprocessingchange={(nextPostProcessing) => {
-                      workingCopy.patch({ postProcessing: nextPostProcessing });
-                    }}
-                    parameters={effectiveParameters} 
-                    macroCode={$paramPanelState.macroCode}
-                    onchange={handleParamChange}
-                    activeVersionId={$paramPanelState.versionId}
-                    messageId={$activeVersionId}
-                    outlineEnabled={viewerOutlineEnabled}
-                    topologyMode={viewerTopologyMode}
-                    onViewerDisplayChange={(display) => {
-                      viewerOutlineEnabled = display.outlineEnabled;
-                      viewerTopologyMode = display.topologyMode;
-                    }}
-                    onShowCode={() => {
-                      selectedCode.set($workingCopy.macroCode);
-                      selectedTitle.set($workingCopy.title);
-                      showCodeModal.set(true);
-                    }}
-                  />
-                </div>
-              {/if}
-            </div>
-            {#if $currentView !== 'inventory-model'}
-              {#if !paramPanelCollapsed && !historyPanelCollapsed}
-                <div class="resizer-v" role="slider" aria-label="Resize history" aria-orientation="vertical" aria-valuenow={$historyHeight} tabindex="0" onmousedown={startResizingHistory} onkeydown={(e) => {
-                  if (e.key === 'ArrowUp') historyHeight.set($historyHeight + 10);
-                  if (e.key === 'ArrowDown') historyHeight.set($historyHeight - 10);
-                }}></div>
-              {/if}
-              <div
-                class="sidebar-section"
-                class:flex-1={paramPanelCollapsed && !historyPanelCollapsed}
-                class:sidebar-section-collapsed={historyPanelCollapsed}
-                style={!historyPanelCollapsed && !paramPanelCollapsed ? `height: ${$historyHeight}px` : undefined}
-                class:onboarding-highlight={$onboarding.target === 'history'}
-              >
-                <div class="pane-header pane-header--with-actions">
-                  <button
-                    class="pane-header__toggle"
-                    type="button"
-                    title={historyPanelCollapsed ? 'Expand thread history' : 'Collapse thread history'}
-                    aria-expanded={!historyPanelCollapsed}
-                    onclick={() => {
-                      historyPanelCollapsed = !historyPanelCollapsed;
-                    }}
-                  >
-                    {historyPanelCollapsed ? '▸' : '▾'}
-                  </button>
-                  <span class="pane-header__title">THREAD HISTORY</span>
-                </div>
-                {#if !historyPanelCollapsed}
-                  <div class="sidebar-content scrollable">
-                    <HistoryPanel history={$history} activeThreadId={$activeThreadId}
-                      inFlightByThread={inFlightByThread}
-                      activeAgentSessions={activeAgentSessions}
-                      attentionThreadIds={threadAttentionIds}
-                      onSelect={loadFromHistory}
-                      onDelete={deleteThread}
-                      onRename={renameThread}
-                      onNew={createNewThread}
-                      onImportFcstd={handleImportFcstd}
-                      onFinalize={finalizeThread}
-                    />
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </aside>
-
-          <div class="resizer-w" role="slider" aria-label="Resize sidebar" aria-orientation="horizontal" aria-valuenow={$sidebarWidth} tabindex="0" onmousedown={startResizingWidth} onkeydown={(e) => {
-            if (e.key === 'ArrowLeft') sidebarWidth.set($sidebarWidth - 10);
-            if (e.key === 'ArrowRight') sidebarWidth.set($sidebarWidth + 10);
-          }}></div>
-        {:else}
-          <div class="sidebar-rail">
-            <button
-              class="sidebar-rail__toggle"
-              type="button"
-              title="Expand left panel"
-              aria-label="Expand left panel"
-              onclick={() => {
-                sidebarCollapsed = false;
-              }}
-            >
-              ▸
-            </button>
-          </div>
-        {/if}
-
         <div class="main-workbench">
           <main
             class="viewport-area"
             role="presentation"
             bind:this={viewportAreaEl}
-            class:onboarding-highlight={$onboarding.target === 'viewport'}
+            class:onboarding-highlight={$onboarding.highlightTarget === 'viewport'}
+            data-onboarding-target="viewport"
           >
             <div class="viewer-shell" class:viewer-shell--occluded={showBlueprintViewport}>
               <Viewer
                 bind:this={viewerComponent}
-                modelKey={currentViewportTargetKey}
+                modelKey={currentViewerModelKey}
                 stlUrl={$activeThreadId ? stlUrl : null}
                 viewerAssets={viewerAssets}
                 manifestParts={activeModelManifest?.parts ?? []}
@@ -2890,7 +2905,8 @@
                     <button
                       class="btn btn-xs btn-primary"
                       onclick={() => void generateFromConceptPreview()}
-                      disabled={$activeThreadBusy || freecadMissing}
+                      disabled={$activeThreadBusy || Boolean(generationUnavailableReason)}
+                      title={generationUnavailableReason ?? undefined}
                     >
                       GENERATE 3D FROM THIS
                     </button>
@@ -2988,13 +3004,6 @@
               </div>
             {/if}
 
-            {#if freecadMissing}
-              <div class="freecad-missing-banner">
-                <div class="freecad-missing-banner__label">FREECAD NOT FOUND</div>
-                <div class="freecad-missing-banner__body">FreeCAD is required to generate models. Install it or set the path in <button class="freecad-missing-banner__settings-link" onclick={() => currentView.set('config')}>Settings</button>.</div>
-              </div>
-            {/if}
-
             {#if $activeThreadRequests.length > 0}
               <div class="cafeteria-strip">
                 {#each $activeThreadRequests as req (req.id)}
@@ -3079,12 +3088,16 @@
                     {/if}
                   </div>
                 {/if}
-                {#if activeVersionAgentLabel}
-                  <div class="agent-origin-chip" title={`Current model authored by ${activeVersionAgentLabel}`}>
-                    {activeVersionAgentLabel}
-                  </div>
-                {/if}
                 <div class="export-actions">
+                  <button class="btn btn-xs btn-secondary" onclick={() => {
+                    if (activeVersionMessage?.output) {
+                      selectedCode.set($workingCopy.macroCode);
+                      selectedTitle.set(activeVersionMessage.output.title || $workingCopy.title || 'design');
+                      showCodeModal.set(true);
+                    }
+                  }} disabled={!activeVersionMessage?.output || showViewerBusyMask} title="View source code">
+                    📄 CODE
+                  </button>
                   <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
                   {#if activeArtifactBundle}
                     <button
@@ -3100,84 +3113,31 @@
               </div>
             {/if}
           </main>
-          
-          {#if $currentView !== 'inventory-model'}
-            {#if !dialogueCollapsed}
-              <div class="resizer-v" role="slider" aria-label="Resize dialogue" aria-orientation="vertical" aria-valuenow={$dialogueHeight} tabindex="0" onmousedown={startResizingHeight} onkeydown={(e) => {
-                if (e.key === 'ArrowUp') dialogueHeight.set($dialogueHeight + 10);
-                if (e.key === 'ArrowDown') dialogueHeight.set($dialogueHeight - 10);
-              }}></div>
-            {/if}
-
-            <div
-              class="dialogue-area"
-              class:dialogue-area-collapsed={dialogueCollapsed}
-              style={!dialogueCollapsed ? `height: ${$dialogueHeight}px` : undefined}
-              class:onboarding-highlight={$onboarding.target === 'dialogue'}
-            >
-              <div class="pane-header pane-header--with-actions dialogue-header">
-                <div class="pane-header__lead">
-                  <button
-                    class="pane-header__toggle"
-                    type="button"
-                    title={dialogueCollapsed ? 'Expand dialogue' : 'Collapse dialogue'}
-                    aria-expanded={!dialogueCollapsed}
-                    onclick={() => {
-                      dialogueCollapsed = !dialogueCollapsed;
-                    }}
-                  >
-                    {dialogueCollapsed ? '▸' : '▾'}
-                  </button>
-                  <span class="pane-header__title">DIALOGUE: {activeThread ? activeThread.title : 'New Session'}</span>
-                </div>
-                <div class="pane-header__actions">
-                  {#if activeVersionMessage?.output?.macroCode}
-                    <button
-                      class="pane-header__chip"
-                      type="button"
-                      title="Open code for the active version"
-                      onclick={() => {
-                        selectedCode.set(activeVersionMessage.output?.macroCode ?? '');
-                        selectedTitle.set(activeVersionMessage.output?.title ?? activeThread?.title ?? 'Code');
-                        showCodeModal.set(true);
-                      }}
-                    >
-                      CODE
-                    </button>
-                  {/if}
-                </div>
-              </div>
-              {#if !dialogueCollapsed}
-                <div class="dialogue-content">
-                  {#key $activeThreadId ?? 'new-thread'}
-                    <PromptPanel
-                      onGenerate={handlePromptPanelSubmit}
-                      isGenerating={$activeThreadBusy}
-                      freecadMissing={freecadMissing}
-                      dialogueState={dialogueState}
-                      messages={activeThread?.messages || []}
-                      activeThreadId={$activeThreadId}
-                      sendWorkspaceCapture={sendWorkspaceCaptureForActiveThread}
-                      workspaceCaptureHint={workspaceCaptureHint}
-                      onToggleWorkspaceCapture={setWorkspaceCaptureForActiveThread}
-                      onOpenConceptPreview={openConceptPreviewInViewport}
-                      onPinConceptPreview={pinConceptPreviewFromMessage}
-                      pinnedConceptPreviewMessageId={activeThreadConceptPreviewState.pinnedMessageId}
-                      onShowCode={(m) => { selectedCode.set(m.output.macroCode); selectedTitle.set(m.output.title); showCodeModal.set(true); }}
-                      onDeleteVersion={deleteVersion}
-                      onRestoreVersion={restoreVersion}
-                      bind:activeVersionId={$activeVersionId}
-                      onVersionChange={loadVersion}
-                    />
-                  {/key}
-                </div>
-              {/if}
-            </div>
-          {/if}
         </div>
       </div>
     {/if}
   </div>
+
+  {#if showNewProjectChooser}
+    <Modal title="Start New Project" onclose={() => showNewProjectChooser = false}>
+      <div class="new-project-chooser">
+        <button class="new-project-chooser__btn" onclick={startBlankProject}>Blank Project</button>
+        <button
+          class="new-project-chooser__btn"
+          onclick={handleTopImportFcstd}
+          disabled={Boolean(freecadUnavailableReason)}
+          title={freecadUnavailableReason ?? undefined}
+        >
+          Import FreeCAD
+        </button>
+        <button class="new-project-chooser__btn" onclick={startMacroImport}>Import Macro</button>
+      </div>
+    </Modal>
+  {/if}
+
+  {#if showNewProjectImport}
+    <ManualImportModal bind:show={showNewProjectImport} onImport={handleTopMacroImport} />
+  {/if}
 
   {#if isBooting}
     <div class="boot-overlay">
@@ -3192,18 +3152,189 @@
     </div>
   {/if}
 
-  {#if visibleAgentTerminal}
+  {#if projectsWindowState.visible}
     <Window
-      bind:x={agentTerminalWindowX}
-      bind:y={agentTerminalWindowY}
-      bind:width={agentTerminalWindowWidth}
-      bind:height={agentTerminalWindowHeight}
-      minWidth={560}
-      minHeight={320}
+      windowId="projects"
+      x={projectsWindowState.x}
+      y={projectsWindowState.y}
+      width={projectsWindowState.width}
+      height={projectsWindowState.height}
+      z={projectsWindowState.z}
+      minWidth={320}
+      minHeight={300}
+      title="Projects"
+      hidden={!projectsWindowState.visible}
+      highlighted={$onboarding.highlightTarget === 'projects'}
+      onclose={() => closeWindowStore('projects')}
+    >
+      <ProjectSwitcher
+        onImportFcstd={handleImportFcstd}
+        freecadUnavailableReason={freecadUnavailableReason}
+      />
+    </Window>
+  {/if}
+
+  {#if paramsWindowState.visible}
+    <Window
+      windowId="params"
+      x={paramsWindowState.x}
+      y={paramsWindowState.y}
+      width={paramsWindowState.width}
+      height={paramsWindowState.height}
+      z={paramsWindowState.z}
+      minWidth={280}
+      minHeight={250}
+      title="Parameters"
+      hidden={!paramsWindowState.visible}
+      highlighted={$onboarding.highlightTarget === 'params'}
+      onclose={() => closeWindowStore('params')}
+      >
+      <div class="window-scroll-container">
+        <ParamPanel
+          uiSpec={effectiveUiSpec}
+          parameters={effectiveParameters}
+          modelManifest={activeModelManifest}
+          postProcessing={$workingCopy.postProcessing ?? null}
+          artifactBundle={activeArtifactBundle}
+          controlViews={availableControlViews}
+          activeControlViewId={activeControlViewId}
+          selectedTarget={selectedTarget}
+          selectedPartId={selectedPartId}
+          bind:searchQuery={sharedContextSearchQuery}
+          onControlFocusChange={(focus) => focusedMeasurementControl = focus}
+          onSelectControlView={handleSelectControlView}
+          onSelectPart={handlePartSelect}
+          onpostprocessingchange={(nextPostProcessing) => {
+            workingCopy.patch({ postProcessing: nextPostProcessing });
+          }}
+          onSemanticChange={handleSemanticControlChange}
+          onchange={handleParamChange}
+          onspecchange={(spec, params) => {
+            paramPanelState.setUiSpec(spec);
+            workingCopy.patch({ uiSpec: spec });
+            if (params) {
+              paramPanelState.setParams(params);
+              workingCopy.patch({ params });
+            }
+          }}
+          activeVersionId={$paramPanelState.versionId}
+          messageId={$activeVersionId}
+          outlineEnabled={viewerOutlineEnabled}
+          topologyMode={viewerTopologyMode}
+          onViewerDisplayChange={(display) => {
+            viewerOutlineEnabled = display.outlineEnabled;
+            viewerTopologyMode = display.topologyMode;
+          }}
+          onShowCode={() => {
+            selectedCode.set($workingCopy.macroCode);
+            selectedTitle.set($workingCopy.title);
+            showCodeModal.set(true);
+          }}
+        />
+
+      </div>
+      </Window>
+
+  {/if}
+
+  {#if settingsWindowState.visible}
+    <Window
+      windowId="settings"
+      x={settingsWindowState.x}
+      y={settingsWindowState.y}
+      width={settingsWindowState.width}
+      height={settingsWindowState.height}
+      z={settingsWindowState.z}
+      minWidth={400}
+      minHeight={350}
+      title="Settings"
+      hidden={!settingsWindowState.visible}
+      highlighted={false}
+      onclose={() => closeWindowStore('settings')}
+    >
+      <div class="window-scroll-container">
+        <ConfigPanel
+          bind:config={$config}
+          availableModels={$availableModels}
+          isLoadingModels={$isLoadingModels}
+          runtimeCapabilities={$runtimeCapabilities}
+          onfetch={fetchModels}
+          onsave={saveConfig}
+        />
+      </div>
+    </Window>
+  {/if}
+
+  {#if mountedWindows.dialogue}
+    <Window
+      windowId="dialogue"
+      x={dialogueWindowState.x}
+      y={dialogueWindowState.y}
+      width={dialogueWindowState.width}
+      height={dialogueWindowState.height}
+      z={dialogueWindowState.z}
+      minWidth={350}
+      minHeight={260}
+      title="Dialogue"
+      hidden={!dialogueWindowState.visible}
+      highlighted={$onboarding.highlightTarget === 'dialogue'}
+      onclose={() => closeWindowStore('dialogue')}
+    >
+      <div class="dialogue-content">
+        <div class="dialogue-toolbar">
+          <label class="dialogue-toolbar__remember">
+            <input
+              type="checkbox"
+              checked={$windowLayoutRemembered}
+              onchange={(event) => void setThreadWindowLayoutRemembered((event.currentTarget as HTMLInputElement).checked)}
+            />
+            <span>Remember layout</span>
+          </label>
+        </div>
+        {#key $activeThreadId ?? 'new-thread'}
+          <PromptPanel
+            onGenerate={handlePromptPanelSubmit}
+            isGenerating={$activeThreadBusy}
+            generationUnavailableReason={generationUnavailableReason}
+            dialogueState={dialogueState}
+            messages={activeThread?.messages || []}
+            messagesLoading={$activeThreadMessagesLoading}
+            messagesHasMore={activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false}
+            messagesPageLoading={activeThread ? ($threadMessagePageState[activeThread.id]?.isLoading ?? false) : false}
+            onLoadOlderMessages={() => activeThread && loadOlderThreadMessages(activeThread.id)}
+            activeThreadId={$activeThreadId}
+            sendWorkspaceCapture={sendWorkspaceCaptureForActiveThread}
+            workspaceCaptureHint={workspaceCaptureHint}
+            onToggleWorkspaceCapture={setWorkspaceCaptureForActiveThread}
+            onOpenConceptPreview={openConceptPreviewInViewport}
+            onPinConceptPreview={pinConceptPreviewFromMessage}
+            pinnedConceptPreviewMessageId={activeThreadConceptPreviewState.pinnedMessageId}
+            onShowCode={(m) => { selectedCode.set(m.output.macroCode); selectedTitle.set(m.output.title); showCodeModal.set(true); }}
+            onDeleteVersion={deleteVersion}
+            onRestoreVersion={restoreVersion}
+            bind:activeVersionId={$activeVersionId}
+            onVersionChange={loadVersion}
+          />
+        {/key}
+      </div>
+    </Window>
+  {/if}
+
+  {#if mountedWindows.terminal && visibleAgentTerminal}
+    <Window
+      windowId="terminal"
+      x={terminalWindowState.x}
+      y={terminalWindowState.y}
+      width={terminalWindowState.width}
+      height={terminalWindowState.height}
+      z={terminalWindowState.z}
+      minWidth={400}
+      minHeight={300}
       title={`${visibleAgentTerminal.agentLabel} Terminal`}
-      hidden={!showAgentTerminalWindow}
+      hidden={!terminalWindowState.visible}
+      highlighted={false}
       onclose={() => {
-        showAgentTerminalWindow = false;
+        closeWindowStore('terminal');
       }}
     >
       <div class="agent-terminal-window">
@@ -3250,7 +3381,7 @@
           <AgentTerminalSurface
             bind:this={agentTerminalSurface}
             snapshot={visibleAgentTerminal}
-            visible={showAgentTerminalWindow}
+            visible={terminalWindowState.visible}
             onRawInput={(data) => void handleAgentTerminalRawInput(data)}
             onResize={({ cols, rows }) =>
               void handleAgentTerminalResize(visibleAgentTerminal.agentId, cols, rows)}
@@ -3343,39 +3474,6 @@
   .app-page { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
   .app-container { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .workbench { display: flex; height: 100%; width: 100%; overflow: hidden; }
-  .sidebar { display: flex; flex-direction: column; flex-shrink: 0; background: var(--bg-100); border-right: 1px solid var(--bg-300); overflow: hidden; }
-  .sidebar-rail {
-    width: 28px;
-    flex-shrink: 0;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding-top: 10px;
-    background: var(--bg-100);
-    border-right: 1px solid var(--bg-300);
-    overflow: hidden;
-  }
-  .sidebar-rail__toggle {
-    width: 20px;
-    height: 28px;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 84%, black 16%);
-    color: var(--secondary);
-    cursor: pointer;
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    line-height: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .sidebar-rail__toggle:hover,
-  .sidebar-rail__toggle:focus-visible {
-    border-color: var(--primary);
-    color: var(--primary);
-    outline: none;
-  }
-  .sidebar-content { flex: 1; min-height: 0; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
   .viewer-shell {
@@ -3492,90 +3590,70 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .dialogue-area { flex-shrink: 0; min-height: 260px; background: var(--bg-100); display: flex; flex-direction: column; border-top: 1px solid var(--bg-300); overflow: hidden; }
-  .dialogue-area-collapsed { height: auto !important; min-height: 0 !important; flex: 0 0 auto; }
-  .dialogue-area-collapsed .pane-header { border-bottom: none; }
   .dialogue-content { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-  .agent-origin-chip {
-    padding: 4px 8px;
-    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
-    color: var(--primary);
-    font-family: var(--font-mono);
-    font-size: 0.62rem;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    pointer-events: none;
-  }
-  .pane-header {
-    padding: 4px 10px;
-    background: var(--bg-200);
+  .dialogue-toolbar {
+    flex: 0 0 auto;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--bg-300);
-    color: var(--secondary);
+    background: color-mix(in srgb, var(--bg-200) 90%, transparent);
+  }
+  .dialogue-toolbar__remember {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+  }
+  .app-overlay-actions { position: absolute; top: 10px; right: 10px; z-index: 150; display: flex; gap: 12px; align-items: flex-start; }
+  .dock-group { display: flex; gap: 2px; }
+  .dock-btn {
+    height: 30px;
+    padding: 0 12px;
+    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
+    border: 1px solid var(--bg-300);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
     font-size: 0.6rem;
     font-weight: bold;
     letter-spacing: 0.1em;
     text-transform: uppercase;
+    cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-  .pane-header--with-actions { justify-content: space-between; }
-  .pane-header__lead { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
-  .pane-header__title {
-    min-width: 0;
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pane-header__actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-  .pane-header__toggle,
-  .pane-header__chip {
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 84%, black 16%);
-    color: var(--text-dim);
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
     justify-content: center;
-    font-family: var(--font-mono);
-    line-height: 1;
-    flex-shrink: 0;
+    backdrop-filter: blur(6px);
+    box-shadow: var(--shadow);
   }
-  .pane-header__toggle {
-    width: 22px;
-    height: 22px;
-    font-size: 0.8rem;
-  }
-  .pane-header__chip {
-    min-width: 38px;
-    height: 22px;
-    padding: 0 8px;
-    font-size: 0.58rem;
-    letter-spacing: 0.1em;
-  }
-  .pane-header__toggle:hover,
-  .pane-header__toggle:focus-visible,
-  .pane-header__chip:hover,
-  .pane-header__chip:focus-visible {
-    border-color: var(--primary);
-    color: var(--primary);
-    outline: none;
-  }
-  .pane-header__chip-active {
-    border-color: var(--primary);
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 14%, var(--bg-100));
-  }
-  .scrollable { min-height: 0; overflow-y: auto; overflow-x: hidden; }
-  .resizer-w { width: 4px; background: var(--bg-300); cursor: col-resize; z-index: 10; flex-shrink: 0; }
-  .resizer-v { height: 4px; background: var(--bg-300); cursor: row-resize; z-index: 10; flex-shrink: 0; }
-  .app-overlay-actions { position: absolute; top: 10px; right: 10px; z-index: 150; display: flex; gap: 8px; }
+  .dock-btn:hover { border-color: var(--primary); color: var(--primary); }
+  .dock-btn--active { border-color: var(--primary); color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, var(--bg-100)); }
+  .dock-btn--accent { color: var(--secondary); font-size: 0.85rem; min-width: 30px; padding: 0 8px; }
+  .dock-btn--accent:hover { color: var(--primary); }
   .overlay-icon-btn, .settings-overlay-btn { width: 34px; height: 34px; background: color-mix(in srgb, var(--bg-100) 90%, transparent); border: 1px solid var(--bg-300); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); }
   .overlay-icon-btn:hover, .settings-overlay-btn:hover { border-color: var(--primary); color: var(--primary); }
   .overlay-icon-btn.draw-active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 25%, var(--bg-100)); box-shadow: 0 0 8px var(--primary); }
+  .new-project-chooser {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    min-width: 320px;
+  }
+  .new-project-chooser__btn {
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  .new-project-chooser__btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
   .terminal-overlay-btn { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; }
   .terminal-overlay-btn-attention { border-color: var(--secondary); color: var(--secondary); box-shadow: 0 0 10px color-mix(in srgb, var(--secondary) 50%, transparent); }
   .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 220; pointer-events: auto; max-width: min(80vw, 420px); }
@@ -3622,42 +3700,6 @@
     cursor: pointer;
   }
   .error-banner__dismiss:hover { border-color: var(--red); color: var(--text); }
-
-  .freecad-missing-banner {
-    position: absolute;
-    bottom: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 135;
-    max-width: min(80vw, 520px);
-    padding: 8px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    background: var(--bg-200);
-    border: 1px solid var(--accent);
-    pointer-events: auto;
-  }
-  .freecad-missing-banner__label {
-    color: var(--accent);
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-  }
-  .freecad-missing-banner__body {
-    color: var(--text-dim);
-    font-size: 0.78rem;
-    line-height: 1.4;
-  }
-  .freecad-missing-banner__settings-link {
-    background: none;
-    border: none;
-    color: var(--primary);
-    cursor: pointer;
-    padding: 0;
-    font-size: inherit;
-    text-decoration: underline;
-  }
 
   /* STL Cafeteria — multi-microwave strip */
   .cafeteria-strip { position: absolute; bottom: 48px; left: 12px; right: 12px; z-index: 100; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
@@ -3883,10 +3925,11 @@
   .agent-terminal-window__screen--live { cursor: text; }
   .agent-terminal-window__composer { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--bg-300); background: color-mix(in srgb, var(--bg-200) 84%, transparent); }
   .agent-terminal-window__input { flex: 1; min-width: 0; }
-  .flex-1 { flex: 1; }
-  .sidebar-section { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  .sidebar-section-collapsed { flex: 0 0 auto !important; height: auto !important; }
-
+  .window-scroll-container {
+    height: 100%;
+    overflow-y: auto;
+    background: var(--bg);
+  }
   /* Onboarding */
   .onboarding-backdrop {
     position: fixed;
@@ -3903,7 +3946,7 @@
     background: var(--bg-100);
   }
   :global(.genie-layer.onboarding-active) {
-    z-index: 1001 !important;
+    z-index: 5000 !important;
   }
 
   /* Agent confirmation stack */

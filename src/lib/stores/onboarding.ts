@@ -1,95 +1,134 @@
 import { writable } from 'svelte/store';
 import { config } from './domainState';
 import { saveConfig } from '../boot/restore';
-import { get } from 'svelte/store';
+import type { WindowId } from './windowStore';
 
 export interface OnboardingStep {
   id: string;
   text: string;
-  target: string | null;
+  highlightTarget: OnboardingHighlightTarget | null;
+  windowIdToOpen?: WindowId;
 }
 
-const STEPS: OnboardingStep[] = [
+export type OnboardingHighlightTarget = 'dialogue' | 'viewport' | 'params' | 'projects';
+
+type OnboardingState = {
+  isActive: boolean;
+  currentStepIndex: number;
+  currentStepId: string | null;
+  highlightTarget: OnboardingHighlightTarget | null;
+  windowIdToOpen: WindowId | null;
+  text: string;
+};
+
+type OnboardingDeps = {
+  configStore?: {
+    update: (updater: (value: any) => any) => void;
+  };
+  saveConfig?: () => Promise<void>;
+};
+
+export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: 'intro',
     text: "Welcome to Ecky CAD! I'm Ecky, your AI design assistant. Let me give you a quick tour of how we can build things together.",
-    target: null,
+    highlightTarget: null,
   },
   {
     id: 'dialogue',
-    text: "This is the Dialogue area. Just tell me what you want to create or change, and I'll write the FreeCAD Python code to make it happen.",
-    target: 'dialogue',
+    text: "This is the Dialogue window. Tell me what you want to create or change, and I'll work the thread from here with you.",
+    highlightTarget: 'dialogue',
+    windowIdToOpen: 'dialogue',
   },
   {
     id: 'viewport',
-    text: "Here is the Viewport. You'll see your 3D models appear here instantly. You can rotate, pan, and zoom to inspect the details.",
-    target: 'viewport',
+    text: "This is the Viewport. Your 3D model shows up here, and you can rotate, pan, and zoom to inspect it.",
+    highlightTarget: 'viewport',
   },
   {
     id: 'params',
-    text: "This is the Parameters panel. When I create a model, I'll often expose sliders and inputs here so you can tweak the design in real-time without writing new prompts.",
-    target: 'params',
+    text: "This is the Parameters window. When a model exposes controls, you can tweak dimensions and options here without writing another prompt.",
+    highlightTarget: 'params',
+    windowIdToOpen: 'params',
   },
   {
-    id: 'history',
-    text: "And finally, the Thread History. Every design variation is saved here automatically. You can always go back in time or branch off into new ideas.",
-    target: 'history',
+    id: 'projects',
+    text: "This is the Projects window. Your active threads, archived work, and trash live here, so you can return to old ideas or branch new ones.",
+    highlightTarget: 'projects',
+    windowIdToOpen: 'projects',
   },
   {
     id: 'finish',
     text: "That's it! Why don't we start by typing something simple below, like 'make a coffee cup'?",
-    target: null,
+    highlightTarget: null,
   }
 ];
 
-function createOnboardingStore() {
-  const { subscribe, set, update } = writable({
+function stateForStep(stepIndex: number): OnboardingState {
+  const step = ONBOARDING_STEPS[stepIndex];
+  return {
     isActive: false,
-    currentStepIndex: 0,
-    target: null as string | null,
-    text: ''
+    currentStepIndex: stepIndex,
+    currentStepId: step?.id ?? null,
+    highlightTarget: step?.highlightTarget ?? null,
+    windowIdToOpen: step?.windowIdToOpen ?? null,
+    text: step?.text ?? '',
+  };
+}
+
+export function createOnboardingStore(deps: OnboardingDeps = {}) {
+  const configStore = deps.configStore ?? config;
+  const persistOnboarding = deps.saveConfig ?? saveConfig;
+  const { subscribe, set, update } = writable<OnboardingState>({
+    ...stateForStep(0),
+    isActive: false,
   });
 
   return {
     subscribe,
     start: () => {
       set({
+        ...stateForStep(0),
         isActive: true,
-        currentStepIndex: 0,
-        target: STEPS[0].target,
-        text: STEPS[0].text
       });
     },
     next: async () => {
       let isFinished = false;
       update(state => {
         const nextIndex = state.currentStepIndex + 1;
-        if (nextIndex >= STEPS.length) {
+        if (nextIndex >= ONBOARDING_STEPS.length) {
           isFinished = true;
-          return { isActive: false, currentStepIndex: 0, target: null, text: '' };
+          return {
+            ...stateForStep(0),
+            isActive: false,
+          };
         }
         return {
+          ...stateForStep(nextIndex),
           isActive: true,
-          currentStepIndex: nextIndex,
-          target: STEPS[nextIndex].target,
-          text: STEPS[nextIndex].text
         };
       });
 
       if (isFinished) {
-        await finishOnboarding();
+        await finishOnboarding(configStore, persistOnboarding);
       }
     },
     skip: async () => {
-      set({ isActive: false, currentStepIndex: 0, target: null, text: '' });
-      await finishOnboarding();
+      set({
+        ...stateForStep(0),
+        isActive: false,
+      });
+      await finishOnboarding(configStore, persistOnboarding);
     }
   };
 }
 
-async function finishOnboarding() {
-  config.update(c => ({ ...c, hasSeenOnboarding: true }));
-  await saveConfig();
+async function finishOnboarding(
+  configStore: OnboardingDeps['configStore'],
+  persistOnboarding: () => Promise<void>,
+) {
+  configStore?.update((current) => ({ ...current, hasSeenOnboarding: true }));
+  await persistOnboarding();
 }
 
 export const onboarding = createOnboardingStore();

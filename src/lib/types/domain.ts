@@ -127,6 +127,12 @@ export interface Message {
   deletedAt?: number | null;
 }
 
+export interface ThreadMessagesPage {
+  messages: Message[];
+  nextBefore: number | null;
+  hasMore: boolean;
+}
+
 export interface GenieTraits {
   version: number;
   seed: number;
@@ -188,6 +194,25 @@ export interface DeletedMessage {
   visualKind?: MessageVisualKind | null;
   attachmentImages?: string[];
   deletedAt: number;
+}
+
+export interface RuntimeBackendCapability {
+  available: boolean;
+  detail: string;
+  path?: string | null;
+}
+
+export interface RuntimeAuthoringContext {
+  engineKind: EngineKind;
+  sourceLanguage: SourceLanguage;
+  geometryBackend: GeometryBackend;
+}
+
+export interface RuntimeCapabilities {
+  freecad: RuntimeBackendCapability;
+  build123d: RuntimeBackendCapability;
+  eckyRust: RuntimeBackendCapability;
+  recommendedAuthoringContext: RuntimeAuthoringContext;
 }
 
 export interface MicrowaveConfig {
@@ -350,6 +375,10 @@ function optionalNumber(value: number | null | undefined): number | undefined {
 
 function optionalString(value: string | null | undefined): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function isBuild123dCompat(value: unknown): boolean {
+  return value === 'build123d' || value === 'build123D';
 }
 
 function slugifyLithophaneId(value: string): string {
@@ -667,11 +696,19 @@ export function normalizeDesignOutput(
     sourceLanguage:
       (output?.sourceLanguage ??
         (legacy.source_language as SourceLanguage | undefined)) ??
-      ((output?.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyIrV0' : 'legacyPython'),
+      ((output?.engineKind ?? legacy.engine_kind) === 'eckyIrV0'
+        ? 'eckyIrV0'
+        : isBuild123dCompat(output?.engineKind ?? legacy.engine_kind)
+          ? 'build123d'
+          : 'legacyPython'),
     geometryBackend:
       (output?.geometryBackend ??
         (legacy.geometry_backend as GeometryBackend | undefined)) ??
-      ((output?.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyRust' : 'freecad'),
+      ((output?.engineKind ?? legacy.engine_kind) === 'eckyIrV0'
+        ? 'eckyRust'
+        : isBuild123dCompat(output?.engineKind ?? legacy.engine_kind)
+          ? 'build123d'
+          : 'freecad'),
     uiSpec: normalizeUiSpec(output?.uiSpec ?? legacy.ui_spec),
     initialParams: normalizeDesignParams(output?.initialParams ?? legacy.initial_params),
     postProcessing: normalizePostProcessing(
@@ -713,6 +750,62 @@ export function normalizeMessage(message: Contract.Message | Message): Message {
         ? [...(legacy.attachment_images as string[])]
         : [],
     timestamp: message.timestamp,
+  };
+}
+
+export function normalizeThreadMessagesPage(
+  page: Contract.ThreadMessagesPage | ThreadMessagesPage,
+): ThreadMessagesPage {
+  return {
+    messages: Array.isArray(page.messages) ? page.messages.map(normalizeMessage) : [],
+    nextBefore: page.nextBefore ?? null,
+    hasMore: Boolean(page.hasMore),
+  };
+}
+
+export function normalizeRuntimeCapabilities(
+  capabilities: Contract.RuntimeCapabilities | RuntimeCapabilities | unknown,
+): RuntimeCapabilities {
+  const raw = (capabilities ?? {}) as Partial<Contract.RuntimeCapabilities> &
+    Record<string, unknown>;
+  const rawBuild123d = (raw.build123d ??
+    (raw as { build123D?: unknown }).build123D) as
+    | Partial<Contract.RuntimeBackendCapability>
+    | undefined;
+  const normalizeCapability = (
+    capability: Partial<Contract.RuntimeBackendCapability> | undefined,
+    fallbackDetail: string,
+  ): RuntimeBackendCapability => ({
+    available: Boolean(capability?.available),
+    detail:
+      (typeof capability?.detail === 'string' && capability.detail.trim()) ||
+      fallbackDetail,
+    path:
+      typeof capability?.path === 'string'
+        ? capability.path
+        : capability?.path === null
+          ? null
+          : null,
+  });
+
+  const recommended = raw.recommendedAuthoringContext as
+    | Partial<Contract.RuntimeAuthoringContext>
+    | undefined;
+
+  return {
+    freecad: normalizeCapability(raw.freecad as Partial<Contract.RuntimeBackendCapability>, 'Unavailable'),
+    build123d: normalizeCapability(rawBuild123d, 'Unavailable'),
+    eckyRust: normalizeCapability(
+      raw.eckyRust as Partial<Contract.RuntimeBackendCapability>,
+      'bundled',
+    ),
+    recommendedAuthoringContext: {
+      engineKind: (recommended?.engineKind as EngineKind | undefined) ?? 'eckyIrV0',
+      sourceLanguage:
+        (recommended?.sourceLanguage as SourceLanguage | undefined) ?? 'eckyIrV0',
+      geometryBackend:
+        (recommended?.geometryBackend as GeometryBackend | undefined) ?? 'eckyRust',
+    },
   };
 }
 
@@ -768,10 +861,18 @@ export function normalizeThread(thread: Contract.Thread | Thread): Thread {
       thread.engineKind ?? (legacy.engine_kind as EngineKind | undefined) ?? 'freecad',
     sourceLanguage:
       (thread.sourceLanguage ?? (legacy.source_language as SourceLanguage | undefined)) ??
-      ((thread.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyIrV0' : 'legacyPython'),
+      ((thread.engineKind ?? legacy.engine_kind) === 'eckyIrV0'
+        ? 'eckyIrV0'
+        : isBuild123dCompat(thread.engineKind ?? legacy.engine_kind)
+          ? 'build123d'
+          : 'legacyPython'),
     geometryBackend:
       (thread.geometryBackend ?? (legacy.geometry_backend as GeometryBackend | undefined)) ??
-      ((thread.engineKind ?? legacy.engine_kind) === 'eckyIrV0' ? 'eckyRust' : 'freecad'),
+      ((thread.engineKind ?? legacy.engine_kind) === 'eckyIrV0'
+        ? 'eckyRust'
+        : isBuild123dCompat(thread.engineKind ?? legacy.engine_kind)
+          ? 'build123d'
+          : 'freecad'),
   };
 }
 
@@ -865,13 +966,17 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
         (legacy.default_source_language as SourceLanguage | undefined)) ??
       (((config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind) === 'eckyIrV0'
         ? 'eckyIrV0'
-        : 'legacyPython'),
+        : isBuild123dCompat((config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind)
+          ? 'build123d'
+          : 'legacyPython'),
     defaultGeometryBackend:
       ((config as AppConfig).defaultGeometryBackend ??
         (legacy.default_geometry_backend as GeometryBackend | undefined)) ??
       (((config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind) === 'eckyIrV0'
         ? 'eckyRust'
-        : 'freecad'),
+        : isBuild123dCompat((config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind)
+          ? 'build123d'
+          : 'freecad'),
     maxGenerationAttempts: Math.max(1, Number((config as AppConfig).maxGenerationAttempts ?? (legacy as any).max_generation_attempts ?? 3) || 3),
     maxVerifyAttempts: Math.max(0, Number((config as AppConfig).maxVerifyAttempts ?? (legacy as any).max_verify_attempts ?? 0) || 0),
   };

@@ -35,6 +35,18 @@ test.describe('ParamPanel Persistence', () => {
         console.log('[MOCK] invoke', cmd, args);
         if (cmd === 'get_config') return { engines: [], selectedEngineId: '', hasSeenOnboarding: true };
         if (cmd === 'save_config') return null;
+        if (cmd === 'get_runtime_capabilities') {
+          return {
+            freecad: { available: true, detail: 'Ready at /mock/freecadcmd', path: '/mock/freecadcmd' },
+            build123d: { available: true, detail: 'Ready at /mock/python3', path: '/mock/python3' },
+            eckyRust: { available: true, detail: 'bundled', path: null },
+            recommendedAuthoringContext: {
+              engineKind: 'freecad',
+              sourceLanguage: 'legacyPython',
+              geometryBackend: 'freecad',
+            },
+          };
+        }
         if (cmd === 'check_freecad') return true;
         if (cmd === 'get_history') return window.__MOCK_HISTORY__;
         if (cmd === 'get_last_design') return [window.__MOCK_HISTORY__[0].messages[0].output, 'thread-1'];

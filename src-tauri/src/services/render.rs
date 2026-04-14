@@ -197,11 +197,20 @@ pub async fn render_model(
     let resolved_backend = geometry_backend.unwrap_or_else(|| {
         if effective_dialect == MacroDialect::EckyIrV0 {
             GeometryBackend::EckyRust
+        } else if effective_dialect == MacroDialect::Build123d {
+            GeometryBackend::Build123d
         } else {
             GeometryBackend::Freecad
         }
     });
+    crate::runtime_capabilities::ensure_backend_available(
+        resolved_backend,
+        configured_freecad_cmd(state).as_deref(),
+        app,
+    )?;
     // For Build123d + IR, lower the IR to Python before dispatch.
+    // If it's already Python (Legacy dialect) but targeting Build123d backend,
+    // we use the code as-is.
     let lowered = if resolved_backend == GeometryBackend::Build123d
         && effective_dialect == MacroDialect::EckyIrV0
     {
@@ -213,7 +222,17 @@ pub async fn render_model(
     let mut result = match resolved_backend {
         GeometryBackend::EckyRust => crate::ecky_ir::render_model(macro_code, parameters, app),
         GeometryBackend::Build123d => {
-            crate::build123d::render_model(dispatch_source, parameters, app)
+            let source_language = if effective_dialect == MacroDialect::EckyIrV0 {
+                crate::models::SourceLanguage::EckyIrV0
+            } else {
+                crate::models::SourceLanguage::Build123d
+            };
+            crate::build123d::render_model_with_source_language(
+                dispatch_source,
+                parameters,
+                app,
+                source_language,
+            )
         }
         GeometryBackend::Freecad => freecad::render_model(
             macro_code,

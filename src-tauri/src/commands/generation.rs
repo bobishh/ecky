@@ -26,14 +26,39 @@ pub fn ecky_ir_v0_guide_text(backend: crate::models::GeometryBackend) -> String 
     }
 }
 
+pub fn build123d_guide_text() -> String {
+    concat!(
+        "Return canonical Python source using the `build123d` library.\n",
+        "Start with `from build123d import *`. Do not return Ecky IR.\n",
+        "Active geometry backend: BUILD123D (OCCT). Produces solid, manifold geometry.\n\n",
+        "Rules:\n",
+        "- Use `with BuildPart() as body:` or similar containers to define parts.\n",
+        "- To expose dynamic parameters, use the `params` dictionary which will be provided at runtime.\n",
+        "- Example: `radius = params.get('radius', 10.0)`\n",
+        "- Ensure the final shapes are added to the `_ecky_parts` list if you want them exported as separate objects.\n",
+        "- Example: `_ecky_parts = [('body', body.part)]` (list of tuples: label, shape)\n\n",
+        "Example:\n",
+        "from build123d import *\n",
+        "with BuildPart() as lamp:\n",
+        "    Cylinder(radius=params.get('radius', 20), height=params.get('height', 100))\n",
+        "_ecky_parts = [('lamp', lamp.part)]\n"
+    ).to_string()
+}
+
 fn ecky_ir_v0_guide_build123d() -> String {
     concat!(
-        "Return canonical Ecky IR v0 source as compact ASCII s-expressions in `macro_code`.\n",
+        "Return canonical Ecky source in `macro_code`.\n",
+        "Compatibility note: `sourceLanguage` / `macroDialect` may still say `eckyIrV0`, but authored source is current `.ecky` Scheme-style code compiled through Steel into internal Core IR.\n",
         "Start with `(model ...)`. Do not return Python.\n",
         "Active geometry backend: BUILD123D (OCCT). Produces solid, manifold geometry.\n\n",
-        "Supported v0 ops:\n",
-        "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded-rect`, `circle`, `polygon`.\n",
-        "  NOTE: `rounded-polygon` and `bspline` are NOT supported on this backend — use `polygon` with enough points or `profile` instead.\n",
+        "Authoring surface:\n",
+        "- Current source is pure, lispy `.ecky` code.\n",
+        "- Allowed language forms: `define`, `lambda`, `let`, `if`, quoted symbols/lists, recursion, and generic sequence helpers.\n",
+        "- Keep code immutable: no `set!`, assignment, rebinding, or hidden side effects.\n",
+        "- Prefer generic helpers from `ecky/core` (`range`, `map`, `filter`, `fold`, `reduce`, `zip`, `enumerate`, `linspace`, `flat-map`, `concat-map`) instead of hand-unrolling point samples.\n",
+        "- Keep helpers generic. Do not invent model-specific macros.\n\n",
+        "Supported CAD ops:\n",
+        "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded-rect`, `circle`, `polygon`, `rounded-polygon`, `bspline`.\n",
         "- Path nodes: `path` (raw 3D point list), `bezier-path` (cubic bezier chain from 3n+1 points).\n",
         "- Sketch nodes: `profile` with explicit `(:outer ...)` and `(:holes ...)` loops.\n",
         "- Sketch modifiers: `offset`, `offset-rounded`.\n",
@@ -54,7 +79,12 @@ fn ecky_ir_v0_guide_build123d() -> String {
         "- `(toggle key #t :label \"...\")` — boolean checkbox; use `#t`/`#f`.\n",
         "- `(image key \"\" :label \"...\")` — file picker; leave default empty.\n\n",
         "Rules & Syntax:\n",
+        "- Author in current `.ecky` surface. `define`, `lambda`, `let`, `if`, recursion, and generic list helpers are allowed. Keep code pure and immutable.\n",
+        "- Do not emit `set!`, assignment, rebinding, mutation helpers, or Python-style imperative control flow.\n",
         "- Use `(profile (:outer ((x y) ...)) (:holes (((x y) ...))))` for contour-aware sketches with holes.\n",
+        "- `profile` also accepts flat keyword style: `(profile :outer (...) :holes (...))`.\n",
+        "- Use `(rounded-polygon ((x y) ...) radius segments?)` for rounded closed profiles.\n",
+        "- Use `(bspline ((x y) ...) closed? :tangents ((x y) ...) :tangent-scalars ((a b) ...))` for smooth curves.\n",
         "- `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep` are all hole-aware and preserve internal cutouts.\n",
         "- `loft` requires compatible topology (same number of loops, same vertex count per mapped loop after resampling).\n",
         "- `revolve` and `sweep` produce solid OCCT geometry — reliable for curved shapes including domes.\n",
@@ -118,10 +148,17 @@ fn ecky_ir_v0_guide_build123d() -> String {
 
 fn ecky_ir_v0_guide_ecky_rust() -> String {
     concat!(
-        "Return canonical Ecky IR v0 source as compact ASCII s-expressions in `macro_code`.\n",
+        "Return canonical Ecky source in `macro_code`.\n",
+        "Compatibility note: `sourceLanguage` / `macroDialect` may still say `eckyIrV0`, but authored source is current `.ecky` Scheme-style code compiled through Steel into internal Core IR.\n",
         "Start with `(model ...)`. Do not return Python.\n",
         "Active geometry backend: ECKY RUST (CSG mesh). Experimental; good for organic shapes and wall patterns.\n\n",
-        "Supported v0 ops:\n",
+        "Authoring surface:\n",
+        "- Current source is pure, lispy `.ecky` code.\n",
+        "- Allowed language forms: `define`, `lambda`, `let`, `if`, quoted symbols/lists, recursion, and generic sequence helpers.\n",
+        "- Keep code immutable: no `set!`, assignment, rebinding, or hidden side effects.\n",
+        "- Prefer generic helpers from `ecky/core` (`range`, `map`, `filter`, `fold`, `reduce`, `zip`, `enumerate`, `linspace`, `flat-map`, `concat-map`) instead of hand-unrolling point samples.\n",
+        "- Keep helpers generic. Do not invent model-specific macros.\n\n",
+        "Supported CAD ops:\n",
         "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded-rect`, `circle`, `polygon`, `rounded-polygon`, `bspline`.\n",
         "- Path nodes: `path` (raw 3D point list), `bezier-path` (cubic bezier chain from 3n+1 points).\n",
         "- Sketch nodes: `profile` with explicit `(:outer ...)` and `(:holes ...)` loops.\n",
@@ -141,7 +178,10 @@ fn ecky_ir_v0_guide_ecky_rust() -> String {
         "- `(toggle key #t :label \"...\")` — boolean checkbox; use `#t`/`#f`.\n",
         "- `(image key \"\" :label \"...\")` — file picker; leave default empty.\n\n",
         "Rules & Syntax:\n",
+        "- Author in current `.ecky` surface. `define`, `lambda`, `let`, `if`, recursion, and generic list helpers are allowed. Keep code pure and immutable.\n",
+        "- Do not emit `set!`, assignment, rebinding, mutation helpers, or Python-style imperative control flow.\n",
         "- Use `(profile (:outer ((x y) ...)) (:holes (((x y) ...))))` for contour-aware sketches with holes.\n",
+        "- `profile` also accepts flat keyword style: `(profile :outer (...) :holes (...))`.\n",
         "- Use `(rounded-polygon ((x y) ...) radius segments?)` for rounded closed profiles.\n",
         "- Use `(bspline ((x y) ...) closed? samples?)` for smooth closed loops. Prefer closed `#t` loops for printable profiles.\n",
         "- `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep` are all hole-aware and preserve internal cutouts.\n",
@@ -245,20 +285,21 @@ fn default_geometry_backend(state: &State<'_, AppState>) -> crate::models::Geome
 
 async fn resolve_generation_engine_kind(
     state: &State<'_, AppState>,
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
     explicit: Option<crate::models::EngineKind>,
+    working_design: Option<&DesignOutput>,
+    last_output: Option<&DesignOutput>,
 ) -> AppResult<crate::models::EngineKind> {
     if let Some(engine_kind) = explicit {
         return Ok(engine_kind);
     }
 
-    if let Some(thread_id) = thread_id {
-        let db = state.db.lock().await;
-        if let Some(engine_kind) = db::get_thread_engine_kind(&db, thread_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-        {
-            return Ok(engine_kind);
-        }
+    if let Some(design) = working_design {
+        return Ok(design.engine_kind);
+    }
+
+    if let Some(design) = last_output {
+        return Ok(design.engine_kind);
     }
 
     Ok(default_engine_kind(state))
@@ -266,20 +307,21 @@ async fn resolve_generation_engine_kind(
 
 async fn resolve_generation_source_language(
     state: &State<'_, AppState>,
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
     explicit: Option<crate::models::SourceLanguage>,
+    working_design: Option<&DesignOutput>,
+    last_output: Option<&DesignOutput>,
 ) -> AppResult<crate::models::SourceLanguage> {
     if let Some(source_language) = explicit {
         return Ok(source_language);
     }
 
-    if let Some(thread_id) = thread_id {
-        let db = state.db.lock().await;
-        if let Some(source_language) = db::get_thread_source_language(&db, thread_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-        {
-            return Ok(source_language);
-        }
+    if let Some(design) = working_design {
+        return Ok(design.source_language);
+    }
+
+    if let Some(design) = last_output {
+        return Ok(design.source_language);
     }
 
     Ok(default_source_language(state))
@@ -287,20 +329,21 @@ async fn resolve_generation_source_language(
 
 async fn resolve_generation_geometry_backend(
     state: &State<'_, AppState>,
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
     explicit: Option<crate::models::GeometryBackend>,
+    working_design: Option<&DesignOutput>,
+    last_output: Option<&DesignOutput>,
 ) -> AppResult<crate::models::GeometryBackend> {
     if let Some(geometry_backend) = explicit {
         return Ok(geometry_backend);
     }
 
-    if let Some(thread_id) = thread_id {
-        let db = state.db.lock().await;
-        if let Some(geometry_backend) = db::get_thread_geometry_backend(&db, thread_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-        {
-            return Ok(geometry_backend);
-        }
+    if let Some(design) = working_design {
+        return Ok(design.geometry_backend);
+    }
+
+    if let Some(design) = last_output {
+        return Ok(design.geometry_backend);
     }
 
     Ok(default_geometry_backend(state))
@@ -498,20 +541,41 @@ pub async fn generate_design(
     }
     let engine = selected_engine(&state)?;
     let options = options.unwrap_or_default();
-    let engine_kind =
-        resolve_generation_engine_kind(&state, thread_id.as_deref(), options.engine_kind).await?;
-    let source_language =
-        resolve_generation_source_language(&state, thread_id.as_deref(), options.source_language)
-            .await?;
-    let geometry_backend =
-        resolve_generation_geometry_backend(&state, thread_id.as_deref(), options.geometry_backend)
-            .await?;
-    let question_mode = options.question_mode.unwrap_or(false);
-    let follow_up_question = options.follow_up_question;
     let mut ctx = {
         let db = state.db.lock().await;
-        crate::context::assemble_context(&db, thread_id, working_design, parent_macro_code)
+        crate::context::assemble_context(
+            &db,
+            thread_id.clone(),
+            working_design.clone(),
+            parent_macro_code.clone(),
+        )
     };
+    let engine_kind = resolve_generation_engine_kind(
+        &state,
+        thread_id.as_deref(),
+        options.engine_kind,
+        working_design.as_ref(),
+        ctx.last_output.as_ref(),
+    )
+    .await?;
+    let source_language = resolve_generation_source_language(
+        &state,
+        thread_id.as_deref(),
+        options.source_language,
+        working_design.as_ref(),
+        ctx.last_output.as_ref(),
+    )
+    .await?;
+    let geometry_backend = resolve_generation_geometry_backend(
+        &state,
+        thread_id.as_deref(),
+        options.geometry_backend,
+        working_design.as_ref(),
+        ctx.last_output.as_ref(),
+    )
+    .await?;
+    let question_mode = options.question_mode.unwrap_or(false);
+    let follow_up_question = options.follow_up_question;
     ctx.available_assets = build_available_assets_block(&state, &app);
     let intent_mode = if question_mode {
         "QUESTION_ONLY"
@@ -537,6 +601,12 @@ pub async fn generate_design(
                 "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
                 contextual_prompt,
                 ecky_ir_v0_guide_text(geometry_backend)
+            )
+        } else if source_language == crate::models::SourceLanguage::Build123d && !question_mode {
+            format!(
+                "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
+                contextual_prompt,
+                build123d_guide_text()
             )
         } else {
             contextual_prompt
@@ -580,6 +650,8 @@ pub async fn generate_design(
             output.data.macro_dialect =
                 if source_language == crate::models::SourceLanguage::EckyIrV0 {
                     MacroDialect::EckyIrV0
+                } else if source_language == crate::models::SourceLanguage::Build123d {
+                    MacroDialect::Build123d
                 } else {
                     MacroDialect::Legacy
                 };

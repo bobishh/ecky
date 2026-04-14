@@ -1,7 +1,9 @@
 <script lang="ts">
   import { get } from 'svelte/store';
+  import { tick } from 'svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import Dropdown from './Dropdown.svelte';
+  import { uiHighlightStore } from './stores/uiHighlightStore';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
@@ -25,7 +27,7 @@
     MaterializedSemanticView,
   } from './modelRuntime/semanticControls';
   import { persistLastSessionSnapshot } from './modelRuntime/sessionSnapshot';
-  import { activeThreadId, history } from './stores/domainState';
+  import { activeThreadIdStore as activeThreadId, historyStore as history } from './stores/domainState';
   import { refreshHistory } from './stores/history';
   import { liveApply } from './stores/paramPanelState';
   import { session } from './stores/sessionStore';
@@ -164,6 +166,29 @@
   let localSelectedPartId = $state<string | null>(null);
   let proposalMutationId = $state<string | null>(null);
   let activeTab = $state<'views' | 'raw' | 'litho'>('views');
+  let highlightedParamKey = $state<string | null>(null);
+  let highlightTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    const highlight = $uiHighlightStore;
+    if (highlight?.action === 'highlightParam') {
+      highlightedParamKey = highlight.target;
+      
+      // Scroll into view
+      void tick().then(() => {
+        const el = document.querySelector(`[data-param-key="${highlight?.target}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      });
+
+      if (highlightTimeoutId) clearTimeout(highlightTimeoutId);
+      highlightTimeoutId = setTimeout(() => {
+        highlightedParamKey = null;
+        highlightTimeoutId = null;
+      }, 2000);
+    }
+  });
   let sectionOverrides = $state<Record<string, boolean>>({});
   let hadSemanticViews = $state(false);
   let composerOpen = $state(false);
@@ -3152,6 +3177,8 @@
                     role="group"
                     class:field-select={field.type === 'select'}
                     class:field-checkbox={field.type === 'checkbox'}
+                    class:highlight-pulse={highlightedParamKey === field.key}
+                    data-param-key={field.key}
                     onmouseenter={() => setFocusedControl(control.primitiveId, field.key)}
                     onmouseleave={clearFocusedControl}
                     onfocusin={() => setFocusedControl(control.primitiveId, field.key)}
@@ -3279,6 +3306,8 @@
                 class:param-freezed={field.frozen}
                 class:field-select={field.type === 'select'}
                 class:field-checkbox={field.type === 'checkbox'}
+                class:highlight-pulse={highlightedParamKey === field.key}
+                data-param-key={field.key}
                 onmouseenter={() => setFocusedControl(null, field.key)}
                 onmouseleave={clearFocusedControl}
                 onfocusin={() => setFocusedControl(null, field.key)}
@@ -3389,6 +3418,8 @@
             class:param-freezed={field.frozen}
             class:field-select={field.type === 'select'}
             class:field-checkbox={field.type === 'checkbox'}
+            class:highlight-pulse={highlightedParamKey === field.key}
+            data-param-key={field.key}
             onmouseenter={() => setFocusedControl(null, field.key)}
             onmouseleave={clearFocusedControl}
             onfocusin={() => setFocusedControl(null, field.key)}
@@ -4422,5 +4453,14 @@
   .btn-xs {
     padding: 2px 6px;
     font-size: 0.6rem;
+  }
+
+  @keyframes highlightPulse {
+    0% { background-color: transparent; }
+    50% { background-color: var(--primary); color: var(--bg-100); }
+    100% { background-color: transparent; }
+  }
+  .highlight-pulse {
+    animation: highlightPulse 2s ease-in-out;
   }
 </style>

@@ -7,7 +7,11 @@ export type TimelineVisual = {
 };
 
 export function isVersionTimelineMessage(message: Message): boolean {
-  return message.role === 'assistant' && Boolean(message.output || message.artifactBundle);
+  return message.role === 'assistant' && Boolean(message.artifactBundle);
+}
+
+export function isRenderableVersionTimelineMessage(message: Message): boolean {
+  return isVersionTimelineMessage(message) && message.status === 'success';
 }
 
 export function versionTimelineTitle(message: Message | null | undefined): string {
@@ -48,7 +52,7 @@ export function threadTimelineMessages(messages: Message[]): Message[] {
 
 export function versionTimelineMessages(messages: Message[]): Message[] {
   return threadTimelineMessages(messages).filter(
-    (message) => isVersionTimelineMessage(message) && message.status !== 'discarded',
+    (message) => isRenderableVersionTimelineMessage(message),
   );
 }
 

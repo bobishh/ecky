@@ -19,6 +19,7 @@
     versionTimelineTitle,
   } from './threadTimeline';
   import { isConceptPreviewMessage } from './viewportBlueprint';
+  import { modelEngineLabel } from './modelEngineLabel';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -43,9 +44,13 @@
   let {
     onGenerate,
     isGenerating = false,
-    freecadMissing = false,
+    generationUnavailableReason = null,
     dialogueState = { mode: 'generate' } as DialogueState,
     messages = [],
+    messagesLoading = false,
+    messagesHasMore = false,
+    messagesPageLoading = false,
+    onLoadOlderMessages,
     onShowCode,
     onOpenConceptPreview,
     onPinConceptPreview,
@@ -61,9 +66,13 @@
   }: {
     onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
     isGenerating?: boolean;
-    freecadMissing?: boolean;
+    generationUnavailableReason?: string | null;
     dialogueState?: DialogueState;
     messages?: Message[];
+    messagesLoading?: boolean;
+    messagesHasMore?: boolean;
+    messagesPageLoading?: boolean;
+    onLoadOlderMessages?: () => Promise<void> | void;
     onShowCode: (message: CodeVersionMessage) => void;
     onOpenConceptPreview?: (message: Message) => void;
     onPinConceptPreview?: (message: Message) => void;
@@ -520,15 +529,6 @@
     }
   }
 
-  function engineLabel(message: VersionMessage | null | undefined) {
-    const source = message?.output?.sourceLanguage;
-
-    if (source === 'legacyPython') return 'FREECAD';
-    if (source === 'eckyIrV0') return 'ECKY IR';
-
-    return message?.output?.engineKind === 'eckyIrV0' ? 'ECKY IR' : 'FREECAD';
-  }
-
 </script>
 
 <div 
@@ -596,16 +596,11 @@
           <div class="version-subtitle">{activeVersion.output.versionName}</div>
         {/if}
         {#if activeVersion}
-          <div class="version-engine">{engineLabel(activeVersion)}</div>
+          <div class="version-engine">{modelEngineLabel(activeVersion)}</div>
         {/if}
       </div>
       {#if activeVersion}
         <div class="version-nav__actions">
-          {#if activeVersion.output}
-            <button class="trail-copy-btn" type="button" onclick={() => showCode(activeVersion)}>
-              CODE
-            </button>
-          {/if}
           <button class="trail-copy-btn delete-btn" type="button" title="Remove from carousel" onclick={() => (versionToDelete = activeVersion)}>
             🗑️
           </button>
@@ -615,6 +610,22 @@
   {/if}
 
   <div class="trail-list" bind:this={trailListEl}>
+    {#if messagesHasMore}
+      <button
+        class="load-older-btn"
+        type="button"
+        disabled={messagesPageLoading}
+        onclick={() => onLoadOlderMessages?.()}
+      >
+        {messagesPageLoading ? 'LOADING OLDER...' : 'LOAD OLDER'}
+      </button>
+    {/if}
+    {#if messagesLoading}
+      <div class="thread-loading">
+        <div class="thread-loading-bar"></div>
+        <span>LOADING THREAD MESSAGES...</span>
+      </div>
+    {/if}
     {#each timelineMessages as msg (msg.id)}
       {@const visuals = timelineVisuals(msg, toAssetUrl)}
       {@const isVersion = isVersionMessage(msg)}
@@ -635,9 +646,6 @@
             {/if}
             {#if isVersion && msg.output?.versionName}
               <span class="version-name">{msg.output.versionName}</span>
-            {/if}
-            {#if isVersion}
-              <span class="version-engine-badge">{engineLabel(msg)}</span>
             {/if}
             {#if statusLabel}
               <span class="trail-status trail-status--{msg.status}">{statusLabel}</span>
@@ -780,9 +788,9 @@
         </button>
         <button
           class="btn btn-primary"
-          disabled={isGenerating || isSubmitting || (dialogueState.mode === 'generate' && freecadMissing) || (!prompt.trim() && attachments.length === 0)}
+          disabled={isGenerating || isSubmitting || (dialogueState.mode === 'generate' && Boolean(generationUnavailableReason)) || (!prompt.trim() && attachments.length === 0)}
           onclick={submit}
-          title={dialogueState.mode === 'generate' && freecadMissing ? 'FreeCAD not found — configure in Settings' : undefined}
+          title={dialogueState.mode === 'generate' ? (generationUnavailableReason ?? undefined) : undefined}
         >
           {#if isSubmitting}
             SENDING...
@@ -1145,6 +1153,48 @@
     overflow-y: auto;
     overflow-x: hidden;
     padding: 8px 12px;
+  }
+
+  .thread-loading,
+  .load-older-btn {
+    align-self: stretch;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-100);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 7px 10px;
+    overflow: hidden;
+  }
+
+  .thread-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .thread-loading-bar {
+    width: 28px;
+    height: 2px;
+    background: var(--primary);
+    animation: thread-loading-pulse 1s infinite ease-in-out;
+  }
+
+  .load-older-btn {
+    cursor: pointer;
+    color: var(--secondary);
+  }
+
+  .load-older-btn:disabled {
+    cursor: default;
+    opacity: 0.65;
+  }
+
+  @keyframes thread-loading-pulse {
+    0%, 100% { opacity: 0.35; transform: scaleX(0.45); }
+    50% { opacity: 1; transform: scaleX(1); }
   }
 
   .trail-item {

@@ -7,7 +7,7 @@
   } from './tauri/client';
   import { buildImportedSyntheticDesign } from './modelRuntime/importedRuntime';
   import { persistLastSessionSnapshot } from './modelRuntime/sessionSnapshot';
-  import { activeThreadId, history } from './stores/domainState';
+  import { activeThreadIdStore as activeThreadId, historyStore as history } from './stores/domainState';
   import { refreshHistory } from './stores/history';
   import { session } from './stores/sessionStore';
   import type {

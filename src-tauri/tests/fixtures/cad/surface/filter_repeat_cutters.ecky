@@ -1,0 +1,33 @@
+(define (repeat-values start step count)
+  (if (<= count 0)
+    '()
+    (cons start (repeat-values (+ start step) step (- count 1)))))
+
+(define (filter-list pred xs)
+  (if (null? xs)
+    '()
+    (if (pred (car xs))
+      (cons (car xs) (filter-list pred (cdr xs)))
+      (filter-list pred (cdr xs)))))
+
+(define (difference-all base cutters)
+  (if (null? cutters)
+    base
+    (difference-all (difference base (car cutters)) (cdr cutters))))
+
+(define kept-centers
+  (filter-list
+    (lambda (x)
+      (or (< x 0) (> x 12)))
+    (repeat-values -24 12 5)))
+
+(define cutters
+  (map
+    (lambda (x)
+      (translate x 0 0
+        (cylinder 4 12)))
+    kept-centers))
+
+(model
+  (part body
+    (difference-all (box 72 28 12) cutters)))

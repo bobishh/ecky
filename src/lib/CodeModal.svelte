@@ -1,7 +1,7 @@
 <script lang="ts">
   import Window from './Window.svelte';
   import CodePanel from './CodePanel.svelte';
-  import { fromMirrorIr, isEckyIrSource, toMirrorIr } from './eckyIrMirror';
+
   let {
     code = $bindable(''),
     title,
@@ -24,12 +24,6 @@
   let copyState = $state<'idle' | 'copied'>('idle');
   let commitState = $state<'idle' | 'committing' | 'forking'>('idle');
   let commitError = $state('');
-  let editorViewMode = $state<'canon' | 'mirror'>('canon');
-
-  const isEckyIr = $derived(isEckyIrSource(code));
-  const displayCode = $derived(
-    isEckyIr ? (editorViewMode === 'mirror' ? toMirrorIr(code) : code) : code,
-  );
 
   function formatCommitError(error: unknown): string {
     if (error instanceof Error) return error.message;
@@ -43,7 +37,7 @@
 
   async function copyCode() {
     try {
-      await navigator.clipboard.writeText(displayCode);
+      await navigator.clipboard.writeText(code);
       copyState = 'copied';
       setTimeout(() => copyState = 'idle', 2000);
     } catch (e: unknown) {
@@ -80,7 +74,7 @@
   }
 
   function handleCodeChange(nextCode: string) {
-    code = isEckyIr && editorViewMode === 'mirror' ? fromMirrorIr(nextCode) : nextCode;
+    code = nextCode;
   }
 </script>
 
@@ -93,29 +87,8 @@
   bind:height
 >
   <div class="code-modal-content">
-    {#if isEckyIr}
-      <div class="code-mode-tabs">
-        <button
-          class="code-mode-tab {editorViewMode === 'canon' ? 'active' : ''}"
-          type="button"
-          onclick={() => (editorViewMode = 'canon')}
-        >
-          CANON
-        </button>
-        <button
-          class="code-mode-tab {editorViewMode === 'mirror' ? 'active' : ''}"
-          type="button"
-          onclick={() => (editorViewMode = 'mirror')}
-        >
-          MIRROR
-        </button>
-        <div class="code-mode-help">
-          MIRROR is an alias view over canonical Ecky IR v0. Saves still commit canonical source.
-        </div>
-      </div>
-    {/if}
     <div class="code-editor-area">
-      <CodePanel code={displayCode} onchange={handleCodeChange} />
+      <CodePanel code={code} onchange={handleCodeChange} />
     </div>
     <div class="code-modal-footer">
       <div class="footer-left">
@@ -170,38 +143,6 @@
     min-height: 0;
   }
 
-  .code-mode-tabs {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 12px 0 12px;
-    background: var(--bg);
-    flex-shrink: 0;
-  }
-
-  .code-mode-tab {
-    background: var(--bg-200);
-    border: 1px solid var(--bg-300);
-    color: var(--text-dim);
-    padding: 4px 10px;
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    cursor: pointer;
-  }
-
-  .code-mode-tab.active {
-    border-color: var(--primary);
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
-  }
-
-  .code-mode-help {
-    min-width: 0;
-    color: var(--text-dim);
-    font-size: 0.66rem;
-    font-family: var(--font-mono);
-  }
-
   .code-modal-footer {
     padding: 12px;
     background: var(--bg-100);
@@ -239,3 +180,4 @@
     justify-content: flex-end;
   }
 </style>
+

@@ -4,26 +4,29 @@ import { workingCopy } from '../stores/workingCopy';
 import { paramPanelState } from '../stores/paramPanelState';
 import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
 import {
-  history,
-  activeThreadId,
+  historyStore as history,
+  activeThreadIdStore as activeThreadId,
   activeVersionId,
   config,
   availableModels,
   isLoadingModels,
-  freecadAvailable,
+  runtimeCapabilities,
 } from '../stores/domainState';
+import { repairDefaultAuthoringContext } from '../runtimeCapabilities';
 import {
-  checkFreecad,
   formatBackendError,
   getConfig,
   getDefaultMacro,
   getHistory,
   getLastDesign,
+  getRuntimeCapabilities,
   getThread,
   listModels,
   saveConfig as persistConfig,
 } from '../tauri/client';
 import { loadVersion } from '../stores/history';
+import { isRenderableVersionTimelineMessage } from '../threadTimeline';
+import type { Thread } from '../types/domain';
 
 type TauriBridgeWindow = Window & typeof globalThis & {
   __TAURI_INTERNALS__?: {
@@ -64,10 +67,17 @@ export async function boot() {
   
   try {
     // 1. Load Config (Idempotent)
-    await loadConfig();
+    const loadedConfig = await loadConfig();
 
-    // 2. Check FreeCAD availability (non-blocking, best-effort)
-    checkFreecad().then(available => freecadAvailable.set(available)).catch(() => freecadAvailable.set(false));
+    // 2. Probe runtime capabilities and repair invalid defaults if needed.
+    const capabilities = await getRuntimeCapabilities();
+    runtimeCapabilities.set(capabilities);
+
+    const repaired = repairDefaultAuthoringContext(loadedConfig, capabilities);
+    if (repaired.repaired) {
+      config.set(repaired.config);
+      await persistConfig(repaired.config);
+    }
 
     // 3. Load History
     await loadHistory();
@@ -116,6 +126,16 @@ async function loadConfig() {
 
   if (!loadedConfig.defaultEngineKind) {
     loadedConfig.defaultEngineKind = 'freecad';
+    needsSave = true;
+  }
+
+  if (!loadedConfig.defaultSourceLanguage) {
+    loadedConfig.defaultSourceLanguage = 'legacyPython';
+    needsSave = true;
+  }
+
+  if (!loadedConfig.defaultGeometryBackend) {
+    loadedConfig.defaultGeometryBackend = 'freecad';
     needsSave = true;
   }
 
@@ -172,12 +192,19 @@ async function loadConfig() {
   if (needsSave) {
     await persistConfig(loadedConfig);
   }
+
+  return loadedConfig;
 }
 
 export async function saveConfig() {
   const currentConfig = get(config);
   try {
     await persistConfig(currentConfig);
+    try {
+      runtimeCapabilities.set(await getRuntimeCapabilities());
+    } catch (refreshError) {
+      console.warn('[Config] Failed to refresh runtime capabilities:', refreshError);
+    }
     session.setStatus('Configuration saved.');
   } catch (e) {
     session.setError(`Config Save Error: ${formatBackendError(e)}`);
@@ -236,25 +263,13 @@ async function restoreLastDesign() {
       return;
     }
 
-    const historyThread = get(history).find((thread) => thread.id === last.threadId);
-    if (!historyThread) {
-      await resetToBlankSession(true);
-      await fetchDefaultMacro();
-      return;
-    }
-
     const freshThread = await getThread(last.threadId);
-    history.update((items) =>
-      items.map((thread) =>
-        thread.id === freshThread.id ? { ...thread, messages: freshThread.messages } : thread,
-      ),
-    );
+    upsertRestoredThread(freshThread);
 
     const targetMessage = freshThread.messages.find(
       (message) =>
         message.id === last.messageId &&
-        message.role === 'assistant' &&
-        (message.output || message.artifactBundle),
+        isRenderableVersionTimelineMessage(message),
     );
 
     if (!targetMessage) {
@@ -275,6 +290,14 @@ async function restoreLastDesign() {
     await resetToBlankSession(true);
     await fetchDefaultMacro();
   }
+}
+
+function upsertRestoredThread(thread: Thread) {
+  history.update((items) =>
+    items.some((item) => item.id === thread.id)
+      ? items.map((item) => (item.id === thread.id ? { ...thread, messages: thread.messages } : item))
+      : [{ ...thread, messages: thread.messages }, ...items],
+  );
 }
 
 async function fetchDefaultMacro() {

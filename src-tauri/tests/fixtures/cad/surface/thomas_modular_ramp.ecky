@@ -1,0 +1,266 @@
+(model
+  (params
+    (number gauge 26 :label "gauge")
+    (number width 40 :label "width")
+    (number height 12 :label "height")
+    (number groove_width 6 :label "groove width")
+    (number groove_depth 3 :label "groove depth")
+    (number duplo_height_blocks 5 :label "duplo height blocks")
+    (number flat_start 48 :label "flat start")
+    (number ramp_length 192 :label "ramp length")
+    (number flat_end 48 :label "flat end")
+    (toggle has_teeth #t :label "has teeth")
+    (number teeth_size 5 :label "teeth size")
+    (number num_segments 3 :label "num segments")
+    (number print_segment 0 :label "print segment"))
+  (part ramp
+    (build
+      (shape duplo_pitch 16)
+      (shape duplo_r 4.8)
+      (shape duplo_depth 5)
+      (shape neck_length_cutout 8.5)
+      (shape neck_width_cutout 7)
+      (shape cutout_radius 6)
+      (shape neck_length_peg 8)
+      (shape neck_width_peg 6)
+      (shape peg_radius 5.5)
+      (shape dz (* duplo_height_blocks 19.2))
+      (shape L (+ flat_start ramp_length flat_end))
+      (shape ramp_end (+ flat_start ramp_length))
+      (shape tooth_phase_shift 0.0)
+      (shape tooth_row_inset -2.0)
+      (shape tooth_z_lift 2.0)
+      (shape body2d
+        (polygon
+          (append
+            (list
+              (list 0 height)
+              (list flat_start height))
+            (map
+              (lambda (i)
+                (list
+                  (+ flat_start (* ramp_length (/ i 100.0)))
+                  (+ height
+                     (* dz
+                        (- 0.5
+                           (* 0.5
+                              (cos (* 3.14159265359 (/ i 100.0)))))))))
+              (range 1 100))
+            (list
+              (list ramp_end (+ height dz))
+              (list L (+ height dz))
+              (list L dz)
+              (list ramp_end dz))
+            (reverse
+              (map
+                (lambda (i)
+                  (list
+                    (+ flat_start (* ramp_length (/ i 100.0)))
+                    (* dz
+                       (- 0.5
+                          (* 0.5
+                             (cos (* 3.14159265359 (/ i 100.0))))))))
+                (range 1 100)))
+            (list
+              (list flat_start 0)
+              (list 0 0)))))
+      (shape body
+        (translate (/ L 2) (- (/ width 2)) (/ (+ height dz) 2)
+          (rotate 90 0 0
+            (extrude body2d width))))
+      (shape groove2d
+        (polygon
+          (append
+            (list
+              (list 0 (+ height 5))
+              (list flat_start (+ height 5)))
+            (map
+              (lambda (i)
+                (list
+                  (+ flat_start (* ramp_length (/ i 100.0)))
+                  (+ height
+                     5
+                     (* dz
+                        (- 0.5
+                           (* 0.5
+                              (cos (* 3.14159265359 (/ i 100.0)))))))))
+              (range 1 100))
+            (list
+              (list ramp_end (+ height dz 5))
+              (list L (+ height dz 5))
+              (list L (+ height dz (- groove_depth)))
+              (list ramp_end (+ height dz (- groove_depth))))
+            (reverse
+              (map
+                (lambda (i)
+                  (list
+                    (+ flat_start (* ramp_length (/ i 100.0)))
+                    (+ height
+                       (- groove_depth)
+                       (* dz
+                          (- 0.5
+                             (* 0.5
+                                (cos (* 3.14159265359 (/ i 100.0)))))))))
+                (range 1 100)))
+            (list
+              (list flat_start (+ height (- groove_depth)))
+              (list 0 (+ height (- groove_depth)))))))
+      (shape groove_solid
+        (translate 0 (- (/ groove_width 2)) 0
+          (rotate 90 0 0
+            (extrude groove2d groove_width))))
+      (shape groove_left
+        (translate 0 (/ gauge 2) 0 groove_solid))
+      (shape groove_right
+        (translate 0 (- (/ gauge 2)) 0 groove_solid))
+      (shape track_grooved (cut body groove_left groove_right))
+      (shape cutout_cyl (translate neck_length_cutout 0 0 (cylinder cutout_radius height)))
+      (shape cutout_box
+        (translate (/ neck_length_cutout 2) 0 0
+          (box neck_length_cutout neck_width_cutout height)))
+      (shape start_cutout (fuse cutout_cyl cutout_box))
+      (shape peg_cyl (translate neck_length_peg 0 0 (cylinder peg_radius height)))
+      (shape peg_box
+        (translate (/ neck_length_peg 2) 0 0
+          (box neck_length_peg neck_width_peg height)))
+      (shape end_peg_local (fuse peg_cyl peg_box))
+      (shape end_peg (translate L 0 dz end_peg_local))
+      (shape start_hole_count (max 0 (floor (/ (- flat_start (/ duplo_pitch 2)) duplo_pitch))))
+      (shape end_hole_count (max 0 (floor (/ (- flat_end (/ duplo_pitch 2)) duplo_pitch))))
+      (shape start_hole_pos
+        (repeat-compound i start_hole_count
+          (translate (+ (/ duplo_pitch 2) (* (+ i 1) duplo_pitch)) (- (/ duplo_pitch 2)) 0
+            (cylinder duplo_r duplo_depth))))
+      (shape start_hole_neg
+        (repeat-compound i start_hole_count
+          (translate (+ (/ duplo_pitch 2) (* (+ i 1) duplo_pitch)) (/ duplo_pitch 2) 0
+            (cylinder duplo_r duplo_depth))))
+      (shape end_hole_pos
+        (repeat-compound i end_hole_count
+          (translate (+ (- L flat_end) (/ duplo_pitch 2) (* i duplo_pitch)) (- (/ duplo_pitch 2)) dz
+            (cylinder duplo_r duplo_depth))))
+      (shape end_hole_neg
+        (repeat-compound i end_hole_count
+          (translate (+ (- L flat_end) (/ duplo_pitch 2) (* i duplo_pitch)) (/ duplo_pitch 2) dz
+            (cylinder duplo_r duplo_depth))))
+      (shape all_holes (compound start_hole_pos start_hole_neg end_hole_pos end_hole_neg))
+      (shape tooth2d
+        (polygon
+          (((- (/ 3.5 2)) 10)
+           ((- (/ 3.5 2)) 0)
+           ((- (/ 1.5 2)) -2.5)
+           ((/ 1.5 2) -2.5)
+           ((/ 3.5 2) 0)
+           ((/ 3.5 2) 10))))
+      (shape tooth_local
+        (translate 0 (- (/ groove_width 2)) 0
+          (rotate 90 0 0
+            (extrude tooth2d groove_width))))
+      (shape num_teeth (max 0 (floor (/ L teeth_size))))
+      (shape valleys
+        (repeat-compound i num_teeth
+          (build
+            (shape x_pos (+ (* (+ i 0.5) teeth_size) tooth_phase_shift))
+            (shape z_pos
+              (+ height
+                 (- groove_depth)
+                 tooth_z_lift
+                 (if (<= x_pos flat_start)
+                   0
+                   (if (>= x_pos ramp_end)
+                     dz
+                     (* dz
+                        (- 0.5
+                           (* 0.5
+                              (cos (* 3.14159265359 (/ (- x_pos flat_start) ramp_length))))))))))
+            (shape slope
+              (if (<= x_pos flat_start)
+                0
+                (if (>= x_pos ramp_end)
+                  0
+                  (* (/ (* dz 0.5 3.14159265359) ramp_length)
+                     (sin (* 3.14159265359 (/ (- x_pos flat_start) ramp_length)))))))
+            (shape angle_deg (rad (atan slope)))
+            (result
+              (compound
+                (translate x_pos (- (/ gauge 2) tooth_row_inset) z_pos
+                  (rotate 0 (- angle_deg) 0 tooth_local))
+                (translate x_pos (+ (- (/ gauge 2)) tooth_row_inset) z_pos
+                  (rotate 0 (- angle_deg) 0 tooth_local)))))))
+      (shape track_after_teeth
+        (if has_teeth
+          (cut track_grooved valleys)
+          track_grooved))
+      (shape track_after_holes
+        (cut track_after_teeth all_holes))
+      (shape track_after_cutout
+        (cut track_after_holes start_cutout))
+      (shape track_original
+        (fuse track_after_cutout end_peg))
+      (shape puzzle_cyl
+        (translate 4.5 0 -50
+          (cylinder 4.5 (+ dz height 100))))
+      (shape puzzle_box
+        (translate (/ 4.5 2) 0 -50
+          (box 4.5 6 (+ dz height 100))))
+      (shape puzzle_tool_local (fuse puzzle_cyl puzzle_box))
+      (shape seg_len (/ L num_segments))
+      (shape placed_segments
+        (repeat-compound i num_segments
+          (build
+            (shape x0 (* i seg_len))
+            (shape x1 (* (+ i 1) seg_len))
+            (shape box_x0 (if (= i 0) (- x0 20) x0))
+            (shape box_x1 (if (= i (- num_segments 1)) (+ x1 20) x1))
+            (shape seg_base
+              (clip-box track_original
+                :x (box_x0 box_x1)
+                :y ((- (/ (+ width 50) 2)) (/ (+ width 50) 2))
+                :z (-20 (+ dz height 30))))
+            (shape seg_minus
+              (if (> i 0)
+                (cut seg_base (translate x0 0 0 puzzle_tool_local))
+                seg_base))
+            (shape seg_plus
+              (if (< i (- num_segments 1))
+                (fuse seg_minus
+                  (common track_original (translate x1 0 0 puzzle_tool_local)))
+                seg_minus))
+            (result
+              (translate 0 (* (- i (/ (- num_segments 1) 2)) 15) 0 seg_plus)))))
+      (shape print_seg_idx
+        (if (< print_segment 1)
+          0
+          (if (>= print_segment num_segments)
+            (- num_segments 1)
+            (- print_segment 1))))
+      (shape print_segment_model
+        (repeat-pick i num_segments (= i print_seg_idx)
+          (build
+            (shape x0 (* i seg_len))
+            (shape x1 (* (+ i 1) seg_len))
+            (shape box_x0 (if (= i 0) (- x0 20) x0))
+            (shape box_x1 (if (= i (- num_segments 1)) (+ x1 20) x1))
+            (shape seg_base
+              (clip-box track_original
+                :x (box_x0 box_x1)
+                :y ((- (/ (+ width 50) 2)) (/ (+ width 50) 2))
+                :z (-20 (+ dz height 30))))
+            (shape seg_minus
+              (if (> i 0)
+                (cut seg_base (translate x0 0 0 puzzle_tool_local))
+                seg_base))
+            (shape seg_plus
+              (if (< i (- num_segments 1))
+                (fuse seg_minus
+                  (common track_original (translate x1 0 0 puzzle_tool_local)))
+                seg_minus))
+            (shape laid_down
+              (translate 0 0 (/ width 2)
+                (rotate 90 0 0 seg_plus)))
+            (result
+              (translate (- (/ (+ x0 x1) 2)) 0 0 laid_down)))))
+      (result
+        (if (= print_segment 0)
+          placed_segments
+          print_segment_model)))))

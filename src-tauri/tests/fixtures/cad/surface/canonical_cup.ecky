@@ -1,0 +1,15 @@
+(model
+  (part cup
+    (fillet 1.47
+      (union
+        (shell 3
+          (revolve
+            (make-face
+              (union
+                (bspline ((30 10) (69 105)) #f
+                  :tangents ((1 0.5) (0.7 1))
+                  :tangent-scalars (1.75 1))
+                (path (30 10 0) (40 0 0) (0 0 0) (0 105 0) (69 105 0))))
+            360))
+        (translate 0 0 10
+          (cylinder 30 3))))))

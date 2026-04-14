@@ -1,0 +1,11 @@
+(model
+  (part body
+    (build
+      (shape left-base (translate -18 0 0 (box 18 18 12)))
+      (shape left-cut (translate -18 0 0 (cylinder 4 12)))
+      (shape left-result (difference left-base left-cut))
+      (shape right-base (translate 18 0 0 (box 18 18 12)))
+      (shape right-pin (translate 18 0 0 (cylinder 5 12)))
+      (shape right-cap (translate 18 0 6 (sphere 7)))
+      (shape right-result (intersection (union right-base right-pin) right-cap))
+      (result (compound left-result right-result)))))

@@ -1,7 +1,7 @@
 use crate::models::{
     normalize_design_output, upgraded_or_default_genie_traits, ArtifactBundle, DeletedMessage,
     DesignOutput, DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest,
-    TargetLeaseInfo, Thread, ThreadReference, UiSpec,
+    TargetLeaseInfo, Thread, ThreadMessagesPage, ThreadReference, UiSpec,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 
@@ -75,6 +75,15 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             summary TEXT NOT NULL DEFAULT '',
             pinned INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL,
+            FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_window_layouts (
+            thread_id TEXT PRIMARY KEY,
+            layout_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
             FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
         )",
         [],
@@ -255,7 +264,7 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             updated_at
         ) as last_used_at,
         genie_traits,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
@@ -319,7 +328,7 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
             updated_at
         ) as last_used_at,
         genie_traits,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
@@ -375,14 +384,16 @@ pub fn get_latest_successful_message_id_in_thread(
     thread_id: &str,
 ) -> SqlResult<Option<String>> {
     conn.query_row(
-        "SELECT id
-         FROM messages
-         WHERE thread_id = ?1
-           AND deleted_at IS NULL
-           AND role = 'assistant'
-           AND status = 'success'
-           AND (output IS NOT NULL OR artifact_bundle IS NOT NULL)
-         ORDER BY timestamp DESC, id DESC
+        "SELECT m.id
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.thread_id = ?1
+           AND t.deleted_at IS NULL
+           AND m.deleted_at IS NULL
+           AND m.role = 'assistant'
+           AND m.status = 'success'
+           AND m.artifact_bundle IS NOT NULL
+         ORDER BY m.timestamp DESC, m.id DESC
          LIMIT 1",
         [thread_id],
         |row| row.get(0),
@@ -416,7 +427,7 @@ pub fn get_latest_successful_target_in_most_recent_thread(
         WHERE m.deleted_at IS NULL
           AND m.role = 'assistant'
           AND m.status = 'success'
-          AND (m.output IS NOT NULL OR m.artifact_bundle IS NOT NULL)
+          AND m.artifact_bundle IS NOT NULL
         ORDER BY rt.last_used_at DESC, m.timestamp DESC, m.id DESC
         LIMIT 1
         ",
@@ -586,6 +597,15 @@ pub fn get_thread_title(conn: &Connection, thread_id: &str) -> SqlResult<Option<
     .optional()
 }
 
+pub fn get_visible_thread_title(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT title FROM threads WHERE id = ?1 AND deleted_at IS NULL",
+        [thread_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn get_thread_summary(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
     conn.query_row(
         "SELECT summary FROM threads WHERE id = ?1",
@@ -650,7 +670,7 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             updated_at
         ) as last_used_at,
         genie_traits,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
@@ -812,6 +832,136 @@ pub fn get_thread_messages_for_thread_view(
         .collect())
 }
 
+pub fn get_thread_latest_version(conn: &Connection, thread_id: &str) -> SqlResult<Option<Message>> {
+    let rows = load_thread_message_rows_with_clause(
+        conn,
+        "thread_id = ?1
+         AND deleted_at IS NULL
+         AND role = 'assistant'
+         AND status = 'success'
+         AND artifact_bundle IS NOT NULL",
+        &[&thread_id],
+        "timestamp DESC, rowid DESC",
+        Some(1),
+    )?;
+    Ok(rows.into_iter().next().map(|row| row.message))
+}
+
+pub fn get_thread_messages_page(
+    conn: &Connection,
+    thread_id: &str,
+    before: Option<u64>,
+    limit: usize,
+    include_visual_payloads: bool,
+) -> SqlResult<ThreadMessagesPage> {
+    let safe_limit = limit.clamp(1, 200);
+    let mut rows = if let Some(before_ts) = before {
+        load_thread_message_rows_with_clause(
+            conn,
+            "thread_id = ?1 AND status != 'discarded' AND timestamp < ?2",
+            &[&thread_id, &(before_ts as i64)],
+            "timestamp DESC, rowid DESC",
+            Some(safe_limit + 1),
+        )?
+    } else {
+        load_thread_message_rows_with_clause(
+            conn,
+            "thread_id = ?1 AND status != 'discarded'",
+            &[&thread_id],
+            "timestamp DESC, rowid DESC",
+            Some(safe_limit + 1),
+        )?
+    };
+
+    let has_more = rows.len() > safe_limit;
+    if has_more {
+        rows.truncate(safe_limit);
+    }
+
+    let mut messages: Vec<Message> = rows
+        .into_iter()
+        .filter_map(|mut row| {
+            if row.deleted_at.is_some() {
+                if is_version_message(&row.message) {
+                    row.message.status = MessageStatus::Discarded;
+                } else {
+                    return None;
+                }
+            } else if row.message.status == MessageStatus::Discarded
+                && !is_version_message(&row.message)
+            {
+                return None;
+            }
+
+            if !include_visual_payloads {
+                row.message.image_data = None;
+                row.message.attachment_images.clear();
+            }
+            Some(row.message)
+        })
+        .collect();
+
+    messages.reverse();
+    let next_before = messages.first().map(|message| message.timestamp);
+    Ok(ThreadMessagesPage {
+        messages,
+        next_before,
+        has_more,
+    })
+}
+
+pub fn get_thread_window_layout(
+    conn: &Connection,
+    thread_id: &str,
+) -> SqlResult<Option<crate::models::ThreadWindowLayout>> {
+    conn.query_row(
+        "SELECT layout_json FROM thread_window_layouts WHERE thread_id = ?1",
+        [thread_id],
+        |row| {
+            let raw: String = row.get(0)?;
+            serde_json::from_str(&raw).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn save_thread_window_layout(
+    conn: &Connection,
+    thread_id: &str,
+    layout: &crate::models::ThreadWindowLayout,
+    updated_at: i64,
+) -> SqlResult<bool> {
+    let thread_exists = conn
+        .query_row(
+            "SELECT 1 FROM threads WHERE id = ?1 AND deleted_at IS NULL",
+            [thread_id],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !thread_exists {
+        return Ok(false);
+    }
+
+    let layout_json = serde_json::to_string(layout)
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+    conn.execute(
+        "INSERT INTO thread_window_layouts (thread_id, layout_json, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(thread_id) DO UPDATE SET
+           layout_json = excluded.layout_json,
+           updated_at = excluded.updated_at",
+        params![thread_id, layout_json, updated_at],
+    )?;
+    Ok(true)
+}
+
 pub fn get_thread_messages_for_context(
     conn: &Connection,
     thread_id: &str,
@@ -830,7 +980,7 @@ pub fn get_thread_messages_for_context(
                 .map(|next| {
                     next.deleted_at.is_some()
                         && next.message.role == MessageRole::Assistant
-                        && (next.message.output.is_some() || next.message.artifact_bundle.is_some())
+                        && is_version_message(&next.message)
                         && next.message.status != MessageStatus::Discarded
                         && next.message.timestamp.saturating_sub(row.message.timestamp) <= 2
                 })
@@ -864,7 +1014,36 @@ fn load_thread_message_rows(
     };
 
     let mut stmt = conn.prepare(sql)?;
-    let msg_iter = stmt.query_map([thread_id], |row| {
+    load_thread_message_rows_from_stmt(&mut stmt, &[&thread_id])
+}
+
+fn load_thread_message_rows_with_clause(
+    conn: &Connection,
+    where_clause: &str,
+    params: &[&dyn rusqlite::ToSql],
+    order_by: &str,
+    limit: Option<usize>,
+) -> SqlResult<Vec<ThreadMessageRow>> {
+    let mut sql = format!(
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
+         FROM messages
+         WHERE {}
+         ORDER BY {}",
+        where_clause, order_by
+    );
+    if let Some(limit) = limit {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit.to_string());
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    load_thread_message_rows_from_stmt(&mut stmt, params)
+}
+
+fn load_thread_message_rows_from_stmt(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: &[&dyn rusqlite::ToSql],
+) -> SqlResult<Vec<ThreadMessageRow>> {
+    let msg_iter = stmt.query_map(params, |row| {
         let output_str: Option<String> = row.get(4)?;
         let output: Option<DesignOutput> =
             output_str.and_then(|s| serde_json::from_str(&s).ok().map(normalize_design_output));
@@ -910,8 +1089,7 @@ fn load_thread_message_rows(
 }
 
 fn is_version_message(message: &Message) -> bool {
-    message.role == MessageRole::Assistant
-        && (message.output.is_some() || message.artifact_bundle.is_some())
+    message.role == MessageRole::Assistant && message.artifact_bundle.is_some()
 }
 
 pub fn get_thread_references(
@@ -1170,7 +1348,7 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
         WHERE m.deleted_at IS NOT NULL
           AND m.trash_hidden_at IS NULL
           AND m.role = 'assistant'
-          AND (m.output IS NOT NULL OR m.artifact_bundle IS NOT NULL)
+          AND m.artifact_bundle IS NOT NULL
         ORDER BY m.deleted_at DESC
     ")?;
     let iter = stmt.query_map([], |row| {
@@ -1318,6 +1496,18 @@ pub fn update_message_artifact_bundle(
         params![serialized, message_id],
     )?;
     Ok(())
+}
+
+pub fn update_message_image_data(
+    conn: &Connection,
+    message_id: &str,
+    image_data: &str,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE messages SET image_data = ?1 WHERE id = ?2",
+        params![image_data, message_id],
+    )?;
+    Ok(changed > 0)
 }
 
 pub fn update_message_output(
@@ -1680,7 +1870,13 @@ pub fn get_message_output_and_thread(
 ) -> SqlResult<Option<(DesignOutput, String)>> {
     let row: Option<(Option<String>, String)> = conn
         .query_row(
-            "SELECT output, thread_id FROM messages WHERE id = ?1",
+            "SELECT m.output, m.thread_id
+             FROM messages m
+             JOIN threads t ON t.id = m.thread_id
+             WHERE m.id = ?1
+               AND m.deleted_at IS NULL
+               AND m.status != 'discarded'
+               AND t.deleted_at IS NULL",
             [message_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1711,6 +1907,24 @@ pub fn get_message_thread_id(conn: &Connection, message_id: &str) -> SqlResult<O
     .optional()
 }
 
+pub fn get_visible_message_thread_id(
+    conn: &Connection,
+    message_id: &str,
+) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT m.thread_id
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.id = ?1
+           AND m.deleted_at IS NULL
+           AND m.status != 'discarded'
+           AND t.deleted_at IS NULL",
+        [message_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub type MessageRuntimeAndThread = (Option<ArtifactBundle>, Option<ModelManifest>, String);
 
 pub fn get_message_runtime_and_thread(
@@ -1719,7 +1933,13 @@ pub fn get_message_runtime_and_thread(
 ) -> SqlResult<Option<MessageRuntimeAndThread>> {
     let row: Option<(Option<String>, Option<String>, String)> = conn
         .query_row(
-            "SELECT artifact_bundle, model_manifest, thread_id FROM messages WHERE id = ?1",
+            "SELECT m.artifact_bundle, m.model_manifest, m.thread_id
+             FROM messages m
+             JOIN threads t ON t.id = m.thread_id
+             WHERE m.id = ?1
+               AND m.deleted_at IS NULL
+               AND m.status != 'discarded'
+               AND t.deleted_at IS NULL",
             [message_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -1814,6 +2034,15 @@ mod tests {
             )",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS thread_window_layouts (
+                thread_id TEXT PRIMARY KEY,
+                layout_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
         // Migrations: keep in sync with init_db
         let _ = conn.execute(
             "ALTER TABLE threads ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
@@ -1850,6 +2079,28 @@ mod tests {
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: DesignParams::from([("x".to_string(), ParamValue::Number(10.0))]),
             post_processing: None,
+        }
+    }
+
+    fn sample_artifact_bundle(model_id: &str) -> ArtifactBundle {
+        ArtifactBundle {
+            schema_version: 1,
+            model_id: model_id.to_string(),
+            source_kind: crate::models::ModelSourceKind::Generated,
+            engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            content_hash: format!("hash-{model_id}"),
+            artifact_version: 1,
+            fcstd_path: format!("/tmp/{model_id}.FCStd"),
+            manifest_path: format!("/tmp/{model_id}.json"),
+            macro_path: None,
+            preview_stl_path: format!("/tmp/{model_id}.stl"),
+            viewer_assets: Vec::new(),
+            edge_targets: Vec::new(),
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
         }
     }
 
@@ -1944,7 +2195,7 @@ mod tests {
             status: MessageStatus::Success,
             output: Some(sample_output()),
             usage: None,
-            artifact_bundle: None,
+            artifact_bundle: Some(sample_artifact_bundle("assistant-1")),
             model_manifest: None,
             agent_origin: None,
             timestamp: 101,
@@ -2009,7 +2260,7 @@ mod tests {
             status: MessageStatus::Success,
             output: Some(sample_output()),
             usage: None,
-            artifact_bundle: None,
+            artifact_bundle: Some(sample_artifact_bundle("assistant-manual")),
             model_manifest: None,
             agent_origin: None,
             timestamp: 200,
@@ -2043,7 +2294,7 @@ mod tests {
             status: MessageStatus::Success,
             output: Some(sample_output()),
             usage: None,
-            artifact_bundle: None,
+            artifact_bundle: Some(sample_artifact_bundle("assistant-trash")),
             model_manifest: None,
             agent_origin: None,
             timestamp: 250,
@@ -2108,6 +2359,100 @@ mod tests {
                 "data:image/png;base64,ref-1".to_string(),
                 "data:image/png;base64,ref-2".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_update_message_image_data_updates_version_preview() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "thread-preview";
+        create_or_update_thread(&conn, thread_id, "Preview", 400, None, None, None, None).unwrap();
+
+        let msg = Message {
+            id: "assistant-preview".to_string(),
+            role: MessageRole::Assistant,
+            content: "Rendered".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: Some(sample_artifact_bundle("assistant-preview")),
+            model_manifest: None,
+            agent_origin: None,
+            timestamp: 400,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+
+        add_message(&conn, thread_id, &msg).unwrap();
+
+        let changed =
+            update_message_image_data(&conn, &msg.id, "data:image/jpeg;base64,render-preview")
+                .unwrap();
+        assert!(changed);
+
+        let latest = get_thread_latest_version(&conn, thread_id)
+            .unwrap()
+            .expect("latest version");
+        assert_eq!(
+            latest.image_data.as_deref(),
+            Some("data:image/jpeg;base64,render-preview")
+        );
+    }
+
+    #[test]
+    fn test_thread_version_count_ignores_output_only_success_messages() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "thread-renderable-count";
+        create_or_update_thread(&conn, thread_id, "Renderable", 500, None, None, None, None)
+            .unwrap();
+
+        let output_only = Message {
+            id: "assistant-output-only".to_string(),
+            role: MessageRole::Assistant,
+            content: "Draft only".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            agent_origin: None,
+            timestamp: 500,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        let rendered = Message {
+            id: "assistant-rendered".to_string(),
+            role: MessageRole::Assistant,
+            content: "Rendered".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: Some(sample_artifact_bundle("assistant-rendered")),
+            model_manifest: None,
+            agent_origin: None,
+            timestamp: 501,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+
+        add_message(&conn, thread_id, &output_only).unwrap();
+        add_message(&conn, thread_id, &rendered).unwrap();
+
+        let threads = get_all_threads(&conn).unwrap();
+        assert_eq!(threads[0].version_count, 1);
+        assert_eq!(
+            get_thread_latest_version(&conn, thread_id)
+                .unwrap()
+                .unwrap()
+                .id,
+            rendered.id
         );
     }
 
@@ -2504,5 +2849,122 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn thread_window_layout_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "thread-layout-1";
+        create_or_update_thread(
+            &conn,
+            thread_id,
+            "Layout Thread",
+            100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut windows = std::collections::HashMap::new();
+        windows.insert(
+            "projects".to_string(),
+            crate::models::ThreadWindowState {
+                visible: true,
+                minimized: false,
+                x: 50.0,
+                y: 60.0,
+                width: 400.0,
+                height: 300.0,
+                z: 1,
+            },
+        );
+        let layout = crate::models::ThreadWindowLayout {
+            schema_version: 1,
+            remember_layout: true,
+            windows,
+        };
+
+        let saved = save_thread_window_layout(&conn, thread_id, &layout, 200).unwrap();
+        assert!(saved);
+
+        let loaded = get_thread_window_layout(&conn, thread_id).unwrap();
+        assert_eq!(loaded, Some(layout));
+    }
+
+    #[test]
+    fn thread_window_layout_returns_none_when_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "thread-no-layout";
+        create_or_update_thread(&conn, thread_id, "No Layout", 100, None, None, None, None)
+            .unwrap();
+
+        let loaded = get_thread_window_layout(&conn, thread_id).unwrap();
+        assert_eq!(loaded, None);
+    }
+
+    #[test]
+    fn thread_window_layout_save_fails_for_missing_thread() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let layout = crate::models::ThreadWindowLayout {
+            schema_version: 1,
+            remember_layout: true,
+            windows: std::collections::HashMap::new(),
+        };
+
+        let saved = save_thread_window_layout(&conn, "nonexistent", &layout, 200).unwrap();
+        assert!(!saved);
+    }
+
+    #[test]
+    fn thread_window_layout_delete_thread_does_not_break_others() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let t1 = "thread-a";
+        let t2 = "thread-b";
+        create_or_update_thread(&conn, t1, "A", 100, None, None, None, None).unwrap();
+        create_or_update_thread(&conn, t2, "B", 100, None, None, None, None).unwrap();
+
+        let layout1 = crate::models::ThreadWindowLayout {
+            schema_version: 1,
+            remember_layout: true,
+            windows: std::collections::HashMap::new(),
+        };
+        let mut windows2 = std::collections::HashMap::new();
+        windows2.insert(
+            "params".to_string(),
+            crate::models::ThreadWindowState {
+                visible: false,
+                minimized: false,
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 200.0,
+                z: 0,
+            },
+        );
+        let layout2 = crate::models::ThreadWindowLayout {
+            schema_version: 1,
+            remember_layout: true,
+            windows: windows2,
+        };
+
+        save_thread_window_layout(&conn, t1, &layout1, 200).unwrap();
+        save_thread_window_layout(&conn, t2, &layout2, 200).unwrap();
+
+        // Soft-delete thread A
+        delete_thread(&conn, t1).unwrap();
+
+        // Thread B layout should still work
+        let loaded = get_thread_window_layout(&conn, t2).unwrap();
+        assert_eq!(loaded, Some(layout2));
     }
 }

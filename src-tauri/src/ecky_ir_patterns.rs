@@ -20,6 +20,7 @@ pub enum WallPatternMode {
     Spiral,
     Diamond,
     Hammered,
+    Fourier,
 }
 
 #[derive(Clone, Debug)]
@@ -492,6 +493,12 @@ fn pattern_amplitude(spec: &WallPatternSpec, u: f64, v: f64, spherical: bool) ->
             let freq_v = spec.v_freq.max(spec.u_freq).max(1.0);
             let noise = value_noise_2d(u * freq_u, v * freq_v, spec.seed);
             smoothstep(spec.bias.clamp(-0.95, 0.95) * 0.5 + 0.25, 1.0, noise)
+        }
+        WallPatternMode::Fourier => {
+            let u_wave = (u_field * spec.u_freq * 2.0 * std::f64::consts::PI).sin();
+            let v_wave = (v_field * spec.v_freq * 2.0 * std::f64::consts::PI).sin();
+            let combined = (u_wave + v_wave) * 0.5;
+            (combined * 0.5 + 0.5).clamp(0.0, 1.0)
         }
     };
 

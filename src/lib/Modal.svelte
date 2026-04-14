@@ -39,10 +39,7 @@
 <style>
   .modal-backdrop {
     position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
+    inset: 0;
     background: rgba(0, 0, 0, 0.7);
     display: flex;
     align-items: center;
@@ -56,9 +53,9 @@
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
     display: flex;
     flex-direction: column;
-    max-width: 90vw;
-    max-height: 90vh;
-    min-width: 400px;
+    max-width: 90%;
+    max-height: 90%;
+    min-width: min(400px, 90%);
   }
 
   .modal-header {

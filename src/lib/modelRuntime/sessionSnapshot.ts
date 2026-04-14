@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 
-import { activeThreadId, activeVersionId } from '../stores/domainState';
+import { activeThreadIdStore as activeThreadId, activeVersionId } from '../stores/domainState';
 import { paramPanelState } from '../stores/paramPanelState';
 import { session } from '../stores/sessionStore';
 import { workingCopy } from '../stores/workingCopy';

@@ -6,10 +6,10 @@ use std::process::Command;
 
 use crate::freecad::resolve_resource_path;
 use crate::models::{
-    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
-    EnrichmentStatus, GeometryBackend, ManifestBounds, ManifestEnrichmentState, ModelManifest,
-    ModelSourceKind, PartBinding, PathResolver, SelectionTarget, SelectionTargetKind,
-    SourceLanguage, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EnrichmentStatus,
+    GeometryBackend, ManifestBounds, ManifestEnrichmentState, ModelManifest, ModelSourceKind,
+    PartBinding, PathResolver, SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerAsset,
+    ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 const RUNNER_RESOURCE_PATH: &str = "server/build123d_runner.py";
@@ -21,6 +21,14 @@ const SOURCE_FILE_NAME: &str = "source.py";
 const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
 const PARTS_DIR_NAME: &str = "parts";
 const RUNNER_REPORT_FILE_NAME: &str = "runner-report.json";
+const BUNDLED_PYTHON_RESOURCE_CANDIDATES: &[&str] = &[
+    "runtime/build123d/bin/python3",
+    "runtime/build123d/bin/python",
+];
+const BUNDLED_PYTHON_FALLBACK_CANDIDATES: &[&str] = &[
+    ".dist/build123d-runtime/bin/python3",
+    ".dist/build123d-runtime/bin/python",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 struct RunnerReport {
@@ -76,6 +84,15 @@ pub fn render_model(
     parameters: &DesignParams,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
+    render_model_with_source_language(source, parameters, app, SourceLanguage::EckyIrV0)
+}
+
+pub fn render_model_with_source_language(
+    source: &str,
+    parameters: &DesignParams,
+    app: &dyn PathResolver,
+    source_language: SourceLanguage,
+) -> AppResult<ArtifactBundle> {
     let params_json =
         serde_json::to_string(parameters).map_err(|e| AppError::validation(e.to_string()))?;
     let mut hasher = Sha256::new();
@@ -111,7 +128,7 @@ pub fn render_model(
     )?;
 
     let report = read_runner_report(&runner_report_path)?;
-    let manifest = build_manifest(&model_id, &report);
+    let manifest = build_manifest(&model_id, &report, source_language);
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
     write_manifest(&manifest_path, &manifest)?;
 
@@ -120,8 +137,8 @@ pub fn render_model(
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind: ModelSourceKind::Generated,
-        engine_kind: EngineKind::EckyIrV0,
-        source_language: SourceLanguage::EckyIrV0,
+        engine_kind: source_language.to_engine_kind(),
+        source_language,
         geometry_backend: GeometryBackend::Build123d,
         content_hash,
         artifact_version: 1,
@@ -174,7 +191,7 @@ fn run_runner(
     report_path: &Path,
     params_json: &str,
 ) -> AppResult<()> {
-    let python_cmd = resolve_python_cmd()?;
+    let python_cmd = resolve_python_cmd_with_app(app)?;
     let runner_path = resolve_resource_path(
         app,
         RUNNER_RESOURCE_PATH,
@@ -208,14 +225,42 @@ fn run_runner(
 }
 
 pub fn resolve_python_cmd() -> AppResult<PathBuf> {
+    resolve_python_cmd_from_env_or_path()
+}
+
+pub fn resolve_python_cmd_with_app(app: &dyn PathResolver) -> AppResult<PathBuf> {
+    if let Some(path) = resolve_python_cmd_from_env() {
+        return Ok(path);
+    }
+
+    if let Some(path) = resolve_bundled_python_cmd(app) {
+        return Ok(path);
+    }
+
+    resolve_python_cmd_from_path()
+}
+
+fn resolve_python_cmd_from_env_or_path() -> AppResult<PathBuf> {
+    if let Some(path) = resolve_python_cmd_from_env() {
+        return Ok(path);
+    }
+
+    resolve_python_cmd_from_path()
+}
+
+fn resolve_python_cmd_from_env() -> Option<PathBuf> {
     for var in &["BUILD123D_PYTHON", "PYTHON_CMD"] {
         if let Ok(cmd) = std::env::var(var) {
             let cmd = cmd.trim().to_string();
             if !cmd.is_empty() {
-                return Ok(PathBuf::from(cmd));
+                return Some(PathBuf::from(cmd));
             }
         }
     }
+    None
+}
+
+fn resolve_python_cmd_from_path() -> AppResult<PathBuf> {
     for candidate in &["python3", "python"] {
         if which_on_path(candidate).is_some() {
             return Ok(PathBuf::from(candidate));
@@ -226,6 +271,25 @@ pub fn resolve_python_cmd() -> AppResult<PathBuf> {
          or set BUILD123D_PYTHON to a specific interpreter."
             .to_string(),
     ))
+}
+
+fn resolve_bundled_python_cmd(app: &dyn PathResolver) -> Option<PathBuf> {
+    for resource in BUNDLED_PYTHON_RESOURCE_CANDIDATES {
+        if let Some(path) = app.resource_path(resource) {
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    for fallback in BUNDLED_PYTHON_FALLBACK_CANDIDATES {
+        let path = PathBuf::from(fallback);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
 }
 
 fn which_on_path(name: &str) -> Option<PathBuf> {
@@ -257,7 +321,11 @@ fn read_runner_report(path: &Path) -> AppResult<RunnerReport> {
     Ok(report)
 }
 
-fn build_manifest(model_id: &str, report: &RunnerReport) -> ModelManifest {
+fn build_manifest(
+    model_id: &str,
+    report: &RunnerReport,
+    source_language: SourceLanguage,
+) -> ModelManifest {
     let mut parts = Vec::new();
     let mut selection_targets = Vec::new();
 
@@ -300,8 +368,8 @@ fn build_manifest(model_id: &str, report: &RunnerReport) -> ModelManifest {
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
-        engine_kind: EngineKind::EckyIrV0,
-        source_language: SourceLanguage::EckyIrV0,
+        engine_kind: source_language.to_engine_kind(),
+        source_language,
         geometry_backend: GeometryBackend::Build123d,
         document: DocumentMetadata {
             document_name: if report.document_name.trim().is_empty() {
@@ -404,6 +472,7 @@ fn path_to_string(path: &Path) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::EngineKind;
     use std::collections::BTreeMap;
 
     struct TestResolver {
@@ -453,5 +522,51 @@ mod tests {
         assert_eq!(stable_part_id("body"), "body");
         assert_eq!(stable_part_id(""), "part");
         assert_eq!(stable_part_id("---"), "part");
+    }
+
+    #[test]
+    fn build_manifest_preserves_raw_build123d_source_identity() {
+        let report = RunnerReport {
+            document_name: "Doc".to_string(),
+            document_label: "Doc".to_string(),
+            warnings: Vec::new(),
+            objects: vec![RunnerObject {
+                object_name: "body".to_string(),
+                label: "body".to_string(),
+                export_path: "/tmp/body.stl".to_string(),
+                bounds: None,
+                volume: None,
+                area: None,
+            }],
+        };
+
+        let manifest = build_manifest("model", &report, SourceLanguage::Build123d);
+
+        assert_eq!(manifest.engine_kind, EngineKind::Build123d);
+        assert_eq!(manifest.source_language, SourceLanguage::Build123d);
+        assert_eq!(manifest.geometry_backend, GeometryBackend::Build123d);
+    }
+
+    #[test]
+    fn build_manifest_preserves_ir_to_build123d_identity() {
+        let report = RunnerReport {
+            document_name: "Doc".to_string(),
+            document_label: "Doc".to_string(),
+            warnings: Vec::new(),
+            objects: vec![RunnerObject {
+                object_name: "body".to_string(),
+                label: "body".to_string(),
+                export_path: "/tmp/body.stl".to_string(),
+                bounds: None,
+                volume: None,
+                area: None,
+            }],
+        };
+
+        let manifest = build_manifest("model", &report, SourceLanguage::EckyIrV0);
+
+        assert_eq!(manifest.engine_kind, EngineKind::EckyIrV0);
+        assert_eq!(manifest.source_language, SourceLanguage::EckyIrV0);
+        assert_eq!(manifest.geometry_backend, GeometryBackend::Build123d);
     }
 }

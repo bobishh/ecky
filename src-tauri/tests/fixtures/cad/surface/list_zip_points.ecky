@@ -1,0 +1,15 @@
+(define (zip-points xs ys)
+  (if (or (null? xs) (null? ys))
+    '()
+    (cons
+      (list (car xs) (car ys))
+      (zip-points (cdr xs) (cdr ys)))))
+
+(define outline-points
+  (zip-points
+    (list -24 -10 0 10 24 24 -24)
+    (list -10 10 18 10 -10 -18 -18)))
+
+(model
+  (part body
+    (extrude (polygon outline-points) 8)))

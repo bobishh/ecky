@@ -219,7 +219,7 @@ export const currentActiveRequest = derived(requestQueue, $q =>
   $q.activeId ? $q.byId[$q.activeId] : null
 );
 
-import { activeThreadId } from './domainState';
+import { activeThreadIdStore as activeThreadId } from './domainState';
 
 /**
  * Returns true if the current active thread has an in-flight (active) request.

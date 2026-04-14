@@ -468,19 +468,9 @@ async fn resolve_target_for_session(
             Some(message_id),
         )?
     } else if let Some(thread_id) = explicit_thread_id {
-        let message_id = db::get_latest_successful_message_id_in_thread(&conn, &thread_id)
-            .map_err(|e| AppError::persistence(e.to_string()))?
-            .ok_or_else(|| {
-                AppError::validation(format!("Thread {} has no successful versions.", thread_id))
-            })?;
-        crate::services::target::resolve_editable_target(
-            &conn,
-            app,
-            Some(thread_id),
-            Some(message_id),
-        )?
+        crate::services::target::resolve_editable_target(&conn, app, Some(thread_id), None)?
     } else if let Some(cached_target) = cached_target {
-        let still_exists = db::get_message_thread_id(&conn, &cached_target.message_id)
+        let still_exists = db::get_visible_message_thread_id(&conn, &cached_target.message_id)
             .map_err(|e| AppError::persistence(e.to_string()))?;
         if still_exists.as_deref() == Some(cached_target.thread_id.as_str()) {
             crate::services::target::resolve_editable_target(
@@ -499,17 +489,7 @@ async fn resolve_target_for_session(
             .as_ref()
             .and_then(|session| session.thread_id.clone())
     }) {
-        let message_id = db::get_latest_successful_message_id_in_thread(&conn, &thread_id)
-            .map_err(|e| AppError::persistence(e.to_string()))?
-            .ok_or_else(|| {
-                AppError::validation(format!("Thread {} has no successful versions.", thread_id))
-            })?;
-        crate::services::target::resolve_editable_target(
-            &conn,
-            app,
-            Some(thread_id),
-            Some(message_id),
-        )?
+        crate::services::target::resolve_editable_target(&conn, app, Some(thread_id), None)?
     } else {
         return Err(AppError::validation(
             "No bound MCP session target is available. Provide threadId/messageId or re-bind the session first.",
@@ -817,7 +797,7 @@ fn workflow_guide_text(state: &AppState) -> String {
         concat!(
             "Ecky MCP guide\n\n",
             "Purpose:\n",
-            "- Ecky edits CAD models, especially generated FreeCAD macro-based models.\n",
+            "- Ecky edits CAD models across FreeCAD, build123d, and current `.ecky` source.\n",
             "- Use the current selected engine prompt as the design-policy baseline.\n\n",
             "Current engine:\n",
             "- {}\n\n",
@@ -831,10 +811,13 @@ fn workflow_guide_text(state: &AppState) -> String {
             "- Semantic views are curated user-facing editing contexts layered on top of raw uiSpec/params; they do not replace the raw control surface.\n",
             "- Reuse or extend an existing relevant view before creating a new one.\n",
             "- Create or edit views when grouping related controls will make the design easier to edit or understand.\n",
-            "- Do not remove or bypass existing views just because the same values can be changed through raw controls.\n\n",
+            "- Do not remove or bypass existing views just because the same values can be changed through raw controls.\n",
+            "- First translate intent: explicitly propose your specific plan to the user using mcp_request_user_prompt and ask for their confirmation before making any code edits to avoid ambiguity.\n",
+            "- Proactively use the get_model_screenshot tool to visually verify your changes when making geometric edits.\n",
+            "- Check the structuralVerification section when using target_get to ensure the generated model passed basic manifold and bounding box checks.\n\n",
             "Recommended startup sequence:\n",
             "1. Read ecky://guides/system-prompt and ecky://guides/modeling-guidelines.\n",
-            "2. If the thread uses Ecky IR, read ecky://guides/ecky-ir-v0 before you generate or replace macro code.\n",
+            "2. If the thread uses sourceLanguage `eckyIrV0`, read ecky://guides/ecky-source before you generate or replace macro code. Compatibility labels still say `eckyIrV0`, but authored macroCode is current `.ecky` Scheme-style source.\n",
             "3. Read ecky://guides/cad-sdk when you need the actual helper surface instead of guessing SDK functions.\n",
             "4. Call workspace_overview.\n",
             "5. If workspace_overview says the thread has no saved versions yet, use that thread context plus the guides to create the first version instead of calling target_meta_get.\n",
@@ -869,7 +852,7 @@ fn workspace_overview_brief(
         source_language: lang_str,
         macro_dialect: dialect_str,
         summary: if is_ir {
-            "This thread uses Ecky IR v0. macroCode MUST be s-expression IR, NOT Python. Read ecky://guides/ecky-ir-v0 for the canonical syntax before writing any macro code.".to_string()
+            "This thread uses Ecky source. `sourceLanguage` stays `eckyIrV0` for compatibility, but `macroCode` MUST be current `.ecky` Scheme-style source starting with `(model ...)`, NOT Python. Read ecky://guides/ecky-source for the canonical authoring surface and helper library.".to_string()
         } else {
             "Use millimeters, keep macro/uiSpec/initialParams aligned, and prefer printable manifold solids. Read the canonical Ecky resources before making broad edits.".to_string()
         },
@@ -882,19 +865,34 @@ fn workspace_overview_brief(
                 .to_string(),
             "Treat semantic views as curated user-facing control contexts layered over raw uiSpec/params."
                 .to_string(),
+            "Stay in the app loop. After connecting to MCP, communicate with the human ONLY through mcp_request_user_prompt or mcp_user_confirm_request inside the thread."
+                .to_string(),
+            "Always call session_activity_set (or long_action_notice) to broadcast your current status before starting slow operations (render, script execution, etc.)."
+                .to_string(),
+            "Use the ui_dispatch tool to provide immediate visual feedback (e.g., opening the parameters window or highlighting a slider) when modifying specific design aspects."
+                .to_string(),
+            "First translate intent: explicitly propose your specific plan to the user using mcp_request_user_prompt and ask for their confirmation before making any code edits to avoid ambiguity."
+                .to_string(),
+            "Proactively use the get_model_screenshot tool to visually verify your changes when making geometric edits."
+                .to_string(),
+            "Check the structuralVerification section when using target_get or check target_meta_get to ensure the generated model passed basic manifold and bounding box checks."
+                .to_string(),
+            "Use ecky://guides/build123d patterns (overlap for booleans, .part/.sketch/.line access) to ensure valid solid geometry."
+                .to_string(),
         ],
         resources: vec![
             "ecky://guides/system-prompt".to_string(),
             "ecky://guides/technical-system-prompt".to_string(),
             "ecky://guides/modeling-guidelines".to_string(),
-            "ecky://guides/ecky-ir-v0".to_string(),
+            "ecky://guides/ecky-source".to_string(),
             "ecky://guides/cad-sdk".to_string(),
+            "ecky://guides/build123d".to_string(),
         ],
         next_steps: if is_ir {
             vec![
                 "Read ecky://guides/system-prompt if you have not loaded Ecky guidance yet."
                     .to_string(),
-                "Read ecky://guides/ecky-ir-v0 NOW — this thread uses Ecky IR. Do not write Python. Treat the guide as the canonical authoring syntax."
+                "Read ecky://guides/ecky-source NOW — this thread uses current `.ecky` source. Compatibility labels may still say `eckyIrV0`. Do not write Python."
                     .to_string(),
                 "Call target_meta_get for a lightweight summary of the current editable target."
                     .to_string(),
@@ -902,12 +900,18 @@ fn workspace_overview_brief(
                     .to_string(),
                 "If the target has a semantic manifest, inspect existing views before creating new control groupings."
                     .to_string(),
+                "Stay in the app loop. Use mcp_request_user_prompt to wait for and reply to the human in the Ecky UI."
+                    .to_string(),
+                "For intermediate actions or multi-step tasks, call session_activity_set (or long_action_notice) to broadcast your current status to the user."
+                    .to_string(),
             ]
         } else {
             vec![
                 "Read ecky://guides/system-prompt if you have not loaded Ecky guidance yet."
                     .to_string(),
-                "Read ecky://guides/ecky-ir-v0 when the thread is using Ecky IR. Treat it as the canonical authoring syntax."
+                "Read ecky://guides/build123d NOW to avoid common modeling pitfalls and boolean errors."
+                    .to_string(),
+                "Read ecky://guides/ecky-source when the thread is using sourceLanguage `eckyIrV0`. That guide defines current `.ecky` authoring syntax."
                     .to_string(),
                 "Read ecky://guides/cad-sdk if you need the actual helper functions available in cad_sdk.py."
                     .to_string(),
@@ -916,6 +920,10 @@ fn workspace_overview_brief(
                 "Use target_macro_get for macro reasoning, target_detail_get(section=...) for exact chunks, and target_get only as a full-payload fallback."
                     .to_string(),
                 "If the target has a semantic manifest, inspect existing views before creating new control groupings."
+                    .to_string(),
+                "Stay in the app loop. Use mcp_request_user_prompt to wait for and reply to the human in the Ecky UI."
+                    .to_string(),
+                "For intermediate actions or multi-step tasks, call session_activity_set (or long_action_notice) to broadcast your current status to the user."
                     .to_string(),
             ]
         },
@@ -1014,15 +1022,27 @@ fn resource_definitions(state: &AppState) -> Vec<Value> {
             "mimeType": "text/plain"
         }),
         json!({
+            "uri": "ecky://guides/ecky-source",
+            "name": "Ecky Source (.ecky)",
+            "description": "Canonical `.ecky` Scheme-style authoring guide compiled to internal Core IR.",
+            "mimeType": "text/plain"
+        }),
+        json!({
             "uri": "ecky://guides/ecky-ir-v0",
-            "name": "Ecky IR v0",
-            "description": "Canonical Ecky IR v0 syntax and modeling rules.",
+            "name": "Ecky IR v0 (compat alias)",
+            "description": "Compatibility alias for the current `.ecky` Scheme/Core IR authoring guide.",
             "mimeType": "text/plain"
         }),
         json!({
             "uri": "ecky://guides/cad-sdk",
             "name": "cad_sdk.py",
             "description": "The actual CAD framework helpers available to Ecky-generated macros.",
+            "mimeType": "text/plain"
+        }),
+        json!({
+            "uri": "ecky://guides/build123d",
+            "name": "Build123d Best Practices",
+            "description": "Critical patterns, common pitfalls, and architectural guidance for build123d modeling.",
             "mimeType": "text/plain"
         }),
     ]
@@ -1033,12 +1053,15 @@ fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
         "ecky://guides/system-prompt" => Some(selected_engine_prompt(state)),
         "ecky://guides/technical-system-prompt" => Some(crate::TECHNICAL_SYSTEM_PROMPT.to_string()),
         "ecky://guides/modeling-guidelines" => Some(workflow_guide_text(state)),
-        "ecky://guides/ecky-ir-v0" => {
+        "ecky://guides/ecky-source" | "ecky://guides/ecky-ir-v0" => {
             let backend = state.config.lock().unwrap().default_geometry_backend;
             Some(crate::commands::generation::ecky_ir_v0_guide_text(backend))
         }
         "ecky://guides/cad-sdk" => {
             Some(include_str!("../../../model-runtime/cad_sdk.py").to_string())
+        }
+        "ecky://guides/build123d" => {
+            Some(include_str!("../../../model-runtime/build123d_guide.md").to_string())
         }
         _ => None,
     }
@@ -1181,6 +1204,29 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "ui_dispatch",
+            "description": "Trigger a UI action in the Ecky frontend to show the user what you are doing (e.g. open the parameters window, highlight a specific slider).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["openWindow", "closeWindow", "highlightParam"],
+                        "description": "The UI action to perform."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "The target of the action (e.g., 'params', 'projects', or a specific parameter key)."
+                    },
+                    "value": {
+                        "type": "object",
+                        "description": "Optional value to show or preview."
+                    }
+                },
+                "required": ["action", "target"]
+            }
+        }),
+        json!({
             "name": "target_meta_get",
             "description": "Fetch a lightweight summary of the current editable target. Preferred default read step after workspace_overview.",
             "inputSchema": with_identity(
@@ -1257,7 +1303,12 @@ fn tool_definitions() -> Vec<Value> {
                 &[
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" })),
-                    ("parameterPatch", json!({ "type": "object" }))
+                    ("parameterPatch", json!({ "type": "object" })),
+                    ("geometryBackend", json!({
+                        "type": "string",
+                        "enum": ["freecad", "build123d", "eckyRust"],
+                        "description": "Optional: Explicitly choose geometry backend. eckyRust is experimental mesh-based; build123d is stable OCCT-based (preferred for valid solids)."
+                    }))
                 ],
                 &["parameterPatch"],
             )
@@ -1266,8 +1317,9 @@ fn tool_definitions() -> Vec<Value> {
             "name": "macro_replace_and_render",
             "description": concat!(
                 "Replace macro code and rerender a draft. ",
-                "IMPORTANT: check workspace_overview.agentBrief.sourceLanguage — if it is \"eckyIrV0\", macroCode MUST be Ecky IR s-expressions (starting with `(model ...)`), NOT Python. ",
-                "When sourceLanguage is eckyIrV0, uiSpec and parameters are auto-derived from the IR params block; you may omit them or pass them for overrides. ",
+                "IMPORTANT: check workspace_overview.agentBrief.sourceLanguage — if it is \"eckyIrV0\", macroCode MUST be current `.ecky` Scheme-style source (starting with `(model ...)`), NOT Python. ",
+                "Compatibility labels still say `eckyIrV0`, but authoring uses pure lispy `.ecky` code compiled to internal Core IR. `define`, `lambda`, `let`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. ",
+                "When sourceLanguage is eckyIrV0, uiSpec and parameters are auto-derived from the params block; you may omit them or pass them for overrides. ",
                 "uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). ",
                 "For numeric parameters, prefer number; range is legacy-only unless explicitly needed. range/number: min, max, step (numbers). ",
                 "select: options array of {label, value} objects — MUST have at least one option. ",
@@ -1302,7 +1354,12 @@ fn tool_definitions() -> Vec<Value> {
                             }
                         }
                     })),
-                    ("parameters", json!({ "type": "object" }))
+                    ("parameters", json!({ "type": "object" })),
+                    ("geometryBackend", json!({
+                        "type": "string",
+                        "enum": ["freecad", "build123d", "eckyRust"],
+                        "description": "Optional: Explicitly choose geometry backend. eckyRust is experimental mesh-based; build123d is stable OCCT-based (preferred for valid solids)."
+                    }))
                 ],
                 &["macroCode"],
             )
@@ -1442,6 +1499,18 @@ fn tool_definitions() -> Vec<Value> {
                 ],
                 &[],
             )
+        }),
+        json!({
+            "name": "compare_models",
+            "description": "Compare two STL models using build123d comparison engine. Returns volume and bounding box matching metrics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "refPath": { "type": "string", "description": "Path to reference STL file" },
+                    "genPath": { "type": "string", "description": "Path to generated STL file" }
+                },
+                "required": ["refPath", "genPath"]
+            }
         }),
         json!({
             "name": "version_restore",
@@ -1800,7 +1869,7 @@ async fn handle_http_post(
         let mut sessions = server.state.mcp_sessions.lock().await;
         sessions.insert(
             session_id.clone(),
-            McpSessionState::new("mcp-http".to_string(), "reconnected".to_string()),
+            McpSessionState::new("mcp-http".to_string(), String::new()),
         );
     }
 
@@ -1918,6 +1987,12 @@ async fn dispatch_tool_call(
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let response =
                 handlers::handle_session_resume(&server.state, req_args, &current_ctx).await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "ui_dispatch" => {
+            let req_args: UiDispatchRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_ui_dispatch(&server.handle, req_args).await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "workspace_overview" => {
@@ -2216,6 +2291,27 @@ async fn dispatch_tool_call(
         "params_patch_and_render" => {
             let mut req_args: ParamsPatchRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+
+            let _ = server.handle.emit(
+                "mcp://ui-dispatch",
+                AgentUiDispatchEvent {
+                    action: "openWindow".to_string(),
+                    target: "params".to_string(),
+                    value: None,
+                },
+            );
+
+            for (key, val) in &req_args.parameter_patch {
+                let _ = server.handle.emit(
+                    "mcp://ui-dispatch",
+                    AgentUiDispatchEvent {
+                        action: "highlightParam".to_string(),
+                        target: key.clone(),
+                        value: serde_json::to_value(val).ok(),
+                    },
+                );
+            }
+
             let action_ctx = current_ctx.with_override(&req_args.identity);
             let target = resolve_target_for_session(
                 &server.state,
@@ -2717,6 +2813,12 @@ async fn dispatch_tool_call(
                 }
             }
         }
+        "compare_models" => {
+            let req_args: CompareModelsRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_compare_models(server.app.as_ref(), req_args).await?;
+            Ok((serde_json::to_value(&response).unwrap(), None))
+        }
         "version_restore" => {
             let req_args: VersionRestoreRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
@@ -2970,7 +3072,7 @@ mod tests {
             Some(crate::models::GeometryBackend::Build123d),
         );
 
-        assert!(workflow.contains("ecky://guides/ecky-ir-v0"));
+        assert!(workflow.contains("ecky://guides/ecky-source"));
         assert!(workflow.contains("call target_meta_get"));
         assert!(workflow.contains("call target_macro_get"));
         assert!(workflow.contains("call target_detail_get(section=...)"));
@@ -2982,11 +3084,11 @@ mod tests {
         assert!(brief
             .resources
             .iter()
-            .any(|resource| resource == "ecky://guides/ecky-ir-v0"));
+            .any(|resource| resource == "ecky://guides/ecky-source"));
         assert!(brief
             .next_steps
             .iter()
-            .any(|step| step.contains("ecky://guides/ecky-ir-v0")));
+            .any(|step| step.contains("ecky://guides/ecky-source")));
         assert!(brief
             .next_steps
             .iter()
@@ -2997,11 +3099,16 @@ mod tests {
     fn ecky_ir_resource_exposes_canonical_sample() {
         let state = test_state();
         let ir_guide =
-            read_resource_text(&state, "ecky://guides/ecky-ir-v0").expect("ir guide resource");
+            read_resource_text(&state, "ecky://guides/ecky-source").expect("ir guide resource");
 
         assert!(ir_guide.contains("(model ...)"));
-        assert!(ir_guide.contains("rounded-polygon"));
+        assert!(ir_guide.contains("Scheme-style"));
+        assert!(ir_guide.contains("range"));
         assert!(ir_guide.contains("postProcessing.lithophaneAttachments"));
+        assert!(resource_definitions(&state)
+            .into_iter()
+            .any(|resource| resource.get("uri").and_then(Value::as_str)
+                == Some("ecky://guides/ecky-source")));
         assert!(resource_definitions(&state)
             .into_iter()
             .any(|resource| resource.get("uri").and_then(Value::as_str)

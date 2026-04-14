@@ -1,4 +1,4 @@
-import { commands, type AppError, type AppLogEntry, type Result, type ThreadAgentState } from './contracts';
+import { commands, type AppError, type AppLogEntry, type Result, type ThreadAgentState, type ThreadWindowLayout } from './contracts';
 import {
   normalizeArtifactBundle,
   normalizeAttachment,
@@ -7,7 +7,10 @@ import {
   normalizeDesignOutput,
   normalizeLastDesignSnapshot,
   normalizeModelManifest,
+  normalizeMessage,
   normalizeParsedParamsResult,
+  normalizeRuntimeCapabilities,
+  normalizeThreadMessagesPage,
   normalizeThread,
   normalizeUsageSummary,
   toContractAttachment,
@@ -31,13 +34,16 @@ import {
   type IntentDecision,
   type LastDesignSnapshot,
   type MacroDialect,
+  type Message,
   type ModelManifest,
   type McpServerStatus,
   type ParsedParamsResult,
+  type RuntimeCapabilities,
   type StructuralVerificationResult,
   type VisualVerificationResult,
   type SourceLanguage,
   type Thread,
+  type ThreadMessagesPage,
   type UiSpec,
   type UsageSummary,
   type ViewportCameraState,
@@ -95,6 +101,10 @@ export async function checkFreecad(): Promise<boolean> {
   return unwrapResult(await commands.checkFreecad());
 }
 
+export async function getRuntimeCapabilities(): Promise<RuntimeCapabilities> {
+  return normalizeRuntimeCapabilities(unwrapResult(await commands.getRuntimeCapabilities()));
+}
+
 export async function saveConfig(config: AppConfig): Promise<void> {
   unwrapResult(await commands.saveConfig(config));
 }
@@ -121,6 +131,29 @@ export async function getHistory(): Promise<Thread[]> {
 
 export async function getThread(id: string): Promise<Thread> {
   return normalizeThread(unwrapResult(await commands.getThread(id)));
+}
+
+export async function getThreadLatestVersion(threadId: string): Promise<Message | null> {
+  const message = unwrapResult(await commands.getThreadLatestVersion(threadId));
+  return message ? normalizeMessage(message) : null;
+}
+
+export async function getThreadMessagesPage(
+  threadId: string,
+  before: number | null = null,
+  limit = 50,
+  includeVisualPayloads = false,
+): Promise<ThreadMessagesPage> {
+  return normalizeThreadMessagesPage(
+    unwrapResult(
+      await commands.getThreadMessagesPage(
+        threadId,
+        before,
+        limit,
+        includeVisualPayloads,
+      ),
+    ),
+  );
 }
 
 export async function clearHistory(): Promise<void> {
@@ -425,6 +458,13 @@ export async function updateVersionRuntime(
   unwrapResult(await commands.updateVersionRuntime(messageId, artifactBundle, modelManifest));
 }
 
+export async function updateVersionPreview(
+  messageId: string,
+  imageData: string,
+): Promise<void> {
+  unwrapResult(await commands.updateVersionPreview(messageId, imageData));
+}
+
 export async function parseMacroParams(macroCode: string): Promise<ParsedParamsResult> {
   return normalizeParsedParamsResult(await commands.parseMacroParams(macroCode));
 }
@@ -635,6 +675,14 @@ export async function verifyGeneratedModel(
   originalPrompt: string,
 ): Promise<StructuralVerificationResult> {
   return unwrapResult(await commands.verifyGeneratedModel(modelId, originalPrompt));
+}
+
+export async function getThreadWindowLayout(threadId: string): Promise<ThreadWindowLayout | null> {
+  return unwrapResult(await commands.getThreadWindowLayout(threadId));
+}
+
+export async function saveThreadWindowLayout(threadId: string, layout: ThreadWindowLayout): Promise<void> {
+  unwrapResult(await commands.saveThreadWindowLayout(threadId, layout));
 }
 
 export type { AppLogEntry };

@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { workingCopy } from '../stores/workingCopy';
-import { activeThreadId, activeVersionId, config, history } from '../stores/domainState';
+import { activeThreadIdStore as activeThreadId, activeVersionId, config, historyStore as history } from '../stores/domainState';
 import { refreshHistory } from '../stores/history';
 import { requestQueue } from '../stores/requestQueue';
 import { session, syncSessionPhaseFromQueue } from '../stores/sessionStore';
@@ -72,6 +72,14 @@ const REPAIR_PHRASES = [
 function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
   const phrase = REPAIR_PHRASES[Math.floor(Math.random() * REPAIR_PHRASES.length)];
   return `${phrase} Retry ${nextAttempt} of ${maxAttempts}.`;
+}
+
+function renderBackendLabel(design: DesignOutput): string {
+  if (design.geometryBackend === 'build123d' || design.sourceLanguage === 'build123d') return 'build123d';
+  if (design.macroDialect === 'eckyIrV0' || design.sourceLanguage === 'eckyIrV0') {
+    return 'Ecky IR';
+  }
+  return 'FreeCAD';
 }
 
 export function isExplicitQuestionOnlyIntent(promptText: string): boolean {
@@ -551,17 +559,16 @@ class GenerationPipeline {
         // --- Render Step ---
         requestQueue.patch(this.requestId, { phase: 'rendering' });
         syncSessionPhaseFromQueue();
-        this.updateStatus(
-          data.macroDialect === 'eckyIrV0'
-            ? 'Executing Ecky IR engine...'
-            : 'Executing FreeCAD engine...',
-        );
+        const backendLabel = renderBackendLabel(data);
+        this.updateStatus(`Executing ${backendLabel} engine...`);
 
         try {
           const bundle = await renderModel(
             data.macroCode,
             data.initialParams || {},
             data.macroDialect ?? null,
+            data.geometryBackend ?? null,
+            data.postProcessing ?? null,
           );
           const rawManifest = await getModelManifest(bundle.modelId);
           const previousManifest =
@@ -675,9 +682,7 @@ class GenerationPipeline {
             const repairMsg = pickRetryMessage(attempt + 1, this.req.maxAttempts);
             if (this.isActiveThread()) session.setRepairMessage(repairMsg);
             const renderErrorText = toErrorMessage(renderError);
-            currentPrompt = `The previous code failed in ${
-              data.macroDialect === 'eckyIrV0' ? 'Ecky IR v0' : 'FreeCAD'
-            } with this error:\n${renderErrorText}\n\nPlease fix it.`;
+            currentPrompt = `The previous code failed in ${backendLabel} with this error:\n${renderErrorText}\n\nPlease fix it.`;
             attempt++;
             continue;
           } else {

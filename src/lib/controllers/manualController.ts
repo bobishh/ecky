@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { workingCopy } from '../stores/workingCopy';
-import { activeThreadId, activeVersionId, config } from '../stores/domainState';
+import { activeThreadIdStore as activeThreadId, activeVersionId, config } from '../stores/domainState';
 import { refreshHistory } from '../stores/history';
 import { showCodeModal } from '../stores/viewState';
 import { session, setManualRenderActive } from '../stores/sessionStore';
@@ -40,6 +40,14 @@ function toAssetUrl(path: string | null | undefined): string {
   } catch {
     return path;
   }
+}
+
+function workingCopyBackendLabel(design: Pick<DesignOutput, 'geometryBackend' | 'sourceLanguage' | 'macroDialect'>): string {
+  if (design.geometryBackend === 'build123d' || design.sourceLanguage === 'build123d') return 'build123d';
+  if (design.macroDialect === 'eckyIrV0' || design.sourceLanguage === 'eckyIrV0') {
+    return 'Ecky IR';
+  }
+  return 'FreeCAD';
 }
 
 function fallbackParamValue(field: UiField): ParamValue {
@@ -287,9 +295,7 @@ export async function handleParamChange(
 
   ensureContext();
 
-  session.setStatus(
-    wc.macroDialect === 'eckyIrV0' ? 'Executing Ecky IR engine...' : 'Executing FreeCAD engine...',
-  );
+  session.setStatus(`Executing ${workingCopyBackendLabel(wc)} engine...`);
   try {
     setManualRenderActive(true, {
       threadId: snapshotThreadId,
@@ -303,7 +309,7 @@ export async function handleParamChange(
       codeToUse,
       currentParams,
       wc.macroDialect ?? null,
-      null,
+      wc.geometryBackend ?? null,
       wc.postProcessing ?? null,
     );
     const runtime = await inspectRuntimeBundle(
@@ -411,7 +417,17 @@ export async function commitManualVersion(
     const nextUiSpec = reconciled.uiSpec;
     const nextParams = reconciled.params;
 
-    const bundle = await renderModel(editedCode, nextParams, null, null, wc.postProcessing ?? null);
+    const manualMacroDialect =
+      wc.sourceLanguage === 'build123d' || wc.macroDialect === 'build123d' ? wc.macroDialect ?? 'build123d' : null;
+    const manualGeometryBackend =
+      wc.sourceLanguage === 'build123d' || wc.geometryBackend === 'build123d' ? 'build123d' : null;
+    const bundle = await renderModel(
+      editedCode,
+      nextParams,
+      manualMacroDialect,
+      manualGeometryBackend,
+      wc.postProcessing ?? null,
+    );
     const runtime = await inspectRuntimeBundle(
       bundle,
       undefined,
@@ -450,7 +466,12 @@ export async function commitManualVersion(
       response: "Manual edit committed as new version.",
       interactionMode: "design",
       macroCode: editedCode,
-      macroDialect: bundle.engineKind === 'eckyIrV0' ? 'eckyIrV0' : wc.macroDialect ?? 'legacy',
+      macroDialect:
+        bundle.sourceLanguage === 'build123d'
+          ? 'build123d'
+          : bundle.engineKind === 'eckyIrV0'
+            ? 'eckyIrV0'
+            : wc.macroDialect ?? 'legacy',
       sourceLanguage: bundle.sourceLanguage || (bundle.engineKind === 'eckyIrV0' ? 'eckyIrV0' : 'legacyPython'),
       geometryBackend: bundle.geometryBackend || (bundle.engineKind === 'eckyIrV0' ? 'eckyRust' : 'freecad'),
       engineKind: bundle.engineKind,

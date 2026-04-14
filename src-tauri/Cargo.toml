@@ -31,6 +31,7 @@ rand = "0.8"
 regex = "1.12.3"
 rustpython-parser = "0.4.0"
 rustpython-ast = { version = "0.4.0", features = ["visitor"] }
+steel_core = { package = "steel-core", version = "0.8.2" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 portable-pty = "0.9.0"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }

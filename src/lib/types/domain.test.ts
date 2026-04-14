@@ -3,8 +3,28 @@ import test from 'node:test';
 
 import {
   hasActiveLithophaneAttachments,
+  normalizeDesignOutput,
   normalizePostProcessing,
+  normalizeThread,
 } from './domain';
+
+test('normalizeDesignOutput resolves legacy defaults', () => {
+  const output = normalizeDesignOutput({
+    engineKind: 'freecad',
+  } as any);
+
+  assert.equal(output.sourceLanguage, 'legacyPython');
+  assert.equal(output.geometryBackend, 'freecad');
+});
+
+test('normalizeThread resolves legacy defaults', () => {
+  const thread = normalizeThread({
+    engine_kind: 'freecad',
+  } as any);
+
+  assert.equal(thread.sourceLanguage, 'legacyPython');
+  assert.equal(thread.geometryBackend, 'freecad');
+});
 
 test('normalizePostProcessing lifts legacy displacement into a lithophane attachment', () => {
   const normalized = normalizePostProcessing({

@@ -13,7 +13,12 @@
     uploadAsset,
     type AppLogEntry,
   } from './tauri/client';
-  import type { AppConfig, AutoAgent, McpServerStatus } from './types/domain';
+  import type {
+    AppConfig,
+    AutoAgent,
+    McpServerStatus,
+    RuntimeCapabilities,
+  } from './types/domain';
 
   type ActiveSection = 'agents' | 'engines' | 'freecad' | 'sounds' | 'prompts' | 'logs';
   type ConnectionType = 'api_key' | 'mcp' | null;
@@ -29,12 +34,14 @@
     config = $bindable(),
     availableModels = [],
     isLoadingModels = false,
+    runtimeCapabilities = null,
     onfetch,
     onsave,
   }: {
     config: AppConfig;
     availableModels?: string[];
     isLoadingModels?: boolean;
+    runtimeCapabilities?: RuntimeCapabilities | null;
     onfetch?: () => Promise<void> | void;
     onsave?: () => Promise<void> | void;
   } = $props();
@@ -223,6 +230,33 @@
   ];
 
   const selectedEngine = $derived(config.engines.find(e => e.id === config.selectedEngineId));
+  const freecadCapability = $derived(runtimeCapabilities?.freecad ?? null);
+  const build123dCapability = $derived(runtimeCapabilities?.build123d ?? null);
+
+  function setDefaultFreecadContext() {
+    if (!freecadCapability?.available) return;
+    config.defaultSourceLanguage = 'legacyPython';
+    config.defaultGeometryBackend = 'freecad';
+    config.defaultEngineKind = 'freecad';
+  }
+
+  function setDefaultBuild123dContext() {
+    if (!build123dCapability?.available) return;
+    config.defaultSourceLanguage = 'build123d';
+    config.defaultGeometryBackend = 'build123d';
+    config.defaultEngineKind = 'build123d';
+  }
+
+  function setDefaultEckyIrContext() {
+    config.defaultSourceLanguage = 'eckyIrV0';
+    if (!config.defaultGeometryBackend || config.defaultGeometryBackend === 'freecad') {
+      config.defaultGeometryBackend = build123dCapability?.available ? 'build123d' : 'eckyRust';
+    }
+    if (config.defaultGeometryBackend === 'build123d' && !build123dCapability?.available) {
+      config.defaultGeometryBackend = 'eckyRust';
+    }
+    config.defaultEngineKind = 'eckyIrV0';
+  }
 
   function asString(value: string | number | null | undefined): string {
     if (typeof value === 'string') return value;
@@ -745,6 +779,15 @@
         {/if}
 
       {:else if activeSection === 'freecad'}
+        {#if runtimeCapabilities}
+          <div class="field">
+            <div class="field-title">RUNTIME STATUS</div>
+            <div class="field-help">BUILD123D: {runtimeCapabilities.build123d.detail}</div>
+            <div class="field-help">FREECAD: {runtimeCapabilities.freecad.detail}</div>
+            <div class="field-help">ECKYRUST: {runtimeCapabilities.eckyRust.detail}</div>
+          </div>
+        {/if}
+
         <div class="field">
           <div class="prompt-header">
             <label for="freecad-cmd">FREECAD COMMAND / APP</label>
@@ -909,17 +952,19 @@
           <div class="conn-type-row">
             <button
               class="conn-type-btn {config.defaultSourceLanguage === 'legacyPython' ? 'active' : ''}"
-              onclick={() => { config.defaultSourceLanguage = 'legacyPython'; config.defaultGeometryBackend = 'freecad'; config.defaultEngineKind = 'freecad'; }}
-            >FREECAD PYTHON</button>
+              onclick={setDefaultFreecadContext}
+              disabled={runtimeCapabilities ? !runtimeCapabilities.freecad.available : false}
+              title={runtimeCapabilities && !runtimeCapabilities.freecad.available ? runtimeCapabilities.freecad.detail : undefined}
+            >FREECAD (PY)</button>
+            <button
+              class="conn-type-btn {config.defaultSourceLanguage === 'build123d' ? 'active' : ''}"
+              onclick={setDefaultBuild123dContext}
+              disabled={runtimeCapabilities ? !runtimeCapabilities.build123d.available : false}
+              title={runtimeCapabilities && !runtimeCapabilities.build123d.available ? runtimeCapabilities.build123d.detail : undefined}
+            >BUILD123D (PY)</button>
             <button
               class="conn-type-btn {config.defaultSourceLanguage === 'eckyIrV0' ? 'active' : ''}"
-              onclick={() => {
-                config.defaultSourceLanguage = 'eckyIrV0';
-                if (!config.defaultGeometryBackend || config.defaultGeometryBackend === 'freecad') {
-                  config.defaultGeometryBackend = 'build123d';
-                }
-                config.defaultEngineKind = 'eckyIrV0';
-              }}
+              onclick={setDefaultEckyIrContext}
             >ECKY IR</button>
           </div>
           {#if config.defaultSourceLanguage === 'eckyIrV0'}
@@ -927,6 +972,8 @@
               <button
                 class="conn-type-btn {config.defaultGeometryBackend === 'build123d' ? 'active' : ''}"
                 onclick={() => { config.defaultGeometryBackend = 'build123d'; }}
+                disabled={runtimeCapabilities ? !runtimeCapabilities.build123d.available : false}
+                title={runtimeCapabilities && !runtimeCapabilities.build123d.available ? runtimeCapabilities.build123d.detail : undefined}
               >BUILD123D</button>
               <button
                 class="conn-type-btn {config.defaultGeometryBackend === 'eckyRust' ? 'active' : ''}"

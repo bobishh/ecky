@@ -80,6 +80,9 @@ pub fn resolve_target(
     }
 
     if let Some(tid) = thread_id {
+        db::get_visible_thread_title(conn, &tid)
+            .map_err(|e| AppError::persistence(e.to_string()))?
+            .ok_or_else(|| AppError::not_found(format!("Thread {} not found.", tid)))?;
         let message_id = db::get_latest_successful_message_id_in_thread(conn, &tid)
             .map_err(|e| AppError::persistence(e.to_string()))?
             .ok_or_else(|| {
@@ -247,5 +250,56 @@ mod tests {
         assert!(err
             .message
             .contains("Message msg-1 does not belong to thread thread-2."));
+    }
+
+    #[test]
+    fn resolve_target_rejects_deleted_thread_targets() {
+        let root = std::env::temp_dir().join(format!("ecky-target-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = TestPathResolver { root };
+        let conn = crate::db::init_db(&test_db_path("target-deleted")).expect("db");
+
+        crate::db::create_or_update_thread(
+            &conn,
+            "thread-1",
+            "Thread One",
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::db::add_message(
+            &conn,
+            "thread-1",
+            &Message {
+                id: "msg-1".to_string(),
+                role: MessageRole::Assistant,
+                content: "Base version".to_string(),
+                status: MessageStatus::Success,
+                output: Some(sample_design("Thread One Design")),
+                usage: None,
+                artifact_bundle: None,
+                model_manifest: None,
+                agent_origin: None,
+                image_data: None,
+                visual_kind: None,
+                attachment_images: Vec::new(),
+                timestamp: 1,
+            },
+        )
+        .unwrap();
+        crate::db::delete_thread(&conn, "thread-1").unwrap();
+
+        let thread_err = resolve_target(&conn, &resolver, Some("thread-1".to_string()), None)
+            .err()
+            .expect("deleted thread target should fail");
+        assert_eq!(thread_err.code, AppErrorCode::NotFound);
+
+        let message_err = resolve_target(&conn, &resolver, None, Some("msg-1".to_string()))
+            .err()
+            .expect("message from deleted thread should fail");
+        assert_eq!(message_err.code, AppErrorCode::NotFound);
     }
 }

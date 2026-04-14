@@ -487,6 +487,9 @@ pub enum EngineKind {
     #[default]
     Freecad,
     EckyIrV0,
+    #[serde(rename = "build123d")]
+    #[specta(rename = "build123d")]
+    Build123d,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
@@ -495,6 +498,9 @@ pub enum SourceLanguage {
     #[default]
     LegacyPython,
     EckyIrV0,
+    #[serde(rename = "build123d")]
+    #[specta(rename = "build123d")]
+    Build123d,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
@@ -513,6 +519,7 @@ impl EngineKind {
         match self {
             Self::Freecad => "freecad",
             Self::EckyIrV0 => "eckyIrV0",
+            Self::Build123d => "build123d",
         }
     }
 
@@ -520,6 +527,7 @@ impl EngineKind {
         match self {
             Self::Freecad => SourceLanguage::LegacyPython,
             Self::EckyIrV0 => SourceLanguage::EckyIrV0,
+            Self::Build123d => SourceLanguage::Build123d,
         }
     }
 
@@ -527,6 +535,7 @@ impl EngineKind {
         match self {
             Self::Freecad => GeometryBackend::Freecad,
             Self::EckyIrV0 => GeometryBackend::EckyRust,
+            Self::Build123d => GeometryBackend::Build123d,
         }
     }
 }
@@ -538,6 +547,7 @@ impl std::str::FromStr for EngineKind {
         match value {
             "freecad" => Ok(Self::Freecad),
             "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
+            "build123d" => Ok(Self::Build123d),
             _ => Err(()),
         }
     }
@@ -548,6 +558,15 @@ impl SourceLanguage {
         match self {
             Self::LegacyPython => "legacyPython",
             Self::EckyIrV0 => "eckyIrV0",
+            Self::Build123d => "build123d",
+        }
+    }
+
+    pub fn to_engine_kind(&self) -> EngineKind {
+        match self {
+            Self::LegacyPython => EngineKind::Freecad,
+            Self::EckyIrV0 => EngineKind::EckyIrV0,
+            Self::Build123d => EngineKind::Build123d,
         }
     }
 }
@@ -559,6 +578,7 @@ impl std::str::FromStr for SourceLanguage {
         match value {
             "legacyPython" | "legacy_python" => Ok(Self::LegacyPython),
             "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
+            "build123d" => Ok(Self::Build123d),
             _ => Err(()),
         }
     }
@@ -585,6 +605,32 @@ impl std::str::FromStr for GeometryBackend {
             _ => Err(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeBackendCapability {
+    pub available: bool,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAuthoringContext {
+    pub engine_kind: EngineKind,
+    pub source_language: SourceLanguage,
+    pub geometry_backend: GeometryBackend,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCapabilities {
+    pub freecad: RuntimeBackendCapability,
+    pub build123d: RuntimeBackendCapability,
+    pub ecky_rust: RuntimeBackendCapability,
+    pub recommended_authoring_context: RuntimeAuthoringContext,
 }
 
 impl ToSql for EngineKind {
@@ -1080,6 +1126,9 @@ pub enum MacroDialect {
     Legacy,
     CadFrameworkV1,
     EckyIrV0,
+    #[serde(rename = "build123d")]
+    #[specta(rename = "build123d")]
+    Build123d,
 }
 
 impl MacroDialect {
@@ -1096,6 +1145,8 @@ pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
     let trimmed = macro_code.trim();
     if trimmed.starts_with("(model") || trimmed.starts_with("(scene") {
         MacroDialect::EckyIrV0
+    } else if trimmed.contains("build123d") {
+        MacroDialect::Build123d
     } else if trimmed.contains("cad_sdk") || trimmed.contains("CONTROLS") {
         MacroDialect::CadFrameworkV1
     } else {
@@ -1724,6 +1775,45 @@ pub struct Thread {
     pub source_language: SourceLanguage,
     #[serde(default = "default_geometry_backend", alias = "geometry_backend")]
     pub geometry_backend: GeometryBackend,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessagesPage {
+    pub messages: Vec<Message>,
+    pub next_before: Option<u64>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadWindowState {
+    pub visible: bool,
+    #[serde(default)]
+    pub minimized: bool,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub z: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadWindowLayout {
+    #[serde(default = "default_thread_window_layout_schema_version")]
+    pub schema_version: u32,
+    #[serde(default = "default_thread_window_layout_remember_layout")]
+    pub remember_layout: bool,
+    pub windows: HashMap<String, ThreadWindowState>,
+}
+
+fn default_thread_window_layout_schema_version() -> u32 {
+    1
+}
+
+fn default_thread_window_layout_remember_layout() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -4042,5 +4132,21 @@ mod tests {
             let err = validate_model_manifest(&manifest).expect_err("manifest should reject unknown viewer nodes");
             prop_assert!(err.message.contains("unknown viewer node id"));
         }
+    }
+
+    #[test]
+    fn engine_kind_build123d_mappings() {
+        let kind = EngineKind::Build123d;
+        assert_eq!(kind.as_str(), "build123d");
+        assert_eq!(kind.to_source_language(), SourceLanguage::Build123d);
+        assert_eq!(kind.to_geometry_backend(), GeometryBackend::Build123d);
+        assert_eq!("build123d".parse::<EngineKind>().unwrap(), kind);
+    }
+
+    #[test]
+    fn source_language_build123d_mappings() {
+        let lang = SourceLanguage::Build123d;
+        assert_eq!(lang.as_str(), "build123d");
+        assert_eq!("build123d".parse::<SourceLanguage>().unwrap(), lang);
     }
 }

@@ -460,15 +460,6 @@
   });
 
   $effect(() => {
-    if (!controls) return;
-    controls.autoRotate = isGenerating && !hideModelWhileBusy;
-    controls.autoRotateSpeed = controls.autoRotate ? 1.8 : 0;
-    if (!controls.autoRotate) {
-      controls.update();
-    }
-  });
-
-  $effect(() => {
     if (!hideModelWhileBusy) return;
     if (hoveredPartId !== null) {
       hoveredPartId = null;
@@ -501,6 +492,8 @@
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.autoRotate = false;
+    controls.autoRotateSpeed = 0;
     controls.addEventListener('change', emitCameraStateChange);
 
     const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x182032, 0.78);

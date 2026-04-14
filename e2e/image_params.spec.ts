@@ -12,6 +12,18 @@ test.describe('Image Parameter Types', () => {
             hasSeenOnboarding: true,
           };
         }
+        if (cmd === 'get_runtime_capabilities') {
+          return {
+            freecad: { available: true, detail: 'Ready at /mock/freecadcmd', path: '/mock/freecadcmd' },
+            build123d: { available: true, detail: 'Ready at /mock/python3', path: '/mock/python3' },
+            eckyRust: { available: true, detail: 'bundled', path: null },
+            recommendedAuthoringContext: {
+              engineKind: 'freecad',
+              sourceLanguage: 'legacyPython',
+              geometryBackend: 'freecad',
+            },
+          };
+        }
         if (cmd === 'check_freecad') return true;
         if (cmd === 'get_history') return [];
         if (cmd === 'get_last_design') return null;

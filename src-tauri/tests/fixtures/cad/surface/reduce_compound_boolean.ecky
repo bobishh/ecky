@@ -1,0 +1,31 @@
+(define (reduce-union solids)
+  (if (null? (cdr solids))
+    (car solids)
+    (union (car solids) (reduce-union (cdr solids)))))
+
+(define (reduce-difference base cutters)
+  (if (null? cutters)
+    base
+    (reduce-difference (difference base (car cutters)) (cdr cutters))))
+
+(define base-solids
+  (list
+    (translate -18 0 0 (box 24 24 12))
+    (box 26 30 12)
+    (translate 18 0 0 (box 24 24 12))))
+
+(define relieved
+  (reduce-difference
+    (reduce-union base-solids)
+    (list
+      (translate -16 0 0 (cylinder 4 12))
+      (translate 16 0 0 (cylinder 4 12))
+      (translate 0 0 6 (sphere 8)))))
+
+(model
+  (part body
+    (reduce-union
+      (list
+        relieved
+        (translate -18 0 6 (sphere 6))
+        (translate 18 0 6 (sphere 6))))))

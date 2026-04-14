@@ -7,6 +7,9 @@
 use serde::Serialize;
 
 use crate::contracts::{ManifestBounds, ModelManifest, StructuralVerificationResult, UiField};
+
+#[cfg(test)]
+use crate::contracts::ControlPrimitive;
 use crate::models::{DesignOutput, ParamValue};
 
 pub const MAX_DIGEST_PARTS: usize = 6;
@@ -505,7 +508,7 @@ pub fn build_context_delta(
                 .params
                 .iter()
                 .find(|pp| pp.key == np.key)
-                .map_or(true, |pp| pp.value != np.value)
+                .is_none_or(|pp| pp.value != np.value)
         })
         .cloned()
         .collect();

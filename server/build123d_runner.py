@@ -53,8 +53,8 @@ def shape_bounds(shape):
 
 
 def export_stl(shape, path):
-    from build123d import exporters
-    exporters.export(shape, path, exporters.ExportTypes.STL)
+    from build123d import export_stl as b123d_export_stl
+    b123d_export_stl(shape, path)
 
 
 def merge_shapes(shapes):
@@ -94,6 +94,10 @@ def main():
     all_shapes = []
 
     for index, (part_id, shape) in enumerate(ecky_parts):
+        if isinstance(shape, list) or type(shape).__name__ == "ShapeList":
+            from build123d import Compound
+            shape = Compound(children=shape)
+
         file_name = f"{index:03d}-{sanitize_name(part_id)}.stl"
         export_path = os.path.abspath(os.path.join(parts_dir, file_name))
         try:

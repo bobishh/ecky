@@ -112,6 +112,26 @@ pub struct AgentViewportScreenshotEvent {
     pub camera: Option<crate::contracts::ViewportCameraState>,
 }
 
+// --- compare_models ---
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareModelsRequest {
+    pub ref_path: String,
+    pub gen_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareModelsResponse {
+    pub reference_volume: f64,
+    pub generated_volume: f64,
+    pub volume_difference_percent: f64,
+    pub bounding_box_match_error: f64,
+    pub status: String,
+    pub details: String,
+}
+
 // --- user_confirm_request ---
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +160,28 @@ pub struct AgentConfirmEvent {
     pub agent_label: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiDispatchRequest {
+    pub action: String,
+    pub target: String,
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiDispatchResponse {
+    pub success: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUiDispatchEvent {
+    pub action: String,
+    pub target: String,
+    pub value: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheckResponse {
@@ -147,6 +189,7 @@ pub struct HealthCheckResponse {
     pub db_path: String,
     pub freecad_configured: bool,
     pub db_ready: bool,
+    pub runtime_capabilities: crate::contracts::RuntimeCapabilities,
 }
 
 #[derive(Debug, Deserialize)]
@@ -540,6 +583,7 @@ pub struct ParamsPatchRequest {
     pub parameter_patch: DesignParams,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub geometry_backend: Option<crate::models::GeometryBackend>,
 }
 
 #[derive(Debug, Serialize)]
@@ -715,6 +759,7 @@ pub struct MacroReplaceRequest {
     pub parameters: Option<DesignParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub geometry_backend: Option<crate::models::GeometryBackend>,
 }
 
 #[derive(Debug, Serialize)]

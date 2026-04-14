@@ -7,14 +7,19 @@ pub mod context;
 pub mod contracts;
 pub mod db;
 pub mod displacement;
+pub mod ecky_cad_host;
+pub mod ecky_core_ir;
 pub mod ecky_ir;
 pub mod ecky_ir_patterns;
+pub mod ecky_scheme;
 pub mod freecad;
+pub mod legacy_python_to_ecky_ir;
 pub mod lithophane;
 pub mod llm;
 pub mod llm_context;
 pub mod mcp;
 pub mod models;
+pub mod runtime_capabilities;
 pub mod services;
 
 use serde::{Deserialize, Serialize};
@@ -794,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_genie_traits_returns_v2_profile() {
+    fn generate_genie_traits_returns_current_profile() {
         let traits = generate_genie_traits();
         assert_eq!(traits.version, crate::models::GENIE_TRAITS_VERSION);
         assert!(traits.seed > 0);

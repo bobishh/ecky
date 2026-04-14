@@ -1,0 +1,13 @@
+(model
+  (part body
+    (build
+      (shape ribs
+        (repeat-union i 4
+          (translate (* i 10) 0 0 (box 4 8 6))))
+      (shape rollers
+        (repeat-compound i 4
+          (translate (+ (* i 10) 5) 0 0 (cylinder 2 6))))
+      (shape marker
+        (repeat-pick i 4 (= i 3)
+          (translate (+ (* i 10) 5) 0 12 (sphere 3))))
+      (result (compound ribs rollers marker)))))

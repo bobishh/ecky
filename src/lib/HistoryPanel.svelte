@@ -17,6 +17,7 @@
   let {
     history,
     activeThreadId,
+    loadingThreadId = null,
     inFlightByThread = {},
     activeAgentSessions = [],
     attentionThreadIds = [],
@@ -29,6 +30,7 @@
   }: {
     history: Thread[];
     activeThreadId: string | null;
+    loadingThreadId?: string | null;
     inFlightByThread?: Record<string, number>;
     activeAgentSessions?: AgentSession[];
     attentionThreadIds?: string[];
@@ -127,6 +129,7 @@
 
   function selectThread(thread: Thread) {
     if (editingThreadId === thread.id) return;
+    if (activeThreadId === thread.id || loadingThreadId === thread.id) return;
     if (hasTextSelection()) return;
     onSelect(thread);
   }
@@ -217,14 +220,6 @@
       };
     }
 
-    if (errorCount > 0) {
-      return {
-        label: 'ISSUES',
-        className: 'issues',
-        title: `${pluralize(errorCount, 'failed attempt')} across ${pluralize(versionCount, 'version')}`
-      };
-    }
-
     if (pendingCount > 0) {
       return {
         label: 'PENDING',
@@ -252,14 +247,7 @@
     return attentionThreadIds.includes(threadId);
   }
 
-  function engineLabel(thread: Thread): string {
-    const source = thread.sourceLanguage;
 
-    if (source === 'legacyPython') return 'FREECAD';
-    if (source === 'eckyIrV0') return 'ECKY IR';
-
-    return thread.engineKind === 'eckyIrV0' ? 'ECKY IR' : 'FREECAD';
-  }
 </script>
 
 <div class="history-panel">
@@ -337,11 +325,11 @@
     {#each paginatedHistory as thread (thread.id)}
       {@const threadState = getThreadState(thread)}
       <div 
-        class="history-card status-{threadState.className} {activeThreadId === thread.id ? 'active' : ''}" 
+        class="history-card status-{threadState.className} {activeThreadId === thread.id ? 'active' : ''} {loadingThreadId === thread.id ? 'loading' : ''}" 
         role="button"
         tabindex="0"
         onclick={() => selectThread(thread)}
-        onkeydown={(e) => { if (editingThreadId !== thread.id && (e.key === 'Enter' || e.key === ' ')) onSelect(thread); }}
+        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') selectThread(thread); }}
       >
         <div class="card-header">
           <div class="card-title-row">
@@ -369,7 +357,6 @@
             <span class="card-date">{formatDate(thread.updatedAt)}</span>
           </div>
           <div class="card-meta-row">
-            <span class="thread-engine-chip">{engineLabel(thread)}</span>
             {#if threadHasUnreadAttention(thread.id)}
               <span class="status-badge unread" title="Agent prompt or screenshot request is waiting in this thread">UNREAD</span>
             {/if}
@@ -377,6 +364,9 @@
               <span class="status-badge queued" title={`${thread.queuedCount} queued user ${thread.queuedCount === 1 ? 'message' : 'messages'} waiting in this thread`}>
                 INBOX {thread.queuedCount}
               </span>
+            {/if}
+            {#if loadingThreadId === thread.id}
+              <span class="status-badge loading">LOADING</span>
             {/if}
             <span class="status-badge {threadState.className}" title={threadState.title}>{threadState.label}</span>
             {#if hasImportPendingSetup(thread)}
@@ -620,6 +610,10 @@
     box-shadow: inset 1px 0 0 var(--primary);
   }
 
+  .history-card.loading {
+    cursor: default;
+  }
+
   .card-header {
     display: flex;
     justify-content: space-between;
@@ -649,17 +643,6 @@
     overflow: hidden;
   }
 
-  .thread-engine-chip {
-    flex-shrink: 0;
-    padding: 1px 6px;
-    border: 1px solid color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
-    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-100));
-    color: var(--secondary);
-    font-size: 0.52rem;
-    letter-spacing: 0.05em;
-    font-family: var(--font-mono);
-    white-space: nowrap;
-  }
 
   .card-title-input {
     flex: 1;
@@ -744,6 +727,13 @@
     border-color: var(--bg-400);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--bg-300) 35%, var(--bg-100));
+  }
+
+  .status-badge.loading {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 12%, var(--bg-100));
+    animation: status-pulse 1.3s infinite;
   }
 
   .status-badge.needs-setup {

@@ -526,14 +526,29 @@ fn export_multipart_3mf_impl(
     write_multipart_3mf_package(target, &objects, &colors)
 }
 
-use crate::services::render::{
-    self as render_service, configured_freecad_cmd, is_freecad_available,
-};
+use crate::services::render::{self as render_service, configured_freecad_cmd};
 
 #[tauri::command]
 #[specta::specta]
-pub async fn check_freecad(state: State<'_, AppState>) -> AppResult<bool> {
-    Ok(is_freecad_available(&state))
+pub async fn check_freecad(state: State<'_, AppState>, app: AppHandle) -> AppResult<bool> {
+    Ok(crate::runtime_capabilities::collect_runtime_capabilities(
+        configured_freecad_cmd(&state).as_deref(),
+        &app,
+    )
+    .freecad
+    .available)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_runtime_capabilities(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::contracts::RuntimeCapabilities> {
+    Ok(crate::runtime_capabilities::collect_runtime_capabilities(
+        configured_freecad_cmd(&state).as_deref(),
+        &app,
+    ))
 }
 
 #[tauri::command]
