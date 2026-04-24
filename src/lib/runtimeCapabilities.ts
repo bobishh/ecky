@@ -26,9 +26,16 @@ export function capabilityForAuthoringContext(
   if (!capabilities) return null;
   if (sourceLanguage === 'legacyPython') return capabilities.freecad;
   if (sourceLanguage === 'build123d') return capabilities.build123d;
+  if (sourceLanguage === 'ecky') {
+    return geometryBackend === 'build123d'
+      ? capabilities.build123d
+      : geometryBackend === 'freecad'
+        ? capabilities.freecad
+        : capabilities.mesh;
+  }
   if (geometryBackend === 'build123d') return capabilities.build123d;
   if (geometryBackend === 'freecad') return capabilities.freecad;
-  return capabilities.eckyRust;
+  return capabilities.mesh;
 }
 
 export function repairDefaultAuthoringContext(

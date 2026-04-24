@@ -28,6 +28,7 @@ function sampleBundle(viewerAssetCount: number): ArtifactBundle {
       path: `/tmp/part-${index + 1}.stl`,
       format: 'stl',
     })),
+    exportArtifacts: [],
   };
 }
 
@@ -36,8 +37,10 @@ test('buildExportChooserOptions shows only STL and FCStd for single-part models'
 
   assert.deepEqual(
     options.map((option) => option.id),
-    ['stl', 'fcstd'],
+    ['stl', 'fcstd', 'step'],
   );
+  assert.equal(options[2]?.disabled, true);
+  assert.equal(options[2]?.disabledReason, 'STEP export is pending for this model.');
 });
 
 test('buildExportChooserOptions shows multipart options first for multipart models', () => {
@@ -45,9 +48,21 @@ test('buildExportChooserOptions shows multipart options first for multipart mode
 
   assert.deepEqual(
     options.map((option) => option.id),
-    ['3mf', 'multipartStlZip', 'stl', 'fcstd'],
+    ['3mf', 'multipartStlZip', 'stl', 'fcstd', 'step'],
   );
   assert.match(options[2]?.subtitle ?? '', /Flattened single-mesh export/);
+});
+
+test('buildExportChooserOptions enables STEP when a STEP artifact exists', () => {
+  const bundle = sampleBundle(1);
+  bundle.exportArtifacts = [
+    { label: 'Neutral CAD', format: 'step', path: '/tmp/model.step', role: 'cad-exchange' },
+  ];
+
+  const step = buildExportChooserOptions(bundle).find((option) => option.id === 'step');
+
+  assert.equal(step?.disabled, false);
+  assert.equal(step?.disabledReason, undefined);
 });
 
 test('buildMultipartExportParts preserves viewer asset order and labels', () => {
@@ -77,6 +92,7 @@ test('buildExportDefaultNames sanitizes the model title into stable filenames', 
     multipartStlZip: 'bulb-lamp-shade-final-parts.zip',
     stl: 'bulb-lamp-shade-final.stl',
     fcstd: 'bulb-lamp-shade-final.FCStd',
+    step: 'bulb-lamp-shade-final.step',
   });
 });
 

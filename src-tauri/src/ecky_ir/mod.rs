@@ -1,6 +1,7 @@
 mod build123d_lowering;
 mod edge_ops;
 mod eval_scalar;
+mod freecad_lowering;
 mod mesh_ops;
 mod model;
 mod runtime;
@@ -15,16 +16,21 @@ use crate::PathResolver;
 
 pub fn lower_to_build123d(source: &str) -> AppResult<String> {
     if let Some(program) = try_compile_to_core_program(source) {
-        let model = model::core_program_to_model(&program?)?;
-        return build123d_lowering::lower_model_to_build123d(&model);
+        return build123d_lowering::lower_core_program_to_build123d(&program?);
     }
     build123d_lowering::lower_to_build123d(source)
 }
 
+pub fn lower_to_freecad(source: &str) -> AppResult<String> {
+    if let Some(program) = try_compile_to_core_program(source) {
+        return freecad_lowering::lower_core_program_to_freecad(&program?);
+    }
+    freecad_lowering::lower_to_freecad(source)
+}
+
 pub fn derive_controls(source: &str) -> AppResult<ParsedParamsResult> {
     if let Some(program) = try_compile_to_core_program(source) {
-        let model = model::core_program_to_model(&program?)?;
-        return runtime::derive_controls_from_model(&model);
+        return runtime::derive_controls_from_core_program(&program?);
     }
     runtime::derive_controls(source)
 }
@@ -35,8 +41,7 @@ pub fn render_model(
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
     if let Some(program) = try_compile_to_core_program(source) {
-        let model = model::core_program_to_model(&program?)?;
-        return runtime::render_model_from_model(&model, source, parameters, app);
+        return runtime::render_core_program(&program?, source, parameters, app);
     }
     runtime::render_model(source, parameters, app)
 }

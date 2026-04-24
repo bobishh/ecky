@@ -31,6 +31,20 @@ export function usesMcpConnection(
   return connectionType === 'mcp';
 }
 
+export function usesAgentDialogueMode(
+  connectionType: string | null | undefined,
+  threadAgentState:
+    | {
+        connectionState?: string | null | undefined;
+      }
+    | null
+    | undefined,
+): boolean {
+  if (connectionType === 'mcp') return true;
+  const state = threadAgentState?.connectionState?.trim() ?? '';
+  return ['sleeping', 'waking', 'waiting', 'active', 'error'].includes(state);
+}
+
 export function hasLiveAgentSession(
   sessions: AgentSession[] | null | undefined,
 ): boolean {

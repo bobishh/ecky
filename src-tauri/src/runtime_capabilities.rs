@@ -15,6 +15,7 @@ pub fn collect_runtime_capabilities(
 ) -> RuntimeCapabilities {
     let freecad = probe_freecad_runtime(configured_freecad_cmd, app);
     let build123d = probe_build123d_runtime(app);
+    let direct_occt = probe_direct_occt_runtime(app);
     let ecky_rust = RuntimeBackendCapability {
         available: true,
         detail: "bundled".to_string(),
@@ -28,6 +29,7 @@ pub fn collect_runtime_capabilities(
         ),
         freecad,
         build123d,
+        direct_occt,
         ecky_rust,
     }
 }
@@ -129,6 +131,35 @@ pub fn probe_build123d_runtime(app: &dyn PathResolver) -> RuntimeBackendCapabili
     }
 }
 
+pub fn probe_direct_occt_runtime(app: &dyn PathResolver) -> RuntimeBackendCapability {
+    let runtime_root = match resolve_direct_occt_runtime_root(app) {
+        Ok(path) => path,
+        Err(err) => return unavailable_capability(err.to_string()),
+    };
+    let layout =
+        crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+
+    if layout.can_compile_native_shim() {
+        available_capability(
+            format!("Ready at {}", runtime_root.display()),
+            layout
+                .include_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        )
+    } else {
+        let blockers = layout.blocker_summary();
+        unavailable_capability(format!(
+            "Direct OCCT unavailable: {}",
+            if blockers.is_empty() {
+                "unknown runtime blocker".to_string()
+            } else {
+                blockers.join("; ")
+            }
+        ))
+    }
+}
+
 fn available_capability(detail: String, path: Option<String>) -> RuntimeBackendCapability {
     RuntimeBackendCapability {
         available: true,
@@ -143,6 +174,55 @@ fn unavailable_capability(detail: String) -> RuntimeBackendCapability {
         detail,
         path: None,
     }
+}
+
+fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
+    if let Ok(path) = std::env::var("BUILD123D_RUNTIME_DIR") {
+        let path = PathBuf::from(path.trim());
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(path) = app.resource_path("runtime/build123d") {
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+
+    for resource in [
+        "runtime/build123d/bin/python3",
+        "runtime/build123d/bin/python",
+    ] {
+        if let Some(path) = app.resource_path(resource) {
+            if let Some(root) = runtime_root_from_python_path(&path) {
+                return Ok(root);
+            }
+        }
+    }
+
+    let repo_runtime =
+        crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap_or_else(|| Path::new(".")),
+        );
+    if repo_runtime.is_dir() {
+        return Ok(repo_runtime);
+    }
+
+    let python = build123d::resolve_python_cmd_with_app(app)?;
+    runtime_root_from_python_path(&python).ok_or_else(|| {
+        AppError::render(format!(
+            "Direct OCCT runtime root could not be inferred from '{}'.",
+            python.display()
+        ))
+    })
+}
+
+fn runtime_root_from_python_path(path: &Path) -> Option<PathBuf> {
+    let bin_dir = path.parent()?;
+    (bin_dir.file_name()? == "bin").then(|| bin_dir.parent().map(Path::to_path_buf))?
 }
 
 fn resolve_existing_freecad_path(configured_freecad_cmd: Option<&str>) -> AppResult<PathBuf> {
@@ -271,7 +351,6 @@ fn probe_build123d_import(python_cmd: &Path) -> AppResult<String> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
 
     struct TestResolver {
         root: PathBuf,
@@ -313,11 +392,6 @@ mod tests {
             perms.set_mode(0o755);
             fs::set_permissions(path, perms).unwrap();
         }
-    }
-
-    fn build123d_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -371,7 +445,7 @@ mod tests {
 
     #[test]
     fn probe_build123d_runtime_reports_ready_when_import_probe_succeeds() {
-        let _guard = build123d_env_lock().lock().unwrap();
+        let _guard = crate::build123d_test_env_lock().lock().unwrap();
         let root = temp_root("build123d-ready");
         let resolver = TestResolver { root };
         let python =
@@ -391,7 +465,7 @@ mod tests {
 
     #[test]
     fn probe_build123d_runtime_reports_import_failure() {
-        let _guard = build123d_env_lock().lock().unwrap();
+        let _guard = crate::build123d_test_env_lock().lock().unwrap();
         let root = temp_root("build123d-fail");
         let resolver = TestResolver { root };
         let python = std::env::temp_dir().join(format!(
@@ -410,7 +484,7 @@ mod tests {
 
     #[test]
     fn collect_runtime_capabilities_prefers_build123d_when_freecad_missing() {
-        let _guard = build123d_env_lock().lock().unwrap();
+        let _guard = crate::build123d_test_env_lock().lock().unwrap();
         let root = temp_root("build123d-only");
         let resolver = TestResolver { root };
         let python = std::env::temp_dir().join(format!(
@@ -444,6 +518,7 @@ mod tests {
         let capabilities = RuntimeCapabilities {
             freecad: unavailable_capability("fc".to_string()),
             build123d: available_capability("b123d".to_string(), Some("/tmp/python".to_string())),
+            direct_occt: unavailable_capability("direct OCCT blocked".to_string()),
             ecky_rust: available_capability("rust".to_string(), None),
             recommended_authoring_context: recommended_authoring_context(false, true),
         };
@@ -475,5 +550,19 @@ mod tests {
             .detail,
             "rust"
         );
+    }
+
+    #[test]
+    fn probe_direct_occt_runtime_reports_blocker_without_changing_recommendation() {
+        let root = temp_root("direct-occt-blocked");
+        let resolver = TestResolver { root };
+
+        let capability = probe_direct_occt_runtime(&resolver);
+
+        assert!(!capability.available);
+        assert!(capability.detail.contains("Direct OCCT"), "{capability:?}");
+
+        let recommended = recommended_authoring_context(false, true);
+        assert_eq!(recommended.geometry_backend, GeometryBackend::Build123d);
     }
 }

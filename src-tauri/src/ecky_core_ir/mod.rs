@@ -1,5 +1,8 @@
 use std::fmt;
 
+mod signatures;
+pub use signatures::verify_core_program;
+
 macro_rules! opaque_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -135,6 +138,9 @@ pub enum CoreSymbol {
     Xy,
     Yz,
     Xz,
+    Min,
+    Center,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -331,6 +337,8 @@ pub enum CoreArrayOp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CoreFrameOp {
+    Plane,
+    Location,
     PathFrame,
     Place,
     ClipBox,
@@ -377,6 +385,20 @@ pub enum CoreNodeKind {
         op: CoreOperation,
         args: Vec<CoreNode>,
         keywords: Vec<CoreKeywordArg>,
+    },
+    Range {
+        start: Box<CoreNode>,
+        end: Box<CoreNode>,
+    },
+    Map {
+        params: Vec<String>,
+        sources: Vec<CoreNode>,
+        body: Box<CoreNode>,
+    },
+    Apply {
+        op: CoreOperation,
+        args: Vec<CoreNode>,
+        list: Box<CoreNode>,
     },
     List(Vec<CoreNode>),
     Group(Vec<CoreNode>),

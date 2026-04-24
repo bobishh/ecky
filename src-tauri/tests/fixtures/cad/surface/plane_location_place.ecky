@@ -1,0 +1,7 @@
+(model
+  (part body
+    (build
+      (shape base (plane :origin (10 20 30) :x (0 1 0) :normal (0 0 1)))
+      (shape peg (box 4 6 2 :align '(min min min)))
+      (shape pose (location base :offset (5 0 0) :rotate (0 90 0)))
+      (result (place pose peg)))))

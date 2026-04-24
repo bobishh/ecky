@@ -9,6 +9,7 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "build",
         "shape",
         "result",
+        "hole",
         "compound",
         "fuse",
         "cut",
@@ -28,8 +29,10 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "sweep",
         "shell",
         "offset",
+        "offset-rounded",
         "fillet",
         "chamfer",
+        "taper",
         "translate",
         "rotate",
         "scale",
@@ -46,10 +49,14 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "xor",
         "linear-array",
         "radial-array",
+        "grid-array",
+        "arc-array",
         "text",
         "svg",
         "import-stl",
         "path-frame",
+        "plane",
+        "location",
         "place",
         "clip-box",
         "twist",
@@ -57,6 +64,9 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "repeat-union",
         "repeat-compound",
         "repeat-pick",
+        "for-union",
+        "for-compound",
+        "wall-pattern",
     ],
 };
 
@@ -79,12 +89,21 @@ pub fn source() -> String {
              [(_ name expr) (list 'shape (quote name) expr)]))\n\
          (define-syntax result\n\
            (syntax-rules ()\n\
-             [(_ expr) (list 'result expr)]))\n",
+             [(_ expr) (list 'result expr)]))\n\
+         (define-syntax for-union\n\
+           (syntax-rules ()\n\
+             [(_ (index count) body) (repeat-union index count body)]))\n\
+         (define-syntax for-compound\n\
+           (syntax-rules ()\n\
+             [(_ (index count) body) (repeat-compound index count body)]))\n",
         exported
     );
 
     for name in MODULE.exports {
-        if matches!(*name, "model" | "part" | "build" | "shape" | "result") {
+        if matches!(
+            *name,
+            "model" | "part" | "build" | "shape" | "result" | "for-union" | "for-compound"
+        ) {
             continue;
         }
         out.push_str(&format!(

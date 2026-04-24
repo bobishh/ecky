@@ -21,16 +21,22 @@ use crate::{
 
 pub fn ecky_ir_v0_guide_text(backend: crate::models::GeometryBackend) -> String {
     match backend {
-        crate::models::GeometryBackend::Build123d => ecky_ir_v0_guide_build123d(),
-        _ => ecky_ir_v0_guide_ecky_rust(),
+        crate::models::GeometryBackend::Build123d => ecky_build123d_guide_text(),
+        crate::models::GeometryBackend::Freecad => freecad_guide_text(),
+        _ => ecky_source_guide_text(),
     }
 }
 
 pub fn build123d_guide_text() -> String {
+    ecky_build123d_guide_text()
+}
+
+pub fn build123d_python_guide_text() -> String {
     concat!(
-        "Return canonical Python source using the `build123d` library.\n",
-        "Start with `from build123d import *`. Do not return Ecky IR.\n",
-        "Active geometry backend: BUILD123D (OCCT). Produces solid, manifold geometry.\n\n",
+        "Return canonical `build123d` source in `macro_code`.\n",
+        "Current fileExtension: `.py`.\n",
+        "Current sourceLanguage: `build123d`.\n",
+        "Start with `from build123d import *`.\n\n",
         "Rules:\n",
         "- Use `with BuildPart() as body:` or similar containers to define parts.\n",
         "- To expose dynamic parameters, use the `params` dictionary which will be provided at runtime.\n",
@@ -45,211 +51,123 @@ pub fn build123d_guide_text() -> String {
     ).to_string()
 }
 
-fn ecky_ir_v0_guide_build123d() -> String {
-    concat!(
-        "Return canonical Ecky source in `macro_code`.\n",
-        "Compatibility note: `sourceLanguage` / `macroDialect` may still say `eckyIrV0`, but authored source is current `.ecky` Scheme-style code compiled through Steel into internal Core IR.\n",
-        "Start with `(model ...)`. Do not return Python.\n",
-        "Active geometry backend: BUILD123D (OCCT). Produces solid, manifold geometry.\n\n",
-        "Authoring surface:\n",
-        "- Current source is pure, lispy `.ecky` code.\n",
-        "- Allowed language forms: `define`, `lambda`, `let`, `if`, quoted symbols/lists, recursion, and generic sequence helpers.\n",
-        "- Keep code immutable: no `set!`, assignment, rebinding, or hidden side effects.\n",
-        "- Prefer generic helpers from `ecky/core` (`range`, `map`, `filter`, `fold`, `reduce`, `zip`, `enumerate`, `linspace`, `flat-map`, `concat-map`) instead of hand-unrolling point samples.\n",
-        "- Keep helpers generic. Do not invent model-specific macros.\n\n",
-        "Supported CAD ops:\n",
-        "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded-rect`, `circle`, `polygon`, `rounded-polygon`, `bspline`.\n",
-        "- Path nodes: `path` (raw 3D point list), `bezier-path` (cubic bezier chain from 3n+1 points).\n",
-        "- Sketch nodes: `profile` with explicit `(:outer ...)` and `(:holes ...)` loops.\n",
-        "- Sketch modifiers: `offset`, `offset-rounded`.\n",
-        "- Constructive nodes: `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `shell`.\n",
-        "  NOTE: `wall-pattern` is NOT supported on this backend — use the EckyRust backend for patterned surfaces.\n",
-        "- `shell` supported targets: `extrude`, `revolve`, `sweep`, `loft`, `cylinder`, `cone`, `sphere`.\n",
-        "  `shell` does NOT support `taper` or `twist` targets on this backend.\n",
-        "- Edge ops: `fillet`, `chamfer` — fully supported via OCCT.\n",
-        "- Composition: `union`, `difference`, `intersection`, `xor`.\n",
-        "- Transforms: `translate`, `rotate`, `scale`, `mirror`.\n",
-        "- Arrays: `linear-array`, `radial-array`, `grid-array`, `arc-array`.\n",
-        "- Numeric helpers: `clamp`, `lerp`, `smoothstep`, `+`, `-`, `*`, `/`, `min`, `max`, `abs`, `sin`, `cos`, `tan`, `deg`, `rad`.\n",
-        "- Boolean ops: `not`, `and`, `or`, `=` (numeric or string equality), `>`, `>=`, `<`, `<=`.\n",
-        "- Conditional: `(if bool-expr then-shape else-shape)`.\n\n",
-        "Param types:\n",
-        "- `(number key default :label \"...\" :min n :max n)` — numeric input.\n",
-        "- `(select key \"default\" :label \"...\" :options ((\"Label\" \"val\") ...))` — dropdown.\n",
-        "- `(toggle key #t :label \"...\")` — boolean checkbox; use `#t`/`#f`.\n",
-        "- `(image key \"\" :label \"...\")` — file picker; leave default empty.\n\n",
-        "Rules & Syntax:\n",
-        "- Author in current `.ecky` surface. `define`, `lambda`, `let`, `if`, recursion, and generic list helpers are allowed. Keep code pure and immutable.\n",
-        "- Do not emit `set!`, assignment, rebinding, mutation helpers, or Python-style imperative control flow.\n",
-        "- Use `(profile (:outer ((x y) ...)) (:holes (((x y) ...))))` for contour-aware sketches with holes.\n",
-        "- `profile` also accepts flat keyword style: `(profile :outer (...) :holes (...))`.\n",
-        "- Use `(rounded-polygon ((x y) ...) radius segments?)` for rounded closed profiles.\n",
-        "- Use `(bspline ((x y) ...) closed? :tangents ((x y) ...) :tangent-scalars ((a b) ...))` for smooth curves.\n",
-        "- `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep` are all hole-aware and preserve internal cutouts.\n",
-        "- `loft` requires compatible topology (same number of loops, same vertex count per mapped loop after resampling).\n",
-        "- `revolve` and `sweep` produce solid OCCT geometry — reliable for curved shapes including domes.\n",
-        "  For a dome: `(difference (sphere r 32) (translate 0 0 (- r) (box (* 2 r) (* 2 r) r)))` or\n",
-        "  `(revolve (profile (:outer ((0 0) (r 0) ... ))) 360)`.\n",
-        "- `fillet` and `chamfer`: `(fillet radius body)` for all edges, or `(fillet radius :edges top body)` for selective edges.\n",
-        "  Edge selectors: `all` (default), `top`, `bottom`, `vertical`.\n",
-        "- Array signatures: `(linear-array count dx dy dz mesh)`, `(grid-array rows cols dx dy mesh)`,\n",
-        "  `(radial-array count step-deg radius mesh)`, `(arc-array count radius start-deg end-deg mesh)`.\n",
-        "- Do not emit a `lithophane` source node. Drive lithophane through `postProcessing.lithophaneAttachments` / the guided LITHO tab.\n",
-        "- Keep `ui_spec`/`initial_params` aligned with the IR parameters.\n\n",
-        "Examples:\n\n",
-        "Teapot spout (sweep + bezier-path):\n",
-        "(model\n",
-        "  (part spout\n",
-        "    (sweep (circle 8 16)\n",
-        "      (bezier-path ((0 0 0) (5 10 20) (10 30 40) (8 50 50)) 24))))\n\n",
-        "Parametric cylinder:\n",
-        "(model\n",
-        "  (params (number dia 40 :label \"Diameter\" :min 10 :max 120)\n",
-        "          (number h 60 :label \"Height\" :min 10 :max 200))\n",
-        "  (part body (cylinder dia h 48)))\n\n",
-        "Hollow rounded box:\n",
-        "(model\n",
-        "  (params (number w 80 :label \"Width\" :min 20 :max 200)\n",
-        "          (number wall 2.5 :label \"Wall\" :min 1 :max 8))\n",
-        "  (part body (shell wall (extrude (rounded-rect w 60 4) 50))))\n\n",
-        "Dome (hemisphere via sphere + cut):\n",
-        "(model\n",
-        "  (params (number r 30 :label \"Radius\" :min 10 :max 100))\n",
-        "  (part dome\n",
-        "    (difference (sphere r 32)\n",
-        "                (translate 0 0 (- r) (box (* 2 r) (* 2 r) r)))))\n\n",
-        "Fillet all top edges:\n",
-        "(model\n",
-        "  (params (number w 40 :label \"Width\" :min 10 :max 100)\n",
-        "          (number h 30 :label \"Height\" :min 5 :max 80))\n",
-        "  (part body (fillet 3 :edges top (box w w h))))\n\n",
-        "Radial array of spokes (step-deg = 360/count):\n",
-        "(model\n",
-        "  (params (number n 6 :label \"Count\" :min 3 :max 12))\n",
-        "  (part wheel\n",
-        "    (union (cylinder 8 4 24)\n",
-        "           (radial-array n (/ 360 n) 30 (cylinder 3 4 12)))))\n\n",
-        "Conditional cap via toggle:\n",
-        "(model\n",
-        "  (params (toggle cap #t :label \"Cap top\"))\n",
-        "  (part body\n",
-        "    (if cap\n",
-        "      (union (cylinder 20 40 32) (translate 0 0 40 (sphere 20 32)))\n",
-        "      (cylinder 20 40 32))))\n\n",
-        "Parametric ring using math:\n",
-        "(model\n",
-        "  (params (number outer 30 :label \"Outer radius\" :min 10 :max 80)\n",
-        "          (number wall 3 :label \"Wall\" :min 1 :max 10))\n",
-        "  (part ring\n",
-        "    (difference (cylinder outer 8 32)\n",
-        "                (cylinder (- outer wall) 10 32))))"
-    ).to_string()
+fn ecky_backend_guide_text(
+    backend: crate::models::GeometryBackend,
+    backend_label: &str,
+    metadata_backend: bool,
+) -> String {
+    let surface = crate::ecky_language_surface::supported_surface_manifest(backend);
+    let target_line = if metadata_backend {
+        "Target geometryBackend comes from thread metadata.\n".to_string()
+    } else {
+        format!("Target geometryBackend: `{backend_label}`.\n")
+    };
+    let runtime_direction = if matches!(backend, crate::models::GeometryBackend::EckyRust) {
+        "\
+         EckyRust CAD VM direction:\n\
+         - EckyRust is a controlled CAD runtime pipeline: parse -> expand -> typecheck -> lower -> validate.\n\
+         - Today this is mesh/eckyRust lowering, not direct OCCT.\n\
+         - Prefer typed/static errors and structural verification first; screenshot verification second.\n\
+         - Wall-pattern is mesh/eckyRust only. Point/list helpers are portable across `.ecky` backends.\n\n"
+            .to_string()
+    } else {
+        "\
+         Verification order:\n\
+         - Prefer typed/static errors and structural verification first; screenshot verification second.\n\
+         - Point/list helpers are portable across `.ecky` backends. Wall-pattern is mesh/eckyRust only.\n\n"
+            .to_string()
+    };
+    let wall_patterns = if surface.wall_pattern_modes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nMesh-only wall patterns:\n- `wall-pattern` is available only on `mesh`/`eckyRust`.\n- Named `:mode` values: {}.\n- Implicit/manifold modes: `gyroid`, `schwarz-p`, `schwarz-d`/`diamond-field`, `neovius`.\n- Chaotic field mode: `attractor-field`.\n- Use `:seed` for deterministic noise-like and attractor-field patterns.\n",
+            crate::ecky_language_surface::join_backticked(surface.wall_pattern_modes)
+        )
+    };
+
+    format!(
+        "Return canonical Ecky source in `macro_code`.\n\
+         Current fileExtension: `.ecky`.\n\
+         Current sourceLanguage: `ecky`.\n\
+         {target_line}\
+         Start with `(model ...)`.\n\n\
+         {runtime_direction}\
+         Typed holes:\n\
+         - {typed_hole_policy}\n\n\
+         Model top-level clauses:\n\
+         - Direct clauses: {}.\n\
+         - Model-level wrappers: {}; wrapper bodies splice model clauses.\n\
+         - `if`, `map`, `flat-map`, helper calls, and generated clause lists are not valid directly at model-clause level.\n\
+         - Use `map`/`range` inside `part` geometry/list expressions, not to emit top-level `part` or `params` clauses.\n\n\
+         Expression/list forms:\n\
+         - Supported forms: {}.\n\
+         - `let` is parallel; use `let*` for sequential bindings.\n\
+         - Keep code pure: no `set!`, assignment, mutation, or hidden side effects.\n\n\
+         Numeric and generative helpers:\n\
+         - Numeric helpers: {}.\n\
+         - Deterministic point/list helpers: {}.\n\
+         - Chaotic helper signatures: `(lorenz-points count dt scale)`, `(rossler-points count dt scale)`, `(logistic-bifurcation-points r-count samples transient scale)`, `(henon-points count scale)`.\n\
+         - Chaotic point helpers are deterministic from their numeric args; current chaotic point helpers have no separate seed argument.\n\
+         - Seeded helpers are deterministic: same literal counts/steps, params, and seed produce the same points. No unseeded randomness. Use explicit `seed` params with `hash01`, `noise2`, `fbm2`, `voronoi2`, `organic-loop`, `jittered-grid`, and `voronoi-cells`.\n\
+         - Bounded literal counts/steps: keep `count`, `samples`, `transient`, `rows`, and `cols` as small positive integer literals; drive radius, spacing, amplitude, scale, and seed from params.\n\n\
+         Supported CAD ops for this backend:\n\
+         - {}.\n\
+         - Keywords are not callable nodes. Example: `:align` belongs on primitives; do not call `(align ...)`.\n\
+         {wall_patterns}\n\
+         Param types:\n\
+         - `(number key default :label \"...\" :min n :max n)`.\n\
+         - `(select key \"default\" :label \"...\" :options ((\"Label\" \"value\") ...))`.\n\
+         - `(toggle key #t :label \"...\")`.\n\
+         - `(image key \"\" :label \"...\")`.\n\n\
+         Examples:\n\n\
+         Model-level let* splicing clauses:\n\
+         (model\n\
+           (let* ((default-r 20)\n\
+                  (default-h (* default-r 3)))\n\
+             (params (number radius default-r :label \"Radius\" :min 5 :max 80)\n\
+                     (number height default-h :label \"Height\" :min 10 :max 200))\n\
+             (part body (cylinder radius height 48))))\n\n\
+         Organic loop profile:\n\
+         (model\n\
+           (params (number seed 7 :label \"Seed\" :min 0 :max 99))\n\
+           (part body\n\
+             (extrude (polygon (organic-loop 24 30 4 seed)) 6)))\n\n\
+         Voronoi-ish perforation centers:\n\
+         (model\n\
+           (params (number seed 3 :label \"Seed\" :min 0 :max 99))\n\
+           (part panel\n\
+             (difference\n\
+               (box 90 60 4 :align '(center center min))\n\
+               (apply union\n\
+                 (map (lambda (p)\n\
+                        (translate (list-ref p 0) (list-ref p 1) -1\n\
+                          (cylinder 2.2 8 16)))\n\
+                      (voronoi-cells 4 6 14 12 2 seed))))))\n",
+        crate::ecky_language_surface::join_backticked(surface.model_clauses),
+        crate::ecky_language_surface::join_backticked(surface.model_wrappers),
+        crate::ecky_language_surface::join_backticked(surface.expression_forms),
+        crate::ecky_language_surface::join_backticked(surface.numeric_helpers),
+        crate::ecky_language_surface::join_backticked(surface.point_list_helpers),
+        crate::ecky_language_surface::join_backticked(&surface.cad_ops),
+        typed_hole_policy = surface.typed_hole_policy,
+    )
 }
 
-fn ecky_ir_v0_guide_ecky_rust() -> String {
-    concat!(
-        "Return canonical Ecky source in `macro_code`.\n",
-        "Compatibility note: `sourceLanguage` / `macroDialect` may still say `eckyIrV0`, but authored source is current `.ecky` Scheme-style code compiled through Steel into internal Core IR.\n",
-        "Start with `(model ...)`. Do not return Python.\n",
-        "Active geometry backend: ECKY RUST (CSG mesh). Experimental; good for organic shapes and wall patterns.\n\n",
-        "Authoring surface:\n",
-        "- Current source is pure, lispy `.ecky` code.\n",
-        "- Allowed language forms: `define`, `lambda`, `let`, `if`, quoted symbols/lists, recursion, and generic sequence helpers.\n",
-        "- Keep code immutable: no `set!`, assignment, rebinding, or hidden side effects.\n",
-        "- Prefer generic helpers from `ecky/core` (`range`, `map`, `filter`, `fold`, `reduce`, `zip`, `enumerate`, `linspace`, `flat-map`, `concat-map`) instead of hand-unrolling point samples.\n",
-        "- Keep helpers generic. Do not invent model-specific macros.\n\n",
-        "Supported CAD ops:\n",
-        "- Primitives: `box`, `cylinder`, `cone`, `sphere`, `rounded-rect`, `circle`, `polygon`, `rounded-polygon`, `bspline`.\n",
-        "- Path nodes: `path` (raw 3D point list), `bezier-path` (cubic bezier chain from 3n+1 points).\n",
-        "- Sketch nodes: `profile` with explicit `(:outer ...)` and `(:holes ...)` loops.\n",
-        "- Sketch modifiers: `offset`, `offset-rounded`.\n",
-        "- Constructive nodes: `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `shell`, `wall-pattern`.\n",
-        "- `shell` supported targets: `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep`, `cylinder`, `cone`, `sphere`.\n",
-        "  `fillet` and `chamfer` are supported with native mesh approximation; prefer rounded/bspline profiles when edge continuity matters most.\n",
-        "- Composition: `union`, `difference`, `intersection`, `xor`.\n",
-        "- Transforms: `translate`, `rotate`, `scale`, `mirror`.\n",
-        "- Arrays: `linear-array`, `radial-array`, `grid-array`, `arc-array`.\n",
-        "- Numeric helpers: `clamp`, `lerp`, `smoothstep`, `+`, `-`, `*`, `/`, `min`, `max`, `abs`, `sin`, `cos`, `tan`, `deg`, `rad`.\n",
-        "- Boolean ops: `not`, `and`, `or`, `=` (numeric or string equality), `>`, `>=`, `<`, `<=`.\n",
-        "- Conditional: `(if bool-expr then-shape else-shape)`.\n\n",
-        "Param types:\n",
-        "- `(number key default :label \"...\" :min n :max n)` — numeric input.\n",
-        "- `(select key \"default\" :label \"...\" :options ((\"Label\" \"val\") ...))` — dropdown.\n",
-        "- `(toggle key #t :label \"...\")` — boolean checkbox; use `#t`/`#f`.\n",
-        "- `(image key \"\" :label \"...\")` — file picker; leave default empty.\n\n",
-        "Rules & Syntax:\n",
-        "- Author in current `.ecky` surface. `define`, `lambda`, `let`, `if`, recursion, and generic list helpers are allowed. Keep code pure and immutable.\n",
-        "- Do not emit `set!`, assignment, rebinding, mutation helpers, or Python-style imperative control flow.\n",
-        "- Use `(profile (:outer ((x y) ...)) (:holes (((x y) ...))))` for contour-aware sketches with holes.\n",
-        "- `profile` also accepts flat keyword style: `(profile :outer (...) :holes (...))`.\n",
-        "- Use `(rounded-polygon ((x y) ...) radius segments?)` for rounded closed profiles.\n",
-        "- Use `(bspline ((x y) ...) closed? samples?)` for smooth closed loops. Prefer closed `#t` loops for printable profiles.\n",
-        "- `extrude`, `revolve`, `loft`, `taper`, `twist`, `sweep` are all hole-aware and preserve internal cutouts.\n",
-        "- `loft` requires compatible topology (same number of loops, same vertex count per mapped loop after resampling).\n",
-        "- `revolve` and `sweep` use CSG mesh generation. Complex curved closed shapes (domes, U-profiles) may produce\n",
-        "  mesh artifacts — prefer primitive-based construction for domes:\n",
-        "  `(difference (sphere r 32) (translate 0 0 (- r) (box (* 2 r) (* 2 r) r)))`.\n",
-        "- `wall-pattern` supports shell-surface targets and deforms the outer surface only.\n",
-        "- `wall-pattern` modes: `ribs` (vertical), `rings` (horizontal), `spiral`, `diamond`, `hammered`.\n",
-        "- `wall-pattern` options: `:mode` (required; literal symbol like `ribs` OR a `select` param ref), `:depth` (required, mm),\n",
-        "  `:uFreq` (default 8), `:vFreq` (default 0), `:softness` (0–1, default 0.15), `:duty` (0–1, default 0.5),\n",
-        "  `:phase`, `:bias`, `:twistDeg`, `:seed`, `:rimFade`. All numeric options accept param references.\n",
-        "- Array signatures: `(linear-array count dx dy dz mesh)`, `(grid-array rows cols dx dy mesh)`,\n",
-        "  `(radial-array count step-deg radius mesh)`, `(arc-array count radius start-deg end-deg mesh)`.\n",
-        "- Do not emit a `lithophane` source node. Drive lithophane through `postProcessing.lithophaneAttachments` / the guided LITHO tab.\n",
-        "- Keep `ui_spec`/`initial_params` aligned with the IR parameters.\n\n",
-        "Examples:\n\n",
-        "Teapot spout (sweep + bezier-path):\n",
-        "(model\n",
-        "  (part spout\n",
-        "    (sweep (circle 8 16)\n",
-        "      (bezier-path ((0 0 0) (5 10 20) (10 30 40) (8 50 50)) 24))))\n\n",
-        "Parametric cylinder:\n",
-        "(model\n",
-        "  (params (number dia 40 :label \"Diameter\" :min 10 :max 120)\n",
-        "          (number h 60 :label \"Height\" :min 10 :max 200))\n",
-        "  (part body (cylinder dia h 48)))\n\n",
-        "Hollow rounded box:\n",
-        "(model\n",
-        "  (params (number w 80 :label \"Width\" :min 20 :max 200)\n",
-        "          (number wall 2.5 :label \"Wall\" :min 1 :max 8))\n",
-        "  (part body (shell wall (extrude (rounded-rect w 60 4) 50))))\n\n",
-        "Ribbed vase (wall-pattern):\n",
-        "(model\n",
-        "  (params (number r 18 :label \"Radius\" :min 8 :max 50)\n",
-        "          (number ribs 20 :label \"Rib count\" :min 6 :max 40))\n",
-        "  (part vase\n",
-        "    (wall-pattern (:mode ribs :depth 1.2 :uFreq ribs :softness 0.12)\n",
-        "      (shell 2 (extrude (circle r 48) 90)))))\n\n",
-        "Extruded profile with hole (rounded-polygon):\n",
-        "(model\n",
-        "  (part frame\n",
-        "    (extrude\n",
-        "      (profile\n",
-        "        (:outer (rounded-polygon ((0 40) (40 0) (0 -40) (-40 0)) 5 8))\n",
-        "        (:holes (circle 20 24)))\n",
-        "      6)))\n\n",
-        "Radial array of spokes (step-deg = 360/count):\n",
-        "(model\n",
-        "  (params (number n 6 :label \"Count\" :min 3 :max 12))\n",
-        "  (part wheel\n",
-        "    (union (cylinder 8 4 24)\n",
-        "           (radial-array n (/ 360 n) 30 (cylinder 3 4 12)))))\n\n",
-        "Conditional cap via toggle:\n",
-        "(model\n",
-        "  (params (toggle cap #t :label \"Cap top\"))\n",
-        "  (part body\n",
-        "    (if cap\n",
-        "      (union (cylinder 20 40 32) (translate 0 0 40 (sphere 20 32)))\n",
-        "      (cylinder 20 40 32))))\n\n",
-        "Parametric ring using math:\n",
-        "(model\n",
-        "  (params (number outer 30 :label \"Outer radius\" :min 10 :max 80)\n",
-        "          (number wall 3 :label \"Wall\" :min 1 :max 10))\n",
-        "  (part ring\n",
-        "    (difference (cylinder outer 8 32)\n",
-        "                (cylinder (- outer wall) 10 32))))"
-    ).to_string()
+fn ecky_build123d_guide_text() -> String {
+    ecky_backend_guide_text(
+        crate::models::GeometryBackend::Build123d,
+        "build123d",
+        false,
+    )
+}
+
+pub fn freecad_guide_text() -> String {
+    ecky_backend_guide_text(crate::models::GeometryBackend::Freecad, "freecad", false)
+}
+
+pub fn ecky_source_guide_text() -> String {
+    ecky_backend_guide_text(crate::models::GeometryBackend::EckyRust, "mesh", true)
 }
 
 fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::models::Engine> {
@@ -271,21 +189,48 @@ fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::models::Engi
     Ok(engine)
 }
 
-fn default_engine_kind(state: &State<'_, AppState>) -> crate::models::EngineKind {
-    state.config.lock().unwrap().default_engine_kind
+fn default_engine_kind(app_state: &AppState) -> crate::models::EngineKind {
+    app_state.config.lock().unwrap().default_engine_kind
 }
 
-fn default_source_language(state: &State<'_, AppState>) -> crate::models::SourceLanguage {
-    state.config.lock().unwrap().default_source_language
+fn default_source_language(app_state: &AppState) -> crate::models::SourceLanguage {
+    app_state.config.lock().unwrap().default_source_language
 }
 
-fn default_geometry_backend(state: &State<'_, AppState>) -> crate::models::GeometryBackend {
-    state.config.lock().unwrap().default_geometry_backend
+fn default_geometry_backend(app_state: &AppState) -> crate::models::GeometryBackend {
+    app_state.config.lock().unwrap().default_geometry_backend
+}
+
+async fn resolve_thread_authoring_context(
+    app_state: &AppState,
+    thread_id: Option<&str>,
+) -> AppResult<Option<crate::context::ResolvedAuthoringContext>> {
+    let Some(thread_id) = thread_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+
+    let db = app_state.db.lock().await;
+    let engine_kind = crate::db::get_thread_engine_kind(&db, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    let source_language = crate::db::get_thread_source_language(&db, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    let geometry_backend = crate::db::get_thread_geometry_backend(&db, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+
+    let Some(engine_kind) = engine_kind else {
+        return Ok(None);
+    };
+
+    Ok(Some(crate::context::ResolvedAuthoringContext {
+        engine_kind,
+        source_language: source_language.unwrap_or_else(|| engine_kind.to_source_language()),
+        geometry_backend: geometry_backend.unwrap_or_else(|| engine_kind.to_geometry_backend()),
+    }))
 }
 
 async fn resolve_generation_engine_kind(
-    state: &State<'_, AppState>,
-    _thread_id: Option<&str>,
+    app_state: &AppState,
+    thread_id: Option<&str>,
     explicit: Option<crate::models::EngineKind>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
@@ -294,6 +239,10 @@ async fn resolve_generation_engine_kind(
         return Ok(engine_kind);
     }
 
+    if let Some(thread_context) = resolve_thread_authoring_context(app_state, thread_id).await? {
+        return Ok(thread_context.engine_kind);
+    }
+
     if let Some(design) = working_design {
         return Ok(design.engine_kind);
     }
@@ -302,12 +251,12 @@ async fn resolve_generation_engine_kind(
         return Ok(design.engine_kind);
     }
 
-    Ok(default_engine_kind(state))
+    Ok(default_engine_kind(app_state))
 }
 
 async fn resolve_generation_source_language(
-    state: &State<'_, AppState>,
-    _thread_id: Option<&str>,
+    app_state: &AppState,
+    thread_id: Option<&str>,
     explicit: Option<crate::models::SourceLanguage>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
@@ -316,6 +265,10 @@ async fn resolve_generation_source_language(
         return Ok(source_language);
     }
 
+    if let Some(thread_context) = resolve_thread_authoring_context(app_state, thread_id).await? {
+        return Ok(thread_context.source_language);
+    }
+
     if let Some(design) = working_design {
         return Ok(design.source_language);
     }
@@ -324,12 +277,12 @@ async fn resolve_generation_source_language(
         return Ok(design.source_language);
     }
 
-    Ok(default_source_language(state))
+    Ok(default_source_language(app_state))
 }
 
 async fn resolve_generation_geometry_backend(
-    state: &State<'_, AppState>,
-    _thread_id: Option<&str>,
+    app_state: &AppState,
+    thread_id: Option<&str>,
     explicit: Option<crate::models::GeometryBackend>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
@@ -338,6 +291,10 @@ async fn resolve_generation_geometry_backend(
         return Ok(geometry_backend);
     }
 
+    if let Some(thread_context) = resolve_thread_authoring_context(app_state, thread_id).await? {
+        return Ok(thread_context.geometry_backend);
+    }
+
     if let Some(design) = working_design {
         return Ok(design.geometry_backend);
     }
@@ -346,7 +303,7 @@ async fn resolve_generation_geometry_backend(
         return Ok(design.geometry_backend);
     }
 
-    Ok(default_geometry_backend(state))
+    Ok(default_geometry_backend(app_state))
 }
 
 fn prepare_images(image_data: Option<String>, attachments: Option<Vec<Attachment>>) -> Vec<String> {
@@ -367,6 +324,14 @@ fn prepare_images(image_data: Option<String>, attachments: Option<Vec<Attachment
 }
 
 fn attachment_image_data_url(attachment: &Attachment) -> Option<String> {
+    if let Some(data_url) = attachment
+        .data_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| value.starts_with("data:image/"))
+    {
+        return Some(data_url.to_string());
+    }
     let bytes = fs::read(&attachment.path).ok()?;
     let b64 = general_purpose::STANDARD.encode(bytes);
     let ext = attachment
@@ -390,6 +355,27 @@ fn collect_attachment_images(attachments: Option<&Vec<Attachment>>) -> Vec<Strin
         .filter(|attachment| attachment.kind == AttachmentKind::Image)
         .filter_map(attachment_image_data_url)
         .collect()
+}
+
+#[cfg(test)]
+mod attachment_image_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_image_data_url_prefers_inline_payload_over_path_reads() {
+        let attachment = Attachment {
+            path: "/definitely/missing.png".to_string(),
+            name: "missing.png".to_string(),
+            explanation: String::new(),
+            data_url: Some("data:image/png;base64,Zm9v".to_string()),
+            kind: AttachmentKind::Image,
+        };
+
+        assert_eq!(
+            attachment_image_data_url(&attachment).as_deref(),
+            Some("data:image/png;base64,Zm9v")
+        );
+    }
 }
 
 fn build_visual_input_notes(
@@ -529,7 +515,7 @@ pub async fn generate_design(
             let sessions = state.mcp_sessions.lock().await;
             if sessions.is_empty() && no_enabled_engine {
                 return Err(AppError::validation(
-                    "No active engine or MCP agent found. Switch to API Key mode in Settings → Agents, or connect an agent."
+                    "No active engine or MCP agent found. Switch to API Key mode in Settings → Agents, or connect an agent.",
                 ));
             }
             // In MCP mode the frontend routes user input through request_user_prompt,
@@ -551,7 +537,7 @@ pub async fn generate_design(
         )
     };
     let engine_kind = resolve_generation_engine_kind(
-        &state,
+        state.inner(),
         thread_id.as_deref(),
         options.engine_kind,
         working_design.as_ref(),
@@ -559,7 +545,7 @@ pub async fn generate_design(
     )
     .await?;
     let source_language = resolve_generation_source_language(
-        &state,
+        state.inner(),
         thread_id.as_deref(),
         options.source_language,
         working_design.as_ref(),
@@ -567,7 +553,7 @@ pub async fn generate_design(
     )
     .await?;
     let geometry_backend = resolve_generation_geometry_backend(
-        &state,
+        state.inner(),
         thread_id.as_deref(),
         options.geometry_backend,
         working_design.as_ref(),
@@ -594,6 +580,11 @@ pub async fn generate_design(
         TECHNICAL_SYSTEM_PROMPT,
         intent_mode,
         framework_contract.as_deref(),
+        crate::context::ResolvedAuthoringContext {
+            engine_kind,
+            source_language,
+            geometry_backend,
+        },
     );
     let contextual_prompt =
         if source_language == crate::models::SourceLanguage::EckyIrV0 && !question_mode {
@@ -606,7 +597,7 @@ pub async fn generate_design(
             format!(
                 "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
                 contextual_prompt,
-                build123d_guide_text()
+                build123d_python_guide_text()
             )
         } else {
             contextual_prompt
@@ -733,7 +724,7 @@ pub async fn init_generation_attempt(
         .as_secs();
     let assistant_message_id = Uuid::new_v4().to_string();
     let user_message_id = Uuid::new_v4().to_string();
-    let default_engine_kind = default_engine_kind(&state);
+    let default_engine_kind = default_engine_kind(state.inner());
 
     {
         let db = state.db.lock().await;
@@ -750,8 +741,8 @@ pub async fn init_generation_attempt(
                     prompt.clone()
                 }
             };
-            let default_source_language = default_source_language(&state);
-            let default_geometry_backend = default_geometry_backend(&state);
+            let default_source_language = default_source_language(state.inner());
+            let default_geometry_backend = default_geometry_backend(state.inner());
             db::create_or_update_thread(
                 &db,
                 &thread_id,
@@ -1050,8 +1041,8 @@ pub async fn verify_generated_model(
     #[allow(unused_variables)] original_prompt: String,
     app: AppHandle,
 ) -> AppResult<crate::contracts::StructuralVerificationResult> {
-    let bundle = crate::freecad::get_artifact_bundle(&app, &model_id)?;
-    let manifest = crate::freecad::get_model_manifest(&app, &model_id)?;
+    let bundle = crate::model_runtime::read_artifact_bundle(&app, &model_id)?;
+    let manifest = crate::model_runtime::read_model_manifest(&app, &model_id)?;
     Ok(crate::services::structural_verification::verify_structure(
         &bundle, &manifest,
     ))
@@ -1059,9 +1050,42 @@ pub async fn verify_generated_model(
 
 #[cfg(test)]
 mod tests {
-    use super::{prepend_follow_up_context, should_use_framework_for_generation};
+    use super::{
+        build123d_guide_text, build123d_python_guide_text, ecky_ir_v0_guide_text,
+        freecad_guide_text, prepend_follow_up_context, resolve_generation_engine_kind,
+        resolve_generation_geometry_backend, resolve_generation_source_language,
+        should_use_framework_for_generation,
+    };
     use crate::context::PromptContext;
-    use crate::models::{DesignOutput, InteractionMode, MacroDialect, UiSpec};
+    use crate::contracts::{Config, McpConfig};
+    use crate::models::{
+        AppState, DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect,
+        SourceLanguage, UiSpec,
+    };
+    use std::path::PathBuf;
+
+    fn test_db_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ecky-generation-{}-{}", name, uuid::Uuid::new_v4()))
+    }
+
+    fn test_config() -> Config {
+        Config {
+            engines: Vec::new(),
+            selected_engine_id: String::new(),
+            freecad_cmd: String::new(),
+            assets: Vec::new(),
+            microwave: None,
+            voice: crate::models::VoiceConfig::default(),
+            mcp: McpConfig::default(),
+            has_seen_onboarding: true,
+            connection_type: None,
+            default_engine_kind: EngineKind::Freecad,
+            default_source_language: SourceLanguage::LegacyPython,
+            default_geometry_backend: GeometryBackend::Freecad,
+            max_generation_attempts: 3,
+            max_verify_attempts: 0,
+        }
+    }
 
     fn prompt_context_with_last_output(macro_dialect: MacroDialect) -> PromptContext {
         PromptContext {
@@ -1124,5 +1148,220 @@ mod tests {
     fn framework_contract_stays_enabled_even_for_legacy_threads() {
         let ctx = prompt_context_with_last_output(MacroDialect::Legacy);
         assert!(should_use_framework_for_generation(&ctx));
+    }
+
+    #[test]
+    fn guide_texts_use_file_hints_and_backend_truth() {
+        let build123d = build123d_guide_text();
+        assert!(build123d.contains("Current fileExtension: `.ecky`."));
+        assert!(build123d.contains("Current sourceLanguage: `ecky`."));
+        assert!(build123d.contains("Target geometryBackend: `build123d`."));
+        assert!(build123d.contains("Return canonical Ecky source in `macro_code`."));
+        assert!(build123d.contains("typed/static errors and structural verification first"));
+        assert!(build123d.contains("Point/list helpers are portable"));
+        assert!(build123d.contains("Wall-pattern is mesh/eckyRust only"));
+        assert!(
+            build123d.contains("Typed holes are supported only as CAD-VM planning placeholders")
+        );
+        assert!(build123d.contains("unfilled holes intentionally reject during render/lowering"));
+        assert!(build123d.contains(
+            "Do not emit `(hole ...)` when the user expects a finished renderable model"
+        ));
+        assert!(build123d.contains("Direct clauses: `params`, `part`, `meta`."));
+        assert!(build123d.contains("wrapper bodies splice model clauses"));
+        assert!(build123d.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(build123d.contains("Deterministic point/list helpers"));
+        assert!(build123d.contains("`organic-loop`"));
+        assert!(build123d.contains("`voronoi-cells`"));
+        assert!(build123d.contains("`lorenz-points`"));
+        assert!(build123d.contains("`rossler-points`"));
+        assert!(build123d.contains("`logistic-bifurcation-points`"));
+        assert!(build123d.contains("`henon-points`"));
+        assert!(build123d.contains("Bounded literal counts/steps"));
+        assert!(build123d.contains("Seeded helpers are deterministic"));
+        assert!(build123d.contains("`offset-rounded`"));
+        assert!(build123d.contains("`grid-array`"));
+        assert!(build123d.contains("`arc-array`"));
+        assert!(build123d.contains("`deg->rad`"));
+        assert!(build123d.contains("`rad->deg`"));
+        assert!(build123d.contains("Model-level let* splicing clauses"));
+        assert!(!build123d.contains("Python"));
+        assert!(!build123d.contains("`wall-pattern`"));
+        assert!(!build123d.contains("direct OCCT"));
+        assert!(!build123d.contains("`schwarz-p`"));
+        assert!(!build123d.contains("`schwarz-d`"));
+        assert!(!build123d.contains("`diamond-field`"));
+        assert!(!build123d.contains("`neovius`"));
+        assert!(!build123d.contains("`attractor-field`"));
+
+        let ecky = ecky_ir_v0_guide_text(crate::models::GeometryBackend::EckyRust);
+        assert!(ecky.contains("Current fileExtension: `.ecky`."));
+        assert!(ecky.contains("Current sourceLanguage: `ecky`."));
+        assert!(ecky.contains("Target geometryBackend comes from thread metadata"));
+        assert!(ecky.contains("EckyRust is a controlled CAD runtime pipeline"));
+        assert!(ecky.contains("parse -> expand -> typecheck -> lower -> validate"));
+        assert!(ecky.contains("not direct OCCT"));
+        assert!(ecky.contains("typed/static errors and structural verification first"));
+        assert!(ecky.contains("Point/list helpers are portable"));
+        assert!(ecky.contains("Typed holes are supported only as CAD-VM planning placeholders"));
+        assert!(ecky.contains("unfilled holes intentionally reject during render/lowering"));
+        assert!(ecky.contains("Direct clauses: `params`, `part`, `meta`."));
+        assert!(ecky.contains("wrapper bodies splice model clauses"));
+        assert!(ecky.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(ecky.contains("Model-level let* splicing clauses"));
+        assert!(ecky.contains("`wall-pattern`"));
+        assert!(ecky.contains("`cellular`"));
+        assert!(ecky.contains("`gyroid`"));
+        assert!(ecky.contains("`schwarz-p`"));
+        assert!(ecky.contains("`schwarz-d`"));
+        assert!(ecky.contains("`diamond-field`"));
+        assert!(ecky.contains("`neovius`"));
+        assert!(ecky.contains("`attractor-field`"));
+
+        let freecad = freecad_guide_text();
+        assert!(freecad.contains("Current fileExtension: `.ecky`."));
+        assert!(freecad.contains("Target geometryBackend: `freecad`."));
+        assert!(freecad.contains("Return canonical Ecky source in `macro_code`."));
+        assert!(freecad.contains("typed/static errors and structural verification first"));
+        assert!(freecad.contains("Point/list helpers are portable"));
+        assert!(freecad.contains("Wall-pattern is mesh/eckyRust only"));
+        assert!(freecad.contains("Typed holes are supported only as CAD-VM planning placeholders"));
+        assert!(freecad.contains("unfilled holes intentionally reject during render/lowering"));
+        assert!(freecad.contains("Direct clauses: `params`, `part`, `meta`."));
+        assert!(freecad.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(freecad.contains("`grid-array`"));
+        assert!(freecad.contains("`arc-array`"));
+        assert!(!freecad.contains("`wall-pattern`"));
+        assert!(!freecad.contains("`schwarz-p`"));
+        assert!(!freecad.contains("`schwarz-d`"));
+        assert!(!freecad.contains("`diamond-field`"));
+        assert!(!freecad.contains("`neovius`"));
+        assert!(!freecad.contains("`attractor-field`"));
+
+        let raw_python = build123d_python_guide_text();
+        assert!(raw_python.contains("Current fileExtension: `.py`."));
+        assert!(raw_python.contains("Current sourceLanguage: `build123d`."));
+        assert!(raw_python.contains("Return canonical `build123d` source in `macro_code`."));
+    }
+
+    #[test]
+    fn guide_lists_only_manifest_cad_ops_for_backend_specific_surface() {
+        let build123d = build123d_guide_text();
+        let freecad = freecad_guide_text();
+        let mesh = ecky_ir_v0_guide_text(crate::models::GeometryBackend::EckyRust);
+
+        for op in crate::ecky_language_surface::CAD_OPS_PORTABLE {
+            assert!(
+                build123d.contains(&format!("`{op}`")),
+                "build123d missing {op}"
+            );
+            assert!(freecad.contains(&format!("`{op}`")), "freecad missing {op}");
+            assert!(mesh.contains(&format!("`{op}`")), "mesh missing {op}");
+            assert!(
+                crate::ecky_scheme::cad::MODULE.exports.contains(op),
+                "manifest op not exported: {op}"
+            );
+        }
+        assert!(!build123d.contains("`align`"));
+        assert!(!freecad.contains("`align`"));
+        assert!(!build123d.contains("`wall-pattern`"));
+        assert!(!freecad.contains("`wall-pattern`"));
+        assert!(mesh.contains("`wall-pattern`"));
+    }
+
+    #[tokio::test]
+    async fn resolver_uses_stored_thread_authoring_context_before_config_defaults() {
+        let conn = crate::db::init_db(&test_db_path("thread-authoring-precedence")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let thread_id = "thread-authoring";
+
+        {
+            let db = state.db.lock().await;
+            crate::db::create_or_update_thread(
+                &db,
+                thread_id,
+                "Thread",
+                100,
+                None,
+                Some(EngineKind::EckyIrV0),
+                Some(SourceLanguage::EckyIrV0),
+                Some(GeometryBackend::Build123d),
+            )
+            .expect("thread");
+        }
+
+        let engine_kind = resolve_generation_engine_kind(&state, Some(thread_id), None, None, None)
+            .await
+            .expect("engine kind");
+        let source_language =
+            resolve_generation_source_language(&state, Some(thread_id), None, None, None)
+                .await
+                .expect("source language");
+        let geometry_backend =
+            resolve_generation_geometry_backend(&state, Some(thread_id), None, None, None)
+                .await
+                .expect("geometry backend");
+
+        assert_eq!(engine_kind, EngineKind::EckyIrV0);
+        assert_eq!(source_language, SourceLanguage::EckyIrV0);
+        assert_eq!(geometry_backend, GeometryBackend::Build123d);
+    }
+
+    #[tokio::test]
+    async fn resolver_uses_thread_authoring_context_before_stale_version_metadata() {
+        let conn =
+            crate::db::init_db(&test_db_path("thread-authoring-before-version")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let thread_id = "thread-authoring";
+        let stale_design = prompt_context_with_last_output(MacroDialect::Legacy)
+            .last_output
+            .expect("last output");
+
+        {
+            let db = state.db.lock().await;
+            crate::db::create_or_update_thread(
+                &db,
+                thread_id,
+                "Thread",
+                100,
+                None,
+                Some(EngineKind::EckyIrV0),
+                Some(SourceLanguage::EckyIrV0),
+                Some(GeometryBackend::Build123d),
+            )
+            .expect("thread");
+        }
+
+        let engine_kind = resolve_generation_engine_kind(
+            &state,
+            Some(thread_id),
+            None,
+            Some(&stale_design),
+            Some(&stale_design),
+        )
+        .await
+        .expect("engine kind");
+        let source_language = resolve_generation_source_language(
+            &state,
+            Some(thread_id),
+            None,
+            Some(&stale_design),
+            Some(&stale_design),
+        )
+        .await
+        .expect("source language");
+        let geometry_backend = resolve_generation_geometry_backend(
+            &state,
+            Some(thread_id),
+            None,
+            Some(&stale_design),
+            Some(&stale_design),
+        )
+        .await
+        .expect("geometry backend");
+
+        assert_eq!(engine_kind, EngineKind::EckyIrV0);
+        assert_eq!(source_language, SourceLanguage::EckyIrV0);
+        assert_eq!(geometry_backend, GeometryBackend::Build123d);
     }
 }

@@ -61,6 +61,9 @@ function createDefaultConfig(): AppConfig {
     freecadCmd: '',
     assets: [],
     microwave: null,
+    voice: {
+      sttLanguageCode: 'en-US',
+    },
     mcp: {
       port: null,
       maxSessions: null,

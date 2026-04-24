@@ -47,7 +47,13 @@ pub fn collect_attachment_image_paths(attachments: &[Attachment]) -> Vec<String>
     attachments
         .iter()
         .filter(|attachment| attachment.kind == AttachmentKind::Image)
-        .map(|attachment| attachment.path.clone())
+        .filter_map(|attachment| {
+            attachment
+                .data_url
+                .as_ref()
+                .cloned()
+                .or_else(|| (!attachment.path.trim().is_empty()).then_some(attachment.path.clone()))
+        })
         .collect()
 }
 
@@ -189,6 +195,7 @@ mod tests {
             freecad_cmd: String::new(),
             assets: Vec::new(),
             microwave: None,
+            voice: crate::models::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
@@ -208,6 +215,7 @@ mod tests {
                 path: "/tmp/ref.png".to_string(),
                 name: "ref.png".to_string(),
                 explanation: String::new(),
+                data_url: None,
                 kind: AttachmentKind::Image,
             }],
         );
@@ -222,12 +230,14 @@ mod tests {
                 path: "/tmp/ref.png".to_string(),
                 name: "ref.png".to_string(),
                 explanation: String::new(),
+                data_url: None,
                 kind: AttachmentKind::Image,
             },
             Attachment {
                 path: "/tmp/model.fcstd".to_string(),
                 name: "model.fcstd".to_string(),
                 explanation: String::new(),
+                data_url: None,
                 kind: AttachmentKind::Cad,
             },
         ];
@@ -235,6 +245,22 @@ mod tests {
         assert_eq!(
             collect_attachment_image_paths(&attachments),
             vec!["/tmp/ref.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_attachment_image_paths_prefers_inline_image_payloads() {
+        let attachments = vec![Attachment {
+            path: String::new(),
+            name: "ref.png".to_string(),
+            explanation: String::new(),
+            data_url: Some("data:image/png;base64,Zm9v".to_string()),
+            kind: AttachmentKind::Image,
+        }];
+
+        assert_eq!(
+            collect_attachment_image_paths(&attachments),
+            vec!["data:image/png;base64,Zm9v".to_string()]
         );
     }
 

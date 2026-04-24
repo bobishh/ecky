@@ -67,13 +67,28 @@ test('llmContextDigest builds a combined authoring digest', () => {
     const digest = buildAuthoringDigest({
       title: 'Tray',
       versionName: 'V3',
-      sourceLanguage: 'eckyIrV0',
+      sourceLanguage: 'ecky',
       uiSpec: { fields: [{ type: 'checkbox', key: 'lip', label: 'Lip', frozen: false }] },
       params: { lip: true },
       modelManifest: null,
     });
     assert.ok(digest.includes('CURRENT WORKING SNAPSHOT'));
-    assert.ok(digest.includes('Tray [V3] (eckyIrV0)'));
+    assert.ok(digest.includes('Tray [V3] (ecky)'));
+    assert.ok(digest.includes('AUTHORING HINTS'));
+    assert.ok(digest.includes('sourceExtension=.ecky'));
     assert.ok(digest.includes('UI fields: 1'));
     assert.ok(digest.includes('Current params: 1'));
+});
+
+test('llmContextDigest maps legacy authoring to freecad hints', () => {
+    const digest = buildAuthoringDigest({
+      title: 'Legacy',
+      versionName: null,
+      sourceLanguage: 'legacyPython',
+      uiSpec: null,
+      params: null,
+      modelManifest: null,
+    });
+    assert.ok(digest.includes('Legacy (freecad)'));
+    assert.ok(digest.includes('sourceExtension=.FCMacro'));
 });

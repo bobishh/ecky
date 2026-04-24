@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 test.describe('Q&A and Design Flow (Mocked)', () => {
   function boxStl(name: string, min: [number, number, number], max: [number, number, number]) {
@@ -40,7 +40,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     return lines.join('\n');
   }
 
-  async function setupMocks(page: Page, options: { failCanonicalCup?: boolean } = {}) {
+  async function setupMocks(page: Page, options: { failCanonicalCup?: boolean; stepArtifact?: boolean } = {}) {
     const stlFixtures: Record<string, string> = {
       '/mock/output.stl': boxStl('output', [-35, 0, -20], [35, 28, 20]),
       '/mock/parts/shell.stl': boxStl('shell', [-120, 0, -42], [-10, 60, 42]),
@@ -97,7 +97,13 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
             path: '/mock/parts/lid.stl',
             format: 'stl'
           }
-        ]
+        ],
+        exportArtifacts: mockOptions.stepArtifact
+          ? [{ label: 'STEP', format: 'step', path: '/mock/output.step', role: 'primary' }]
+          : [],
+        edgeTargets: [],
+        calloutAnchors: [],
+        measurementGuides: []
       });
 
       const generatedManifest = () => ({
@@ -172,7 +178,13 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
             path: '/mock/parts/outer-shell.stl',
             format: 'stl'
           }
-        ]
+        ],
+        exportArtifacts: mockOptions.stepArtifact
+          ? [{ label: 'STEP', format: 'step', path: '/mock/imported.step', role: 'primary' }]
+          : [],
+        edgeTargets: [],
+        calloutAnchors: [],
+        measurementGuides: []
       });
 
       const importedManifest = () => ({
@@ -381,7 +393,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           return {
             freecad: { available: true, detail: 'Ready at /mock/freecadcmd', path: '/mock/freecadcmd' },
             build123d: { available: true, detail: 'Ready at /mock/python3', path: '/mock/python3' },
-            eckyRust: { available: true, detail: 'bundled', path: null },
+            mesh: { available: true, detail: 'bundled', path: null },
             recommendedAuthoringContext: {
               engineKind: 'freecad',
               sourceLanguage: 'legacyPython',
@@ -410,6 +422,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         if (cmd === 'get_default_macro') return '# macro';
         if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
         if (cmd === 'plugin:dialog|open') return '/mock/imported.FCStd';
+        if (cmd === 'plugin:dialog|save') return '/mock/exported.step';
+        if (cmd === 'export_file') return null;
         
         if (cmd === 'init_generation_attempt') {
           const assistantId = 'msg-' + Math.random();
@@ -503,6 +517,32 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
         if (cmd === 'render_model') {
           return window.__MOCK_BUNDLES__['generated-box'];
+        }
+
+        if (cmd === 'verify_generated_model') {
+          return {
+            passed: true,
+            summary: 'Mock structural verification passed.',
+            issues: [],
+            metrics: {
+              partCount: 2,
+              previewStlSizeBytes: 1024,
+              totalVolume: null,
+              totalArea: null,
+              bbox: null,
+            },
+            verifierStatus: 'ok',
+            verifierSource: 'rust_structural',
+          };
+        }
+
+        if (cmd === 'verify_render') {
+          return {
+            passed: true,
+            summary: 'Mock visual verification passed.',
+            issues: [],
+            usage: null,
+          };
         }
 
         if (cmd === 'import_fcstd') {
@@ -729,6 +769,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.waitForSelector('.workbench');
   }
 
+  async function numericZIndex(target: Locator) {
+    return target.evaluate((element) => Number.parseInt(window.getComputedStyle(element).zIndex || '0', 10));
+  }
+
   test('asking a question should show Ecky response without creating design', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
@@ -769,6 +813,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
 
@@ -777,6 +822,55 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_model')).toBeTruthy();
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'get_model_manifest')).toBeTruthy();
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_stl')).toBeFalsy();
+  });
+
+  test('Given rendered model lacks STEP artifact When export chooser opens Then STEP stays pending', async ({
+    page,
+  }) => {
+    await setupMocks(page);
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.prompt-input')).toBeVisible();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(page.getByRole('button', { name: /EXPORT/i })).toBeVisible();
+    await page.getByRole('button', { name: /EXPORT/i }).click();
+
+    const stepButton = page.locator('.export-chooser__action', { hasText: 'STEP' });
+    await expect(stepButton).toBeVisible();
+    await expect(stepButton).toBeDisabled();
+    await expect(stepButton).toContainText('STEP export is pending for this model.');
+  });
+
+  test('Given rendered model has STEP artifact When STEP export selected Then source artifact is copied', async ({
+    page,
+  }) => {
+    await setupMocks(page, { stepArtifact: true });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.prompt-input')).toBeVisible();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(page.getByRole('button', { name: /EXPORT/i })).toBeVisible();
+    await page.getByRole('button', { name: /EXPORT/i }).click();
+
+    const stepButton = page.locator('.export-chooser__action', { hasText: 'STEP' });
+    await expect(stepButton).toBeEnabled();
+    await stepButton.click();
+
+    await expect
+      .poll(async () => {
+        const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
+        return calls.find((entry: { cmd: string }) => entry.cmd === 'export_file')?.args ?? null;
+      })
+      .toEqual({ sourcePath: '/mock/output.step', targetPath: '/mock/exported.step' });
+    await expect(page.locator('.export-chooser')).toHaveCount(0);
   });
 
   test('selected parts expose editable controls in the main viewer overlay', async ({ page }) => {
@@ -981,6 +1075,31 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.getByRole('button', { name: /\+ NEW/i }).click();
     await expect(page.getByRole('button', { name: /Canonical Cup/i })).toHaveCount(0);
+  });
+
+  test('Given visible projects window When new project chooser opens from both entry points Then chooser stacks above floating windows', async ({ page }) => {
+    await setupMocks(page);
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await expect(projectsWindow).toBeVisible();
+
+    const assertChooserAboveProjects = async () => {
+      const modalBackdrop = page.locator('.modal-backdrop');
+      await expect(modalBackdrop).toBeVisible();
+      await expect(modalBackdrop).toContainText('Start New Project');
+      expect(await numericZIndex(modalBackdrop)).toBeGreaterThan(await numericZIndex(projectsWindow));
+      await page.keyboard.press('Escape');
+      await expect(modalBackdrop).toHaveCount(0);
+    };
+
+    await page.locator('button[title="New project"]').click();
+    await assertChooserAboveProjects();
+
+    await projectsWindow.click({ position: { x: 20, y: 20 } });
+    await page.getByRole('button', { name: /\+ NEW/i }).click();
+    await assertChooserAboveProjects();
   });
 
   test('imported FCStd proposals persist after review and version reload', async ({ page }) => {

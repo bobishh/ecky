@@ -1,9 +1,12 @@
 <script lang="ts">
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { readFile } from '@tauri-apps/plugin-fs';
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
+  import { appendTranscriptToPrompt, createPromptAudioRecorder, type PromptAudioRecorder } from './audio/pushToTalk';
+  import { formatBackendError, transcribePromptAudio } from './tauri/client';
   import type {
     Attachment,
     Message,
@@ -20,6 +23,7 @@
   } from './threadTimeline';
   import { isConceptPreviewMessage } from './viewportBlueprint';
   import { modelEngineLabel } from './modelEngineLabel';
+  import type { DialogueState } from './composables/dialogueState';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -36,15 +40,11 @@
     artifactBundle?: Message['artifactBundle'];
   };
 
-  type DialogueState =
-    | { mode: 'generate' }
-    | { mode: 'mcp-idle' }
-    | { mode: 'agent-reply'; requestId: string; agentLabel: string };
-
   let {
     onGenerate,
     isGenerating = false,
     generationUnavailableReason = null,
+    imageAttachmentUnavailableReason = null,
     dialogueState = { mode: 'generate' } as DialogueState,
     messages = [],
     messagesLoading = false,
@@ -58,6 +58,7 @@
     activeThreadId = null,
     sendWorkspaceCapture = false,
     workspaceCaptureHint = null,
+    sttLanguageCode = 'en-US',
     onToggleWorkspaceCapture,
     activeVersionId = $bindable(null),
     onVersionChange,
@@ -67,6 +68,7 @@
     onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
     isGenerating?: boolean;
     generationUnavailableReason?: string | null;
+    imageAttachmentUnavailableReason?: string | null;
     dialogueState?: DialogueState;
     messages?: Message[];
     messagesLoading?: boolean;
@@ -80,6 +82,7 @@
     activeThreadId?: string | null;
     sendWorkspaceCapture?: boolean;
     workspaceCaptureHint?: string | null;
+    sttLanguageCode?: string;
     onToggleWorkspaceCapture?: (enabled: boolean) => void;
     activeVersionId?: string | null;
     onVersionChange?: (message: VersionMessage) => void;
@@ -90,6 +93,7 @@
   const PROMPT_DRAFTS_STORAGE_KEY = 'ecky:prompt-drafts:v1';
   const NEW_THREAD_DRAFT_KEY = '__new__';
   const PROMPT_DRAFT_DEBOUNCE_MS = 400;
+  type VoiceState = 'idle' | 'listening' | 'transcribing' | 'error';
 
   let prompt = $state('');
   let attachments = $state<Attachment[]>([]);
@@ -98,7 +102,17 @@
   let draftScopeKey = $state<string | null>(null);
   let draftPersistTimer: number | null = null;
   let pendingDraftWrite = $state<{ scopeKey: string; prompt: string } | null>(null);
+  let voiceRecorder = $state<PromptAudioRecorder | null>(null);
+  let voiceState = $state<VoiceState>('idle');
+  let voiceStatus = $state('');
+  const voiceBusy = $derived(voiceState === 'listening' || voiceState === 'transcribing');
   const hasImageAttachments = $derived(attachments.some((attachment) => attachment.type === 'image'));
+  const submitUnavailableReason = $derived.by<string | null>(() => {
+    if (dialogueState.mode !== 'generate') return null;
+    if (generationUnavailableReason) return generationUnavailableReason;
+    if (hasImageAttachments && imageAttachmentUnavailableReason) return imageAttachmentUnavailableReason;
+    return null;
+  });
 
   function currentDraftScopeKey(threadId: string | null | undefined) {
     const normalized = `${threadId ?? ''}`.trim();
@@ -166,6 +180,82 @@
     schedulePromptDraftPersist(currentDraftScopeKey(activeThreadId), prompt);
   }
 
+  async function startVoiceInput() {
+    if (voiceBusy || isGenerating || isSubmitting) return;
+    const recorder = createPromptAudioRecorder();
+    voiceRecorder = recorder;
+    voiceState = 'listening';
+    voiceStatus = 'LISTENING';
+    try {
+      await recorder.start();
+    } catch (error) {
+      voiceRecorder = null;
+      voiceState = 'error';
+      voiceStatus = formatBackendError(error);
+    }
+  }
+
+  async function finishVoiceInput() {
+    if (voiceState !== 'listening' || !voiceRecorder) return;
+    const recorder = voiceRecorder;
+    voiceRecorder = null;
+    voiceState = 'transcribing';
+    voiceStatus = 'TRANSCRIBING';
+    try {
+      const capture = await recorder.stop();
+      const transcript = await transcribePromptAudio({
+        base64Data: capture.base64Data,
+        mimeType: capture.mimeType,
+        languageCode: sttLanguageCode.trim() || 'en-US',
+      });
+      prompt = appendTranscriptToPrompt(prompt, transcript.text);
+      schedulePromptDraftPersist(currentDraftScopeKey(activeThreadId), prompt);
+      voiceState = 'idle';
+      voiceStatus = '';
+    } catch (error) {
+      voiceState = 'error';
+      voiceStatus = formatBackendError(error);
+    }
+  }
+
+  function cancelVoiceInput() {
+    if (voiceState === 'listening') {
+      voiceRecorder?.cancel();
+    }
+    voiceRecorder = null;
+    if (voiceState === 'listening') {
+      voiceState = 'idle';
+      voiceStatus = '';
+    }
+  }
+
+  function handleVoicePointerDown(event: PointerEvent) {
+    event.preventDefault();
+    (event.currentTarget as HTMLButtonElement).setPointerCapture?.(event.pointerId);
+    void startVoiceInput();
+  }
+
+  function handleVoicePointerUp(event: PointerEvent) {
+    event.preventDefault();
+    const button = event.currentTarget as HTMLButtonElement;
+    if (button.hasPointerCapture?.(event.pointerId)) {
+      button.releasePointerCapture(event.pointerId);
+    }
+    void finishVoiceInput();
+  }
+
+  function handleVoiceKeydown(event: KeyboardEvent) {
+    if ((event.key !== ' ' && event.key !== 'Enter') || event.repeat) return;
+    event.preventDefault();
+    void startVoiceInput();
+  }
+
+  function handleVoiceKeyup(event: KeyboardEvent) {
+    if (event.key !== ' ' && event.key !== 'Enter') return;
+    event.preventDefault();
+    void finishVoiceInput();
+  }
+
   function isVersionMessage(message: Message): message is VersionMessage {
     return isVersionTimelineMessage(message);
   }
@@ -177,17 +267,58 @@
     loadPromptDraft(nextScopeKey);
   });
 
-  function processPaths(paths: string[]) {
-    const newAttachments = paths.map((path) => {
+  function imageMimeType(name: string): string {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+    if (ext === 'webp') return 'image/webp';
+    return 'image/png';
+  }
+
+  function bytesToBase64(bytes: Uint8Array): string {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }
+
+  async function inlineImageAttachmentFromPath(path: string): Promise<Attachment> {
+    const name = path.split(/[\/\\]/).pop() || path;
+    const bytes = await readFile(path);
+    return {
+      path: '',
+      name,
+      explanation: '',
+      dataUrl: `data:${imageMimeType(name)};base64,${bytesToBase64(bytes)}`,
+      type: 'image',
+    };
+  }
+
+  async function processPaths(paths: string[]) {
+    const newAttachments = await Promise.all(paths.map(async (path) => {
       const name = path.split(/[\/\\]/).pop() || path;
       const ext = (name.split('.').pop() || '').toLowerCase();
+      if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+        try {
+          return await inlineImageAttachmentFromPath(path);
+        } catch {
+          return {
+            path,
+            name,
+            explanation: '',
+            type: 'image',
+          };
+        }
+      }
       return {
         path,
         name,
         explanation: '',
-        type: ['png', 'jpg', 'jpeg'].includes(ext) ? 'image' : 'cad'
+        type: 'cad',
       };
-    });
+    }));
     attachments = [...attachments, ...newAttachments];
   }
 
@@ -206,7 +337,7 @@
             isDragging = true;
           } else if (event.payload.type === 'drop') {
             isDragging = false;
-            processPaths(event.payload.paths);
+            void processPaths(event.payload.paths);
           } else if (event.payload.type === 'leave') {
             isDragging = false;
           }
@@ -246,7 +377,7 @@
     if (e.dataTransfer && e.dataTransfer.files.length > 0) {
       const files = Array.from(e.dataTransfer.files);
       const mockPaths = files.map((file) => file.name); // Fallback to names
-      processPaths(mockPaths);
+      void processPaths(mockPaths);
     }
   }
 
@@ -310,17 +441,7 @@
 
       if (selected) {
         const paths = Array.isArray(selected) ? selected : [selected];
-        const newAttachments = paths.map((path) => {
-          const name = path.split(/[\/\\]/).pop() || path;
-          const ext = (name.split('.').pop() || '').toLowerCase();
-          return {
-            path,
-            name,
-            explanation: '',
-            type: ['png', 'jpg', 'jpeg'].includes(ext) ? 'image' : 'cad'
-          };
-        });
-        attachments = [...attachments, ...newAttachments];
+        await processPaths(paths);
       }
     } catch (e: unknown) {
       console.error('Failed to open file dialog:', e);
@@ -739,8 +860,12 @@
     {#if attachments.length > 0}
       <div class="attachments-list">
         {#if hasImageAttachments}
-          <div class="attachment-hint">
-            Images go to the intent check and the design model. Add a short note so the model knows what to notice in each reference.
+          <div class="attachment-hint" class:attachment-hint--warning={Boolean(imageAttachmentUnavailableReason)}>
+            {#if imageAttachmentUnavailableReason}
+              {imageAttachmentUnavailableReason}
+            {:else}
+              Images go to the intent check and the design model. Add a short note so the model knows what to notice in each reference.
+            {/if}
           </div>
         {/if}
         {#each attachments as att, i}
@@ -783,14 +908,35 @@
         {/if}
       </div>
       <div class="prompt-actions__right">
+        <button
+          class="btn btn-xs btn-ghost voice-btn"
+          class:voice-btn--active={voiceState === 'listening'}
+          class:voice-btn--busy={voiceState === 'transcribing'}
+          aria-label="Start voice input"
+          title="Hold to record voice input"
+          disabled={isGenerating || isSubmitting || voiceState === 'transcribing'}
+          onpointerdown={handleVoicePointerDown}
+          onpointerup={handleVoicePointerUp}
+          onpointercancel={cancelVoiceInput}
+          onkeydown={handleVoiceKeydown}
+          onkeyup={handleVoiceKeyup}
+        >
+          {#if voiceState === 'listening'}
+            ⏹ LISTENING
+          {:else if voiceState === 'transcribing'}
+            … TRANSCRIBING
+          {:else}
+            🎙 VOICE
+          {/if}
+        </button>
         <button class="btn btn-xs btn-ghost" onclick={addAttachment} title="Attach images or reference CAD files">
           📎 ATTACH REFERENCE
         </button>
         <button
           class="btn btn-primary"
-          disabled={isGenerating || isSubmitting || (dialogueState.mode === 'generate' && Boolean(generationUnavailableReason)) || (!prompt.trim() && attachments.length === 0)}
+          disabled={isGenerating || isSubmitting || Boolean(submitUnavailableReason) || (!prompt.trim() && attachments.length === 0)}
           onclick={submit}
-          title={dialogueState.mode === 'generate' ? (generationUnavailableReason ?? undefined) : undefined}
+          title={submitUnavailableReason ?? undefined}
         >
           {#if isSubmitting}
             SENDING...
@@ -806,6 +952,9 @@
         </button>
       </div>
     </div>
+    {#if voiceStatus}
+      <div class="voice-status" class:voice-status--error={voiceState === 'error'}>{voiceStatus}</div>
+    {/if}
     {#if workspaceCaptureHint && dialogueState.mode !== 'generate'}
       <div class="workspace-capture-hint">{workspaceCaptureHint}</div>
     {/if}
@@ -906,6 +1055,10 @@
     font-size: 0.64rem;
     line-height: 1.4;
     padding: 2px 2px 6px;
+  }
+
+  .attachment-hint--warning {
+    color: var(--secondary);
   }
 
   .att-header {
@@ -1452,6 +1605,39 @@
 
   .prompt-actions__right {
     margin-left: auto;
+  }
+
+  .voice-btn {
+    min-width: 86px;
+    justify-content: center;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .voice-btn--active {
+    color: var(--bg-100);
+    background: var(--secondary);
+    border-color: var(--secondary);
+  }
+
+  .voice-btn--busy {
+    color: var(--primary);
+    border-color: var(--primary);
+  }
+
+  .voice-status {
+    color: var(--secondary);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    line-height: 1.35;
+    max-height: 42px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: pre-wrap;
+  }
+
+  .voice-status--error {
+    color: var(--red);
   }
 
   .workspace-capture-toggle {

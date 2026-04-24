@@ -1,11 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::ecky_core_ir::{
+    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode,
+    CoreNodeKind, CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference,
+    CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
+};
 use crate::models::{AppResult, ParamValue};
 
 use super::model::{
-    expr_head_symbol as head_symbol, expr_keyword_name as keyword_name,
-    expr_list_items as list_items, expr_parse_stringish as parse_stringish, parse_model,
-    parse_typed_build_expr as parse_build_expr, IrExpr as Value, IrModel,
+    allocate_legacy_local_name, core_program_param_defaults, expr_head_symbol as head_symbol,
+    expr_keyword_name as keyword_name, expr_list_items as list_items,
+    expr_parse_stringish as parse_stringish, parse_model,
+    parse_typed_build_expr as parse_build_expr, parse_value_kind_tag, IrExpr as Value, IrModel,
 };
 use super::shared::{unsupported, validation};
 
@@ -20,14 +26,112 @@ impl IrExprVecExt for Value {
     }
 }
 
+#[cfg(test)]
+mod typed_hole_tests {
+    use super::lower_core_program_to_build123d;
+
+    fn typed_hole_cases() -> [(&'static str, &'static str, &'static str); 4] {
+        [
+            (
+                "solid",
+                "solid cutout",
+                r#"(model
+                    (part shell
+                      (difference
+                        (box 1 1 1)
+                        (hole :type solid :goal "solid cutout"))))"#,
+            ),
+            (
+                "sketch",
+                "sketch profile",
+                r#"(model
+                    (part body
+                      (extrude
+                        (hole :type sketch :goal "sketch profile")
+                        5)))"#,
+            ),
+            (
+                "path",
+                "path spine",
+                r#"(model
+                    (part rail
+                      (sweep
+                        (circle 1)
+                        (hole :type path :goal "path spine"))))"#,
+            ),
+            (
+                "shape",
+                "generic shape",
+                r#"(model
+                    (part body
+                      (translate
+                        1 0 0
+                        (hole :type shape :goal "generic shape"))))"#,
+            ),
+        ]
+    }
+
+    #[test]
+    fn lower_core_program_rejects_typed_hole_kinds() {
+        for (type_name, goal, source) in typed_hole_cases() {
+            let program = crate::ecky_scheme::compile_to_core_program(source)
+                .unwrap_or_else(|err| panic!("{type_name} hole should compile: {err}"));
+            let err = match lower_core_program_to_build123d(&program) {
+                Ok(script) => panic!("{type_name} hole lowered into script: {script}"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("Typed hole"), "{message}");
+            assert!(
+                message.contains(&format!("requested type `{type_name}`")),
+                "{message}"
+            );
+            assert!(message.contains(goal), "{message}");
+            assert!(
+                message.contains("must be filled before render/lowering"),
+                "{message}"
+            );
+        }
+    }
+}
+
 pub fn lower_to_build123d(source: &str) -> AppResult<String> {
     let model = parse_model(source)?;
     lower_model_to_build123d(&model)
 }
 
 pub(crate) fn lower_model_to_build123d(model: &IrModel) -> AppResult<String> {
-    let mut lowerer = ExprLowerer::new(&model);
-    lowerer.lower_model()
+    let defaults = model
+        .params
+        .iter()
+        .map(|param| (param.field.key().to_string(), param.default_value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let parts = model
+        .parts
+        .iter()
+        .map(|part| (part.part_id.clone(), part.expr.dup(), part.value_kind))
+        .collect::<Vec<_>>();
+    lower_parts_to_build123d(&defaults, &parts)
+}
+
+pub(crate) fn lower_core_program_to_build123d(program: &CoreProgram) -> AppResult<String> {
+    let defaults = core_program_param_defaults(program)?;
+    let param_names = program
+        .parameters
+        .iter()
+        .map(|param| (param.id.raw(), param.key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut lowerer = ExprLowerer::new(&defaults);
+    lowerer.lower_core_parts(&program.parts, &param_names)
+}
+
+fn lower_parts_to_build123d(
+    defaults: &BTreeMap<String, ParamValue>,
+    parts: &[(String, Value, Option<CoreValueKind>)],
+) -> AppResult<String> {
+    let mut lowerer = ExprLowerer::new(defaults);
+    lowerer.lower_parts(parts)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +193,18 @@ struct LoweredList {
     source_op: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeListKind {
+    Number,
+    Geom(B123dGeomKind),
+}
+
+#[derive(Clone, Debug)]
+struct LoweredRuntimeList {
+    var: String,
+    kind: RuntimeListKind,
+}
+
 impl LoweredList {
     fn new(items: Vec<Value>, kind: LoweredListKind, source_op: Option<String>) -> Self {
         Self {
@@ -110,6 +226,7 @@ impl LoweredList {
 enum LoweredBinding {
     Geom(LoweredGeom),
     List(LoweredList),
+    RuntimeList(LoweredRuntimeList),
     Frame(String),
     Number(String),
     Boolean(String),
@@ -170,7 +287,7 @@ fn lower_num_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<String>
         };
     }
     let items = list_items(value, "numeric expression")?;
-    let op = head_symbol(&items, "numeric expression")?;
+    let op = head_symbol(items, "numeric expression")?;
     let args = &items[1..];
     match op {
         "if" => {
@@ -299,6 +416,16 @@ fn lower_num_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<String>
             }
             Ok(format!("math.atan({})", lower_num_expr(&args[0], scope)?))
         }
+        "atan2" => {
+            if args.len() != 2 {
+                return Err(validation("`atan2` expects y and x."));
+            }
+            Ok(format!(
+                "math.atan2({}, {})",
+                lower_num_expr(&args[0], scope)?,
+                lower_num_expr(&args[1], scope)?
+            ))
+        }
         "abs" => {
             if args.len() != 1 {
                 return Err(validation("`abs` expects one argument."));
@@ -311,22 +438,67 @@ fn lower_num_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<String>
             }
             Ok(format!("math.floor({})", lower_num_expr(&args[0], scope)?))
         }
-        "deg" => {
+        "deg" | "deg->rad" => {
             if args.len() != 1 {
-                return Err(validation("`deg` expects one argument."));
+                return Err(validation("`deg`/`deg->rad` expects one argument."));
             }
             Ok(format!(
                 "math.radians({})",
                 lower_num_expr(&args[0], scope)?
             ))
         }
-        "rad" => {
+        "rad" | "rad->deg" => {
             if args.len() != 1 {
-                return Err(validation("`rad` expects one argument."));
+                return Err(validation("`rad`/`rad->deg` expects one argument."));
             }
             Ok(format!(
                 "math.degrees({})",
                 lower_num_expr(&args[0], scope)?
+            ))
+        }
+        "signed-pow" => {
+            if args.len() != 2 {
+                return Err(validation("`signed-pow` expects value and exponent."));
+            }
+            Ok(format!(
+                "_ecky_signed_pow({}, {})",
+                lower_num_expr(&args[0], scope)?,
+                lower_num_expr(&args[1], scope)?
+            ))
+        }
+        "hash01" | "hash-signed" | "noise2" | "voronoi2" | "cell-distance2" => {
+            if args.len() != 3 {
+                return Err(validation(format!("`{}` expects x, y, and seed.", op)));
+            }
+            let func = match op {
+                "hash01" => "_ecky_hash01",
+                "hash-signed" => "_ecky_hash_signed",
+                "noise2" => "_ecky_noise2",
+                "voronoi2" => "_ecky_voronoi2",
+                "cell-distance2" => "_ecky_cell_distance2",
+                _ => unreachable!(),
+            };
+            Ok(format!(
+                "{func}({}, {}, {})",
+                lower_num_expr(&args[0], scope)?,
+                lower_num_expr(&args[1], scope)?,
+                lower_num_expr(&args[2], scope)?
+            ))
+        }
+        "fbm2" => {
+            if args.len() != 6 {
+                return Err(validation(
+                    "`fbm2` expects x, y, seed, octaves, lacunarity, and gain.",
+                ));
+            }
+            Ok(format!(
+                "_ecky_fbm2({}, {}, {}, {}, {}, {})",
+                lower_num_expr(&args[0], scope)?,
+                lower_num_expr(&args[1], scope)?,
+                lower_num_expr(&args[2], scope)?,
+                lower_num_expr(&args[3], scope)?,
+                lower_num_expr(&args[4], scope)?,
+                lower_num_expr(&args[5], scope)?
             ))
         }
         other => Err(unsupported(format!(
@@ -352,7 +524,7 @@ fn infer_list_item_kind(value: &Value, scope: &LoweringScope<'_>) -> LoweredList
         return LoweredListKind::Scalar;
     };
 
-    if head_symbol(&items, "list item").ok() == Some("let") && items.len() == 3 {
+    if matches!(head_symbol(&items, "list item").ok(), Some("let" | "let*")) && items.len() == 3 {
         if let Ok(child_scope) = lower_scalar_let_scope(&items[1], scope) {
             return infer_list_item_kind(&items[2], &child_scope);
         }
@@ -391,10 +563,24 @@ fn binding_kind_noun(binding: &LoweredBinding) -> &'static str {
     match binding {
         LoweredBinding::Geom(geom) => geom.kind.noun(),
         LoweredBinding::List(list) => list.kind.noun(),
+        LoweredBinding::RuntimeList(list) => list.kind.noun(),
         LoweredBinding::Frame(_) => "frame",
         LoweredBinding::Number(_) => "number",
         LoweredBinding::Boolean(_) => "boolean",
         LoweredBinding::Stringish(_) => "string-like value",
+    }
+}
+
+impl RuntimeListKind {
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Number => "runtime number list",
+            Self::Geom(kind) => match kind {
+                B123dGeomKind::Sketch2d => "runtime 2D sketch list",
+                B123dGeomKind::Solid3d => "runtime 3D solid list",
+                B123dGeomKind::Path3d => "runtime 3D path list",
+            },
+        }
     }
 }
 
@@ -428,7 +614,7 @@ fn lower_scalar_let_scope<'a>(
     let mut child_scope = scope.clone();
     for binding in bindings {
         let pair = list_items(binding, "binding pair")?;
-        if pair.len() != 2 {
+        if pair.len() != 2 && pair.len() != 4 {
             return Err(validation("Each binding must be `(name expr)`."));
         }
         let name = pair[0]
@@ -451,7 +637,11 @@ fn lower_point_2d_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<(S
             lower_num_expr(&items[2], scope)?,
         ));
     }
-    if head_symbol(&items, "2D point expression").ok() == Some("let") && items.len() == 3 {
+    if matches!(
+        head_symbol(&items, "2D point expression").ok(),
+        Some("let" | "let*")
+    ) && items.len() == 3
+    {
         let child_scope = lower_scalar_let_scope(&items[1], scope)?;
         return lower_point_2d_expr(&items[2], &child_scope);
     }
@@ -478,7 +668,11 @@ fn lower_point_3d_expr(
             lower_num_expr(&items[3], scope)?,
         ));
     }
-    if head_symbol(&items, "3D point expression").ok() == Some("let") && items.len() == 3 {
+    if matches!(
+        head_symbol(&items, "3D point expression").ok(),
+        Some("let" | "let*")
+    ) && items.len() == 3
+    {
         let child_scope = lower_scalar_let_scope(&items[1], scope)?;
         return lower_point_3d_expr(&items[2], &child_scope);
     }
@@ -492,6 +686,101 @@ fn lower_point_3d_expr(
     Err(validation("3D points must be (x y z) triples."))
 }
 
+fn extract_let_binding_hint(pair: &[Value]) -> Option<CoreValueKind> {
+    if pair.len() == 4 {
+        keyword_name(&pair[2])
+            .filter(|k| *k == "value-kind")
+            .and_then(|_| pair[3].as_symbol())
+            .and_then(parse_value_kind_tag)
+    } else {
+        None
+    }
+}
+
+fn core_symbol_name(symbol: &CoreSymbol) -> &'static str {
+    match symbol {
+        CoreSymbol::Start => "start",
+        CoreSymbol::End => "end",
+        CoreSymbol::Xy => "xy",
+        CoreSymbol::Yz => "yz",
+        CoreSymbol::Xz => "xz",
+        CoreSymbol::Min => "min",
+        CoreSymbol::Center => "center",
+        CoreSymbol::Max => "max",
+    }
+}
+
+fn core_value_kind_tag_local(kind: CoreValueKind) -> &'static str {
+    match kind {
+        CoreValueKind::Any => "any",
+        CoreValueKind::Number => "number",
+        CoreValueKind::Boolean => "boolean",
+        CoreValueKind::Text => "text",
+        CoreValueKind::List => "list",
+        CoreValueKind::Point2 => "point2",
+        CoreValueKind::Point3 => "point3",
+        CoreValueKind::Sketch => "sketch",
+        CoreValueKind::Path => "path",
+        CoreValueKind::Frame => "frame",
+        CoreValueKind::Compound => "compound",
+        CoreValueKind::Solid => "solid",
+    }
+}
+
+fn core_operation_name_local(op: &CoreOperation) -> String {
+    match op {
+        CoreOperation::Primitive(CorePrimitive::Box) => "box".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Cone) => "cone".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Circle) => "circle".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle".to_string(),
+        CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect".to_string(),
+        CoreOperation::Primitive(CorePrimitive::RoundedPolygon) => "rounded-polygon".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Polygon) => "polygon".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Profile) => "profile".to_string(),
+        CoreOperation::Primitive(CorePrimitive::MakeFace) => "make-face".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Text) => "text".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Svg) => "svg".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Stl) => "import-stl".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Union) => "union".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Difference) => "difference".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Intersection) => "intersection".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Xor) => "xor".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Translate) => "translate".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Rotate) => "rotate".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Scale) => "scale".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Mirror) => "mirror".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Extrude) => "extrude".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Revolve) => "revolve".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Loft) => "loft".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
+        CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
+        CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
+        CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
+        CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::Repeat) => "repeat".to_string(),
+        CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
+        CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
+        CoreOperation::Array(CoreArrayOp::RepeatPick) => "repeat-pick".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Plane) => "plane".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Location) => "location".to_string(),
+        CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
+        CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
+        CoreOperation::Meta(CoreMetaOp::Group) => "compound".to_string(),
+        CoreOperation::Meta(CoreMetaOp::Comment) => "meta".to_string(),
+        CoreOperation::Meta(CoreMetaOp::Annotate) => "build".to_string(),
+        CoreOperation::Custom(name) => name.clone(),
+    }
+}
+
 fn fmt_f64(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}.0", n as i64)
@@ -499,6 +788,39 @@ fn fmt_f64(n: f64) -> String {
         // Use Rust's default Display which gives enough precision
         format!("{}", n)
     }
+}
+
+fn value_literal_f64(value: &Value) -> Option<f64> {
+    value.as_f64()
+}
+
+fn python_local_ident(symbol: &str, prefix: &str) -> String {
+    let mut out = String::from(prefix);
+    let mut wrote_any = false;
+
+    for ch in symbol.chars() {
+        match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => {
+                out.push(ch);
+                wrote_any = true;
+            }
+            '-' => {
+                out.push('_');
+                wrote_any = true;
+            }
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "_u{:x}_", other as u32);
+                wrote_any = true;
+            }
+        }
+    }
+
+    if !wrote_any {
+        out.push_str("value");
+    }
+
+    out
 }
 
 fn lower_bool_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<String> {
@@ -529,7 +851,7 @@ fn lower_bool_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<String
         };
     }
     let items = list_items(value, "boolean expression")?;
-    let op = head_symbol(&items, "boolean expression")?;
+    let op = head_symbol(items, "boolean expression")?;
     let args = &items[1..];
     match op {
         "if" => {
@@ -605,12 +927,13 @@ fn lower_stringish_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<S
                 LoweredBinding::Stringish(expr)
                 | LoweredBinding::Number(expr)
                 | LoweredBinding::Boolean(expr) => Ok(format!("str({expr})")),
-                LoweredBinding::Geom(_) | LoweredBinding::Frame(_) | LoweredBinding::List(_) => {
-                    Err(unsupported(format!(
-                        "Symbol `{}` is not a string-like binding in this context.",
-                        sym
-                    )))
-                }
+                LoweredBinding::Geom(_)
+                | LoweredBinding::Frame(_)
+                | LoweredBinding::List(_)
+                | LoweredBinding::RuntimeList(_) => Err(unsupported(format!(
+                    "Symbol `{}` is not a string-like binding in this context.",
+                    sym
+                ))),
             };
         }
         return match scope.params.get(sym) {
@@ -695,6 +1018,20 @@ struct PlaceCall {
 }
 
 #[derive(Debug, PartialEq)]
+struct PlaneCall {
+    origin: Option<Value>,
+    x: Option<Value>,
+    normal: Option<Value>,
+}
+
+#[derive(Debug, PartialEq)]
+struct LocationCall {
+    frame: Value,
+    offset: Option<Value>,
+    rotate: Option<Value>,
+}
+
+#[derive(Debug, PartialEq)]
 struct ClipBoxCall {
     geometry: Value,
     x: Value,
@@ -758,6 +1095,38 @@ impl ParsedCallArgs {
     }
 }
 
+fn typed_hole_error(args: &[Value]) -> String {
+    let parsed = ParsedCallArgs::parse("hole", args, &["type", "goal"]);
+    let (type_name, goal) = match parsed {
+        Ok(parsed) => (
+            parsed
+                .keywords
+                .get("type")
+                .and_then(|value| parse_stringish(value, "hole type").ok()),
+            parsed
+                .keywords
+                .get("goal")
+                .and_then(|value| parse_stringish(value, "hole goal").ok()),
+        ),
+        Err(_) => (None, None),
+    };
+    match (type_name, goal) {
+        (Some(type_name), Some(goal)) => format!(
+            "Typed hole requested type `{}` with goal `{}` must be filled before render/lowering.",
+            type_name, goal
+        ),
+        (Some(type_name), None) => format!(
+            "Typed hole requested type `{}` must be filled before render/lowering.",
+            type_name
+        ),
+        (None, Some(goal)) => format!(
+            "Typed hole with goal `{}` must be filled before render/lowering.",
+            goal
+        ),
+        (None, None) => "Typed hole must be filled before render/lowering.".to_string(),
+    }
+}
+
 fn parse_path_frame_call(args: &[Value]) -> AppResult<PathFrameCall> {
     let parsed = ParsedCallArgs::parse("path-frame", args, &["at", "up"])?;
     if parsed.positional.len() != 1 {
@@ -788,6 +1157,34 @@ fn parse_place_call(args: &[Value]) -> AppResult<PlaceCall> {
     Ok(PlaceCall {
         frame: parsed.positional[0].dup(),
         geometry: parsed.positional[1].dup(),
+        offset: parsed.keywords.get("offset").map(Value::dup),
+        rotate: parsed.keywords.get("rotate").map(Value::dup),
+    })
+}
+
+fn parse_plane_call(args: &[Value]) -> AppResult<PlaneCall> {
+    let parsed = ParsedCallArgs::parse("plane", args, &["origin", "x", "normal"])?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`plane` expects only `:origin`, `:x`, and `:normal` options.",
+        ));
+    }
+    Ok(PlaneCall {
+        origin: parsed.keywords.get("origin").map(Value::dup),
+        x: parsed.keywords.get("x").map(Value::dup),
+        normal: parsed.keywords.get("normal").map(Value::dup),
+    })
+}
+
+fn parse_location_call(args: &[Value]) -> AppResult<LocationCall> {
+    let parsed = ParsedCallArgs::parse("location", args, &["offset", "rotate"])?;
+    if parsed.positional.len() != 1 {
+        return Err(validation(
+            "`location` expects a plane/frame and optional `:offset` / `:rotate`.",
+        ));
+    }
+    Ok(LocationCall {
+        frame: parsed.positional[0].dup(),
         offset: parsed.keywords.get("offset").map(Value::dup),
         rotate: parsed.keywords.get("rotate").map(Value::dup),
     })
@@ -834,6 +1231,62 @@ fn parse_linear_array_call(args: &[Value]) -> AppResult<LinearArrayCall> {
         dz: parsed.positional[3].dup(),
         geometry: parsed.positional[4].dup(),
     })
+}
+
+fn parse_lambda_expr(value: &Value) -> AppResult<(Vec<String>, Value)> {
+    let items = list_items(value, "lambda expression")?;
+    if head_symbol(items, "lambda expression")? != "lambda" || items.len() != 3 {
+        return Err(validation("`map` expects `(lambda (args ...) body)`."));
+    }
+    let params = list_items(&items[1], "lambda parameter list")?
+        .iter()
+        .map(|param| {
+            param
+                .as_symbol()
+                .map(str::to_string)
+                .ok_or_else(|| validation("Lambda parameters must be symbols."))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok((params, items[2].dup()))
+}
+
+fn parse_align_axis(value: &Value, node: &str) -> AppResult<&'static str> {
+    match value.as_symbol().or_else(|| value.as_str()) {
+        Some("min") => Ok("Align.MIN"),
+        Some("center") => Ok("Align.CENTER"),
+        Some("max") => Ok("Align.MAX"),
+        Some(other) => Err(validation(format!(
+            "`{} :align` expects `min`, `center`, or `max`, got `{}`.",
+            node, other
+        ))),
+        None => Err(validation(format!(
+            "`{} :align` expects `(x y z)` axis symbols.",
+            node
+        ))),
+    }
+}
+
+fn parse_align_tuple(value: Option<&Value>, node: &str, default: &str) -> AppResult<String> {
+    let Some(value) = value else {
+        return Ok(default.to_string());
+    };
+    let items = {
+        let parsed = list_items(value, "align tuple")?;
+        if parsed.len() == 2 && parsed.first().and_then(Value::as_symbol) == Some("quote") {
+            list_items(&parsed[1], "align tuple")?
+        } else {
+            parsed
+        }
+    };
+    if items.len() != 3 {
+        return Err(validation(format!("`{} :align` expects `(x y z)`.", node)));
+    }
+    Ok(format!(
+        "({}, {}, {})",
+        parse_align_axis(&items[0], node)?,
+        parse_align_axis(&items[1], node)?,
+        parse_align_axis(&items[2], node)?,
+    ))
 }
 
 // ---- Linearizer: PyExpr tree → flat Python assignment statements -----------
@@ -908,167 +1361,17 @@ fn b123d_preamble() -> Vec<String> {
     vec![
         "from build123d import *".into(),
         "from build123d import exporters".into(),
+        "from _ecky_build123d_helpers import *".into(),
         "import math".into(),
-        String::new(),
-        "def _ecky_intersect_x(shape, z):".into(),
-        "    try:".into(),
-        "        pts = shape.find_intersection_points(Axis(origin=(0,0,z), direction=(1,0,0)))".into(),
-        "        if not pts: return 0.0".into(),
-        "        pt = pts[-1][0] if isinstance(pts[-1], (list, tuple)) else pts[-1]".into(),
-        "        return pt.X".into(),
-        "    except:".into(),
-        "        return 0.0".into(),
-        String::new(),
-        "def _ecky_face(shape):".into(),
-        "    try:".into(),
-        "        faces = shape.faces()".into(),
-        "        if len(faces) == 1: return faces[0]".into(),
-        "        if len(faces) > 1: return shape".into(),
-        "    except Exception:".into(),
-        "        pass".into(),
-        "    try:".into(),
-        "        return make_face(Wire(shape.edges()))".into(),
-        "    except Exception:".into(),
-        "        return shape".into(),
-        String::new(),
-        "def _ecky_wire_from_segments(*segments):".into(),
-        "    edges = []".into(),
-        "    for segment in segments:".into(),
-        "        try:".into(),
-        "            edges.extend(list(segment.edges()))".into(),
-        "            continue".into(),
-        "        except Exception:".into(),
-        "            pass".into(),
-        "        try:".into(),
-        "            edges.append(segment)".into(),
-        "        except Exception:".into(),
-        "            pass".into(),
-        "    return Wire(edges)".into(),
-        String::new(),
-        "def _ecky_face_from_wires(*wires):".into(),
-        "    edges = []".into(),
-        "    for wire in wires:".into(),
-        "        try:".into(),
-        "            edges.extend(list(wire.edges()))".into(),
-        "        except Exception:".into(),
-        "            pass".into(),
-        "    if not edges:".into(),
-        "        return Compound(children=[])".into(),
-        "    try:".into(),
-        "        return make_face(Wire(edges))".into(),
-        "    except Exception:".into(),
-        "        return _ecky_face(_ecky_compound(*wires))".into(),
-        String::new(),
-        "def _ecky_face_with_holes(outer_wire, *hole_wires):".into(),
-        "    return Face(outer_wire, list(hole_wires))".into(),
-        String::new(),
-        "def _ecky_apply_transform(transform, shape):".into(),
-        "    try:".into(),
-        "        solids = _ecky_collect_solids(shape)".into(),
-        "        if len(solids) == 1:".into(),
-        "            return transform * solids[0]".into(),
-        "        if len(solids) > 1:".into(),
-        "            return Compound(children=[transform * solid for solid in solids])".into(),
-        "    except Exception:".into(),
-        "        pass".into(),
-        "    try:".into(),
-        "        return transform * shape".into(),
-        "    except Exception:".into(),
-        "        return Compound(children=[])".into(),
-        String::new(),
-        "def _ecky_solid(shape):".into(),
-        "    try:".into(),
-        "        solids = list(shape.solids())".into(),
-        "        if len(solids) == 1: return Compound(children=[solids[0]])".into(),
-        "        if len(solids) > 1: return Compound(children=solids)".into(),
-        "    except Exception:".into(),
-        "        pass".into(),
-        "    return shape".into(),
-        String::new(),
-        "def _ecky_has_solids(shape):".into(),
-        "    try: return len(list(shape.solids())) > 0".into(),
-        "    except Exception: return False".into(),
-        String::new(),
-        "def _ecky_collect_solids(shape):".into(),
-        "    try: return list(shape.solids())".into(),
-        "    except Exception: return []".into(),
-        String::new(),
-        "def _ecky_compound(*shapes):".into(),
-        "    solids = []".into(),
-        "    for shape in shapes: solids.extend(_ecky_collect_solids(shape))".into(),
-        "    return Compound(children=solids)".into(),
-        String::new(),
-        "def _ecky_difference_solid(base, *cuts):".into(),
-        "    if not _ecky_has_solids(base): return Compound(children=[])".into(),
-        "    out = _ecky_solid(base)".into(),
-        "    for cut in cuts:".into(),
-        "        if not _ecky_has_solids(cut): continue".into(),
-        "        out = out - _ecky_solid(cut)".into(),
-        "    return _ecky_solid(out)".into(),
-        String::new(),
-        "def _ecky_intersection_solid(*shapes):".into(),
-        "    non_empty = [shape for shape in shapes if _ecky_has_solids(shape)]".into(),
-        "    if not non_empty: return Compound(children=[])".into(),
-        "    out = _ecky_solid(non_empty[0])".into(),
-        "    for shape in non_empty[1:]:".into(),
-        "        out = out & _ecky_solid(shape)".into(),
-        "        if not _ecky_has_solids(out): return Compound(children=[])".into(),
-        "    return _ecky_solid(out)".into(),
-        String::new(),
-        "def _ecky_fuse_many(*shapes):".into(),
-        "    solids = []".into(),
-        "    for shape in shapes: solids.extend(_ecky_collect_solids(shape))".into(),
-        "    if not solids: return Compound(children=[])".into(),
-        "    if len(solids) == 1: return Compound(children=[solids[0]])".into(),
-        "    return _ecky_solid(solids[0].fuse(*solids[1:]))".into(),
-        String::new(),
-        "def _ecky_cut_many(base, *cuts):".into(),
-        "    base_solids = _ecky_collect_solids(base)".into(),
-        "    cut_solids = []".into(),
-        "    for cut in cuts: cut_solids.extend(_ecky_collect_solids(cut))".into(),
-        "    if not base_solids: return Compound(children=[])".into(),
-        "    if not cut_solids: return base_solids[0] if len(base_solids) == 1 else Compound(children=base_solids)".into(),
-        "    cutter = cut_solids[0] if len(cut_solids) == 1 else Compound(children=cut_solids)".into(),
-        "    out = []".into(),
-        "    for solid in base_solids:".into(),
-        "        out.extend(_ecky_collect_solids(solid - cutter))".into(),
-        "    if not out: return Compound(children=[])".into(),
-        "    return out[0] if len(out) == 1 else Compound(children=out)".into(),
-        String::new(),
-        "def _ecky_common_many(*shapes):".into(),
-        "    buckets = [_ecky_collect_solids(shape) for shape in shapes]".into(),
-        "    if any(len(bucket) == 0 for bucket in buckets): return Compound(children=[])".into(),
-        "    current = buckets[0]".into(),
-        "    for bucket in buckets[1:]:".into(),
-        "        out = []".into(),
-        "        for left in current:".into(),
-        "            hit = left.intersect(*bucket)".into(),
-        "            out.extend(_ecky_collect_solids(hit))".into(),
-        "        current = out".into(),
-        "        if not current: return Compound(children=[])".into(),
-        "    return current[0] if len(current) == 1 else Compound(children=current)".into(),
-        String::new(),
-        "def _ecky_path_frame(path, at='end', up=None):".into(),
-        "    if at == 'start': position = 0.0".into(),
-        "    elif at == 'end': position = 1.0".into(),
-        "    else: position = float(at)".into(),
-        "    kwargs = {'position_mode': PositionMode.PARAMETER, 'frame_method': FrameMethod.FRENET}".into(),
-        "    if up is not None: kwargs['x_dir'] = Vector(*up)".into(),
-        "    return path.location_at(position, **kwargs)".into(),
-        String::new(),
-        "def _ecky_place(frame, shape, offset=(0,0,0), rotate=(0,0,0)):".into(),
-        "    ox, oy, oz = offset".into(),
-        "    rx, ry, rz = rotate".into(),
-        "    return frame * Pos(ox, oy, oz) * Rot(rx, ry, rz) * shape".into(),
-        String::new(),
-        "def _ecky_clip_box(shape, xmin, xmax, ymin, ymax, zmin, zmax):".into(),
-        "    solids = _ecky_collect_solids(shape)".into(),
-        "    if not solids: return Compound(children=[])".into(),
-        "    xmin, xmax = min(xmin, xmax), max(xmin, xmax)".into(),
-        "    ymin, ymax = min(ymin, ymax), max(ymin, ymax)".into(),
-        "    zmin, zmax = min(zmin, zmax), max(zmin, zmax)".into(),
-        "    clip = Pos((xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0) * Box(xmax - xmin, ymax - ymin, zmax - zmin, align=(Align.CENTER, Align.CENTER, Align.CENTER))".into(),
-        "    return _ecky_common_many(shape, clip)".into(),
+        "def _ecky_fract01(value):\n    value = float(value)\n    wrapped = value - math.floor(value)\n    return max(0.0, min(1.0, wrapped))".into(),
+        "def _ecky_hash01(x, y, seed):\n    raw = math.sin(float(x) * 127.1 + float(y) * 311.7 + float(seed) * 74.7) * 43758.5453123\n    return _ecky_fract01(raw)".into(),
+        "def _ecky_hash_signed(x, y, seed):\n    return _ecky_hash01(x, y, seed) * 2.0 - 1.0".into(),
+        "def _ecky_smoothstep01(x):\n    t = max(0.0, min(1.0, float(x)))\n    return t * t * (3.0 - 2.0 * t)".into(),
+        "def _ecky_noise2(x, y, seed):\n    x0 = math.floor(float(x)); y0 = math.floor(float(y))\n    xf = float(x) - x0; yf = float(y) - y0\n    n00 = _ecky_hash01(x0, y0, seed); n10 = _ecky_hash01(x0 + 1.0, y0, seed)\n    n01 = _ecky_hash01(x0, y0 + 1.0, seed); n11 = _ecky_hash01(x0 + 1.0, y0 + 1.0, seed)\n    sx = _ecky_smoothstep01(xf); sy = _ecky_smoothstep01(yf)\n    ix0 = n00 + (n10 - n00) * sx; ix1 = n01 + (n11 - n01) * sx\n    return max(0.0, min(1.0, ix0 + (ix1 - ix0) * sy))".into(),
+        "def _ecky_fbm2(x, y, seed, octaves, lacunarity, gain):\n    octaves = max(1, min(12, int(round(float(octaves)))))\n    lacunarity = max(0.0001, float(lacunarity)); gain = max(0.0, min(1.0, float(gain)))\n    amp = 0.5; freq = 1.0; total = 0.0; norm = 0.0\n    for octave in range(octaves):\n        total += _ecky_noise2(float(x) * freq, float(y) * freq, float(seed) + octave * 17.0) * amp\n        norm += amp; amp *= gain; freq *= lacunarity\n    return 0.0 if norm <= 1e-12 else max(0.0, min(1.0, total / norm))".into(),
+        "def _ecky_cell_distance2(x, y, seed):\n    cx = math.floor(float(x)); cy = math.floor(float(y)); best = float('inf')\n    for oy in (-1, 0, 1):\n        for ox in (-1, 0, 1):\n            gx = cx + ox; gy = cy + oy\n            px = gx + _ecky_hash01(gx, gy, seed)\n            py = gy + _ecky_hash01(gx + 19.19, gy + 7.73, float(seed) + 31.0)\n            best = min(best, math.hypot(float(x) - px, float(y) - py))\n    return max(0.0, min(1.0, best / math.sqrt(2.0)))".into(),
+        "def _ecky_voronoi2(x, y, seed):\n    return max(0.0, min(1.0, 1.0 - _ecky_cell_distance2(x, y, seed)))".into(),
+        "def _ecky_signed_pow(value, exponent):\n    value = float(value); exponent = float(exponent)\n    return math.copysign(abs(value) ** exponent, value)".into(),
         String::new(),
     ]
 }
@@ -1084,17 +1387,19 @@ fn serialize_b123d_program(linearized_lines: Vec<String>, part_entries: Vec<Stri
 // ---- Expression lowerer ---------------------------------------------------
 
 struct ExprLowerer<'a> {
-    model: &'a IrModel,
+    param_defaults: &'a BTreeMap<String, ParamValue>,
     lin: Linearizer,
     imp_counter: usize,
+    local_name_counts: BTreeMap<String, usize>,
 }
 
 impl<'a> ExprLowerer<'a> {
-    fn new(model: &'a IrModel) -> Self {
+    fn new(param_defaults: &'a BTreeMap<String, ParamValue>) -> Self {
         Self {
-            model,
+            param_defaults,
             lin: Linearizer::new(),
             imp_counter: 0,
+            local_name_counts: BTreeMap::new(),
         }
     }
 
@@ -1124,37 +1429,121 @@ impl<'a> ExprLowerer<'a> {
         scope: &LoweringScope<'_>,
     ) -> AppResult<(Vec<String>, String, B123dGeomKind)> {
         let mut nested = ExprLowerer {
-            model: self.model,
+            param_defaults: self.param_defaults,
             lin: Linearizer::new(),
             imp_counter: self.imp_counter,
+            local_name_counts: self.local_name_counts.clone(),
         };
         let node = nested.lower_geom_expr(value, scope)?;
         let result_var = nested.lin.linearize(&node.expr);
         self.imp_counter = nested.imp_counter;
+        self.local_name_counts = nested.local_name_counts;
         Ok((nested.lin.lines, result_var, node.kind))
     }
 
-    fn param_defaults(&self) -> BTreeMap<String, ParamValue> {
-        self.model
-            .params
-            .iter()
-            .map(|p| (p.field.key().to_string(), p.default_value.clone()))
-            .collect()
+    #[allow(clippy::too_many_arguments)]
+    fn lower_core_value_locally(
+        &mut self,
+        node: &CoreNode,
+        hint: Option<CoreValueKind>,
+        param_names: &BTreeMap<u64, String>,
+        refs: &BTreeMap<u64, String>,
+        locals: &BTreeMap<String, String>,
+        used_local_names: &BTreeMap<String, usize>,
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<(Vec<String>, LoweredBinding)> {
+        let mut nested = ExprLowerer {
+            param_defaults: self.param_defaults,
+            lin: Linearizer::new(),
+            imp_counter: self.imp_counter,
+            local_name_counts: self.local_name_counts.clone(),
+        };
+        let mut child_refs = refs.clone();
+        let mut child_locals = locals.clone();
+        let mut child_used_local_names = used_local_names.clone();
+        let binding = nested.lower_core_value_hinted(
+            node,
+            hint,
+            param_names,
+            &mut child_refs,
+            &mut child_locals,
+            &mut child_used_local_names,
+            scope,
+        )?;
+        self.imp_counter = nested.imp_counter;
+        self.local_name_counts = nested.local_name_counts;
+        Ok((nested.lin.lines, binding))
     }
 
-    fn lower_model(&mut self) -> AppResult<String> {
-        let defaults = self.param_defaults();
-        let scope = LoweringScope::new(&defaults);
-        let parts: Vec<(String, Value)> = self
-            .model
-            .parts
-            .iter()
-            .map(|p| (p.part_id.clone(), p.expr.dup()))
-            .collect();
+    fn lower_core_list_value(
+        &self,
+        node: &CoreNode,
+        param_names: &BTreeMap<u64, String>,
+        refs: &BTreeMap<u64, String>,
+        locals: &BTreeMap<String, String>,
+        used_local_names: &mut BTreeMap<String, usize>,
+    ) -> AppResult<Value> {
+        match &node.kind {
+            CoreNodeKind::Literal(CoreLiteral::Number(number)) => Ok(Value::number(*number)),
+            CoreNodeKind::Literal(CoreLiteral::Boolean(flag)) => Ok(Value::boolean(*flag)),
+            CoreNodeKind::Literal(CoreLiteral::Text(text)) => Ok(Value::string(text.clone())),
+            CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => {
+                Ok(Value::symbol(core_symbol_name(symbol)))
+            }
+            CoreNodeKind::Literal(CoreLiteral::Point2([x, y])) => {
+                Ok(Value::list(vec![Value::number(*x), Value::number(*y)]))
+            }
+            CoreNodeKind::Literal(CoreLiteral::Point3([x, y, z])) => Ok(Value::list(vec![
+                Value::number(*x),
+                Value::number(*y),
+                Value::number(*z),
+            ])),
+            CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(Value::symbol(
+                locals.get(name).cloned().unwrap_or_else(|| name.clone()),
+            )),
+            CoreNodeKind::Reference(CoreReference::Node(id)) => refs
+                .get(&id.raw())
+                .cloned()
+                .map(Value::symbol)
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "Unsupported Core node reference {:?} in list value.",
+                        id
+                    ))
+                }),
+            CoreNodeKind::Reference(CoreReference::Parameter(id)) => param_names
+                .get(&id.raw())
+                .cloned()
+                .map(Value::symbol)
+                .ok_or_else(|| {
+                    unsupported(format!("Unsupported Core parameter reference {:?}.", id))
+                }),
+            CoreNodeKind::List(items) => Ok(Value::list(
+                items
+                    .iter()
+                    .map(|item| {
+                        self.lower_core_list_value(
+                            item,
+                            param_names,
+                            refs,
+                            locals,
+                            used_local_names,
+                        )
+                    })
+                    .collect::<AppResult<Vec<_>>>()?,
+            )),
+            _ => self.lower_core_node_to_value(node, param_names, refs, locals, used_local_names),
+        }
+    }
 
+    fn lower_parts(
+        &mut self,
+        parts: &[(String, Value, Option<CoreValueKind>)],
+    ) -> AppResult<String> {
+        let scope = LoweringScope::new(self.param_defaults);
         let mut part_entries: Vec<String> = Vec::new();
-        for (part_id, expr) in &parts {
-            let node = self.lower_geom_expr(expr, &scope)?;
+        for (part_id, expr, value_kind) in parts {
+            let node = self.lower_geom_expr_hinted(expr, &scope, *value_kind)?;
             let var = self.lin.linearize(&node.expr);
             part_entries.push(format!("({:?}, {})", part_id, var));
         }
@@ -1163,6 +1552,765 @@ impl<'a> ExprLowerer<'a> {
             std::mem::take(&mut self.lin.lines),
             part_entries,
         ))
+    }
+
+    fn lower_core_parts(
+        &mut self,
+        parts: &[crate::ecky_core_ir::CorePart],
+        param_names: &BTreeMap<u64, String>,
+    ) -> AppResult<String> {
+        let scope = LoweringScope::new(self.param_defaults);
+        let mut part_entries: Vec<String> = Vec::new();
+        for part in parts {
+            let mut refs = BTreeMap::new();
+            let mut locals = BTreeMap::new();
+            let mut used_local_names = BTreeMap::new();
+            let node = self.lower_core_geom_node(
+                &part.root,
+                param_names,
+                &mut refs,
+                &mut locals,
+                &mut used_local_names,
+                &scope,
+            )?;
+            let var = self.lin.linearize(&node.expr);
+            part_entries.push(format!("({:?}, {})", part.key, var));
+        }
+
+        Ok(serialize_b123d_program(
+            std::mem::take(&mut self.lin.lines),
+            part_entries,
+        ))
+    }
+
+    fn lower_core_geom_node(
+        &mut self,
+        node: &CoreNode,
+        param_names: &BTreeMap<u64, String>,
+        refs: &mut BTreeMap<u64, String>,
+        locals: &mut BTreeMap<String, String>,
+        used_local_names: &mut BTreeMap<String, usize>,
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<LoweredNode> {
+        match self.lower_core_value_hinted(
+            node,
+            Some(node.value_kind),
+            param_names,
+            refs,
+            locals,
+            used_local_names,
+            scope,
+        )? {
+            LoweredBinding::Geom(geom) => Ok(LoweredNode {
+                expr: PyExpr::Var(geom.var),
+                kind: geom.kind,
+            }),
+            other => Err(unsupported(format!(
+                "Core node expected geometry but resolved to {}.",
+                binding_kind_noun(&other)
+            ))),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_core_value_hinted(
+        &mut self,
+        node: &CoreNode,
+        hint: Option<CoreValueKind>,
+        param_names: &BTreeMap<u64, String>,
+        refs: &mut BTreeMap<u64, String>,
+        locals: &mut BTreeMap<String, String>,
+        used_local_names: &mut BTreeMap<String, usize>,
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<LoweredBinding> {
+        match &node.kind {
+            CoreNodeKind::Literal(CoreLiteral::Number(number)) => {
+                let value = Value::number(*number);
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+            CoreNodeKind::Literal(CoreLiteral::Boolean(flag)) => {
+                let value = Value::boolean(*flag);
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+            CoreNodeKind::Literal(CoreLiteral::Text(text)) => {
+                let value = Value::string(text.clone());
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+            CoreNodeKind::Reference(CoreReference::Local(name)) => {
+                let value =
+                    Value::symbol(locals.get(name).cloned().unwrap_or_else(|| name.clone()));
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+            CoreNodeKind::Reference(CoreReference::Node(id)) => {
+                let name = refs.get(&id.raw()).cloned().ok_or_else(|| {
+                    unsupported(format!(
+                        "Unsupported Core node reference {:?} in hinted value.",
+                        id
+                    ))
+                })?;
+                let value = Value::symbol(name);
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+            CoreNodeKind::Reference(CoreReference::Parameter(id)) => {
+                let name = param_names.get(&id.raw()).cloned().ok_or_else(|| {
+                    unsupported(format!("Unsupported Core parameter reference {:?}.", id))
+                })?;
+                let value = Value::symbol(name);
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+            CoreNodeKind::List(items) => {
+                let value = Value::list(
+                    items
+                        .iter()
+                        .map(|item| {
+                            self.lower_core_list_value(
+                                item,
+                                param_names,
+                                refs,
+                                locals,
+                                used_local_names,
+                            )
+                        })
+                        .collect::<AppResult<Vec<_>>>()?,
+                );
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+            CoreNodeKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } if !matches!(
+                hint.or(Some(node.value_kind)),
+                Some(
+                    CoreValueKind::Any
+                        | CoreValueKind::List
+                        | CoreValueKind::Point2
+                        | CoreValueKind::Point3
+                ) | None
+            ) =>
+            {
+                let (cond_lines, cond_binding) = self.lower_core_value_locally(
+                    condition,
+                    Some(CoreValueKind::Boolean),
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                    scope,
+                )?;
+                let cond_expr = match cond_binding {
+                    LoweredBinding::Boolean(expr) => expr,
+                    other => {
+                        return Err(unsupported(format!(
+                            "Core `if` condition resolved to {} instead of boolean.",
+                            binding_kind_noun(&other)
+                        )))
+                    }
+                };
+                let result_hint = hint.or(Some(node.value_kind));
+                let (then_lines, then_binding) = self.lower_core_value_locally(
+                    then_branch,
+                    result_hint.or(Some(then_branch.value_kind)),
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                    scope,
+                )?;
+                let (else_lines, else_binding) = self.lower_core_value_locally(
+                    else_branch,
+                    result_hint.or(Some(else_branch.value_kind)),
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                    scope,
+                )?;
+                let mut lines = cond_lines;
+                lines.push(format!("if {cond_expr}:"));
+                match (then_binding, else_binding) {
+                    (LoweredBinding::Geom(then_geom), LoweredBinding::Geom(else_geom)) => {
+                        if then_geom.kind != else_geom.kind {
+                            return Err(unsupported(format!(
+                                "Node `if` requires matching branch kinds, got {} and {}.",
+                                then_geom.kind.noun(),
+                                else_geom.kind.noun()
+                            )));
+                        }
+                        let result = self.next_imp_var();
+                        lines.extend(then_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {}", then_geom.var));
+                        lines.push("else:".to_string());
+                        lines.extend(else_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {}", else_geom.var));
+                        Ok(LoweredBinding::Geom(LoweredGeom {
+                            var: self.lin.linearize(&PyExpr::Imperative {
+                                lines,
+                                result_var: result.clone(),
+                            }),
+                            kind: then_geom.kind,
+                        }))
+                    }
+                    (LoweredBinding::Number(then_expr), LoweredBinding::Number(else_expr)) => {
+                        let result = self.next_python_binding_ident("_if_value");
+                        lines.extend(then_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {then_expr}"));
+                        lines.push("else:".to_string());
+                        lines.extend(else_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {else_expr}"));
+                        for line in lines {
+                            self.lin.emit(line);
+                        }
+                        Ok(LoweredBinding::Number(result))
+                    }
+                    (LoweredBinding::Boolean(then_expr), LoweredBinding::Boolean(else_expr)) => {
+                        let result = self.next_python_binding_ident("_if_value");
+                        lines.extend(then_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {then_expr}"));
+                        lines.push("else:".to_string());
+                        lines.extend(else_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {else_expr}"));
+                        for line in lines {
+                            self.lin.emit(line);
+                        }
+                        Ok(LoweredBinding::Boolean(result))
+                    }
+                    (
+                        LoweredBinding::Stringish(then_expr),
+                        LoweredBinding::Stringish(else_expr),
+                    ) => {
+                        let result = self.next_python_binding_ident("_if_value");
+                        lines.extend(then_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {then_expr}"));
+                        lines.push("else:".to_string());
+                        lines.extend(else_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {else_expr}"));
+                        for line in lines {
+                            self.lin.emit(line);
+                        }
+                        Ok(LoweredBinding::Stringish(result))
+                    }
+                    (LoweredBinding::Frame(then_expr), LoweredBinding::Frame(else_expr)) => {
+                        let result = self.next_python_binding_ident("_if_value");
+                        lines.extend(then_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {then_expr}"));
+                        lines.push("else:".to_string());
+                        lines.extend(else_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {else_expr}"));
+                        for line in lines {
+                            self.lin.emit(line);
+                        }
+                        Ok(LoweredBinding::Frame(result))
+                    }
+                    (
+                        LoweredBinding::RuntimeList(then_list),
+                        LoweredBinding::RuntimeList(else_list),
+                    ) => {
+                        if then_list.kind != else_list.kind {
+                            return Err(unsupported(format!(
+                                "Node `if` requires matching branch kinds, got {} and {}.",
+                                then_list.kind.noun(),
+                                else_list.kind.noun()
+                            )));
+                        }
+                        let result = self.next_python_binding_ident("_if_value");
+                        lines.extend(then_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {}", then_list.var));
+                        lines.push("else:".to_string());
+                        lines.extend(else_lines.into_iter().map(|line| format!("    {line}")));
+                        lines.push(format!("    {result} = {}", else_list.var));
+                        for line in lines {
+                            self.lin.emit(line);
+                        }
+                        Ok(LoweredBinding::RuntimeList(LoweredRuntimeList {
+                            var: result,
+                            kind: then_list.kind,
+                        }))
+                    }
+                    (then_binding, else_binding) => Err(unsupported(format!(
+                        "Node `if` requires matching branch kinds, got {} and {}.",
+                        binding_kind_noun(&then_binding),
+                        binding_kind_noun(&else_binding)
+                    ))),
+                }
+            }
+            CoreNodeKind::Build { bindings, result } => {
+                let mut child_scope = scope.clone();
+                let mut child_refs = refs.clone();
+                let mut child_locals = locals.clone();
+                let mut child_used_local_names = used_local_names.clone();
+
+                for binding in bindings {
+                    let lowered = self.lower_core_value_hinted(
+                        &binding.value,
+                        Some(binding.value.value_kind),
+                        param_names,
+                        &mut child_refs,
+                        &mut child_locals,
+                        &mut child_used_local_names,
+                        &child_scope,
+                    )?;
+                    let ir_name =
+                        allocate_legacy_local_name(&binding.name, &mut child_used_local_names);
+                    let stored = self.emit_and_store_binding(&ir_name, lowered);
+                    let mut frame = BTreeMap::new();
+                    frame.insert(ir_name.clone(), stored);
+                    child_scope = child_scope.with_frame(frame);
+                    child_refs.insert(binding.value.id.raw(), ir_name.clone());
+                    child_locals.insert(binding.name.clone(), ir_name);
+                }
+
+                self.lower_core_value_hinted(
+                    result,
+                    hint.or(Some(result.value_kind)),
+                    param_names,
+                    &mut child_refs,
+                    &mut child_locals,
+                    &mut child_used_local_names,
+                    &child_scope,
+                )
+            }
+            CoreNodeKind::Let { bindings, body } => {
+                let mut child_refs = refs.clone();
+                let mut child_locals = locals.clone();
+                let mut child_used_local_names = used_local_names.clone();
+                let ir_binding_names = bindings
+                    .iter()
+                    .map(|binding| {
+                        (
+                            binding.name.clone(),
+                            allocate_legacy_local_name(&binding.name, &mut child_used_local_names),
+                            binding.value.id.raw(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut frame = BTreeMap::new();
+
+                for (binding, (_, ir_name, node_id)) in bindings.iter().zip(ir_binding_names.iter())
+                {
+                    let lowered = self.lower_core_value_hinted(
+                        &binding.value,
+                        Some(binding.value.value_kind),
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                        scope,
+                    )?;
+                    let stored = self.emit_and_store_binding(ir_name, lowered);
+                    frame.insert(ir_name.clone(), stored);
+                    child_refs.insert(*node_id, ir_name.clone());
+                }
+                for (original_name, ir_name, _) in ir_binding_names {
+                    child_locals.insert(original_name, ir_name);
+                }
+                let child_scope = scope.with_frame(frame);
+                self.lower_core_value_hinted(
+                    body,
+                    hint.or(Some(body.value_kind)),
+                    param_names,
+                    &mut child_refs,
+                    &mut child_locals,
+                    &mut child_used_local_names,
+                    &child_scope,
+                )
+            }
+            CoreNodeKind::Group(items) => {
+                let (last, prefix) = items
+                    .split_last()
+                    .ok_or_else(|| validation("Core group sequence cannot be empty."))?;
+                for item in prefix {
+                    let _ = self.lower_core_value_hinted(
+                        item,
+                        Some(item.value_kind),
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                        scope,
+                    )?;
+                }
+                self.lower_core_value_hinted(
+                    last,
+                    hint.or(Some(last.value_kind)),
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                    scope,
+                )
+            }
+            _ => {
+                let value = self.lower_core_node_to_value(
+                    node,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?;
+                self.lower_binding_value_hinted(&value, scope, hint)
+            }
+        }
+    }
+
+    fn lower_core_node_to_value(
+        &self,
+        node: &CoreNode,
+        param_names: &BTreeMap<u64, String>,
+        refs: &BTreeMap<u64, String>,
+        locals: &BTreeMap<String, String>,
+        used_local_names: &mut BTreeMap<String, usize>,
+    ) -> AppResult<Value> {
+        match &node.kind {
+            CoreNodeKind::Literal(CoreLiteral::Number(number)) => Ok(Value::number(*number)),
+            CoreNodeKind::Literal(CoreLiteral::Boolean(flag)) => Ok(Value::boolean(*flag)),
+            CoreNodeKind::Literal(CoreLiteral::Text(text)) => Ok(Value::string(text.clone())),
+            CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => {
+                Ok(Value::symbol(core_symbol_name(symbol)))
+            }
+            CoreNodeKind::Literal(CoreLiteral::Point2([x, y])) => {
+                Ok(Value::list(vec![Value::number(*x), Value::number(*y)]))
+            }
+            CoreNodeKind::Literal(CoreLiteral::Point3([x, y, z])) => Ok(Value::list(vec![
+                Value::number(*x),
+                Value::number(*y),
+                Value::number(*z),
+            ])),
+            CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(Value::symbol(
+                locals.get(name).cloned().unwrap_or_else(|| name.clone()),
+            )),
+            CoreNodeKind::Reference(CoreReference::Node(id)) => refs
+                .get(&id.raw())
+                .cloned()
+                .map(Value::symbol)
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "Unsupported Core node reference {:?} in value bridge.",
+                        id
+                    ))
+                }),
+            CoreNodeKind::Reference(CoreReference::Parameter(id)) => param_names
+                .get(&id.raw())
+                .cloned()
+                .map(Value::symbol)
+                .ok_or_else(|| {
+                    unsupported(format!("Unsupported Core parameter reference {:?}.", id))
+                }),
+            CoreNodeKind::Reference(other) => Err(unsupported(format!(
+                "Unsupported Core IR reference in build123d lowerer: {:?}.",
+                other
+            ))),
+            CoreNodeKind::Build { bindings, result } => {
+                let mut nested_refs = refs.clone();
+                let mut nested_locals = locals.clone();
+                let mut items = vec![Value::symbol("build")];
+                let ir_binding_names = bindings
+                    .iter()
+                    .map(|binding: &CoreShapeBinding| {
+                        (
+                            binding.name.clone(),
+                            allocate_legacy_local_name(&binding.name, used_local_names),
+                            binding.value.id.raw(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (binding, (original_name, ir_name, node_id)) in
+                    bindings.iter().zip(ir_binding_names.iter())
+                {
+                    let mut shape_items = vec![
+                        Value::symbol("shape"),
+                        Value::symbol(ir_name.clone()),
+                        self.lower_core_node_to_value(
+                            &binding.value,
+                            param_names,
+                            &nested_refs,
+                            &nested_locals,
+                            used_local_names,
+                        )?,
+                    ];
+                    if binding.value.value_kind != CoreValueKind::Any {
+                        shape_items.push(Value::keyword("value-kind"));
+                        shape_items.push(Value::symbol(core_value_kind_tag_local(
+                            binding.value.value_kind,
+                        )));
+                    }
+                    items.push(Value::list(shape_items));
+                    nested_refs.insert(*node_id, ir_name.clone());
+                    nested_locals.insert(original_name.clone(), ir_name.clone());
+                }
+                items.push(Value::list(vec![
+                    Value::symbol("result"),
+                    self.lower_core_node_to_value(
+                        result,
+                        param_names,
+                        &nested_refs,
+                        &nested_locals,
+                        used_local_names,
+                    )?,
+                ]));
+                Ok(Value::list(items))
+            }
+            CoreNodeKind::Let { bindings, body } => {
+                let mut nested_refs = refs.clone();
+                let mut nested_locals = locals.clone();
+                let ir_binding_names = bindings
+                    .iter()
+                    .map(|binding| {
+                        (
+                            binding.name.clone(),
+                            allocate_legacy_local_name(&binding.name, used_local_names),
+                            binding.value.id.raw(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let binding_values = bindings
+                    .iter()
+                    .zip(ir_binding_names.iter())
+                    .map(|(binding, (_, ir_name, node_id))| {
+                        nested_refs.insert(*node_id, ir_name.clone());
+                        let mut pair = vec![
+                            Value::symbol(ir_name.clone()),
+                            self.lower_core_node_to_value(
+                                &binding.value,
+                                param_names,
+                                refs,
+                                locals,
+                                used_local_names,
+                            )?,
+                        ];
+                        if binding.value.value_kind != CoreValueKind::Any {
+                            pair.push(Value::keyword("value-kind"));
+                            pair.push(Value::symbol(core_value_kind_tag_local(
+                                binding.value.value_kind,
+                            )));
+                        }
+                        Ok(Value::list(pair))
+                    })
+                    .collect::<AppResult<Vec<_>>>()?;
+                for (original_name, ir_name, _) in ir_binding_names {
+                    nested_locals.insert(original_name, ir_name);
+                }
+                Ok(Value::list(vec![
+                    Value::symbol("let"),
+                    Value::list(binding_values),
+                    self.lower_core_node_to_value(
+                        body,
+                        param_names,
+                        &nested_refs,
+                        &nested_locals,
+                        used_local_names,
+                    )?,
+                ]))
+            }
+            CoreNodeKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => Ok(Value::list(vec![
+                Value::symbol("if"),
+                self.lower_core_node_to_value(
+                    condition,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?,
+                self.lower_core_node_to_value(
+                    then_branch,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?,
+                self.lower_core_node_to_value(
+                    else_branch,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?,
+            ])),
+            CoreNodeKind::Call { op, args, keywords } => {
+                let mut items = vec![Value::symbol(core_operation_name_local(op))];
+                for arg in args {
+                    items.push(self.lower_core_node_to_value(
+                        arg,
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                    )?);
+                }
+                for CoreKeywordArg { name, value } in keywords {
+                    items.push(Value::keyword(name.clone()));
+                    items.push(self.lower_core_node_to_value(
+                        value,
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                    )?);
+                }
+                Ok(Value::list(items))
+            }
+            CoreNodeKind::Range { start, end } => Ok(Value::list(vec![
+                Value::symbol("range"),
+                self.lower_core_node_to_value(start, param_names, refs, locals, used_local_names)?,
+                self.lower_core_node_to_value(end, param_names, refs, locals, used_local_names)?,
+            ])),
+            CoreNodeKind::Map {
+                params,
+                sources,
+                body,
+            } => {
+                let mut nested_locals = locals.clone();
+                let mut ir_params = Vec::new();
+                for param in params {
+                    let ir_name = allocate_legacy_local_name(param, used_local_names);
+                    nested_locals.insert(param.clone(), ir_name.clone());
+                    ir_params.push(Value::symbol(ir_name));
+                }
+                let mut items = vec![
+                    Value::symbol("map"),
+                    Value::list(vec![
+                        Value::symbol("lambda"),
+                        Value::list(ir_params),
+                        self.lower_core_node_to_value(
+                            body,
+                            param_names,
+                            refs,
+                            &nested_locals,
+                            used_local_names,
+                        )?,
+                    ]),
+                ];
+                for source in sources {
+                    items.push(self.lower_core_node_to_value(
+                        source,
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                    )?);
+                }
+                Ok(Value::list(items))
+            }
+            CoreNodeKind::Apply { op, args, list } => {
+                let mut items = vec![
+                    Value::symbol("apply"),
+                    Value::symbol(core_operation_name_local(op)),
+                ];
+                for arg in args {
+                    items.push(self.lower_core_node_to_value(
+                        arg,
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                    )?);
+                }
+                items.push(self.lower_core_node_to_value(
+                    list,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?);
+                Ok(Value::list(items))
+            }
+            CoreNodeKind::List(items) | CoreNodeKind::Group(items) => Ok(Value::list(
+                items
+                    .iter()
+                    .map(|item| {
+                        self.lower_core_node_to_value(
+                            item,
+                            param_names,
+                            refs,
+                            locals,
+                            used_local_names,
+                        )
+                    })
+                    .collect::<AppResult<Vec<_>>>()?,
+            )),
+        }
+    }
+
+    fn emit_and_store_binding(&mut self, name: &str, binding: LoweredBinding) -> LoweredBinding {
+        let local_name = self.next_python_binding_ident(name);
+        match &binding {
+            LoweredBinding::Geom(geom) => self.lin.emit(format!("{local_name} = {}", geom.var)),
+            LoweredBinding::List(_) | LoweredBinding::RuntimeList(_) => {}
+            LoweredBinding::Frame(expr)
+            | LoweredBinding::Number(expr)
+            | LoweredBinding::Boolean(expr)
+            | LoweredBinding::Stringish(expr) => {
+                self.lin.emit(format!("{local_name} = {expr}"));
+            }
+        }
+        match binding {
+            LoweredBinding::Geom(mut geom) => {
+                geom.var = local_name;
+                LoweredBinding::Geom(geom)
+            }
+            LoweredBinding::List(list) => LoweredBinding::List(list),
+            LoweredBinding::RuntimeList(list) => LoweredBinding::RuntimeList(list),
+            LoweredBinding::Frame(_) => LoweredBinding::Frame(local_name),
+            LoweredBinding::Number(_) => LoweredBinding::Number(local_name),
+            LoweredBinding::Boolean(_) => LoweredBinding::Boolean(local_name),
+            LoweredBinding::Stringish(_) => LoweredBinding::Stringish(local_name),
+        }
+    }
+
+    fn next_python_binding_ident(&mut self, name: &str) -> String {
+        let base = python_local_ident(name, "_");
+        let slot = self.local_name_counts.entry(base.clone()).or_insert(0);
+        *slot += 1;
+        if *slot == 1 {
+            base
+        } else {
+            format!("{}_{}", base, *slot)
+        }
+    }
+
+    fn lower_geom_expr_hinted(
+        &mut self,
+        value: &Value,
+        scope: &LoweringScope<'_>,
+        hint: Option<CoreValueKind>,
+    ) -> AppResult<LoweredNode> {
+        if matches!(
+            hint,
+            Some(
+                CoreValueKind::Solid
+                    | CoreValueKind::Sketch
+                    | CoreValueKind::Compound
+                    | CoreValueKind::Path
+            )
+        ) {
+            return self.lower_legacy_group_sequence_or_geom(value, scope);
+        }
+        self.lower_geom_expr(value, scope)
+    }
+
+    fn lower_legacy_group_sequence_or_geom(
+        &mut self,
+        value: &Value,
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<LoweredNode> {
+        let Some(items) = value.as_list() else {
+            return self.lower_geom_expr(value, scope);
+        };
+        if items.is_empty() || items.first().and_then(Value::as_symbol).is_some() {
+            return self.lower_geom_expr(value, scope);
+        }
+
+        let (last, prefix) = items
+            .split_last()
+            .ok_or_else(|| validation("Geometry group sequence cannot be empty."))?;
+        for item in prefix {
+            let _ = self.lower_legacy_group_sequence_or_geom(item, scope)?;
+        }
+        self.lower_legacy_group_sequence_or_geom(last, scope)
     }
 
     fn parse_properties(&self, args: &[Value]) -> AppResult<(Vec<Value>, BTreeMap<String, Value>)> {
@@ -1201,9 +2349,12 @@ impl<'a> ExprLowerer<'a> {
             return Ok(None);
         };
 
-        if head_symbol(&items, "list expression").ok() == Some("let") {
+        if matches!(
+            head_symbol(&items, "list expression").ok(),
+            Some("let" | "let*")
+        ) {
             if items.len() != 3 {
-                return Err(validation("List `let` expects bindings and a body."));
+                return Err(validation("List `let`/`let*` expects bindings and a body."));
             }
             let child_scope = lower_scalar_let_scope(&items[1], scope)?;
             return self.try_materialize_list_binding(&items[2], &child_scope);
@@ -1318,6 +2469,138 @@ impl<'a> ExprLowerer<'a> {
             cad_op,
             expected_kind.noun()
         )))
+    }
+
+    fn lower_runtime_list_expr(
+        &mut self,
+        value: &Value,
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<LoweredRuntimeList> {
+        if let Some(sym) = value.as_symbol() {
+            return match scope.resolve_binding(sym) {
+                Some(LoweredBinding::RuntimeList(list)) => Ok(list.clone()),
+                Some(binding) => Err(unsupported(format!(
+                    "Symbol `{}` is a {} and cannot be used as a runtime list.",
+                    sym,
+                    binding_kind_noun(binding)
+                ))),
+                None => Err(validation(format!("Unknown symbol `{}`.", sym))),
+            };
+        }
+
+        let items = value
+            .to_vec()
+            .ok_or_else(|| validation("Expected a proper list for runtime list expression."))?;
+        let node = head_symbol(&items, "runtime list expression")?;
+        let args = &items[1..];
+        match node {
+            "range" => {
+                let (start, end) = match args {
+                    [end] => ("0.0".to_string(), lower_num_expr(end, scope)?),
+                    [start, end] => (lower_num_expr(start, scope)?, lower_num_expr(end, scope)?),
+                    _ => return Err(validation("`range` expects one or two bounds.")),
+                };
+                let result = self.next_imp_var();
+                self.lin.emit(format!(
+                    "{result} = list(range(int(math.floor({start})), int(math.floor({end}))))"
+                ));
+                Ok(LoweredRuntimeList {
+                    var: result,
+                    kind: RuntimeListKind::Number,
+                })
+            }
+            "map" => self.lower_runtime_map_list(args, scope),
+            "let" | "let*" => {
+                if args.len() != 2 {
+                    return Err(validation(
+                        "Runtime list `let`/`let*` expects bindings and body.",
+                    ));
+                }
+                let child_scope = lower_scalar_let_scope(&args[0], scope)?;
+                self.lower_runtime_list_expr(&args[1], &child_scope)
+            }
+            other => Err(unsupported(format!(
+                "Runtime list expression `{}` is not supported by the build123d lowerer.",
+                other
+            ))),
+        }
+    }
+
+    fn lower_runtime_map_list(
+        &mut self,
+        args: &[Value],
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<LoweredRuntimeList> {
+        if args.len() < 2 {
+            return Err(validation(
+                "`map` expects function and at least one source list.",
+            ));
+        }
+        let (params, body) = parse_lambda_expr(&args[0])?;
+        if params.len() != args.len() - 1 {
+            return Err(validation(format!(
+                "`map` lambda expects {} source list(s), got {}.",
+                params.len(),
+                args.len() - 1
+            )));
+        }
+        let sources = args[1..]
+            .iter()
+            .map(|source| self.lower_runtime_list_expr(source, scope))
+            .collect::<AppResult<Vec<_>>>()?;
+        for source in &sources {
+            if source.kind != RuntimeListKind::Number {
+                return Err(unsupported(format!(
+                    "`map` currently supports numeric runtime source lists, got {}.",
+                    source.kind.noun()
+                )));
+            }
+        }
+
+        let result = self.next_imp_var();
+        let mut frame = BTreeMap::new();
+        let mut lines = vec![format!("{result} = []")];
+        if params.len() == 1 {
+            let loop_var = python_local_ident(&params[0], "__ecky_map_");
+            let local_name = python_local_ident(&params[0], "_");
+            frame.insert(
+                params[0].clone(),
+                LoweredBinding::Number(local_name.clone()),
+            );
+            lines.push(format!("for {loop_var} in {}:", sources[0].var));
+            lines.push(format!("    {local_name} = float({loop_var})"));
+        } else {
+            let tuple_var = self.next_imp_var();
+            let source_vars = sources
+                .iter()
+                .map(|source| source.var.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("for {tuple_var} in zip({source_vars}):"));
+            for (index, param) in params.iter().enumerate() {
+                let local_name = python_local_ident(param, "_");
+                frame.insert(param.clone(), LoweredBinding::Number(local_name.clone()));
+                lines.push(format!("    {local_name} = float({tuple_var}[{index}])"));
+            }
+        }
+        let child_scope = scope.with_frame(frame);
+        let (body_lines, body_result, body_kind) =
+            self.lower_geom_expr_locally(&body, &child_scope)?;
+        lines.extend(body_lines.into_iter().map(|line| format!("    {line}")));
+        if body_kind == B123dGeomKind::Solid3d {
+            lines.push(format!(
+                "    {result}.extend(_ecky_collect_solids({body_result}))"
+            ));
+        } else {
+            lines.push(format!("    {result}.append({body_result})"));
+        }
+        for line in lines {
+            self.lin.emit(line);
+        }
+        Ok(LoweredRuntimeList {
+            var: result,
+            kind: RuntimeListKind::Geom(body_kind),
+        })
     }
 
     fn materialize_list_len(
@@ -1456,7 +2739,7 @@ impl<'a> ExprLowerer<'a> {
 
     fn plan_shell_target(&self, target: &Value, wall: &Value) -> AppResult<ShellLoweringPlan> {
         let target_items = list_items(target, "shell target")?;
-        let target_node = head_symbol(&target_items, "shell target")?;
+        let target_node = head_symbol(target_items, "shell target")?;
         let target_args = &target_items[1..];
 
         let plan = match target_node {
@@ -1778,9 +3061,54 @@ impl<'a> ExprLowerer<'a> {
         }
 
         let items = list_items(value, "frame expression")?;
-        let node = head_symbol(&items, "frame expression")?;
+        let node = head_symbol(items, "frame expression")?;
         let args = &items[1..];
         match node {
+            "plane" => {
+                let call = parse_plane_call(args)?;
+                let origin = if let Some(value) = call.origin {
+                    let (x, y, z) = self.lower_vec3(&value, scope, "`plane :origin`")?;
+                    format!("({x}, {y}, {z})")
+                } else {
+                    "(0.0, 0.0, 0.0)".to_string()
+                };
+                let x_dir = if let Some(value) = call.x {
+                    let (x, y, z) = self.lower_vec3(&value, scope, "`plane :x`")?;
+                    format!("({x}, {y}, {z})")
+                } else {
+                    "(1.0, 0.0, 0.0)".to_string()
+                };
+                let z_dir = if let Some(value) = call.normal {
+                    let (x, y, z) = self.lower_vec3(&value, scope, "`plane :normal`")?;
+                    format!("({x}, {y}, {z})")
+                } else {
+                    "(0.0, 0.0, 1.0)".to_string()
+                };
+                Ok(format!(
+                    "Plane(origin={origin}, x_dir={x_dir}, z_dir={z_dir})"
+                ))
+            }
+            "location" => {
+                let call = parse_location_call(args)?;
+                let frame = self.lower_frame_expr(&call.frame, scope)?;
+                let offset = if let Some(value) = call.offset {
+                    let (x, y, z) = self.lower_vec3(&value, scope, "`location :offset`")?;
+                    format!("({x}, {y}, {z})")
+                } else {
+                    "(0.0, 0.0, 0.0)".to_string()
+                };
+                let rotate = if let Some(value) = call.rotate {
+                    let (x, y, z) = self.lower_vec3(&value, scope, "`location :rotate`")?;
+                    format!("({x}, {y}, {z})")
+                } else {
+                    "(0.0, 0.0, 0.0)".to_string()
+                };
+                let result = self.next_imp_var();
+                self.lin.emit(format!(
+                    "{result} = _ecky_location({frame}, {offset}, {rotate})"
+                ));
+                Ok(result)
+            }
             "path-frame" => {
                 let call = parse_path_frame_call(args)?;
                 let path = self.lower_geom_expr(&call.path, scope)?;
@@ -1818,6 +3146,53 @@ impl<'a> ExprLowerer<'a> {
         }
     }
 
+    fn lower_binding_value_hinted(
+        &mut self,
+        value: &Value,
+        scope: &LoweringScope<'_>,
+        hint: Option<CoreValueKind>,
+    ) -> AppResult<LoweredBinding> {
+        match hint {
+            Some(CoreValueKind::Number) => {
+                return Ok(LoweredBinding::Number(lower_num_expr(value, scope)?))
+            }
+            Some(CoreValueKind::Boolean) => {
+                return Ok(LoweredBinding::Boolean(lower_bool_expr(value, scope)?))
+            }
+            Some(CoreValueKind::Text) => {
+                return Ok(LoweredBinding::Stringish(lower_stringish_expr(
+                    value, scope,
+                )?))
+            }
+            Some(CoreValueKind::Frame) => {
+                return Ok(LoweredBinding::Frame(self.lower_frame_expr(value, scope)?))
+            }
+            Some(
+                CoreValueKind::Solid
+                | CoreValueKind::Sketch
+                | CoreValueKind::Compound
+                | CoreValueKind::Path,
+            ) => {
+                let geom = self.lower_geom_expr_hinted(value, scope, hint)?;
+                let var = self.lin.linearize(&geom.expr);
+                return Ok(LoweredBinding::Geom(LoweredGeom {
+                    var,
+                    kind: geom.kind,
+                }));
+            }
+            Some(CoreValueKind::List) => {
+                if let Some(list) = self.try_materialize_list_binding(value, scope)? {
+                    return Ok(LoweredBinding::List(list));
+                }
+                if let Ok(list) = self.lower_runtime_list_expr(value, scope) {
+                    return Ok(LoweredBinding::RuntimeList(list));
+                }
+            }
+            Some(CoreValueKind::Any | CoreValueKind::Point2 | CoreValueKind::Point3) | None => {}
+        }
+        self.lower_binding_value(value, scope)
+    }
+
     fn lower_binding_value(
         &mut self,
         value: &Value,
@@ -1835,6 +3210,9 @@ impl<'a> ExprLowerer<'a> {
         }
         if let Some(list) = self.try_materialize_list_binding(value, scope)? {
             return Ok(LoweredBinding::List(list));
+        }
+        if let Ok(list) = self.lower_runtime_list_expr(value, scope) {
+            return Ok(LoweredBinding::RuntimeList(list));
         }
         let number_err = match lower_num_expr(value, scope) {
             Ok(number) => return Ok(LoweredBinding::Number(number)),
@@ -1928,6 +3306,124 @@ impl<'a> ExprLowerer<'a> {
             .collect()
     }
 
+    fn lower_apply_geom(
+        &mut self,
+        args: &[Value],
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<LoweredNode> {
+        if args.len() < 2 {
+            return Err(validation(
+                "`apply` expects an operation and a runtime list.",
+            ));
+        }
+        let op = args[0]
+            .as_symbol()
+            .ok_or_else(|| validation("`apply` operation must be a symbol."))?;
+        let fixed_args = &args[1..args.len() - 1];
+        let runtime_list = self.lower_runtime_list_expr(args.last().expect("apply list"), scope)?;
+        let RuntimeListKind::Geom(list_kind) = runtime_list.kind.clone() else {
+            return Err(unsupported(format!(
+                "`apply {}` expected a geometry list, got {}.",
+                op,
+                runtime_list.kind.noun()
+            )));
+        };
+        let fixed = self.lower_geom_list(fixed_args, scope)?;
+        for operand in &fixed {
+            if operand.kind != list_kind {
+                return Err(unsupported(format!(
+                    "`apply {}` requires matching geometry kinds, got {} and {}.",
+                    op,
+                    operand.kind.noun(),
+                    list_kind.noun()
+                )));
+            }
+        }
+        let kind = fixed
+            .first()
+            .map(|operand| operand.kind.clone())
+            .unwrap_or_else(|| list_kind.clone());
+        if kind != B123dGeomKind::Solid3d {
+            return Err(unsupported(format!(
+                "`apply {}` currently supports 3D solids on build123d.",
+                op
+            )));
+        }
+        let fixed_vars = fixed
+            .iter()
+            .map(|node| self.lin.linearize(&node.expr))
+            .collect::<Vec<_>>();
+        let result = self.next_imp_var();
+        let mut call_args = fixed_vars.clone();
+        call_args.push(format!("*{}", runtime_list.var));
+        match op {
+            "union" | "fuse" => {
+                let needed = 2usize.saturating_sub(fixed_vars.len());
+                if needed > 0 {
+                    self.lin.emit(format!(
+                        "if len({}) < {}: raise ValueError('apply {} produced too few geometry operands')",
+                        runtime_list.var, needed, op
+                    ));
+                }
+                self.lin.emit(format!(
+                    "{result} = _ecky_fuse_many({})",
+                    call_args.join(", ")
+                ));
+            }
+            "compound" => {
+                let needed = 1usize.saturating_sub(fixed_vars.len());
+                if needed > 0 {
+                    self.lin.emit(format!(
+                        "if len({}) < {}: raise ValueError('apply compound produced no geometry')",
+                        runtime_list.var, needed
+                    ));
+                }
+                self.lin.emit(format!(
+                    "{result} = _ecky_compound({})",
+                    call_args.join(", ")
+                ));
+            }
+            "difference" | "cut" => {
+                if fixed_vars.is_empty() {
+                    return Err(validation(
+                        "`apply difference` requires a fixed base operand.",
+                    ));
+                }
+                self.lin.emit(format!(
+                    "if not {}: raise ValueError('apply {} produced no cutters')",
+                    runtime_list.var, op
+                ));
+                self.lin.emit(format!(
+                    "{result} = _ecky_cut_many({})",
+                    call_args.join(", ")
+                ));
+            }
+            "intersection" | "common" => {
+                let needed = 2usize.saturating_sub(fixed_vars.len());
+                if needed > 0 {
+                    self.lin.emit(format!(
+                        "if len({}) < {}: raise ValueError('apply {} produced too few geometry operands')",
+                        runtime_list.var, needed, op
+                    ));
+                }
+                self.lin.emit(format!(
+                    "{result} = _ecky_common_many({})",
+                    call_args.join(", ")
+                ));
+            }
+            other => {
+                return Err(unsupported(format!(
+                    "`apply {}` is not supported by the build123d lowerer.",
+                    other
+                )))
+            }
+        }
+        Ok(LoweredNode {
+            expr: PyExpr::Var(result),
+            kind,
+        })
+    }
+
     fn lower_geom_expr(
         &mut self,
         value: &Value,
@@ -1940,6 +3436,11 @@ impl<'a> ExprLowerer<'a> {
                     kind: geom.kind.clone(),
                 }),
                 Some(LoweredBinding::List(list)) => Err(unsupported(format!(
+                    "Symbol `{}` is a {} and cannot be used as geometry here.",
+                    sym,
+                    list.kind.noun()
+                ))),
+                Some(LoweredBinding::RuntimeList(list)) => Err(unsupported(format!(
                     "Symbol `{}` is a {} and cannot be used as geometry here.",
                     sym,
                     list.kind.noun()
@@ -1960,45 +3461,24 @@ impl<'a> ExprLowerer<'a> {
         let (expr, kind) = match node {
             "def" => {
                 return Err(unsupported(
-                    "`def` is not supported by Ecky IR v0. Use lexical `let` for immutable local bindings.",
+                    "`def` is not supported by current `.ecky` runtime. Use lexical `let` for immutable local bindings.",
                 ));
             }
             "build" => {
                 let build = parse_build_expr(value)?;
                 let mut child_scope = scope.clone();
                 for binding in &build.bindings {
-                    let lowered = self.lower_binding_value(&binding.expr, &child_scope)?;
-                    let local_name = format!("_{}", binding.name.replace('-', "_"));
-                    match &lowered {
-                        LoweredBinding::Geom(geom) => {
-                            self.lin.emit(format!("{local_name} = {}", geom.var))
-                        }
-                        LoweredBinding::List(_) => {}
-                        LoweredBinding::Frame(expr)
-                        | LoweredBinding::Number(expr)
-                        | LoweredBinding::Boolean(expr)
-                        | LoweredBinding::Stringish(expr) => {
-                            self.lin.emit(format!("{local_name} = {expr}"));
-                        }
-                    }
-                    let stored = match lowered {
-                        LoweredBinding::Geom(mut geom) => {
-                            geom.var = local_name.clone();
-                            LoweredBinding::Geom(geom)
-                        }
-                        LoweredBinding::List(list) => LoweredBinding::List(list),
-                        LoweredBinding::Frame(_) => LoweredBinding::Frame(local_name.clone()),
-                        LoweredBinding::Number(_) => LoweredBinding::Number(local_name.clone()),
-                        LoweredBinding::Boolean(_) => LoweredBinding::Boolean(local_name.clone()),
-                        LoweredBinding::Stringish(_) => {
-                            LoweredBinding::Stringish(local_name.clone())
-                        }
-                    };
+                    let lowered = self.lower_binding_value_hinted(
+                        &binding.expr,
+                        &child_scope,
+                        binding.value_kind,
+                    )?;
+                    let stored = self.emit_and_store_binding(&binding.name, lowered);
                     let mut frame = BTreeMap::new();
                     frame.insert(binding.name.clone(), stored);
                     child_scope = child_scope.with_frame(frame);
                 }
-                return self.lower_geom_expr(&build.result, &child_scope);
+                return self.lower_legacy_group_sequence_or_geom(&build.result, &child_scope);
             }
             "let" => {
                 if args.len() < 2 {
@@ -2009,117 +3489,134 @@ impl<'a> ExprLowerer<'a> {
 
                 for b in bindings {
                     let pair = list_items(b, "binding pair")?;
-                    if pair.len() != 2 {
+                    if pair.len() != 2 && pair.len() != 4 {
                         return Err(validation("Each binding must be `(name expr)`."));
                     }
                     let name = pair[0]
                         .as_symbol()
                         .ok_or_else(|| validation("Binding name must be a symbol."))?;
-                    let binding = self.lower_binding_value(&pair[1], scope)?;
-                    let local_name = format!("_{}", name.replace('-', "_"));
-                    match &binding {
-                        LoweredBinding::Geom(geom) => {
-                            self.lin.emit(format!("{local_name} = {}", geom.var));
-                        }
-                        LoweredBinding::List(_) => {}
-                        LoweredBinding::Frame(expr) => {
-                            self.lin.emit(format!("{local_name} = {expr}"));
-                        }
-                        LoweredBinding::Number(expr)
-                        | LoweredBinding::Boolean(expr)
-                        | LoweredBinding::Stringish(expr) => {
-                            self.lin.emit(format!("{local_name} = {expr}"));
-                        }
-                    }
-                    let local_binding = match binding {
-                        LoweredBinding::Geom(mut geom) => {
-                            geom.var = local_name.clone();
-                            LoweredBinding::Geom(geom)
-                        }
-                        LoweredBinding::List(list) => LoweredBinding::List(list),
-                        LoweredBinding::Frame(_) => LoweredBinding::Frame(local_name.clone()),
-                        LoweredBinding::Number(_) => LoweredBinding::Number(local_name.clone()),
-                        LoweredBinding::Boolean(_) => LoweredBinding::Boolean(local_name.clone()),
-                        LoweredBinding::Stringish(_) => {
-                            LoweredBinding::Stringish(local_name.clone())
-                        }
-                    };
+                    let hint = extract_let_binding_hint(pair);
+                    let binding = self.lower_binding_value_hinted(&pair[1], scope, hint)?;
+                    let local_binding = self.emit_and_store_binding(name, binding);
                     frame.insert(name.to_string(), local_binding);
                 }
                 let child_scope = scope.with_frame(frame);
-                return self.lower_geom_expr(&args[1], &child_scope);
+                return self.lower_legacy_group_sequence_or_geom(&args[1], &child_scope);
             }
+            "let*" => {
+                if args.len() < 2 {
+                    return Err(validation("`let*` expects bindings and a body."));
+                }
+                let bindings = list_items(&args[0], "let* bindings")?;
+                let mut child_scope = scope.clone();
+
+                for b in bindings {
+                    let pair = list_items(b, "binding pair")?;
+                    if pair.len() != 2 && pair.len() != 4 {
+                        return Err(validation("Each binding must be `(name expr)`."));
+                    }
+                    let name = pair[0]
+                        .as_symbol()
+                        .ok_or_else(|| validation("Binding name must be a symbol."))?;
+                    let hint = extract_let_binding_hint(pair);
+                    let binding = self.lower_binding_value_hinted(&pair[1], &child_scope, hint)?;
+                    let local_binding = self.emit_and_store_binding(name, binding);
+                    let mut frame = BTreeMap::new();
+                    frame.insert(name.to_string(), local_binding);
+                    child_scope = child_scope.with_frame(frame);
+                }
+                return self.lower_legacy_group_sequence_or_geom(&args[1], &child_scope);
+            }
+            "apply" => {
+                return self.lower_apply_geom(args, scope);
+            }
+            "hole" => return Err(validation(typed_hole_error(args))),
             // -- Primitives (Step 1) --
             "box" => {
-                if args.len() != 3 {
+                let parsed = ParsedCallArgs::parse("box", args, &["align"])?;
+                if parsed.positional.len() != 3 {
                     return Err(validation("`box` expects width, depth, and height."));
                 }
-                let w = lower_num_expr(&args[0], scope)?;
-                let d = lower_num_expr(&args[1], scope)?;
-                let h = lower_num_expr(&args[2], scope)?;
+                let w = lower_num_expr(&parsed.positional[0], scope)?;
+                let d = lower_num_expr(&parsed.positional[1], scope)?;
+                let h = lower_num_expr(&parsed.positional[2], scope)?;
+                let align = parse_align_tuple(
+                    parsed.keywords.get("align"),
+                    "box",
+                    "(Align.CENTER, Align.CENTER, Align.MIN)",
+                )?;
                 (
                     PyExpr::Call {
                         func: "Box".into(),
                         args: vec![PyExpr::Inline(w), PyExpr::Inline(d), PyExpr::Inline(h)],
-                        kwargs: vec![(
-                            "align".into(),
-                            PyExpr::Inline("(Align.CENTER, Align.CENTER, Align.MIN)".into()),
-                        )],
+                        kwargs: vec![("align".into(), PyExpr::Inline(align))],
                     },
                     B123dGeomKind::Solid3d,
                 )
             }
             "cylinder" => {
-                if args.len() < 2 || args.len() > 3 {
+                let parsed = ParsedCallArgs::parse("cylinder", args, &["align"])?;
+                if parsed.positional.len() < 2 || parsed.positional.len() > 3 {
                     return Err(validation(
                         "`cylinder` expects radius, height, and optional segments.",
                     ));
                 }
-                let r = lower_num_expr(&args[0], scope)?;
-                let h = lower_num_expr(&args[1], scope)?;
+                let r = lower_num_expr(&parsed.positional[0], scope)?;
+                let h = lower_num_expr(&parsed.positional[1], scope)?;
+                let align = parse_align_tuple(
+                    parsed.keywords.get("align"),
+                    "cylinder",
+                    "(Align.CENTER, Align.CENTER, Align.MIN)",
+                )?;
                 (
                     PyExpr::Call {
                         func: "Cylinder".into(),
                         args: vec![PyExpr::Inline(r), PyExpr::Inline(h)],
-                        kwargs: vec![(
-                            "align".into(),
-                            PyExpr::Inline("(Align.CENTER, Align.CENTER, Align.MIN)".into()),
-                        )],
+                        kwargs: vec![("align".into(), PyExpr::Inline(align))],
                     },
                     B123dGeomKind::Solid3d,
                 )
             }
             "sphere" => {
-                if args.is_empty() || args.len() > 3 {
+                let parsed = ParsedCallArgs::parse("sphere", args, &["align"])?;
+                if parsed.positional.is_empty() || parsed.positional.len() > 3 {
                     return Err(validation("`sphere` expects radius and optional segments."));
                 }
-                let r = lower_num_expr(&args[0], scope)?;
+                let r = lower_num_expr(&parsed.positional[0], scope)?;
+                let align = parse_align_tuple(
+                    parsed.keywords.get("align"),
+                    "sphere",
+                    "(Align.CENTER, Align.CENTER, Align.CENTER)",
+                )?;
                 (
                     PyExpr::Call {
                         func: "Sphere".into(),
                         args: vec![PyExpr::Inline(r)],
-                        kwargs: vec![],
+                        kwargs: vec![("align".into(), PyExpr::Inline(align))],
                     },
                     B123dGeomKind::Solid3d,
                 )
             }
             "cone" => {
-                if args.len() < 3 || args.len() > 4 {
+                let parsed = ParsedCallArgs::parse("cone", args, &["align"])?;
+                if parsed.positional.len() < 3 || parsed.positional.len() > 4 {
                     return Err(validation(
                         "`cone` expects bottom radius, top radius, height, and optional segments.",
                     ));
                 }
-                let br = lower_num_expr(&args[0], scope)?;
-                let tr = lower_num_expr(&args[1], scope)?;
-                let h = lower_num_expr(&args[2], scope)?;
+                let br = lower_num_expr(&parsed.positional[0], scope)?;
+                let tr = lower_num_expr(&parsed.positional[1], scope)?;
+                let h = lower_num_expr(&parsed.positional[2], scope)?;
+                let align = parse_align_tuple(
+                    parsed.keywords.get("align"),
+                    "cone",
+                    "(Align.CENTER, Align.CENTER, Align.MIN)",
+                )?;
                 (
                     PyExpr::Call {
                         func: "Cone".into(),
                         args: vec![PyExpr::Inline(br), PyExpr::Inline(tr), PyExpr::Inline(h)],
-                        kwargs: vec![(
-                            "align".into(),
-                            PyExpr::Inline("(Align.CENTER, Align.CENTER, Align.MIN)".into()),
-                        )],
+                        kwargs: vec![("align".into(), PyExpr::Inline(align))],
                     },
                     B123dGeomKind::Solid3d,
                 )
@@ -2163,7 +3660,7 @@ impl<'a> ExprLowerer<'a> {
                 let points = self.lower_points_2d_args(&args[0], scope, "polygon")?;
                 (
                     PyExpr::Call {
-                        func: "Polygon".into(),
+                        func: "_ecky_polygon".into(),
                         args: vec![PyExpr::Inline(points)],
                         kwargs: vec![],
                     },
@@ -2341,6 +3838,17 @@ impl<'a> ExprLowerer<'a> {
                 if args.len() != 4 {
                     return Err(validation("`scale` expects x, y, z, and a geometry node."));
                 }
+                if let (Some(sx), Some(sy), Some(sz)) = (
+                    value_literal_f64(&args[0]),
+                    value_literal_f64(&args[1]),
+                    value_literal_f64(&args[2]),
+                ) {
+                    if (sx - sy).abs() >= 1e-9 || (sy - sz).abs() >= 1e-9 {
+                        return Err(validation(format!(
+                            "`scale` does not support literal non-uniform scaling on build123d: ({sx}, {sy}, {sz})."
+                        )));
+                    }
+                }
                 let sx = lower_num_expr(&args[0], scope)?;
                 let sy = lower_num_expr(&args[1], scope)?;
                 let sz = lower_num_expr(&args[2], scope)?;
@@ -2445,22 +3953,21 @@ impl<'a> ExprLowerer<'a> {
             }
             // -- Sketch-to-solid (Step 4) --
             "extrude" => {
-                if args.len() != 2 {
+                let parsed = ParsedCallArgs::parse("extrude", args, &["symmetric"])?;
+                if parsed.positional.len() != 2 {
                     return Err(validation("`extrude` expects a sketch and height."));
                 }
-                let sketch = self.lower_sketch_expr(&args[0], scope)?;
-                let h = lower_num_expr(&args[1], scope)?;
+                let sketch = self.lower_sketch_expr(&parsed.positional[0], scope)?;
+                let h = lower_num_expr(&parsed.positional[1], scope)?;
+                let symmetric = if let Some(value) = parsed.keywords.get("symmetric") {
+                    lower_bool_expr(value, scope)?
+                } else {
+                    "False".to_string()
+                };
                 (
                     PyExpr::Call {
-                        func: "extrude".into(),
-                        args: vec![
-                            PyExpr::Call {
-                                func: "_ecky_face".into(),
-                                args: vec![sketch.expr],
-                                kwargs: vec![],
-                            },
-                            PyExpr::Inline(h),
-                        ],
+                        func: "_ecky_extrude".into(),
+                        args: vec![sketch.expr, PyExpr::Inline(h), PyExpr::Inline(symmetric)],
                         kwargs: vec![],
                     },
                     B123dGeomKind::Solid3d,
@@ -2687,6 +4194,14 @@ impl<'a> ExprLowerer<'a> {
                     return Err(validation(
                         "`bezier-path` expects points and optional segments.",
                     ));
+                }
+                let point_count =
+                    self.materialize_list_len(&args[0], scope, "bezier-path points")?;
+                if point_count < 4 || (point_count - 1) % 3 != 0 {
+                    return Err(validation(format!(
+                        "`bezier-path` expects 3n+1 control points (4, 7, 10, ...), got {}.",
+                        point_count
+                    )));
                 }
                 let points_str = self.lower_points_3d_args(&args[0], scope, "bezier-path")?;
                 let pts = self.next_imp_var();
@@ -3151,8 +4666,8 @@ impl<'a> ExprLowerer<'a> {
                 let count = lower_num_expr(&args[1], scope)?;
                 let count_var = self.next_imp_var();
                 let result = self.next_imp_var();
-                let loop_var = format!("__ecky_ru_{}", index.replace('-', "_"));
-                let local_name = format!("_{}", index.replace('-', "_"));
+                let loop_var = python_local_ident(index, "__ecky_ru_");
+                let local_name = python_local_ident(index, "_");
                 let mut frame = BTreeMap::new();
                 frame.insert(
                     index.to_string(),
@@ -3194,8 +4709,8 @@ impl<'a> ExprLowerer<'a> {
                 let count = lower_num_expr(&args[1], scope)?;
                 let count_var = self.next_imp_var();
                 let result = self.next_imp_var();
-                let loop_var = format!("__ecky_rp_{}", index.replace('-', "_"));
-                let local_name = format!("_{}", index.replace('-', "_"));
+                let loop_var = python_local_ident(index, "__ecky_rp_");
+                let local_name = python_local_ident(index, "_");
                 let mut frame = BTreeMap::new();
                 frame.insert(
                     index.to_string(),
@@ -3238,8 +4753,8 @@ impl<'a> ExprLowerer<'a> {
                 let count_var = self.next_imp_var();
                 let solids_var = self.next_imp_var();
                 let result = self.next_imp_var();
-                let loop_var = format!("__ecky_rc_{}", index.replace('-', "_"));
-                let local_name = format!("_{}", index.replace('-', "_"));
+                let loop_var = python_local_ident(index, "__ecky_rc_");
+                let local_name = python_local_ident(index, "_");
                 let mut frame = BTreeMap::new();
                 frame.insert(
                     index.to_string(),

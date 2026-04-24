@@ -5,6 +5,7 @@ Ecky CAD build123d runner.
 Executes a generated build123d Python source file and exports:
   - Per-part STL files to ECKYCAD_PARTS_DIR
   - Merged preview STL to ECKYCAD_STL
+  - Merged STEP model to ECKYCAD_STEP when provided
   - JSON runner report to ECKYCAD_REPORT
 
 The source file must define:
@@ -13,6 +14,7 @@ The source file must define:
 Environment variables:
   ECKYCAD_SOURCE    path to the Python source file to execute
   ECKYCAD_STL       path to write the merged preview STL
+  ECKYCAD_STEP      optional path to write the merged STEP model
   ECKYCAD_PARTS_DIR directory to write per-part STL files
   ECKYCAD_REPORT    path to write the runner report JSON
   ECKYCAD_PARAMS    JSON-encoded parameters dict (injected as `params`)
@@ -57,6 +59,15 @@ def export_stl(shape, path):
     b123d_export_stl(shape, path)
 
 
+def export_step(shape, path):
+    if not path:
+        return
+    from build123d import export_step as b123d_export_step
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    b123d_export_step(shape, path)
+
+
 def merge_shapes(shapes):
     from build123d import Compound
     if len(shapes) == 1:
@@ -67,6 +78,7 @@ def merge_shapes(shapes):
 def main():
     source_path = os.environ["ECKYCAD_SOURCE"]
     stl_path = os.environ["ECKYCAD_STL"]
+    step_path = os.environ.get("ECKYCAD_STEP", "")
     parts_dir = os.environ["ECKYCAD_PARTS_DIR"]
     report_path = os.environ["ECKYCAD_REPORT"]
     params_json = os.environ.get("ECKYCAD_PARAMS", "{}")
@@ -131,8 +143,9 @@ def main():
     try:
         preview_shape = merge_shapes(all_shapes)
         export_stl(preview_shape, stl_path)
+        export_step(preview_shape, step_path)
     except Exception as exc:
-        print(f"ERROR: failed to export preview STL: {exc}", file=sys.stderr)
+        print(f"ERROR: failed to export preview artifacts: {exc}", file=sys.stderr)
         traceback.print_exc()
         sys.exit(1)
 

@@ -85,7 +85,7 @@ pub(super) fn ir_options() -> Options {
 pub(super) fn ir_parse(source: &str) -> AppResult<Value> {
     lexpr::parse::Parser::from_str_custom(&strip_comments(source), ir_options())
         .expect_value()
-        .map_err(|err| validation(format!("Failed to parse Ecky IR v0: {}", err)))
+        .map_err(|err| validation(format!("Failed to parse `.ecky`: {}", err)))
 }
 
 pub(super) fn canonicalize(source: &str) -> AppResult<String> {

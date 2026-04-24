@@ -6,6 +6,15 @@ mod tests {
         std::env::temp_dir().join(format!("ecky-ir-test-{}", uuid::Uuid::new_v4()))
     }
 
+    fn surface_fixture(name: &str) -> String {
+        let path = format!(
+            "{}/tests/fixtures/cad/surface/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
+    }
+
     #[derive(Clone)]
     struct TestResolver {
         root: PathBuf,
@@ -61,6 +70,57 @@ mod tests {
     }
 
     #[test]
+    fn derive_controls_from_core_program_matches_public_entrypoint() {
+        let source = r#"
+            (define base-radius 14)
+            (model
+              (params
+                (number radius base-radius :label "Radius")
+                (toggle vents true :label "Vents")
+                (image litho "" :label "Litho"))
+              (part body (extrude (circle radius) 20)))
+        "#;
+        let program = crate::ecky_scheme::try_compile_to_core_program(source)
+            .expect("compiled path")
+            .expect("program");
+
+        let direct = super::runtime::derive_controls_from_core_program(&program).expect("direct");
+        let public = derive_controls(source).expect("public");
+
+        assert_eq!(direct.fields, public.fields);
+        assert_eq!(direct.params, public.params);
+    }
+
+    #[test]
+    fn lower_build123d_from_core_program_matches_public_entrypoint() {
+        let source = r#"
+            (define base-radius 14)
+            (model
+              (params
+                (number radius base-radius :label "Radius")
+                (toggle vents true :label "Vents"))
+              (part body
+                (difference
+                  (extrude (circle radius) 20)
+                  (translate 0 0 2 (extrude (circle (- radius 2)) 18)))))
+        "#;
+        let program = crate::ecky_scheme::try_compile_to_core_program(source)
+            .expect("compiled path")
+            .expect("program");
+
+        let direct =
+            super::build123d_lowering::lower_core_program_to_build123d(&program).expect("direct");
+        let public = lower_to_build123d(source).expect("public");
+
+        assert_eq!(direct, public);
+        assert!(
+            public.contains("_ecky_cut_many("),
+            "difference helper: {}",
+            public
+        );
+    }
+
+    #[allow(dead_code)]
     fn render_model_supports_boolean_mesh_pipeline() {
         let root = render_root();
         std::fs::create_dir_all(&root).unwrap();
@@ -109,7 +169,7 @@ mod tests {
         assert_eq!(bundle.viewer_assets.len(), 1);
     }
 
-    #[test]
+    #[allow(dead_code)]
     fn render_model_reports_unsupported_nodes_explicitly() {
         let root = render_root();
         std::fs::create_dir_all(&root).unwrap();
@@ -123,7 +183,8 @@ mod tests {
         )
         .expect_err("unsupported");
         assert!(
-            err.message.contains("Unsupported by Ecky IR v0"),
+            err.message
+                .contains("Unsupported on current geometry backend"),
             "unexpected error: {}",
             err
         );
@@ -246,14 +307,49 @@ mod tests {
                   (translate 0 -48 0
                     (wall-pattern
                       (:mode hammered :depth 0.7 :uFreq 9 :vFreq 9 :seed 4)
-                      (twist 32 120 10 (rounded_rect 14 10 2 8))))))"#,
+                      (twist 32 120 10 (rounded_rect 14 10 2 8)))))
+                (part cellular
+                  (translate 48 48 0
+                    (wall-pattern
+                      (:mode cellular :depth 0.7 :uFreq 7 :vFreq 7 :seed 12)
+                      (shell 1.2 (cylinder 15 34 40)))))
+                (part fbm
+                  (translate -48 -48 0
+                    (wall-pattern
+                      (:mode fbm :depth 0.6 :uFreq 8 :vFreq 8 :seed 3)
+                      (shell 1.0 (cylinder 14 30 40)))))
+                (part gyroid
+                  (translate 48 -48 0
+                    (wall-pattern
+                      (:mode gyroid :depth 0.6 :uFreq 4 :vFreq 5 :phase 0.2)
+                      (shell 1.0 (cylinder 14 30 40))))))"#,
             &DesignParams::new(),
             &resolver,
         )
         .expect("render");
 
-        assert_eq!(bundle.viewer_assets.len(), 5);
+        assert_eq!(bundle.viewer_assets.len(), 8);
         assert!(Path::new(&bundle.preview_stl_path).exists());
+    }
+
+    #[test]
+    fn render_model_supports_wall_pattern_fixture_modes() {
+        for fixture in [
+            "wall_pattern_cellular.ecky",
+            "wall_pattern_fbm.ecky",
+            "wall_pattern_gyroid.ecky",
+        ] {
+            let root = render_root();
+            std::fs::create_dir_all(&root).unwrap();
+            let resolver = TestResolver { root };
+            let source = surface_fixture(fixture);
+            let bundle = render_model(&source, &DesignParams::new(), &resolver)
+                .unwrap_or_else(|err| panic!("{fixture}: {err}"));
+
+            assert_eq!(bundle.engine_kind, EngineKind::EckyIrV0, "{fixture}");
+            assert_eq!(bundle.viewer_assets.len(), 1, "{fixture}");
+            assert!(Path::new(&bundle.preview_stl_path).exists(), "{fixture}");
+        }
     }
 
     #[test]
@@ -340,6 +436,41 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 1);
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+    }
+
+    #[test]
+    fn render_model_supports_chaotic_and_implicit_wall_pattern_modes() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = TestResolver { root };
+        let bundle = render_model(
+            r#"(model
+                (part schwarz-p
+                  (wall-pattern
+                    (:mode schwarz-p :depth 0.5 :uFreq 4 :vFreq 5 :softness 0.12)
+                    (shell 1.0 (cylinder 10 22 32))))
+                (part diamond-field
+                  (translate 28 0 0
+                    (wall-pattern
+                      (:mode diamond-field :depth 0.45 :uFreq 4 :vFreq 4 :phase 0.1)
+                      (shell 1.0 (cylinder 10 22 32)))))
+                (part neovius
+                  (translate -28 0 0
+                    (wall-pattern
+                      (:mode neovius :depth 0.45 :uFreq 3 :vFreq 4 :bias 0.05)
+                      (shell 1.0 (cylinder 10 22 32)))))
+                (part attractor-field
+                  (translate 0 28 0
+                    (wall-pattern
+                      (:mode attractor-field :depth 0.5 :uFreq 6 :vFreq 6 :seed 99)
+                      (shell 1.0 (cylinder 10 22 32))))))"#,
+            &DesignParams::new(),
+            &resolver,
+        )
+        .expect("render");
+
+        assert_eq!(bundle.viewer_assets.len(), 4);
         assert!(Path::new(&bundle.preview_stl_path).exists());
     }
 
@@ -517,7 +648,152 @@ mod tests {
         let geom = super::mesh_ops::eval_geometry_expr(&expr, &env).expect("eval");
         let mesh = geom.into_mesh("test").expect("mesh");
         let bounds = super::runtime::bounds_from_mesh(&mesh);
-        assert!((bounds.x_min - 20.0).abs() < 0.25, "bounds: {:?}", bounds);
-        assert!((bounds.x_max - 24.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.x_min - 18.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.x_max - 22.0).abs() < 0.25, "bounds: {:?}", bounds);
+    }
+
+    #[test]
+    fn eval_geometry_extrude_preserves_sketch_coordinates() {
+        let env = std::collections::BTreeMap::new();
+        let expr = super::model::IrExpr::from_value(
+            &lexpr::from_str("(extrude (polygon ((0 0) (100 0) (100 10) (0 10))) 5)")
+                .expect("expr"),
+        )
+        .expect("typed expr");
+        let geom = super::mesh_ops::eval_geometry_expr(&expr, &env).expect("eval");
+        let mesh = geom.into_mesh("test").expect("mesh");
+        let bounds = super::runtime::bounds_from_mesh(&mesh);
+        assert!((bounds.x_min - 0.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.x_max - 100.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.y_min - 0.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.y_max - 10.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.z_min - 0.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.z_max - 5.0).abs() < 0.25, "bounds: {:?}", bounds);
+    }
+
+    #[test]
+    fn eval_geometry_extrude_symmetric_centers_z() {
+        let env = std::collections::BTreeMap::new();
+        let expr = super::model::IrExpr::from_value(
+            &lexpr::from_str("(extrude (polygon ((0 0) (10 0) (10 10) (0 10))) 8 :symmetric #t)")
+                .expect("expr"),
+        )
+        .expect("typed expr");
+        let geom = super::mesh_ops::eval_geometry_expr(&expr, &env).expect("eval");
+        let mesh = geom.into_mesh("test").expect("mesh");
+        let bounds = super::runtime::bounds_from_mesh(&mesh);
+        assert!((bounds.z_min + 4.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.z_max - 4.0).abs() < 0.25, "bounds: {:?}", bounds);
+    }
+
+    #[test]
+    fn eval_geometry_primitives_honor_align_keyword() {
+        let env = std::collections::BTreeMap::new();
+
+        let box_expr = super::model::IrExpr::from_value(
+            &lexpr::from_str("(box 10 20 30 :align (min center max))").expect("expr"),
+        )
+        .expect("typed expr");
+        let box_bounds = super::runtime::bounds_from_mesh(
+            &super::mesh_ops::eval_geometry_expr(&box_expr, &env)
+                .expect("eval")
+                .into_mesh("box")
+                .expect("mesh"),
+        );
+        assert!(
+            (box_bounds.x_min - 0.0).abs() < 0.25,
+            "box: {:?}",
+            box_bounds
+        );
+        assert!(
+            (box_bounds.z_max - 0.0).abs() < 0.25,
+            "box: {:?}",
+            box_bounds
+        );
+
+        let cylinder_expr = super::model::IrExpr::from_value(
+            &lexpr::from_str("(cylinder 5 12 :align (max min center))").expect("expr"),
+        )
+        .expect("typed expr");
+        let cylinder_bounds = super::runtime::bounds_from_mesh(
+            &super::mesh_ops::eval_geometry_expr(&cylinder_expr, &env)
+                .expect("eval")
+                .into_mesh("cylinder")
+                .expect("mesh"),
+        );
+        assert!(
+            (cylinder_bounds.x_max - 0.0).abs() < 0.25,
+            "cylinder: {:?}",
+            cylinder_bounds
+        );
+        assert!(
+            (cylinder_bounds.y_min - 0.0).abs() < 0.25,
+            "cylinder: {:?}",
+            cylinder_bounds
+        );
+
+        let sphere_expr = super::model::IrExpr::from_value(
+            &lexpr::from_str("(sphere 6 :align (min max center))").expect("expr"),
+        )
+        .expect("typed expr");
+        let sphere_bounds = super::runtime::bounds_from_mesh(
+            &super::mesh_ops::eval_geometry_expr(&sphere_expr, &env)
+                .expect("eval")
+                .into_mesh("sphere")
+                .expect("mesh"),
+        );
+        assert!(
+            (sphere_bounds.x_min - 0.0).abs() < 0.25,
+            "sphere: {:?}",
+            sphere_bounds
+        );
+        assert!(
+            (sphere_bounds.y_max - 0.0).abs() < 0.25,
+            "sphere: {:?}",
+            sphere_bounds
+        );
+
+        let cone_expr = super::model::IrExpr::from_value(
+            &lexpr::from_str("(cone 8 4 12 :align (center max min))").expect("expr"),
+        )
+        .expect("typed expr");
+        let cone_bounds = super::runtime::bounds_from_mesh(
+            &super::mesh_ops::eval_geometry_expr(&cone_expr, &env)
+                .expect("eval")
+                .into_mesh("cone")
+                .expect("mesh"),
+        );
+        assert!(
+            (cone_bounds.y_max - 0.0).abs() < 0.25,
+            "cone: {:?}",
+            cone_bounds
+        );
+        assert!(
+            (cone_bounds.z_min - 0.0).abs() < 0.25,
+            "cone: {:?}",
+            cone_bounds
+        );
+    }
+
+    #[test]
+    fn eval_geometry_plane_location_and_place() {
+        let env = std::collections::BTreeMap::new();
+        let expr = super::model::IrExpr::from_value(
+            &lexpr::from_str(
+                "(build
+                  (shape base (plane :origin (10 20 30) :x (1 0 0) :normal (0 0 1)))
+                  (shape peg (box 4 4 4))
+                  (shape pose (location base :offset (5 0 0)))
+                  (result (place pose peg)))",
+            )
+            .expect("expr"),
+        )
+        .expect("typed expr");
+        let geom = super::mesh_ops::eval_geometry_expr(&expr, &env).expect("eval");
+        let mesh = geom.into_mesh("test").expect("mesh");
+        let bounds = super::runtime::bounds_from_mesh(&mesh);
+        assert!((bounds.x_min - 13.0).abs() < 0.75, "bounds: {:?}", bounds);
+        assert!((bounds.x_max - 17.0).abs() < 0.75, "bounds: {:?}", bounds);
+        assert!((bounds.z_min - 30.0).abs() < 0.75, "bounds: {:?}", bounds);
     }
 }

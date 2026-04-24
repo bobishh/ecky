@@ -1,4 +1,5 @@
 use crate::models::{DesignOutput, Engine, UsageSegment, UsageSummary};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -11,6 +12,13 @@ pub struct IntentClassification {
     pub response: String,
     #[serde(default)]
     pub final_response: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConceptPreviewDraft {
+    pub svg: String,
+    #[serde(default)]
+    pub caption: String,
 }
 
 pub enum ResponseFormat {
@@ -182,6 +190,92 @@ If intent is "design", "response" must be one short routing sentence for the ass
         } else {
             "Intent looks like a design change request.".to_string()
         };
+    }
+    Ok(LlmOutcome {
+        data: parsed,
+        usage: raw.usage,
+    })
+}
+
+pub async fn generate_concept_preview(
+    engine: &Engine,
+    prompt: &str,
+    images: Vec<String>,
+) -> Result<LlmOutcome<ConceptPreviewDraft>, String> {
+    if !engine.enabled {
+        return Err(format!(
+            "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
+            engine.name
+        ));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let system_prompt = r#"Return ONLY JSON with fields:
+1) "svg": full SVG markup string
+2) "caption": one short user-facing sentence
+
+Task: produce a fast concept sketch for a CAD idea.
+
+Rules for svg:
+- valid standalone <svg>...</svg>
+- no markdown fences
+- no explanations outside JSON
+- transparent or white background
+- clean line-art / concept-sketch style
+- simple fills allowed, but prioritize readable silhouette and proportions
+- include one clear object only unless prompt explicitly asks for multiple objects
+- no text labels inside the drawing
+- keep it compact and renderable in a browser image tag
+- use a viewBox
+- avoid external assets, fonts, scripts, filters, or CSS imports
+
+The sketch should help a human confirm rough shape, proportions, and major features before CAD generation.
+"#;
+
+    let user_prompt = format!(
+        "Create a concept preview sketch for this request:\n\n{}",
+        prompt.trim()
+    );
+
+    let raw = match engine.provider.as_str() {
+        "openai" | "ollama" => {
+            call_openai_compatible(
+                &client,
+                engine,
+                engine.model.as_str(),
+                system_prompt,
+                &user_prompt,
+                images,
+                "concept_preview",
+                ResponseFormat::JsonObject,
+            )
+            .await?
+        }
+        "gemini" => {
+            call_gemini(
+                &client,
+                engine,
+                engine.model.as_str(),
+                system_prompt,
+                &user_prompt,
+                images,
+                "concept_preview",
+                ResponseFormat::JsonObject,
+            )
+            .await?
+        }
+        _ => return Err(format!("Unsupported provider: {}", engine.provider)),
+    };
+
+    let mut parsed: ConceptPreviewDraft = serde_json::from_value(raw.data)
+        .map_err(|e| format!("Concept preview parse error: {}", e))?;
+    parsed.svg = extract_svg_markup(&parsed.svg)?;
+    parsed.caption = parsed.caption.trim().to_string();
+    if parsed.caption.is_empty() {
+        parsed.caption = "Concept preview ready.".to_string();
     }
     Ok(LlmOutcome {
         data: parsed,
@@ -518,7 +612,15 @@ fn openai_models_url(base_url: &str) -> String {
     format!("{}/models", normalized)
 }
 
-fn is_obviously_non_chat_openai_model(model_id: &str) -> bool {
+fn is_openai_first_party_base_url(base_url: &str) -> bool {
+    let normalized = base_url.trim().trim_end_matches('/');
+    if normalized.is_empty() {
+        return true;
+    }
+    normalized == "https://api.openai.com/v1" || normalized.starts_with("https://api.openai.com/")
+}
+
+fn is_obviously_non_chat_openai_model(model_id: &str, base_url: &str) -> bool {
     let id = model_id.to_lowercase();
     let blocked_prefixes = [
         "text-embedding",
@@ -537,7 +639,7 @@ fn is_obviously_non_chat_openai_model(model_id: &str) -> bool {
     if blocked_prefixes.iter().any(|p| id.starts_with(p)) {
         return true;
     }
-    if id.contains("instruct") {
+    if is_openai_first_party_base_url(base_url) && id.contains("instruct") {
         return true;
     }
     false
@@ -889,6 +991,29 @@ pub fn clean_json_text(text: &str) -> String {
     }
 }
 
+pub fn extract_svg_markup(text: &str) -> Result<String, String> {
+    let trimmed = text.trim();
+    let start = trimmed
+        .find("<svg")
+        .ok_or_else(|| "Concept preview response did not include <svg> markup.".to_string())?;
+    let end = trimmed
+        .rfind("</svg>")
+        .ok_or_else(|| "Concept preview response did not include </svg>.".to_string())?;
+    let markup = trimmed[start..end + "</svg>".len()].trim().to_string();
+    if markup.is_empty() {
+        return Err("Concept preview SVG was empty.".to_string());
+    }
+    Ok(markup)
+}
+
+pub fn svg_to_data_url(svg: &str) -> Result<String, String> {
+    let markup = extract_svg_markup(svg)?;
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(markup)
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn call_openai_compatible(
     client: &reqwest::Client,
@@ -1128,7 +1253,7 @@ async fn fetch_openai_models(
 
     let filtered = all_models
         .iter()
-        .filter(|id| !is_obviously_non_chat_openai_model(id))
+        .filter(|id| !is_obviously_non_chat_openai_model(id, base_url))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -1260,6 +1385,30 @@ mod tests {
             openai_models_url("https://api.openai.com/v1/"),
             "https://api.openai.com/v1/models"
         );
+    }
+
+    #[test]
+    fn first_party_openai_filter_removes_legacy_instruct_models() {
+        assert!(is_obviously_non_chat_openai_model(
+            "gpt-3.5-turbo-instruct",
+            ""
+        ));
+        assert!(is_obviously_non_chat_openai_model(
+            "gpt-3.5-turbo-instruct",
+            "https://api.openai.com/v1"
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_filter_keeps_nvidia_nim_instruct_models() {
+        assert!(!is_obviously_non_chat_openai_model(
+            "qwen/qwen3-coder-480b-a35b-instruct",
+            "https://integrate.api.nvidia.com/v1"
+        ));
+        assert!(!is_obviously_non_chat_openai_model(
+            "mistralai/mixtral-8x22b-instruct-v01",
+            "https://integrate.api.nvidia.com/v1"
+        ));
     }
 
     #[test]
@@ -1438,5 +1587,35 @@ mod tests {
             v.issues[1].category,
             crate::contracts::VisualIssueCategory::FloatingPart
         );
+    }
+
+    #[test]
+    fn extract_svg_markup_pulls_svg_out_of_wrapped_text() {
+        let wrapped =
+            "Here.\n<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>\nDone.";
+        let svg = extract_svg_markup(wrapped).expect("svg");
+
+        assert_eq!(
+            svg,
+            "<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn svg_to_data_url_encodes_svg_payload() {
+        let data_url = svg_to_data_url("<svg viewBox=\"0 0 1 1\"></svg>").expect("svg data url");
+
+        assert!(data_url.starts_with("data:image/svg+xml;base64,"));
+        let encoded = data_url
+            .split_once(',')
+            .map(|(_, payload)| payload)
+            .expect("base64 payload");
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("decode"),
+        )
+        .expect("utf8");
+        assert_eq!(decoded, "<svg viewBox=\"0 0 1 1\"></svg>");
     }
 }

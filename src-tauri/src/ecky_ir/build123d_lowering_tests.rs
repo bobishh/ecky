@@ -2,13 +2,27 @@ use super::super::edge_ops::{
     chamfer_mesh, detect_feature_edges, fillet_mesh, filter_edges, EdgeSelector,
 };
 use super::super::shared::IrMesh;
-use super::lower_to_build123d;
+use super::{lower_core_program_to_build123d, lower_to_build123d};
+
+fn surface_fixture(name: &str) -> String {
+    let path = format!(
+        "{}/tests/fixtures/cad/surface/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        name
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
+}
 
 #[test]
 fn lower_to_build123d_minimal_extrude() {
     let src = r#"(model (part body (extrude (rounded_rect 30 20 4) 10)))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("from build123d import *"), "missing import");
+    assert!(
+        code.contains("from _ecky_build123d_helpers import *"),
+        "missing helpers import"
+    );
+    assert!(!code.contains("def _ecky_solid("), "inline helper leaked");
     assert!(
         code.contains("RectangleRounded(30.0, 20.0, 4.0)"),
         "rounded_rect"
@@ -24,7 +38,7 @@ fn lower_to_build123d_difference() {
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("Cylinder(10.0, 20.0,"), "outer cylinder");
     assert!(code.contains("Cylinder(8.0, 20.0,"), "inner cylinder");
-    assert!(code.contains(" - "), "difference operator");
+    assert!(code.contains("_ecky_cut_many("), "difference helper");
     assert!(code.contains(r#"("shell","#), "part entry");
 }
 
@@ -107,8 +121,12 @@ fn lower_to_build123d_nested_let_prefers_nearest_binding() {
               (extrude (circle r) 5)))))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("_r = 10.0"), "outer binding: {}", code);
-    assert!(code.contains("_r = 4.0"), "inner binding: {}", code);
-    assert!(code.contains("Circle(_r)"), "inner binding used: {}", code);
+    assert!(code.contains("_r_2 = 4.0"), "inner binding: {}", code);
+    assert!(
+        code.contains("Circle(_r_2)"),
+        "inner binding used: {}",
+        code
+    );
 }
 
 #[test]
@@ -138,12 +156,87 @@ fn lower_to_build123d_nested_let_allows_sequential_dependency() {
 }
 
 #[test]
+fn lower_to_build123d_let_star_allows_sequential_dependency() {
+    let src = r#"(model
+        (part body
+          (let* ((a 2) (b (+ a 1)))
+            (extrude (circle b) 5))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(code.contains("_a = 2.0"), "outer: {}", code);
+    assert!(code.contains("_b = (_a + 1.0)"), "inner: {}", code);
+    assert!(code.contains("Circle(_b)"), "body: {}", code);
+}
+
+#[test]
 fn lower_to_build123d_numeric_expressions() {
     let src = r#"(model (params (number w 40)) (part body (extrude (circle (/ w 2)) 5)))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(
         code.contains(r#"float(params.get("w", 40.0)) / 2.0"#),
         "division: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_build_shape_param_arithmetic_wall() {
+    let src = r#"(model
+      (params
+        (number duplo_height_blocks 5)
+        (number flat_start 48)
+        (number ramp_length 192)
+        (number flat_end 48))
+      (part body
+        (build
+          (shape dz (* duplo_height_blocks 19.2))
+          (shape L (+ flat_start ramp_length flat_end))
+          (result (box L 10 dz)))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains(r#"_dz = (float(params.get("duplo_height_blocks", 5.0)) * 19.2)"#),
+        "mul lowering missing: {}",
+        code
+    );
+    assert!(
+        code.contains(
+            r#"_L = (float(params.get("flat_start", 48.0)) + float(params.get("ramp_length", 192.0)) + float(params.get("flat_end", 48.0)))"#
+        ),
+        "sum lowering missing: {}",
+        code
+    );
+    assert!(code.contains("Box(_L, 10.0, _dz"), "box missing: {}", code);
+}
+
+#[test]
+fn lower_to_build123d_hygienic_let_locals_emit_valid_python_identifiers() {
+    let src = r#"(model
+        (params
+          (number width 100)
+          (number height 20)
+          (number shift 5))
+        (part body
+          (let ((w (/ width 2))
+                (h height))
+            (translate shift 0 0
+              (extrude
+                (polygon ((0 0) ((* 2 w) 0) ((* 2 w) h) (0 h)))
+                8)))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        !code.contains("_##"),
+        "invalid python local emitted: {}",
+        code
+    );
+    assert!(
+        !code.contains(" ##"),
+        "invalid symbol leaked into python: {}",
+        code
+    );
+    assert!(code.contains("_ecky_polygon("), "polygon missing: {}", code);
+    assert!(code.contains("extrude("), "extrude missing: {}", code);
+    assert!(
+        code.contains("float(params.get(\"shift\", 5.0))"),
+        "shift param missing: {}",
         code
     );
 }
@@ -161,7 +254,7 @@ fn lower_to_build123d_polygon_accepts_let_wrapped_point_lists() {
                   (list i (+ i 1)))))
             5)))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains("Polygon("), "polygon: {}", code);
+    assert!(code.contains("_ecky_polygon("), "polygon: {}", code);
     assert!(code.contains("(1.0, (1.0 + 1.0))"), "first point: {}", code);
     assert!(
         code.contains("(3.0, (3.0 + 1.0))"),
@@ -208,7 +301,7 @@ fn lower_to_build123d_polygon_accepts_build_bound_generated_point_lists() {
                  (list i (+ i 10)))))
             (result (extrude (polygon pts) 5)))))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains("Polygon("), "polygon: {}", code);
+    assert!(code.contains("_ecky_polygon("), "polygon: {}", code);
     assert!(
         code.contains("(0.0, (0.0 + 10.0))"),
         "first point: {}",
@@ -264,6 +357,34 @@ fn lower_to_build123d_bspline_accepts_build_bound_generated_point_lists() {
     assert!(
         code.contains("Spline([(0.0, 0.0), (5.0, 2.0), (10.0, 0.0)], periodic=False)"),
         "bspline: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_path_accepts_lorenz_point_helper() {
+    let src = r#"(model
+        (part rail
+          (path (lorenz-points 4 0.01 12))))"#;
+    let code = crate::ecky_ir::lower_to_build123d(src).expect("lower");
+    assert!(code.contains("Polyline("), "path: {}", code);
+    assert!(
+        code.contains("max((-12.0), min(12.0"),
+        "chaotic helper bounds should lower into point expressions: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_polygon_accepts_henon_point_helper() {
+    let src = r#"(model
+        (part body
+          (extrude (polygon (henon-points 8 10)) 2)))"#;
+    let code = crate::ecky_ir::lower_to_build123d(src).expect("lower");
+    assert!(code.contains("_ecky_polygon("), "polygon: {}", code);
+    assert!(
+        code.contains("max((-10.0), min(10.0"),
+        "chaotic helper bounds should lower into point expressions: {}",
         code
     );
 }
@@ -332,7 +453,8 @@ fn lower_to_build123d_rejects_mutable_def() {
     let src = r#"(model (part body (def body (box 10 10 10))))"#;
     let err = lower_to_build123d(src).unwrap_err();
     assert!(
-        err.to_string().contains("not supported by Ecky IR v0"),
+        err.to_string()
+            .contains("not supported by current `.ecky` runtime"),
         "unexpected: {}",
         err
     );
@@ -342,7 +464,7 @@ fn lower_to_build123d_rejects_mutable_def() {
 fn lower_to_build123d_union_three_parts() {
     let src = r#"(model (part compound (union (sphere 5) (cylinder 3 10) (box 4 4 4))))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains("Sphere(5.0)"), "sphere");
+    assert!(code.contains("Sphere(5.0,"), "sphere");
     assert!(code.contains("Cylinder(3.0, 10.0,"), "cylinder");
     assert!(code.contains("Box(4.0, 4.0, 4.0,"), "box");
     assert!(code.contains("_ecky_fuse_many("), "fuse helper: {}", code);
@@ -363,20 +485,23 @@ fn lower_to_build123d_shell_extrude() {
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("Circle(12.0)"), "circle");
     assert!(code.contains("offset("), "offset for inner sketch");
-    assert!(code.contains("extrude("), "extrude");
+    assert!(code.contains("_ecky_extrude("), "extrude helper");
     assert!(
-        code.contains("= _ecky_face("),
+        code.contains("_ecky_extrude("),
         "shell extrude should coerce sketches to faces: {}",
         code
     );
-    assert!(code.contains(" - "), "difference");
+    assert!(
+        code.contains("_ecky_cut_many(") || code.contains(" - "),
+        "difference"
+    );
 }
 
 #[test]
 fn lower_to_build123d_revolve() {
     let src = r#"(model (part body (revolve (polygon ((10 0) (14 0) (14 20) (10 20))) 360)))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains("Polygon("), "polygon");
+    assert!(code.contains("_ecky_polygon("), "polygon");
     assert!(code.contains("Rot(90, 0, 0)"), "rotation to XZ");
     assert!(code.contains("revolve("), "revolve call");
     assert!(code.contains("revolution_arc=360.0"), "full revolution");
@@ -417,13 +542,21 @@ fn lower_to_build123d_sweep_profile_with_holes() {
             (bezier-path ((0 0 0) (30 0 0) (60 0 10) (90 0 10))))))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("Bezier("), "path: {}", code);
-    assert!(code.contains("Polygon("), "profile loops: {}", code);
     assert!(
-        !code.contains("Wire(Polygon("),
+        code.contains("_ecky_polygon(") || code.contains("Polygon(["),
+        "profile loops: {}",
+        code
+    );
+    assert!(
+        !code.contains("Wire(_ecky_polygon("),
         "raw loop fallback: {}",
         code
     );
-    assert!(code.contains(" - "), "hole subtraction: {}", code);
+    assert!(
+        code.contains("_ecky_face_with_holes("),
+        "hole subtraction: {}",
+        code
+    );
     assert!(code.contains("sweep("), "sweep call: {}", code);
 }
 
@@ -439,7 +572,7 @@ fn lower_to_build123d_build_shape_result_clip_and_place() {
             (shape clipped (clip-box placed-peg :x (20 40) :y (-5 5) :z (-10 20)))
             (result (compound clipped)))))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains(".location_at("), "path-frame: {}", code);
+    assert!(code.contains("_ecky_path_frame("), "path-frame: {}", code);
     assert!(code.contains("_ecky_place("), "place helper: {}", code);
     assert!(
         code.contains("_ecky_clip_box("),
@@ -617,7 +750,7 @@ fn lower_to_build123d_if_conditional() {
     let src =
         r#"(model (params (toggle cap #t)) (part body (if cap (sphere 10) (cylinder 10 20))))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains("Sphere(10.0)"), "then branch");
+    assert!(code.contains("Sphere(10.0,"), "then branch");
     assert!(code.contains("Cylinder(10.0, 20.0,"), "else branch");
     assert!(code.contains("if "), "conditional");
     assert!(code.contains("else:"), "else");
@@ -674,7 +807,7 @@ fn lower_to_build123d_profile_with_holes() {
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("Circle(20.0)"), "outer circle");
     assert!(code.contains("Circle(10.0)"), "hole circle");
-    assert!(code.contains(" - "), "hole subtraction");
+    assert!(code.contains("_ecky_face_with_holes("), "hole subtraction");
     assert!(code.contains("extrude("), "extrude");
 }
 
@@ -715,7 +848,7 @@ fn lower_to_build123d_make_face_accepts_bspline() {
 fn lower_to_build123d_polygon() {
     let src = r#"(model (part body (extrude (polygon ((0 0) (10 0) (10 10) (0 10))) 5)))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains("Polygon("), "polygon");
+    assert!(code.contains("_ecky_polygon("), "polygon");
     assert!(code.contains("(0.0, 0.0)"), "point");
     assert!(code.contains("extrude("), "extrude");
 }
@@ -791,7 +924,7 @@ fn lower_to_build123d_shell_revolve() {
     let src =
         r#"(model (part body (shell 2 (revolve (polygon ((10 0) (14 0) (14 20) (10 20))) 360))))"#;
     let code = lower_to_build123d(src).expect("lower");
-    assert!(code.contains("Polygon("), "polygon");
+    assert!(code.contains("_ecky_polygon("), "polygon");
     assert!(code.contains("offset("), "solid offset");
     assert!(code.contains("revolve("), "revolve call");
     assert!(
@@ -1072,10 +1205,943 @@ fn lower_to_build123d_canonical_cup_contains_expected_snippets() {
 }
 
 #[test]
+fn lower_to_build123d_tooth_rotated_cutters_fixture() {
+    let code = lower_to_build123d(include_str!(
+        "../../tests/fixtures/cad/surface/tooth_rotated_cutters.ecky"
+    ))
+    .expect("lower");
+    assert!(
+        code.contains("for __ecky_rc_i in range(_b0):"),
+        "repeat compound loop: {}",
+        code
+    );
+    assert!(
+        code.contains("Rot(0.0, (_i * 7.5), 0.0)"),
+        "per-tooth rotation: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_cut_many(_base, _cutters)"),
+        "cut cutters from base: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_tooth_rotated_cutters_comprehension_fixture() {
+    let code = lower_to_build123d(include_str!(
+        "../../tests/fixtures/cad/surface/tooth_rotated_cutters_comprehension.ecky"
+    ))
+    .expect("lower");
+    assert!(
+        code.contains("for __ecky_map_i in _b"),
+        "map loop: {}",
+        code
+    );
+    assert!(
+        code.contains("range(int(math.floor(0.0)), int(math.floor("),
+        "dynamic range: {}",
+        code
+    );
+    assert!(
+        code.contains("Rot(0.0, (_i * 7.5), 0.0)"),
+        "per-tooth rotation: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_cut_many(_base, *_b"),
+        "spliced cutter list: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_supports_deterministic_fancy_helpers() {
+    let code = crate::ecky_ir::lower_to_build123d(
+        r#"(model
+          (params (number seed 7 :label "Seed" :min 0 :max 99))
+          (part body
+            (union
+              (extrude (polygon (organic-loop 12 20 3 seed)) 4)
+              (translate (* 10 (hash01 1 2 seed)) 0 6 (box 2 2 2)))))"#,
+    )
+    .expect("lower");
+
+    assert!(
+        code.contains("def _ecky_hash01"),
+        "hash helper preamble: {}",
+        code
+    );
+    assert!(code.contains("_ecky_hash01("), "hash helper call: {}", code);
+    assert!(code.contains("_ecky_polygon"), "organic polygon: {}", code);
+}
+
+#[test]
+fn lower_to_build123d_organic_bspline_loop_fixture() {
+    let source = surface_fixture("organic_bspline_loop.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(code.contains("Spline("), "bspline helper: {}", code);
+    assert!(code.contains("periodic=True"), "closed loop: {}", code);
+    assert!(code.contains("_ecky_hash_signed("), "seeded loop: {}", code);
+    assert!(code.contains("_ecky_extrude("), "surface extrude: {}", code);
+}
+
+#[test]
+fn lower_to_build123d_voronoi_perforated_panel_fixture() {
+    let source = surface_fixture("voronoi_perforated_panel.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(code.contains("Cylinder("), "cutout cylinders: {}", code);
+    assert!(
+        code.contains("_ecky_fuse_many("),
+        "apply union cutouts: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_cut_many("),
+        "panel perforation cut: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_hash_signed("),
+        "seeded cells: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_thomas_modular_ramp_fixture() {
+    let code = crate::ecky_ir::lower_to_build123d(include_str!(
+        "../../tests/fixtures/cad/surface/thomas_modular_ramp.ecky"
+    ))
+    .expect("lower");
+
+    assert!(code.contains("_ecky_polygon("), "polygon: {}", code);
+    assert!(
+        code.contains("tooth_phase_shift"),
+        "keeps ramp helper bindings: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_matches_public_entrypoint_for_comprehension_fixture() {
+    let source =
+        include_str!("../../tests/fixtures/cad/surface/tooth_rotated_cutters_comprehension.ecky");
+    let program = crate::ecky_scheme::try_compile_to_core_program(source)
+        .expect("compiled path")
+        .expect("program");
+    let direct = lower_core_program_to_build123d(&program).expect("direct");
+    let public = crate::ecky_ir::lower_to_build123d(source).expect("public");
+
+    assert_eq!(direct, public);
+    assert!(
+        direct.contains("for __ecky_map_") && direct.contains(" in _b"),
+        "map loop: {}",
+        direct
+    );
+    assert!(
+        direct.contains("range(int(math.floor(0.0)), int(math.floor("),
+        "dynamic range: {}",
+        direct
+    );
+    assert!(
+        direct.contains("_ecky_cut_many(_base, *_b"),
+        "spliced cutter list: {}",
+        direct
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_supports_text_params_without_legacy_model_bridge() {
+    use crate::ecky_core_ir::{
+        CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CoreParameter,
+        CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart, CorePrimitive,
+        CoreProgram, CoreReference, CoreValueKind, NodeId, ParamId, PartId, ProgramId,
+    };
+
+    let label_id = ParamId::new(1);
+    let root = CoreNode::new(
+        NodeId::new(10),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Text),
+            args: vec![
+                CoreNode::new(
+                    NodeId::new(11),
+                    CoreNodeKind::Reference(CoreReference::Parameter(label_id)),
+                    CoreValueKind::Text,
+                ),
+                CoreNode::new(
+                    NodeId::new(12),
+                    CoreNodeKind::Literal(CoreLiteral::Number(10.0)),
+                    CoreValueKind::Number,
+                ),
+            ],
+            keywords: vec![],
+        },
+        CoreValueKind::Sketch,
+    );
+    let program = CoreProgram::new(
+        ProgramId::new(1),
+        vec![CoreParameter {
+            id: label_id,
+            key: "label".into(),
+            label: "Label".into(),
+            kind: CoreParameterKind::Text,
+            default_value: CoreParameterValue::Text("hello".into()),
+            frozen: false,
+            constraints: CoreParameterConstraints::default(),
+        }],
+        vec![CorePart {
+            id: PartId::new(2),
+            key: "body".into(),
+            label: "Body".into(),
+            root,
+        }],
+    );
+
+    let code = lower_core_program_to_build123d(&program).expect("lower");
+
+    assert!(code.contains("Text("), "text primitive: {}", code);
+    assert!(
+        code.contains(r#"str(params.get("label", "hello"))"#),
+        "text param default: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_keeps_root_build_and_let_bindings_distinct() {
+    use crate::ecky_core_ir::{
+        CoreBinding, CoreBooleanOp, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart,
+        CorePrimitive, CoreProgram, CoreReference, CoreShapeBinding, CoreTransformOp,
+        CoreValueKind, NodeId, PartId, ProgramId,
+    };
+
+    fn num(id: u64, value: f64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Literal(CoreLiteral::Number(value)),
+            CoreValueKind::Number,
+        )
+    }
+
+    fn local(id: u64, name: &str, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Local(name.into())),
+            kind,
+        )
+    }
+
+    fn node_ref(id: u64, target: u64, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Node(NodeId::new(target))),
+            kind,
+        )
+    }
+
+    fn call(id: u64, op: CoreOperation, args: Vec<CoreNode>, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Call {
+                op,
+                args,
+                keywords: vec![],
+            },
+            kind,
+        )
+    }
+
+    let left_box = call(
+        10,
+        CoreOperation::Primitive(CorePrimitive::Box),
+        vec![num(11, 1.0), num(12, 1.0), num(13, 1.0)],
+        CoreValueKind::Solid,
+    );
+
+    let right_box = call(
+        20,
+        CoreOperation::Transform(CoreTransformOp::Translate),
+        vec![
+            num(21, 10.0),
+            num(22, 0.0),
+            num(23, 0.0),
+            call(
+                24,
+                CoreOperation::Primitive(CorePrimitive::Box),
+                vec![num(25, 1.0), num(26, 1.0), num(27, 1.0)],
+                CoreValueKind::Solid,
+            ),
+        ],
+        CoreValueKind::Solid,
+    );
+
+    let body = call(
+        40,
+        CoreOperation::Boolean(CoreBooleanOp::Union),
+        vec![
+            call(
+                41,
+                CoreOperation::Transform(CoreTransformOp::Translate),
+                vec![
+                    local(42, "shift/one", CoreValueKind::Number),
+                    num(43, 0.0),
+                    num(44, 0.0),
+                    node_ref(45, 10, CoreValueKind::Solid),
+                ],
+                CoreValueKind::Solid,
+            ),
+            call(
+                46,
+                CoreOperation::Transform(CoreTransformOp::Translate),
+                vec![
+                    local(47, "shift-one", CoreValueKind::Number),
+                    num(48, 0.0),
+                    num(49, 0.0),
+                    node_ref(50, 20, CoreValueKind::Solid),
+                ],
+                CoreValueKind::Solid,
+            ),
+        ],
+        CoreValueKind::Solid,
+    );
+
+    let root = CoreNode::new(
+        NodeId::new(60),
+        CoreNodeKind::Build {
+            bindings: vec![
+                CoreShapeBinding {
+                    name: "left/box".into(),
+                    value: left_box,
+                },
+                CoreShapeBinding {
+                    name: "left-box".into(),
+                    value: right_box,
+                },
+            ],
+            result: Box::new(CoreNode::new(
+                NodeId::new(61),
+                CoreNodeKind::Let {
+                    bindings: vec![
+                        CoreBinding {
+                            name: "shift/one".into(),
+                            value: num(62, 1.0),
+                        },
+                        CoreBinding {
+                            name: "shift-one".into(),
+                            value: num(63, 2.0),
+                        },
+                    ],
+                    body: Box::new(body),
+                },
+                CoreValueKind::Solid,
+            )),
+        },
+        CoreValueKind::Solid,
+    );
+
+    let program = CoreProgram::new(
+        ProgramId::new(1),
+        vec![],
+        vec![CorePart {
+            id: PartId::new(2),
+            key: "body".into(),
+            label: "Body".into(),
+            root,
+        }],
+    );
+
+    let code = lower_core_program_to_build123d(&program).expect("lower");
+
+    assert!(
+        code.contains("_left_box = _v0"),
+        "slash build binding collapsed: {}",
+        code
+    );
+    assert!(
+        code.contains("_left_box_2 = _v2"),
+        "hyphen build binding missing: {}",
+        code
+    );
+    assert!(
+        code.contains("_shift_one = 1.0"),
+        "slash let binding collapsed: {}",
+        code
+    );
+    assert!(
+        code.contains("_shift_one_2 = 2.0"),
+        "hyphen let binding missing: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_apply_transform(Pos(_shift_one, 0.0, 0.0), _left_box)"),
+        "first branch captured wrong build/let bindings: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_apply_transform(Pos(_shift_one_2, 0.0, 0.0), _left_box_2)"),
+        "second branch captured wrong build/let bindings: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_materializes_direct_list_points() {
+    use crate::ecky_core_ir::{
+        CoreBinding, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive,
+        CoreProgram, CoreReference, CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
+    };
+
+    fn num(id: u64, value: f64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Literal(CoreLiteral::Number(value)),
+            CoreValueKind::Number,
+        )
+    }
+
+    fn local(id: u64, name: &str) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Local(name.into())),
+            CoreValueKind::Number,
+        )
+    }
+
+    fn point2(id: u64, x: CoreNode, y: CoreNode) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::List(vec![x, y]),
+            CoreValueKind::Point2,
+        )
+    }
+
+    fn call(id: u64, op: CoreOperation, args: Vec<CoreNode>, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Call {
+                op,
+                args,
+                keywords: vec![],
+            },
+            kind,
+        )
+    }
+
+    let pts = CoreNode::new(
+        NodeId::new(20),
+        CoreNodeKind::List(vec![
+            point2(21, local(22, "x"), num(23, 2.0)),
+            point2(24, num(25, 3.0), num(26, 4.0)),
+        ]),
+        CoreValueKind::List,
+    );
+    let root = CoreNode::new(
+        NodeId::new(30),
+        CoreNodeKind::Let {
+            bindings: vec![CoreBinding {
+                name: "x".into(),
+                value: num(31, 1.0),
+            }],
+            body: Box::new(CoreNode::new(
+                NodeId::new(36),
+                CoreNodeKind::Let {
+                    bindings: vec![CoreBinding {
+                        name: "pts".into(),
+                        value: pts,
+                    }],
+                    body: Box::new(call(
+                        32,
+                        CoreOperation::Surface(CoreSurfaceOp::Extrude),
+                        vec![
+                            call(
+                                33,
+                                CoreOperation::Primitive(CorePrimitive::Polygon),
+                                vec![CoreNode::new(
+                                    NodeId::new(34),
+                                    CoreNodeKind::Reference(CoreReference::Local("pts".into())),
+                                    CoreValueKind::List,
+                                )],
+                                CoreValueKind::Sketch,
+                            ),
+                            num(35, 5.0),
+                        ],
+                        CoreValueKind::Solid,
+                    )),
+                },
+                CoreValueKind::Solid,
+            )),
+        },
+        CoreValueKind::Solid,
+    );
+    let program = CoreProgram::new(
+        ProgramId::new(1),
+        vec![],
+        vec![CorePart {
+            id: PartId::new(2),
+            key: "body".into(),
+            label: "Body".into(),
+            root,
+        }],
+    );
+
+    let code = lower_core_program_to_build123d(&program).expect("lower");
+
+    assert!(code.contains("_ecky_polygon("), "polygon: {}", code);
+    assert!(code.contains("_x = 1.0"), "x binding: {}", code);
+    assert!(code.contains("(_x, 2.0)"), "first point: {}", code);
+    assert!(code.contains("(3.0, 4.0)"), "second point: {}", code);
+}
+
+#[test]
+fn lower_core_program_to_build123d_materializes_let_point_node_refs() {
+    use crate::ecky_core_ir::{
+        CoreBinding, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive,
+        CoreProgram, CoreReference, CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
+    };
+
+    fn num(id: u64, value: f64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Literal(CoreLiteral::Number(value)),
+            CoreValueKind::Number,
+        )
+    }
+
+    fn node_ref(id: u64, target: u64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Node(NodeId::new(target))),
+            CoreValueKind::Number,
+        )
+    }
+
+    fn call(id: u64, op: CoreOperation, args: Vec<CoreNode>, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Call {
+                op,
+                args,
+                keywords: vec![],
+            },
+            kind,
+        )
+    }
+
+    let first_point = CoreNode::new(
+        NodeId::new(20),
+        CoreNodeKind::Let {
+            bindings: vec![CoreBinding {
+                name: "x".into(),
+                value: num(21, 1.0),
+            }],
+            body: Box::new(CoreNode::new(
+                NodeId::new(22),
+                CoreNodeKind::List(vec![node_ref(23, 21), num(24, 2.0)]),
+                CoreValueKind::Point2,
+            )),
+        },
+        CoreValueKind::Point2,
+    );
+    let points = CoreNode::new(
+        NodeId::new(30),
+        CoreNodeKind::List(vec![
+            first_point,
+            CoreNode::new(
+                NodeId::new(31),
+                CoreNodeKind::List(vec![num(32, 3.0), num(33, 4.0)]),
+                CoreValueKind::Point2,
+            ),
+        ]),
+        CoreValueKind::List,
+    );
+    let root = call(
+        40,
+        CoreOperation::Surface(CoreSurfaceOp::Extrude),
+        vec![
+            call(
+                41,
+                CoreOperation::Primitive(CorePrimitive::Polygon),
+                vec![points],
+                CoreValueKind::Sketch,
+            ),
+            num(42, 5.0),
+        ],
+        CoreValueKind::Solid,
+    );
+    let program = CoreProgram::new(
+        ProgramId::new(1),
+        vec![],
+        vec![CorePart {
+            id: PartId::new(2),
+            key: "body".into(),
+            label: "Body".into(),
+            root,
+        }],
+    );
+
+    let code = lower_core_program_to_build123d(&program).expect("lower");
+
+    assert!(code.contains("_ecky_polygon("), "polygon: {}", code);
+    assert!(code.contains("(1.0, 2.0)"), "first point: {}", code);
+    assert!(code.contains("(3.0, 4.0)"), "second point: {}", code);
+}
+
+#[test]
+fn lower_core_program_to_build123d_group_prefix_let_shadow_does_not_leak_into_tail() {
+    use crate::ecky_core_ir::{
+        CoreBinding, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive,
+        CoreProgram, CoreReference, CoreShapeBinding, CoreTransformOp, CoreValueKind, NodeId,
+        PartId, ProgramId,
+    };
+
+    fn num(id: u64, value: f64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Literal(CoreLiteral::Number(value)),
+            CoreValueKind::Number,
+        )
+    }
+
+    fn local(id: u64, name: &str, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Local(name.into())),
+            kind,
+        )
+    }
+
+    fn node_ref(id: u64, target: u64, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Node(NodeId::new(target))),
+            kind,
+        )
+    }
+
+    fn call(id: u64, op: CoreOperation, args: Vec<CoreNode>, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Call {
+                op,
+                args,
+                keywords: vec![],
+            },
+            kind,
+        )
+    }
+
+    let base = call(
+        10,
+        CoreOperation::Primitive(CorePrimitive::Box),
+        vec![num(11, 1.0), num(12, 1.0), num(13, 1.0)],
+        CoreValueKind::Solid,
+    );
+    let prefix = CoreNode::new(
+        NodeId::new(20),
+        CoreNodeKind::Let {
+            bindings: vec![CoreBinding {
+                name: "shift".into(),
+                value: num(21, 2.0),
+            }],
+            body: Box::new(call(
+                22,
+                CoreOperation::Transform(CoreTransformOp::Translate),
+                vec![
+                    local(23, "shift", CoreValueKind::Number),
+                    num(24, 0.0),
+                    num(25, 0.0),
+                    node_ref(26, 10, CoreValueKind::Solid),
+                ],
+                CoreValueKind::Solid,
+            )),
+        },
+        CoreValueKind::Solid,
+    );
+    let tail = call(
+        30,
+        CoreOperation::Transform(CoreTransformOp::Translate),
+        vec![
+            local(31, "shift", CoreValueKind::Number),
+            num(32, 0.0),
+            num(33, 0.0),
+            node_ref(34, 10, CoreValueKind::Solid),
+        ],
+        CoreValueKind::Solid,
+    );
+    let root = CoreNode::new(
+        NodeId::new(40),
+        CoreNodeKind::Build {
+            bindings: vec![CoreShapeBinding {
+                name: "body".into(),
+                value: base,
+            }],
+            result: Box::new(CoreNode::new(
+                NodeId::new(41),
+                CoreNodeKind::Let {
+                    bindings: vec![CoreBinding {
+                        name: "shift".into(),
+                        value: num(42, 1.0),
+                    }],
+                    body: Box::new(CoreNode::new(
+                        NodeId::new(43),
+                        CoreNodeKind::Group(vec![prefix, tail]),
+                        CoreValueKind::Solid,
+                    )),
+                },
+                CoreValueKind::Solid,
+            )),
+        },
+        CoreValueKind::Solid,
+    );
+    let program = CoreProgram::new(
+        ProgramId::new(1),
+        vec![],
+        vec![CorePart {
+            id: PartId::new(2),
+            key: "body".into(),
+            label: "Body".into(),
+            root,
+        }],
+    );
+
+    let code = lower_core_program_to_build123d(&program).expect("lower");
+
+    assert!(
+        code.contains("_body = _v0"),
+        "outer build binding: {}",
+        code
+    );
+    assert!(code.contains("_shift = 1.0"), "outer let binding: {}", code);
+    assert!(
+        code.contains("_shift_2 = 2.0"),
+        "inner let shadow: {}",
+        code
+    );
+    assert_eq!(
+        code.matches("_ecky_apply_transform(").count(),
+        2,
+        "group should emit prefix and tail transforms: {}",
+        code
+    );
+
+    let prefix_pos = code
+        .find("Pos(_shift_2, 0.0, 0.0), _body)")
+        .expect("prefix transform");
+    let tail_pos = code
+        .find("Pos(_shift, 0.0, 0.0), _body)")
+        .expect("tail transform");
+
+    assert!(
+        prefix_pos < tail_pos,
+        "group order/scope restore wrong: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_direct_if_keeps_branch_scopes_separate() {
+    use crate::ecky_core_ir::{
+        CoreBinding, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive,
+        CoreProgram, CoreReference, CoreShapeBinding, CoreTransformOp, CoreValueKind, NodeId,
+        PartId, ProgramId,
+    };
+
+    fn num(id: u64, value: f64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Literal(CoreLiteral::Number(value)),
+            CoreValueKind::Number,
+        )
+    }
+
+    fn bool_lit(id: u64, value: bool) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Literal(CoreLiteral::Boolean(value)),
+            CoreValueKind::Boolean,
+        )
+    }
+
+    fn local(id: u64, name: &str, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Local(name.into())),
+            kind,
+        )
+    }
+
+    fn node_ref(id: u64, target: u64, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Node(NodeId::new(target))),
+            kind,
+        )
+    }
+
+    fn call(id: u64, op: CoreOperation, args: Vec<CoreNode>, kind: CoreValueKind) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Call {
+                op,
+                args,
+                keywords: vec![],
+            },
+            kind,
+        )
+    }
+
+    let base = call(
+        10,
+        CoreOperation::Primitive(CorePrimitive::Box),
+        vec![num(11, 1.0), num(12, 1.0), num(13, 1.0)],
+        CoreValueKind::Solid,
+    );
+    let then_branch = CoreNode::new(
+        NodeId::new(20),
+        CoreNodeKind::Let {
+            bindings: vec![CoreBinding {
+                name: "shift".into(),
+                value: num(21, 2.0),
+            }],
+            body: Box::new(call(
+                22,
+                CoreOperation::Transform(CoreTransformOp::Translate),
+                vec![
+                    local(23, "shift", CoreValueKind::Number),
+                    num(24, 0.0),
+                    num(25, 0.0),
+                    node_ref(26, 10, CoreValueKind::Solid),
+                ],
+                CoreValueKind::Solid,
+            )),
+        },
+        CoreValueKind::Solid,
+    );
+    let else_branch = CoreNode::new(
+        NodeId::new(30),
+        CoreNodeKind::Let {
+            bindings: vec![CoreBinding {
+                name: "shift".into(),
+                value: num(31, 4.0),
+            }],
+            body: Box::new(call(
+                32,
+                CoreOperation::Transform(CoreTransformOp::Translate),
+                vec![
+                    local(33, "shift", CoreValueKind::Number),
+                    num(34, 0.0),
+                    num(35, 0.0),
+                    node_ref(36, 10, CoreValueKind::Solid),
+                ],
+                CoreValueKind::Solid,
+            )),
+        },
+        CoreValueKind::Solid,
+    );
+    let root = CoreNode::new(
+        NodeId::new(40),
+        CoreNodeKind::Build {
+            bindings: vec![CoreShapeBinding {
+                name: "body".into(),
+                value: base,
+            }],
+            result: Box::new(CoreNode::new(
+                NodeId::new(41),
+                CoreNodeKind::Let {
+                    bindings: vec![CoreBinding {
+                        name: "cap".into(),
+                        value: bool_lit(42, true),
+                    }],
+                    body: Box::new(CoreNode::new(
+                        NodeId::new(43),
+                        CoreNodeKind::If {
+                            condition: Box::new(local(44, "cap", CoreValueKind::Boolean)),
+                            then_branch: Box::new(then_branch),
+                            else_branch: Box::new(else_branch),
+                        },
+                        CoreValueKind::Solid,
+                    )),
+                },
+                CoreValueKind::Solid,
+            )),
+        },
+        CoreValueKind::Solid,
+    );
+    let program = CoreProgram::new(
+        ProgramId::new(1),
+        vec![],
+        vec![CorePart {
+            id: PartId::new(2),
+            key: "body".into(),
+            label: "Body".into(),
+            root,
+        }],
+    );
+
+    let code = lower_core_program_to_build123d(&program).expect("lower");
+
+    assert!(code.contains("_body = _v0"), "build binding: {}", code);
+    assert!(code.contains("_cap = True"), "condition binding: {}", code);
+    assert!(code.contains("if _cap:"), "direct conditional: {}", code);
+    assert!(
+        code.contains("_shift = 2.0"),
+        "then branch binding: {}",
+        code
+    );
+    assert!(
+        code.contains("_shift_2 = 4.0"),
+        "else branch binding: {}",
+        code
+    );
+    assert!(
+        code.contains("Pos(_shift, 0.0, 0.0), _body"),
+        "then branch uses then scope: {}",
+        code
+    );
+    assert!(
+        code.contains("Pos(_shift_2, 0.0, 0.0), _body"),
+        "else branch uses else scope: {}",
+        code
+    );
+}
+
+#[test]
 fn lower_to_build123d_text() {
     let src = r#"(model (part body (text "hello" 10)))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("Text(\"hello\", font_size=10.0)"));
+}
+
+#[test]
+fn lower_to_build123d_begin_sequence_returns_last_geometry() {
+    let src = r#"
+        (define (finish-box)
+          (begin
+            (box 1 1 1)
+            (translate 2 0 0 (box 1 1 1))))
+        (model
+          (part body
+            (finish-box)))
+    "#;
+    let program = crate::ecky_scheme::try_compile_to_core_program(src)
+        .expect("compiled path")
+        .expect("program");
+    let model = crate::ecky_ir::model::core_program_to_model(&program).expect("model");
+    assert_eq!(
+        model.parts[0].value_kind,
+        Some(crate::ecky_core_ir::CoreValueKind::Solid)
+    );
+    let code = lower_core_program_to_build123d(&program).expect("lower");
+    assert!(code.contains("Box(1.0, 1.0, 1.0"), "box: {}", code);
+    assert!(
+        code.contains("Pos(2.0, 0.0, 0.0)"),
+        "translate from final begin form: {}",
+        code
+    );
 }
 
 #[test]
@@ -1114,4 +2180,99 @@ fn lower_to_build123d_variadic_loft() {
     assert!(code.contains("_ecky_apply_transform(Pos(0, 0, (50.0) * 0),"));
     assert!(code.contains("_ecky_apply_transform(Pos(0, 0, (50.0) * 0.5),"));
     assert!(code.contains("_ecky_apply_transform(Pos(0, 0, (50.0) * 1),"));
+}
+
+#[test]
+fn lower_to_build123d_extrude_supports_symmetric_flag() {
+    let src =
+        r#"(model (part body (extrude (polygon ((0 0) (10 0) (10 5) (0 5))) 8 :symmetric #t)))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(code.contains("_ecky_extrude("), "extrude helper: {}", code);
+    assert!(code.contains("True"), "symmetric flag: {}", code);
+    assert!(
+        code.contains("_ecky_extrude(_v0, 8.0, True)"),
+        "centered offset: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_scale_rejects_literal_non_uniform_scale() {
+    let src = r#"(model (part body (scale 2 1 3 (box 10 10 10))))"#;
+    let err = lower_to_build123d(src).expect_err("non-uniform scale should fail");
+    assert!(
+        err.to_string()
+            .contains("`scale` does not support literal non-uniform scaling"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
+fn lower_to_build123d_bezier_path_rejects_bad_static_point_count() {
+    let src = r#"(model (part body (sweep (circle 2) (bezier-path ((0 0 0) (1 0 0) (2 0 0) (3 0 0) (4 0 0))))))"#;
+    let err = lower_to_build123d(src).expect_err("bad bezier count should fail");
+    assert!(
+        err.to_string()
+            .contains("`bezier-path` expects 3n+1 control points"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
+fn lower_to_build123d_primitives_support_align_keyword() {
+    let src = r#"(model
+      (part body
+        (union
+          (box 10 20 30 :align '(min center max))
+          (translate 20 0 0 (cylinder 5 12 :align '(max min center)))
+          (translate 40 0 0 (sphere 6 :align '(min max center)))
+          (translate 60 0 0 (cone 8 4 12 :align '(center max min))))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("align=(Align.MIN, Align.CENTER, Align.MAX)"),
+        "box align: {}",
+        code
+    );
+    assert!(
+        code.contains("align=(Align.MAX, Align.MIN, Align.CENTER)"),
+        "cylinder align: {}",
+        code
+    );
+    assert!(
+        code.contains("align=(Align.MIN, Align.MAX, Align.CENTER)"),
+        "sphere align: {}",
+        code
+    );
+    assert!(
+        code.contains("align=(Align.CENTER, Align.MAX, Align.MIN)"),
+        "cone align: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_supports_plane_location_and_place() {
+    let src = r#"(model
+      (part body
+        (build
+          (shape base (plane :origin (10 20 30) :x (0 1 0) :normal (0 0 1)))
+          (shape peg (box 4 4 4))
+          (shape pose (location base :offset (5 0 0) :rotate (0 90 0)))
+          (result (place pose peg)))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains(
+            "Plane(origin=(10.0, 20.0, 30.0), x_dir=(0.0, 1.0, 0.0), z_dir=(0.0, 0.0, 1.0))"
+        ),
+        "plane: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_location("),
+        "location helper: {}",
+        code
+    );
+    assert!(code.contains("_ecky_place("), "place helper: {}", code);
 }

@@ -45,7 +45,6 @@
            (flat_start 0)
            (0 0))))
       (shape body
-        (translate (/ L 2) (- (/ width 2)) (/ (+ height dz) 2)
-          (rotate 90 0 0
-            (extrude body2d width))))
+        (rotate 90 0 0
+          (extrude body2d width :symmetric #t)))
       (result body))))

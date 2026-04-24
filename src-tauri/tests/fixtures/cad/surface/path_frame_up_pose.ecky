@@ -1,0 +1,7 @@
+(model
+  (part body
+    (build
+      (shape rail (path (0 0 0) (20 0 10) (20 10 10)))
+      (shape peg (box 4 2 6 :align '(min min min)))
+      (shape frame (path-frame rail :at end :up (1 0 0)))
+      (result (place frame peg :offset (1 2 3) :rotate (10 20 30))))))

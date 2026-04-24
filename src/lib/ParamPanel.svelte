@@ -21,7 +21,7 @@
     type ContextSelectionTarget,
   } from './modelRuntime/contextualEditing';
   import { normalizePostProcessing } from './types/domain';
-  import { cycleTopologyMode, topologyModeLabel, type TopologyMode } from './viewerDisplayMode';
+  import { type TopologyMode } from './viewerDisplayMode';
   import type {
     MaterializedSemanticControl,
     MaterializedSemanticView,
@@ -30,6 +30,15 @@
   import { activeThreadIdStore as activeThreadId, historyStore as history } from './stores/domainState';
   import { refreshHistory } from './stores/history';
   import { liveApply } from './stores/paramPanelState';
+  import ParamPanelToolbar from './components/ParamPanelToolbar.svelte';
+  import ParamPanelModeTabs from './components/ParamPanelModeTabs.svelte';
+  import ParamPanelControlField from './components/ParamPanelControlField.svelte';
+  import ParamPanelAdvisoryList from './components/ParamPanelAdvisoryList.svelte';
+  import ParamPanelContextStrip from './components/ParamPanelContextStrip.svelte';
+  import ParamPanelPrimitiveComposer from './components/ParamPanelPrimitiveComposer.svelte';
+  import ParamPanelAdvisoryComposer from './components/ParamPanelAdvisoryComposer.svelte';
+  import ParamPanelRelationComposer from './components/ParamPanelRelationComposer.svelte';
+  import ParamPanelViewComposer from './components/ParamPanelViewComposer.svelte';
   import { session } from './stores/sessionStore';
   import type {
     CheckboxField,
@@ -2030,68 +2039,23 @@
 </script>
 
 <div class="param-panel">
-  <div class="panel-toolbar">
-    <div class="search-box">
-      <input 
-        type="text" 
-        placeholder="Search controls..." 
-        bind:value={searchQuery}
-        class="search-input"
-      />
-      {#if searchQuery}
-        <button class="clear-search" onclick={() => searchQuery = ''}>✕</button>
-      {/if}
-    </div>
-  </div>
-
-  <div class="panel-actions">
-    {#if !editing}
-      <div class="live-apply-group">
-        <label class="live-toggle" title="Update geometry immediately on every change">
-          <input class="ui-checkbox" type="checkbox" bind:checked={$liveApply} />
-          <span>LIVE</span>
-        </label>
-        <button 
-          class="btn btn-xs btn-primary apply-btn" 
-          onclick={applyChanges} 
-          disabled={$liveApply || applying}
-        >
-          {#if applying}
-            APPLYING...
-          {:else}
-            APPLY
-          {/if}
-        </button>
-        <button
-          class="btn btn-xs btn-ghost"
-          onclick={saveValues}
-          disabled={!activeVersionId || saveValuesState === 'saving'}
-          title={activeVersionId ? 'Persist current values as defaults for this version' : 'Generate first to persist defaults'}
-        >
-          {#if saveValuesState === 'saving'}
-            SAVING...
-          {:else if saveValuesState === 'saved'}
-            SAVED
-          {:else}
-            SAVE VALUES
-          {/if}
-        </button>
-      </div>
-      <button class="btn btn-xs" onclick={startEditing} title="Edit controls">✏️ EDIT CONTROLS</button>
-    {:else}
-      <div class="edit-toolbar-left">
-        <button class="btn btn-xs btn-primary" onclick={saveFields}>💾 SAVE</button>
-        <button class="btn btn-xs btn-ghost" onclick={cancelEditing}>✕ CANCEL</button>
-      </div>
-      <button class="btn btn-xs btn-secondary" onclick={readFromMacro} title="Auto-detect parameters from macro code" disabled={reading}>
-        {#if reading}
-          ⏳ READING...
-        {:else}
-          🔍 READ FROM MACRO
-        {/if}
-      </button>
-    {/if}
-  </div>
+  <ParamPanelToolbar
+    searchQuery={searchQuery}
+    editing={editing}
+    applying={applying}
+    reading={reading}
+    saveValuesState={saveValuesState}
+    liveApply={$liveApply}
+    activeVersionId={activeVersionId}
+    onSearchQueryChange={(value) => searchQuery = value}
+    onApplyChanges={applyChanges}
+    onSaveValues={saveValues}
+    onStartEditing={startEditing}
+    onSaveFields={saveFields}
+    onCancelEditing={cancelEditing}
+    onReadFromMacro={readFromMacro}
+    onLiveApplyChange={(checked) => liveApply.set(checked)}
+  />
 
   <div class="param-panel-body">
     {#if editing}
@@ -2187,50 +2151,15 @@
       </div>
     {/if}
 
-    <div class="panel-mode-tabs">
-      <button
-        class="panel-mode-tab"
-        class:panel-mode-tab-active={activeTab === 'views'}
-        onclick={() => activeTab = 'views'}
-      >
-        VIEWS
-      </button>
-      <button
-        class="panel-mode-tab"
-        class:panel-mode-tab-active={activeTab === 'raw'}
-        onclick={() => activeTab = 'raw'}
-      >
-        RAW
-      </button>
-      <button
-        class="panel-mode-tab"
-        class:panel-mode-tab-active={activeTab === 'litho'}
-        onclick={() => activeTab = 'litho'}
-      >
-        LITHO
-      </button>
-      <button
-        class="panel-mode-tab panel-mode-tab-compact"
-        class:panel-mode-tab-active={outlineEnabled}
-        onclick={() => updateViewerDisplay({ outlineEnabled: !outlineEnabled })}
-        title="Toggle part outlines in the viewport"
-      >
-        OUTLINE
-      </button>
-      <button
-        class="panel-mode-tab panel-mode-tab-compact"
-        class:panel-mode-tab-active={topologyMode !== 'off'}
-        onclick={() => updateViewerDisplay({ topologyMode: cycleTopologyMode(topologyMode) })}
-        title="Cycle topology overlay: off, feature edges, mesh wireframe"
-      >
-        {topologyModeLabel(topologyMode)}
-      </button>
-      {#if macroCode && onShowCode}
-        <button class="panel-mode-tab panel-code-btn" onclick={onShowCode} title="View macro code">
-          CODE
-        </button>
-      {/if}
-    </div>
+    <ParamPanelModeTabs
+      activeTab={activeTab}
+      outlineEnabled={outlineEnabled}
+      topologyMode={topologyMode}
+      macroCode={macroCode}
+      onActiveTabChange={(tab) => activeTab = tab}
+      onShowCode={onShowCode}
+      onViewerDisplayChange={updateViewerDisplay}
+    />
 
     {#if enrichmentProposals.length > 0 && modelManifest?.sourceKind === 'importedFcstd'}
       <div class="proposal-section">
@@ -2661,472 +2590,131 @@
         </div>
       {/if}
     {:else if activeTab === 'views'}
-      <div class="part-strip">
-        <div class="context-strip-head">
-          <div class="section-label">CONTEXTS</div>
-          <div class="context-strip-actions">
-            <button class="btn btn-xs btn-ghost" onclick={openCreateViewComposer}>
-              + VIEW
-            </button>
-            <button class="btn btn-xs btn-ghost" onclick={openPrimitiveComposer}>
-              + KNOB
-            </button>
-            <button class="btn btn-xs btn-ghost" onclick={openAdvisoryComposer}>
-              + RULE
-            </button>
-            <button class="btn btn-xs btn-ghost" onclick={openRelationComposer}>
-              + LINK
-            </button>
-            {#if activeSemanticView?.source === 'manual'}
-              <button class="btn btn-xs btn-ghost" onclick={() => openEditViewComposer(activeSemanticView)}>
-                EDIT
-              </button>
-              <button class="btn btn-xs btn-ghost" onclick={() => deleteManualView(activeSemanticView.viewId)}>
-                DELETE
-              </button>
-            {/if}
-          </div>
-        </div>
-        <div class="part-strip-list">
-          {#if controlViews.length > 0}
-            {#each controlViews as view}
-              <button
-                class="view-chip"
-                class:view-chip-active={view.viewId === activeControlViewId}
-                onclick={() => onSelectControlView?.(view.viewId)}
-              >
-                <span>{view.label}</span>
-                {#if shouldShowSemanticSource(view.source)}
-                  <span class="semantic-source-badge">{semanticSourceLabel(view.source)}</span>
-                {/if}
-              </button>
-            {/each}
-          {:else}
-            <div class="no-params">
-              No views yet. Create one to group raw controls into semantic contexts.
-            </div>
-          {/if}
-        </div>
-      </div>
+      <ParamPanelContextStrip
+        {controlViews}
+        {activeControlViewId}
+        {activeSemanticView}
+        onSelectControlView={onSelectControlView}
+        onOpenCreateViewComposer={openCreateViewComposer}
+        onOpenPrimitiveComposer={openPrimitiveComposer}
+        onOpenAdvisoryComposer={openAdvisoryComposer}
+        onOpenRelationComposer={openRelationComposer}
+        onOpenEditViewComposer={openEditViewComposer}
+        onDeleteManualView={deleteManualView}
+        {shouldShowSemanticSource}
+        {semanticSourceLabel}
+      />
 
       {#if advisoryComposerOpen}
-        <div class="view-composer">
-          <div class="controls-head">
-            <div class="section-label">NEW RULE</div>
-          </div>
-          <div class="composer-grid">
-            <div class="composer-field">
-              <label class="composer-label" for="composer-advisory-label">RULE NAME</label>
-              <input
-                id="composer-advisory-label"
-                class="input-mono composer-input"
-                bind:value={advisoryLabel}
-                placeholder="Connector Fit / Thin Wall / Clearance Check..."
-              />
-            </div>
-            <div class="composer-field">
-              <div class="composer-label">SEVERITY</div>
-              <Dropdown
-                options={[
-                  { id: 'warning', name: 'Warning' },
-                  { id: 'info', name: 'Info' },
-                ]}
-                value={advisorySeverity}
-                onchange={(value) => advisorySeverity = value === 'info' ? 'info' : 'warning'}
-              />
-            </div>
-            <div class="composer-field">
-              <div class="composer-label">CONDITION</div>
-              <Dropdown
-                options={[
-                  { id: 'always', name: 'Always' },
-                  { id: 'below', name: 'Below threshold' },
-                  { id: 'above', name: 'Above threshold' },
-                ]}
-                value={advisoryCondition}
-                onchange={(value) => advisoryCondition = value === 'below' || value === 'above' ? value : 'always'}
-              />
-            </div>
-            {#if advisoryCondition !== 'always'}
-              <div class="composer-field">
-                <label class="composer-label" for="composer-advisory-threshold">THRESHOLD</label>
-                <input
-                  id="composer-advisory-threshold"
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.01"
-                  bind:value={advisoryThreshold}
-                  placeholder="1.2"
-                />
-              </div>
-            {/if}
-          </div>
-          <div class="composer-field">
-            <label class="composer-label" for="composer-advisory-message">MESSAGE</label>
-            <input
-              id="composer-advisory-message"
-              class="input-mono composer-input"
-              bind:value={advisoryMessage}
-              placeholder="Connector changes may require matching clearance adjustments."
-            />
-          </div>
-          <div class="composer-note">
-            Attach this rule to one or more semantic controls in the active context.
-          </div>
-          <div class="composer-list">
-            {#if advisoryCandidateControls.length > 0}
-              {#each advisoryCandidateControls as control}
-                <label class="primitive-picker">
-                  <input
-                    class="ui-checkbox"
-                    type="checkbox"
-                    checked={advisoryPrimitiveIds.includes(control.primitiveId)}
-                    onchange={(event) => toggleAdvisoryPrimitive(control.primitiveId, getInputChecked(event))}
-                  />
-                  <div class="primitive-picker__body">
-                    <div class="primitive-picker__label">{control.label}</div>
-                    <div class="primitive-picker__meta">{control.rawField?.key || control.primitiveId}</div>
-                  </div>
-                </label>
-              {/each}
-            {:else}
-              <div class="no-params">Open a context first to attach a rule.</div>
-            {/if}
-          </div>
-          <div class="composer-actions">
-            <button class="btn btn-xs btn-ghost" onclick={resetAdvisoryComposer}>CANCEL</button>
-            <button class="btn btn-xs btn-primary" onclick={saveManualAdvisory} disabled={!advisoryCanSave}>
-              CREATE RULE
-            </button>
-          </div>
-        </div>
+        <ParamPanelAdvisoryComposer
+          label={advisoryLabel}
+          message={advisoryMessage}
+          severity={advisorySeverity}
+          condition={advisoryCondition}
+          threshold={advisoryThreshold}
+          candidateControls={advisoryCandidateControls}
+          selectedPrimitiveIds={advisoryPrimitiveIds}
+          canSave={advisoryCanSave}
+          onLabelChange={(value) => advisoryLabel = value}
+          onMessageChange={(value) => advisoryMessage = value}
+          onSeverityChange={(value) => advisorySeverity = value}
+          onConditionChange={(value) => advisoryCondition = value}
+          onThresholdChange={(value) => advisoryThreshold = value}
+          onTogglePrimitive={toggleAdvisoryPrimitive}
+          onCancel={resetAdvisoryComposer}
+          onSave={saveManualAdvisory}
+        />
       {/if}
 
       {#if relationComposerOpen}
-        <div class="view-composer">
-          <div class="controls-head">
-            <div class="section-label">NEW LINK</div>
-          </div>
-          <div class="composer-grid">
-            <div class="composer-field">
-              <div class="composer-label">SOURCE KNOB</div>
-              <Dropdown
-                options={advisoryCandidateControls.map((control) => ({ id: control.primitiveId, name: control.label }))}
-                value={relationSourcePrimitiveId}
-                onchange={(value) => relationSourcePrimitiveId = typeof value === 'string' ? value : null}
-                placeholder="Choose source..."
-              />
-            </div>
-            <div class="composer-field">
-              <div class="composer-label">TARGET KNOB</div>
-              <Dropdown
-                options={advisoryCandidateControls.map((control) => ({ id: control.primitiveId, name: control.label }))}
-                value={relationTargetPrimitiveId}
-                onchange={(value) => relationTargetPrimitiveId = typeof value === 'string' ? value : null}
-                placeholder="Choose target..."
-              />
-            </div>
-            <div class="composer-field">
-              <div class="composer-label">MODE</div>
-              <Dropdown
-                options={[
-                  { id: 'mirror', name: 'Mirror value' },
-                  { id: 'scale', name: 'Scale source' },
-                  { id: 'offset', name: 'Offset source' },
-                ]}
-                value={relationMode}
-                onchange={(value) =>
-                  relationMode =
-                    value === 'scale' || value === 'offset' ? value : 'mirror'
-                }
-              />
-            </div>
-            {#if relationMode === 'scale'}
-              <div class="composer-field">
-                <label class="composer-label" for="relation-scale">SCALE</label>
-                <input
-                  id="relation-scale"
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.01"
-                  bind:value={relationScale}
-                />
-              </div>
-            {/if}
-            {#if relationMode === 'offset'}
-              <div class="composer-field">
-                <label class="composer-label" for="relation-offset">OFFSET</label>
-                <input
-                  id="relation-offset"
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.01"
-                  bind:value={relationOffset}
-                />
-              </div>
-            {/if}
-          </div>
-          <div class="composer-note">
-            Linked knobs apply on semantic edits and persist with this version.
-          </div>
-          <div class="composer-actions">
-            <button class="btn btn-xs btn-ghost" onclick={resetRelationComposer}>CANCEL</button>
-            <button class="btn btn-xs btn-primary" onclick={saveControlRelation} disabled={!relationCanSave}>
-              CREATE LINK
-            </button>
-          </div>
-        </div>
+        <ParamPanelRelationComposer
+          controls={advisoryCandidateControls}
+          sourcePrimitiveId={relationSourcePrimitiveId}
+          targetPrimitiveId={relationTargetPrimitiveId}
+          mode={relationMode}
+          scale={relationScale}
+          offset={relationOffset}
+          canSave={relationCanSave}
+          onSourceChange={(value) => relationSourcePrimitiveId = value}
+          onTargetChange={(value) => relationTargetPrimitiveId = value}
+          onModeChange={(value) => relationMode = value}
+          onScaleChange={(value) => relationScale = value}
+          onOffsetChange={(value) => relationOffset = value}
+          onCancel={resetRelationComposer}
+          onSave={saveControlRelation}
+        />
       {/if}
 
       {#if primitiveComposerOpen}
-        <div class="view-composer">
-          <div class="controls-head">
-            <div class="section-label">{primitiveComposerMode === 'edit' ? 'EDIT KNOB' : 'NEW KNOB'}</div>
-          </div>
-          <div class="composer-grid">
-            <div class="composer-field">
-              <label class="composer-label" for="composer-primitive-label">KNOB NAME</label>
-              <input
-                id="composer-primitive-label"
-                class="input-mono composer-input"
-                bind:value={primitiveLabel}
-                placeholder="Connector Size / Hose Fit / Wall Thickness..."
-              />
-            </div>
-            <div class="composer-field">
-              <div class="composer-label">SCOPE</div>
-              <Dropdown
-                options={[
-                  { id: 'global', name: 'Global' },
-                  { id: 'part', name: 'Part' },
-                ]}
-                value={primitiveScope}
-                onchange={(value) => {
-                  primitiveScope = value === 'part' ? 'part' : 'global';
-                  if (primitiveScope !== 'part') {
-                    primitivePartId = null;
-                  } else if (!primitivePartId) {
-                    primitivePartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
-                  }
-                }}
-              />
-            </div>
-            {#if primitiveScope === 'part'}
-              <div class="composer-field">
-                <div class="composer-label">PART</div>
-                <Dropdown
-                  options={(modelManifest?.parts || []).map((part) => ({ id: part.partId, name: part.label }))}
-                  value={primitivePartId}
-                  onchange={(value) => primitivePartId = typeof value === 'string' ? value : null}
-                  placeholder="Choose part..."
-                />
-              </div>
-            {/if}
-          </div>
-          <div class="composer-note">
-            Pick one or more raw params to drive with a single semantic knob. Mixed field types are not allowed in one knob yet.
-          </div>
-          <label class="primitive-picker">
-            <input
-              class="ui-checkbox"
-              type="checkbox"
-              bind:checked={primitiveAttachToView}
-            />
-            <div class="primitive-picker__body">
-              <div class="primitive-picker__label">Add to current context</div>
-              <div class="primitive-picker__meta">
-                {#if activeSemanticView}
-                  {activeSemanticView.source === 'manual'
-                    ? `Updates ${activeSemanticView.label}.`
-                    : `Creates a custom context from ${activeSemanticView.label}.`}
-                {:else}
-                  Creates a custom context for this knob.
-                {/if}
-              </div>
-            </div>
-          </label>
-          <div class="composer-list">
-            {#if primitiveCandidateFields.length > 0}
-              {#each primitiveCandidateFields as field}
-                <label class="primitive-picker">
-                  <input
-                    class="ui-checkbox"
-                    type="checkbox"
-                    checked={primitiveParameterKeys.includes(field.key)}
-                    onchange={(event) => togglePrimitiveParameter(field.key, getInputChecked(event))}
-                  />
-                  <div class="primitive-picker__body">
-                    <div class="primitive-picker__label">{field.label}</div>
-                    <div class="primitive-picker__meta">{field.key}</div>
-                  </div>
-                </label>
-              {/each}
-            {:else}
-              <div class="no-params">No raw params are available for this scope.</div>
-            {/if}
-          </div>
-          {#if selectedPrimitiveFields.length > 0 && primitiveKindPreview === 'number'}
-            <div class="binding-editor">
-              <div class="section-label">BINDINGS</div>
-              {#each selectedPrimitiveFields as field}
-                {@const draft = primitiveBindingDrafts[field.key]}
-                <div class="binding-row">
-                  <div class="binding-row__label">{field.label}</div>
-                  <input
-                    class="input-mono binding-input"
-                    type="number"
-                    step="0.01"
-                    value={draft?.scale ?? '1'}
-                    oninput={(event) => updatePrimitiveDraft(field.key, 'scale', getInputValue(event))}
-                    placeholder="scale"
-                  />
-                  <input
-                    class="input-mono binding-input"
-                    type="number"
-                    step="0.01"
-                    value={draft?.offset ?? '0'}
-                    oninput={(event) => updatePrimitiveDraft(field.key, 'offset', getInputValue(event))}
-                    placeholder="offset"
-                  />
-                  <input
-                    class="input-mono binding-input"
-                    type="number"
-                    step="0.01"
-                    value={draft?.min ?? ''}
-                    oninput={(event) => updatePrimitiveDraft(field.key, 'min', getInputValue(event))}
-                    placeholder="min"
-                  />
-                  <input
-                    class="input-mono binding-input"
-                    type="number"
-                    step="0.01"
-                    value={draft?.max ?? ''}
-                    oninput={(event) => updatePrimitiveDraft(field.key, 'max', getInputValue(event))}
-                    placeholder="max"
-                  />
-                </div>
-              {/each}
-            </div>
-          {/if}
-          <div class="composer-note">
-            {#if primitiveKindPreview}
-              This knob will behave as a {primitiveKindPreview}.
-            {:else if primitiveParameterKeys.length > 0}
-              Select params of the same kind only.
-            {:else}
-              Choose the raw params this knob should control.
-            {/if}
-          </div>
-          <div class="composer-actions">
-            <button class="btn btn-xs btn-ghost" onclick={resetPrimitiveComposer}>CANCEL</button>
-            {#if primitiveComposerMode === 'edit' && primitiveEditingId}
-              <button class="btn btn-xs btn-ghost" onclick={() => primitiveEditingId && deleteManualPrimitive(primitiveEditingId)}>
-                DELETE KNOB
-              </button>
-            {/if}
-            <button class="btn btn-xs btn-primary" onclick={saveManualPrimitive} disabled={!primitiveCanSave}>
-              {primitiveComposerMode === 'edit' ? 'SAVE KNOB' : 'CREATE KNOB'}
-            </button>
-          </div>
-        </div>
+        <ParamPanelPrimitiveComposer
+          mode={primitiveComposerMode}
+          editingId={primitiveEditingId}
+          label={primitiveLabel}
+          scope={primitiveScope}
+          partId={primitivePartId}
+          attachToView={primitiveAttachToView}
+          activeSemanticView={activeSemanticView
+            ? {
+                label: activeSemanticView.label,
+                source: activeSemanticView.source,
+              }
+            : null}
+          modelParts={modelManifest?.parts || []}
+          candidateFields={primitiveCandidateFields}
+          selectedParameterKeys={primitiveParameterKeys}
+          selectedFields={selectedPrimitiveFields}
+          bindingDrafts={primitiveBindingDrafts}
+          kindPreview={primitiveKindPreview}
+          canSave={primitiveCanSave}
+          onLabelChange={(value) => primitiveLabel = value}
+          onScopeChange={(value) => {
+            primitiveScope = value;
+            if (primitiveScope !== 'part') {
+              primitivePartId = null;
+            } else if (!primitivePartId) {
+              primitivePartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
+            }
+          }}
+          onPartIdChange={(value) => primitivePartId = value}
+          onAttachToViewChange={(value) => primitiveAttachToView = value}
+          onToggleParameter={togglePrimitiveParameter}
+          onUpdateDraft={updatePrimitiveDraft}
+          onCancel={resetPrimitiveComposer}
+          onDelete={deleteManualPrimitive}
+          onSave={saveManualPrimitive}
+        />
       {/if}
 
       {#if composerOpen}
-        <div class="view-composer">
-          <div class="controls-head">
-            <div class="section-label">{composerMode === 'edit' ? 'EDIT VIEW' : 'NEW VIEW'}</div>
-          </div>
-          <div class="composer-grid">
-            <div class="composer-field">
-              <label class="composer-label" for="composer-view-label">VIEW NAME</label>
-              <input
-                id="composer-view-label"
-                class="input-mono composer-input"
-                bind:value={composerViewLabel}
-                placeholder="Connector / Fit / Printability..."
-              />
-            </div>
-            <div class="composer-field">
-              <div class="composer-label">SCOPE</div>
-              <Dropdown
-                options={[
-                  { id: 'global', name: 'Global' },
-                  { id: 'part', name: 'Part' },
-                ]}
-                value={composerViewScope}
-                onchange={(value) => {
-                  composerViewScope = value === 'part' ? 'part' : 'global';
-                  if (composerViewScope !== 'part') {
-                    composerViewPartId = null;
-                  } else if (!composerViewPartId) {
-                    composerViewPartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
-                  }
-                }}
-              />
-            </div>
-            {#if composerViewScope === 'part'}
-              <div class="composer-field">
-                <div class="composer-label">PART</div>
-                <Dropdown
-                  options={(modelManifest?.parts || []).map((part) => ({ id: part.partId, name: part.label }))}
-                  value={composerViewPartId}
-                  onchange={(value) => composerViewPartId = typeof value === 'string' ? value : null}
-                  placeholder="Choose part..."
-                />
-              </div>
-            {/if}
-          </div>
-          <div class="composer-note">
-            Build a reusable semantic context from existing meaningful controls.
-          </div>
-          <div class="composer-list">
-            {#if composerVisiblePrimitives.length > 0}
-              {#each composerVisiblePrimitives as primitive}
-                <label class="primitive-picker">
-                  <input
-                    class="ui-checkbox"
-                    type="checkbox"
-                    checked={composerPrimitiveIds.includes(primitive.primitiveId)}
-                    onchange={(event) => toggleComposerPrimitive(primitive.primitiveId, getInputChecked(event))}
-                  />
-                  <div class="primitive-picker__body">
-                    <div class="primitive-picker__label">{primitive.label}</div>
-                    {#if primitive.partLabels.length > 0}
-                      <div class="primitive-picker__meta">{primitive.partLabels.join(', ')}</div>
-                    {/if}
-                  </div>
-                </label>
-              {/each}
-            {:else}
-              <div class="no-params">No primitives are available for this scope yet.</div>
-            {/if}
-          </div>
-          <div class="composer-actions">
-            <button class="btn btn-xs btn-ghost" onclick={resetComposer}>CANCEL</button>
-            <button class="btn btn-xs btn-primary" onclick={saveManualView} disabled={!composerCanSave}>
-              {composerMode === 'edit' ? 'SAVE VIEW' : 'CREATE VIEW'}
-            </button>
-          </div>
-        </div>
+        <ParamPanelViewComposer
+          mode={composerMode}
+          label={composerViewLabel}
+          scope={composerViewScope}
+          partId={composerViewPartId}
+          modelParts={modelManifest?.parts || []}
+          visiblePrimitives={composerVisiblePrimitives}
+          selectedPrimitiveIds={composerPrimitiveIds}
+          canSave={composerCanSave}
+          onLabelChange={(value) => composerViewLabel = value}
+          onScopeChange={(value) => {
+            composerViewScope = value;
+            if (composerViewScope !== 'part') {
+              composerViewPartId = null;
+            } else if (!composerViewPartId) {
+              composerViewPartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
+            }
+          }}
+          onPartIdChange={(value) => composerViewPartId = value}
+          onTogglePrimitive={toggleComposerPrimitive}
+          onCancel={resetComposer}
+          onSave={saveManualView}
+        />
       {/if}
 
-      {#if activeSemanticView?.advisories?.length}
-        <div class="warning-stack">
-          {#each activeSemanticView.advisories as advisory}
-            <div class="warning-chip" data-severity={advisory.severity}>
-              <span>{advisory.label}: {advisory.message}</span>
-              {#if advisory.advisoryId.startsWith('advisory-manual-')}
-                <button
-                  class="btn btn-xs btn-ghost warning-chip-action"
-                  onclick={() => deleteManualAdvisory(advisory.advisoryId)}
-                >
-                  DELETE
-                </button>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      {/if}
+      <ParamPanelAdvisoryList
+        advisories={activeSemanticView?.advisories || []}
+        onDeleteManualAdvisory={deleteManualAdvisory}
+      />
 
       {#if activeViewRelations.length > 0}
         <div class="warning-stack">
@@ -3172,111 +2760,31 @@
               {#each section.controls as control}
                 {@const field = control.rawField}
                 {#if field}
-                  <div
-                    class="param-field"
-                    role="group"
-                    class:field-select={field.type === 'select'}
-                    class:field-checkbox={field.type === 'checkbox'}
-                    class:highlight-pulse={highlightedParamKey === field.key}
-                    data-param-key={field.key}
-                    onmouseenter={() => setFocusedControl(control.primitiveId, field.key)}
-                    onmouseleave={clearFocusedControl}
-                    onfocusin={() => setFocusedControl(control.primitiveId, field.key)}
-                    onfocusout={clearFocusedControl}
-                  >
-                    <div class="field-header">
-                      <div class="field-title">
-                        <label class="param-label" for={control.primitiveId}>
-                          {control.label}
-                        </label>
-                        {#if shouldShowSemanticSource(control.source)}
-                          <span class="semantic-source-badge">{semanticSourceLabel(control.source)}</span>
-                        {/if}
-                      </div>
-                      {#if isManualPrimitive(control)}
-                        <button
-                          class="btn btn-xs btn-ghost field-action-btn"
-                          onclick={() => openEditPrimitiveComposer(control)}
-                        >
-                          EDIT
-                        </button>
-                      {/if}
-                    </div>
-
-                    <div class="field-control">
-                      {#if field.type === 'range'}
-                        {@const range = getRangeProps(field)}
-                        <div class="range-group cad-range">
-                          <input
-                            id={control.primitiveId}
-                            type="range"
-                            min={range.min}
-                            max={range.max}
-                            step={range.step}
-                            value={asNumber(control.value, range.min)}
-                            oninput={(e) => updateSemanticControl(control, parseFloat(getInputValue(e)))}
-                            disabled={!control.editable}
-                          />
-                          <input
-                            type="number"
-                            class="input-mono param-input param-input-compact"
-                            min={range.min}
-                            max={range.max}
-                            step={range.step}
-                            value={asNumber(control.value, range.min)}
-                            oninput={(e) => updateSemanticControl(control, parseFloat(getInputValue(e)))}
-                            disabled={!control.editable}
-                          />
-                        </div>
-                      {:else if field.type === 'number'}
-                        <input
-                          id={control.primitiveId}
-                          type="number"
-                          class="input-mono param-input"
-                          value={asNumber(control.value, 0)}
-                          oninput={(e) => updateSemanticControl(control, parseFloat(getInputValue(e)))}
-                          disabled={!control.editable}
-                        />
-                      {:else if field.type === 'select'}
-                        <Dropdown
-                          options={(field.options || []).map(option => ({ id: option.value, name: option.label }))}
-                          value={control.value as string | number | null}
-                          onchange={(val) => { if (val !== undefined) updateSemanticControl(control, val); }}
-                          disabled={!control.editable}
-                          placeholder="Select..."
-                        />
-                      {:else if field.type === 'checkbox'}
-                        <label class="checkbox-wrapper" class:checkbox-wrapper-checked={Boolean(control.value)}>
-                          <input
-                            id={control.primitiveId}
-                            class="ui-checkbox"
-                            type="checkbox"
-                            checked={Boolean(control.value)}
-                            onchange={(e) => updateSemanticControl(control, getInputChecked(e))}
-                            disabled={!control.editable}
-                          />
-                          <span class="checkbox-status">{control.value ? 'ON' : 'OFF'}</span>
-                        </label>
-                      {:else if field.type === 'image'}
-                        <div class="image-field-wrapper">
-                          <button
-                            class="btn param-btn"
-                            onclick={async () => {
-                              const file = await open({
-                                multiple: false,
-                                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
-                              });
-                              const selected = firstSelectedPath(file);
-                              if (selected) updateSemanticControl(control, selected);
-                            }}
-                            disabled={!control.editable}
-                          >
-                            {control.value ? String(control.value).split(/[/\\]/).pop() : 'Select Image...'}
-                          </button>
-                        </div>
-                      {/if}
-                    </div>
-                  </div>
+                  <ParamPanelControlField
+                    elementId={control.primitiveId}
+                    field={field}
+                    value={control.value}
+                    rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
+                    editable={control.editable}
+                    highlighted={highlightedParamKey === field.key}
+                    semanticSource={control.source}
+                    showSemanticSource={shouldShowSemanticSource(control.source)}
+                    canEdit={isManualPrimitive(control)}
+                    onUpdate={(nextValue) => updateSemanticControl(control, nextValue)}
+                    onEdit={() => openEditPrimitiveComposer(control)}
+                    onPickImage={async () => {
+                      const file = await open({
+                        multiple: false,
+                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                      });
+                      const selected = firstSelectedPath(file);
+                      if (selected) updateSemanticControl(control, selected);
+                    }}
+                    onMouseEnter={() => setFocusedControl(control.primitiveId, field.key)}
+                    onMouseLeave={clearFocusedControl}
+                    onFocusIn={() => setFocusedControl(control.primitiveId, field.key)}
+                    onFocusOut={clearFocusedControl}
+                  />
                 {/if}
               {/each}
             </div>
@@ -3289,7 +2797,7 @@
             : 'No semantic controls match your search.'}
         </div>
       {/if}
-    {:else}
+      {:else}
       {#if filteredFields.length > 0 && focusedFields.length > 0}
         <div class="focused-section">
           <div class="controls-head">
@@ -3297,105 +2805,31 @@
           </div>
           <div class="param-list">
             {#each focusedFields as field}
-              {@const cadHint = getCadHint(field)}
-              <div
-                class="param-field param-field-focus"
-                role="group"
-                data-cad-tone={cadHint.tone}
-                class:auto-field={field._auto}
-                class:param-freezed={field.frozen}
-                class:field-select={field.type === 'select'}
-                class:field-checkbox={field.type === 'checkbox'}
-                class:highlight-pulse={highlightedParamKey === field.key}
-                data-param-key={field.key}
-                onmouseenter={() => setFocusedControl(null, field.key)}
-                onmouseleave={clearFocusedControl}
-                onfocusin={() => setFocusedControl(null, field.key)}
-                onfocusout={clearFocusedControl}
-              >
-                <div class="field-header">
-                  <div class="field-title">
-                    <label class="param-label" for={field.key}>
-                      {field.label}
-                    </label>
-                  </div>
-                  {#if field.frozen}<span class="frozen-badge" title="FROZEN">❄️</span>{/if}
-                </div>
-
-                <div class="field-control">
-                  {#if field.type === 'range'}
-                    {@const range = getRangeProps(field)}
-                    <div class="range-group cad-range">
-                      <input
-                        id={field.key}
-                        type="range"
-                        min={range.min}
-                        max={range.max}
-                        step={range.step}
-                        value={asNumber(localParams[field.key], range.min)}
-                        oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
-                        disabled={field.frozen}
-                      />
-                      <input
-                        type="number"
-                        class="input-mono param-input param-input-compact"
-                        min={range.min}
-                        max={range.max}
-                        step={range.step}
-                        value={asNumber(localParams[field.key], range.min)}
-                        oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
-                        disabled={field.frozen}
-                      />
-                    </div>
-                  {:else if field.type === 'number'}
-                    <input
-                      id={field.key}
-                      type="number"
-                      class="input-mono param-input"
-                      value={asNumber(localParams[field.key], 0)}
-                      oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
-                      disabled={field.frozen}
-                    />
-                  {:else if field.type === 'select'}
-                    <Dropdown
-                      options={(field.options || []).map(option => ({ id: option.value, name: option.label }))}
-                      value={getSelectValue(field.key)}
-                      onchange={(val) => { if (val !== undefined) update(field.key, val); }}
-                      disabled={field.frozen}
-                      placeholder="Select..."
-                    />
-                  {:else if field.type === 'checkbox'}
-                    <label class="checkbox-wrapper" class:checkbox-wrapper-checked={Boolean(localParams[field.key])}>
-                      <input
-                        id={field.key}
-                        class="ui-checkbox"
-                        type="checkbox"
-                        checked={Boolean(localParams[field.key])}
-                        onchange={(e) => update(field.key, getInputChecked(e))}
-                        disabled={field.frozen}
-                      />
-                      <span class="checkbox-status">{localParams[field.key] ? 'ON' : 'OFF'}</span>
-                    </label>
-                  {:else if field.type === 'image'}
-                    <div class="image-field-wrapper">
-                      <button 
-                        class="btn param-btn" 
-                        onclick={async () => {
-                          const file = await open({
-                            multiple: false,
-                            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
-                          });
-                          const selected = firstSelectedPath(file);
-                          if (selected) update(field.key, selected);
-                        }}
-                        disabled={field.frozen}
-                      >
-                        {localParams[field.key] ? String(localParams[field.key]).split(/[/\\]/).pop() : 'Select Image...'}
-                      </button>
-                    </div>
-                  {/if}
-                </div>
-              </div>
+              <ParamPanelControlField
+                elementId={field.key}
+                field={field}
+                value={localParams[field.key]}
+                rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
+                editable={!field.frozen}
+                frozen={field.frozen}
+                autoField={field._auto}
+                focused={true}
+                highlighted={highlightedParamKey === field.key}
+                cadTone={getCadHint(field).tone}
+                onUpdate={(nextValue) => update(field.key, nextValue)}
+                onPickImage={async () => {
+                  const file = await open({
+                    multiple: false,
+                    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                  });
+                  const selected = firstSelectedPath(file);
+                  if (selected) update(field.key, selected);
+                }}
+                onMouseEnter={() => setFocusedControl(null, field.key)}
+                onMouseLeave={clearFocusedControl}
+                onFocusIn={() => setFocusedControl(null, field.key)}
+                onFocusOut={clearFocusedControl}
+              />
             {/each}
           </div>
         </div>
@@ -3409,104 +2843,30 @@
         {/if}
         <div class="param-list">
           {#each remainingFields as field}
-          {@const cadHint = getCadHint(field)}
-          <div
-            class="param-field"
-            role="group"
-            data-cad-tone={cadHint.tone}
-            class:auto-field={field._auto}
-            class:param-freezed={field.frozen}
-            class:field-select={field.type === 'select'}
-            class:field-checkbox={field.type === 'checkbox'}
-            class:highlight-pulse={highlightedParamKey === field.key}
-            data-param-key={field.key}
-            onmouseenter={() => setFocusedControl(null, field.key)}
-            onmouseleave={clearFocusedControl}
-            onfocusin={() => setFocusedControl(null, field.key)}
-            onfocusout={clearFocusedControl}
-          >
-            <div class="field-header">
-              <div class="field-title">
-                <label class="param-label" for={field.key}>
-                  {field.label}
-                </label>
-              </div>
-              {#if field.frozen}<span class="frozen-badge" title="FROZEN">❄️</span>{/if}
-            </div>
-
-            <div class="field-control">
-              {#if field.type === 'range'}
-                {@const range = getRangeProps(field)}
-                <div class="range-group cad-range">
-                  <input
-                    id={field.key}
-                    type="range"
-                    min={range.min}
-                    max={range.max}
-                    step={range.step}
-                    value={asNumber(localParams[field.key], range.min)}
-                    oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
-                    disabled={field.frozen}
-                  />
-                  <input
-                    type="number"
-                    class="input-mono param-input param-input-compact"
-                    min={range.min}
-                    max={range.max}
-                    step={range.step}
-                    value={asNumber(localParams[field.key], range.min)}
-                    oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
-                    disabled={field.frozen}
-                  />
-                </div>
-              {:else if field.type === 'number'}
-                <input
-                  id={field.key}
-                  type="number"
-                  class="input-mono param-input"
-                  value={asNumber(localParams[field.key], 0)}
-                  oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
-                  disabled={field.frozen}
-                />
-              {:else if field.type === 'select'}
-                <Dropdown
-                  options={(field.options || []).map(option => ({ id: option.value, name: option.label }))}
-                  value={getSelectValue(field.key)}
-                  onchange={(val) => { if (val !== undefined) update(field.key, val); }}
-                  disabled={field.frozen}
-                  placeholder="Select..."
-                />
-              {:else if field.type === 'checkbox'}
-               <label class="checkbox-wrapper" class:checkbox-wrapper-checked={Boolean(localParams[field.key])}>
-                 <input
-                   id={field.key}
-                   class="ui-checkbox"
-                   type="checkbox"
-                   checked={Boolean(localParams[field.key])}
-                   onchange={(e) => update(field.key, getInputChecked(e))}
-                   disabled={field.frozen}
-                 />
-                 <span class="checkbox-status">{localParams[field.key] ? 'ON' : 'OFF'}</span>
-               </label>
-              {:else if field.type === 'image'}
-               <div class="image-field-wrapper">
-                 <button 
-                   class="btn param-btn" 
-                   onclick={async () => {
-                     const file = await open({
-                       multiple: false,
-                       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
-                     });
-                     const selected = firstSelectedPath(file);
-                     if (selected) update(field.key, selected);
-                   }}
-                   disabled={field.frozen}
-                 >
-                   {localParams[field.key] ? String(localParams[field.key]).split(/[/\\]/).pop() : 'Select Image...'}
-                 </button>
-               </div>
-              {/if}            </div>
-          </div>
+          <ParamPanelControlField
+            elementId={field.key}
+            field={field}
+            value={localParams[field.key]}
+            rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
+            editable={!field.frozen}
+            frozen={field.frozen}
+            autoField={field._auto}
+            highlighted={highlightedParamKey === field.key}
+            cadTone={getCadHint(field).tone}
+            onUpdate={(nextValue) => update(field.key, nextValue)}
+            onPickImage={async () => {
+              const file = await open({
+                multiple: false,
+                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+              });
+              const selected = firstSelectedPath(file);
+              if (selected) update(field.key, selected);
+            }}
+            onMouseEnter={() => setFocusedControl(null, field.key)}
+            onMouseLeave={clearFocusedControl}
+            onFocusIn={() => setFocusedControl(null, field.key)}
+            onFocusOut={clearFocusedControl}
+          />
           {/each}
         </div>
       {:else if filteredFields.length === 0}
@@ -3687,11 +3047,6 @@
 
   .warning-chip-action {
     flex-shrink: 0;
-  }
-
-  .warning-chip[data-severity='warning'] {
-    border-color: color-mix(in srgb, var(--primary) 45%, var(--bg-300));
-    color: var(--primary);
   }
 
   .proposal-card {
@@ -4005,30 +3360,6 @@
     align-items: center;
   }
 
-  .live-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 0.6rem;
-    font-weight: bold;
-    color: var(--text-dim);
-    cursor: pointer;
-    user-select: none;
-    padding: 2px 6px;
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-  }
-
-  .live-toggle:has(input:checked) {
-    color: var(--secondary);
-    border-color: var(--secondary);
-    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-200));
-  }
-
-  .live-toggle input {
-    display: none;
-  }
-
   .apply-btn {
     min-width: 50px;
   }
@@ -4066,25 +3397,6 @@
 
   .param-field.field-select:has(:global(.custom-select.is-open)) {
     z-index: 12;
-  }
-
-  .param-field[data-cad-tone="x"],
-  .param-field[data-cad-tone="size"] {
-    --cad-tone-color: var(--cad-axis-x);
-  }
-
-  .param-field[data-cad-tone="y"] {
-    --cad-tone-color: var(--cad-axis-y);
-  }
-
-  .param-field[data-cad-tone="z"] {
-    --cad-tone-color: var(--cad-axis-z);
-  }
-
-  .param-field[data-cad-tone="angle"],
-  .param-field[data-cad-tone="mode"],
-  .param-field[data-cad-tone="state"] {
-    --cad-tone-color: var(--cad-axis-angle);
   }
 
   .param-field-focus {
@@ -4164,46 +3476,6 @@
     gap: 7px;
   }
 
-  input[type="range"] {
-    flex: 1;
-    cursor: pointer;
-    height: 6px;
-    background:
-      linear-gradient(
-        90deg,
-        color-mix(in srgb, var(--cad-tone-color) 38%, var(--bg-300)) 0%,
-        color-mix(in srgb, var(--cad-tone-color) 18%, var(--bg-300)) 100%
-      );
-    border-radius: 0;
-    appearance: none;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 35%, transparent);
-  }
-
-  input[type="range"]::-webkit-slider-thumb {
-    appearance: none;
-    width: 14px;
-    height: 14px;
-    background: var(--cad-tone-color);
-    border: 1px solid color-mix(in srgb, #fff 18%, #000 82%);
-    border-radius: 0;
-    cursor: pointer;
-    box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--cad-tone-color) 16%, transparent),
-      0 0 12px color-mix(in srgb, var(--cad-tone-color) 34%, transparent);
-  }
-
-  input[type="range"]::-moz-range-thumb {
-    width: 14px;
-    height: 14px;
-    background: var(--cad-tone-color);
-    border: 1px solid color-mix(in srgb, #fff 18%, #000 82%);
-    border-radius: 0;
-    cursor: pointer;
-    box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--cad-tone-color) 16%, transparent),
-      0 0 12px color-mix(in srgb, var(--cad-tone-color) 34%, transparent);
-  }
-
   .range-value {
     font-size: 0.75rem;
     color: var(--cad-tone-color);
@@ -4271,10 +3543,6 @@
     color: var(--primary);
     font-weight: bold;
     letter-spacing: 0.06em;
-  }
-
-  .ui-checkbox:checked + .checkbox-status {
-    color: var(--cad-tone-color);
   }
 
   .ui-checkbox {

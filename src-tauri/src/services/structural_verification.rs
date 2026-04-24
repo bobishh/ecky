@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
@@ -27,6 +27,28 @@ pub fn verify_structure(
                     part_id: None,
                     numeric_payload: Some(0.0),
                 });
+            } else {
+                match preview_stl_triangles(stl_path) {
+                    Ok(StlPreview::Parsed(triangles)) if triangles.is_empty() => {
+                        issues.push(StructuralIssue {
+                            code: "PREVIEW_STL_NO_TRIANGLES".into(),
+                            message: "Preview STL file contains no triangles.".into(),
+                            part_id: None,
+                            numeric_payload: Some(0.0),
+                        });
+                    }
+                    Ok(StlPreview::Parsed(triangles)) => {
+                        add_preview_stl_topology_issues(&mut issues, &triangles);
+                    }
+                    Ok(StlPreview::Unreadable) | Err(_) => {
+                        issues.push(StructuralIssue {
+                            code: "PREVIEW_STL_UNREADABLE".into(),
+                            message: "Preview STL file could not be parsed as valid STL.".into(),
+                            part_id: None,
+                            numeric_payload: None,
+                        });
+                    }
+                }
             }
         }
         Err(_) => {
@@ -288,6 +310,284 @@ fn bounds_valid(b: &ManifestBounds) -> bool {
     (b.x_min < b.x_max) || (b.y_min < b.y_max) || (b.z_min < b.z_max)
 }
 
+enum StlPreview {
+    Parsed(Vec<StlTriangle>),
+    Unreadable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct StlVertex([u32; 3]);
+
+#[derive(Clone, Copy, Debug)]
+struct StlTriangle {
+    vertices: [StlVertex; 3],
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct StlEdge {
+    a: StlVertex,
+    b: StlVertex,
+}
+
+impl StlVertex {
+    fn new(coords: [f32; 3]) -> Self {
+        Self(coords.map(stl_float_key))
+    }
+}
+
+impl StlTriangle {
+    fn edges(&self) -> [StlEdge; 3] {
+        [
+            StlEdge::new(self.vertices[0], self.vertices[1]),
+            StlEdge::new(self.vertices[1], self.vertices[2]),
+            StlEdge::new(self.vertices[2], self.vertices[0]),
+        ]
+    }
+}
+
+impl StlEdge {
+    fn new(a: StlVertex, b: StlVertex) -> Self {
+        if a <= b {
+            Self { a, b }
+        } else {
+            Self { a: b, b: a }
+        }
+    }
+}
+
+fn stl_float_key(value: f32) -> u32 {
+    if value == 0.0 {
+        0.0_f32.to_bits()
+    } else if value.is_nan() {
+        f32::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn preview_stl_triangles(path: &Path) -> std::io::Result<StlPreview> {
+    let bytes = fs::read(path)?;
+    let first_non_whitespace = bytes.iter().position(|b| !b.is_ascii_whitespace());
+
+    if bytes.len() >= 84 {
+        let triangle_count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]);
+        let expected_binary_len = (triangle_count as usize)
+            .checked_mul(50)
+            .and_then(|triangle_bytes| triangle_bytes.checked_add(84));
+        if expected_binary_len == Some(bytes.len()) {
+            return Ok(StlPreview::Parsed(parse_binary_stl_triangles(
+                &bytes,
+                triangle_count as usize,
+            )));
+        }
+    }
+
+    if let Some(first_non_whitespace) = first_non_whitespace {
+        let stl_body = &bytes[first_non_whitespace..];
+        if stl_body
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"solid"))
+        {
+            return match std::str::from_utf8(stl_body) {
+                Ok(text) => Ok(parse_ascii_stl_triangles(text)),
+                Err(_) => Ok(StlPreview::Unreadable),
+            };
+        }
+    }
+
+    Ok(StlPreview::Unreadable)
+}
+
+fn parse_binary_stl_triangles(bytes: &[u8], triangle_count: usize) -> Vec<StlTriangle> {
+    let mut triangles = Vec::with_capacity(triangle_count);
+    let mut offset = 84;
+    for _ in 0..triangle_count {
+        offset += 12; // normal vector
+        let mut vertices = [StlVertex([0; 3]); 3];
+        for vertex in &mut vertices {
+            let x = f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]);
+            offset += 4;
+            let y = f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]);
+            offset += 4;
+            let z = f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]);
+            offset += 4;
+            *vertex = StlVertex::new([x, y, z]);
+        }
+        offset += 2; // attribute byte count
+        triangles.push(StlTriangle { vertices });
+    }
+    triangles
+}
+
+fn parse_ascii_stl_triangles(text: &str) -> StlPreview {
+    let facet_count = ascii_stl_facet_count(text);
+    if facet_count == 0 {
+        return StlPreview::Parsed(Vec::new());
+    }
+
+    let mut triangles = Vec::with_capacity(facet_count);
+    let mut current_vertices: Option<Vec<StlVertex>> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if starts_ascii_case(trimmed, "facet") {
+            if current_vertices.is_some() {
+                return StlPreview::Unreadable;
+            }
+            current_vertices = Some(Vec::with_capacity(3));
+        } else if starts_ascii_case(trimmed, "vertex") {
+            let Some(vertices) = current_vertices.as_mut() else {
+                continue;
+            };
+            let Some(vertex) = parse_ascii_stl_vertex(trimmed) else {
+                return StlPreview::Unreadable;
+            };
+            vertices.push(vertex);
+        } else if starts_ascii_case(trimmed, "endfacet") {
+            let Some(vertices) = current_vertices.take() else {
+                continue;
+            };
+            let Ok(vertices) = <Vec<StlVertex> as TryInto<[StlVertex; 3]>>::try_into(vertices)
+            else {
+                return StlPreview::Unreadable;
+            };
+            triangles.push(StlTriangle { vertices });
+        }
+    }
+
+    if current_vertices.is_some() || triangles.len() != facet_count {
+        return StlPreview::Unreadable;
+    }
+
+    StlPreview::Parsed(triangles)
+}
+
+fn parse_ascii_stl_vertex(line: &str) -> Option<StlVertex> {
+    let mut parts = line.split_whitespace();
+    let label = parts.next()?;
+    if !label.eq_ignore_ascii_case("vertex") {
+        return None;
+    }
+    let x = parts.next()?.parse::<f32>().ok()?;
+    let y = parts.next()?.parse::<f32>().ok()?;
+    let z = parts.next()?.parse::<f32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(StlVertex::new([x, y, z]))
+}
+
+fn ascii_stl_facet_count(text: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            line.trim_start()
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("facet"))
+        })
+        .count()
+}
+
+fn starts_ascii_case(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+fn add_preview_stl_topology_issues(issues: &mut Vec<StructuralIssue>, triangles: &[StlTriangle]) {
+    let edge_triangles = stl_edge_triangles(triangles);
+    let non_manifold_edges = edge_triangles
+        .values()
+        .filter(|triangle_ids| triangle_ids.len() != 2)
+        .count();
+    if non_manifold_edges > 0 {
+        issues.push(StructuralIssue {
+            code: "PREVIEW_STL_NON_MANIFOLD".into(),
+            message: format!(
+                "Preview STL contains {} non-manifold edge(s).",
+                non_manifold_edges
+            ),
+            part_id: None,
+            numeric_payload: Some(non_manifold_edges as f64),
+        });
+    }
+
+    let component_count = stl_component_count(triangles.len(), &edge_triangles);
+    if component_count > 1 {
+        issues.push(StructuralIssue {
+            code: "PREVIEW_STL_DISCONNECTED_COMPONENTS".into(),
+            message: format!(
+                "Preview STL contains {} disconnected triangle components.",
+                component_count
+            ),
+            part_id: None,
+            numeric_payload: Some(component_count as f64),
+        });
+    }
+}
+
+fn stl_edge_triangles(triangles: &[StlTriangle]) -> HashMap<StlEdge, Vec<usize>> {
+    let mut edge_triangles: HashMap<StlEdge, Vec<usize>> = HashMap::new();
+    for (triangle_idx, triangle) in triangles.iter().enumerate() {
+        for edge in triangle.edges() {
+            edge_triangles.entry(edge).or_default().push(triangle_idx);
+        }
+    }
+    edge_triangles
+}
+
+fn stl_component_count(
+    triangle_count: usize,
+    edge_triangles: &HashMap<StlEdge, Vec<usize>>,
+) -> usize {
+    let mut adjacency = vec![Vec::new(); triangle_count];
+    for triangle_ids in edge_triangles.values() {
+        for (position, &left) in triangle_ids.iter().enumerate() {
+            for &right in &triangle_ids[(position + 1)..] {
+                if left == right {
+                    continue;
+                }
+                adjacency[left].push(right);
+                adjacency[right].push(left);
+            }
+        }
+    }
+
+    let mut visited = vec![false; triangle_count];
+    let mut components = 0;
+    for start in 0..triangle_count {
+        if visited[start] {
+            continue;
+        }
+        components += 1;
+        visited[start] = true;
+        let mut queue = VecDeque::from([start]);
+        while let Some(current) = queue.pop_front() {
+            for &next in &adjacency[current] {
+                if visited[next] {
+                    continue;
+                }
+                visited[next] = true;
+                queue.push_back(next);
+            }
+        }
+    }
+    components
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,11 +596,7 @@ mod tests {
 
     fn test_bundle(dir: &Path) -> ArtifactBundle {
         let stl_path = dir.join("preview.stl");
-        // Write a minimal binary STL (84-byte header + 0 triangles)
-        let mut f = fs::File::create(&stl_path).unwrap();
-        f.write_all(&[0u8; 80]).unwrap(); // 80-byte header
-        f.write_all(&0u32.to_le_bytes()).unwrap(); // 0 triangles
-        f.flush().unwrap();
+        write_closed_tetra_binary_stl(&stl_path, 0.0);
 
         let manifest_path = dir.join("manifest.json");
         fs::write(&manifest_path, "{}").unwrap();
@@ -324,6 +620,75 @@ mod tests {
             measurement_guides: vec![],
             export_artifacts: vec![],
         }
+    }
+
+    fn write_zero_triangle_binary_stl(path: &Path) {
+        let mut f = fs::File::create(path).unwrap();
+        f.write_all(&[0u8; 80]).unwrap();
+        f.write_all(&0u32.to_le_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+
+    fn write_one_triangle_binary_stl(path: &Path) {
+        write_binary_stl(path, &[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]);
+    }
+
+    fn write_closed_tetra_binary_stl(path: &Path, x_offset: f32) {
+        let triangles = closed_tetra_triangles(x_offset);
+        write_binary_stl(path, &triangles);
+    }
+
+    fn closed_tetra_triangles(x_offset: f32) -> Vec<[[f32; 3]; 3]> {
+        let a = [x_offset, 0.0, 0.0];
+        let b = [x_offset + 1.0, 0.0, 0.0];
+        let c = [x_offset, 1.0, 0.0];
+        let d = [x_offset, 0.0, 1.0];
+        vec![[a, b, c], [a, d, b], [a, c, d], [b, d, c]]
+    }
+
+    fn write_two_tetra_binary_stl(path: &Path) {
+        let mut triangles = closed_tetra_triangles(0.0);
+        triangles.extend(closed_tetra_triangles(10.0));
+        write_binary_stl(path, &triangles);
+    }
+
+    fn write_binary_stl(path: &Path, triangles: &[[[f32; 3]; 3]]) {
+        let mut f = fs::File::create(path).unwrap();
+        f.write_all(&[0u8; 80]).unwrap();
+        f.write_all(&(triangles.len() as u32).to_le_bytes())
+            .unwrap();
+        for triangle in triangles {
+            f.write_all(&[0u8; 12]).unwrap();
+            for vertex in triangle {
+                for coordinate in vertex {
+                    f.write_all(&coordinate.to_le_bytes()).unwrap();
+                }
+            }
+            f.write_all(&[0u8; 2]).unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    fn write_ascii_stl(path: &Path, triangles: &[[[f32; 3]; 3]]) {
+        let mut text = String::from("solid preview\n");
+        for triangle in triangles {
+            text.push_str("  facet normal 0 0 0\n");
+            text.push_str("    outer loop\n");
+            for [x, y, z] in triangle {
+                text.push_str(&format!("      vertex {x} {y} {z}\n"));
+            }
+            text.push_str("    endloop\n");
+            text.push_str("  endfacet\n");
+        }
+        text.push_str("endsolid preview\n");
+        fs::write(path, text).unwrap();
+    }
+
+    fn write_binary_stl_with_declared_triangle_count(path: &Path, triangle_count: u32) {
+        let mut f = fs::File::create(path).unwrap();
+        f.write_all(&[0u8; 80]).unwrap();
+        f.write_all(&triangle_count.to_le_bytes()).unwrap();
+        f.flush().unwrap();
     }
 
     fn test_manifest() -> ModelManifest {
@@ -397,6 +762,211 @@ mod tests {
         assert_eq!(result.metrics.part_count, 1);
         assert!(result.metrics.preview_stl_size_bytes.unwrap() > 0);
         assert!((result.metrics.total_volume.unwrap() - 1000.0).abs() < f64::EPSILON);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn closed_tetra_preview_stl_has_no_topology_issues() {
+        let dir = temp_dir("closed_tetra");
+        let bundle = test_bundle(&dir);
+        write_closed_tetra_binary_stl(Path::new(&bundle.preview_stl_path), 0.0);
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(result.passed, "Expected pass, got: {:?}", result.issues);
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_DISCONNECTED_COMPONENTS"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_single_triangle_preview_stl_fails_non_manifold() {
+        let dir = temp_dir("binary_one_triangle");
+        let bundle = test_bundle(&dir);
+        write_one_triangle_binary_stl(Path::new(&bundle.preview_stl_path));
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_UNREADABLE"));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ascii_open_single_triangle_preview_stl_fails_non_manifold() {
+        let dir = temp_dir("ascii_one_triangle");
+        let bundle = test_bundle(&dir);
+        write_ascii_stl(
+            Path::new(&bundle.preview_stl_path),
+            &[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]],
+        );
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_UNREADABLE"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn separated_tetra_preview_stl_fails_disconnected_components() {
+        let dir = temp_dir("two_tetra");
+        let bundle = test_bundle(&dir);
+        write_two_tetra_binary_stl(Path::new(&bundle.preview_stl_path));
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        let issue = result
+            .issues
+            .iter()
+            .find(|i| i.code == "PREVIEW_STL_DISCONNECTED_COMPONENTS")
+            .expect("expected disconnected component issue");
+        assert_eq!(issue.numeric_payload, Some(2.0));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn binary_preview_stl_without_triangles_fails() {
+        let dir = temp_dir("binary_empty_mesh");
+        let bundle = test_bundle(&dir);
+        write_zero_triangle_binary_stl(Path::new(&bundle.preview_stl_path));
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn truncated_binary_preview_stl_fails_unreadable() {
+        let dir = temp_dir("binary_truncated");
+        let bundle = test_bundle(&dir);
+        fs::write(&bundle.preview_stl_path, [0u8; 83]).unwrap();
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_UNREADABLE"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn binary_preview_stl_count_mismatch_fails_unreadable() {
+        let dir = temp_dir("binary_count_mismatch");
+        let bundle = test_bundle(&dir);
+        write_binary_stl_with_declared_triangle_count(Path::new(&bundle.preview_stl_path), 2);
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&bundle.preview_stl_path)
+            .unwrap();
+        f.write_all(&[0u8; 50]).unwrap();
+        f.flush().unwrap();
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_UNREADABLE"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ascii_preview_stl_without_facets_fails() {
+        let dir = temp_dir("ascii_empty_mesh");
+        let bundle = test_bundle(&dir);
+        fs::write(&bundle.preview_stl_path, b"solid empty\nendsolid empty\n").unwrap();
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn malformed_ascii_preview_stl_without_facets_fails_no_triangles() {
+        let dir = temp_dir("ascii_malformed_empty_mesh");
+        let bundle = test_bundle(&dir);
+        fs::write(
+            &bundle.preview_stl_path,
+            b"solid malformed\nvertex nonsense without facet\nendsolid malformed\n",
+        )
+        .unwrap();
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_UNREADABLE"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalid_utf8_ascii_preview_stl_fails_unreadable() {
+        let dir = temp_dir("ascii_invalid_utf8");
+        let bundle = test_bundle(&dir);
+        fs::write(
+            &bundle.preview_stl_path,
+            b"solid invalid\n\xff\nendsolid invalid\n",
+        )
+        .unwrap();
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_UNREADABLE"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
         fs::remove_dir_all(&dir).ok();
     }
 

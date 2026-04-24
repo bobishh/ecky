@@ -1,0 +1,12 @@
+(model
+  (part body
+    (extrude
+      (bspline
+        (map
+          (lambda (i)
+            (let* ((a (* 6.283185307179586 (/ i 18)))
+                   (r (+ 24 (* 2.5 (hash-signed i 18 17)))))
+              (list (* r (cos a)) (* 0.64 r (sin a)))))
+          (range 0 18))
+        :closed #t)
+      6)))

@@ -103,6 +103,24 @@ export function buildManifestDigest(manifest: ModelManifest | null | undefined):
   return lines.join('\n');
 }
 
+function authoringSourceExtension(
+  sourceLanguage: SourceLanguage | null | undefined,
+  geometryBackend: ModelManifest['geometryBackend'] | null | undefined,
+) : string | null {
+  switch (sourceLanguage) {
+    case 'build123d':
+      return '.py';
+    case 'legacyPython':
+      return '.FCMacro';
+    case 'ecky':
+      return '.ecky';
+    default:
+      break;
+  }
+
+  return geometryBackend ? '.ecky' : null;
+}
+
 export function buildAuthoringDigest(input: {
   title?: string | null;
   versionName?: string | null;
@@ -114,10 +132,23 @@ export function buildAuthoringDigest(input: {
   const blocks: string[] = [];
   const title = compactText(input.title ?? '', 64);
   const versionName = compactText(input.versionName ?? '', 32);
-  const sourceLanguage = input.sourceLanguage ? ` (${input.sourceLanguage})` : '';
+  const sourceLanguage = sourceLanguageLabel(input.sourceLanguage);
+  const sourceLanguageSuffix = sourceLanguage ? ` (${sourceLanguage})` : '';
   if (title || versionName) {
     blocks.push(
-      `CURRENT WORKING SNAPSHOT\n${title || 'Untitled'}${versionName ? ` [${versionName}]` : ''}${sourceLanguage}`,
+      `CURRENT WORKING SNAPSHOT\n${title || 'Untitled'}${versionName ? ` [${versionName}]` : ''}${sourceLanguageSuffix}`,
+    );
+  }
+  const sourceExtension = authoringSourceExtension(
+    input.sourceLanguage,
+    input.modelManifest?.geometryBackend,
+  );
+  if (sourceExtension) {
+    const backend = input.modelManifest?.geometryBackend;
+    const lines = [`sourceExtension=${sourceExtension}`];
+    if (backend) lines.push(`geometryBackend=${backend}`);
+    blocks.push(
+      `AUTHORING HINTS\n${lines.join('\n')}`,
     );
   }
   const manifestDigest = buildManifestDigest(input.modelManifest);
@@ -127,4 +158,9 @@ export function buildAuthoringDigest(input: {
   const paramsDigest = buildParamsDigest(input.params);
   if (paramsDigest) blocks.push(paramsDigest);
   return blocks.join('\n\n');
+}
+function sourceLanguageLabel(sourceLanguage: SourceLanguage | null | undefined): string {
+  if (sourceLanguage === 'ecky') return 'ecky';
+  if (sourceLanguage === 'legacyPython') return 'freecad';
+  return sourceLanguage ?? '';
 }

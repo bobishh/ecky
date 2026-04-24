@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::ecky_deterministic;
 use crate::models::{AppResult, ParamValue};
 
 use super::model::{expr_head_symbol, expr_list_items, inline_let_expr, IrExpr};
@@ -99,11 +100,42 @@ pub(super) fn eval_number(value: &IrExpr, env: &BTreeMap<String, ParamValue>) ->
         "sin" => unary_op(args, env, f64::sin),
         "cos" => unary_op(args, env, f64::cos),
         "tan" => unary_op(args, env, f64::tan),
-        "deg" => unary_op(args, env, |value| value.to_radians()),
-        "rad" => unary_op(args, env, |value| value.to_degrees()),
+        "atan" => unary_op(args, env, f64::atan),
+        "atan2" => {
+            if args.len() != 2 {
+                return Err(validation("`atan2` expects y and x."));
+            }
+            Ok(eval_number(&args[0], env)?.atan2(eval_number(&args[1], env)?))
+        }
+        "deg" | "deg->rad" => unary_op(args, env, |value| value.to_radians()),
+        "rad" | "rad->deg" => unary_op(args, env, |value| value.to_degrees()),
         "abs" => unary_op(args, env, f64::abs),
+        "floor" => unary_op(args, env, f64::floor),
+        "signed-pow" => binary_op(args, env, |value, exponent| {
+            value.signum() * value.abs().powf(exponent)
+        }),
+        "hash01" => ternary_op(args, env, ecky_deterministic::hash01),
+        "hash-signed" => ternary_op(args, env, ecky_deterministic::hash_signed),
+        "noise2" => ternary_op(args, env, ecky_deterministic::noise2),
+        "voronoi2" => ternary_op(args, env, ecky_deterministic::voronoi2),
+        "cell-distance2" => ternary_op(args, env, ecky_deterministic::cell_distance2),
+        "fbm2" => {
+            if args.len() != 6 {
+                return Err(validation(
+                    "`fbm2` expects x, y, seed, octaves, lacunarity, and gain.",
+                ));
+            }
+            Ok(ecky_deterministic::fbm2(
+                eval_number(&args[0], env)?,
+                eval_number(&args[1], env)?,
+                eval_number(&args[2], env)?,
+                eval_number(&args[3], env)?,
+                eval_number(&args[4], env)?,
+                eval_number(&args[5], env)?,
+            ))
+        }
         other => Err(unsupported(format!(
-            "Numeric operator `{}` is not supported by Ecky IR v0.",
+            "Numeric operator `{}` is not supported by current `.ecky` runtime.",
             other
         ))),
     }
@@ -120,6 +152,36 @@ pub(super) fn unary_op(
         ));
     }
     Ok(op(eval_number(&args[0], env)?))
+}
+
+fn binary_op(
+    args: &[IrExpr],
+    env: &BTreeMap<String, ParamValue>,
+    op: impl Fn(f64, f64) -> f64,
+) -> AppResult<f64> {
+    if args.len() != 2 {
+        return Err(validation(
+            "Binary numeric operator expects exactly two arguments.",
+        ));
+    }
+    Ok(op(eval_number(&args[0], env)?, eval_number(&args[1], env)?))
+}
+
+fn ternary_op(
+    args: &[IrExpr],
+    env: &BTreeMap<String, ParamValue>,
+    op: impl Fn(f64, f64, f64) -> f64,
+) -> AppResult<f64> {
+    if args.len() != 3 {
+        return Err(validation(
+            "Ternary numeric operator expects exactly three arguments.",
+        ));
+    }
+    Ok(op(
+        eval_number(&args[0], env)?,
+        eval_number(&args[1], env)?,
+        eval_number(&args[2], env)?,
+    ))
 }
 
 pub(super) fn eval_bool(value: &IrExpr, env: &BTreeMap<String, ParamValue>) -> AppResult<bool> {
@@ -178,7 +240,7 @@ pub(super) fn eval_bool(value: &IrExpr, env: &BTreeMap<String, ParamValue>) -> A
             }
         }
         other => Err(unsupported(format!(
-            "Boolean operator `{}` is not supported by Ecky IR v0.",
+            "Boolean operator `{}` is not supported by current `.ecky` runtime.",
             other
         ))),
     }

@@ -1,0 +1,103 @@
+<script lang="ts">
+  import { cycleTopologyMode, topologyModeLabel, type TopologyMode } from '../viewerDisplayMode';
+
+  let {
+    activeTab = 'views',
+    outlineEnabled = true,
+    topologyMode = 'mesh',
+    macroCode = '',
+    onActiveTabChange,
+    onShowCode,
+    onViewerDisplayChange,
+  }: {
+    activeTab?: 'views' | 'raw' | 'litho';
+    outlineEnabled?: boolean;
+    topologyMode?: TopologyMode;
+    macroCode?: string;
+    onActiveTabChange?: (tab: 'views' | 'raw' | 'litho') => void;
+    onShowCode?: () => void;
+    onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
+  } = $props();
+</script>
+
+<div class="panel-mode-tabs">
+  <button
+    class="panel-mode-tab"
+    class:panel-mode-tab-active={activeTab === 'views'}
+    onclick={() => onActiveTabChange?.('views')}
+  >
+    VIEWS
+  </button>
+  <button
+    class="panel-mode-tab"
+    class:panel-mode-tab-active={activeTab === 'raw'}
+    onclick={() => onActiveTabChange?.('raw')}
+  >
+    RAW
+  </button>
+  <button
+    class="panel-mode-tab"
+    class:panel-mode-tab-active={activeTab === 'litho'}
+    onclick={() => onActiveTabChange?.('litho')}
+  >
+    LITHO
+  </button>
+  <button
+    class="panel-mode-tab panel-mode-tab-compact"
+    class:panel-mode-tab-active={outlineEnabled}
+    onclick={() => onViewerDisplayChange?.({ outlineEnabled: !outlineEnabled, topologyMode })}
+    title="Toggle part outlines in the viewport"
+  >
+    OUTLINE
+  </button>
+  <button
+    class="panel-mode-tab panel-mode-tab-compact"
+    class:panel-mode-tab-active={topologyMode !== 'off'}
+    onclick={() => onViewerDisplayChange?.({ outlineEnabled, topologyMode: cycleTopologyMode(topologyMode) })}
+    title="Cycle topology overlay: off, feature edges, mesh wireframe"
+  >
+    {topologyModeLabel(topologyMode)}
+  </button>
+  {#if macroCode && onShowCode}
+    <button class="panel-mode-tab panel-code-btn" onclick={onShowCode} title="View macro code">
+      CODE
+    </button>
+  {/if}
+</div>
+
+<style>
+  .panel-mode-tabs {
+    display: flex;
+    gap: 6px;
+    overflow: hidden;
+    align-items: center;
+  }
+
+  .panel-mode-tab {
+    flex: 0 0 auto;
+    padding: 5px 10px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    color: var(--text-dim);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+  }
+
+  .panel-mode-tab-active {
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
+    color: var(--text);
+  }
+
+  .panel-mode-tab-compact {
+    white-space: nowrap;
+  }
+
+  .panel-code-btn {
+    margin-left: auto;
+    border-color: color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
+    color: var(--secondary);
+  }
+</style>

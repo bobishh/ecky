@@ -49,12 +49,26 @@ import {
   type ViewportCameraState,
 } from '../types/domain';
 import type {
+  ComponentPackage,
+  ComponentPackageHeader,
+  BrepHiddenLineProjectionRequest,
+  BrepHiddenLineProjectionResponse,
   ExportPartInput,
+  InstalledComponentPackage,
   PostProcessingSpec,
+  PromptTranscription,
   QueueAgentPromptInput,
   RejectViewportScreenshotInput,
   ResolveAgentPromptInput,
   ResolveViewportScreenshotInput,
+  SketchBrepCandidateRequest,
+  SketchBrepCandidateResponse,
+  SketchDraftRequest,
+  SketchDraftSource,
+  SketchPreviewHullRequest,
+  SketchSuggestionRequest,
+  SketchSuggestionResponse,
+  TranscribePromptAudioInput,
 } from './contracts';
 
 export type { ThreadAgentState };
@@ -215,6 +229,8 @@ export async function generateDesign(input: {
   questionMode: boolean | null;
   followUpQuestion: string | null;
   engineKind?: EngineKind | null;
+  sourceLanguage?: SourceLanguage | null;
+  geometryBackend?: GeometryBackend | null;
 }): Promise<GenerateOutput> {
   const result = unwrapResult(
     await commands.generateDesign(
@@ -229,6 +245,8 @@ export async function generateDesign(input: {
         questionMode: input.questionMode,
         followUpQuestion: input.followUpQuestion,
         engineKind: input.engineKind ?? null,
+        sourceLanguage: input.sourceLanguage ?? null,
+        geometryBackend: input.geometryBackend ?? null,
       },
     ),
   );
@@ -374,6 +392,93 @@ export async function exportFile(sourcePath: string, targetPath: string): Promis
   unwrapResult(await commands.exportFile(sourcePath, targetPath));
 }
 
+export async function readComponentPackageManifest(
+  projectDir: string,
+): Promise<ComponentPackage> {
+  return unwrapResult(await commands.readComponentPackageManifest(projectDir));
+}
+
+export async function writeComponentPackageManifest(
+  projectDir: string,
+  componentPackage: ComponentPackage,
+): Promise<string> {
+  return unwrapResult(await commands.writeComponentPackageManifest(projectDir, componentPackage));
+}
+
+export async function writeComponentPackageArchive(
+  projectDir: string,
+  archivePath: string,
+): Promise<void> {
+  unwrapResult(await commands.writeComponentPackageArchive(projectDir, archivePath));
+}
+
+export async function readComponentPackageFromArchive(
+  archivePath: string,
+): Promise<ComponentPackage> {
+  return unwrapResult(await commands.readComponentPackageFromArchive(archivePath));
+}
+
+export async function readComponentPackageHeaderFromArchive(
+  archivePath: string,
+): Promise<ComponentPackageHeader> {
+  return unwrapResult(await commands.readComponentPackageHeaderFromArchive(archivePath));
+}
+
+export async function extractComponentPackageArchive(
+  archivePath: string,
+  targetDir: string,
+): Promise<ComponentPackage> {
+  return unwrapResult(await commands.extractComponentPackageArchive(archivePath, targetDir));
+}
+
+export async function installComponentPackageArchive(
+  archivePath: string,
+): Promise<InstalledComponentPackage> {
+  return unwrapResult(await commands.installComponentPackageArchive(archivePath));
+}
+
+export async function listInstalledComponentPackageHeaders(): Promise<ComponentPackageHeader[]> {
+  return unwrapResult(await commands.listInstalledComponentPackageHeaders());
+}
+
+export async function generateSketchDraftSource(
+  request: SketchDraftRequest,
+): Promise<SketchDraftSource> {
+  return unwrapResult(await commands.generateSketchDraftSource(request));
+}
+
+export async function suggestSketchFeatures(
+  request: SketchSuggestionRequest,
+): Promise<SketchSuggestionResponse> {
+  return unwrapResult(await commands.suggestSketchFeatures(request));
+}
+
+export async function generateSketchDraftPreview(
+  request: SketchDraftRequest,
+): Promise<{ draft: SketchDraftSource; artifactBundle: ArtifactBundle }> {
+  const [draft, bundle] = unwrapResult(await commands.generateSketchDraftPreview(request));
+  return { draft, artifactBundle: normalizeArtifactBundle(bundle) };
+}
+
+export async function generateSketchPreviewHull(
+  request: SketchPreviewHullRequest,
+): Promise<{ draft: SketchDraftSource; artifactBundle: ArtifactBundle }> {
+  const [draft, bundle] = unwrapResult(await commands.generateSketchPreviewHull(request));
+  return { draft, artifactBundle: normalizeArtifactBundle(bundle) };
+}
+
+export async function analyzeSketchBrepCandidates(
+  request: SketchBrepCandidateRequest,
+): Promise<SketchBrepCandidateResponse> {
+  return unwrapResult(await commands.analyzeSketchBrepCandidates(request));
+}
+
+export async function extractBrepHiddenLineProjections(
+  request: BrepHiddenLineProjectionRequest,
+): Promise<BrepHiddenLineProjectionResponse> {
+  return unwrapResult(await commands.extractBrepHiddenLineProjections(request));
+}
+
 export async function exportMultipartStlZip(
   parts: ExportPartInput[],
   targetPath: string,
@@ -395,6 +500,8 @@ export async function addManualVersion(input: {
   title: string;
   versionName: string;
   macroCode: string;
+  sourceLanguage?: SourceLanguage | null;
+  geometryBackend?: GeometryBackend | null;
   parameters: DesignParams;
   uiSpec: UiSpec;
   postProcessing?: PostProcessingSpec | null;
@@ -407,6 +514,8 @@ export async function addManualVersion(input: {
       title: input.title,
       versionName: input.versionName,
       macroCode: input.macroCode,
+      sourceLanguage: input.sourceLanguage ?? null,
+      geometryBackend: input.geometryBackend ?? null,
       parameters: input.parameters,
       uiSpec: toContractUiSpec(input.uiSpec),
       postProcessing: input.postProcessing ?? null,
@@ -479,6 +588,10 @@ export async function uploadAsset(input: {
 
 export async function saveRecordedAudio(input: { base64Data: string; name: string }) {
   return unwrapResult(await commands.saveRecordedAudio(input.base64Data, input.name));
+}
+
+export async function transcribePromptAudio(input: TranscribePromptAudioInput): Promise<PromptTranscription> {
+  return unwrapResult(await commands.transcribePromptAudio(input));
 }
 
 export async function getLastDesign(): Promise<LastDesignSnapshot | null> {

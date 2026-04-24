@@ -1,6 +1,6 @@
 import type { ArtifactBundle } from './types/domain';
 
-export type ExportMode = '3mf' | 'multipartStlZip' | 'stl' | 'fcstd';
+export type ExportMode = '3mf' | 'multipartStlZip' | 'stl' | 'fcstd' | 'step';
 
 export type ExportChooserOption = {
   id: ExportMode;
@@ -20,6 +20,10 @@ export type MultipartExportPart = {
 
 export function hasMultipartExportAssets(bundle: ArtifactBundle | null | undefined): boolean {
   return (bundle?.viewerAssets?.length ?? 0) > 1;
+}
+
+export function getStepExportPath(bundle: ArtifactBundle | null | undefined): string | undefined {
+  return bundle?.exportArtifacts?.find((a) => a.format === 'step')?.path;
 }
 
 export function buildMultipartExportParts(
@@ -51,6 +55,7 @@ export function buildExportDefaultNames(title: string | null | undefined) {
     multipartStlZip: `${stem}-parts.zip`,
     stl: `${stem}.stl`,
     fcstd: `${stem}.FCStd`,
+    step: `${stem}.step`,
   };
 }
 
@@ -91,6 +96,15 @@ export function buildExportChooserOptions(
     subtitle: 'FreeCAD source document.',
     disabled: !Boolean(bundle?.fcstdPath),
     disabledReason: bundle?.fcstdPath ? undefined : 'FreeCAD source is not available for this model.',
+  });
+
+  const stepPath = getStepExportPath(bundle);
+  options.push({
+    id: 'step',
+    title: 'STEP',
+    subtitle: 'Neutral CAD exchange file.',
+    disabled: !Boolean(stepPath),
+    disabledReason: stepPath ? undefined : 'STEP export is pending for this model.',
   });
 
   return options;

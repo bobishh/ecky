@@ -56,7 +56,7 @@ test('modelEngineLabel prefers artifact metadata over stale output defaults', ()
         },
       }),
     ),
-    'Python + build123d',
+    'build123d (.py)',
   );
 });
 
@@ -67,9 +67,9 @@ test('modelEngineLabel distinguishes IR lowered into build123d', () => {
         modelManifest: {
           modelId: 'model',
           sourceKind: 'generated',
-          sourceLanguage: 'eckyIrV0',
+          sourceLanguage: 'ecky',
           geometryBackend: 'build123d',
-          engineKind: 'eckyIrV0',
+          engineKind: 'ecky',
           document: { documentName: 'model', documentLabel: 'model' },
           parts: [],
           parameterGroups: [],
@@ -84,6 +84,33 @@ test('modelEngineLabel distinguishes IR lowered into build123d', () => {
         },
       }),
     ),
-    'IR + build123d',
+    'Ecky + build123d (.ecky)',
+  );
+});
+
+test('modelEngineLabel falls back to canonical ecky extension for native source', () => {
+  assert.equal(
+    modelEngineLabel(
+      message({
+        modelManifest: {
+          modelId: 'model',
+          sourceKind: 'generated',
+          sourceLanguage: 'ecky',
+          engineKind: 'ecky',
+          document: { documentName: 'model', documentLabel: 'model' },
+          parts: [],
+          parameterGroups: [],
+          controlPrimitives: [],
+          controlRelations: [],
+          controlViews: [],
+          advisories: [],
+          selectionTargets: [],
+          measurementAnnotations: [],
+          warnings: [],
+          enrichmentState: { status: 'none', proposals: [] },
+        },
+      }),
+    ),
+    'Ecky (.ecky)',
   );
 });

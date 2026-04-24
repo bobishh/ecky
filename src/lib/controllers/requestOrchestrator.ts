@@ -23,6 +23,7 @@ import type {
 } from '../types/domain';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
 import { detectFollowUpAnswer } from './followUpGuard';
+import { needsGeneratedQuestionAnswer, pendingQuestionCopy } from './questionAnswer';
 import { runStructuralCheck } from './structuralVerification';
 import { runVerificationRound } from './verificationLoop';
 import { buildAuthoringDigest } from '../llmContextDigest';
@@ -47,6 +48,9 @@ import {
 // ---------------------------------------------------------------------------
 
 const DUPLICATE_REQUEST_WINDOW_MS = 1500;
+const TEXT_ONLY_NVIDIA_NIM_REASON =
+  'Selected NVIDIA NIM model looks text-only. Image attachments, concept-preview reuse, and screenshot verification are unavailable.';
+const MODEL_CAPABILITIES_MODULE_SPECIFIER = '../modelRuntime/modelCapabilities';
 const GENERIC_ROUTING_RESPONSE_MARKERS = [
   'this looks like a geometry change request',
   'intent looks like a design change request',
@@ -69,6 +73,27 @@ const REPAIR_PHRASES = [
   "Repairing the macro with the confidence of a forged permit."
 ];
 
+type ModelCapabilitySummary = {
+  supportsVision: boolean;
+  reason: string | null;
+};
+
+type ModelCapabilitiesModule = {
+  inferModelCapabilities?: (
+    provider: string,
+    baseUrl: string,
+    model: string,
+  ) => Partial<ModelCapabilitySummary> | null | undefined;
+  isVisionCapableModel?: (provider: string, baseUrl: string, model: string) => boolean;
+  visionUnavailableReason?: (
+    provider: string,
+    baseUrl: string,
+    model: string,
+  ) => string | null | undefined;
+};
+
+let modelCapabilitiesModulePromise: Promise<ModelCapabilitiesModule | null> | null = null;
+
 function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
   const phrase = REPAIR_PHRASES[Math.floor(Math.random() * REPAIR_PHRASES.length)];
   return `${phrase} Retry ${nextAttempt} of ${maxAttempts}.`;
@@ -76,8 +101,8 @@ function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
 
 function renderBackendLabel(design: DesignOutput): string {
   if (design.geometryBackend === 'build123d' || design.sourceLanguage === 'build123d') return 'build123d';
-  if (design.macroDialect === 'eckyIrV0' || design.sourceLanguage === 'eckyIrV0') {
-    return 'Ecky IR';
+  if (design.macroDialect === 'ecky' || design.sourceLanguage === 'ecky') {
+    return 'Ecky';
   }
   return 'FreeCAD';
 }
@@ -169,10 +194,138 @@ function mergeUsageSummary(
   };
 }
 
+function normalizeCapabilitySummary(
+  summary: Partial<ModelCapabilitySummary> | null | undefined,
+): ModelCapabilitySummary | null {
+  if (!summary || typeof summary.supportsVision !== 'boolean') return null;
+  return {
+    supportsVision: summary.supportsVision,
+    reason: summary.reason ?? null,
+  };
+}
+
+function isMissingModelCapabilitiesModule(error: unknown): boolean {
+  const message = formatBackendError(error).toLowerCase();
+  return (
+    message.includes('modelcapabilities') &&
+    (
+      message.includes('cannot find module') ||
+      message.includes('failed to fetch dynamically imported module') ||
+      message.includes('failed to resolve module specifier') ||
+      message.includes('error loading dynamically imported module')
+    )
+  );
+}
+
+async function loadModelCapabilitiesModule(): Promise<ModelCapabilitiesModule | null> {
+  if (!modelCapabilitiesModulePromise) {
+    modelCapabilitiesModulePromise = (async () => {
+      try {
+        const specifier = MODEL_CAPABILITIES_MODULE_SPECIFIER;
+        return await import(/* @vite-ignore */ specifier) as ModelCapabilitiesModule;
+      } catch (error) {
+        if (!isMissingModelCapabilitiesModule(error)) {
+          console.warn('[Orchestrator] modelCapabilities helper unavailable:', error);
+        }
+        return null;
+      }
+    })();
+  }
+
+  return modelCapabilitiesModulePromise;
+}
+
+function isNvidiaNimEndpoint(provider: string, baseUrl: string): boolean {
+  if (`${provider ?? ''}`.trim().toLowerCase() !== 'openai') return false;
+  const normalizedBaseUrl = `${baseUrl ?? ''}`.trim();
+  if (!normalizedBaseUrl) return false;
+
+  try {
+    return new URL(normalizedBaseUrl).hostname.toLowerCase() === 'integrate.api.nvidia.com';
+  } catch {
+    return /integrate\.api\.nvidia\.com/i.test(normalizedBaseUrl);
+  }
+}
+
+function isLikelyVisionModel(model: string): boolean {
+  const normalizedModel = `${model ?? ''}`.trim().toLowerCase();
+  if (!normalizedModel) return false;
+  return (
+    normalizedModel.includes('multimodal') ||
+    normalizedModel.includes('multi-modal') ||
+    /(^|[\s/_-])(vision|vl)($|[\s/_-])/.test(normalizedModel)
+  );
+}
+
+function fallbackInferModelCapabilities(
+  provider: string,
+  baseUrl: string,
+  model: string,
+): ModelCapabilitySummary {
+  if (!isNvidiaNimEndpoint(provider, baseUrl)) {
+    return { supportsVision: true, reason: null };
+  }
+  if (!`${model ?? ''}`.trim()) {
+    return { supportsVision: true, reason: null };
+  }
+  if (isLikelyVisionModel(model)) {
+    return { supportsVision: true, reason: null };
+  }
+  return {
+    supportsVision: false,
+    reason: TEXT_ONLY_NVIDIA_NIM_REASON,
+  };
+}
+
+function selectedEngineFromConfig(
+  currentConfig: AppConfig,
+): AppConfig['engines'][number] | null {
+  return currentConfig.engines.find((engine) => engine.id === currentConfig.selectedEngineId) ?? null;
+}
+
+async function inferSelectedModelCapabilities(
+  currentConfig: AppConfig,
+): Promise<ModelCapabilitySummary> {
+  const selectedEngine = selectedEngineFromConfig(currentConfig);
+  if (!selectedEngine) return { supportsVision: true, reason: null };
+
+  const { provider, baseUrl, model } = selectedEngine;
+  const fallback = fallbackInferModelCapabilities(provider, baseUrl, model);
+  const helper = await loadModelCapabilitiesModule();
+  if (!helper) return fallback;
+
+  const inferred =
+    normalizeCapabilitySummary(helper.inferModelCapabilities?.(provider, baseUrl, model)) ??
+    (
+      typeof helper.isVisionCapableModel === 'function'
+        ? {
+            supportsVision: helper.isVisionCapableModel(provider, baseUrl, model),
+            reason: helper.visionUnavailableReason?.(provider, baseUrl, model) ?? null,
+          }
+        : null
+    );
+
+  if (!inferred) return fallback;
+  if (inferred.supportsVision) return { supportsVision: true, reason: null };
+  return {
+    supportsVision: false,
+    reason: inferred.reason ?? fallback.reason ?? TEXT_ONLY_NVIDIA_NIM_REASON,
+  };
+}
+
+function filterModelFacingAttachments(
+  attachments: Attachment[],
+  supportsVision: boolean,
+): Attachment[] {
+  if (supportsVision) return attachments;
+  return attachments.filter((attachment) => attachment.type !== 'image');
+}
+
 function requestAttachmentSignature(attachment: Attachment): string {
   return [
     attachment.type || '',
     attachment.path || '',
+    attachment.dataUrl || '',
     attachment.name || '',
     attachment.explanation || '',
   ].join('|');
@@ -284,6 +437,14 @@ function buildWorkingDesignSnapshot(): DesignOutput | null {
   };
 }
 
+function configAuthoringContext(currentConfig: AppConfig): Pick<DesignOutput, 'engineKind' | 'sourceLanguage' | 'geometryBackend'> {
+  return {
+    engineKind: currentConfig.defaultEngineKind,
+    sourceLanguage: currentConfig.defaultSourceLanguage,
+    geometryBackend: currentConfig.defaultGeometryBackend,
+  };
+}
+
 type GenerateSubmissionOptions = {
   imageDataOverride?: string | null;
 };
@@ -296,11 +457,15 @@ export async function handleGenerate(
   session.setError(null);
 
   // Keep backend AppState config in sync with current UI config before generation.
-  await saveConfig(get(config));
+  const currentConfig = get(config);
+  await saveConfig(currentConfig);
+  const modelCapabilities = await inferSelectedModelCapabilities(currentConfig);
 
   // Capture screenshot with drawing overlay synchronously before clearing
-  let preCapture: string | null = options.imageDataOverride ?? null;
-  if (!preCapture && viewerRef && get(session).stlUrl) {
+  let preCapture: string | null = modelCapabilities.supportsVision
+    ? options.imageDataOverride ?? null
+    : null;
+  if (!preCapture && modelCapabilities.supportsVision && viewerRef && get(session).stlUrl) {
     const overlay = getDrawingCanvas?.() ?? null;
     preCapture = viewerRef.captureScreenshot(overlay);
   }
@@ -335,12 +500,24 @@ export async function handleGenerate(
     promptChars: initialPrompt.length,
     attachments: attachments.length,
     screenshotMb: Number((estimateBase64Bytes(preCapture) / (1024 * 1024)).toFixed(2)),
+    supportsVision: modelCapabilities.supportsVision,
   });
+  if (!modelCapabilities.supportsVision) {
+    console.info('[Orchestrator] vision inputs suppressed for selected model', {
+      requestId,
+      reason: modelCapabilities.reason,
+    });
+  }
 
   ensureContext();
 
   const pipeline = new GenerationPipeline(requestId);
   pipeline.preCapture = preCapture;
+  pipeline.modelCapabilities = modelCapabilities;
+  pipeline.modelFacingAttachments = filterModelFacingAttachments(
+    attachments,
+    modelCapabilities.supportsVision,
+  );
   pipeline.execute().catch(err => {
     console.error("[Orchestrator] Pipeline hard failure:", err);
   });
@@ -363,6 +540,8 @@ class GenerationPipeline {
   assistantMessageId: string | null = null;
   currentScreenshot: string | null = null;
   preCapture: string | null = null;
+  modelCapabilities: ModelCapabilitySummary = { supportsVision: true, reason: null };
+  modelFacingAttachments: Attachment[] = [];
   isQuestion: boolean = false;
   forcedQuestionOnly: boolean = false;
   lightResponse: string = '';
@@ -390,6 +569,7 @@ class GenerationPipeline {
     this.snapshotParentMacroCode = get(workingCopy).macroCode || null;
     this.snapshotWorkingDesign = buildWorkingDesignSnapshot();
     this.currentConfig = get(config);
+    this.modelFacingAttachments = this.req.attachments;
   }
 
   // --- Main Execution ---
@@ -432,10 +612,14 @@ class GenerationPipeline {
         : 'local design heuristic';
 
     // Use pre-captured screenshot (with drawing overlay composited) from handleGenerate
-    if (this.preCapture) {
-      this.currentScreenshot = this.preCapture;
-    } else if (viewerRef && get(session).stlUrl) {
-      this.currentScreenshot = viewerRef.captureScreenshot();
+    if (this.modelCapabilities.supportsVision) {
+      if (this.preCapture) {
+        this.currentScreenshot = this.preCapture;
+      } else if (viewerRef && get(session).stlUrl) {
+        this.currentScreenshot = viewerRef.captureScreenshot();
+      }
+    } else {
+      this.currentScreenshot = null;
     }
     if (this.currentScreenshot) {
       requestQueue.patch(this.requestId, { screenshot: this.currentScreenshot });
@@ -444,6 +628,8 @@ class GenerationPipeline {
       requestId: this.requestId,
       threadId: this.snapshotThreadId,
       screenshotMb: Number((estimateBase64Bytes(this.currentScreenshot) / (1024 * 1024)).toFixed(2)),
+      supportsVision: this.modelCapabilities.supportsVision,
+      screenshotSuppressedReason: this.modelCapabilities.supportsVision ? null : this.modelCapabilities.reason,
     });
 
     const followUpMatched = await this.applyFollowUpAnswerGuard();
@@ -470,14 +656,40 @@ class GenerationPipeline {
   }
 
   private async stepAnswerQuestion() {
-    this.updateStatus('Answering question...');
-    requestQueue.patch(this.requestId, { phase: 'answering' });
+    const pendingCopy = pendingQuestionCopy(this.finalResponse);
+    this.updateStatus(pendingCopy);
+    requestQueue.patch(this.requestId, { phase: 'answering', lightResponse: pendingCopy });
     syncSessionPhaseFromQueue();
-    
-    const questionReplyText =
-      this.finalResponse ||
-      this.lightResponse ||
-      'Question answered. Geometry unchanged.';
+
+    let questionReplyText = this.finalResponse.trim();
+    if (needsGeneratedQuestionAnswer(questionReplyText)) {
+      const authoringContext = this.snapshotWorkingDesign ?? configAuthoringContext(this.currentConfig);
+      try {
+        const result = await generateDesign({
+          prompt: this.req.prompt,
+          threadId: this.snapshotThreadId,
+          parentMacroCode: this.snapshotParentMacroCode,
+          workingDesign: this.snapshotWorkingDesign,
+          isRetry: false,
+          imageData: this.currentScreenshot,
+          attachments: this.modelFacingAttachments,
+          questionMode: true,
+          followUpQuestion: null,
+          engineKind: authoringContext.engineKind ?? null,
+          sourceLanguage: authoringContext.sourceLanguage,
+          geometryBackend: authoringContext.geometryBackend,
+        });
+        this.checkCanceled();
+        this.usageSummary = mergeUsageSummary(this.usageSummary, result.usage);
+        questionReplyText =
+          result.design.response?.trim() ||
+          'Question answered. Geometry unchanged.';
+      } catch (e) {
+        this.checkCanceled();
+        await this.handleGenerationFailure(toErrorMessage(e));
+        return;
+      }
+    }
 
     // Finalize the existing attempt with the answer
     await this.finalizeAttempt('success', undefined, undefined, questionReplyText);
@@ -491,6 +703,7 @@ class GenerationPipeline {
 
     requestQueue.patch(this.requestId, {
       phase: 'success',
+      lightResponse: questionReplyText,
       result: {
         design: null,
         threadId: this.snapshotThreadId,
@@ -534,6 +747,7 @@ class GenerationPipeline {
       this.updateStatus(`Consulting LLM (Attempt ${attempt}/${this.req.maxAttempts})...`);
 
       try {
+        const authoringContext = this.snapshotWorkingDesign ?? configAuthoringContext(this.currentConfig);
         const result = await generateDesign({
           prompt: currentPrompt,
           threadId: this.snapshotThreadId,
@@ -541,9 +755,12 @@ class GenerationPipeline {
           workingDesign: this.snapshotWorkingDesign,
           isRetry: attempt > 1,
           imageData: this.currentScreenshot,
-          attachments: this.req.attachments,
+          attachments: this.modelFacingAttachments,
           questionMode: false,
           followUpQuestion: attempt === 1 ? this.followUpQuestion : null,
+          engineKind: authoringContext.engineKind ?? null,
+          sourceLanguage: authoringContext.sourceLanguage,
+          geometryBackend: authoringContext.geometryBackend,
         });
         this.checkCanceled();
         this.usageSummary = mergeUsageSummary(this.usageSummary, result.usage);
@@ -586,9 +803,12 @@ class GenerationPipeline {
           this.checkCanceled();
 
           // Collect reference image paths from attachments for verification
-          const referenceImagePaths = (this.req.attachments ?? [])
+          const referenceImagePaths = (this.modelFacingAttachments ?? [])
             .filter((a) => a.type === 'image')
             .map((a) => a.path);
+          const visionVerificationSkipReason = this.modelCapabilities.supportsVision
+            ? null
+            : this.modelCapabilities.reason;
 
           // ── Stage 1: Structural verification (always runs) ──────────────
           let structuralSummary: string | null = null;
@@ -626,9 +846,11 @@ class GenerationPipeline {
           }
 
           // ── Stage 2: Screenshot/VLM verification (gated by config) ───────
-          if (maxVerifyAttempts > 0 && viewerRef) {
-            // Give Three.js one frame to render the new STL before capturing
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          if (maxVerifyAttempts > 0 && (viewerRef || visionVerificationSkipReason)) {
+            if (viewerRef && !visionVerificationSkipReason) {
+              // Give Three.js one frame to render the new STL before capturing
+              await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            }
 
             let verifyAttempt = 0;
             while (verifyAttempt < maxVerifyAttempts) {
@@ -636,14 +858,19 @@ class GenerationPipeline {
               verifyAttempt++;
 
               requestQueue.patch(this.requestId, { phase: 'rendering' });
-              this.updateStatus(`Vision verify (${verifyAttempt}/${maxVerifyAttempts})...`);
+              this.updateStatus(
+                visionVerificationSkipReason
+                  ? 'Vision verify skipped for selected model.'
+                  : `Vision verify (${verifyAttempt}/${maxVerifyAttempts})...`,
+              );
 
               const vResult = await runVerificationRound(verifyAttempt, {
                 originalPrompt: this.req.prompt,
                 maxVerifyAttempts,
                 currentGenerationAttempt: attempt,
                 maxGenerationAttempts: this.req.maxAttempts,
-                capture: () => viewerRef!.captureMultiAngleScreenshots(),
+                skipReason: visionVerificationSkipReason,
+                capture: () => viewerRef?.captureMultiAngleScreenshots() ?? [],
                 verify: (prompt, screenshots, refImages, structSummary) =>
                   verifyRender(prompt, screenshots, refImages, structSummary),
                 referenceImages: referenceImagePaths,
@@ -651,7 +878,11 @@ class GenerationPipeline {
                 structuralMetrics,
               });
 
-              console.info('[Pipeline] vision verify:', vResult.kind);
+              if (vResult.kind === 'skipped') {
+                console.info('[Pipeline] vision verify skipped:', vResult.reason);
+              } else {
+                console.info('[Pipeline] vision verify:', vResult.kind);
+              }
 
               if (vResult.kind === 'passed' || vResult.kind === 'skipped') break;
 
@@ -730,7 +961,7 @@ class GenerationPipeline {
         threadId: this.snapshotThreadId,
         context: buildLightReasoningContext(),
         imageData: this.currentScreenshot,
-        attachments: this.req.attachments
+        attachments: this.modelFacingAttachments
       });
       this.checkCanceled();
       this.usageSummary = mergeUsageSummary(this.usageSummary, intent.usage);
@@ -911,6 +1142,7 @@ class GenerationPipeline {
     await refreshHistory();
     requestQueue.patch(this.requestId, {
       phase: 'success',
+      lightResponse: data.response?.trim() || 'Design synthesized successfully.',
       result: {
         design: data,
         threadId: this.snapshotThreadId,
@@ -945,6 +1177,7 @@ class GenerationPipeline {
     await refreshHistory();
     requestQueue.patch(this.requestId, {
       phase: 'success',
+      lightResponse: responseText,
       result: {
         design: data,
         threadId: this.snapshotThreadId,

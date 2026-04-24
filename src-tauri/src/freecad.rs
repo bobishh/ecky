@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::models::{
-    validate_model_manifest, AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata,
-    EnrichmentProposal, EnrichmentStatus, ManifestBounds, ManifestEnrichmentState, ModelManifest,
-    ModelSourceKind, ParameterGroup, PartBinding, PathResolver, SelectionTarget,
-    SelectionTargetKind, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    validate_model_manifest, AppError, AppResult, ArtifactBundle, BrepHiddenLineProjectionRequest,
+    BrepHiddenLineProjectionResponse, BrepHiddenLineProjectionView, DesignParams, DocumentMetadata,
+    EnrichmentProposal, EnrichmentStatus, ExportArtifact, ManifestBounds, ManifestEnrichmentState,
+    ModelManifest, ModelSourceKind, ParameterGroup, PartBinding, PathResolver, SelectionTarget,
+    SelectionTargetKind, SketchView, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 const RUNNER_RESOURCE_PATH: &str = "server/freecad_runner.py";
@@ -21,9 +22,10 @@ const IMPORTED_FCSTD_ARTIFACT_DIR: &str = "imported-fcstd";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const RUNNER_REPORT_FILE_NAME: &str = "runner-report.json";
-const MACRO_FILE_NAME: &str = "source.FCMacro";
+const HIDDEN_LINE_REPORT_FILE_NAME: &str = "hidden-line-projections.json";
 const FCSTD_FILE_NAME: &str = "model.FCStd";
 const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
+const STEP_FILE_NAME: &str = "model.step";
 const PARTS_DIR_NAME: &str = "parts";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +66,16 @@ struct RunnerBounds {
     z_max: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HiddenLineProjectionReport {
+    source_artifact_path: String,
+    #[serde(default)]
+    views: Vec<BrepHiddenLineProjectionView>,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct RunnerBinding {
     object_name: String,
@@ -86,9 +98,28 @@ pub fn render_model(
     configured_freecad_cmd: Option<&str>,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
+    render_model_with_sources(
+        macro_code,
+        None,
+        parameters,
+        configured_freecad_cmd,
+        app,
+        crate::models::SourceLanguage::LegacyPython,
+    )
+}
+
+pub fn render_model_with_sources(
+    executable_source: &str,
+    authored_source: Option<&str>,
+    parameters: &DesignParams,
+    configured_freecad_cmd: Option<&str>,
+    app: &dyn PathResolver,
+    source_language: crate::models::SourceLanguage,
+) -> AppResult<ArtifactBundle> {
     let params_json =
         serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
-    let content_hash = digest_segments([macro_code.as_bytes(), b"|", params_json.as_bytes()]);
+    let source_identity = authored_source.unwrap_or(executable_source);
+    let content_hash = digest_segments([source_identity.as_bytes(), b"|", params_json.as_bytes()]);
     let short_hash = short_digest(&content_hash);
     let model_id = format!("generated-{}", short_hash);
     let bundle_dir = artifact_dir(app, ModelSourceKind::Generated, &model_id)?;
@@ -99,34 +130,53 @@ pub fn render_model(
 
     fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
 
-    let macro_path = bundle_dir.join(MACRO_FILE_NAME);
+    let macro_path = bundle_dir.join(crate::source_flavor::authored_source_file_name(
+        source_language,
+        crate::models::GeometryBackend::Freecad,
+    ));
+    let runner_macro_path = if authored_source.is_some() {
+        bundle_dir.join(crate::source_flavor::lowered_source_file_name(
+            crate::models::GeometryBackend::Freecad,
+        ))
+    } else {
+        macro_path.clone()
+    };
     let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
     let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
     fs::create_dir_all(&parts_dir).map_err(|err| AppError::persistence(err.to_string()))?;
-    fs::write(&macro_path, macro_code).map_err(|err| AppError::persistence(err.to_string()))?;
+    fs::write(&macro_path, source_identity)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    if runner_macro_path != macro_path {
+        fs::write(&runner_macro_path, executable_source)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+    }
     ensure_runtime_sdk(app, &bundle_dir)?;
 
     run_generate_runner(
         app,
         configured_freecad_cmd,
-        &macro_path,
+        &runner_macro_path,
         &preview_stl_path,
         &fcstd_path,
+        &step_path,
         &parts_dir,
         &runner_report_path,
         &params_json,
     )?;
 
-    let report = read_runner_report(&runner_report_path)?;
+    let report =
+        normalize_runner_report_paths(&bundle_dir, read_runner_report(&runner_report_path)?)?;
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
     let manifest = build_manifest(
         &model_id,
         ModelSourceKind::Generated,
         parameters.keys().cloned().collect(),
         &report,
-        None,
+        Some(path_to_string(&macro_path)?),
+        source_language,
     )?;
     write_manifest(&manifest_path, &manifest)?;
 
@@ -139,7 +189,9 @@ pub fn render_model(
         &manifest_path,
         Some(&macro_path),
         &preview_stl_path,
+        &step_path,
         &manifest,
+        source_language,
     )?;
     write_bundle(&bundle_dir, &bundle)?;
     Ok(bundle)
@@ -172,6 +224,7 @@ pub fn import_fcstd(
 
     let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
     let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
     fs::create_dir_all(&parts_dir).map_err(|err| AppError::persistence(err.to_string()))?;
@@ -188,11 +241,13 @@ pub fn import_fcstd(
         configured_freecad_cmd,
         &fcstd_path,
         &preview_stl_path,
+        &step_path,
         &parts_dir,
         &runner_report_path,
     )?;
 
-    let report = read_runner_report(&runner_report_path)?;
+    let report =
+        normalize_runner_report_paths(&bundle_dir, read_runner_report(&runner_report_path)?)?;
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
     let manifest = build_manifest(
         &model_id,
@@ -205,6 +260,7 @@ pub fn import_fcstd(
                 .ok_or_else(|| AppError::internal("Invalid FCStd source path."))?
                 .to_string(),
         ),
+        crate::models::SourceLanguage::LegacyPython,
     )?;
     write_manifest(&manifest_path, &manifest)?;
 
@@ -217,7 +273,9 @@ pub fn import_fcstd(
         &manifest_path,
         None,
         &preview_stl_path,
+        &step_path,
         &manifest,
+        crate::models::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &bundle)?;
     Ok(bundle)
@@ -251,6 +309,7 @@ pub fn apply_imported_model(
 
     let fcstd_path = PathBuf::from(&bundle.fcstd_path);
     let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
@@ -266,13 +325,15 @@ pub fn apply_imported_model(
         configured_freecad_cmd,
         &fcstd_path,
         &preview_stl_path,
+        &step_path,
         &parts_dir,
         &runner_report_path,
         &params_json,
         &bindings_json,
     )?;
 
-    let report = read_runner_report(&runner_report_path)?;
+    let report =
+        normalize_runner_report_paths(&bundle_dir, read_runner_report(&runner_report_path)?)?;
     let next_manifest = rebuild_imported_manifest(manifest, &report)?;
     write_manifest(&manifest_path, &next_manifest)?;
 
@@ -286,7 +347,9 @@ pub fn apply_imported_model(
         &manifest_path,
         None,
         &preview_stl_path,
+        &step_path,
         &next_manifest,
+        crate::models::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &next_bundle)?;
     Ok((next_bundle, next_manifest))
@@ -313,6 +376,65 @@ pub fn get_artifact_bundle(app: &dyn PathResolver, model_id: &str) -> AppResult<
         .ok_or_else(|| AppError::not_found(format!("No artifact bundle for model '{}'.", model_id)))
 }
 
+pub fn extract_brep_hidden_line_projections(
+    app: &dyn PathResolver,
+    configured_freecad_cmd: Option<&str>,
+    request: BrepHiddenLineProjectionRequest,
+) -> AppResult<BrepHiddenLineProjectionResponse> {
+    let artifact_bundle = request.artifact_bundle;
+    let sketch_document = request.sketch_document;
+    let tolerance = request.tolerance.unwrap_or(0.1);
+    let fcstd_path = validate_hidden_line_artifact(&artifact_bundle)?;
+    if request
+        .views
+        .iter()
+        .any(|view| matches!(view, SketchView::Custom))
+    {
+        return Err(AppError::validation(
+            "Exact BRep hidden-line supports front/top/side views only. Custom views need an explicit projection plane.",
+        ));
+    }
+
+    let bundle_dir = fcstd_path
+        .parent()
+        .ok_or_else(|| AppError::validation("FCStd artifact path has no parent directory."))?;
+    let report_path = bundle_dir.join(HIDDEN_LINE_REPORT_FILE_NAME);
+    let views_json = serde_json::to_string(&request.views).map_err(|err| {
+        AppError::validation(format!("Failed to serialize projection views: {}", err))
+    })?;
+
+    run_hidden_line_runner(
+        app,
+        configured_freecad_cmd,
+        &fcstd_path,
+        &report_path,
+        &views_json,
+        tolerance,
+    )?;
+
+    let report = read_hidden_line_projection_report(&report_path)?;
+    if report.views.is_empty() {
+        return Err(AppError::render(
+            "FreeCAD hidden-line projection produced no views.",
+        ));
+    }
+    let mut response = BrepHiddenLineProjectionResponse {
+        model_id: artifact_bundle.model_id,
+        source_artifact_path: report.source_artifact_path,
+        views: report.views,
+        warnings: report.warnings,
+        validation: None,
+    };
+    if let Some(document) = sketch_document.as_ref() {
+        response.validation = Some(
+            crate::sketch_brep_validation::validate_sketch_brep_hidden_line_projection(
+                document, &response, tolerance,
+            ),
+        );
+    }
+    Ok(response)
+}
+
 pub fn save_model_manifest(
     app: &dyn PathResolver,
     model_id: &str,
@@ -326,7 +448,8 @@ pub fn save_model_manifest(
     }
     validate_model_manifest(manifest)?;
     let manifest_path = bundle_dir_from_model_id(app, model_id)?.join(MANIFEST_FILE_NAME);
-    write_manifest(&manifest_path, manifest)
+    write_manifest(&manifest_path, manifest)?;
+    refresh_bundle_for_manifest(&manifest_path, manifest)
 }
 
 pub fn get_default_macro(app: &dyn PathResolver) -> AppResult<String> {
@@ -446,14 +569,19 @@ fn build_bundle(
     manifest_path: &Path,
     macro_path: Option<&Path>,
     preview_stl_path: &Path,
+    step_path: &Path,
     manifest: &ModelManifest,
+    source_language: crate::models::SourceLanguage,
 ) -> AppResult<ArtifactBundle> {
+    let bundle_dir = manifest_path
+        .parent()
+        .ok_or_else(|| AppError::internal("Manifest path missing parent."))?;
     Ok(ArtifactBundle {
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
-        engine_kind: crate::models::EngineKind::Freecad,
-        source_language: crate::models::SourceLanguage::LegacyPython,
+        engine_kind: source_language.to_engine_kind(),
+        source_language,
         geometry_backend: crate::models::GeometryBackend::Freecad,
         content_hash: content_hash.to_string(),
         artifact_version,
@@ -461,15 +589,11 @@ fn build_bundle(
         manifest_path: path_to_string(manifest_path)?,
         macro_path: macro_path.map(path_to_string).transpose()?,
         preview_stl_path: path_to_string(preview_stl_path)?,
-        viewer_assets: manifest
-            .parts
-            .iter()
-            .flat_map(part_to_viewer_assets)
-            .collect(),
+        viewer_assets: viewer_assets_from_manifest(bundle_dir, manifest)?,
         edge_targets: Vec::new(),
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
-        export_artifacts: Vec::new(),
+        export_artifacts: step_export_artifacts(step_path)?,
     })
 }
 
@@ -484,21 +608,36 @@ fn content_hash_for_path(path: &Path) -> AppResult<String> {
     Ok(digest_segments([bytes.as_slice()]))
 }
 
-fn part_to_viewer_assets(part: &PartBinding) -> Vec<ViewerAsset> {
-    let Some(path) = part.viewer_asset_path.as_ref() else {
-        return Vec::new();
-    };
-    part.viewer_node_ids
-        .iter()
-        .map(|node_id| ViewerAsset {
+fn viewer_assets_from_manifest(
+    bundle_dir: &Path,
+    manifest: &ModelManifest,
+) -> AppResult<Vec<ViewerAsset>> {
+    let mut assets = Vec::new();
+    for part in &manifest.parts {
+        let Some(path) = part.viewer_asset_path.as_ref() else {
+            continue;
+        };
+        let normalized_path =
+            path_to_string(&normalize_bundle_relative_path(bundle_dir, Path::new(path)))?;
+        assets.extend(part.viewer_node_ids.iter().map(|node_id| ViewerAsset {
             part_id: part.part_id.clone(),
             node_id: node_id.clone(),
             object_name: part.freecad_object_name.clone(),
             label: part.label.clone(),
-            path: path.clone(),
+            path: normalized_path.clone(),
             format: ViewerAssetFormat::Stl,
-        })
-        .collect()
+        }));
+    }
+    Ok(assets)
+}
+
+fn step_export_artifacts(step_path: &Path) -> AppResult<Vec<ExportArtifact>> {
+    Ok(vec![ExportArtifact {
+        label: "STEP".to_string(),
+        format: "step".to_string(),
+        path: path_to_string(step_path)?,
+        role: "primary".to_string(),
+    }])
 }
 
 fn build_manifest(
@@ -507,6 +646,7 @@ fn build_manifest(
     parameter_keys: Vec<String>,
     report: &RunnerReport,
     source_path: Option<String>,
+    source_language: crate::models::SourceLanguage,
 ) -> AppResult<ModelManifest> {
     let mut parts = Vec::new();
     let mut selection_targets = Vec::new();
@@ -590,8 +730,8 @@ fn build_manifest(
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
-        engine_kind: crate::models::EngineKind::Freecad,
-        source_language: crate::models::SourceLanguage::LegacyPython,
+        engine_kind: source_language.to_engine_kind(),
+        source_language,
         geometry_backend: crate::models::GeometryBackend::Freecad,
         document: DocumentMetadata {
             document_name: if report.document_name.trim().is_empty() {
@@ -687,6 +827,7 @@ fn rebuild_imported_manifest(
         Vec::new(),
         report,
         previous_manifest.document.source_path.clone(),
+        crate::models::SourceLanguage::LegacyPython,
     )?;
 
     let merged_proposals = merge_imported_proposals(
@@ -845,9 +986,50 @@ fn load_cached_bundle(bundle_dir: &Path) -> AppResult<Option<ArtifactBundle>> {
     })?;
     let bundle: ArtifactBundle = serde_json::from_str(&raw)
         .map_err(|err| AppError::parse(format!("Failed to parse artifact bundle: {}", err)))?;
+    let cached = normalize_cached_bundle(bundle_dir, bundle.clone())?;
+    if let Some(ref repaired) = cached {
+        if repaired != &bundle {
+            write_bundle(bundle_dir, repaired)?;
+        }
+    }
+    Ok(cached)
+}
+
+fn refresh_bundle_for_manifest(manifest_path: &Path, manifest: &ModelManifest) -> AppResult<()> {
+    let Some(bundle_dir) = manifest_path.parent() else {
+        return Ok(());
+    };
+    let bundle_path = bundle_dir.join(BUNDLE_FILE_NAME);
+    if !bundle_path.exists() {
+        return Ok(());
+    }
+
+    let raw = fs::read_to_string(&bundle_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read artifact bundle '{}': {}",
+            bundle_path.display(),
+            err
+        ))
+    })?;
+    let bundle: ArtifactBundle = serde_json::from_str(&raw)
+        .map_err(|err| AppError::parse(format!("Failed to parse artifact bundle: {}", err)))?;
+    let refreshed = bundle_from_manifest(bundle_dir, bundle, manifest)?;
+    write_bundle(bundle_dir, &refreshed)
+}
+
+fn normalize_cached_bundle(
+    bundle_dir: &Path,
+    bundle: ArtifactBundle,
+) -> AppResult<Option<ArtifactBundle>> {
+    let manifest = match load_manifest_for_bundle_dir(bundle_dir, &bundle)? {
+        Some(manifest) => manifest,
+        None => return Ok(None),
+    };
+    let bundle = bundle_from_manifest(bundle_dir, bundle, &manifest)?;
     if !Path::new(&bundle.fcstd_path).exists()
         || !Path::new(&bundle.manifest_path).exists()
         || !Path::new(&bundle.preview_stl_path).exists()
+        || !bundle_step_path(bundle_dir).exists()
         || bundle
             .viewer_assets
             .iter()
@@ -856,6 +1038,121 @@ fn load_cached_bundle(bundle_dir: &Path) -> AppResult<Option<ArtifactBundle>> {
         return Ok(None);
     }
     Ok(Some(bundle))
+}
+
+fn load_manifest_for_bundle_dir(
+    bundle_dir: &Path,
+    bundle: &ArtifactBundle,
+) -> AppResult<Option<ModelManifest>> {
+    let manifest_path = canonical_manifest_path(bundle_dir, bundle);
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&manifest_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read model manifest '{}': {}",
+            manifest_path.display(),
+            err
+        ))
+    })?;
+    let manifest: ModelManifest = serde_json::from_str(&raw)
+        .map_err(|err| AppError::parse(format!("Failed to parse model manifest: {}", err)))?;
+    validate_model_manifest(&manifest)?;
+    Ok(Some(manifest))
+}
+
+fn bundle_from_manifest(
+    bundle_dir: &Path,
+    mut bundle: ArtifactBundle,
+    manifest: &ModelManifest,
+) -> AppResult<ArtifactBundle> {
+    if bundle.model_id != manifest.model_id
+        || bundle.source_kind != manifest.source_kind
+        || bundle.geometry_backend != crate::models::GeometryBackend::Freecad
+        || manifest.geometry_backend != crate::models::GeometryBackend::Freecad
+    {
+        return Err(AppError::validation(
+            "Cached FreeCAD bundle does not match the model manifest.",
+        ));
+    }
+
+    bundle.schema_version = manifest.schema_version;
+    bundle.engine_kind = manifest.engine_kind;
+    bundle.source_language = manifest.source_language;
+    bundle.geometry_backend = manifest.geometry_backend;
+    bundle.fcstd_path = path_to_string(&canonical_fcstd_path(bundle_dir, &bundle))?;
+    bundle.manifest_path = path_to_string(&canonical_manifest_path(bundle_dir, &bundle))?;
+    bundle.preview_stl_path = path_to_string(&canonical_preview_path(bundle_dir, &bundle))?;
+    bundle.export_artifacts = step_export_artifacts(&canonical_step_path(bundle_dir, &bundle))?;
+    bundle.viewer_assets = viewer_assets_from_manifest(bundle_dir, manifest)?;
+    crate::models::validate_model_runtime_bundle(manifest, &bundle)?;
+    Ok(bundle)
+}
+
+fn canonical_fcstd_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
+    let canonical = bundle_dir.join(FCSTD_FILE_NAME);
+    if canonical.exists() {
+        canonical
+    } else {
+        normalize_bundle_relative_path(bundle_dir, Path::new(&bundle.fcstd_path))
+    }
+}
+
+fn canonical_manifest_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
+    let canonical = bundle_dir.join(MANIFEST_FILE_NAME);
+    if canonical.exists() {
+        canonical
+    } else {
+        normalize_bundle_relative_path(bundle_dir, Path::new(&bundle.manifest_path))
+    }
+}
+
+fn canonical_preview_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
+    let canonical = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    if canonical.exists() {
+        canonical
+    } else {
+        normalize_bundle_relative_path(bundle_dir, Path::new(&bundle.preview_stl_path))
+    }
+}
+
+fn bundle_step_path(bundle_dir: &Path) -> PathBuf {
+    bundle_dir.join(STEP_FILE_NAME)
+}
+
+fn canonical_step_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
+    let canonical = bundle_step_path(bundle_dir);
+    if canonical.exists() {
+        return canonical;
+    }
+    bundle
+        .export_artifacts
+        .iter()
+        .find(|artifact| artifact.format == "step")
+        .map(|artifact| normalize_bundle_relative_path(bundle_dir, Path::new(&artifact.path)))
+        .unwrap_or(canonical)
+}
+
+fn normalize_bundle_relative_path(bundle_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        bundle_dir.join(path)
+    }
+}
+
+fn normalize_runner_report_paths(
+    bundle_dir: &Path,
+    mut report: RunnerReport,
+) -> AppResult<RunnerReport> {
+    for object in &mut report.objects {
+        object.export_path = path_to_string(&normalize_bundle_relative_path(
+            bundle_dir,
+            Path::new(&object.export_path),
+        ))?;
+    }
+    Ok(report)
 }
 
 fn read_runner_report(path: &Path) -> AppResult<RunnerReport> {
@@ -876,6 +1173,47 @@ fn read_runner_report(path: &Path) -> AppResult<RunnerReport> {
     Ok(report)
 }
 
+fn validate_hidden_line_artifact(bundle: &ArtifactBundle) -> AppResult<PathBuf> {
+    let fcstd_path = bundle.fcstd_path.trim();
+    if bundle.geometry_backend != crate::models::GeometryBackend::Freecad || fcstd_path.is_empty() {
+        return Err(AppError::with_details(
+            crate::models::AppErrorCode::Validation,
+            "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd artifact.",
+            format!(
+                "geometryBackend={}; fcstdPath={}",
+                bundle.geometry_backend.as_str(),
+                bundle.fcstd_path
+            ),
+        ));
+    }
+
+    let path = PathBuf::from(fcstd_path);
+    if !path.exists() {
+        return Err(AppError::not_found(format!(
+            "FCStd artifact for exact BRep hidden-line was not found at '{}'.",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn read_hidden_line_projection_report(path: &Path) -> AppResult<HiddenLineProjectionReport> {
+    let raw = fs::read_to_string(path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read FreeCAD hidden-line projection report '{}': {}",
+            path.display(),
+            err
+        ))
+    })?;
+    serde_json::from_str(&raw).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse FreeCAD hidden-line projection report '{}': {}",
+            path.display(),
+            err
+        ))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_generate_runner(
     app: &dyn PathResolver,
@@ -883,6 +1221,7 @@ fn run_generate_runner(
     macro_path: &Path,
     preview_stl_path: &Path,
     fcstd_path: &Path,
+    step_path: &Path,
     parts_dir: &Path,
     runner_report_path: &Path,
     params_json: &str,
@@ -893,6 +1232,7 @@ fn run_generate_runner(
         .env("ECKYCAD_MACRO", path_to_string(macro_path)?)
         .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
         .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
+        .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
         .env(
@@ -912,6 +1252,7 @@ fn run_import_runner(
     configured_freecad_cmd: Option<&str>,
     fcstd_path: &Path,
     preview_stl_path: &Path,
+    step_path: &Path,
     parts_dir: &Path,
     runner_report_path: &Path,
 ) -> AppResult<()> {
@@ -920,8 +1261,28 @@ fn run_import_runner(
         .env("ECKYCAD_MODE", "import_fcstd")
         .env("ECKYCAD_IMPORT_FCSTD", path_to_string(fcstd_path)?)
         .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
+        .env("ECKYCAD_PARAMS", "{}");
+    run_command(command)
+}
+
+fn run_hidden_line_runner(
+    app: &dyn PathResolver,
+    configured_freecad_cmd: Option<&str>,
+    fcstd_path: &Path,
+    projection_report_path: &Path,
+    views_json: &str,
+    tolerance: f64,
+) -> AppResult<()> {
+    let mut command = base_runner_command(app, configured_freecad_cmd)?;
+    command
+        .env("ECKYCAD_MODE", "hidden_line_projection")
+        .env("ECKYCAD_IMPORT_FCSTD", path_to_string(fcstd_path)?)
+        .env("ECKYCAD_REPORT", path_to_string(projection_report_path)?)
+        .env("ECKYCAD_PROJECTION_VIEWS", views_json)
+        .env("ECKYCAD_PROJECTION_TOLERANCE", tolerance.to_string())
         .env("ECKYCAD_PARAMS", "{}");
     run_command(command)
 }
@@ -932,6 +1293,7 @@ fn run_apply_import_runner(
     configured_freecad_cmd: Option<&str>,
     fcstd_path: &Path,
     preview_stl_path: &Path,
+    step_path: &Path,
     parts_dir: &Path,
     runner_report_path: &Path,
     params_json: &str,
@@ -943,6 +1305,7 @@ fn run_apply_import_runner(
         .env("ECKYCAD_IMPORT_FCSTD", path_to_string(fcstd_path)?)
         .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
         .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
         .env("ECKYCAD_PARAMS", params_json)
@@ -1380,6 +1743,38 @@ impl From<RunnerBounds> for ManifestBounds {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestResolver {
+        root: PathBuf,
+    }
+
+    impl TestResolver {
+        fn new(prefix: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("ecky-freecad-test-{prefix}-{nonce}"));
+            fs::create_dir_all(&root).expect("create temp root");
+            Self { root }
+        }
+    }
+
+    impl PathResolver for TestResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
 
     fn fixture_generated_report() -> RunnerReport {
         serde_json::from_str(include_str!(
@@ -1402,6 +1797,197 @@ mod tests {
             warnings: Vec::new(),
             objects,
         }
+    }
+
+    fn sample_part_binding(part_id: &str, object_name: &str, asset_path: &Path) -> PartBinding {
+        PartBinding {
+            part_id: part_id.to_string(),
+            freecad_object_name: object_name.to_string(),
+            label: object_name.to_string(),
+            kind: "Part::Feature".to_string(),
+            semantic_role: None,
+            viewer_asset_path: Some(asset_path.to_string_lossy().to_string()),
+            viewer_node_ids: vec![object_name.to_string()],
+            parameter_keys: Vec::new(),
+            editable: false,
+            bounds: None,
+            volume: None,
+            area: None,
+        }
+    }
+
+    fn sample_manifest(
+        model_id: &str,
+        source_kind: ModelSourceKind,
+        asset_path: &Path,
+    ) -> ModelManifest {
+        let part = sample_part_binding("part-shell", "OuterShell", asset_path);
+        ModelManifest {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: model_id.to_string(),
+            source_kind,
+            engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            document: DocumentMetadata {
+                document_name: "Doc".to_string(),
+                document_label: "Doc".to_string(),
+                source_path: None,
+                object_count: 1,
+                warnings: Vec::new(),
+            },
+            parts: vec![part.clone()],
+            parameter_groups: Vec::new(),
+            control_primitives: Vec::new(),
+            control_relations: Vec::new(),
+            control_views: Vec::new(),
+            advisories: Vec::new(),
+            selection_targets: vec![SelectionTarget {
+                target_id: Some("target-part-shell".to_string()),
+                part_id: part.part_id.clone(),
+                viewer_node_id: part.freecad_object_name.clone(),
+                label: part.label.clone(),
+                kind: SelectionTargetKind::Object,
+                editable: false,
+                parameter_keys: Vec::new(),
+                primitive_ids: Vec::new(),
+                view_ids: Vec::new(),
+            }],
+            measurement_annotations: Vec::new(),
+            warnings: Vec::new(),
+            enrichment_state: ManifestEnrichmentState {
+                status: EnrichmentStatus::None,
+                proposals: Vec::new(),
+            },
+        }
+    }
+
+    fn sample_bundle(model_id: &str, source_kind: ModelSourceKind) -> ArtifactBundle {
+        ArtifactBundle {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: model_id.to_string(),
+            source_kind,
+            engine_kind: crate::models::EngineKind::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/stale.FCStd".to_string(),
+            manifest_path: "/tmp/stale-manifest.json".to_string(),
+            macro_path: None,
+            preview_stl_path: "/tmp/stale-preview.stl".to_string(),
+            viewer_assets: vec![ViewerAsset {
+                part_id: "stale".to_string(),
+                node_id: "stale".to_string(),
+                object_name: "stale".to_string(),
+                label: "stale".to_string(),
+                path: "/tmp/stale-part.stl".to_string(),
+                format: ViewerAssetFormat::Stl,
+            }],
+            edge_targets: Vec::new(),
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_bundle_exposes_step_export_artifact() {
+        let root = std::env::temp_dir().join(format!("ecky-step-bundle-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(PARTS_DIR_NAME)).expect("bundle dirs");
+        let fcstd_path = root.join(FCSTD_FILE_NAME);
+        let manifest_path = root.join(MANIFEST_FILE_NAME);
+        let preview_stl_path = root.join(PREVIEW_STL_FILE_NAME);
+        let step_path = root.join(STEP_FILE_NAME);
+        let asset_path = root.join(PARTS_DIR_NAME).join("000-outershell.stl");
+        let manifest = sample_manifest("generated-step", ModelSourceKind::Generated, &asset_path);
+
+        let bundle = build_bundle(
+            "generated-step",
+            ModelSourceKind::Generated,
+            "hash",
+            1,
+            &fcstd_path,
+            &manifest_path,
+            None,
+            &preview_stl_path,
+            &step_path,
+            &manifest,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("bundle");
+
+        assert_eq!(bundle.export_artifacts.len(), 1);
+        assert_eq!(bundle.export_artifacts[0].label, "STEP");
+        assert_eq!(bundle.export_artifacts[0].format, "step");
+        assert_eq!(bundle.export_artifacts[0].role, "primary");
+        assert_eq!(bundle.export_artifacts[0].path, step_path.to_string_lossy());
+    }
+
+    #[test]
+    fn hidden_line_validation_rejects_mesh_bundle_with_raw_backend_context() {
+        let mut bundle = sample_bundle("mesh-preview", ModelSourceKind::Generated);
+        bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        bundle.fcstd_path = String::new();
+
+        let err = validate_hidden_line_artifact(&bundle).expect_err("mesh bundle should fail");
+
+        assert_eq!(err.code, crate::models::AppErrorCode::Validation);
+        assert_eq!(
+            err.message,
+            "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd artifact."
+        );
+        assert_eq!(
+            err.details.as_deref(),
+            Some("geometryBackend=mesh; fcstdPath=")
+        );
+    }
+
+    #[test]
+    fn hidden_line_validation_accepts_existing_freecad_fcstd_artifact() {
+        let resolver = TestResolver::new("hidden-line-existing");
+        let fcstd_path = resolver.root.join("model.FCStd");
+        fs::write(&fcstd_path, b"fcstd").expect("write fcstd");
+        let mut bundle = sample_bundle("freecad-preview", ModelSourceKind::Generated);
+        bundle.fcstd_path = fcstd_path.to_string_lossy().to_string();
+
+        let accepted = validate_hidden_line_artifact(&bundle).expect("valid hidden-line artifact");
+
+        assert_eq!(accepted, fcstd_path);
+    }
+
+    #[test]
+    fn hidden_line_report_parses_project_ex_visible_and_hidden_edges() {
+        let resolver = TestResolver::new("hidden-line-report");
+        let report_path = resolver.root.join("hidden-line-projections.json");
+        fs::write(
+            &report_path,
+            r#"{
+              "sourceArtifactPath": "/tmp/model.FCStd",
+              "views": [
+                {
+                  "view": "front",
+                  "direction": [0, -1, 0],
+                  "visibleEdges": [
+                    {"edgeId": "front-v-0", "points": [[0, 0], [10, 0]], "sourceClass": "V"}
+                  ],
+                  "hiddenEdges": [
+                    {"edgeId": "front-h-0", "points": [[0, 5], [10, 5]], "sourceClass": "H"}
+                  ]
+                }
+              ],
+              "warnings": []
+            }"#,
+        )
+        .expect("write hidden-line report");
+
+        let report = read_hidden_line_projection_report(&report_path).expect("parse report");
+
+        assert_eq!(report.source_artifact_path, "/tmp/model.FCStd");
+        assert_eq!(report.views.len(), 1);
+        assert_eq!(report.views[0].view, SketchView::Front);
+        assert_eq!(report.views[0].visible_edges.len(), 1);
+        assert_eq!(report.views[0].hidden_edges[0].source_class, "H");
     }
 
     #[test]
@@ -1449,6 +2035,7 @@ mod tests {
             ],
             &report,
             None,
+            crate::models::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -1502,6 +2089,7 @@ mod tests {
             vec!["lid_height".to_string()],
             &report,
             None,
+            crate::models::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -1555,6 +2143,7 @@ mod tests {
             Vec::new(),
             &report,
             Some("/tmp/model.FCStd".to_string()),
+            crate::models::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -1586,6 +2175,7 @@ mod tests {
             ],
             &fixture_generated_report(),
             None,
+            crate::models::SourceLanguage::LegacyPython,
         )
         .expect("generated fixture manifest should build");
 
@@ -1624,6 +2214,7 @@ mod tests {
             Vec::new(),
             &base_report,
             Some("/tmp/imported.FCStd".to_string()),
+            crate::models::SourceLanguage::LegacyPython,
         )
         .expect("imported fixture manifest should build");
 
@@ -1675,6 +2266,7 @@ mod tests {
             vec!["outer_shell_width".to_string(), "lid_height".to_string()],
             &fixture_generated_report(),
             None,
+            crate::models::SourceLanguage::LegacyPython,
         )
         .expect("generated fixture manifest should build");
         manifest.parts[1].editable = false;
@@ -1688,6 +2280,876 @@ mod tests {
             bindings[0].parameter_keys,
             vec!["outer_shell_width".to_string()]
         );
+    }
+
+    #[test]
+    fn load_cached_bundle_repairs_paths_and_viewer_assets_from_manifest() {
+        let resolver = TestResolver::new("cache-repair");
+        let bundle_dir = artifact_dir(&resolver, ModelSourceKind::Generated, "generated-cache")
+            .expect("bundle dir");
+        fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
+
+        let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
+        fs::write(&fcstd_path, b"fcstd").expect("fcstd");
+        fs::write(&preview_path, b"preview").expect("preview");
+        fs::write(&step_path, b"step").expect("step");
+        fs::write(&asset_path, b"part").expect("part");
+
+        let manifest = sample_manifest("generated-cache", ModelSourceKind::Generated, &asset_path);
+        write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+
+        let bundle = sample_bundle("generated-cache", ModelSourceKind::Generated);
+        write_bundle(&bundle_dir, &bundle).expect("bundle");
+
+        let cached = load_cached_bundle(&bundle_dir)
+            .expect("load cached bundle")
+            .expect("cached bundle");
+
+        assert_eq!(cached.fcstd_path, fcstd_path.to_string_lossy());
+        assert_eq!(
+            cached.manifest_path,
+            bundle_dir.join(MANIFEST_FILE_NAME).to_string_lossy()
+        );
+        assert_eq!(cached.preview_stl_path, preview_path.to_string_lossy());
+        assert_eq!(cached.export_artifacts[0].path, step_path.to_string_lossy());
+        assert_eq!(cached.viewer_assets.len(), 1);
+        assert_eq!(cached.viewer_assets[0].part_id, "part-shell");
+        assert_eq!(cached.viewer_assets[0].path, asset_path.to_string_lossy());
+
+        let saved: ArtifactBundle = serde_json::from_str(
+            &fs::read_to_string(bundle_dir.join(BUNDLE_FILE_NAME)).expect("read bundle"),
+        )
+        .expect("parse bundle");
+        assert_eq!(saved.fcstd_path, fcstd_path.to_string_lossy());
+        assert_eq!(
+            saved.manifest_path,
+            bundle_dir.join(MANIFEST_FILE_NAME).to_string_lossy()
+        );
+        assert_eq!(saved.preview_stl_path, preview_path.to_string_lossy());
+        assert_eq!(saved.viewer_assets[0].path, asset_path.to_string_lossy());
+    }
+
+    #[test]
+    fn load_cached_bundle_normalizes_relative_bundle_and_asset_paths() {
+        let resolver = TestResolver::new("cache-relative");
+        let model_id = "generated-relative";
+        let bundle_dir =
+            artifact_dir(&resolver, ModelSourceKind::Generated, model_id).expect("bundle dir");
+        fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
+
+        fs::write(bundle_dir.join(FCSTD_FILE_NAME), b"fcstd").expect("fcstd");
+        fs::write(bundle_dir.join(PREVIEW_STL_FILE_NAME), b"preview").expect("preview");
+        fs::write(bundle_dir.join(STEP_FILE_NAME), b"step").expect("step");
+        fs::write(
+            bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl"),
+            b"part",
+        )
+        .expect("part");
+
+        let mut manifest = sample_manifest(
+            model_id,
+            ModelSourceKind::Generated,
+            Path::new("parts/000-outershell.stl"),
+        );
+        manifest.parts[0].viewer_asset_path = Some("parts/000-outershell.stl".to_string());
+        write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+
+        let mut bundle = sample_bundle(model_id, ModelSourceKind::Generated);
+        bundle.fcstd_path = FCSTD_FILE_NAME.to_string();
+        bundle.manifest_path = MANIFEST_FILE_NAME.to_string();
+        bundle.preview_stl_path = PREVIEW_STL_FILE_NAME.to_string();
+        bundle.viewer_assets[0].path = "parts/stale.stl".to_string();
+        write_bundle(&bundle_dir, &bundle).expect("bundle");
+
+        let cached = load_cached_bundle(&bundle_dir)
+            .expect("load cached bundle")
+            .expect("cached bundle");
+
+        assert_eq!(
+            cached.fcstd_path,
+            bundle_dir.join(FCSTD_FILE_NAME).to_string_lossy()
+        );
+        assert_eq!(
+            cached.manifest_path,
+            bundle_dir.join(MANIFEST_FILE_NAME).to_string_lossy()
+        );
+        assert_eq!(
+            cached.preview_stl_path,
+            bundle_dir.join(PREVIEW_STL_FILE_NAME).to_string_lossy()
+        );
+        assert_eq!(
+            cached.export_artifacts[0].path,
+            bundle_dir.join(STEP_FILE_NAME).to_string_lossy()
+        );
+        assert_eq!(
+            cached.viewer_assets[0].path,
+            bundle_dir
+                .join(PARTS_DIR_NAME)
+                .join("000-outershell.stl")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn load_cached_bundle_rejects_missing_preview_even_with_manifest_assets() {
+        let resolver = TestResolver::new("cache-no-preview");
+        let bundle_dir = artifact_dir(&resolver, ModelSourceKind::Generated, "generated-missing")
+            .expect("bundle dir");
+        fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
+
+        let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
+        let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
+        fs::write(&fcstd_path, b"fcstd").expect("fcstd");
+        fs::write(&asset_path, b"part").expect("part");
+
+        let manifest =
+            sample_manifest("generated-missing", ModelSourceKind::Generated, &asset_path);
+        write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+
+        let mut bundle = sample_bundle("generated-missing", ModelSourceKind::Generated);
+        bundle.fcstd_path = fcstd_path.to_string_lossy().to_string();
+        write_bundle(&bundle_dir, &bundle).expect("bundle");
+
+        assert!(load_cached_bundle(&bundle_dir)
+            .expect("load cached bundle")
+            .is_none());
+    }
+
+    #[test]
+    fn save_model_manifest_refreshes_bundle_viewer_assets() {
+        let resolver = TestResolver::new("save-refresh");
+        let model_id = "generated-save-refresh";
+        let bundle_dir =
+            artifact_dir(&resolver, ModelSourceKind::Generated, model_id).expect("bundle dir");
+        fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
+
+        let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
+        fs::write(&fcstd_path, b"fcstd").expect("fcstd");
+        fs::write(&preview_path, b"preview").expect("preview");
+        fs::write(&step_path, b"step").expect("step");
+        fs::write(&asset_path, b"part").expect("part");
+
+        let mut manifest = sample_manifest(model_id, ModelSourceKind::Generated, &asset_path);
+        write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+        write_bundle(
+            &bundle_dir,
+            &sample_bundle(model_id, ModelSourceKind::Generated),
+        )
+        .expect("bundle");
+
+        let updated_asset_path = bundle_dir.join(PARTS_DIR_NAME).join("001-lid.stl");
+        fs::write(&updated_asset_path, b"part").expect("updated part");
+        manifest.parts[0].part_id = "part-lid".to_string();
+        manifest.parts[0].freecad_object_name = "Lid".to_string();
+        manifest.parts[0].label = "Lid".to_string();
+        manifest.parts[0].viewer_node_ids = vec!["Lid".to_string()];
+        manifest.parts[0].viewer_asset_path =
+            Some(updated_asset_path.to_string_lossy().to_string());
+        manifest.selection_targets[0].part_id = "part-lid".to_string();
+        manifest.selection_targets[0].viewer_node_id = "Lid".to_string();
+        manifest.selection_targets[0].label = "Lid".to_string();
+
+        save_model_manifest(&resolver, model_id, &manifest).expect("save manifest");
+
+        let raw = fs::read_to_string(bundle_dir.join(BUNDLE_FILE_NAME)).expect("read bundle");
+        let saved: ArtifactBundle = serde_json::from_str(&raw).expect("parse bundle");
+        assert_eq!(saved.viewer_assets.len(), 1);
+        assert_eq!(saved.viewer_assets[0].part_id, "part-lid");
+        assert_eq!(saved.viewer_assets[0].object_name, "Lid");
+        assert_eq!(
+            saved.viewer_assets[0].path,
+            updated_asset_path.to_string_lossy()
+        );
+        assert_eq!(saved.preview_stl_path, preview_path.to_string_lossy());
+    }
+
+    #[test]
+    fn save_model_manifest_normalizes_relative_viewer_asset_paths() {
+        let resolver = TestResolver::new("save-relative");
+        let model_id = "generated-save-relative";
+        let bundle_dir =
+            artifact_dir(&resolver, ModelSourceKind::Generated, model_id).expect("bundle dir");
+        fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
+
+        fs::write(bundle_dir.join(FCSTD_FILE_NAME), b"fcstd").expect("fcstd");
+        fs::write(bundle_dir.join(PREVIEW_STL_FILE_NAME), b"preview").expect("preview");
+        fs::write(bundle_dir.join(PARTS_DIR_NAME).join("001-lid.stl"), b"part").expect("part");
+
+        let mut manifest = sample_manifest(
+            model_id,
+            ModelSourceKind::Generated,
+            Path::new("parts/001-lid.stl"),
+        );
+        manifest.parts[0].part_id = "part-lid".to_string();
+        manifest.parts[0].freecad_object_name = "Lid".to_string();
+        manifest.parts[0].label = "Lid".to_string();
+        manifest.parts[0].viewer_node_ids = vec!["Lid".to_string()];
+        manifest.parts[0].viewer_asset_path = Some("parts/001-lid.stl".to_string());
+        manifest.selection_targets[0].part_id = "part-lid".to_string();
+        manifest.selection_targets[0].viewer_node_id = "Lid".to_string();
+        manifest.selection_targets[0].label = "Lid".to_string();
+        write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+        write_bundle(
+            &bundle_dir,
+            &sample_bundle(model_id, ModelSourceKind::Generated),
+        )
+        .expect("bundle");
+
+        save_model_manifest(&resolver, model_id, &manifest).expect("save manifest");
+
+        let saved: ArtifactBundle = serde_json::from_str(
+            &fs::read_to_string(bundle_dir.join(BUNDLE_FILE_NAME)).expect("read bundle"),
+        )
+        .expect("parse bundle");
+        assert_eq!(
+            saved.viewer_assets[0].path,
+            bundle_dir
+                .join(PARTS_DIR_NAME)
+                .join("001-lid.stl")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn load_cached_bundle_repairs_bundle_metadata_from_manifest() {
+        let resolver = TestResolver::new("cache-metadata");
+        let model_id = "generated-metadata";
+        let bundle_dir =
+            artifact_dir(&resolver, ModelSourceKind::Generated, model_id).expect("bundle dir");
+        fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
+
+        let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
+        fs::write(&fcstd_path, b"fcstd").expect("fcstd");
+        fs::write(&preview_path, b"preview").expect("preview");
+        fs::write(&step_path, b"step").expect("step");
+        fs::write(&asset_path, b"part").expect("part");
+
+        let mut manifest = sample_manifest(model_id, ModelSourceKind::Generated, &asset_path);
+        manifest.schema_version = MODEL_RUNTIME_SCHEMA_VERSION + 3;
+        manifest.engine_kind = crate::models::EngineKind::Build123d;
+        manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
+        write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+
+        let bundle = sample_bundle(model_id, ModelSourceKind::Generated);
+        write_bundle(&bundle_dir, &bundle).expect("bundle");
+
+        let cached = load_cached_bundle(&bundle_dir)
+            .expect("load cached bundle")
+            .expect("cached bundle");
+
+        assert_eq!(cached.schema_version, manifest.schema_version);
+        assert_eq!(cached.engine_kind, manifest.engine_kind);
+        assert_eq!(cached.source_language, manifest.source_language);
+        assert_eq!(cached.geometry_backend, manifest.geometry_backend);
+        assert_eq!(cached.export_artifacts[0].path, step_path.to_string_lossy());
+
+        let saved: ArtifactBundle = serde_json::from_str(
+            &fs::read_to_string(bundle_dir.join(BUNDLE_FILE_NAME)).expect("read bundle"),
+        )
+        .expect("parse bundle");
+        assert_eq!(saved.schema_version, manifest.schema_version);
+        assert_eq!(saved.engine_kind, manifest.engine_kind);
+        assert_eq!(saved.source_language, manifest.source_language);
+        assert_eq!(saved.geometry_backend, manifest.geometry_backend);
+    }
+
+    #[test]
+    fn normalize_runner_report_paths_resolves_relative_exports() {
+        let bundle_dir = std::env::temp_dir().join("ecky-runner-report-relative");
+        let report = sample_report(vec![RunnerObject {
+            object_name: "OuterShell".to_string(),
+            label: "Outer Shell".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: "parts/000-outershell.stl".to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+        }]);
+
+        let normalized =
+            normalize_runner_report_paths(&bundle_dir, report).expect("normalize runner report");
+
+        assert_eq!(
+            normalized.objects[0].export_path,
+            bundle_dir
+                .join(PARTS_DIR_NAME)
+                .join("000-outershell.stl")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn normalize_freecad_cmd_resolves_bundle_directory_binaries() {
+        let root = TestResolver::new("freecad-cmd-dir").root;
+        let freecad_dir = root.join("FreeCAD");
+        fs::create_dir_all(&freecad_dir).expect("freecad dir");
+        let binary = freecad_dir.join("freecadcmd");
+        fs::write(&binary, b"#!/bin/sh\n").expect("binary");
+
+        assert_eq!(normalize_freecad_cmd(&freecad_dir), binary);
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_canonical_cup_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("cup");
+        let source = include_str!("../tests/fixtures/cad/surface/canonical_cup.ecky");
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.source_language,
+            crate::models::SourceLanguage::EckyIrV0
+        );
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle.fcstd_path.ends_with("model.FCStd"));
+        assert!(bundle.preview_stl_path.ends_with("preview.stl"));
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.fcstd_path).exists());
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_thomas_body_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("thomas-body");
+        let source = include_str!("../tests/fixtures/cad/surface/thomas_modular_ramp_body.ecky");
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.source_language,
+            crate::models::SourceLanguage::EckyIrV0
+        );
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_loft_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("loft");
+        let source = r#"(model
+            (part body
+              (loft 30
+                (polygon ((0 0) (20 0) (20 20) (0 20)))
+                (polygon ((3 3) (17 3) (17 17) (3 17))))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_circle_extrude_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("circle-extrude");
+        let source = r#"(model
+            (part body
+              (extrude (circle 10) 8)))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_rounded_rect_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("rounded-rect");
+        let source = r#"(model
+            (part body
+              (extrude (rounded-rect 20 10 2) 8)))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_rounded_polygon_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("rounded-polygon");
+        let source = r#"(model
+            (part body
+              (extrude (rounded-polygon ((0 20) (20 0) (0 -20) (-20 0)) 4 8) 8)))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_profile_offset_and_bezier_path_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("profile-offset-bezier");
+        let source = r#"(model
+            (part body
+              (union
+                (extrude
+                  (profile
+                    :outer (polygon ((0 0) (24 0) (24 24) (0 24)))
+                    :holes ((polygon ((8 8) (16 8) (16 16) (8 16)))))
+                  4)
+                (translate 40 0 0
+                  (extrude
+                    (offset 2 :openings ((polygon ((8 8) (16 8) (16 16) (8 16))))
+                      (polygon ((0 0) (24 0) (24 24) (0 24))))
+                    4))
+                (translate 80 0 0
+                  (sweep
+                    (polygon ((0 0) (3 0) (3 2) (0 2)))
+                    (bezier-path ((0 0 0) (10 0 0) (10 10 0) (20 10 0))))))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_taper_twist_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("taper-twist");
+        let source = r#"(model
+            (part body
+              (union
+                (translate 20 0 0
+                  (taper 20 0.6 (polygon ((0 0) (10 0) (10 10) (0 10)))))
+                (translate 60 0 0
+                  (twist 20 90 8 (polygon ((0 0) (10 0) (10 10) (0 10))))))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_named_arrays_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("named-arrays");
+        let source = r#"(model
+            (part body
+              (union
+                (linear-array 3 14 0 0 (box 4 4 4))
+                (translate 0 20 0 (grid-array 2 2 10 10 (box 2 2 2)))
+                (translate 50 0 0 (radial-array 4 90 12 (cylinder 2 4)))
+                (translate 90 0 0 (arc-array 3 16 0 180 (cylinder 2 4))))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_place_frames_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("place-frames");
+        let source = r#"(model
+            (part body
+              (union
+                (build
+                  (shape base (plane :origin (10 20 30) :x (0 1 0) :normal (0 0 1)))
+                  (shape peg (box 4 6 2 :align '(min min min)))
+                  (shape pose (location base :offset (5 0 0) :rotate (0 90 0)))
+                  (result (place pose peg)))
+                (build
+                  (shape rail (path (0 0 0) (20 0 10) (20 10 10)))
+                  (shape peg (box 4 2 6 :align '(min min min)))
+                  (shape frame (path-frame rail :at 0.5))
+                  (result (place frame peg :offset (1 2 3) :rotate (10 20 30)))))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_rejects_parallel_path_frame_up_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("path-frame-up-error");
+        let source = r#"(model
+            (part body
+              (build
+                (shape rail (path (0 0 0) (20 0 10) (20 10 10)))
+                (shape peg (box 4 2 6 :align '(min min min)))
+                (shape frame (path-frame rail :at end :up (0 1 0)))
+                (result (place frame peg :offset (1 2 3) :rotate (10 20 30))))))"#;
+
+        let err = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect_err("parallel up should fail");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("`path-frame :up`") && message.contains("perpendicular"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn render_model_with_sources_rejects_parallel_plane_axes_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("plane-axis-error");
+        let source = r#"(model
+            (part body
+              (build
+                (shape base (plane :origin (0 0 0) :x (0 0 1) :normal (0 0 1)))
+                (shape peg (box 4 2 6 :align '(min min min)))
+                (result (place base peg)))))"#;
+
+        let err = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect_err("parallel plane axes should fail");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("`plane :x`") && message.contains("perpendicular"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_xor_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("xor");
+        let source = r#"(model
+            (part body
+              (union
+                (xor
+                  (box 10 10 10)
+                  (translate 5 0 0 (box 10 10 10)))
+                (translate 30 0 0
+                  (extrude
+                    (xor
+                      (polygon ((0 0) (20 0) (20 20) (0 20)))
+                      (polygon ((8 8) (16 8) (16 16) (8 16))))
+                    6)))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_renders_ecky_thomas_ramp_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("thomas-ramp");
+        let source = include_str!("../tests/fixtures/cad/surface/thomas_modular_ramp.ecky");
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        assert_eq!(
+            bundle.source_language,
+            crate::models::SourceLanguage::EckyIrV0
+        );
+        assert_eq!(
+            bundle.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+        assert!(bundle
+            .macro_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("source.ecky")));
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert!(!manifest.parts.is_empty());
     }
 
     proptest! {

@@ -53,6 +53,70 @@ async getAppLogs() : Promise<Result<AppLogEntry[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async readComponentPackageManifest(projectDir: string) : Promise<Result<ComponentPackage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_component_package_manifest", { projectDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async writeComponentPackageManifest(projectDir: string, componentPackage: ComponentPackage) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_component_package_manifest", { projectDir, componentPackage }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async writeComponentPackageArchive(projectDir: string, archivePath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_component_package_archive", { projectDir, archivePath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async readComponentPackageFromArchive(archivePath: string) : Promise<Result<ComponentPackage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_component_package_from_archive", { archivePath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async readComponentPackageHeaderFromArchive(archivePath: string) : Promise<Result<ComponentPackageHeader, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_component_package_header_from_archive", { archivePath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async extractComponentPackageArchive(archivePath: string, targetDir: string) : Promise<Result<ComponentPackage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_component_package_archive", { archivePath, targetDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async installComponentPackageArchive(archivePath: string) : Promise<Result<InstalledComponentPackage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_component_package_archive", { archivePath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listInstalledComponentPackageHeaders() : Promise<Result<ComponentPackageHeader[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_installed_component_package_headers") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getHistory() : Promise<Result<Thread[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_history") };
@@ -301,6 +365,14 @@ async getModelManifest(modelId: string) : Promise<Result<ModelManifest, AppError
     else return { status: "error", error: e  as any };
 }
 },
+async extractBrepHiddenLineProjections(request: BrepHiddenLineProjectionRequest) : Promise<Result<BrepHiddenLineProjectionResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_brep_hidden_line_projections", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async saveModelManifest(modelId: string, manifest: ModelManifest, messageId: string | null) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_model_manifest", { modelId, manifest, messageId }) };
@@ -344,6 +416,46 @@ async exportMultipartStlZip(parts: ExportPartInput[], targetPath: string, modelN
 async exportMultipart3mf(parts: ExportPartInput[], targetPath: string, modelName: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_multipart_3mf", { parts, targetPath, modelName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async generateSketchDraftSource(request: SketchDraftRequest) : Promise<Result<SketchDraftSource, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_sketch_draft_source", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async suggestSketchFeatures(request: SketchSuggestionRequest) : Promise<Result<SketchSuggestionResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("suggest_sketch_features", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async generateSketchDraftPreview(request: SketchDraftRequest) : Promise<Result<[SketchDraftSource, ArtifactBundle], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_sketch_draft_preview", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async generateSketchPreviewHull(request: SketchPreviewHullRequest) : Promise<Result<[SketchDraftSource, ArtifactBundle], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_sketch_preview_hull", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async analyzeSketchBrepCandidates(request: SketchBrepCandidateRequest) : Promise<Result<SketchBrepCandidateResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_sketch_brep_candidates", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -419,6 +531,14 @@ async uploadAsset(sourcePath: string, name: string, format: string) : Promise<Re
 async saveRecordedAudio(base64Data: string, name: string) : Promise<Result<Asset, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_recorded_audio", { base64Data, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async transcribePromptAudio(input: TranscribePromptAudioInput) : Promise<Result<PromptTranscription, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("transcribe_prompt_audio", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -612,7 +732,7 @@ async wakeAutoAgent(label: string) : Promise<Result<null, AppError>> {
 
 /** user-defined types **/
 
-export type AddManualVersionInput = { threadId: string; title: string; versionName: string; macroCode: string; parameters: Partial<{ [key in string]: ParamValue }>; uiSpec: UiSpec; postProcessing: PostProcessingSpec | null; artifactBundle: ArtifactBundle | null; modelManifest: ModelManifest | null }
+export type AddManualVersionInput = { threadId: string; title: string; versionName: string; macroCode: string; sourceLanguage: SourceLanguage | null; geometryBackend: GeometryBackend | null; parameters: Partial<{ [key in string]: ParamValue }>; uiSpec: UiSpec; postProcessing: PostProcessingSpec | null; artifactBundle: ArtifactBundle | null; modelManifest: ModelManifest | null }
 export type Advisory = { advisoryId: string; label: string; severity: AdvisorySeverity; primitiveIds?: string[]; viewIds?: string[]; message: string; condition?: AdvisoryCondition; threshold?: number | null }
 export type AdvisoryCondition = "always" | "below" | "above"
 export type AdvisorySeverity = "info" | "warning"
@@ -645,8 +765,15 @@ export type AppError = { code: AppErrorCode; message: string; details?: string |
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
+export type AssemblyComponentRef = { instanceId: string; componentId: string }
+export type AssemblyDefinition = { assemblyId: string; displayName: string; components?: AssemblyComponentRef[]; mates?: AssemblyMate[]; operations?: AssemblyOperation[]; output: AssemblyOutput }
+export type AssemblyHeader = { assemblyId: string; displayName: string; componentCount: number; mateCount: number; operationCount: number; output: AssemblyOutput }
+export type AssemblyMate = { mateId: string; typeId: string; a: PortReference; b: PortReference; params?: Partial<{ [key in string]: ComponentInterfaceValue }> }
+export type AssemblyOperation = { operationId: string; kind: OperationKind; targetInstanceIds?: string[]; portRefs?: PortReference[]; params?: Partial<{ [key in string]: ComponentInterfaceValue }> }
+export type AssemblyOutput = { mode: AssemblyOutputMode }
+export type AssemblyOutputMode = "separateParts" | "joinedAssembly" | "fusedSolid" | "moldedSolid"
 export type Asset = { id: string; name: string; path: string; format: string }
-export type Attachment = { path: string; name: string; explanation: string; kind: AttachmentKind }
+export type Attachment = { path: string; name: string; explanation: string; dataUrl?: string | null; kind: AttachmentKind }
 export type AttachmentKind = "image" | "cad"
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
@@ -657,8 +784,22 @@ export type AutoAgent = { id: string; label: string; cmd: string; model?: string
  * Active-mode wake behavior now depends on `mcp.mode` and `mcp.primaryAgentId`.
  */
 startOnDemand?: boolean }
+export type BrepHiddenLineProjectionRequest = { artifactBundle: ArtifactBundle; views?: SketchView[]; tolerance?: number | null; sketchDocument?: SketchDocument | null }
+export type BrepHiddenLineProjectionResponse = { modelId: string; sourceArtifactPath: string; views?: BrepHiddenLineProjectionView[]; warnings?: string[]; validation?: SketchBrepProjectionValidation | null }
+export type BrepHiddenLineProjectionView = { view: SketchView; direction: [number, number, number]; visibleEdges?: BrepProjectedEdge2d[]; hiddenEdges?: BrepProjectedEdge2d[] }
+export type BrepProjectedEdge2d = { edgeId: string; points?: ([number, number])[]; sourceClass: string }
 export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
+export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null; sketches?: SketchDefinition[]; keepouts?: ComponentKeepoutVolume[]; fusionZones?: ComponentFusionZone[]; params?: ComponentParam[]; ports?: ComponentPort[] }
+export type ComponentFusionZone = { zoneId: string; surfaceRef: string; allowedOps?: OperationKind[]; maxBlendRadius?: number | null; keepoutIds?: string[] }
+export type ComponentHeader = { componentId: string; version: string; displayName: string; params?: ComponentParam[]; ports?: ComponentPort[] }
+export type ComponentInterfaceValue = number | string | boolean
+export type ComponentKeepoutVolume = { keepoutId: string; label: string; kind: KeepoutVolumeKind; frame?: PortFrame | null; size?: [number, number, number] | null; radius?: number | null; height?: number | null }
+export type ComponentPackage = { schemaVersion?: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentDefinition[]; assemblies?: AssemblyDefinition[] }
+export type ComponentPackageHeader = { schemaVersion: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentHeader[]; assemblies?: AssemblyHeader[] }
+export type ComponentParam = { key: string; label: string; kind: ComponentParamKind; unit?: string | null }
+export type ComponentParamKind = "number" | "text" | "boolean" | "choice"
+export type ComponentPort = { portId: string; typeId: string; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
 export type ControlRelation = { relationId: string; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number; enabled?: boolean }
@@ -677,7 +818,7 @@ export type Engine = { id: string; name: string; provider: string; apiKey: strin
  * Defaults to true for backward compatibility with existing configs.
  */
 enabled?: boolean }
-export type EngineKind = "freecad" | "eckyIrV0" | "build123d"
+export type EngineKind = "freecad" | "ecky" | "build123d"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
 export type ExportArtifact = { label: string; format: string; path: string; role: string }
@@ -687,9 +828,11 @@ export type FinalizeStatus = "success" | "error" | "discarded"
 export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null; engineKind?: EngineKind | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null }
 export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
-export type GeometryBackend = "freecad" | "build123d" | "eckyRust"
+export type GeometryBackend = "freecad" | "build123d" | "mesh"
+export type InstalledComponentPackage = { header: ComponentPackageHeader; packageDir: string }
 export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
 export type InteractionMode = "design" | "question" | "tune"
+export type KeepoutVolumeKind = "box" | "cylinder" | "sphere" | "custom"
 export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null }
 export type LithophaneAttachment = { id: string; enabled?: boolean; source: LithophaneAttachmentSource; targetPartId?: string; placement?: LithophanePlacement; relief?: LithophaneRelief; color?: LithophaneColor }
 export type LithophaneAttachmentSource = { kind: "file"; imagePath: string } | { kind: "param"; imageParam: string }
@@ -699,9 +842,11 @@ export type LithophanePlacement = { mode?: LithophanePlacementMode; side?: Litho
 export type LithophanePlacementMode = "partSidePatch"
 export type LithophaneRelief = { depthMm?: number; invert?: boolean }
 export type LithophaneSide = "front" | "back" | "left" | "right" | "top" | "bottom"
-export type MacroDialect = "legacy" | "cadFrameworkV1" | "eckyIrV0" | "build123d"
+export type MacroDialect = "legacy" | "cadFrameworkV1" | "ecky" | "build123d"
 export type ManifestBounds = { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number }
 export type ManifestEnrichmentState = { status: EnrichmentStatus; proposals?: EnrichmentProposal[] }
+export type MatePortTypePair = { aTypeId: string; bTypeId: string }
+export type MateTypeDefinition = { typeId: string; displayName: string; allowedPortTypePairs?: MatePortTypePair[]; params?: ComponentParam[] }
 export type McpConfig = { 
 /**
  * HTTP port for the MCP server. Defaults to 39249.
@@ -742,15 +887,21 @@ export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
 export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
 export type ModelSourceKind = "generated" | "importedFcstd"
+export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
+export type PackageVisibility = "source" | "compiled" | "locked" | "private"
 export type ParamValue = string | number | boolean | null
 export type ParameterGroup = { groupId: string; label: string; parameterKeys?: string[]; partIds?: string[]; editable: boolean; presentation?: string | null; order?: number | null }
 export type ParsedParamsResult = { fields: UiField[]; params: Partial<{ [key in string]: ParamValue }> }
 export type PartBinding = { partId: string; freecadObjectName: string; label: string; kind: string; semanticRole?: string | null; viewerAssetPath?: string | null; viewerNodeIds?: string[]; parameterKeys?: string[]; editable: boolean; bounds?: ManifestBounds | null; volume?: number | null; area?: number | null }
+export type PortFrame = { origin: [number, number, number]; xAxis: [number, number, number]; yAxis: [number, number, number]; zAxis: [number, number, number] }
+export type PortReference = { instanceId: string; portId: string }
+export type PortTypeDefinition = { typeId: string; displayName: string; base?: string | null; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[]; params?: ComponentParam[] }
 export type PostProcessingSpec = { displacement?: DisplacementSpec | null; lithophaneAttachments?: LithophaneAttachment[] }
 export type PreparePromptWorkspaceCaptureInput = { dataUrl: string; threadId?: string | null; name?: string | null; explanation?: string | null }
 export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
 export type ProjectionType = "planar" | "auto" | "cylindrical" | "spherical"
+export type PromptTranscription = { text: string; provider: string; model: string }
 export type QueueAgentPromptInput = { threadId?: string | null; promptText: string; attachments?: Attachment[] }
 export type QueuedAgentPrompt = { threadId: string; messageId: string }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
@@ -758,12 +909,34 @@ export type ResolveAgentPromptInput = { requestId: string; promptText: string; m
 export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: string; width: number; height: number; camera: ViewportCameraState; source: string; threadId: string; messageId: string; modelId?: string | null; includeOverlays: boolean }
 export type RuntimeAuthoringContext = { engineKind: EngineKind; sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend }
 export type RuntimeBackendCapability = { available: boolean; detail: string; path?: string | null }
-export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; eckyRust: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }
+export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; directOcct: RuntimeBackendCapability; mesh: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
 export type SelectionTargetKind = "part" | "object" | "group" | "edge"
-export type SourceLanguage = "legacyPython" | "eckyIrV0" | "build123d"
+export type SketchBrepCandidateEdge = { edgeId: string; a: string; b: string; supportViews?: SketchView[] }
+export type SketchBrepCandidateGraph = { vertices?: SketchBrepCandidateVertex[]; edges?: SketchBrepCandidateEdge[] }
+export type SketchBrepCandidateRequest = { document: SketchDocument }
+export type SketchBrepCandidateResponse = { graph: SketchBrepCandidateGraph; validation: SketchBrepProjectionValidation }
+export type SketchBrepCandidateVertex = { vertexId: string; point: [number, number, number]; evidenceViews?: SketchView[] }
+export type SketchBrepProjectionValidation = { passed: boolean; issues?: SketchValidationIssue[]; evidence?: string[] }
+export type SketchConstraint = { constraintId: string; kind: SketchConstraintKind; targetIds?: string[]; value?: number | null }
+export type SketchConstraintKind = "closed" | "horizontal" | "vertical" | "tangent" | "equal" | "symmetric" | "dimension"
+export type SketchDefinition = { sketchId: string; view: SketchView; plane?: PortFrame | null; primitives?: SketchPrimitive[]; constraints?: SketchConstraint[] }
+export type SketchDocument = { documentId: string; sketches?: SketchDefinition[]; activeSketchId?: string | null; units?: string | null; metadata?: Partial<{ [key in string]: string }> | null }
+export type SketchDraftOperationKind = "extrude" | "revolve"
+export type SketchDraftRequest = { partId: string; sketch: SketchDefinition; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean }
+export type SketchDraftSource = { sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend; macroDialect: MacroDialect; source: string; warnings?: string[] }
+export type SketchFeatureSuggestion = { suggestionId: string; sketchId: string; primitiveId?: string | null; partId: string; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean; confidence: number; reason: string; warnings?: string[] }
+export type SketchPreviewHullRequest = { partId: string; document: SketchDocument; fallbackDepth: number }
+export type SketchPrimitive = { primitiveId: string; kind: SketchPrimitiveKind; points?: ([number, number])[]; closed?: boolean; radius?: number | null }
+export type SketchPrimitiveKind = "point" | "line" | "polyline" | "spline" | "arc" | "circle"
+export type SketchSuggestionRequest = { document: SketchDocument; limit?: number | null }
+export type SketchSuggestionResponse = { suggestions?: SketchFeatureSuggestion[]; warnings?: string[] }
+export type SketchValidationIssue = { sketchId: string; primitiveId?: string | null; severity: SketchValidationSeverity; message: string }
+export type SketchValidationSeverity = "warning" | "error"
+export type SketchView = "front" | "side" | "top" | "custom"
+export type SourceLanguage = "legacyPython" | "ecky" | "build123d"
 export type StructuralIssue = { code: string; message: string; 
 /**
  * ID of the affected part, when the issue is part-specific.
@@ -781,6 +954,7 @@ export type ThreadMessagesPage = { messages: Message[]; nextBefore: number | nul
 export type ThreadStatus = "active" | "finalized"
 export type ThreadWindowLayout = { schemaVersion?: number; rememberLayout?: boolean; windows: Partial<{ [key in string]: ThreadWindowState }> }
 export type ThreadWindowState = { visible: boolean; minimized?: boolean; x: number; y: number; width: number; height: number; z: number }
+export type TranscribePromptAudioInput = { base64Data: string; mimeType: string; languageCode?: string | null }
 export type UiField = { type: "range"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "number"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "select"; key: string; label?: string; options?: SelectOption[]; frozen?: boolean } | { type: "checkbox"; key: string; label?: string; frozen?: boolean } | { type: "image"; key: string; label?: string; frozen?: boolean }
 export type UiSpec = { fields?: UiField[] }
 export type UsageSegment = { stage: string; provider: string; model: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null }
@@ -795,6 +969,7 @@ export type ViewportCameraState = { position: [number, number, number]; target: 
 export type VisualIssue = { category: VisualIssueCategory; description: string; partLabel?: string | null }
 export type VisualIssueCategory = "missing_part" | "floating_part" | "connector_broken" | "reference_mismatch" | "topology_broken" | "other"
 export type VisualVerificationResult = { passed: boolean; summary: string; issues: VisualIssue[]; usage?: UsageSummary | null }
+export type VoiceConfig = { sttLanguageCode?: string }
 
 /** tauri-specta globals **/
 

@@ -7,9 +7,9 @@ use std::process::Command;
 use crate::freecad::resolve_resource_path;
 use crate::models::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EnrichmentStatus,
-    GeometryBackend, ManifestBounds, ManifestEnrichmentState, ModelManifest, ModelSourceKind,
-    PartBinding, PathResolver, SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerAsset,
-    ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    ExportArtifact, GeometryBackend, ManifestBounds, ManifestEnrichmentState, ModelManifest,
+    ModelSourceKind, PartBinding, PathResolver, SelectionTarget, SelectionTargetKind,
+    SourceLanguage, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 const RUNNER_RESOURCE_PATH: &str = "server/build123d_runner.py";
@@ -17,8 +17,8 @@ const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const GENERATED_ARTIFACT_DIR: &str = "generated";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
-const SOURCE_FILE_NAME: &str = "source.py";
 const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
+const STEP_FILE_NAME: &str = "model.step";
 const PARTS_DIR_NAME: &str = "parts";
 const RUNNER_REPORT_FILE_NAME: &str = "runner-report.json";
 const BUNDLED_PYTHON_RESOURCE_CANDIDATES: &[&str] = &[
@@ -93,10 +93,21 @@ pub fn render_model_with_source_language(
     app: &dyn PathResolver,
     source_language: SourceLanguage,
 ) -> AppResult<ArtifactBundle> {
+    render_model_with_sources(source, None, parameters, app, source_language)
+}
+
+pub fn render_model_with_sources(
+    executable_source: &str,
+    authored_source: Option<&str>,
+    parameters: &DesignParams,
+    app: &dyn PathResolver,
+    source_language: SourceLanguage,
+) -> AppResult<ArtifactBundle> {
+    let source_identity = authored_source.unwrap_or(executable_source);
     let params_json =
         serde_json::to_string(parameters).map_err(|e| AppError::validation(e.to_string()))?;
     let mut hasher = Sha256::new();
-    hasher.update(source.as_bytes());
+    hasher.update(source_identity.as_bytes());
     hasher.update(b"|");
     hasher.update(params_json.as_bytes());
     let content_hash = format!("{:x}", hasher.finalize());
@@ -112,23 +123,47 @@ pub fn render_model_with_source_language(
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
     fs::create_dir_all(&parts_dir).map_err(|e| AppError::persistence(e.to_string()))?;
 
-    let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-    fs::write(&source_path, source).map_err(|e| AppError::persistence(e.to_string()))?;
+    let authored_source_path = bundle_dir.join(crate::source_flavor::authored_source_file_name(
+        source_language,
+        GeometryBackend::Build123d,
+    ));
+    fs::write(&authored_source_path, source_identity)
+        .map_err(|e| AppError::persistence(e.to_string()))?;
+
+    let runner_source_path = if authored_source.is_some() {
+        let path = bundle_dir.join(crate::source_flavor::lowered_source_file_name(
+            GeometryBackend::Build123d,
+        ));
+        fs::write(&path, executable_source).map_err(|e| AppError::persistence(e.to_string()))?;
+        path
+    } else {
+        authored_source_path.clone()
+    };
 
     let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
+
+    #[cfg(test)]
+    let _build123d_env_guard = crate::build123d_test_env_lock().lock().unwrap();
 
     run_runner(
         app,
-        &source_path,
+        &runner_source_path,
         &preview_stl_path,
+        &step_path,
         &parts_dir,
         &runner_report_path,
         &params_json,
     )?;
 
     let report = read_runner_report(&runner_report_path)?;
-    let manifest = build_manifest(&model_id, &report, source_language);
+    let manifest = build_manifest(
+        &model_id,
+        &report,
+        source_language,
+        Some(path_to_string(&authored_source_path)?),
+    );
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
     write_manifest(&manifest_path, &manifest)?;
 
@@ -144,13 +179,13 @@ pub fn render_model_with_source_language(
         artifact_version: 1,
         fcstd_path: String::new(),
         manifest_path: path_to_string(&manifest_path)?,
-        macro_path: Some(path_to_string(&source_path)?),
+        macro_path: Some(path_to_string(&authored_source_path)?),
         preview_stl_path: path_to_string(&preview_stl_path)?,
         viewer_assets,
         edge_targets: Vec::new(),
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
-        export_artifacts: Vec::new(),
+        export_artifacts: step_export_artifacts(&step_path)?,
     };
     write_bundle(&bundle_dir, &bundle)?;
     Ok(bundle)
@@ -169,10 +204,11 @@ fn load_cached_bundle(bundle_dir: &Path) -> AppResult<Option<ArtifactBundle>> {
     }
     let raw = fs::read_to_string(&bundle_path)
         .map_err(|e| AppError::persistence(format!("Failed to read bundle: {}", e)))?;
-    let bundle: ArtifactBundle = serde_json::from_str(&raw)
+    let mut bundle: ArtifactBundle = serde_json::from_str(&raw)
         .map_err(|e| AppError::parse(format!("Failed to parse bundle: {}", e)))?;
     if !Path::new(&bundle.manifest_path).exists()
         || !Path::new(&bundle.preview_stl_path).exists()
+        || !bundle_step_path(bundle_dir).exists()
         || bundle
             .viewer_assets
             .iter()
@@ -180,6 +216,7 @@ fn load_cached_bundle(bundle_dir: &Path) -> AppResult<Option<ArtifactBundle>> {
     {
         return Ok(None);
     }
+    bundle.export_artifacts = step_export_artifacts(&bundle_step_path(bundle_dir))?;
     Ok(Some(bundle))
 }
 
@@ -187,6 +224,7 @@ fn run_runner(
     app: &dyn PathResolver,
     source_path: &Path,
     stl_path: &Path,
+    step_path: &Path,
     parts_dir: &Path,
     report_path: &Path,
     params_json: &str,
@@ -204,6 +242,7 @@ fn run_runner(
         .arg(&runner_path)
         .env("ECKYCAD_SOURCE", path_to_string(source_path)?)
         .env("ECKYCAD_STL", path_to_string(stl_path)?)
+        .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(report_path)?)
         .env("ECKYCAD_PARAMS", params_json)
@@ -222,6 +261,19 @@ fn run_runner(
         ));
     }
     Ok(())
+}
+
+fn bundle_step_path(bundle_dir: &Path) -> PathBuf {
+    bundle_dir.join(STEP_FILE_NAME)
+}
+
+fn step_export_artifacts(step_path: &Path) -> AppResult<Vec<ExportArtifact>> {
+    Ok(vec![ExportArtifact {
+        label: "STEP".to_string(),
+        format: "step".to_string(),
+        path: path_to_string(step_path)?,
+        role: "primary".to_string(),
+    }])
 }
 
 pub fn resolve_python_cmd() -> AppResult<PathBuf> {
@@ -325,6 +377,7 @@ fn build_manifest(
     model_id: &str,
     report: &RunnerReport,
     source_language: SourceLanguage,
+    source_path: Option<String>,
 ) -> ModelManifest {
     let mut parts = Vec::new();
     let mut selection_targets = Vec::new();
@@ -382,7 +435,7 @@ fn build_manifest(
             } else {
                 report.document_label.clone()
             },
-            source_path: None,
+            source_path,
             object_count: parts.len(),
             warnings: report.warnings.clone(),
         },
@@ -493,6 +546,44 @@ mod tests {
         }
     }
 
+    struct RepoResourceResolver {
+        root: PathBuf,
+    }
+
+    impl PathResolver for RepoResourceResolver {
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, path: &str) -> Option<PathBuf> {
+            let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+            match path {
+                "server/build123d_runner.py" => {
+                    Some(repo_root.join("server").join("build123d_runner.py"))
+                }
+                "runtime/build123d/bin/python3" => Some(
+                    repo_root
+                        .join(".dist")
+                        .join("build123d-runtime")
+                        .join("bin")
+                        .join("python3"),
+                ),
+                "runtime/build123d/bin/python" => Some(
+                    repo_root
+                        .join(".dist")
+                        .join("build123d-runtime")
+                        .join("bin")
+                        .join("python"),
+                ),
+                _ => None,
+            }
+        }
+    }
+
     #[test]
     fn render_model_fails_without_python_or_runner() {
         let root =
@@ -525,6 +616,47 @@ mod tests {
     }
 
     #[test]
+    fn render_model_handles_fusing_placed_shape_lists() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-build123d-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = RepoResourceResolver { root };
+        let source = r#"
+from build123d import *
+from _ecky_build123d_helpers import *
+
+_base = _ecky_fuse_many(
+    Cylinder(0.4, 1, align=(Align.CENTER, Align.CENTER, Align.MIN)),
+    _ecky_place(
+        Location((0, 0, 1)),
+        Cone(0.4, 0, 0.4, align=(Align.CENTER, Align.CENTER, Align.MIN)),
+    ),
+)
+_a = _ecky_place(Location((0, 0, 0)), _base)
+_b = _ecky_place(Location((2, 0, 0)), _base)
+_c = _ecky_place(Location((4, 0, 0)), _base)
+_body = _ecky_fuse_many(_a, _b, _c)
+_ecky_parts = [("body", _body)]
+"#;
+
+        let bundle = render_model_with_source_language(
+            source,
+            &BTreeMap::new(),
+            &resolver,
+            SourceLanguage::Build123d,
+        )
+        .expect("placed ShapeList operands should fuse and render");
+
+        assert_eq!(bundle.viewer_assets.len(), 1);
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert_eq!(bundle.export_artifacts.len(), 1);
+        assert_eq!(bundle.export_artifacts[0].format, "step");
+        assert_eq!(bundle.export_artifacts[0].role, "primary");
+        assert!(Path::new(&bundle.export_artifacts[0].path).exists());
+        assert!(bundle.export_artifacts[0].path.ends_with("model.step"));
+    }
+
+    #[test]
     fn build_manifest_preserves_raw_build123d_source_identity() {
         let report = RunnerReport {
             document_name: "Doc".to_string(),
@@ -540,11 +672,20 @@ mod tests {
             }],
         };
 
-        let manifest = build_manifest("model", &report, SourceLanguage::Build123d);
+        let manifest = build_manifest(
+            "model",
+            &report,
+            SourceLanguage::Build123d,
+            Some("/tmp/source.py".to_string()),
+        );
 
         assert_eq!(manifest.engine_kind, EngineKind::Build123d);
         assert_eq!(manifest.source_language, SourceLanguage::Build123d);
         assert_eq!(manifest.geometry_backend, GeometryBackend::Build123d);
+        assert_eq!(
+            manifest.document.source_path.as_deref(),
+            Some("/tmp/source.py")
+        );
     }
 
     #[test]
@@ -563,10 +704,19 @@ mod tests {
             }],
         };
 
-        let manifest = build_manifest("model", &report, SourceLanguage::EckyIrV0);
+        let manifest = build_manifest(
+            "model",
+            &report,
+            SourceLanguage::EckyIrV0,
+            Some("/tmp/source.ecky".to_string()),
+        );
 
         assert_eq!(manifest.engine_kind, EngineKind::EckyIrV0);
         assert_eq!(manifest.source_language, SourceLanguage::EckyIrV0);
         assert_eq!(manifest.geometry_backend, GeometryBackend::Build123d);
+        assert_eq!(
+            manifest.document.source_path.as_deref(),
+            Some("/tmp/source.ecky")
+        );
     }
 }

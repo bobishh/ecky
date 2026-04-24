@@ -16,8 +16,8 @@ type MockConfig = {
     autoAgents: unknown[];
   };
   connectionType: null;
-  defaultEngineKind: 'freecad' | 'eckyIrV0';
-  defaultSourceLanguage: 'legacyPython' | 'eckyIrV0';
+  defaultEngineKind: 'freecad' | 'ecky';
+  defaultSourceLanguage: 'legacyPython' | 'ecky';
   defaultGeometryBackend: 'freecad' | 'build123d';
   maxGenerationAttempts: number;
   maxVerifyAttempts: number;
@@ -82,14 +82,14 @@ async function installCapabilityMock(page: Page, configOverrides: Partial<MockCo
             detail: 'Ready at /mock/python3',
             path: '/mock/python3',
           },
-          eckyRust: {
+          mesh: {
             available: true,
             detail: 'bundled',
             path: null,
           },
           recommendedAuthoringContext: {
-            engineKind: 'eckyIrV0',
-            sourceLanguage: 'eckyIrV0',
+            engineKind: 'ecky',
+            sourceLanguage: 'ecky',
             geometryBackend: 'build123d',
           },
         };
@@ -170,10 +170,10 @@ test.describe('Runtime capability boot repair', () => {
               detail: 'Ready at /mock/python3',
               path: '/mock/python3',
             },
-            eckyRust: {
-              available: true,
-              detail: 'bundled',
-              path: null,
+          mesh: {
+            available: true,
+            detail: 'bundled',
+            path: null,
             },
             recommendedAuthoringContext: {
               engineKind: 'freecad',
@@ -230,17 +230,23 @@ test.describe('Runtime capability boot repair', () => {
         typeof call === 'object' &&
         call !== null &&
         'defaultSourceLanguage' in call &&
-        (call as { defaultSourceLanguage?: string }).defaultSourceLanguage === 'eckyIrV0',
+        (call as { defaultSourceLanguage?: string }).defaultSourceLanguage === 'ecky',
     );
     expect(repairedCall).toBeTruthy();
     expect(repairedCall).toMatchObject({
-      defaultEngineKind: 'eckyIrV0',
-      defaultSourceLanguage: 'eckyIrV0',
+      defaultEngineKind: 'ecky',
+      defaultSourceLanguage: 'ecky',
       defaultGeometryBackend: 'build123d',
     });
 
-    await expect(page.getByRole('button', { name: 'ECKY IR' })).toHaveClass(/active/);
+    await expect(page.getByRole('button', { name: 'ECKY', exact: true })).toHaveClass(/active/);
+    const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
+    await expect(authoringField.getByText('SOURCE', { exact: true })).toBeVisible();
+    await expect(authoringField.getByText('BACKEND FOR ECKY', { exact: true })).toBeVisible();
     await expect(page.locator('button.conn-type-btn.active', { hasText: 'BUILD123D' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'FREECAD PYTHON' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'BUILD123D PYTHON' })).toBeVisible();
+    await expect(authoringField.getByRole('button', { name: 'FREECAD', exact: true })).toBeVisible();
   });
 
   test('Given FreeCAD absent When user opens import and settings Then FreeCAD actions stay visible but disabled with reason', async ({ page }) => {
@@ -257,8 +263,12 @@ test.describe('Runtime capability boot repair', () => {
     await page.keyboard.press('Escape');
 
     await page.locator('button[title="Settings"]').click();
-    const freecadDefault = page.getByRole('button', { name: 'FREECAD (PY)' });
+    const freecadDefault = page.getByRole('button', { name: 'FREECAD PYTHON' });
+    const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
+    const freecadBackend = authoringField.getByRole('button', { name: 'FREECAD', exact: true });
     await expect(freecadDefault).toBeDisabled();
     await expect(freecadDefault).toHaveAttribute('title', /FreeCAD executable not found/);
+    await expect(freecadBackend).toBeDisabled();
+    await expect(freecadBackend).toHaveAttribute('title', /FreeCAD executable not found/);
   });
 });

@@ -3,6 +3,7 @@
   import Dropdown from './Dropdown.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { derivePrimaryAgentId, normalizeMcpMode } from './agents/state';
+  import { inferModelCapabilities } from './modelRuntime/modelCapabilities';
   import {
     formatBackendError,
     getAppLogs,
@@ -230,6 +231,14 @@
   ];
 
   const selectedEngine = $derived(config.engines.find(e => e.id === config.selectedEngineId));
+  const selectedEngineCapabilities = $derived.by(() => {
+    if (!selectedEngine) return null;
+    return inferModelCapabilities(
+      selectedEngine.provider,
+      selectedEngine.baseUrl,
+      selectedEngine.model,
+    );
+  });
   const freecadCapability = $derived(runtimeCapabilities?.freecad ?? null);
   const build123dCapability = $derived(runtimeCapabilities?.build123d ?? null);
 
@@ -248,14 +257,19 @@
   }
 
   function setDefaultEckyIrContext() {
-    config.defaultSourceLanguage = 'eckyIrV0';
-    if (!config.defaultGeometryBackend || config.defaultGeometryBackend === 'freecad') {
-      config.defaultGeometryBackend = build123dCapability?.available ? 'build123d' : 'eckyRust';
-    }
+    config.defaultSourceLanguage = 'ecky';
     if (config.defaultGeometryBackend === 'build123d' && !build123dCapability?.available) {
-      config.defaultGeometryBackend = 'eckyRust';
+      config.defaultGeometryBackend = freecadCapability?.available ? 'freecad' : 'mesh';
+    } else if (config.defaultGeometryBackend === 'freecad' && !freecadCapability?.available) {
+      config.defaultGeometryBackend = build123dCapability?.available ? 'build123d' : 'mesh';
+    } else if (!config.defaultGeometryBackend) {
+      config.defaultGeometryBackend = build123dCapability?.available
+        ? 'build123d'
+        : freecadCapability?.available
+          ? 'freecad'
+          : 'mesh';
     }
-    config.defaultEngineKind = 'eckyIrV0';
+    config.defaultEngineKind = 'ecky';
   }
 
   function asString(value: string | number | null | undefined): string {
@@ -277,6 +291,14 @@
     return config.microwave;
   }
   const microwave = $derived.by(() => getMicrowaveConfig());
+
+  function getVoiceConfig(): AppConfig['voice'] {
+    if (!config.voice || !config.voice.sttLanguageCode?.trim()) {
+      config.voice = { sttLanguageCode: 'en-US' };
+    }
+    return config.voice;
+  }
+  const voice = $derived.by(() => getVoiceConfig());
 
   if (typeof config.freecadCmd !== 'string') {
     config.freecadCmd = '';
@@ -501,6 +523,8 @@
     isSaving = true;
     message = 'Saving registry...';
     try {
+      const voiceConfig = getVoiceConfig();
+      voiceConfig.sttLanguageCode = voiceConfig.sttLanguageCode.trim() || 'en-US';
       if (onsave) await onsave();
       message = 'Registry saved successfully.';
     } catch (e: unknown) {
@@ -784,7 +808,7 @@
             <div class="field-title">RUNTIME STATUS</div>
             <div class="field-help">BUILD123D: {runtimeCapabilities.build123d.detail}</div>
             <div class="field-help">FREECAD: {runtimeCapabilities.freecad.detail}</div>
-            <div class="field-help">ECKYRUST: {runtimeCapabilities.eckyRust.detail}</div>
+            <div class="field-help">MESH: {runtimeCapabilities.mesh.detail}</div>
           </div>
         {/if}
 
@@ -864,6 +888,18 @@
               <div class="mic-status">{micStatusMessage}</div>
             {/if}
           </div>
+        </div>
+
+        <div class="field">
+          <label for="stt-language-code">STT LANGUAGE CODE</label>
+          <input
+            id="stt-language-code"
+            type="text"
+            class="input-mono"
+            spellcheck="false"
+            bind:value={voice.sttLanguageCode}
+          />
+          <div class="field-help">BCP-47 code passed to speech backend. Default: en-US.</div>
         </div>
 
         <div class="field">
@@ -949,26 +985,34 @@
 
         <div class="field">
           <div class="field-title">DEFAULT AUTHORING CONTEXT</div>
+          <div class="field-help" style="margin-bottom: 6px;">SOURCE</div>
           <div class="conn-type-row">
             <button
               class="conn-type-btn {config.defaultSourceLanguage === 'legacyPython' ? 'active' : ''}"
               onclick={setDefaultFreecadContext}
               disabled={runtimeCapabilities ? !runtimeCapabilities.freecad.available : false}
               title={runtimeCapabilities && !runtimeCapabilities.freecad.available ? runtimeCapabilities.freecad.detail : undefined}
-            >FREECAD (PY)</button>
+            >FREECAD PYTHON</button>
             <button
               class="conn-type-btn {config.defaultSourceLanguage === 'build123d' ? 'active' : ''}"
               onclick={setDefaultBuild123dContext}
               disabled={runtimeCapabilities ? !runtimeCapabilities.build123d.available : false}
               title={runtimeCapabilities && !runtimeCapabilities.build123d.available ? runtimeCapabilities.build123d.detail : undefined}
-            >BUILD123D (PY)</button>
+            >BUILD123D PYTHON</button>
             <button
-              class="conn-type-btn {config.defaultSourceLanguage === 'eckyIrV0' ? 'active' : ''}"
+              class="conn-type-btn {config.defaultSourceLanguage === 'ecky' ? 'active' : ''}"
               onclick={setDefaultEckyIrContext}
-            >ECKY IR</button>
+            >ECKY</button>
           </div>
-          {#if config.defaultSourceLanguage === 'eckyIrV0'}
+          {#if config.defaultSourceLanguage === 'ecky'}
+            <div class="field-help" style="margin-top: 8px; margin-bottom: 6px;">BACKEND FOR ECKY</div>
             <div class="conn-type-row" style="margin-top: 6px;">
+              <button
+                class="conn-type-btn {config.defaultGeometryBackend === 'freecad' ? 'active' : ''}"
+                onclick={() => { config.defaultGeometryBackend = 'freecad'; }}
+                disabled={runtimeCapabilities ? !runtimeCapabilities.freecad.available : false}
+                title={runtimeCapabilities && !runtimeCapabilities.freecad.available ? runtimeCapabilities.freecad.detail : undefined}
+              >FREECAD</button>
               <button
                 class="conn-type-btn {config.defaultGeometryBackend === 'build123d' ? 'active' : ''}"
                 onclick={() => { config.defaultGeometryBackend = 'build123d'; }}
@@ -976,13 +1020,13 @@
                 title={runtimeCapabilities && !runtimeCapabilities.build123d.available ? runtimeCapabilities.build123d.detail : undefined}
               >BUILD123D</button>
               <button
-                class="conn-type-btn {config.defaultGeometryBackend === 'eckyRust' ? 'active' : ''}"
-                onclick={() => { config.defaultGeometryBackend = 'eckyRust'; }}
-              >ECKY RUST</button>
+                class="conn-type-btn {config.defaultGeometryBackend === 'mesh' ? 'active' : ''}"
+                onclick={() => { config.defaultGeometryBackend = 'mesh'; }}
+              >MESH</button>
             </div>
           {/if}
           <div class="field-help">
-            New generated threads inherit this language by default. Imported FCStd flows stay pinned to FreeCAD.
+            New generated threads inherit this source and backend by default. Imported FCStd threads stay FreeCAD Python.
           </div>
         </div>
 
@@ -1329,6 +1373,12 @@
             />
           </div>
 
+          {#if selectedEngineCapabilities && selectedEngineCapabilities.reason}
+            <div class="engine-capability-hint" data-testid="engine-vision-warning">
+              {selectedEngineCapabilities.reason}
+            </div>
+          {/if}
+
           <div class="field prompt-field">
             <div class="prompt-header">
               <label for="e-prompt">SYSTEM PROMPT (template with $USER_PROMPT)</label>
@@ -1563,6 +1613,17 @@
     font-size: 0.62rem;
     color: var(--text-dim);
     line-height: 1.35;
+  }
+
+  .engine-capability-hint {
+    padding: 10px 12px;
+    border: 1px solid var(--primary);
+    border-left-width: 2px;
+    background: var(--bg-200);
+    color: var(--text);
+    font-size: 0.65rem;
+    line-height: 1.45;
+    overflow: hidden;
   }
 
   .flex-1 { flex: 1; }

@@ -1,6 +1,9 @@
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
+
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use steel_core::parser::ast::{Atom, Define, ExprKind, Let};
+use steel_core::parser::parser::Parser;
 use steel_core::parser::tokens::TokenType;
 use steel_core::rvals::SteelVal;
 
@@ -13,6 +16,7 @@ use crate::ecky_core_ir::{
     CoreSymbol, CoreTransformOp, CoreValueKind, NodeId, ParamId, PartId, ProgramId, SourceFileId,
     SourceSpan,
 };
+use crate::ecky_deterministic;
 
 use super::bootstrap;
 
@@ -40,15 +44,20 @@ pub fn compile_to_legacy_source(source: &str) -> AppResult<String> {
 pub fn compile_to_core_program(source: &str) -> CoreResult<CoreProgram> {
     bootstrap::validate_user_source(source)
         .map_err(|err| CompilerError::new(CompilerErrorKind::Parse, err))?;
+    reject_model_level_sequence_forms(source)?;
 
     if can_use_expanded_ast(source) {
-        match compile_to_core_program_from_expanded_ast(source) {
-            Ok(program) => return Ok(program),
-            Err(_) => {}
+        if let Ok(program) = compile_to_core_program_from_expanded_ast(source) {
+            return verify_compiled_core_program(program);
         }
     }
 
-    compile_to_core_program_via_runtime(source)
+    compile_to_core_program_via_runtime(source).and_then(verify_compiled_core_program)
+}
+
+fn verify_compiled_core_program(program: CoreProgram) -> CoreResult<CoreProgram> {
+    crate::ecky_core_ir::verify_core_program(&program)?;
+    Ok(program)
 }
 
 fn can_use_expanded_ast(source: &str) -> bool {
@@ -57,8 +66,9 @@ fn can_use_expanded_ast(source: &str) -> bool {
 
 fn compile_to_core_program_via_runtime(source: &str) -> CoreResult<CoreProgram> {
     let mut engine = bootstrap::new_engine();
-    seed_symbol_bindings(&mut engine, source);
-    let wrapped = bootstrap::wrap_user_source(source);
+    let runtime_source = rewrite_runtime_model_clause_wrappers(source)?;
+    seed_symbol_bindings(&mut engine, &runtime_source);
+    let wrapped = bootstrap::wrap_user_source(&runtime_source);
     let values = engine
         .compile_and_run_raw_program(wrapped)
         .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
@@ -78,6 +88,174 @@ fn compile_to_core_program_via_runtime(source: &str) -> CoreResult<CoreProgram> 
     };
 
     parse_program(&root)
+}
+
+fn rewrite_runtime_model_clause_wrappers(source: &str) -> CoreResult<String> {
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+    Ok(forms
+        .iter()
+        .map(rewrite_runtime_expr_source)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn rewrite_runtime_expr_source(expr: &ExprKind) -> String {
+    match expr {
+        ExprKind::List(list) => {
+            if expr_list_head_is(&list.args, "define-syntax") {
+                return expr.to_string();
+            }
+            if expr_list_head_is(&list.args, "model") {
+                return rewrite_runtime_model_source(&list.args);
+            }
+            format!(
+                "({})",
+                list.args
+                    .iter()
+                    .map(rewrite_runtime_expr_source)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        }
+        ExprKind::Define(def) => format!(
+            "(define {} {})",
+            def.name,
+            rewrite_runtime_expr_source(&def.body)
+        ),
+        ExprKind::Begin(begin) => format!(
+            "(begin {})",
+            begin
+                .exprs
+                .iter()
+                .map(rewrite_runtime_expr_source)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        _ => expr.to_string(),
+    }
+}
+
+fn rewrite_runtime_model_source(items: &[ExprKind]) -> String {
+    let groups = items
+        .iter()
+        .skip(1)
+        .map(rewrite_runtime_model_clause_group_source)
+        .collect::<Vec<_>>();
+    format!("(cons 'model {})", append_runtime_clause_groups(groups))
+}
+
+fn rewrite_runtime_model_clause_group_source(expr: &ExprKind) -> String {
+    let Ok(items) = expr_list_items(expr, "model clause") else {
+        return format!("(list {})", expr);
+    };
+    let Some(head) = items.first().and_then(expr_head_name) else {
+        return format!("(list {})", expr);
+    };
+
+    match head.as_str() {
+        "begin" => append_runtime_clause_groups(
+            items
+                .iter()
+                .skip(1)
+                .map(rewrite_runtime_model_clause_group_source)
+                .collect(),
+        ),
+        "let" | "let*" if items.len() >= 3 => {
+            let body = append_runtime_clause_groups(
+                items
+                    .iter()
+                    .skip(2)
+                    .map(rewrite_runtime_model_clause_group_source)
+                    .collect(),
+            );
+            format!("({} {} {})", head, items[1], body)
+        }
+        _ => format!("(list {})", expr),
+    }
+}
+
+fn append_runtime_clause_groups(groups: Vec<String>) -> String {
+    match groups.len() {
+        0 => "'()".to_string(),
+        1 => groups[0].clone(),
+        _ => format!("(append {})", groups.join(" ")),
+    }
+}
+
+fn reject_model_level_sequence_forms(source: &str) -> CoreResult<()> {
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+    for form in &forms {
+        reject_model_level_sequence_forms_in_top_level(form)?;
+    }
+    Ok(())
+}
+
+fn reject_model_level_sequence_forms_in_top_level(form: &ExprKind) -> CoreResult<()> {
+    match form {
+        ExprKind::Begin(begin) => {
+            for item in &begin.exprs {
+                reject_model_level_sequence_forms_in_top_level(item)?;
+            }
+        }
+        ExprKind::List(list) if expr_list_head_is(&list.args, "model") => {
+            reject_model_level_sequence_forms_in_model(&list.args[1..])?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn reject_model_level_sequence_forms_in_model(forms: &[ExprKind]) -> CoreResult<()> {
+    for form in forms {
+        reject_model_level_sequence_form_group(form)?;
+    }
+    Ok(())
+}
+
+fn reject_model_level_sequence_form_group(form: &ExprKind) -> CoreResult<()> {
+    match form {
+        ExprKind::Begin(begin) => {
+            for item in &begin.exprs {
+                reject_model_level_sequence_form_group(item)?;
+            }
+        }
+        ExprKind::Let(let_expr) => {
+            reject_model_level_sequence_form_group(&let_expr.body_expr)?;
+        }
+        ExprKind::List(_) | ExprKind::Vector(_) => {
+            let items = expr_list_items(form, "model clause")?;
+            if let Some(head) = items.first().and_then(expr_head_name) {
+                match head.as_str() {
+                    "begin" => {
+                        for item in items.iter().skip(1) {
+                            reject_model_level_sequence_form_group(item)?;
+                        }
+                    }
+                    "let" | "let*" if items.len() >= 3 => {
+                        for item in items.iter().skip(2) {
+                            reject_model_level_sequence_form_group(item)?;
+                        }
+                    }
+                    "map" | "range" => return Err(model_level_sequence_form_error(head.as_str())),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn model_level_sequence_form_error(name: &str) -> CompilerError {
+    CompilerError::new(
+        CompilerErrorKind::UnsupportedFeature,
+        format!(
+            "Model children are clauses, not sequence expressions. Supported direct clauses: `params`, `part`, `meta`. Supported wrappers: `begin`, `let`, `let*`. `{}` belongs inside `(part ...)` geometry/list expressions.",
+            name
+        ),
+    )
 }
 
 fn compile_to_core_program_from_expanded_ast(source: &str) -> CoreResult<CoreProgram> {
@@ -195,6 +373,12 @@ enum ExpandedHelper {
 }
 
 type ExpandedHelperMap = BTreeMap<String, ExpandedHelper>;
+
+#[derive(Clone, Debug)]
+struct ExpandedModelClause {
+    items: Vec<ExprKind>,
+    helpers: ExpandedHelperMap,
+}
 
 fn parse_expanded_program(forms: &[ExprKind]) -> CoreResult<CoreProgram> {
     let (root, helpers) = collect_expanded_model_context(forms).ok_or_else(|| {
@@ -326,6 +510,29 @@ fn is_model_expr(expr: &ExprKind) -> bool {
     )
 }
 
+fn expr_list_head_is(items: &[ExprKind], expected: &str) -> bool {
+    items.first().and_then(expr_head_name).as_deref() == Some(expected)
+}
+
+fn expr_head_name(value: &ExprKind) -> Option<String> {
+    match value {
+        ExprKind::Atom(atom) => match &atom.syn.ty {
+            TokenType::Begin => Some("begin".to_string()),
+            TokenType::Define => Some("define".to_string()),
+            TokenType::DefineSyntax => Some("define-syntax".to_string()),
+            TokenType::If => Some("if".to_string()),
+            TokenType::Lambda => Some("lambda".to_string()),
+            TokenType::Let => Some("let".to_string()),
+            TokenType::Quote => Some("quote".to_string()),
+            TokenType::Require => Some("require".to_string()),
+            TokenType::Set => Some("set!".to_string()),
+            TokenType::SyntaxRules => Some("syntax-rules".to_string()),
+            _ => expr_name(value).ok(),
+        },
+        _ => expr_name(value).ok(),
+    }
+}
+
 fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreResult<CoreProgram> {
     let forms = expr_list_items(value, "model root")?;
     let head = expr_name(forms.first().ok_or_else(|| {
@@ -342,13 +549,15 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     }
 
     let mut params = Vec::new();
-    let mut raw_parts = Vec::new();
     let mut next_param = 1u64;
     let mut next_part = 1u64;
     let mut next_node = 1u64;
 
-    for form in forms.into_iter().skip(1) {
-        let items = expr_list_items(&form, "model clause")?;
+    let clauses = collect_expanded_model_clauses(&forms[1..], helpers)?;
+    let mut raw_parts = Vec::new();
+
+    for clause_form in clauses {
+        let items = clause_form.items;
         let clause =
             expr_name(items.first().ok_or_else(|| {
                 CompilerError::new(CompilerErrorKind::Parse, "Empty model clause.")
@@ -356,11 +565,19 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
         match clause.as_str() {
             "params" => {
                 for decl in items.into_iter().skip(1) {
-                    params.push(parse_expanded_param_decl(&decl, &mut next_param, helpers)?);
+                    params.push(parse_expanded_param_decl(
+                        &decl,
+                        &mut next_param,
+                        &clause_form.helpers,
+                    )?);
                 }
             }
-            "part" => raw_parts.push(items),
+            "part" => raw_parts.push(ExpandedModelClause {
+                items,
+                helpers: clause_form.helpers,
+            }),
             "meta" => {}
+            "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
             other => {
                 return Err(CompilerError::new(
                     CompilerErrorKind::UnsupportedFeature,
@@ -384,7 +601,13 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let parts = raw_parts
         .iter()
         .map(|items| {
-            parse_expanded_part_decl(items, &mut next_part, &mut next_node, &param_ids, helpers)
+            parse_expanded_part_decl(
+                &items.items,
+                &mut next_part,
+                &mut next_node,
+                &param_ids,
+                &items.helpers,
+            )
         })
         .collect::<CoreResult<Vec<_>>>()?;
 
@@ -396,6 +619,95 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     }
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts))
+}
+
+fn collect_expanded_model_clauses(
+    forms: &[ExprKind],
+    helpers: &ExpandedHelperMap,
+) -> CoreResult<Vec<ExpandedModelClause>> {
+    let mut clauses = Vec::new();
+    for form in forms {
+        push_expanded_model_clauses(form, helpers, &mut clauses)?;
+    }
+    Ok(clauses)
+}
+
+fn push_expanded_model_clauses(
+    form: &ExprKind,
+    helpers: &ExpandedHelperMap,
+    clauses: &mut Vec<ExpandedModelClause>,
+) -> CoreResult<()> {
+    match form {
+        ExprKind::Begin(begin) => {
+            for item in &begin.exprs {
+                push_expanded_model_clauses(item, helpers, clauses)?;
+            }
+        }
+        ExprKind::Let(let_expr) => {
+            let scoped_helpers = model_let_helpers(let_expr, helpers)?;
+            push_expanded_model_clauses(&let_expr.body_expr, &scoped_helpers, clauses)?;
+        }
+        ExprKind::List(_) | ExprKind::Vector(_) => {
+            let items = expr_list_items(form, "model clause")?;
+            if let Some(head) = items.first().and_then(expr_head_name) {
+                match head.as_str() {
+                    "begin" => {
+                        for item in items.iter().skip(1) {
+                            push_expanded_model_clauses(item, helpers, clauses)?;
+                        }
+                        return Ok(());
+                    }
+                    "let" | "let*" if items.len() >= 3 => {
+                        let scoped_helpers = model_list_let_helpers(&items[1], helpers)?;
+                        for item in items.iter().skip(2) {
+                            push_expanded_model_clauses(item, &scoped_helpers, clauses)?;
+                        }
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            clauses.push(ExpandedModelClause {
+                items,
+                helpers: helpers.clone(),
+            });
+        }
+        _ => {
+            clauses.push(ExpandedModelClause {
+                items: expr_list_items(form, "model clause")?,
+                helpers: helpers.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn model_let_helpers(let_expr: &Let, helpers: &ExpandedHelperMap) -> CoreResult<ExpandedHelperMap> {
+    let mut scoped_helpers = helpers.clone();
+    for (name_expr, value_expr) in &let_expr.bindings {
+        let name = expr_value_symbol_or_text(name_expr, "model let binding name")?;
+        scoped_helpers.insert(name, ExpandedHelper::Value(value_expr.clone()));
+    }
+    Ok(scoped_helpers)
+}
+
+fn model_list_let_helpers(
+    bindings_expr: &ExprKind,
+    helpers: &ExpandedHelperMap,
+) -> CoreResult<ExpandedHelperMap> {
+    let mut scoped_helpers = helpers.clone();
+    for binding in expr_list_items(bindings_expr, "model let bindings")? {
+        let pair = expr_list_items(&binding, "model let binding")?;
+        if pair.len() != 2 {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "Each model `let` binding must be `(name expr)`.",
+            ));
+        }
+        let name = expr_value_symbol_or_text(&pair[0], "model let binding name")?;
+        scoped_helpers.insert(name, ExpandedHelper::Value(pair[1].clone()));
+    }
+    Ok(scoped_helpers)
 }
 
 fn parse_expanded_param_decl(
@@ -647,6 +959,18 @@ fn parse_expanded_node(
                         CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xz)),
                         CoreValueKind::Any,
                     ),
+                    "min" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Min)),
+                        CoreValueKind::Any,
+                    ),
+                    "center" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Center)),
+                        CoreValueKind::Any,
+                    ),
+                    "max" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Max)),
+                        CoreValueKind::Any,
+                    ),
                     "true" => (
                         CoreNodeKind::Literal(CoreLiteral::Boolean(true)),
                         CoreValueKind::Boolean,
@@ -728,7 +1052,7 @@ fn parse_expanded_node(
                     _ => unreachable!(),
                 }
             } else if let Some(head) = items.first() {
-                if let Ok(op_name) = expr_name(head) {
+                if let Ok(op_name) = expr_name(head).map(|name| normalize_hygienic_op_name(&name)) {
                     if op_name == "build" {
                         let build = parse_expanded_build_node(
                             &items,
@@ -739,6 +1063,8 @@ fn parse_expanded_node(
                             helper_stack,
                         )?;
                         (build, CoreValueKind::Solid)
+                    } else if op_name == "hole" {
+                        parse_expanded_typed_hole_call(&items[1..], next_node)?
                     } else if op_name == "list" {
                         parse_expanded_list_node(
                             &items[1..],
@@ -770,7 +1096,15 @@ fn parse_expanded_node(
                             helper_stack,
                         )?
                     } else if op_name == "range" {
-                        parse_expanded_range_node(&items[1..], next_node)?
+                        parse_expanded_range_node(
+                            &items[1..],
+                            next_node,
+                            param_ids,
+                            helpers,
+                            node_refs,
+                            local_names,
+                            helper_stack,
+                        )?
                     } else if op_name == "map" {
                         parse_expanded_map_node(
                             &op_name,
@@ -833,12 +1167,55 @@ fn parse_expanded_node(
                             local_names,
                             helper_stack,
                         )?
+                    } else if matches!(op_name.as_str(), "jitter2" | "superellipse-point") {
+                        parse_expanded_point_helper_node(
+                            &op_name,
+                            &items[1..],
+                            next_node,
+                            param_ids,
+                            helpers,
+                            node_refs,
+                            local_names,
+                            helper_stack,
+                        )?
+                    } else if matches!(
+                        op_name.as_str(),
+                        "jittered-grid"
+                            | "polar-points"
+                            | "organic-loop"
+                            | "wave-loop"
+                            | "voronoi-cells"
+                            | "lorenz-points"
+                            | "rossler-points"
+                            | "logistic-bifurcation-points"
+                            | "henon-points"
+                    ) {
+                        parse_expanded_fancy_list_node(
+                            &op_name,
+                            &items[1..],
+                            next_node,
+                            param_ids,
+                            helpers,
+                            node_refs,
+                            local_names,
+                            helper_stack,
+                        )?
                     } else if matches!(
                         op_name.as_str(),
                         "flat-map" | "concat-map" | "flat_map" | "concat_map"
                     ) {
                         parse_expanded_flat_map_node(
                             &op_name,
+                            &items[1..],
+                            next_node,
+                            param_ids,
+                            helpers,
+                            node_refs,
+                            local_names,
+                            helper_stack,
+                        )?
+                    } else if op_name == "apply" {
+                        parse_expanded_apply_node(
                             &items[1..],
                             next_node,
                             param_ids,
@@ -905,6 +1282,17 @@ fn parse_expanded_node(
                         )
                     } else if op_name == "let" && items.len() == 3 {
                         parse_expanded_let_node(
+                            &items[1],
+                            &items[2],
+                            next_node,
+                            param_ids,
+                            helpers,
+                            node_refs,
+                            local_names,
+                            helper_stack,
+                        )?
+                    } else if op_name == "let*" && items.len() == 3 {
+                        parse_expanded_let_star_node(
                             &items[1],
                             &items[2],
                             next_node,
@@ -1012,9 +1400,7 @@ fn parse_expanded_node(
                             op_name.as_str(),
                             "repeat" | "repeat-union" | "repeat-compound" | "repeat-pick"
                         ) {
-                            if let Some(index_symbol) =
-                                items.get(1).and_then(|node| expr_identifier(node))
-                            {
+                            if let Some(index_symbol) = items.get(1).and_then(expr_identifier) {
                                 body_locals.insert(index_symbol);
                             }
                         }
@@ -1325,13 +1711,15 @@ fn parse_expanded_reverse_node(
 fn parse_expanded_range_node(
     args: &[ExprKind],
     next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
 ) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
-    let (start, end) = match args {
-        [end] => (0i64, parse_integer_literal(end, "`range` end")?),
-        [start, end] => (
-            parse_integer_literal(start, "`range` start")?,
-            parse_integer_literal(end, "`range` end")?,
-        ),
+    let (start_expr, end_expr) = match args {
+        [end] => (None, end),
+        [start, end] => (Some(start), end),
         _ => {
             return Err(CompilerError::new(
                 CompilerErrorKind::Parse,
@@ -1339,23 +1727,60 @@ fn parse_expanded_range_node(
             ))
         }
     };
-    if end < start {
-        return Err(CompilerError::new(
-            CompilerErrorKind::TypeMismatch,
-            "`range` end must be greater than or equal to start.",
-        ));
+
+    let literal_start = match start_expr {
+        Some(start) => parse_optional_integer_literal(start, "`range` start")?,
+        None => Some(0),
+    };
+    let literal_end = parse_optional_integer_literal(end_expr, "`range` end")?;
+    if let (Some(start), Some(end)) = (literal_start, literal_end) {
+        if end < start {
+            return Err(CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                "`range` end must be greater than or equal to start.",
+            ));
+        }
+        let items = (start..end)
+            .map(|value| {
+                core_node_with_span(
+                    alloc_node_id(next_node),
+                    CoreNodeKind::Literal(CoreLiteral::Number(value as f64)),
+                    CoreValueKind::Number,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok((CoreNodeKind::List(items), CoreValueKind::List));
     }
-    let items = (start..end)
-        .map(|value| {
-            core_node_with_span(
-                alloc_node_id(next_node),
-                CoreNodeKind::Literal(CoreLiteral::Number(value as f64)),
-                CoreValueKind::Number,
-                None,
-            )
-        })
-        .collect::<Vec<_>>();
-    Ok((CoreNodeKind::List(items), CoreValueKind::List))
+
+    let start = match start_expr {
+        Some(start) => parse_expanded_node(
+            start,
+            next_node,
+            param_ids,
+            helpers,
+            node_refs,
+            local_names,
+            helper_stack,
+        )?,
+        None => number_literal_node(0.0, next_node, expr_source_span(end_expr)),
+    };
+    let end = parse_expanded_node(
+        end_expr,
+        next_node,
+        param_ids,
+        helpers,
+        node_refs,
+        local_names,
+        helper_stack,
+    )?;
+    Ok((
+        CoreNodeKind::Range {
+            start: Box::new(start),
+            end: Box::new(end),
+        },
+        CoreValueKind::List,
+    ))
 }
 
 fn parse_expanded_map_node(
@@ -1376,17 +1801,51 @@ fn parse_expanded_map_node(
             args.first().and_then(expr_source_span),
         ));
     }
-    let sources = collect_sequence_sources(
-        op_name,
-        &args[1..],
-        next_node,
-        param_ids,
-        helpers,
-        node_refs,
-        local_names,
-        helper_stack,
-    )?;
-    let mapped = zip_sequence_sources(sources)
+    let parsed_sources = args[1..]
+        .iter()
+        .map(|arg| {
+            parse_expanded_node(
+                arg,
+                next_node,
+                param_ids,
+                helpers,
+                node_refs,
+                local_names,
+                helper_stack,
+            )
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    let mut static_sources = Vec::new();
+    let mut all_static = true;
+    for source in &parsed_sources {
+        match extract_list_items(
+            clone_node_with_fresh_ids(source, next_node),
+            &format!("`{}` source", op_name),
+            next_node,
+        ) {
+            Ok(items) => static_sources.push(items),
+            Err(err) if source.value_kind == CoreValueKind::List => {
+                all_static = false;
+                break;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    if !all_static {
+        return parse_expanded_dynamic_map_node(
+            op_name,
+            &args[0],
+            parsed_sources,
+            next_node,
+            param_ids,
+            helpers,
+            node_refs,
+            local_names,
+            helper_stack,
+        );
+    }
+
+    let mapped = zip_sequence_sources(static_sources)
         .into_iter()
         .map(|items| {
             compile_sequence_callable_application(
@@ -1404,6 +1863,201 @@ fn parse_expanded_map_node(
         .collect::<CoreResult<Vec<_>>>()?;
     let value_kind = infer_list_value_kind(&mapped);
     Ok((CoreNodeKind::List(mapped), value_kind))
+}
+
+fn parse_expanded_dynamic_map_node(
+    op_name: &str,
+    callable: &ExprKind,
+    sources: Vec<CoreNode>,
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let (params, body_expr, nested_stack) = match callable {
+        ExprKind::LambdaFunction(lambda) => {
+            if lambda.rest || lambda.kwargs {
+                return Err(sequence_callable_kind_error(
+                    &format!("`{}`", op_name),
+                    "fixed-arity function",
+                    "variadic function",
+                    expr_source_span(callable),
+                ));
+            }
+            let params = lambda
+                .args
+                .iter()
+                .map(|arg| {
+                    expr_identifier(arg).ok_or_else(|| {
+                        sequence_callable_kind_error(
+                            &format!("`{}` lambda parameter", op_name),
+                            "symbol",
+                            &expr_actual_kind_label(arg),
+                            expr_source_span(arg),
+                        )
+                    })
+                })
+                .collect::<CoreResult<Vec<_>>>()?;
+            (params, lambda.body.clone(), helper_stack.clone())
+        }
+        func if expr_identifier(func)
+            .and_then(|name| helpers.get(&name).map(|helper| (name, helper)))
+            .is_some() =>
+        {
+            let (name, helper) = expr_identifier(func)
+                .and_then(|helper_name| {
+                    helpers
+                        .get(&helper_name)
+                        .map(|helper| (helper_name, helper))
+                })
+                .unwrap();
+            let ExpandedHelper::Function { params, body } = helper else {
+                return Err(sequence_callable_kind_error(
+                    &format!("`{}`", op_name),
+                    "function",
+                    "value",
+                    expr_source_span(callable),
+                ));
+            };
+            if helper_stack.contains(&name) {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!("Recursive helper function `{}` is not supported.", name),
+                )
+                .with_span(expr_source_span(callable).unwrap_or(SourceSpan::new(None, 0, 0))));
+            }
+            let mut nested_stack = helper_stack.clone();
+            nested_stack.insert(name);
+            (params.clone(), body.clone(), nested_stack)
+        }
+        _ => {
+            return Err(sequence_callable_kind_error(
+                &format!("`{}`", op_name),
+                "lambda or helper function for dynamic list source",
+                &expr_actual_kind_label(callable),
+                expr_source_span(callable),
+            ))
+        }
+    };
+    if params.len() != sources.len() {
+        return Err(sequence_callable_arity_error(
+            &format!("`{}`", op_name),
+            sources.len(),
+            params.len(),
+            expr_source_span(callable),
+        ));
+    }
+
+    let mut nested_locals = local_names.clone();
+    for param in &params {
+        nested_locals.insert(param.clone());
+    }
+    let body = parse_expanded_node(
+        &body_expr,
+        next_node,
+        param_ids,
+        helpers,
+        node_refs,
+        &nested_locals,
+        &nested_stack,
+    )?;
+    Ok((
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body: Box::new(body),
+        },
+        CoreValueKind::List,
+    ))
+}
+
+fn parse_expanded_apply_node(
+    args: &[ExprKind],
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    if args.len() < 2 {
+        return Err(sequence_arity_error(
+            "`apply`",
+            "function and list argument",
+            args.len(),
+            args.first().and_then(expr_source_span),
+        ));
+    }
+    let target_name = expr_identifier(&args[0])
+        .map(|name| normalize_hygienic_op_name(&name))
+        .ok_or_else(|| {
+            sequence_callable_kind_error(
+                "`apply`",
+                "global CAD operation",
+                &expr_actual_kind_label(&args[0]),
+                expr_source_span(&args[0]),
+            )
+        })?;
+    if local_names.contains(&target_name)
+        || node_refs.contains_key(&target_name)
+        || param_ids.contains_key(&target_name)
+    {
+        return Err(sequence_callable_kind_error(
+            "`apply`",
+            "global CAD operation",
+            "reference",
+            expr_source_span(&args[0]),
+        ));
+    }
+    if !is_apply_splice_operation(&target_name) {
+        return Err(CompilerError::new(
+            CompilerErrorKind::UnsupportedFeature,
+            format!("`apply` currently supports CAD variadic operations, got `{target_name}`."),
+        )
+        .with_span(expr_source_span(&args[0]).unwrap_or(SourceSpan::new(None, 0, 0))));
+    }
+
+    let fixed_args = args[1..args.len() - 1]
+        .iter()
+        .map(|arg| {
+            parse_expanded_node(
+                arg,
+                next_node,
+                param_ids,
+                helpers,
+                node_refs,
+                local_names,
+                helper_stack,
+            )
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    let list = parse_expanded_node(
+        args.last().expect("apply list arg"),
+        next_node,
+        param_ids,
+        helpers,
+        node_refs,
+        local_names,
+        helper_stack,
+    )?;
+    if list.value_kind != CoreValueKind::List {
+        return Err(sequence_type_mismatch_error(
+            "`apply` final argument",
+            "list",
+            core_value_kind_label(list.value_kind),
+            list.span,
+        ));
+    }
+    Ok((
+        CoreNodeKind::Apply {
+            op: map_operation(&target_name),
+            args: fixed_args,
+            list: Box::new(list),
+        },
+        infer_value_kind(&target_name),
+    ))
 }
 
 fn parse_expanded_filter_node(
@@ -1691,6 +2345,955 @@ fn parse_expanded_linspace_node(
             .collect::<CoreResult<Vec<_>>>()?
     };
     Ok((CoreNodeKind::List(items), CoreValueKind::List))
+}
+
+fn parse_expanded_point_helper_node(
+    op_name: &str,
+    args: &[ExprKind],
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let parse = |expr: &ExprKind, next_node: &mut u64| {
+        parse_expanded_node(
+            expr,
+            next_node,
+            param_ids,
+            helpers,
+            node_refs,
+            local_names,
+            helper_stack,
+        )
+    };
+    let point = match op_name {
+        "jitter2" => {
+            if args.len() != 4 {
+                return Err(sequence_arity_error(
+                    "`jitter2`",
+                    "x, y, amount, and seed",
+                    args.len(),
+                    args.first().and_then(expr_source_span),
+                ));
+            }
+            jitter_point_nodes(
+                parse(&args[0], next_node)?,
+                parse(&args[1], next_node)?,
+                parse(&args[2], next_node)?,
+                parse(&args[3], next_node)?,
+                next_node,
+                args.first().and_then(expr_source_span),
+            )
+        }
+        "superellipse-point" => {
+            if args.len() != 4 {
+                return Err(sequence_arity_error(
+                    "`superellipse-point`",
+                    "rx, ry, n, and t",
+                    args.len(),
+                    args.first().and_then(expr_source_span),
+                ));
+            }
+            let span = args.first().and_then(expr_source_span);
+            let angle = mul_number_node(
+                number_literal_node(std::f64::consts::TAU, next_node, span),
+                parse(&args[3], next_node)?,
+                next_node,
+                span,
+            );
+            let exponent = div_number_node(
+                number_literal_node(2.0, next_node, span),
+                parse(&args[2], next_node)?,
+                next_node,
+                span,
+            );
+            vec![
+                mul_number_node(
+                    parse(&args[0], next_node)?,
+                    call_number_node(
+                        "signed-pow",
+                        vec![
+                            call_number_node("cos", vec![angle.clone()], next_node, span),
+                            exponent.clone(),
+                        ],
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                ),
+                mul_number_node(
+                    parse(&args[1], next_node)?,
+                    call_number_node(
+                        "signed-pow",
+                        vec![
+                            call_number_node("sin", vec![angle], next_node, span),
+                            exponent,
+                        ],
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                ),
+            ]
+        }
+        _ => unreachable!(),
+    };
+    Ok((CoreNodeKind::List(point), CoreValueKind::Point2))
+}
+
+fn parse_expanded_fancy_list_node(
+    op_name: &str,
+    args: &[ExprKind],
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let span = args.first().and_then(expr_source_span);
+    let parse = |expr: &ExprKind, next_node: &mut u64| {
+        parse_expanded_node(
+            expr,
+            next_node,
+            param_ids,
+            helpers,
+            node_refs,
+            local_names,
+            helper_stack,
+        )
+    };
+    let mut points = Vec::new();
+    match op_name {
+        "polar-points" => {
+            if args.len() != 2 {
+                return Err(sequence_arity_error(
+                    "`polar-points`",
+                    "count and radius",
+                    args.len(),
+                    span,
+                ));
+            }
+            let count = parse_positive_count(&args[0], "`polar-points` count")?;
+            for index in 0..count {
+                let angle = number_literal_node(
+                    std::f64::consts::TAU * index as f64 / count as f64,
+                    next_node,
+                    span,
+                );
+                points.push(point2_node(
+                    mul_number_node(
+                        parse(&args[1], next_node)?,
+                        call_number_node("cos", vec![angle.clone()], next_node, span),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        parse(&args[1], next_node)?,
+                        call_number_node("sin", vec![angle], next_node, span),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                ));
+            }
+        }
+        "organic-loop" => {
+            if args.len() != 4 {
+                return Err(sequence_arity_error(
+                    "`organic-loop`",
+                    "count, radius, amount, and seed",
+                    args.len(),
+                    span,
+                ));
+            }
+            let count = parse_positive_count(&args[0], "`organic-loop` count")?;
+            for index in 0..count {
+                let angle = number_literal_node(
+                    std::f64::consts::TAU * index as f64 / count as f64,
+                    next_node,
+                    span,
+                );
+                let radius = add_number_node(
+                    parse(&args[1], next_node)?,
+                    mul_number_node(
+                        parse(&args[2], next_node)?,
+                        call_number_node(
+                            "hash-signed",
+                            vec![
+                                number_literal_node(index as f64, next_node, span),
+                                number_literal_node(count as f64, next_node, span),
+                                parse(&args[3], next_node)?,
+                            ],
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                );
+                points.push(point2_node(
+                    mul_number_node(
+                        radius.clone(),
+                        call_number_node("cos", vec![angle.clone()], next_node, span),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        radius,
+                        call_number_node("sin", vec![angle], next_node, span),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                ));
+            }
+        }
+        "wave-loop" => {
+            if args.len() != 6 {
+                return Err(sequence_arity_error(
+                    "`wave-loop`",
+                    "count, rx, ry, amp, waves, and seed",
+                    args.len(),
+                    span,
+                ));
+            }
+            let count = parse_positive_count(&args[0], "`wave-loop` count")?;
+            for index in 0..count {
+                let angle = number_literal_node(
+                    std::f64::consts::TAU * index as f64 / count as f64,
+                    next_node,
+                    span,
+                );
+                let wave_phase = add_number_node(
+                    mul_number_node(parse(&args[4], next_node)?, angle.clone(), next_node, span),
+                    mul_number_node(
+                        number_literal_node(std::f64::consts::TAU, next_node, span),
+                        call_number_node(
+                            "hash01",
+                            vec![
+                                number_literal_node(index as f64, next_node, span),
+                                parse(&args[4], next_node)?,
+                                parse(&args[5], next_node)?,
+                            ],
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                );
+                let wave = mul_number_node(
+                    parse(&args[3], next_node)?,
+                    call_number_node("sin", vec![wave_phase], next_node, span),
+                    next_node,
+                    span,
+                );
+                points.push(point2_node(
+                    mul_number_node(
+                        add_number_node(parse(&args[1], next_node)?, wave.clone(), next_node, span),
+                        call_number_node("cos", vec![angle.clone()], next_node, span),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        add_number_node(parse(&args[2], next_node)?, wave, next_node, span),
+                        call_number_node("sin", vec![angle], next_node, span),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                ));
+            }
+        }
+        "jittered-grid" | "voronoi-cells" => {
+            if args.len() != 6 {
+                return Err(sequence_arity_error(
+                    &format!("`{}`", op_name),
+                    "rows, cols, dx, dy, amount, and seed",
+                    args.len(),
+                    span,
+                ));
+            }
+            let rows = parse_positive_count(&args[0], &format!("`{}` rows", op_name))?;
+            let cols = parse_positive_count(&args[1], &format!("`{}` cols", op_name))?;
+            for row in 0..rows {
+                for col in 0..cols {
+                    let x = mul_number_node(
+                        number_literal_node(col as f64 - (cols - 1) as f64 / 2.0, next_node, span),
+                        parse(&args[2], next_node)?,
+                        next_node,
+                        span,
+                    );
+                    let y = mul_number_node(
+                        number_literal_node(row as f64 - (rows - 1) as f64 / 2.0, next_node, span),
+                        parse(&args[3], next_node)?,
+                        next_node,
+                        span,
+                    );
+                    let seed = add_number_node(
+                        parse(&args[5], next_node)?,
+                        number_literal_node((row * 1009 + col) as f64, next_node, span),
+                        next_node,
+                        span,
+                    );
+                    let mut jittered = jitter_point_nodes(
+                        x,
+                        y,
+                        parse(&args[4], next_node)?,
+                        seed,
+                        next_node,
+                        span,
+                    );
+                    let jy = jittered.pop().expect("jitter2 y");
+                    let jx = jittered.pop().expect("jitter2 x");
+                    points.push(point2_node(jx, jy, next_node, span));
+                }
+            }
+        }
+        "lorenz-points" => {
+            if args.len() != 3 {
+                return Err(sequence_arity_error(
+                    "`lorenz-points`",
+                    "count, dt, and scale",
+                    args.len(),
+                    span,
+                ));
+            }
+            let count = parse_positive_count(&args[0], "`lorenz-points` count")?;
+            let mut x = number_literal_node(0.1, next_node, span);
+            let mut y = number_literal_node(0.0, next_node, span);
+            let mut z = number_literal_node(0.0, next_node, span);
+            for _ in 0..count {
+                let sigma = number_literal_node(10.0, next_node, span);
+                let rho = number_literal_node(28.0, next_node, span);
+                let beta = div_number_node(
+                    number_literal_node(8.0, next_node, span),
+                    number_literal_node(3.0, next_node, span),
+                    next_node,
+                    span,
+                );
+                let dx = mul_number_node(
+                    sigma,
+                    sub_number_node(y.clone(), x.clone(), next_node, span),
+                    next_node,
+                    span,
+                );
+                let dy = sub_number_node(
+                    mul_number_node(
+                        x.clone(),
+                        sub_number_node(rho, z.clone(), next_node, span),
+                        next_node,
+                        span,
+                    ),
+                    y.clone(),
+                    next_node,
+                    span,
+                );
+                let dz = sub_number_node(
+                    mul_number_node(x.clone(), y.clone(), next_node, span),
+                    mul_number_node(beta, z.clone(), next_node, span),
+                    next_node,
+                    span,
+                );
+                x = add_number_node(
+                    x,
+                    mul_number_node(parse(&args[1], next_node)?, dx, next_node, span),
+                    next_node,
+                    span,
+                );
+                y = add_number_node(
+                    y,
+                    mul_number_node(parse(&args[1], next_node)?, dy, next_node, span),
+                    next_node,
+                    span,
+                );
+                z = add_number_node(
+                    z,
+                    mul_number_node(parse(&args[1], next_node)?, dz, next_node, span),
+                    next_node,
+                    span,
+                );
+                let scale = parse(&args[2], next_node)?;
+                points.push(bounded_point3_node(
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            x.clone(),
+                            number_literal_node(30.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            y.clone(),
+                            number_literal_node(30.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            z.clone(),
+                            number_literal_node(50.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    scale,
+                    next_node,
+                    span,
+                ));
+            }
+        }
+        "rossler-points" => {
+            if args.len() != 3 {
+                return Err(sequence_arity_error(
+                    "`rossler-points`",
+                    "count, dt, and scale",
+                    args.len(),
+                    span,
+                ));
+            }
+            let count = parse_positive_count(&args[0], "`rossler-points` count")?;
+            let mut x = number_literal_node(0.1, next_node, span);
+            let mut y = number_literal_node(0.0, next_node, span);
+            let mut z = number_literal_node(0.0, next_node, span);
+            for _ in 0..count {
+                let dx = neg_number_node(
+                    add_number_node(y.clone(), z.clone(), next_node, span),
+                    next_node,
+                    span,
+                );
+                let dy = add_number_node(
+                    x.clone(),
+                    mul_number_node(
+                        number_literal_node(0.2, next_node, span),
+                        y.clone(),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                );
+                let dz = add_number_node(
+                    number_literal_node(0.2, next_node, span),
+                    mul_number_node(
+                        z.clone(),
+                        sub_number_node(
+                            x.clone(),
+                            number_literal_node(5.7, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                );
+                x = add_number_node(
+                    x,
+                    mul_number_node(parse(&args[1], next_node)?, dx, next_node, span),
+                    next_node,
+                    span,
+                );
+                y = add_number_node(
+                    y,
+                    mul_number_node(parse(&args[1], next_node)?, dy, next_node, span),
+                    next_node,
+                    span,
+                );
+                z = add_number_node(
+                    z,
+                    mul_number_node(parse(&args[1], next_node)?, dz, next_node, span),
+                    next_node,
+                    span,
+                );
+                let scale = parse(&args[2], next_node)?;
+                points.push(bounded_point3_node(
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            x.clone(),
+                            number_literal_node(15.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            y.clone(),
+                            number_literal_node(15.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            z.clone(),
+                            number_literal_node(30.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    scale,
+                    next_node,
+                    span,
+                ));
+            }
+        }
+        "logistic-bifurcation-points" => {
+            if args.len() != 4 {
+                return Err(sequence_arity_error(
+                    "`logistic-bifurcation-points`",
+                    "r-count, samples, transient, and scale",
+                    args.len(),
+                    span,
+                ));
+            }
+            let r_count = parse_positive_count(&args[0], "`logistic-bifurcation-points` r-count")?;
+            let samples = parse_positive_count(&args[1], "`logistic-bifurcation-points` samples")?;
+            let transient =
+                parse_nonnegative_count(&args[2], "`logistic-bifurcation-points` transient")?;
+            for ri in 0..r_count {
+                let r = if r_count == 1 {
+                    number_literal_node(2.5, next_node, span)
+                } else {
+                    add_number_node(
+                        number_literal_node(2.5, next_node, span),
+                        mul_number_node(
+                            number_literal_node(1.5, next_node, span),
+                            div_number_node(
+                                number_literal_node(ri as f64, next_node, span),
+                                number_literal_node((r_count - 1) as f64, next_node, span),
+                                next_node,
+                                span,
+                            ),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    )
+                };
+                let mut x = add_number_node(
+                    number_literal_node(0.2, next_node, span),
+                    mul_number_node(
+                        number_literal_node(0.6, next_node, span),
+                        call_number_node(
+                            "hash01",
+                            vec![
+                                number_literal_node(ri as f64, next_node, span),
+                                number_literal_node(samples as f64, next_node, span),
+                                number_literal_node(transient as f64, next_node, span),
+                            ],
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    next_node,
+                    span,
+                );
+                for _ in 0..transient {
+                    x = logistic_step_node(r.clone(), x, next_node, span);
+                }
+                for _ in 0..samples {
+                    x = logistic_step_node(r.clone(), x, next_node, span);
+                    let scale = parse(&args[3], next_node)?;
+                    let x_pos = sub_number_node(
+                        mul_number_node(
+                            scale.clone(),
+                            sub_number_node(
+                                mul_number_node(
+                                    number_literal_node(2.0, next_node, span),
+                                    div_number_node(
+                                        sub_number_node(
+                                            r.clone(),
+                                            number_literal_node(2.5, next_node, span),
+                                            next_node,
+                                            span,
+                                        ),
+                                        number_literal_node(1.5, next_node, span),
+                                        next_node,
+                                        span,
+                                    ),
+                                    next_node,
+                                    span,
+                                ),
+                                number_literal_node(1.0, next_node, span),
+                                next_node,
+                                span,
+                            ),
+                            next_node,
+                            span,
+                        ),
+                        number_literal_node(0.0, next_node, span),
+                        next_node,
+                        span,
+                    );
+                    let y_pos = mul_number_node(
+                        scale.clone(),
+                        sub_number_node(
+                            mul_number_node(
+                                number_literal_node(2.0, next_node, span),
+                                x.clone(),
+                                next_node,
+                                span,
+                            ),
+                            number_literal_node(1.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    );
+                    points.push(bounded_point2_node(x_pos, y_pos, scale, next_node, span));
+                }
+            }
+        }
+        "henon-points" => {
+            if args.len() != 2 {
+                return Err(sequence_arity_error(
+                    "`henon-points`",
+                    "count and scale",
+                    args.len(),
+                    span,
+                ));
+            }
+            let count = parse_positive_count(&args[0], "`henon-points` count")?;
+            let mut x = number_literal_node(0.1, next_node, span);
+            let mut y = number_literal_node(0.0, next_node, span);
+            for _ in 0..count {
+                let nx = add_number_node(
+                    sub_number_node(
+                        number_literal_node(1.0, next_node, span),
+                        mul_number_node(
+                            number_literal_node(1.4, next_node, span),
+                            mul_number_node(x.clone(), x.clone(), next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    y,
+                    next_node,
+                    span,
+                );
+                let ny = mul_number_node(
+                    number_literal_node(0.3, next_node, span),
+                    x,
+                    next_node,
+                    span,
+                );
+                x = nx;
+                y = ny;
+                let scale = parse(&args[1], next_node)?;
+                points.push(bounded_point2_node(
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            x.clone(),
+                            number_literal_node(2.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    mul_number_node(
+                        scale.clone(),
+                        div_number_node(
+                            y.clone(),
+                            number_literal_node(2.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        next_node,
+                        span,
+                    ),
+                    scale,
+                    next_node,
+                    span,
+                ));
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok((CoreNodeKind::List(points), CoreValueKind::List))
+}
+
+fn parse_positive_count(value: &ExprKind, context: &str) -> CoreResult<usize> {
+    let count = parse_integer_literal(value, context)?;
+    if count < 1 {
+        return Err(sequence_type_mismatch_error(
+            context,
+            "positive integer",
+            &count.to_string(),
+            expr_source_span(value),
+        ));
+    }
+    Ok(count as usize)
+}
+
+fn parse_nonnegative_count(value: &ExprKind, context: &str) -> CoreResult<usize> {
+    let count = parse_integer_literal(value, context)?;
+    if count < 0 {
+        return Err(sequence_type_mismatch_error(
+            context,
+            "nonnegative integer",
+            &count.to_string(),
+            expr_source_span(value),
+        ));
+    }
+    Ok(count as usize)
+}
+
+fn jitter_point_nodes(
+    x: CoreNode,
+    y: CoreNode,
+    amount: CoreNode,
+    seed: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> Vec<CoreNode> {
+    let x_hash = call_number_node(
+        "hash-signed",
+        vec![x.clone(), y.clone(), seed.clone()],
+        next_node,
+        span,
+    );
+    let y_hash = call_number_node(
+        "hash-signed",
+        vec![
+            add_number_node(
+                x.clone(),
+                number_literal_node(19.19, next_node, span),
+                next_node,
+                span,
+            ),
+            add_number_node(
+                y.clone(),
+                number_literal_node(7.73, next_node, span),
+                next_node,
+                span,
+            ),
+            add_number_node(
+                seed,
+                number_literal_node(31.0, next_node, span),
+                next_node,
+                span,
+            ),
+        ],
+        next_node,
+        span,
+    );
+    vec![
+        add_number_node(
+            x,
+            mul_number_node(amount.clone(), x_hash, next_node, span),
+            next_node,
+            span,
+        ),
+        add_number_node(
+            y,
+            mul_number_node(amount, y_hash, next_node, span),
+            next_node,
+            span,
+        ),
+    ]
+}
+
+fn point2_node(
+    x: CoreNode,
+    y: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    core_node_with_span(
+        alloc_node_id(next_node),
+        CoreNodeKind::List(vec![x, y]),
+        CoreValueKind::Point2,
+        span,
+    )
+}
+
+fn bounded_point2_node(
+    x: CoreNode,
+    y: CoreNode,
+    scale: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    point2_node(
+        clamp_to_scale_node(x, scale.clone(), next_node, span),
+        clamp_to_scale_node(y, scale, next_node, span),
+        next_node,
+        span,
+    )
+}
+
+fn point3_node(
+    x: CoreNode,
+    y: CoreNode,
+    z: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    core_node_with_span(
+        alloc_node_id(next_node),
+        CoreNodeKind::List(vec![x, y, z]),
+        CoreValueKind::Point3,
+        span,
+    )
+}
+
+fn bounded_point3_node(
+    x: CoreNode,
+    y: CoreNode,
+    z: CoreNode,
+    scale: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    point3_node(
+        clamp_to_scale_node(x, scale.clone(), next_node, span),
+        clamp_to_scale_node(y, scale.clone(), next_node, span),
+        clamp_to_scale_node(z, scale, next_node, span),
+        next_node,
+        span,
+    )
+}
+
+fn clamp_to_scale_node(
+    value: CoreNode,
+    scale: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    call_number_node(
+        "clamp",
+        vec![
+            value,
+            neg_number_node(scale.clone(), next_node, span),
+            scale,
+        ],
+        next_node,
+        span,
+    )
+}
+
+fn call_number_node(
+    name: &str,
+    args: Vec<CoreNode>,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    core_node_with_span(
+        alloc_node_id(next_node),
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom(name.to_string()),
+            args,
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Number,
+        span,
+    )
+}
+
+fn add_number_node(
+    left: CoreNode,
+    right: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    call_number_node("+", vec![left, right], next_node, span)
+}
+
+fn sub_number_node(
+    left: CoreNode,
+    right: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    call_number_node("-", vec![left, right], next_node, span)
+}
+
+fn neg_number_node(value: CoreNode, next_node: &mut u64, span: Option<SourceSpan>) -> CoreNode {
+    call_number_node("-", vec![value], next_node, span)
+}
+
+fn mul_number_node(
+    left: CoreNode,
+    right: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    call_number_node("*", vec![left, right], next_node, span)
+}
+
+fn div_number_node(
+    left: CoreNode,
+    right: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    call_number_node("/", vec![left, right], next_node, span)
+}
+
+fn logistic_step_node(
+    r: CoreNode,
+    x: CoreNode,
+    next_node: &mut u64,
+    span: Option<SourceSpan>,
+) -> CoreNode {
+    mul_number_node(
+        r,
+        mul_number_node(
+            x.clone(),
+            sub_number_node(
+                number_literal_node(1.0, next_node, span),
+                x,
+                next_node,
+                span,
+            ),
+            next_node,
+            span,
+        ),
+        next_node,
+        span,
+    )
 }
 
 fn parse_expanded_flat_map_node(
@@ -2022,7 +3625,7 @@ fn extract_list_items(
         _ => Err(sequence_type_mismatch_error(
             context,
             "list",
-            &core_value_kind_label(value_kind),
+            core_value_kind_label(value_kind),
             span,
         )),
     }
@@ -2099,6 +3702,30 @@ fn clone_node_with_fresh_ids(node: &CoreNode, next_node: &mut u64) -> CoreNode {
                     value: clone_node_with_fresh_ids(&keyword.value, next_node),
                 })
                 .collect(),
+        },
+        CoreNodeKind::Range { start, end } => CoreNodeKind::Range {
+            start: Box::new(clone_node_with_fresh_ids(start, next_node)),
+            end: Box::new(clone_node_with_fresh_ids(end, next_node)),
+        },
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => CoreNodeKind::Map {
+            params: params.clone(),
+            sources: sources
+                .iter()
+                .map(|source| clone_node_with_fresh_ids(source, next_node))
+                .collect(),
+            body: Box::new(clone_node_with_fresh_ids(body, next_node)),
+        },
+        CoreNodeKind::Apply { op, args, list } => CoreNodeKind::Apply {
+            op: op.clone(),
+            args: args
+                .iter()
+                .map(|arg| clone_node_with_fresh_ids(arg, next_node))
+                .collect(),
+            list: Box::new(clone_node_with_fresh_ids(list, next_node)),
         },
         CoreNodeKind::List(items) => CoreNodeKind::List(
             items
@@ -2406,11 +4033,89 @@ fn evaluate_core_number(
                 "sin" => unary_core_number_op(op_name, args, env, node.span, f64::sin),
                 "cos" => unary_core_number_op(op_name, args, env, node.span, f64::cos),
                 "tan" => unary_core_number_op(op_name, args, env, node.span, f64::tan),
+                "atan" => unary_core_number_op(op_name, args, env, node.span, f64::atan),
+                "atan2" => {
+                    if args.len() != 2 {
+                        return Err(sequence_arity_error(
+                            "`atan2`",
+                            "y and x",
+                            args.len(),
+                            node.span,
+                        ));
+                    }
+                    Ok(evaluate_core_number(op_name, &args[0], env)?
+                        .atan2(evaluate_core_number(op_name, &args[1], env)?))
+                }
                 "deg" => {
+                    unary_core_number_op(op_name, args, env, node.span, |value| value.to_radians())
+                }
+                "deg->rad" => {
                     unary_core_number_op(op_name, args, env, node.span, |value| value.to_radians())
                 }
                 "rad" => {
                     unary_core_number_op(op_name, args, env, node.span, |value| value.to_degrees())
+                }
+                "rad->deg" => {
+                    unary_core_number_op(op_name, args, env, node.span, |value| value.to_degrees())
+                }
+                "floor" => unary_core_number_op(op_name, args, env, node.span, f64::floor),
+                "signed-pow" => {
+                    binary_core_number_op(op_name, args, env, node.span, |value, exp| {
+                        value.signum() * value.abs().powf(exp)
+                    })
+                }
+                "hash01" => ternary_core_number_op(
+                    op_name,
+                    args,
+                    env,
+                    node.span,
+                    ecky_deterministic::hash01,
+                ),
+                "hash-signed" => ternary_core_number_op(
+                    op_name,
+                    args,
+                    env,
+                    node.span,
+                    ecky_deterministic::hash_signed,
+                ),
+                "noise2" => ternary_core_number_op(
+                    op_name,
+                    args,
+                    env,
+                    node.span,
+                    ecky_deterministic::noise2,
+                ),
+                "voronoi2" => ternary_core_number_op(
+                    op_name,
+                    args,
+                    env,
+                    node.span,
+                    ecky_deterministic::voronoi2,
+                ),
+                "cell-distance2" => ternary_core_number_op(
+                    op_name,
+                    args,
+                    env,
+                    node.span,
+                    ecky_deterministic::cell_distance2,
+                ),
+                "fbm2" => {
+                    if args.len() != 6 {
+                        return Err(sequence_arity_error(
+                            "`fbm2`",
+                            "x, y, seed, octaves, lacunarity, and gain",
+                            args.len(),
+                            node.span,
+                        ));
+                    }
+                    Ok(ecky_deterministic::fbm2(
+                        evaluate_core_number(op_name, &args[0], env)?,
+                        evaluate_core_number(op_name, &args[1], env)?,
+                        evaluate_core_number(op_name, &args[2], env)?,
+                        evaluate_core_number(op_name, &args[3], env)?,
+                        evaluate_core_number(op_name, &args[4], env)?,
+                        evaluate_core_number(op_name, &args[5], env)?,
+                    ))
                 }
                 _ => Err(sequence_type_mismatch_error(
                     &format!("`{}`", op_name),
@@ -2442,6 +4147,9 @@ fn evaluate_core_stringish(
             CoreSymbol::Xy => "xy".to_string(),
             CoreSymbol::Yz => "yz".to_string(),
             CoreSymbol::Xz => "xz".to_string(),
+            CoreSymbol::Min => "min".to_string(),
+            CoreSymbol::Center => "center".to_string(),
+            CoreSymbol::Max => "max".to_string(),
         }),
         CoreNodeKind::Reference(CoreReference::Local(name)) => evaluate_core_stringish(
             op_name,
@@ -2519,6 +4227,49 @@ fn unary_core_number_op(
         ));
     }
     Ok(op(evaluate_core_number(op_name, &args[0], env)?))
+}
+
+fn binary_core_number_op(
+    op_name: &str,
+    args: &[CoreNode],
+    env: &BTreeMap<String, CoreNode>,
+    span: Option<SourceSpan>,
+    op: impl Fn(f64, f64) -> f64,
+) -> CoreResult<f64> {
+    if args.len() != 2 {
+        return Err(sequence_arity_error(
+            &format!("`{}`", op_name),
+            "two numbers",
+            args.len(),
+            span,
+        ));
+    }
+    Ok(op(
+        evaluate_core_number(op_name, &args[0], env)?,
+        evaluate_core_number(op_name, &args[1], env)?,
+    ))
+}
+
+fn ternary_core_number_op(
+    op_name: &str,
+    args: &[CoreNode],
+    env: &BTreeMap<String, CoreNode>,
+    span: Option<SourceSpan>,
+    op: impl Fn(f64, f64, f64) -> f64,
+) -> CoreResult<f64> {
+    if args.len() != 3 {
+        return Err(sequence_arity_error(
+            &format!("`{}`", op_name),
+            "three numbers",
+            args.len(),
+            span,
+        ));
+    }
+    Ok(op(
+        evaluate_core_number(op_name, &args[0], env)?,
+        evaluate_core_number(op_name, &args[1], env)?,
+        evaluate_core_number(op_name, &args[2], env)?,
+    ))
 }
 
 fn unary_core_number_predicate(
@@ -2665,6 +4416,11 @@ fn node_actual_kind_label(node: &CoreNode) -> String {
         CoreNodeKind::Call { op, .. } => core_custom_operation_name(op)
             .map(|name| format!("call `{}`", name))
             .unwrap_or_else(|| "call".to_string()),
+        CoreNodeKind::Range { .. } => "list".to_string(),
+        CoreNodeKind::Map { .. } => "list".to_string(),
+        CoreNodeKind::Apply { op, .. } => core_custom_operation_name(op)
+            .map(|name| format!("apply `{}`", name))
+            .unwrap_or_else(|| "apply".to_string()),
         CoreNodeKind::List(_) => "list".to_string(),
         CoreNodeKind::Group(_) => "group".to_string(),
     }
@@ -2693,6 +4449,13 @@ fn infer_list_value_kind(items: &[CoreNode]) -> CoreValueKind {
         Some(CoreValueKind::Point3) => CoreValueKind::Point3,
         _ => CoreValueKind::List,
     }
+}
+
+fn parse_optional_integer_literal(value: &ExprKind, context: &str) -> CoreResult<Option<i64>> {
+    if !matches!(value, ExprKind::Atom(atom) if matches!(atom.syn.ty, TokenType::Number(_))) {
+        return Ok(None);
+    }
+    parse_integer_literal(value, context).map(Some)
 }
 
 fn parse_integer_literal(value: &ExprKind, context: &str) -> CoreResult<i64> {
@@ -2761,6 +4524,124 @@ fn parse_expanded_let_node(
         },
         value_kind,
     ))
+}
+
+fn parse_expanded_let_star_node(
+    bindings_expr: &ExprKind,
+    body_expr: &ExprKind,
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let binding_items = expr_list_items(bindings_expr, "let* bindings")?;
+    let body = build_expanded_let_star_body(
+        &binding_items,
+        body_expr,
+        next_node,
+        param_ids,
+        helpers,
+        node_refs,
+        local_names,
+        helper_stack,
+    )?;
+    Ok((body.kind, body.value_kind))
+}
+
+fn build_expanded_let_star_body(
+    bindings: &[ExprKind],
+    body_expr: &ExprKind,
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
+) -> CoreResult<CoreNode> {
+    let Some((first, rest)) = bindings.split_first() else {
+        return parse_expanded_node(
+            body_expr,
+            next_node,
+            param_ids,
+            helpers,
+            node_refs,
+            local_names,
+            helper_stack,
+        );
+    };
+    let pair = expr_list_items(first, "let* binding")?;
+    if pair.len() != 2 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Each `let*` binding must be `(name expr)`.",
+        ));
+    }
+    let name = expr_value_symbol_or_text(&pair[0], "let* binding name")?;
+    let value = parse_expanded_node(
+        &pair[1],
+        next_node,
+        param_ids,
+        helpers,
+        node_refs,
+        local_names,
+        helper_stack,
+    )?;
+    let mut nested_locals = local_names.clone();
+    nested_locals.insert(name.clone());
+    let body = build_expanded_let_star_body(
+        rest,
+        body_expr,
+        next_node,
+        param_ids,
+        helpers,
+        node_refs,
+        &nested_locals,
+        helper_stack,
+    )?;
+    let value_kind = body.value_kind;
+    Ok(core_node_with_span(
+        alloc_node_id(next_node),
+        CoreNodeKind::Let {
+            bindings: vec![CoreBinding { name, value }],
+            body: Box::new(body),
+        },
+        value_kind,
+        expr_source_span(body_expr),
+    ))
+}
+
+fn parse_expanded_typed_hole_call(
+    args: &[ExprKind],
+    next_node: &mut u64,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let mut type_name = None;
+    let mut goal = None;
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let key = normalize_keyword(&expr_name(&args[index])?);
+        let value = args.get(index + 1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Typed hole option `{}` missing value.", key),
+            )
+        })?;
+        match key.as_str() {
+            ":type" => type_name = Some(expr_value_symbol_or_text(value, "hole type")?),
+            ":goal" => goal = Some(expr_value_symbol_or_text(value, "hole goal")?),
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!("Unsupported typed hole option `{}`.", other),
+                ))
+            }
+        }
+        index += 2;
+    }
+
+    typed_hole_call(type_name, goal, next_node)
 }
 
 fn parse_expanded_build_node(
@@ -2884,6 +4765,10 @@ fn expr_name(value: &ExprKind) -> CoreResult<String> {
             format!("Expected symbol, received {:?}", other),
         )),
     }
+}
+
+fn normalize_hygienic_op_name(name: &str) -> String {
+    name.rsplit("__%#__").next().unwrap_or(name).to_string()
 }
 
 fn expr_identifier(value: &ExprKind) -> Option<String> {
@@ -3036,6 +4921,7 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
             }
             "part" => raw_parts.push(items),
             "meta" => {}
+            "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
             other => {
                 return Err(CompilerError::new(
                     CompilerErrorKind::UnsupportedFeature,
@@ -3358,6 +5244,8 @@ fn parse_node(
                     } else if op_name == "build" {
                         let build = parse_build_node(&items, next_node, param_ids, local_names)?;
                         (build, CoreValueKind::Solid)
+                    } else if op_name == "hole" {
+                        parse_typed_hole_call(&items[1..], next_node)?
                     } else if op_name == "if" && items.len() == 4 {
                         (
                             CoreNodeKind::If {
@@ -3463,6 +5351,91 @@ fn parse_node(
     };
 
     Ok(CoreNode::new(id, kind, value_kind))
+}
+
+fn parse_typed_hole_call(
+    args: &[SteelVal],
+    next_node: &mut u64,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let mut type_name = None;
+    let mut goal = None;
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let key = normalize_keyword(&symbol_name(&args[index])?);
+        let value = args.get(index + 1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Typed hole option `{}` missing value.", key),
+            )
+        })?;
+        match key.as_str() {
+            ":type" => type_name = Some(value_symbol_or_text(value, "hole type")?),
+            ":goal" => goal = Some(value_symbol_or_text(value, "hole goal")?),
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!("Unsupported typed hole option `{}`.", other),
+                ))
+            }
+        }
+        index += 2;
+    }
+
+    typed_hole_call(type_name, goal, next_node)
+}
+
+fn typed_hole_call(
+    type_name: Option<String>,
+    goal: Option<String>,
+    next_node: &mut u64,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let type_name = type_name.ok_or_else(|| {
+        CompilerError::new(CompilerErrorKind::Parse, "Typed hole requires `:type`.")
+    })?;
+    let value_kind = typed_hole_value_kind(&type_name)?;
+    let mut keywords = vec![CoreKeywordArg {
+        name: "type".to_string(),
+        value: CoreNode::new(
+            alloc_node_id(next_node),
+            CoreNodeKind::Literal(CoreLiteral::Text(type_name)),
+            CoreValueKind::Text,
+        ),
+    }];
+    if let Some(goal) = goal {
+        keywords.push(CoreKeywordArg {
+            name: "goal".to_string(),
+            value: CoreNode::new(
+                alloc_node_id(next_node),
+                CoreNodeKind::Literal(CoreLiteral::Text(goal)),
+                CoreValueKind::Text,
+            ),
+        });
+    }
+    Ok((
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom("hole".to_string()),
+            args: vec![],
+            keywords,
+        },
+        value_kind,
+    ))
+}
+
+fn typed_hole_value_kind(type_name: &str) -> CoreResult<CoreValueKind> {
+    match type_name.to_ascii_lowercase().as_str() {
+        "solid" => Ok(CoreValueKind::Solid),
+        "sketch" => Ok(CoreValueKind::Sketch),
+        "path" => Ok(CoreValueKind::Path),
+        "shape" => Ok(CoreValueKind::Solid),
+        other => Err(CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!(
+                "Typed hole `:type` expected solid, sketch, path, or shape; got `{}`.",
+                other
+            ),
+        )),
+    }
 }
 
 fn parse_build_node(
@@ -3655,6 +5628,8 @@ fn map_operation(name: &str) -> CoreOperation {
         "repeat-union" => CoreOperation::Array(CoreArrayOp::RepeatUnion),
         "repeat-compound" => CoreOperation::Array(CoreArrayOp::RepeatCompound),
         "repeat-pick" => CoreOperation::Array(CoreArrayOp::RepeatPick),
+        "plane" => CoreOperation::Frame(CoreFrameOp::Plane),
+        "location" => CoreOperation::Frame(CoreFrameOp::Location),
         "path-frame" => CoreOperation::Frame(CoreFrameOp::PathFrame),
         "place" => CoreOperation::Frame(CoreFrameOp::Place),
         "clip-box" => CoreOperation::Frame(CoreFrameOp::ClipBox),
@@ -3666,18 +5641,51 @@ fn map_operation(name: &str) -> CoreOperation {
 fn infer_value_kind(name: &str) -> CoreValueKind {
     match name {
         "+" | "-" | "*" | "/" | "min" | "max" | "clamp" | "lerp" | "smoothstep" | "sin" | "cos"
-        | "tan" | "deg" | "rad" | "abs" => CoreValueKind::Number,
+        | "tan" | "atan" | "atan2" | "deg" | "rad" | "deg->rad" | "rad->deg" | "abs" | "floor"
+        | "signed-pow" | "hash01" | "hash-signed" | "noise2" | "fbm2" | "voronoi2"
+        | "cell-distance2" => CoreValueKind::Number,
         "not" | "and" | "or" | "=" | ">" | ">=" | "<" | "<=" | "even?" | "odd?" | "zero?"
         | "null?" | "empty?" | "list?" => CoreValueKind::Boolean,
-        "list" | "append" | "reverse" | "range" | "map" | "filter" | "zip" | "enumerate"
-        | "linspace" | "flat-map" | "concat-map" | "flat_map" | "concat_map" => CoreValueKind::List,
+        "list"
+        | "append"
+        | "reverse"
+        | "range"
+        | "map"
+        | "filter"
+        | "zip"
+        | "enumerate"
+        | "linspace"
+        | "flat-map"
+        | "concat-map"
+        | "flat_map"
+        | "concat_map"
+        | "jittered-grid"
+        | "polar-points"
+        | "organic-loop"
+        | "wave-loop"
+        | "voronoi-cells"
+        | "lorenz-points"
+        | "rossler-points"
+        | "logistic-bifurcation-points"
+        | "henon-points" => CoreValueKind::List,
+        "jitter2" | "superellipse-point" => CoreValueKind::Point2,
         "circle" | "rectangle" | "rounded-rect" | "rounded-polygon" | "rounded_polygon"
-        | "polygon" | "profile" | "make-face" | "text" | "svg" => CoreValueKind::Sketch,
-        "bezier-path" | "path" | "polyline" | "bspline" => CoreValueKind::Path,
-        "path-frame" => CoreValueKind::Frame,
+        | "polygon" | "profile" | "make-face" | "text" | "svg" | "offset-rounded" => {
+            CoreValueKind::Sketch
+        }
+        "bezier-path" | "path" | "polyline" => CoreValueKind::Path,
+        "bspline" => CoreValueKind::Sketch,
+        "plane" | "location" | "path-frame" => CoreValueKind::Frame,
         "compound" | "repeat-compound" => CoreValueKind::Compound,
         _ => CoreValueKind::Solid,
     }
+}
+
+fn is_apply_splice_operation(name: &str) -> bool {
+    matches!(
+        name,
+        "union" | "fuse" | "difference" | "cut" | "intersection" | "common" | "compound"
+    )
 }
 
 fn emit_program(program: &CoreProgram) -> String {
@@ -3813,6 +5821,9 @@ fn emit_node(
             CoreSymbol::Xy => "xy".to_string(),
             CoreSymbol::Yz => "yz".to_string(),
             CoreSymbol::Xz => "xz".to_string(),
+            CoreSymbol::Min => "min".to_string(),
+            CoreSymbol::Center => "center".to_string(),
+            CoreSymbol::Max => "max".to_string(),
         },
         CoreNodeKind::Literal(CoreLiteral::Point2(point)) => {
             format!("({} {})", emit_number(point[0]), emit_number(point[1]))
@@ -3865,6 +5876,38 @@ fn emit_node(
                 items.push(format!(":{}", keyword.name));
                 items.push(emit_node(&keyword.value, param_names, node_names));
             }
+            format!("({})", items.join(" "))
+        }
+        CoreNodeKind::Range { start, end } => format!(
+            "(range {} {})",
+            emit_node(start, param_names, node_names),
+            emit_node(end, param_names, node_names)
+        ),
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => {
+            let params = params.join(" ");
+            let mut items = vec![format!(
+                "(lambda ({}) {})",
+                params,
+                emit_node(body, param_names, node_names)
+            )];
+            items.extend(
+                sources
+                    .iter()
+                    .map(|source| emit_node(source, param_names, node_names)),
+            );
+            format!("(map {})", items.join(" "))
+        }
+        CoreNodeKind::Apply { op, args, list } => {
+            let mut items = vec!["apply".to_string(), emit_operation(op)];
+            items.extend(
+                args.iter()
+                    .map(|arg| emit_node(arg, param_names, node_names)),
+            );
+            items.push(emit_node(list, param_names, node_names));
             format!("({})", items.join(" "))
         }
         CoreNodeKind::List(items) => {
@@ -3960,6 +6003,8 @@ fn emit_operation(op: &CoreOperation) -> String {
         CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatPick) => "repeat-pick".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Plane) => "plane".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Location) => "location".to_string(),
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
         CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
@@ -4058,6 +6103,247 @@ mod tests {
         assert_eq!(bindings.len(), 1);
         assert!(matches!(bindings[0].value.kind, CoreNodeKind::If { .. }));
         assert!(matches!(body.kind, CoreNodeKind::Call { .. }));
+    }
+
+    #[test]
+    fn compiles_let_star_source_via_expanded_ast_path() {
+        let program = compile_to_core_program_from_expanded_ast(
+            "(model (part body (let* ((a 2) (b (+ a 1))) (translate b 0 0 (box 10 10 10)))))",
+        )
+        .expect("compile");
+        let root = &program.parts[0].root;
+        let CoreNodeKind::Let { bindings, body } = &root.kind else {
+            panic!("expected outer let node, got {:?}", root.kind);
+        };
+        assert_eq!(bindings.len(), 1);
+        assert!(
+            bindings[0].name.contains('a'),
+            "expected hygienic outer binding for a, got {}",
+            bindings[0].name
+        );
+        let CoreNodeKind::Let {
+            bindings: inner_bindings,
+            body: inner_body,
+        } = &body.kind
+        else {
+            panic!("expected nested let node, got {:?}", body.kind);
+        };
+        assert_eq!(inner_bindings.len(), 1);
+        assert!(
+            inner_bindings[0].name.contains('b'),
+            "expected hygienic inner binding for b, got {}",
+            inner_bindings[0].name
+        );
+        let CoreNodeKind::Call { .. } = &inner_body.kind else {
+            panic!("expected translate call, got {:?}", inner_body.kind);
+        };
+    }
+
+    #[test]
+    fn splices_begin_model_clauses_via_expanded_ast_path() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (begin
+                (params (number width 12))
+                (meta source "fixture")
+                (part body (box width 2 3))
+                (part cap (sphere 4))))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parameters.len(), 1);
+        assert_eq!(program.parameters[0].key, "width");
+        assert_eq!(program.parts.len(), 2);
+        assert_eq!(program.parts[0].key, "body");
+        assert_eq!(program.parts[1].key, "cap");
+    }
+
+    #[test]
+    fn splices_let_model_clauses_via_expanded_ast_path() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (let ((default-width 18)
+                    (body-depth 5))
+                (params (number width default-width))
+                (part body (box width body-depth 3))))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parameters.len(), 1);
+        assert!(matches!(
+            program.parameters[0].default_value,
+            crate::ecky_core_ir::CoreParameterValue::Number(18.0)
+        ));
+        assert_eq!(program.parts.len(), 1);
+        let CoreNodeKind::Call { op, args, .. } = &program.parts[0].root.kind else {
+            panic!("expected box call, got {:?}", program.parts[0].root.kind);
+        };
+        assert!(matches!(op, CoreOperation::Primitive(CorePrimitive::Box)));
+        assert!(matches!(
+            args[0].kind,
+            CoreNodeKind::Reference(CoreReference::Parameter(_))
+        ));
+        assert!(matches!(
+            args[1].kind,
+            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(5.0))
+        ));
+    }
+
+    #[test]
+    fn splices_let_star_model_clauses_via_runtime_path() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (let* ((default-width 11)
+                     (body-depth (+ default-width 4)))
+                (params (number width default-width))
+                (part body (box width body-depth 3))))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parameters.len(), 1);
+        assert!(matches!(
+            program.parameters[0].default_value,
+            crate::ecky_core_ir::CoreParameterValue::Number(11.0)
+        ));
+        assert_eq!(program.parts.len(), 1);
+        let CoreNodeKind::Call { args, .. } = &program.parts[0].root.kind else {
+            panic!("expected box call, got {:?}", program.parts[0].root.kind);
+        };
+        assert!(matches!(
+            args[1].kind,
+            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(15.0))
+        ));
+    }
+
+    #[test]
+    fn splices_model_clauses_when_runtime_path_is_forced_by_user_macro() {
+        let program = compile_to_core_program(
+            r#"
+            (define-syntax passthrough
+              (syntax-rules ()
+                [(_ expr) expr]))
+            (model
+              (let* ((default-width 9)
+                     (body-depth (+ default-width 6)))
+                (params (number width default-width))
+                (part body (passthrough (box width body-depth 3)))))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parameters.len(), 1);
+        assert!(matches!(
+            program.parameters[0].default_value,
+            crate::ecky_core_ir::CoreParameterValue::Number(9.0)
+        ));
+        let CoreNodeKind::Call { args, .. } = &program.parts[0].root.kind else {
+            panic!("expected box call, got {:?}", program.parts[0].root.kind);
+        };
+        assert!(matches!(
+            args[1].kind,
+            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(15.0))
+        ));
+    }
+
+    #[test]
+    fn compiles_model_level_let_star_with_computed_param_default() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (let* ((default-r 20)
+                     (default-h (* default-r 3)))
+                (params (number radius default-r :label "Radius")
+                        (number height default-h :label "Height"))
+                (part body (cylinder radius height 48))))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parameters.len(), 2);
+        assert!(matches!(
+            program.parameters[0].default_value,
+            crate::ecky_core_ir::CoreParameterValue::Number(20.0)
+        ));
+        assert!(matches!(
+            program.parameters[1].default_value,
+            crate::ecky_core_ir::CoreParameterValue::Number(60.0)
+        ));
+        assert_eq!(program.parts.len(), 1);
+    }
+
+    #[test]
+    fn spliced_model_clauses_preserve_unsupported_clause_error() {
+        let err = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (begin
+                (bogus clause)
+                (part body (box 1 1 1))))
+            "#,
+        )
+        .expect_err("unsupported clause");
+
+        assert!(err
+            .to_string()
+            .contains("Unsupported top-level model clause `bogus`."));
+    }
+
+    #[test]
+    fn model_level_map_reports_clause_boundary() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (map (lambda (i) (part body (box i 1 1))) (range 1 3)))
+            "#,
+        )
+        .expect_err("model-level map must be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("Model children are clauses"), "{message}");
+        assert!(
+            message.contains("Supported direct clauses: `params`, `part`, `meta`."),
+            "{message}"
+        );
+        assert!(
+            message.contains("Supported wrappers: `begin`, `let`, `let*`."),
+            "{message}"
+        );
+        assert!(
+            message.contains("`map` belongs inside `(part ...)` geometry/list expressions."),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn model_level_range_reports_clause_boundary() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (range 1 3))
+            "#,
+        )
+        .expect_err("model-level range must be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("Model children are clauses"), "{message}");
+        assert!(
+            message.contains("Supported direct clauses: `params`, `part`, `meta`."),
+            "{message}"
+        );
+        assert!(
+            message.contains("Supported wrappers: `begin`, `let`, `let*`."),
+            "{message}"
+        );
+        assert!(
+            message.contains("`range` belongs inside `(part ...)` geometry/list expressions."),
+            "{message}"
+        );
     }
 
     #[test]
@@ -4162,6 +6448,113 @@ mod tests {
             panic!("expected path call");
         };
         assert!(matches!(path_op, CoreOperation::Path(CorePathOp::Polyline)));
+    }
+
+    #[test]
+    fn polygon_rejects_known_3d_point_lists_before_lowering() {
+        let literal_err = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (polygon ((0 0 0) (1 0 0) (0 1 0)))
+                  1)))
+            "#,
+        )
+        .expect_err("polygon must reject literal 3D points");
+
+        let message = literal_err.to_string();
+        assert!(message.contains("polygon"), "{message}");
+        assert!(message.contains("2D point list"), "{message}");
+        assert!(message.contains("point3 list"), "{message}");
+
+        let helper_err = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (polygon (lorenz-points 4 0.01 10))
+                  1)))
+            "#,
+        )
+        .expect_err("polygon must reject helper-expanded 3D points");
+
+        let message = helper_err.to_string();
+        assert!(message.contains("polygon"), "{message}");
+        assert!(message.contains("2D point list"), "{message}");
+        assert!(message.contains("point3 list"), "{message}");
+    }
+
+    #[test]
+    fn path_rejects_known_2d_point_lists_before_lowering() {
+        for op in ["path", "polyline"] {
+            let source = format!(
+                r#"
+                (model
+                  (part body
+                    ({} ((0 0) (1 0)))))
+                "#,
+                op
+            );
+            let err = compile_to_core_program(&source)
+                .expect_err(&format!("{op} must reject literal 2D points"));
+
+            let message = err.to_string();
+            assert!(message.contains("path"), "{message}");
+            assert!(message.contains("3D point list"), "{message}");
+            assert!(message.contains("point2 list"), "{message}");
+        }
+
+        let helper_err = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (path (organic-loop 8 10 1 2))))
+            "#,
+        )
+        .expect_err("path must reject helper-expanded 2D points");
+
+        let message = helper_err.to_string();
+        assert!(message.contains("path"), "{message}");
+        assert!(message.contains("3D point list"), "{message}");
+        assert!(message.contains("point2 list"), "{message}");
+    }
+
+    #[test]
+    fn bspline_rejects_known_3d_point_lists_before_lowering() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (bspline ((0 0 0) (1 0 0) (1 1 0) (0 1 0)))
+                  1)))
+            "#,
+        )
+        .expect_err("bspline sketch path must reject 3D points");
+
+        let message = err.to_string();
+        assert!(message.contains("bspline"), "{message}");
+        assert!(message.contains("2D point list"), "{message}");
+        assert!(message.contains("point3 list"), "{message}");
+    }
+
+    #[test]
+    fn dynamic_point_lists_remain_permissive() {
+        compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape pts
+                    (map
+                      (lambda (i) (list i 0))
+                      (range 0 2)))
+                  (result
+                    (path pts)))))
+            "#,
+        )
+        .expect("dynamic list element kind stays unknown");
     }
 
     #[test]
@@ -4320,6 +6713,69 @@ mod tests {
     }
 
     #[test]
+    fn compiles_deterministic_fancy_helpers_into_portable_points() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (params (number seed 7 :label "Seed" :min 0 :max 99))
+              (part body
+                (extrude
+                  (polygon (organic-loop 12 20 3 seed))
+                  4)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parts.len(), 1);
+    }
+
+    #[test]
+    fn compiles_chaotic_point_helpers_with_literal_counts_on_expanded_ast_path() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (part body
+                (list
+                  (lorenz-points 4 0.01 10)
+                  (rossler-points 5 0.05 8)
+                  (logistic-bifurcation-points 3 2 4 6)
+                  (henon-points 7 9))))
+            "#,
+        )
+        .expect("compile");
+
+        let root = &program.parts[0].root;
+        let CoreNodeKind::List(groups) = &root.kind else {
+            panic!("expected root list, got {:?}", root.kind);
+        };
+        assert_eq!(groups.len(), 4);
+
+        let CoreNodeKind::List(lorenz) = &groups[0].kind else {
+            panic!("expected lorenz points, got {:?}", groups[0].kind);
+        };
+        assert_eq!(lorenz.len(), 4);
+        assert_eq!(lorenz[0].value_kind, CoreValueKind::Point3);
+
+        let CoreNodeKind::List(rossler) = &groups[1].kind else {
+            panic!("expected rossler points, got {:?}", groups[1].kind);
+        };
+        assert_eq!(rossler.len(), 5);
+        assert_eq!(rossler[0].value_kind, CoreValueKind::Point3);
+
+        let CoreNodeKind::List(logistic) = &groups[2].kind else {
+            panic!("expected logistic points, got {:?}", groups[2].kind);
+        };
+        assert_eq!(logistic.len(), 6);
+        assert_eq!(logistic[0].value_kind, CoreValueKind::Point2);
+
+        let CoreNodeKind::List(henon) = &groups[3].kind else {
+            panic!("expected henon points, got {:?}", groups[3].kind);
+        };
+        assert_eq!(henon.len(), 7);
+        assert_eq!(henon[0].value_kind, CoreValueKind::Point2);
+    }
+
+    #[test]
     fn compiles_filter_fold_and_reduce_builtins_on_expanded_ast_path() {
         let program = compile_to_core_program_from_expanded_ast(
             r#"
@@ -4386,5 +6842,148 @@ mod tests {
         assert!(filter_type_err.to_string().contains("`filter`"));
         assert!(filter_type_err.to_string().contains("expected boolean"));
         assert!(filter_type_err.to_string().contains("got number"));
+    }
+
+    #[test]
+    fn compiles_dynamic_tooth_apply_map_on_expanded_ast_path() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (params
+                (number num-teeth 4)
+                (number pitch 5)
+                (number dz 20)
+                (number length 80))
+              (part teeth
+                (build
+                  (shape tooth
+                    (box 2 4 1))
+                  (shape num-teeth
+                    (max 0 (floor (/ length pitch))))
+                  (result
+                    (apply union
+                      (map
+                        (lambda (i)
+                          (let* ((x (* (+ i 0.5) pitch))
+                                 (slope (* (/ dz length)
+                                           (sin (* pi (/ x length)))))
+                                 (angle-deg (rad (atan slope)))
+                                 (angle2-deg (rad (atan2 dz length))))
+                            (translate x 0 0
+                              (rotate 0 (+ angle-deg angle2-deg) 0 tooth))))
+                        (range 0 num-teeth)))))))
+            "#,
+        )
+        .expect("compile dynamic tooth math");
+
+        let param_names = program
+            .parameters
+            .iter()
+            .map(|param| (param.id.raw(), param.key.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let rendered = emit_node(&program.parts[0].root, &param_names, &BTreeMap::new());
+        assert!(rendered.contains("(apply union"), "{rendered}");
+        assert!(rendered.contains("(map (lambda ("), "{rendered}");
+        assert!(rendered.contains("(range 0 num-teeth)"), "{rendered}");
+        assert!(rendered.contains("(floor (/ length pitch))"), "{rendered}");
+        assert!(rendered.contains("(atan "), "{rendered}");
+        assert!(rendered.contains("(atan2 dz length)"), "{rendered}");
+    }
+
+    #[test]
+    fn compiles_align_and_plane_location_on_expanded_ast_path() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape base-plane
+                    (plane :origin '(1 2 3) :x '(1 0 0) :normal '(0 0 1)))
+                  (shape peg
+                    (box 4 6 8 :align '(min center max)))
+                  (result
+                    (place
+                      (location base-plane :offset '(5 0 0) :rotate '(0 90 0))
+                      peg)))))
+            "#,
+        )
+        .expect("compile");
+
+        let root = &program.parts[0].root;
+        let CoreNodeKind::Build { bindings, result } = &root.kind else {
+            panic!("expected build, got {:?}", root.kind);
+        };
+        assert_eq!(bindings.len(), 2);
+        let CoreNodeKind::Call { op, keywords, .. } = &bindings[0].value.kind else {
+            panic!("expected plane call, got {:?}", bindings[0].value.kind);
+        };
+        assert!(matches!(op, CoreOperation::Frame(CoreFrameOp::Plane)));
+        assert_eq!(keywords.len(), 3);
+
+        let CoreNodeKind::Call { op, keywords, .. } = &bindings[1].value.kind else {
+            panic!("expected box call, got {:?}", bindings[1].value.kind);
+        };
+        assert!(matches!(op, CoreOperation::Primitive(CorePrimitive::Box)));
+        assert_eq!(keywords.len(), 1);
+
+        let rendered = emit_node(root, &BTreeMap::new(), &BTreeMap::new());
+        assert!(rendered.contains("(plane :origin (1 2 3) :x (1 0 0) :normal (0 0 1))"));
+        assert!(rendered.contains("(box 4 6 8 :align (min center max))"));
+        assert!(rendered.contains("(location base-plane :offset (5 0 0) :rotate (0 90 0))"));
+
+        let CoreNodeKind::Call { op, .. } = &result.kind else {
+            panic!("expected place call, got {:?}", result.kind);
+        };
+        assert!(matches!(op, CoreOperation::Frame(CoreFrameOp::Place)));
+    }
+
+    #[test]
+    fn compiles_typed_hole_placeholder_in_expression_position() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (difference
+                  (hole :type Solid :goal "snap clip outer body")
+                  (box 1 1 1))))
+            "#,
+        )
+        .expect("compile typed hole");
+
+        let CoreNodeKind::Call { op, args, .. } = &program.parts[0].root.kind else {
+            panic!("expected difference call");
+        };
+        assert!(matches!(
+            op,
+            CoreOperation::Boolean(CoreBooleanOp::Difference)
+        ));
+        assert_eq!(args[0].value_kind, CoreValueKind::Solid);
+        let CoreNodeKind::Call {
+            op: hole_op,
+            keywords,
+            ..
+        } = &args[0].kind
+        else {
+            panic!("expected hole call");
+        };
+        assert!(matches!(hole_op, CoreOperation::Custom(name) if name == "hole"));
+        assert_eq!(keywords.len(), 2);
+    }
+
+    #[test]
+    fn typed_hole_type_mismatch_fails_typecheck() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (extrude (hole :type solid :goal "wrong profile") 5)))
+            "#,
+        )
+        .expect_err("solid hole cannot be extruded as sketch");
+
+        let message = err.to_string();
+        assert!(message.contains("extrude"), "{message}");
+        assert!(message.contains("sketch"), "{message}");
+        assert!(message.contains("solid"), "{message}");
     }
 }

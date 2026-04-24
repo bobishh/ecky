@@ -1,11 +1,14 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const webPort = process.env.PLAYWRIGHT_WEB_PORT ?? '5173';
+const webUrl = `http://localhost:${webPort}`;
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
   reporter: 'list',
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: webUrl,
   },
   projects: [
     {
@@ -15,8 +18,8 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: 'npm run dev:web',
-      url: 'http://localhost:5173',
+      command: `npm run dev:web -- --port ${webPort} --strictPort`,
+      url: webUrl,
       reuseExistingServer: true,
     },
     {

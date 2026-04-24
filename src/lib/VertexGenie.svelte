@@ -481,7 +481,7 @@
   });
 </script>
 
-<div class="genie-shell">
+<div class="genie-shell" data-agent-connected={agentConnected ? 'true' : 'false'}>
   <canvas bind:this={canvas} class="genie-canvas"></canvas>
   {#if cleanBubble}
     <div class="genie-bubble">

@@ -2,8 +2,8 @@ use crate::db;
 use crate::mcp::contracts::*;
 use crate::mcp::handlers;
 use crate::models::{
-    AppError, AppErrorCode, AppResult, AppState, McpSessionState, McpTargetRef, PathResolver,
-    TargetLeaseInfo, ViewportScreenshotCapture,
+    AppError, AppErrorCode, AppResult, AppState, Config, McpSessionState, McpTargetRef,
+    PathResolver, TargetLeaseInfo, ViewportScreenshotCapture,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -778,17 +778,78 @@ fn selected_engine_label(state: &AppState) -> String {
         Some(engine) => {
             let provider = engine.provider.trim();
             let model = engine.model.trim();
-            if provider.is_empty() && model.is_empty() {
-                engine.name.clone()
-            } else if provider.is_empty() {
-                model.to_string()
-            } else if model.is_empty() {
+            if !model.is_empty() {
+                let provider_lower = provider.to_ascii_lowercase();
+                let model_lower = model.to_ascii_lowercase();
+                if provider.is_empty()
+                    || model_lower == provider_lower
+                    || model_lower.starts_with(&format!("{}-", provider_lower))
+                    || model_lower.starts_with(&format!("{}/", provider_lower))
+                {
+                    model.to_string()
+                } else {
+                    format!("{} ({})", model, provider)
+                }
+            } else if !provider.is_empty() {
                 provider.to_string()
+            } else if !engine.name.trim().is_empty() {
+                engine.name.clone()
             } else {
-                format!("{} / {}", provider, model)
+                "default engine".to_string()
             }
         }
         None => "default engine".to_string(),
+    }
+}
+
+fn workspace_source_hints(
+    source_language: crate::models::SourceLanguage,
+    geometry_backend: Option<crate::models::GeometryBackend>,
+) -> (&'static str, &'static str) {
+    match source_language {
+        crate::models::SourceLanguage::EckyIrV0 => (".ecky", "ecky"),
+        crate::models::SourceLanguage::Build123d => (".py", "build123d"),
+        crate::models::SourceLanguage::LegacyPython => match geometry_backend {
+            Some(crate::models::GeometryBackend::Freecad) => (".FCMacro", "freecad"),
+            _ => (".py", "freecad"),
+        },
+    }
+}
+
+fn backend_hint(geometry_backend: Option<crate::models::GeometryBackend>) -> &'static str {
+    match geometry_backend {
+        Some(crate::models::GeometryBackend::Build123d) => "build123d",
+        Some(crate::models::GeometryBackend::Freecad) => "freecad",
+        Some(crate::models::GeometryBackend::EckyRust) => "mesh",
+        None => "default",
+    }
+}
+
+fn backend_guide_uri(
+    geometry_backend: Option<crate::models::GeometryBackend>,
+) -> Option<&'static str> {
+    match geometry_backend {
+        Some(crate::models::GeometryBackend::Build123d) => Some("ecky://guides/build123d"),
+        Some(crate::models::GeometryBackend::Freecad) => Some("ecky://guides/freecad"),
+        Some(crate::models::GeometryBackend::EckyRust) => Some("ecky://guides/ecky-rust"),
+        None => None,
+    }
+}
+
+fn surface_manifest_uri(
+    geometry_backend: Option<crate::models::GeometryBackend>,
+) -> Option<&'static str> {
+    match geometry_backend {
+        Some(crate::models::GeometryBackend::Build123d) => {
+            Some("ecky://guides/surface-manifest/build123d")
+        }
+        Some(crate::models::GeometryBackend::Freecad) => {
+            Some("ecky://guides/surface-manifest/freecad")
+        }
+        Some(crate::models::GeometryBackend::EckyRust) => {
+            Some("ecky://guides/surface-manifest/ecky-rust")
+        }
+        None => None,
     }
 }
 
@@ -797,38 +858,46 @@ fn workflow_guide_text(state: &AppState) -> String {
         concat!(
             "Ecky MCP guide\n\n",
             "Purpose:\n",
-            "- Ecky edits CAD models across FreeCAD, build123d, and current `.ecky` source.\n",
+            "- One public authored language: `.ecky`.\n",
+            "- Backend metadata decides how `.ecky` renders: `build123d`, `freecad`, or `mesh`/`eckyRust`.\n",
+            "- EckyRust direction is a controlled CAD runtime pipeline: parse -> expand -> typecheck -> lower -> validate. It is not direct OCCT today.\n",
             "- Use the current selected engine prompt as the design-policy baseline.\n\n",
             "Current engine:\n",
             "- {}\n\n",
+            "Guide access:\n",
+            "- Ecky guides are MCP resources. Use `resources/list` and `resources/read`.\n",
+            "- Read prose guides for explanation, then read the matching JSON surface manifest for the authoritative machine-readable supported `.ecky` surface.\n",
+            "- Surface manifests: `ecky://guides/surface-manifest/build123d`, `ecky://guides/surface-manifest/freecad`, `ecky://guides/surface-manifest/ecky-rust`.\n\n",
             "Modeling rules:\n",
             "- Units are millimeters.\n",
             "- Prefer manifold printable solids with practical wall thickness and clearances.\n",
             "- For generated models, keep macroCode, uiSpec, and initialParams aligned.\n",
             "- Remove stale parameters that are no longer used.\n",
             "- Preserve the current thread/version intent unless explicitly asked to fork or restore.\n",
-            "- For semantic controls, use knobs/views that reflect the actual model structure.\n",
-            "- Semantic views are curated user-facing editing contexts layered on top of raw uiSpec/params; they do not replace the raw control surface.\n",
-            "- Reuse or extend an existing relevant view before creating a new one.\n",
-            "- Create or edit views when grouping related controls will make the design easier to edit or understand.\n",
-            "- Do not remove or bypass existing views just because the same values can be changed through raw controls.\n",
-            "- First translate intent: explicitly propose your specific plan to the user using mcp_request_user_prompt and ask for their confirmation before making any code edits to avoid ambiguity.\n",
-            "- Proactively use the get_model_screenshot tool to visually verify your changes when making geometric edits.\n",
-            "- Check the structuralVerification section when using target_get to ensure the generated model passed basic manifold and bounding box checks.\n\n",
+            "- In current `.ecky` source, authored sketch coordinates are literal. `extrude` preserves sketch X/Y and grows along +Z unless `:symmetric #t` is set.\n",
+            "- Current `.ecky` compiler treats `let` bindings as parallel. Same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies.\n",
+            "- `box`, `cylinder`, `cone`, and `sphere` accept `:align '(x y z)` using `min`, `center`, `max`.\n",
+            "- Use `plane`, `location`, and `place` for local coordinates instead of compensating global translations.\n",
+            "- Sample: `(extrude (polygon ((0 0) (100 0) (100 20) (0 20))) 8)` stays at `X=0..100`, `Y=0..20`.\n",
+            "- Sample: `(box 40 20 10 :align '(min center min))` anchors `X=0`, centers `Y`, sits on `Z=0`.\n",
+            "- Sample: `(place (location (plane :origin '(80 0 6)) :rotate '(0 90 0)) (cylinder 4 18))` uses local coordinates, not compensation math.\n",
+            "- `ecky://guides/ecky-source` teaches the language. `ecky://guides/build123d`, `ecky://guides/freecad`, and `ecky://guides/ecky-rust` explain backend-specific limits and patterns for the same language.\n",
+            "- JSON surface manifests are authoritative for supported forms, helpers, CAD ops, and wall-pattern modes.\n",
+            "- Reuse existing semantic views before inventing new control groupings.\n",
+            "- Stay in the app loop. Use `mcp_request_user_prompt` for human replies.\n",
+            "- Prefer typed/static errors and structural verification first; screenshot verification second.\n",
+            "- Check the structuralVerification section when using target_get to ensure the generated model passed basic manifold and bounding box checks.\n",
+            "- Use get_model_screenshot to visually verify geometric edits after structural checks.\n\n",
             "Recommended startup sequence:\n",
-            "1. Read ecky://guides/system-prompt and ecky://guides/modeling-guidelines.\n",
-            "2. If the thread uses sourceLanguage `eckyIrV0`, read ecky://guides/ecky-source before you generate or replace macro code. Compatibility labels still say `eckyIrV0`, but authored macroCode is current `.ecky` Scheme-style source.\n",
-            "3. Read ecky://guides/cad-sdk when you need the actual helper surface instead of guessing SDK functions.\n",
-            "4. Call workspace_overview.\n",
-            "5. If workspace_overview says the thread has no saved versions yet, use that thread context plus the guides to create the first version instead of calling target_meta_get.\n",
-            "6. Otherwise call target_meta_get.\n",
-            "7. For macro geometry/orientation questions, call target_macro_get.\n",
-            "8. For exact chunks, call target_detail_get(section=...).\n",
-            "9. Call semantic_manifest_get when semantic bindings or existing views matter; inspect current views before inventing new groupings.\n",
-            "10. Use target_get only when you truly need the full payload.\n",
-            "11. Then mutate with params_patch_and_render, macro_replace_and_render, or semantic tools, keeping semantic views aligned with the underlying raw params.\n",
-            "12. Use measurement_annotation tools to encode what dimensions mean instead of leaving that meaning only in prose.\n",
-            "13. For long steps, call long_action_notice and long_action_clear so Ecky can show clean busy status without scraping terminal text.\n"
+            "1. Read `ecky://guides/system-prompt` and `ecky://guides/modeling-guidelines` with `resources/read`.\n",
+            "2. Call workspace_overview. If `sourceLanguage=ecky`, read `ecky://guides/ecky-source` first, then the prose backend guide matching `geometryBackend=build123d`, `geometryBackend=freecad`, or `geometryBackend=mesh`.\n",
+            "3. Then read the matching authoritative JSON surface manifest for `sourceLanguage=ecky`: `ecky://guides/surface-manifest/build123d`, `ecky://guides/surface-manifest/freecad`, or `ecky://guides/surface-manifest/ecky-rust`.\n",
+            "4. Call workspace_overview, then target_meta_get.\n",
+            "5. Use target_macro_get for macro reasoning and target_detail_get(section=...) for exact chunks.\n",
+            "6. Use target_get only when you truly need the full payload.\n",
+            "7. If semantic bindings matter, call semantic_manifest_get before changing views or annotations.\n",
+            "8. Then mutate with params_patch_and_render, macro_replace_and_render, or semantic tools.\n",
+            "9. Use measurement_annotation tools for dimension meaning, and long_action_notice/long_action_clear for slow work.\n"
         ),
         selected_engine_label(state)
     )
@@ -837,96 +906,82 @@ fn workflow_guide_text(state: &AppState) -> String {
 fn workspace_overview_brief(
     state: &AppState,
     source_language: Option<crate::models::SourceLanguage>,
-    _geometry_backend: Option<crate::models::GeometryBackend>,
+    geometry_backend: Option<crate::models::GeometryBackend>,
 ) -> WorkspaceOverviewBrief {
     let resolved_lang =
         source_language.unwrap_or_else(|| state.config.lock().unwrap().default_source_language);
-    let is_ir = matches!(resolved_lang, crate::models::SourceLanguage::EckyIrV0);
-    let (lang_str, dialect_str) = if is_ir {
-        ("eckyIrV0".to_string(), "eckyIrV0".to_string())
-    } else {
-        ("python".to_string(), "cadFrameworkV1".to_string())
+    let (lang_str, dialect_str) = match resolved_lang {
+        crate::models::SourceLanguage::EckyIrV0 => ("ecky".to_string(), "ecky".to_string()),
+        crate::models::SourceLanguage::Build123d => {
+            ("build123d".to_string(), "build123d".to_string())
+        }
+        crate::models::SourceLanguage::LegacyPython => {
+            ("freecad".to_string(), "cadFrameworkV1".to_string())
+        }
+    };
+    let (file_extension, source_hint) = workspace_source_hints(resolved_lang, geometry_backend);
+    let backend = backend_hint(geometry_backend);
+    let guide_read_step = match (
+        resolved_lang,
+        backend_guide_uri(geometry_backend),
+        surface_manifest_uri(geometry_backend),
+    ) {
+        (crate::models::SourceLanguage::EckyIrV0, Some(guide_uri), Some(manifest_uri)) => format!(
+            "Use `resources/read` for sourceLanguage={} / geometryBackend={}: `ecky://guides/ecky-source`, then `{}`, then authoritative JSON `{}`.",
+            source_hint, backend, guide_uri, manifest_uri
+        ),
+        (crate::models::SourceLanguage::EckyIrV0, _, _) => format!(
+            "Use `resources/read` for sourceLanguage={} / geometryBackend={} now: language guide, prose backend guide, then authoritative JSON surface manifest after backend resolves.",
+            source_hint, backend
+        ),
+        _ => format!(
+            "Use `resources/read` on the guide stack for sourceLanguage={} / geometryBackend={} now.",
+            source_hint, backend
+        ),
     };
     WorkspaceOverviewBrief {
         engine_label: selected_engine_label(state),
         source_language: lang_str,
         macro_dialect: dialect_str,
-        summary: if is_ir {
-            "This thread uses Ecky source. `sourceLanguage` stays `eckyIrV0` for compatibility, but `macroCode` MUST be current `.ecky` Scheme-style source starting with `(model ...)`, NOT Python. Read ecky://guides/ecky-source for the canonical authoring surface and helper library.".to_string()
-        } else {
-            "Use millimeters, keep macro/uiSpec/initialParams aligned, and prefer printable manifold solids. Read the canonical Ecky resources before making broad edits.".to_string()
-        },
+        summary: format!(
+            "Current authoring surface: {} source. fileExtension={}. geometryBackend={}. Use `resources/read`; when sourceLanguage=ecky, read `ecky://guides/ecky-source`, then the prose backend guide, then the matching authoritative JSON surface manifest.",
+            match resolved_lang {
+                crate::models::SourceLanguage::EckyIrV0 => "ecky",
+                crate::models::SourceLanguage::Build123d => "build123d",
+                crate::models::SourceLanguage::LegacyPython => "freecad",
+            },
+            file_extension,
+            backend,
+        ),
         rules: vec![
-            "Units are millimeters.".to_string(),
-            "Keep macroCode, uiSpec, and initialParams aligned.".to_string(),
-            "Remove stale parameters that are no longer used.".to_string(),
-            "Prefer printable manifold solids with practical clearances.".to_string(),
-            "Preserve current thread/version intent unless explicitly asked to fork or restore."
-                .to_string(),
-            "Treat semantic views as curated user-facing control contexts layered over raw uiSpec/params."
-                .to_string(),
-            "Stay in the app loop. After connecting to MCP, communicate with the human ONLY through mcp_request_user_prompt or mcp_user_confirm_request inside the thread."
-                .to_string(),
-            "Always call session_activity_set (or long_action_notice) to broadcast your current status before starting slow operations (render, script execution, etc.)."
-                .to_string(),
-            "Use the ui_dispatch tool to provide immediate visual feedback (e.g., opening the parameters window or highlighting a slider) when modifying specific design aspects."
-                .to_string(),
-            "First translate intent: explicitly propose your specific plan to the user using mcp_request_user_prompt and ask for their confirmation before making any code edits to avoid ambiguity."
-                .to_string(),
-            "Proactively use the get_model_screenshot tool to visually verify your changes when making geometric edits."
-                .to_string(),
-            "Check the structuralVerification section when using target_get or check target_meta_get to ensure the generated model passed basic manifold and bounding box checks."
-                .to_string(),
-            "Use ecky://guides/build123d patterns (overlap for booleans, .part/.sketch/.line access) to ensure valid solid geometry."
-                .to_string(),
+            "Units: millimeters. Keep macroCode, uiSpec, and initialParams aligned; remove stale params.".to_string(),
+            format!(
+                "Canonical Ecky source uses fileExtension={}. geometryBackend={} is authoritative for lowering; the JSON surface manifest is authoritative for supported `.ecky` forms.",
+                file_extension, backend
+            ),
+            "`.ecky` is the only public Ecky source extension. build123d/freecad are backend targets, not separate Ecky languages.".to_string(),
+            "Preserve current thread/version intent unless explicitly asked to fork or restore.".to_string(),
+            "Reuse semantic views when they already group the right controls.".to_string(),
+            "For geometry edits, check typed/static errors and structuralVerification first; use get_model_screenshot second.".to_string(),
         ],
         resources: vec![
             "ecky://guides/system-prompt".to_string(),
-            "ecky://guides/technical-system-prompt".to_string(),
             "ecky://guides/modeling-guidelines".to_string(),
             "ecky://guides/ecky-source".to_string(),
-            "ecky://guides/cad-sdk".to_string(),
+            "ecky://guides/freecad".to_string(),
             "ecky://guides/build123d".to_string(),
+            "ecky://guides/ecky-rust".to_string(),
+            "ecky://guides/surface-manifest/build123d".to_string(),
+            "ecky://guides/surface-manifest/freecad".to_string(),
+            "ecky://guides/surface-manifest/ecky-rust".to_string(),
         ],
-        next_steps: if is_ir {
-            vec![
-                "Read ecky://guides/system-prompt if you have not loaded Ecky guidance yet."
-                    .to_string(),
-                "Read ecky://guides/ecky-source NOW — this thread uses current `.ecky` source. Compatibility labels may still say `eckyIrV0`. Do not write Python."
-                    .to_string(),
-                "Call target_meta_get for a lightweight summary of the current editable target."
-                    .to_string(),
-                "Use target_macro_get for macro reasoning, target_detail_get(section=...) for exact chunks, and target_get only as a full-payload fallback."
-                    .to_string(),
-                "If the target has a semantic manifest, inspect existing views before creating new control groupings."
-                    .to_string(),
-                "Stay in the app loop. Use mcp_request_user_prompt to wait for and reply to the human in the Ecky UI."
-                    .to_string(),
-                "For intermediate actions or multi-step tasks, call session_activity_set (or long_action_notice) to broadcast your current status to the user."
-                    .to_string(),
-            ]
-        } else {
-            vec![
-                "Read ecky://guides/system-prompt if you have not loaded Ecky guidance yet."
-                    .to_string(),
-                "Read ecky://guides/build123d NOW to avoid common modeling pitfalls and boolean errors."
-                    .to_string(),
-                "Read ecky://guides/ecky-source when the thread is using sourceLanguage `eckyIrV0`. That guide defines current `.ecky` authoring syntax."
-                    .to_string(),
-                "Read ecky://guides/cad-sdk if you need the actual helper functions available in cad_sdk.py."
-                    .to_string(),
-                "Call target_meta_get for a lightweight summary of the current editable target."
-                    .to_string(),
-                "Use target_macro_get for macro reasoning, target_detail_get(section=...) for exact chunks, and target_get only as a full-payload fallback."
-                    .to_string(),
-                "If the target has a semantic manifest, inspect existing views before creating new control groupings."
-                    .to_string(),
-                "Stay in the app loop. Use mcp_request_user_prompt to wait for and reply to the human in the Ecky UI."
-                    .to_string(),
-                "For intermediate actions or multi-step tasks, call session_activity_set (or long_action_notice) to broadcast your current status to the user."
-                    .to_string(),
-            ]
-        },
+        next_steps: vec![
+            guide_read_step,
+            "Call target_meta_get first for target summary.".to_string(),
+            "Use target_macro_get for reasoning and target_detail_get(section=...) for exact chunks. Keep target_get as fallback.".to_string(),
+            "If semantic manifest exists, inspect current views before regrouping controls.".to_string(),
+            "Use mcp_request_user_prompt for human replies and long_action_notice for slow work.".to_string(),
+        ],
     }
 }
 
@@ -1018,34 +1073,87 @@ fn resource_definitions(state: &AppState) -> Vec<Value> {
         json!({
             "uri": "ecky://guides/modeling-guidelines",
             "name": "Modeling Guidelines",
-            "description": "Core modeling, printability, and workflow guidance for external agents using Ecky MCP.",
+            "description": "Core modeling, printability, and workflow guidance for Ecky agents.",
             "mimeType": "text/plain"
         }),
         json!({
             "uri": "ecky://guides/ecky-source",
             "name": "Ecky Source (.ecky)",
-            "description": "Canonical `.ecky` Scheme-style authoring guide compiled to internal Core IR.",
+            "description": "Canonical `.ecky` language guide. Backend metadata picks build123d, freecad, or mesh/eckyRust lowering.",
             "mimeType": "text/plain"
         }),
         json!({
-            "uri": "ecky://guides/ecky-ir-v0",
-            "name": "Ecky IR v0 (compat alias)",
-            "description": "Compatibility alias for the current `.ecky` Scheme/Core IR authoring guide.",
-            "mimeType": "text/plain"
-        }),
-        json!({
-            "uri": "ecky://guides/cad-sdk",
-            "name": "cad_sdk.py",
-            "description": "The actual CAD framework helpers available to Ecky-generated macros.",
+            "uri": "ecky://guides/freecad",
+            "name": "Ecky on FreeCAD",
+            "description": "Backend guide for `.ecky` source when geometryBackend=freecad.",
             "mimeType": "text/plain"
         }),
         json!({
             "uri": "ecky://guides/build123d",
-            "name": "Build123d Best Practices",
-            "description": "Critical patterns, common pitfalls, and architectural guidance for build123d modeling.",
+            "name": "Ecky on build123d",
+            "description": "Backend guide for `.ecky` source when geometryBackend=build123d.",
             "mimeType": "text/plain"
         }),
+        json!({
+            "uri": "ecky://guides/ecky-rust",
+            "name": "Ecky on mesh/eckyRust",
+            "description": "Backend guide for `.ecky` source when geometryBackend=mesh/eckyRust.",
+            "mimeType": "text/plain"
+        }),
+        json!({
+            "uri": "ecky://guides/surface-manifest/build123d",
+            "name": "Ecky build123d Supported Surface Manifest",
+            "description": "Machine-readable `.ecky` supported authoring surface for geometryBackend=build123d.",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "ecky://guides/surface-manifest/freecad",
+            "name": "Ecky FreeCAD Supported Surface Manifest",
+            "description": "Machine-readable `.ecky` supported authoring surface for geometryBackend=freecad.",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "ecky://guides/surface-manifest/ecky-rust",
+            "name": "EckyRust Supported Surface Manifest",
+            "description": "Machine-readable `.ecky` supported authoring surface for geometryBackend=mesh/eckyRust.",
+            "mimeType": "application/json"
+        }),
     ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResourceContent {
+    mime_type: &'static str,
+    text: String,
+}
+
+fn surface_manifest_backend_for_uri(uri: &str) -> Option<crate::models::GeometryBackend> {
+    match uri {
+        "ecky://guides/surface-manifest/build123d" => {
+            Some(crate::models::GeometryBackend::Build123d)
+        }
+        "ecky://guides/surface-manifest/freecad" => Some(crate::models::GeometryBackend::Freecad),
+        "ecky://guides/surface-manifest/ecky-rust" => {
+            Some(crate::models::GeometryBackend::EckyRust)
+        }
+        _ => None,
+    }
+}
+
+fn surface_manifest_json(backend: crate::models::GeometryBackend) -> Value {
+    let manifest = crate::ecky_language_surface::supported_surface_manifest(backend);
+    json!({
+        "backend": manifest.backend,
+        "modelClauses": manifest.model_clauses,
+        "modelWrappers": manifest.model_wrappers,
+        "expressionForms": manifest.expression_forms,
+        "numericHelpers": manifest.numeric_helpers,
+        "pointListHelpers": manifest.point_list_helpers,
+        "booleanHelpers": manifest.boolean_helpers,
+        "cadOps": manifest.cad_ops,
+        "wallPatternModes": manifest.wall_pattern_modes,
+        "typedHolePolicy": manifest.typed_hole_policy,
+    })
 }
 
 fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
@@ -1054,17 +1162,33 @@ fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
         "ecky://guides/technical-system-prompt" => Some(crate::TECHNICAL_SYSTEM_PROMPT.to_string()),
         "ecky://guides/modeling-guidelines" => Some(workflow_guide_text(state)),
         "ecky://guides/ecky-source" | "ecky://guides/ecky-ir-v0" => {
-            let backend = state.config.lock().unwrap().default_geometry_backend;
-            Some(crate::commands::generation::ecky_ir_v0_guide_text(backend))
+            Some(crate::commands::generation::ecky_source_guide_text())
         }
-        "ecky://guides/cad-sdk" => {
-            Some(include_str!("../../../model-runtime/cad_sdk.py").to_string())
+        "ecky://guides/freecad" | "ecky://guides/cad-sdk" => {
+            Some(crate::commands::generation::freecad_guide_text())
         }
-        "ecky://guides/build123d" => {
-            Some(include_str!("../../../model-runtime/build123d_guide.md").to_string())
+        "ecky://guides/build123d" => Some(crate::commands::generation::build123d_guide_text()),
+        "ecky://guides/ecky-rust" | "ecky://guides/mesh" => {
+            Some(crate::commands::generation::ecky_ir_v0_guide_text(
+                crate::models::GeometryBackend::EckyRust,
+            ))
         }
         _ => None,
     }
+}
+
+fn read_resource_content(state: &AppState, uri: &str) -> Option<ResourceContent> {
+    if let Some(backend) = surface_manifest_backend_for_uri(uri) {
+        return Some(ResourceContent {
+            mime_type: "application/json",
+            text: serde_json::to_string_pretty(&surface_manifest_json(backend)).unwrap(),
+        });
+    }
+
+    read_resource_text(state, uri).map(|text| ResourceContent {
+        mime_type: "text/plain",
+        text,
+    })
 }
 
 fn prompt_definitions() -> Vec<Value> {
@@ -1081,14 +1205,14 @@ fn prompt_payload(state: &AppState, name: &str) -> Option<Value> {
             let system_prompt = selected_engine_prompt(state);
             let workflow = workflow_guide_text(state);
             Some(json!({
-                "description": "Bootstrap prompt for external agents connecting to Ecky MCP.",
+                "description": "Bootstrap prompt for Ecky agents connecting to MCP.",
                 "messages": [
                     {
                         "role": "user",
                         "content": {
                             "type": "text",
                             "text": format!(
-                                "{}\n\nSelected system prompt:\n\n{}\n\nAfter reading this, call `workspace_overview` before editing anything.",
+                                "{}\n\nSelected system prompt:\n\n{}\n\nAfter reading this, call `workspace_overview` before editing anything. Use sourceLanguage and geometryBackend from that response to choose the matching guide.",
                                 workflow,
                                 system_prompt
                             )
@@ -1297,6 +1421,19 @@ fn tool_definitions() -> Vec<Value> {
             )
         }),
         json!({
+            "name": "concept_preview_generate",
+            "description": "Generate a fast concept sketch for the current bound thread and save it as an assistant concept preview. Uses the selected app model as a sketcher and stores the result directly in thread history so Ecky's blueprint viewport can open it immediately.",
+            "inputSchema": with_identity(
+                &[
+                    ("prompt", json!({ "type": "string", "description": "Short sketch request describing object, silhouette, and key features." })),
+                    ("attachments", json!({ "type": "array", "items": { "type": "object" }, "description": "Optional reference attachments. For images, prefer inline dataUrl payloads from request_user_prompt." })),
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" }))
+                ],
+                &["prompt"],
+            )
+        }),
+        json!({
             "name": "params_patch_and_render",
             "description": "Patch a subset of parameters and rerender a draft. Works without prior browsing by resolving the default target automatically.",
             "inputSchema": with_identity(
@@ -1306,8 +1443,8 @@ fn tool_definitions() -> Vec<Value> {
                     ("parameterPatch", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "eckyRust"],
-                        "description": "Optional: Explicitly choose geometry backend. eckyRust is experimental mesh-based; build123d is stable OCCT-based (preferred for valid solids)."
+                        "enum": ["freecad", "build123d"],
+                        "description": "Optional: Explicitly choose geometry backend for Ecky source. build123d is the stable OCCT target; freecad is the direct CAD target."
                     }))
                 ],
                 &["parameterPatch"],
@@ -1317,11 +1454,11 @@ fn tool_definitions() -> Vec<Value> {
             "name": "macro_replace_and_render",
             "description": concat!(
                 "Replace macro code and rerender a draft. ",
-                "IMPORTANT: check workspace_overview.agentBrief.sourceLanguage — if it is \"eckyIrV0\", macroCode MUST be current `.ecky` Scheme-style source (starting with `(model ...)`), NOT Python. ",
-                "Compatibility labels still say `eckyIrV0`, but authoring uses pure lispy `.ecky` code compiled to internal Core IR. `define`, `lambda`, `let`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. ",
-                "When sourceLanguage is eckyIrV0, uiSpec and parameters are auto-derived from the params block; you may omit them or pass them for overrides. ",
+                "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses build123d or freecad lowering; source extension does not. ",
+                "Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. ",
+                "When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block; you may omit them or pass them for overrides. ",
                 "uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). ",
-                "For numeric parameters, prefer number; range is legacy-only unless explicitly needed. range/number: min, max, step (numbers). ",
+                "For numeric parameters, prefer number; range only when explicitly needed. range/number: min, max, step (numbers). ",
                 "select: options array of {label, value} objects — MUST have at least one option. ",
                 "checkbox: no extra fields. ",
                 "image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string once chosen by the user. ",
@@ -1357,8 +1494,8 @@ fn tool_definitions() -> Vec<Value> {
                     ("parameters", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "eckyRust"],
-                        "description": "Optional: Explicitly choose geometry backend. eckyRust is experimental mesh-based; build123d is stable OCCT-based (preferred for valid solids)."
+                        "enum": ["freecad", "build123d"],
+                        "description": "Optional: Explicitly choose geometry backend for Ecky source. build123d is the stable OCCT target; freecad is the direct CAD target."
                     }))
                 ],
                 &["macroCode"],
@@ -1536,7 +1673,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "request_user_prompt",
-            "description": "Request text input from the human in the Ecky UI for a specific thread. Blocks until the user submits or the timeout expires. Use the session's bound thread from session_log_in, or pass threadId/messageId explicitly to reassert the same target. Ecky will not guess from the current workspace view. If timeoutSecs is omitted, Ecky uses the configured MCP prompt timeout. The response includes promptText/attachments plus threadId/threadTitle for the bound thread context. Each attachment path is already an absolute local file path staged by Ecky and should be opened directly with your normal file/image tools; do not rewrite or guess a different path. A timeout is normal when the user does not answer right away; poll again later or call session_log_out if you are leaving the workspace. In active MCP mode, call this again immediately after each completed user-facing turn so Ecky can queue the next message.",
+            "description": "Request text input from the human in the Ecky UI for a specific thread. Blocks until the user submits or the timeout expires. Use the session's bound thread from session_log_in, or pass threadId/messageId explicitly to reassert the same target. Ecky will not guess from the current workspace view. If timeoutSecs is omitted, Ecky uses the configured MCP prompt timeout. The response includes promptText/attachments plus threadId/threadTitle for the bound thread context. Image attachments may include inline dataUrl payloads; prefer those directly and avoid copying them into scratch folders. CAD attachments remain path-based. A timeout is normal when the user does not answer right away; poll again later or call session_log_out if you are leaving the workspace. In active MCP mode, call this again immediately after each completed user-facing turn so Ecky can queue the next message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1895,15 +2032,15 @@ async fn dispatch_request(
         ),
         "resources/read" => {
             match serde_json::from_value::<ReadResourceParams>(req.params.unwrap_or_default()) {
-                Ok(params) => match read_resource_text(&server.state, &params.uri) {
-                    Some(text) => json_rpc_result(
+                Ok(params) => match read_resource_content(&server.state, &params.uri) {
+                    Some(content) => json_rpc_result(
                         req.id,
                         json!({
                             "contents": [
                                 {
                                     "uri": params.uri,
-                                    "mimeType": "text/plain",
-                                    "text": text
+                                    "mimeType": content.mime_type,
+                                    "text": content.text
                                 }
                             ]
                         }),
@@ -1956,6 +2093,9 @@ async fn dispatch_tool_call(
     session_id: &str,
     params: CallToolParams,
 ) -> AppResult<(Value, Option<McpTargetRef>)> {
+    let config = server.state.config.lock().unwrap().clone();
+    ensure_mcp_tool_allowed_for_app_mode(&config, &params.name)?;
+
     let session = get_session(&server.state, session_id)
         .await
         .ok_or_else(|| AppError::not_found("MCP session not found."))?;
@@ -2286,6 +2426,20 @@ async fn dispatch_tool_call(
             let req_args: GetModelScreenshotRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let value = request_model_screenshot(server, session_id, req_args).await?;
+            Ok((value, None))
+        }
+        "concept_preview_generate" => {
+            let req_args: ConceptPreviewGenerateRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response =
+                handlers::handle_concept_preview_generate(&server.state, req_args, &current_ctx)
+                    .await?;
+            let value = serde_json::json!({
+                "threadId": response.thread_id,
+                "messageId": response.message_id,
+                "imageData": response.image_data,
+                "caption": response.caption,
+            });
             Ok((value, None))
         }
         "params_patch_and_render" => {
@@ -2981,6 +3135,37 @@ async fn dispatch_tool_call(
     }
 }
 
+fn app_mode_blocks_external_mcp_tools(config: &Config) -> Option<&'static str> {
+    if config.connection_type.as_deref() == Some("mcp") {
+        return None;
+    }
+
+    let api_key_like_mode = config.connection_type.as_deref() == Some("api_key")
+        || (config.connection_type.is_none() && config.engines.iter().any(|engine| engine.enabled));
+
+    if api_key_like_mode {
+        Some("app is in api key mode. External MCP tools are disabled.")
+    } else {
+        Some("app is not in mcp mode. External MCP tools are disabled.")
+    }
+}
+
+fn tool_allowed_while_external_mcp_blocked(tool_name: &str) -> bool {
+    matches!(tool_name, "health_check" | "session_log_out")
+}
+
+fn ensure_mcp_tool_allowed_for_app_mode(config: &Config, tool_name: &str) -> AppResult<()> {
+    let Some(message) = app_mode_blocks_external_mcp_tools(config) else {
+        return Ok(());
+    };
+
+    if tool_allowed_while_external_mcp_blocked(tool_name) {
+        return Ok(());
+    }
+
+    Err(AppError::conflict(message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2995,6 +3180,7 @@ mod tests {
                 freecad_cmd: String::new(),
                 assets: Vec::new(),
                 microwave: None,
+                voice: crate::models::VoiceConfig::default(),
                 mcp: McpConfig::default(),
                 has_seen_onboarding: true,
                 connection_type: None,
@@ -3009,6 +3195,120 @@ mod tests {
         )
     }
 
+    fn test_api_key_config() -> Config {
+        Config {
+            engines: vec![crate::contracts::Engine {
+                id: "engine-1".to_string(),
+                name: "Engine".to_string(),
+                provider: "openai".to_string(),
+                api_key: "key".to_string(),
+                model: "gpt-5.4".to_string(),
+                light_model: String::new(),
+                base_url: String::new(),
+                system_prompt: String::new(),
+                enabled: true,
+            }],
+            selected_engine_id: "engine-1".to_string(),
+            freecad_cmd: String::new(),
+            assets: Vec::new(),
+            microwave: None,
+            voice: crate::models::VoiceConfig::default(),
+            mcp: McpConfig::default(),
+            has_seen_onboarding: true,
+            connection_type: Some("api_key".to_string()),
+            default_engine_kind: crate::models::EngineKind::Freecad,
+            default_source_language: crate::models::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            max_generation_attempts: 3,
+            max_verify_attempts: 0,
+        }
+    }
+
+    fn test_mcp_engine_state(provider: &str, model: &str) -> AppState {
+        AppState::new(
+            Config {
+                engines: vec![crate::contracts::Engine {
+                    id: "engine-1".to_string(),
+                    name: "Engine".to_string(),
+                    provider: provider.to_string(),
+                    api_key: "key".to_string(),
+                    model: model.to_string(),
+                    light_model: String::new(),
+                    base_url: String::new(),
+                    system_prompt: String::new(),
+                    enabled: true,
+                }],
+                selected_engine_id: "engine-1".to_string(),
+                freecad_cmd: String::new(),
+                assets: Vec::new(),
+                microwave: None,
+                voice: crate::models::VoiceConfig::default(),
+                mcp: McpConfig::default(),
+                has_seen_onboarding: true,
+                connection_type: Some("mcp".to_string()),
+                default_engine_kind: crate::models::EngineKind::EckyIrV0,
+                default_source_language: crate::models::SourceLanguage::EckyIrV0,
+                default_geometry_backend: crate::models::GeometryBackend::Build123d,
+                max_generation_attempts: 3,
+                max_verify_attempts: 0,
+            },
+            None,
+            Connection::open_in_memory().expect("memory db"),
+        )
+    }
+
+    #[test]
+    fn api_key_mode_blocks_external_mcp_tools() {
+        let config = test_api_key_config();
+
+        assert_eq!(
+            app_mode_blocks_external_mcp_tools(&config),
+            Some("app is in api key mode. External MCP tools are disabled.")
+        );
+        assert!(!tool_allowed_while_external_mcp_blocked("session_log_in"));
+
+        let err = ensure_mcp_tool_allowed_for_app_mode(&config, "session_log_in")
+            .expect_err("session_log_in should be blocked in api key mode");
+        assert_eq!(err.code, AppErrorCode::Conflict);
+        assert_eq!(
+            err.message,
+            "app is in api key mode. External MCP tools are disabled."
+        );
+    }
+
+    #[test]
+    fn health_check_and_logout_stay_allowed_while_blocked() {
+        let config = test_api_key_config();
+
+        ensure_mcp_tool_allowed_for_app_mode(&config, "health_check")
+            .expect("health_check should stay allowed");
+        ensure_mcp_tool_allowed_for_app_mode(&config, "session_log_out")
+            .expect("session_log_out should stay allowed");
+    }
+
+    #[test]
+    fn explicit_mcp_mode_keeps_tools_enabled() {
+        let mut config = test_api_key_config();
+        config.connection_type = Some("mcp".to_string());
+
+        assert_eq!(app_mode_blocks_external_mcp_tools(&config), None);
+        ensure_mcp_tool_allowed_for_app_mode(&config, "session_log_in")
+            .expect("session_log_in should stay allowed in mcp mode");
+    }
+
+    #[test]
+    fn legacy_local_config_without_connection_type_is_treated_as_api_key_mode() {
+        let mut config = test_api_key_config();
+        config.connection_type = None;
+
+        let err = ensure_mcp_tool_allowed_for_app_mode(&config, "thread_list")
+            .expect_err("legacy local configs should block external MCP tools");
+        assert_eq!(
+            err.message,
+            "app is in api key mode. External MCP tools are disabled."
+        );
+    }
+
     #[test]
     fn tool_definitions_include_get_model_screenshot() {
         let tool_names = tool_definitions()
@@ -3021,6 +3321,18 @@ mod tests {
             "expected get_model_screenshot in {:?}",
             tool_names
         );
+    }
+
+    #[test]
+    fn tool_definitions_include_concept_preview_generate() {
+        let tool_names = tool_definitions()
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "concept_preview_generate"));
     }
 
     #[test]
@@ -3073,26 +3385,120 @@ mod tests {
         );
 
         assert!(workflow.contains("ecky://guides/ecky-source"));
-        assert!(workflow.contains("call target_meta_get"));
-        assert!(workflow.contains("call target_macro_get"));
-        assert!(workflow.contains("call target_detail_get(section=...)"));
+        assert!(workflow.contains("resources/read"));
+        assert!(workflow.contains("sourceLanguage=ecky"));
+        assert!(workflow.contains("geometryBackend=build123d"));
+        assert!(workflow.contains("geometryBackend=mesh"));
+        assert!(workflow.contains("authoritative machine-readable supported `.ecky` surface"));
+        assert!(workflow.contains("prose backend guide"));
+        assert!(workflow.contains("JSON surface manifests are authoritative"));
+        assert!(workflow.contains("ecky://guides/surface-manifest/build123d"));
+        assert!(workflow.contains("ecky://guides/surface-manifest/freecad"));
+        assert!(workflow.contains("ecky://guides/surface-manifest/ecky-rust"));
+        assert!(workflow.contains("parse -> expand -> typecheck -> lower -> validate"));
+        assert!(workflow.contains("not direct OCCT today"));
+        assert!(workflow.contains("structural verification first"));
+        assert!(workflow.contains("target_meta_get"));
+        assert!(workflow.contains("target_macro_get"));
+        assert!(workflow.contains("target_detail_get(section=...)"));
         assert!(workflow.contains("Use target_get only when you truly need the full payload"));
         assert!(workflow.contains("measurement_annotation tools"));
         assert!(workflow.contains("long_action_notice"));
         assert!(!workflow.contains("If needed, call target_get or thread_get"));
+        assert!(!workflow.contains("disk"));
 
         assert!(brief
             .resources
             .iter()
             .any(|resource| resource == "ecky://guides/ecky-source"));
         assert!(brief
+            .resources
+            .iter()
+            .any(|resource| resource == "ecky://guides/ecky-rust"));
+        for uri in [
+            "ecky://guides/surface-manifest/build123d",
+            "ecky://guides/surface-manifest/freecad",
+            "ecky://guides/surface-manifest/ecky-rust",
+        ] {
+            assert!(brief.resources.iter().any(|resource| resource == uri));
+        }
+        assert_eq!(brief.source_language, "ecky");
+        assert!(brief.summary.contains("resources/read"));
+        assert!(brief.summary.contains("fileExtension=.ecky"));
+        assert!(brief.summary.contains("geometryBackend=build123d"));
+        assert!(brief
+            .summary
+            .contains("matching authoritative JSON surface manifest"));
+        assert!(!brief.summary.contains("mesh"));
+        assert!(!brief.summary.contains("Compatibility"));
+        assert!(brief
+            .rules
+            .iter()
+            .any(|rule| rule.contains("JSON surface manifest is authoritative")));
+        assert!(brief
             .next_steps
             .iter()
-            .any(|step| step.contains("ecky://guides/ecky-source")));
+            .any(|step| step.contains("geometryBackend=build123d")));
+        let guide_step = brief
+            .next_steps
+            .iter()
+            .find(|step| step.contains("ecky://guides/surface-manifest/build123d"))
+            .expect("brief guide step should include build123d surface manifest");
+        assert!(guide_step.contains("ecky://guides/ecky-source"));
+        assert!(guide_step.contains("ecky://guides/build123d"));
+        assert!(guide_step.contains("authoritative JSON"));
         assert!(brief
             .next_steps
             .iter()
             .any(|step| step.contains("target_meta_get")));
+        assert!(brief.rules.len() <= 6, "{:?}", brief.rules);
+        assert!(brief.next_steps.len() <= 5, "{:?}", brief.next_steps);
+    }
+
+    #[test]
+    fn bootstrap_prompt_reads_surface_manifest_after_backend_guide() {
+        let state = test_state();
+        let prompt = prompt_payload(&state, "bootstrap_ecky").expect("bootstrap prompt");
+        let text = prompt
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| messages.first())
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.get("text"))
+            .and_then(Value::as_str)
+            .expect("bootstrap prompt text");
+
+        assert!(text.contains("sourceLanguage=ecky"));
+        assert!(text.contains("then the prose backend guide"));
+        assert!(text.contains("Then read the matching authoritative JSON surface manifest"));
+        for uri in [
+            "ecky://guides/surface-manifest/build123d",
+            "ecky://guides/surface-manifest/freecad",
+            "ecky://guides/surface-manifest/ecky-rust",
+        ] {
+            assert!(text.contains(uri), "missing {uri}");
+        }
+
+        let language_idx = text
+            .find("read `ecky://guides/ecky-source` first")
+            .expect("language guide read step");
+        let backend_idx = text
+            .find("then the prose backend guide")
+            .expect("backend guide read step");
+        let manifest_idx = text
+            .find("Then read the matching authoritative JSON surface manifest")
+            .expect("surface manifest read step");
+        assert!(language_idx < backend_idx);
+        assert!(backend_idx < manifest_idx);
+    }
+
+    #[test]
+    fn selected_engine_label_deduplicates_provider_prefixed_model_names() {
+        let state = test_mcp_engine_state("gemini", "gemini-2.5-flash");
+        assert_eq!(selected_engine_label(&state), "gemini-2.5-flash");
+
+        let openai_state = test_mcp_engine_state("openai", "gpt-5.4");
+        assert_eq!(selected_engine_label(&openai_state), "gpt-5.4 (openai)");
     }
 
     #[test]
@@ -3102,17 +3508,194 @@ mod tests {
             read_resource_text(&state, "ecky://guides/ecky-source").expect("ir guide resource");
 
         assert!(ir_guide.contains("(model ...)"));
-        assert!(ir_guide.contains("Scheme-style"));
+        assert!(ir_guide.contains("`.ecky`"));
+        assert!(ir_guide.contains("fileExtension: `.ecky`."));
+        assert!(ir_guide.contains("Current sourceLanguage: `ecky`."));
+        assert!(ir_guide.contains("Target geometryBackend comes from thread metadata"));
+        assert!(ir_guide.contains("EckyRust is a controlled CAD runtime pipeline"));
+        assert!(ir_guide.contains("parse -> expand -> typecheck -> lower -> validate"));
+        assert!(ir_guide.contains("not direct OCCT"));
+        assert!(ir_guide.contains("structural verification first"));
+        assert!(ir_guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
+        assert!(ir_guide.contains("unfilled holes intentionally reject during render/lowering"));
         assert!(ir_guide.contains("range"));
-        assert!(ir_guide.contains("postProcessing.lithophaneAttachments"));
+        assert!(ir_guide.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(ir_guide.contains("`organic-loop`"));
+        assert!(ir_guide.contains("`voronoi-cells`"));
+        assert!(ir_guide.contains("`lorenz-points`"));
+        assert!(ir_guide.contains("`rossler-points`"));
+        assert!(ir_guide.contains("`logistic-bifurcation-points`"));
+        assert!(ir_guide.contains("`henon-points`"));
+        assert!(ir_guide.contains("Bounded literal counts/steps"));
+        assert!(ir_guide.contains("Seeded helpers are deterministic"));
+        assert!(ir_guide.contains("`wall-pattern`"));
+        assert!(ir_guide.contains("`cellular`"));
+        assert!(ir_guide.contains("`schwarz-p`"));
+        assert!(ir_guide.contains("`schwarz-d`"));
+        assert!(ir_guide.contains("`diamond-field`"));
+        assert!(ir_guide.contains("`neovius`"));
+        assert!(ir_guide.contains("`attractor-field`"));
+        assert!(ir_guide.contains("mesh"));
         assert!(resource_definitions(&state)
             .into_iter()
             .any(|resource| resource.get("uri").and_then(Value::as_str)
                 == Some("ecky://guides/ecky-source")));
         assert!(resource_definitions(&state)
             .into_iter()
+            .any(|resource| resource.get("name").and_then(Value::as_str)
+                == Some("Ecky on build123d")));
+        assert!(resource_definitions(&state)
+            .into_iter()
+            .any(|resource| resource.get("uri").and_then(Value::as_str)
+                == Some("ecky://guides/ecky-rust")));
+        assert!(!resource_definitions(&state)
+            .into_iter()
             .any(|resource| resource.get("uri").and_then(Value::as_str)
                 == Some("ecky://guides/ecky-ir-v0")));
+    }
+
+    fn read_surface_manifest_resource(state: &AppState, uri: &str) -> Value {
+        let content = read_resource_content(state, uri).expect("surface manifest resource");
+        assert_eq!(content.mime_type, "application/json");
+        serde_json::from_str(&content.text).expect("surface manifest json")
+    }
+
+    #[test]
+    fn mcp_surface_manifest_resources_are_listed_with_json_mime() {
+        let state = test_state();
+        let resources = resource_definitions(&state);
+
+        for uri in [
+            "ecky://guides/surface-manifest/build123d",
+            "ecky://guides/surface-manifest/freecad",
+            "ecky://guides/surface-manifest/ecky-rust",
+        ] {
+            let resource = resources
+                .iter()
+                .find(|resource| resource.get("uri").and_then(Value::as_str) == Some(uri))
+                .unwrap_or_else(|| panic!("missing manifest resource: {uri}"));
+
+            assert_eq!(
+                resource.get("mimeType").and_then(Value::as_str),
+                Some("application/json")
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_surface_manifest_resources_read_backend_specific_json() {
+        let state = test_state();
+
+        for (uri, backend) in [
+            ("ecky://guides/surface-manifest/build123d", "build123d"),
+            ("ecky://guides/surface-manifest/freecad", "freecad"),
+            ("ecky://guides/surface-manifest/ecky-rust", "mesh"),
+        ] {
+            let manifest = read_surface_manifest_resource(&state, uri);
+            assert_eq!(
+                manifest.get("backend").and_then(Value::as_str),
+                Some(backend)
+            );
+
+            for key in [
+                "modelClauses",
+                "modelWrappers",
+                "expressionForms",
+                "numericHelpers",
+                "pointListHelpers",
+                "booleanHelpers",
+                "cadOps",
+                "wallPatternModes",
+                "typedHolePolicy",
+            ] {
+                assert!(manifest.get(key).is_some(), "missing {key} in {uri}");
+            }
+        }
+
+        for uri in [
+            "ecky://guides/surface-manifest/build123d",
+            "ecky://guides/surface-manifest/freecad",
+        ] {
+            let manifest = read_surface_manifest_resource(&state, uri);
+            let cad_ops = manifest
+                .get("cadOps")
+                .and_then(Value::as_array)
+                .expect("cadOps array");
+            let wall_pattern_modes = manifest
+                .get("wallPatternModes")
+                .and_then(Value::as_array)
+                .expect("wallPatternModes array");
+
+            assert!(!cad_ops.iter().any(|op| op.as_str() == Some("wall-pattern")));
+            assert!(wall_pattern_modes.is_empty());
+        }
+
+        let ecky_rust =
+            read_surface_manifest_resource(&state, "ecky://guides/surface-manifest/ecky-rust");
+        let ecky_rust_cad_ops = ecky_rust
+            .get("cadOps")
+            .and_then(Value::as_array)
+            .expect("cadOps array");
+        let ecky_rust_wall_pattern_modes = ecky_rust
+            .get("wallPatternModes")
+            .and_then(Value::as_array)
+            .expect("wallPatternModes array");
+
+        assert!(ecky_rust_cad_ops
+            .iter()
+            .any(|op| op.as_str() == Some("wall-pattern")));
+        assert!(ecky_rust_wall_pattern_modes
+            .iter()
+            .any(|mode| mode.as_str() == Some("schwarz-p")));
+        assert!(ecky_rust_wall_pattern_modes
+            .iter()
+            .any(|mode| mode.as_str() == Some("attractor-field")));
+    }
+
+    #[test]
+    fn build123d_resource_exposes_file_hints_without_python_or_mesh_terms() {
+        let state = test_state();
+        let guide = read_resource_text(&state, "ecky://guides/build123d")
+            .expect("build123d guide resource");
+
+        assert!(guide.contains("Current fileExtension: `.ecky`."));
+        assert!(guide.contains("Current sourceLanguage: `ecky`."));
+        assert!(guide.contains("Target geometryBackend: `build123d`."));
+        assert!(guide.contains("Return canonical Ecky source in `macro_code`."));
+        assert!(guide.contains("Wall-pattern is mesh/eckyRust only"));
+        assert!(guide.contains("typed/static errors and structural verification first"));
+        assert!(guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
+        assert!(!guide.contains("Python"));
+        assert!(!guide.contains("`wall-pattern`"));
+        assert!(!guide.contains("`schwarz-p`"));
+        assert!(!guide.contains("`schwarz-d`"));
+        assert!(!guide.contains("`diamond-field`"));
+        assert!(!guide.contains("`neovius`"));
+        assert!(!guide.contains("`attractor-field`"));
+    }
+
+    #[test]
+    fn freecad_resource_exposes_backend_guidance_without_retired_extensions() {
+        let state = test_state();
+        let guide =
+            read_resource_text(&state, "ecky://guides/freecad").expect("freecad guide resource");
+
+        assert!(guide.contains("Current fileExtension: `.ecky`."));
+        assert!(guide.contains("Current sourceLanguage: `ecky`."));
+        assert!(guide.contains("Target geometryBackend: `freecad`."));
+        assert!(guide.contains("Return canonical Ecky source in `macro_code`."));
+        assert!(guide.contains("Supported CAD ops for this backend"));
+        assert!(guide.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(guide.contains("Wall-pattern is mesh/eckyRust only"));
+        assert!(guide.contains("typed/static errors and structural verification first"));
+        assert!(guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
+        assert!(!guide.contains("`wall-pattern`"));
+        assert!(!guide.contains("`schwarz-p`"));
+        assert!(!guide.contains("`schwarz-d`"));
+        assert!(!guide.contains("`diamond-field`"));
+        assert!(!guide.contains("`neovius`"));
+        assert!(!guide.contains("`attractor-field`"));
+        assert!(!guide.contains(".frecky"));
     }
 
     #[test]

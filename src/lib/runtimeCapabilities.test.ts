@@ -15,6 +15,9 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     freecadCmd: '',
     assets: [],
     microwave: null,
+    voice: {
+      sttLanguageCode: 'en-US',
+    },
     mcp: {
       port: null,
       maxSessions: null,
@@ -35,14 +38,16 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 }
 
 function sampleCapabilities(overrides: Partial<RuntimeCapabilities> = {}): RuntimeCapabilities {
+  const mesh = { available: true, detail: 'MESH ready', path: null };
   return {
     freecad: { available: false, detail: 'FreeCAD missing', path: null },
     build123d: { available: true, detail: 'BUILD123D ready', path: '/tmp/python3' },
-    eckyRust: { available: true, detail: 'bundled', path: null },
+    directOcct: { available: false, detail: 'Direct OCCT unavailable', path: null },
+    mesh,
     recommendedAuthoringContext: {
-      engineKind: 'eckyIrV0',
-      sourceLanguage: 'eckyIrV0',
-      geometryBackend: 'build123d',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
     },
     ...overrides,
   };
@@ -65,7 +70,7 @@ test('authoringContextFromConfig mirrors persisted defaults', () => {
   );
 });
 
-test('capabilityForAuthoringContext routes legacy/freecad and ecky rust correctly', () => {
+test('capabilityForAuthoringContext routes legacy/freecad and ecky mesh correctly', () => {
   const capabilities = sampleCapabilities({
     freecad: { available: true, detail: 'FreeCAD ready', path: '/tmp/freecadcmd' },
   });
@@ -75,15 +80,19 @@ test('capabilityForAuthoringContext routes legacy/freecad and ecky rust correctl
     'FreeCAD ready',
   );
   assert.equal(
-    capabilityForAuthoringContext(capabilities, 'eckyIrV0', 'eckyRust')?.detail,
-    'bundled',
+    capabilityForAuthoringContext(capabilities, 'ecky', 'mesh')?.detail,
+    'MESH ready',
+  );
+  assert.equal(
+    capabilityForAuthoringContext(capabilities, 'ecky', 'mesh')?.detail,
+    'MESH ready',
   );
 });
 
 test('repairDefaultAuthoringContext keeps valid persisted default', () => {
   const config = sampleConfig({
-    defaultEngineKind: 'eckyIrV0',
-    defaultSourceLanguage: 'eckyIrV0',
+    defaultEngineKind: 'ecky',
+    defaultSourceLanguage: 'ecky',
     defaultGeometryBackend: 'build123d',
   });
   const capabilities = sampleCapabilities();
@@ -92,6 +101,23 @@ test('repairDefaultAuthoringContext keeps valid persisted default', () => {
 
   assert.equal(result.repaired, false);
   assert.equal(result.config.defaultGeometryBackend, 'build123d');
+});
+
+test('repairDefaultAuthoringContext never selects direct OCCT while internal only', () => {
+  const result = repairDefaultAuthoringContext(
+    sampleConfig(),
+    sampleCapabilities({
+      build123d: { available: false, detail: 'missing', path: null },
+      directOcct: { available: true, detail: 'Direct OCCT ready', path: '/tmp/include' },
+      recommendedAuthoringContext: {
+        engineKind: 'ecky',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'mesh',
+      },
+    }),
+  );
+
+  assert.equal(result.config.defaultGeometryBackend, 'mesh');
 });
 
 test('repairDefaultAuthoringContext falls back to recommended context when freecad default is unavailable', () => {
@@ -105,9 +131,9 @@ test('repairDefaultAuthoringContext falls back to recommended context when freec
       geometryBackend: result.config.defaultGeometryBackend,
     },
     {
-      engineKind: 'eckyIrV0',
-      sourceLanguage: 'eckyIrV0',
-      geometryBackend: 'build123d',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
     },
   );
 });

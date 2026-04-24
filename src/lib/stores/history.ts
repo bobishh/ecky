@@ -30,6 +30,7 @@ import {
   setThreadEngineKind as setThreadEngineKindCommand,
   getThread,
   restoreVersion as restoreVersionCommand,
+  updateVersionRuntime,
 } from '../tauri/client';
 
 type NewThreadPayload = {
@@ -47,6 +48,10 @@ type ThreadMessagePageState = {
 
 let latestLoadVersionToken = 0;
 let latestThreadSwitchToken = 0;
+const versionRuntimePayloadCache = new Map<
+  string,
+  { artifactBundle: Message['artifactBundle']; modelManifest: Message['modelManifest'] }
+>();
 
 export const activeThreadMessagesLoading = writable(false);
 export const activeThreadVersionLoading = writable(false);
@@ -115,15 +120,25 @@ function hasConsistentRuntimePayload(
   return Boolean(bundle && manifest && bundle.modelId === manifest.modelId);
 }
 
-async function resolveForkRuntimePayload(message: Message): Promise<{
+function rememberVersionRuntimePayload(
+  messageId: string,
+  artifactBundle: Message['artifactBundle'] | null | undefined,
+  modelManifest: Message['modelManifest'] | null | undefined,
+) {
+  if (!hasConsistentRuntimePayload(artifactBundle, modelManifest)) return;
+  versionRuntimePayloadCache.set(messageId, {
+    artifactBundle: artifactBundle ?? null,
+    modelManifest: modelManifest ?? null,
+  });
+}
+
+function resolveVersionRuntimePayload(message: Message): {
   artifactBundle: Message['artifactBundle'] | null;
   modelManifest: Message['modelManifest'] | null;
-}> {
-  if (hasConsistentRuntimePayload(message.artifactBundle, message.modelManifest)) {
-    return {
-      artifactBundle: message.artifactBundle ?? null,
-      modelManifest: message.modelManifest ?? null,
-    };
+} {
+  const cached = versionRuntimePayloadCache.get(message.id);
+  if (cached && hasConsistentRuntimePayload(cached.artifactBundle, cached.modelManifest)) {
+    return cached;
   }
 
   const currentThreadId = get(activeThreadId);
@@ -140,10 +155,62 @@ async function resolveForkRuntimePayload(message: Message): Promise<{
     };
   }
 
+  return {
+    artifactBundle: message.artifactBundle ?? null,
+    modelManifest: message.modelManifest ?? null,
+  };
+}
+
+export function resetVersionRuntimePayloadCacheForTests() {
+  versionRuntimePayloadCache.clear();
+}
+
+export function rememberVersionRuntimePayloadForTests(
+  messageId: string,
+  artifactBundle: Message['artifactBundle'] | null | undefined,
+  modelManifest: Message['modelManifest'] | null | undefined,
+) {
+  rememberVersionRuntimePayload(messageId, artifactBundle, modelManifest);
+}
+
+export function resolveVersionRuntimePayloadForTests(message: Message) {
+  return resolveVersionRuntimePayload(message);
+}
+
+async function persistVersionRuntimePayload(
+  messageId: string,
+  artifactBundle: Message['artifactBundle'] | null | undefined,
+  modelManifest: Message['modelManifest'] | null | undefined,
+  persistRuntime: typeof updateVersionRuntime = updateVersionRuntime,
+): Promise<boolean> {
+  if (!hasConsistentRuntimePayload(artifactBundle, modelManifest)) return false;
+  await persistRuntime(messageId, artifactBundle!, modelManifest!);
+  return true;
+}
+
+export async function persistVersionRuntimePayloadForTests(
+  messageId: string,
+  artifactBundle: Message['artifactBundle'] | null | undefined,
+  modelManifest: Message['modelManifest'] | null | undefined,
+  persistRuntime?: typeof updateVersionRuntime,
+) {
+  return persistVersionRuntimePayload(messageId, artifactBundle, modelManifest, persistRuntime);
+}
+
+async function resolveForkRuntimePayload(message: Message): Promise<{
+  artifactBundle: Message['artifactBundle'] | null;
+  modelManifest: Message['modelManifest'] | null;
+}> {
+  const runtimePayload = resolveVersionRuntimePayload(message);
+  if (hasConsistentRuntimePayload(runtimePayload.artifactBundle, runtimePayload.modelManifest)) {
+    return runtimePayload;
+  }
+
   if (message.artifactBundle) {
     try {
       const refreshedManifest = await getModelManifest(message.artifactBundle.modelId);
       if (message.artifactBundle.modelId === refreshedManifest.modelId) {
+        rememberVersionRuntimePayload(message.id, message.artifactBundle, refreshedManifest);
         return {
           artifactBundle: message.artifactBundle,
           modelManifest: refreshedManifest,
@@ -175,8 +242,9 @@ export async function loadVersion(msg: Message | null | undefined, expectedThrea
     paramPanelState.reset();
   }
 
+  const runtimePayload = resolveVersionRuntimePayload(msg);
   const runtime = await inspectRuntimeBundle(
-    msg.artifactBundle ?? null,
+    runtimePayload.artifactBundle ?? null,
     undefined,
     undefined,
     msg.output?.postProcessing ?? null,
@@ -185,17 +253,36 @@ export async function loadVersion(msg: Message | null | undefined, expectedThrea
   if (isStale()) return;
   if (runtime.bundle) {
     session.setStlUrl(toAssetUrl(runtime.bundle.previewStlPath));
-    session.setModelRuntime(runtime.bundle, msg.modelManifest ?? null);
+    session.setModelRuntime(runtime.bundle, runtimePayload.modelManifest ?? msg.modelManifest ?? null);
     session.setSelectedPartId(null);
+    rememberVersionRuntimePayload(
+      msg.id,
+      runtime.bundle,
+      runtimePayload.modelManifest ?? msg.modelManifest ?? null,
+    );
   } else if (runtime.skippedOversizedPreview) {
     session.setStlUrl(null);
     session.clearModelRuntime();
   } else if (msg.output) {
     session.clearModelRuntime();
-    session.setStatus('Cached runtime expired. Rebuilding preview...');
+    session.setStatus('Cached runtime missing on disk. Rebuilding preview...');
     await handleParamChange(msg.output.initialParams || {}, msg.output.macroCode, false);
     if (isStale()) return;
     rebuiltRuntime = true;
+    rememberVersionRuntimePayload(
+      msg.id,
+      get(session).artifactBundle,
+      get(session).modelManifest,
+    );
+    try {
+      await persistVersionRuntimePayload(
+        msg.id,
+        get(session).artifactBundle,
+        get(session).modelManifest,
+      );
+    } catch (error) {
+      console.warn('[History] Failed to persist rebuilt runtime bundle:', error);
+    }
   } else {
     session.setStlUrl(null);
     session.clearModelRuntime();
@@ -204,11 +291,11 @@ export async function loadVersion(msg: Message | null | undefined, expectedThrea
   if (runtime.skippedOversizedPreview) {
     session.setStatus(
       runtime.bundle
-        ? `Loaded Version: ${versionLabel(msg)} (lithophane preview skipped; using base part meshes to keep the viewer responsive).`
+        ? `Loaded Version: ${versionLabel(msg)} (lithophane preview skipped; using base part geometry to keep the viewer responsive).`
         : `Loaded Version: ${versionLabel(msg)} (lithophane preview was too large to load safely).`,
     );
   } else if (runtime.degradedToPreview) {
-    session.setStatus(`Loaded Version: ${versionLabel(msg)} (preview only; part meshes were evicted).`);
+    session.setStatus(`Loaded Version: ${versionLabel(msg)} (preview only; part geometry was evicted).`);
   } else if (rebuiltRuntime) {
     session.setStatus(`Loaded Version: ${versionLabel(msg)} (runtime rebuilt from macro).`);
   } else if (runtime.bundle || msg.output || !msg.artifactBundle) {
@@ -220,8 +307,8 @@ export async function loadVersion(msg: Message | null | undefined, expectedThrea
     design: msg.output ?? null,
     threadId: expectedThreadId ?? get(activeThreadId),
     messageId: msg.id,
-    artifactBundle: runtime.bundle ?? msg.artifactBundle ?? null,
-    modelManifest: msg.modelManifest ?? null,
+    artifactBundle: runtime.bundle ?? runtimePayload.artifactBundle ?? msg.artifactBundle ?? null,
+    modelManifest: runtimePayload.modelManifest ?? msg.modelManifest ?? null,
     selectedPartId: null,
   });
 }
@@ -426,11 +513,11 @@ export async function setThreadEngineKind(id: string, engineKind: Thread['engine
     await refreshHistory();
     if (get(activeThreadId) === id) {
       session.setStatus(
-        engineKind === 'eckyIrV0'
-          ? 'Thread engine set to Ecky IR v0.'
+        engineKind === 'ecky'
+          ? 'Thread engine set to Ecky.'
           : engineKind === 'build123d'
-            ? 'Thread engine set to build123d.'
-          : 'Thread engine set to FreeCAD.',
+            ? 'Thread engine set to build123d Python.'
+            : 'Thread engine set to FreeCAD.',
       );
     }
   } catch (e) {

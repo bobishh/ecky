@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
+pub mod direct_occt;
+pub mod direct_occt_executor;
+pub mod direct_occt_runtime;
+pub mod direct_occt_sdk;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OpaqueHandle<Tag> {
     raw: u64,

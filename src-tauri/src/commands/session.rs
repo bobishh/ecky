@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose, Engine as _};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -357,28 +356,9 @@ fn parse_workspace_capture_data_url(data_url: &str) -> AppResult<(&'static str, 
 }
 
 fn stage_prompt_workspace_capture_to_dir(
-    staging_root: &Path,
     input: &crate::contracts::PreparePromptWorkspaceCaptureInput,
 ) -> AppResult<crate::contracts::Attachment> {
-    let (extension, payload) = parse_workspace_capture_data_url(&input.data_url)?;
-    let thread_folder = input
-        .thread_id
-        .as_deref()
-        .map(sanitize_attachment_file_name)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "threadless".to_string());
-    let target_dir = staging_root
-        .join("mcp-attachments")
-        .join("workspace")
-        .join(thread_folder);
-    fs::create_dir_all(&target_dir).map_err(|err| {
-        AppError::internal(format!(
-            "Failed to prepare workspace capture directory {}: {}",
-            target_dir.display(),
-            err
-        ))
-    })?;
-
+    let (extension, _) = parse_workspace_capture_data_url(&input.data_url)?;
     let requested_name = input
         .name
         .as_deref()
@@ -399,25 +379,14 @@ fn stage_prompt_workspace_capture_to_dir(
     } else {
         format!("{}.{}", file_stem, extension)
     };
-    let target_path = target_dir.join(format!("{}-{}", uuid::Uuid::new_v4(), display_name));
-    let bytes = general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|err| AppError::validation(err.to_string()))?;
-    fs::write(&target_path, bytes).map_err(|err| {
-        AppError::internal(format!(
-            "Failed to write workspace capture {}: {}",
-            target_path.display(),
-            err
-        ))
-    })?;
-
     Ok(crate::contracts::Attachment {
-        path: target_path.to_string_lossy().to_string(),
+        path: String::new(),
         name: display_name,
         explanation: input
             .explanation
             .clone()
             .unwrap_or_else(|| "Current workspace view.".to_string()),
+        data_url: Some(input.data_url.clone()),
         kind: crate::contracts::AttachmentKind::Image,
     })
 }
@@ -451,6 +420,21 @@ fn stage_prompt_attachments_to_dir(
         .iter()
         .enumerate()
         .map(|(index, attachment)| {
+            if attachment.kind == crate::contracts::AttachmentKind::Image
+                && attachment
+                    .data_url
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| value.starts_with("data:image/"))
+            {
+                return Ok(crate::contracts::Attachment {
+                    path: String::new(),
+                    name: attachment.name.clone(),
+                    explanation: attachment.explanation.clone(),
+                    data_url: attachment.data_url.clone(),
+                    kind: attachment.kind.clone(),
+                });
+            }
             let source_path = Path::new(&attachment.path);
             let file_name = sanitize_attachment_file_name(
                 source_path
@@ -471,6 +455,7 @@ fn stage_prompt_attachments_to_dir(
                 path: destination_path.to_string_lossy().to_string(),
                 name: attachment.name.clone(),
                 explanation: attachment.explanation.clone(),
+                data_url: attachment.data_url.clone(),
                 kind: attachment.kind.clone(),
             })
         })
@@ -506,6 +491,15 @@ fn attachments_already_staged(
     attachments: &[crate::contracts::Attachment],
 ) -> bool {
     attachments.iter().all(|attachment| {
+        if attachment.kind == crate::contracts::AttachmentKind::Image
+            && attachment
+                .data_url
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| value.starts_with("data:image/"))
+        {
+            return true;
+        }
         let path = Path::new(&attachment.path);
         path.is_absolute() && path.starts_with(staged_root)
     })
@@ -535,6 +529,7 @@ async fn get_message_attachments_impl(
                     path: meta.path,
                     name: meta.name,
                     explanation: meta.explanation,
+                    data_url: meta.data_url,
                     kind: parse_attachment_kind(&meta.kind),
                 })
         })
@@ -552,16 +547,26 @@ async fn get_message_attachments_impl(
         attachments = legacy_message
             .attachment_images
             .into_iter()
-            .map(|path| {
-                let name = Path::new(&path)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("attachment.png")
-                    .to_string();
+            .map(|image_ref| {
+                let is_inline = image_ref.trim_start().starts_with("data:image/");
+                let name = if is_inline {
+                    "attachment.png".to_string()
+                } else {
+                    Path::new(&image_ref)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("attachment.png")
+                        .to_string()
+                };
                 crate::contracts::Attachment {
-                    path,
+                    path: if is_inline {
+                        String::new()
+                    } else {
+                        image_ref.clone()
+                    },
                     name,
                     explanation: String::new(),
+                    data_url: is_inline.then_some(image_ref),
                     kind: crate::contracts::AttachmentKind::Image,
                 }
             })
@@ -591,16 +596,10 @@ pub async fn prepare_prompt_workspace_capture(
     state: State<'_, AppState>,
 ) -> AppResult<crate::contracts::Attachment> {
     let app = state.app_handle.lock().unwrap().clone();
-    let Some(app) = app else {
-        return Err(AppError::internal(
-            "App handle is unavailable for workspace capture staging.",
-        ));
+    let Some(_app) = app else {
+        return stage_prompt_workspace_capture_to_dir(&input);
     };
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|err| AppError::internal(format!("Failed to resolve app config dir: {}", err)))?;
-    stage_prompt_workspace_capture_to_dir(&config_dir, &input)
+    stage_prompt_workspace_capture_to_dir(&input)
 }
 
 fn build_mcp_thread_title(
@@ -1116,6 +1115,7 @@ mod tests {
             freecad_cmd: String::new(),
             assets: Vec::new(),
             microwave: None,
+            voice: crate::models::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
@@ -1140,6 +1140,7 @@ mod tests {
                     path: "/tmp/rim-reference.png".to_string(),
                     name: "rim-reference.png".to_string(),
                     explanation: "Outer rim profile".to_string(),
+                    data_url: None,
                     kind: crate::contracts::AttachmentKind::Image,
                 }],
             },
@@ -1192,6 +1193,7 @@ mod tests {
                     path: "/tmp/frame.png".to_string(),
                     name: "frame.png".to_string(),
                     explanation: "Reference photo".to_string(),
+                    data_url: None,
                     kind: crate::contracts::AttachmentKind::Image,
                 }],
             },
@@ -1250,6 +1252,7 @@ mod tests {
                     path: "/tmp/reference.png".to_string(),
                     name: "reference.png".to_string(),
                     explanation: "Reference".to_string(),
+                    data_url: None,
                     kind: crate::contracts::AttachmentKind::Image,
                 }],
             },
@@ -1418,6 +1421,7 @@ mod tests {
                 path: source_path.to_string_lossy().to_string(),
                 name: "source.png".to_string(),
                 explanation: "Reference".to_string(),
+                data_url: None,
                 kind: crate::contracts::AttachmentKind::Image,
             }],
         )
@@ -1442,18 +1446,21 @@ mod tests {
                 .to_string(),
             name: "reference.png".to_string(),
             explanation: "Reference".to_string(),
+            data_url: None,
             kind: crate::contracts::AttachmentKind::Image,
         }];
         let outside = vec![crate::contracts::Attachment {
             path: "/var/folders/example/reference.png".to_string(),
             name: "reference.png".to_string(),
             explanation: "Reference".to_string(),
+            data_url: None,
             kind: crate::contracts::AttachmentKind::Image,
         }];
         let relative = vec![crate::contracts::Attachment {
             path: "reference.png".to_string(),
             name: "reference.png".to_string(),
             explanation: "Reference".to_string(),
+            data_url: None,
             kind: crate::contracts::AttachmentKind::Image,
         }];
 
@@ -1463,15 +1470,8 @@ mod tests {
     }
 
     #[test]
-    fn stage_prompt_workspace_capture_to_dir_writes_a_managed_image_attachment() {
-        let staging_root = std::env::temp_dir().join(format!(
-            "ecky-stage-workspace-capture-{}",
-            uuid::Uuid::new_v4()
-        ));
-        fs::create_dir_all(&staging_root).expect("staging root");
-
+    fn stage_prompt_workspace_capture_to_dir_returns_inline_image_attachment() {
         let staged = stage_prompt_workspace_capture_to_dir(
-            &staging_root,
             &crate::contracts::PreparePromptWorkspaceCaptureInput {
                 data_url: "data:image/png;base64,Zm9v".to_string(),
                 thread_id: Some("thread-1".to_string()),
@@ -1481,23 +1481,19 @@ mod tests {
         )
         .expect("workspace capture");
 
-        assert!(staged.path.contains("mcp-attachments/workspace/thread-1/"));
-        assert!(staged.path.ends_with(".png"));
+        assert_eq!(staged.path, "");
         assert_eq!(staged.name, "workspace-view.png");
         assert_eq!(staged.explanation, "Current workspace with annotations.");
-        assert_eq!(fs::read(&staged.path).expect("staged capture"), b"foo");
+        assert_eq!(
+            staged.data_url.as_deref(),
+            Some("data:image/png;base64,Zm9v")
+        );
+        assert_eq!(staged.kind, crate::contracts::AttachmentKind::Image);
     }
 
     #[test]
     fn stage_prompt_workspace_capture_to_dir_rejects_non_image_data_urls() {
-        let staging_root = std::env::temp_dir().join(format!(
-            "ecky-stage-workspace-capture-{}",
-            uuid::Uuid::new_v4()
-        ));
-        fs::create_dir_all(&staging_root).expect("staging root");
-
         let err = stage_prompt_workspace_capture_to_dir(
-            &staging_root,
             &crate::contracts::PreparePromptWorkspaceCaptureInput {
                 data_url: "data:text/plain;base64,Zm9v".to_string(),
                 thread_id: None,
@@ -1510,6 +1506,34 @@ mod tests {
         assert!(err
             .message
             .contains("Unsupported workspace capture MIME type"));
+    }
+
+    #[test]
+    fn stage_prompt_attachments_to_dir_keeps_inline_images_in_memory() {
+        let staging_root =
+            std::env::temp_dir().join(format!("ecky-stage-attachments-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&staging_root).expect("staging root");
+
+        let staged = stage_prompt_attachments_to_dir(
+            &staging_root,
+            "request-inline",
+            Some("session-1"),
+            &[crate::contracts::Attachment {
+                path: String::new(),
+                name: "concept.png".to_string(),
+                explanation: "Inline".to_string(),
+                data_url: Some("data:image/png;base64,Zm9v".to_string()),
+                kind: crate::contracts::AttachmentKind::Image,
+            }],
+        )
+        .expect("inline attachments");
+
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].path, "");
+        assert_eq!(
+            staged[0].data_url.as_deref(),
+            Some("data:image/png;base64,Zm9v")
+        );
     }
 
     #[test]

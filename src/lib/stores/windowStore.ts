@@ -4,7 +4,7 @@ import { getThreadWindowLayout, saveThreadWindowLayout } from '../tauri/client';
 import { triggerHighlight } from './uiHighlightStore';
 import type { ThreadWindowLayout, ThreadWindowState } from '../tauri/contracts';
 
-export type WindowId = 'projects' | 'params' | 'dialogue' | 'settings' | 'terminal';
+export type WindowId = 'projects' | 'params' | 'dialogue' | 'settings' | 'terminal' | 'sketch';
 
 export type WindowRegistryEntry = {
   title: string;
@@ -44,6 +44,12 @@ export const windowRegistry: Record<WindowId, WindowRegistryEntry> = {
     minSize: { width: 400, height: 300 },
     mountPolicy: 'keepAlive',
   },
+  sketch: {
+    title: 'Sketch Workspace',
+    defaultRect: { x: 180, y: 120, width: 760, height: 520 },
+    minSize: { width: 520, height: 360 },
+    mountPolicy: 'lazy',
+  },
 };
 
 export type WindowState = {
@@ -64,7 +70,7 @@ type ThreadWindowCacheEntry = {
   rememberLayout: boolean;
 };
 
-const ALL_WINDOW_IDS: WindowId[] = ['projects', 'params', 'dialogue', 'settings', 'terminal'];
+const ALL_WINDOW_IDS: WindowId[] = ['projects', 'params', 'dialogue', 'settings', 'terminal', 'sketch'];
 
 function buildDefaults(): WindowStoreState {
   const state = {} as WindowStoreState;

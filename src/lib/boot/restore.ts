@@ -119,6 +119,17 @@ async function loadConfig() {
     needsSave = true;
   }
 
+  if (!loadedConfig.voice || !loadedConfig.voice.sttLanguageCode?.trim()) {
+    loadedConfig.voice = { sttLanguageCode: 'en-US' };
+    needsSave = true;
+  } else {
+    const normalizedSttLanguageCode = loadedConfig.voice.sttLanguageCode.trim();
+    if (normalizedSttLanguageCode !== loadedConfig.voice.sttLanguageCode) {
+      loadedConfig.voice.sttLanguageCode = normalizedSttLanguageCode;
+      needsSave = true;
+    }
+  }
+
   if (typeof loadedConfig.freecadCmd !== 'string') {
     loadedConfig.freecadCmd = '';
     needsSave = true;

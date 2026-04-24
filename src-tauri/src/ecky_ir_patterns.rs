@@ -6,6 +6,7 @@ use csgrs::mesh::plane::Plane;
 use csgrs::mesh::Mesh;
 use csgrs::traits::CSG;
 
+use crate::ecky_deterministic;
 use crate::models::{AppError, AppResult};
 
 const MAX_SAFE_PATTERN_STL_BYTES: u64 = 64 * 1024 * 1024;
@@ -21,6 +22,13 @@ pub enum WallPatternMode {
     Diamond,
     Hammered,
     Fourier,
+    Cellular,
+    Fbm,
+    Gyroid,
+    SchwarzP,
+    SchwarzD,
+    Neovius,
+    AttractorField,
 }
 
 #[derive(Clone, Debug)]
@@ -491,7 +499,7 @@ fn pattern_amplitude(spec: &WallPatternSpec, u: f64, v: f64, spherical: bool) ->
         WallPatternMode::Hammered => {
             let freq_u = spec.u_freq.max(1.0);
             let freq_v = spec.v_freq.max(spec.u_freq).max(1.0);
-            let noise = value_noise_2d(u * freq_u, v * freq_v, spec.seed);
+            let noise = ecky_deterministic::noise2(u * freq_u, v * freq_v, spec.seed as f64);
             smoothstep(spec.bias.clamp(-0.95, 0.95) * 0.5 + 0.25, 1.0, noise)
         }
         WallPatternMode::Fourier => {
@@ -499,6 +507,50 @@ fn pattern_amplitude(spec: &WallPatternSpec, u: f64, v: f64, spherical: bool) ->
             let v_wave = (v_field * spec.v_freq * 2.0 * std::f64::consts::PI).sin();
             let combined = (u_wave + v_wave) * 0.5;
             (combined * 0.5 + 0.5).clamp(0.0, 1.0)
+        }
+        WallPatternMode::Cellular => {
+            let freq_u = spec.u_freq.max(1.0);
+            let freq_v = spec.v_freq.max(spec.u_freq).max(1.0);
+            let dist = ecky_deterministic::cell_distance2(u * freq_u, v * freq_v, spec.seed as f64);
+            (1.0 - smoothstep(0.04, 0.42, dist)).clamp(0.0, 1.0)
+        }
+        WallPatternMode::Fbm => {
+            let freq_u = spec.u_freq.max(1.0);
+            let freq_v = spec.v_freq.max(spec.u_freq).max(1.0);
+            ecky_deterministic::fbm2(u * freq_u, v * freq_v, spec.seed as f64, 5.0, 2.0, 0.5)
+        }
+        WallPatternMode::Gyroid => {
+            let x = u_field * spec.u_freq.max(1.0) * std::f64::consts::TAU;
+            let y = v_field * spec.v_freq.max(spec.u_freq).max(1.0) * std::f64::consts::TAU;
+            let z = (u_field + v_field + spec.phase) * std::f64::consts::TAU;
+            let g = x.sin() * y.cos() + y.sin() * z.cos() + z.sin() * x.cos();
+            (g / 3.0 * 0.5 + 0.5).clamp(0.0, 1.0)
+        }
+        WallPatternMode::SchwarzP => {
+            let (x, y, z) = implicit_coords(spec, u_field, v_field);
+            implicit_band(ecky_deterministic::schwarz_p_scalar(x, y, z), spec.softness)
+        }
+        WallPatternMode::SchwarzD => {
+            let (x, y, z) = implicit_coords(spec, u_field, v_field);
+            implicit_band(
+                ecky_deterministic::diamond_minimal_scalar(x, y, z),
+                spec.softness,
+            )
+        }
+        WallPatternMode::Neovius => {
+            let (x, y, z) = implicit_coords(spec, u_field, v_field);
+            implicit_band(ecky_deterministic::neovius_scalar(x, y, z), spec.softness)
+        }
+        WallPatternMode::AttractorField => {
+            let freq_u = spec.u_freq.max(1.0);
+            let freq_v = spec.v_freq.max(spec.u_freq).max(1.0);
+            let seed = spec.seed as f64;
+            let x = u_field * freq_u + spec.phase;
+            let y = v_field * freq_v - spec.phase;
+            let logistic = ecky_deterministic::logistic_scalar2(x, y, seed);
+            let henon = ecky_deterministic::henon_scalar2(x + logistic, y, seed + 19.0);
+            let ikeda = ecky_deterministic::ikeda_scalar2(x, y + henon, seed + 37.0);
+            (logistic * 0.34 + henon * 0.33 + ikeda * 0.33).clamp(0.0, 1.0)
         }
     };
 
@@ -518,6 +570,18 @@ fn wrap01(value: f64) -> f64 {
         wrapped += 1.0;
     }
     wrapped
+}
+
+fn implicit_coords(spec: &WallPatternSpec, u: f64, v: f64) -> (f64, f64, f64) {
+    let x = u * spec.u_freq.max(1.0) * std::f64::consts::TAU;
+    let y = v * spec.v_freq.max(spec.u_freq).max(1.0) * std::f64::consts::TAU;
+    let z = (u + v + spec.phase) * spec.u_freq.max(spec.v_freq).max(1.0) * std::f64::consts::PI;
+    (x, y, z)
+}
+
+fn implicit_band(value: f64, softness: f64) -> f64 {
+    let width = (0.08 + softness * 0.7).clamp(0.08, 0.4);
+    (1.0 - smoothstep(0.0, width, (value - 0.5).abs())).clamp(0.0, 1.0)
 }
 
 fn pulse(value: f64, duty: f64, softness: f64) -> f64 {
@@ -543,33 +607,4 @@ fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
     }
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn hash_u64(mut value: u64) -> u64 {
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xff51afd7ed558ccd);
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xc4ceb9fe1a85ec53);
-    value ^ (value >> 33)
-}
-
-fn random_from_grid(x: i64, y: i64, seed: u64) -> f64 {
-    let mixed = hash_u64((x as u64).wrapping_mul(0x9e3779b97f4a7c15) ^ (y as u64) ^ seed);
-    (mixed as f64 / u64::MAX as f64).clamp(0.0, 1.0)
-}
-
-fn value_noise_2d(x: f64, y: f64, seed: u64) -> f64 {
-    let x0 = x.floor() as i64;
-    let y0 = y.floor() as i64;
-    let xf = x - x.floor();
-    let yf = y - y.floor();
-    let n00 = random_from_grid(x0, y0, seed);
-    let n10 = random_from_grid(x0 + 1, y0, seed);
-    let n01 = random_from_grid(x0, y0 + 1, seed);
-    let n11 = random_from_grid(x0 + 1, y0 + 1, seed);
-    let sx = smoothstep(0.0, 1.0, xf);
-    let sy = smoothstep(0.0, 1.0, yf);
-    let ix0 = lerp(n00, n10, sx);
-    let ix1 = lerp(n01, n11, sx);
-    lerp(ix0, ix1, sy)
 }

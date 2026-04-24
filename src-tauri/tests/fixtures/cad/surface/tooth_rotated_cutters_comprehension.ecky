@@ -1,0 +1,25 @@
+(model
+  (params
+    (number num-teeth 5)
+    (number pitch 8))
+  (part body
+    (build
+      (shape base (box 48 18 8))
+      (shape tooth2d
+        (polygon
+          ((-2 4)
+           (-2 0)
+           (-0.75 -2)
+           (0.75 -2)
+           (2 0)
+           (2 4))))
+      (shape tooth
+        (rotate 90 0 0
+          (extrude tooth2d 22 :symmetric #t)))
+      (result
+        (apply difference base
+          (map
+            (lambda (i)
+              (translate (+ -16 (* i pitch)) 0 4
+                (rotate 0 (* i 7.5) 0 tooth)))
+            (range 0 num-teeth)))))))

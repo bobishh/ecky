@@ -8,7 +8,7 @@
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { writeTextFile } from '@tauri-apps/plugin-fs';
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { buildAgentGenieTraits } from './lib/genie/traits';
 
@@ -16,6 +16,7 @@
   import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
   import ManualImportModal from './lib/ManualImportModal.svelte';
   import AgentTerminalSurface from './lib/AgentTerminalSurface.svelte';
+  import SketchWorkspace from './lib/SketchWorkspace.svelte';
   import Modal from './lib/Modal.svelte';
   import Window from './lib/Window.svelte';
   import ProjectSwitcher from './lib/ProjectSwitcher.svelte';
@@ -39,6 +40,7 @@
     stopMicrowaveAudio,
     stopMicrowaveHum,
   } from './lib/audio/microwave';
+  import { setSpeechMuted, speakEckyText, stopEckySpeech } from './lib/audio/tts';
   import { onboarding } from './lib/stores/onboarding';
   import { session } from './lib/stores/sessionStore';
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
@@ -71,6 +73,7 @@
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
   import { nowSeconds } from './lib/stores/timeEngine';
   import { liveApply, paramPanelState } from './lib/stores/paramPanelState';
+  import { inferModelCapabilities } from './lib/modelRuntime/modelCapabilities';
   import { persistLastSessionSnapshot } from './lib/modelRuntime/sessionSnapshot';
   import { getRenderableRuntimeBundle, inspectRuntimeBundle } from './lib/modelRuntime/runtimeBundle';
   import {
@@ -80,9 +83,20 @@
     hasLiveAgentSession,
     resolveActivePendingPrompt,
     shouldAutoFocusAgentWorkingVersion,
+    usesAgentDialogueMode,
     usesMcpConnection,
     usesActiveMcpMode,
   } from './lib/agents/state';
+  import { deriveDialogueState, type DialogueState } from './lib/composables/dialogueState';
+  import {
+    deriveOptimisticDialogueMessages,
+    hasLiveApiEngineConnection,
+  } from './lib/composables/apiDialogue';
+  import {
+    deriveViewerBusyState,
+    mapThreadAgentStateToViewerBusy,
+    type ViewerBusyPhase,
+  } from './lib/composables/viewerBusyState';
   import {
     agentTerminalSessionKey,
     buildAgentTerminalKeyInput,
@@ -94,6 +108,7 @@
     setWorkspaceCaptureEnabled,
     writeWorkspaceCapturePrefs,
   } from './lib/agents/workspaceCapture';
+  import { codeInspectorTitle } from './lib/modelEngineLabel';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
@@ -152,9 +167,14 @@
     buildExportChooserOptions,
     buildExportDefaultNames,
     buildMultipartExportParts,
+    getStepExportPath,
     hasMultipartExportAssets,
     type ExportMode,
   } from './lib/exportOptions';
+  import { deriveContextState } from './lib/composables/contextState';
+  import { deriveViewportState } from './lib/composables/viewportState';
+  import { deriveAgentOpsState, type PendingViewportScreenshotChoice } from './lib/composables/agentOps';
+  import { deriveExportState } from './lib/composables/exportOps';
   import {
     authoringContextFromConfig,
     capabilityForAuthoringContext,
@@ -193,11 +213,14 @@
     type ThreadAgentState,
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
+  import type { SketchDraftSource } from './lib/tauri/contracts';
+  import type { SketchGhostPreviewState } from './lib/sketchGhostPreview';
   import type {
     AgentSession,
     AgentTerminalInput,
     AgentTerminalSnapshot,
     Attachment,
+    ArtifactBundle,
     DesignParams,
     GenieTraits,
     Message,
@@ -231,7 +254,6 @@
   };
 
   type ThreadPhase = Request['phase'] | 'idle' | 'booting';
-  type ViewerBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
   type ViewerCaptureDetails = {
     dataUrl: string;
     width: number;
@@ -254,15 +276,15 @@
     messageId: string;
     modelId: string | null;
   };
-  type PendingViewportScreenshotChoice = AgentViewportScreenshotEvent & {
-    message: string;
-    buttons: string[];
-  };
   type HiddenViewerSpec = {
     requestId: string;
     targetKey: string;
     stlUrl: string;
     viewerAssets: ViewerAsset[];
+  };
+  type SketchPreviewState = {
+    draft: SketchDraftSource;
+    artifactBundle: ArtifactBundle;
   };
 
   function defaultConceptPreviewUiState(): ConceptPreviewUiState {
@@ -293,38 +315,6 @@
     return Boolean(navigator.webdriver);
   }
 
-  function mapAgentPhaseToViewerBusy(session: AgentSession | null): ViewerBusyPhase {
-    switch (session?.phase) {
-      case 'rendering':
-      case 'restoring_version':
-        return 'rendering';
-      case 'saving_version':
-        return 'committing';
-      case 'patching_params':
-      case 'patching_macro':
-      case 'reading':
-      case 'resolving':
-        return 'generating';
-      default:
-        return null;
-    }
-  }
-
-  function mapThreadAgentStateToViewerBusy(
-    state: ThreadAgentState | null | undefined,
-  ): ViewerBusyPhase {
-    if (!state || state.connectionState !== 'active' || state.waitingOnPrompt || !state.busy) return null;
-    switch (state.phase) {
-      case 'rendering':
-      case 'restoring_version':
-        return 'rendering';
-      case 'saving_version':
-        return 'committing';
-      default:
-        return null;
-    }
-  }
-
   function formatAgentOriginLabel(origin: Message['agentOrigin'] | null | undefined): string | null {
     if (!origin) return null;
     const host = origin.hostLabel?.trim() || origin.agentLabel?.trim() || 'Agent';
@@ -335,56 +325,26 @@
     return `${host} · ${model}`;
   }
 
-  function isActiveRequestPhase(phase: Request['phase']): boolean {
-    return !['success', 'error', 'canceled'].includes(phase);
+  function toAssetUrl(path: string | null | undefined): string {
+    if (!path) return '';
+    try {
+      return convertFileSrc(path);
+    } catch {
+      return path;
+    }
   }
 
-  function isModelBusyRequestPhase(phase: Request['phase']): boolean {
-    return ['generating', 'repairing', 'queued_for_render', 'rendering', 'committing'].includes(phase);
-  }
-
-  function requestMatchesViewerTarget(
-    request: Request,
-    threadId: string | null,
-    messageId: string | null,
-    modelId: string | null,
-  ): boolean {
-    if (!threadId || request.threadId !== threadId) return false;
-    if (modelId) {
-      if (request.baseModelId) return request.baseModelId === modelId;
-      if (messageId && request.baseMessageId) return request.baseMessageId === messageId;
-      return false;
-    }
-    if (messageId) {
-      if (request.baseMessageId) return request.baseMessageId === messageId;
-      return false;
-    }
-    return true;
-  }
-
-  function sessionMatchesViewerTarget(
-    candidate: AgentSession,
-    threadId: string | null,
-    messageId: string | null,
-    modelId: string | null,
-  ): boolean {
-    if (!threadId || candidate.threadId !== threadId) return false;
-    if (modelId) {
-      if (candidate.modelId) return candidate.modelId === modelId;
-      if (messageId && candidate.messageId) return candidate.messageId === messageId;
-      return false;
-    }
-    if (messageId) {
-      if (candidate.messageId) return candidate.messageId === messageId;
-      return false;
-    }
-    return true;
+  function fileBasename(path: string | null | undefined): string {
+    if (!path) return '';
+    return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
   }
 
   // Local reactive aliases for templates
   const phase = $derived($session.phase);
   const status = $derived($session.status);
   const error = $derived($session.error);
+  let errorCopied = $state(false);
+  let errorCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
   const stlUrl = $derived($session.stlUrl);
   const activeArtifactBundle = $derived($session.artifactBundle);
   const sessionModelManifest = $derived($session.modelManifest);
@@ -397,300 +357,46 @@
   let viewerTopologyMode = $state<TopologyMode>('mesh');
   let showNewProjectChooser = $state(false);
   let showNewProjectImport = $state(false);
+  let sketchPreview = $state<SketchPreviewState | null>(null);
+  let sketchGhostPreview = $state<SketchGhostPreviewState | null>(null);
+  let codeModalMode = $state<'version' | 'sketch-preview'>('version');
 
   const isBooting = $derived(phase === 'booting');
   const isQuestionFlow = $derived(phase === 'answering');
   const isMcpConnection = $derived(usesMcpConnection($config.connectionType));
   const isActiveMcpMode = $derived(usesActiveMcpMode($config.connectionType, $config.mcp.mode));
-
-  type DialogueState =
-    | { mode: 'generate' }
-    | { mode: 'mcp-idle' }
-    | { mode: 'agent-reply'; requestId: string; agentLabel: string };
-
-  const dialogueState = $derived.by<DialogueState>(() => {
-    if (activePendingAgentPrompt) {
-      return {
-        mode: 'agent-reply',
-        requestId: activePendingAgentPrompt.requestId,
-        agentLabel: activePendingAgentPrompt.agentLabel,
-      };
-    }
-    if (isMcpConnection) return { mode: 'mcp-idle' };
-    return { mode: 'generate' };
-  });
-  const viewerAssets = $derived.by<ViewerAsset[]>(() => {
-    const assets = activeArtifactBundle?.viewerAssets || [];
-    return assets.map((asset) => ({
-      ...asset,
-      path: toAssetUrl(asset.path),
-    }));
-  });
-  const hasRenderableModel = $derived.by(() =>
-    Boolean($activeThreadId && ((stlUrl || '').trim() || viewerAssets.length > 0)),
+  const usesQueuedAgentDialogue = $derived.by<boolean>(() =>
+    usesAgentDialogueMode($config.connectionType, threadAgentState),
   );
-  const effectiveUiSpec = $derived.by<UiSpec>(() => {
-    if (($paramPanelState.uiSpec?.fields || []).length > 0) {
-      return $paramPanelState.uiSpec;
-    }
-    return buildImportedUiSpec(sessionModelManifest);
-  });
-  const effectiveParameters = $derived.by<DesignParams>(() =>
-    buildImportedParams(sessionModelManifest, $paramPanelState.params || {}, effectiveUiSpec),
-  );
-  const activeModelManifest = $derived.by(() =>
-    ensureSemanticManifest(sessionModelManifest, effectiveUiSpec, effectiveParameters),
-  );
-  const contextSelectionTargets = $derived.by<ContextSelectionTarget[]>(() =>
-    buildContextSelectionTargets(activeModelManifest),
-  );
-  const selectedTarget = $derived.by<ContextSelectionTarget | null>(() =>
-    resolveContextSelectionTarget(
-      activeModelManifest,
-      contextSelectionTargets,
-      selectedContextTargetId,
-      $session.selectedPartId,
-    ),
-  );
-  const selectedPartId = $derived(deriveSelectedPartId(selectedTarget));
-  const importedPreviewTransforms = $derived.by<Record<string, ImportedPreviewTransform>>(() =>
-    buildImportedPreviewTransforms(activeModelManifest, effectiveParameters),
-  );
-  const overlayPreviewOnly = $derived.by(() => {
-    if (!(activeModelManifest?.sourceKind === 'importedFcstd' && overlaySelectedPart?.editable)) {
-      return false;
-    }
-    if (!selectedPartId) return false;
-    const preview = importedPreviewTransforms[selectedPartId];
-    if (!preview) return false;
-    return (
-      Math.abs(preview.scale.x - 1) > 0.001 ||
-      Math.abs(preview.scale.y - 1) > 0.001 ||
-      Math.abs(preview.scale.z - 1) > 0.001
-    );
-  });
-  const overlaySelectedPart = $derived.by(() => {
-    if (!selectedPartId || !activeModelManifest?.parts?.length) return null;
-    return activeModelManifest.parts.find((part) => part.partId === selectedPartId) ?? null;
-  });
-  const availableControlViews = $derived.by<MaterializedSemanticView[]>(() =>
-    materializeControlViews(activeModelManifest, effectiveUiSpec, effectiveParameters),
-  );
-  let activeControlViewId = $state<string | null>(null);
-  $effect(() => {
-    activeControlViewId = resolveActiveContextViewId(
-      availableControlViews,
-      selectedTarget,
-      activeControlViewId,
-    );
-  });
-  const activeControlView = $derived.by(() =>
-    availableControlViews.find((view) => view.viewId === activeControlViewId) ??
-    availableControlViews[0] ??
-    null,
-  );
-  const overlayControls = $derived.by(() => {
-    if (!activeControlView) return [];
-    return pickContextControls(activeControlView, selectedTarget);
-  });
-  const overlayAdvisories = $derived.by(() =>
-    pickContextAdvisories(activeControlView, selectedTarget),
-  );
-  const activeMeasurementCallout = $derived.by(() =>
-    resolveMeasurementCallout(
-      activeModelManifest,
-      activeArtifactBundle,
-      contextSelectionTargets,
-      focusedMeasurementControl,
-      selectedTarget,
-    ),
-  );
-  const suppressViewportBusyUi = $derived($showCodeModal);
-  let showEnrichmentModal = $state(false);
-  let showExportChooser = $state(false);
-  const enrichmentManifest = $derived.by(() => {
-    if (!showEnrichmentModal) return null;
-    const m = sessionModelManifest;
-    if (!m || m.sourceKind !== 'importedFcstd') return null;
-    if (m.enrichmentState?.status !== 'pending') return null;
-    return m;
-  });
-  const localViewportRequests = $derived.by<Request[]>(() => {
-    const threadId = $activeThreadId;
-    const messageId = $activeVersionId;
-    const modelId = activeArtifactBundle?.modelId ?? null;
-    return $activeThreadRequests.filter(
-      (request) =>
-        isActiveRequestPhase(request.phase) &&
-        requestMatchesViewerTarget(request, threadId, messageId, modelId),
-    );
-  });
-  const externalViewerSession = $derived.by<AgentSession | null>(() => {
-    const threadId = $activeThreadId;
-    const messageId = $activeVersionId;
-    const modelId = activeArtifactBundle?.modelId ?? null;
-    if (!threadId && !messageId && !modelId) return null;
-
-    return (
-      activeAgentSessions.find((candidate) =>
-        sessionMatchesViewerTarget(candidate, threadId, messageId, modelId),
-      ) ??
-      null
-    );
-  });
-  const externalViewerBusyPhase = $derived.by<ViewerBusyPhase>(() =>
-    mapAgentPhaseToViewerBusy(externalViewerSession),
-  );
-  const threadScopedAgentBusyPhase = $derived.by<ViewerBusyPhase>(() =>
-    mapThreadAgentStateToViewerBusy(threadAgentState),
-  );
-  const manualViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
-    if (
-      $session.isManual &&
-      phase === 'rendering' &&
-      $session.manualThreadId === $activeThreadId &&
-      ($session.manualMessageId ?? null) === ($activeVersionId ?? null)
-    ) {
-      return 'rendering';
-    }
-    return null;
-  });
-  const showViewerBusyMask = $derived.by(() => {
-    if (suppressViewportBusyUi) return false;
-    if (localViewportRequests.some((request) => isModelBusyRequestPhase(request.phase))) return true;
-    if (manualViewerBusyPhase === 'rendering') return true;
-    // Only show the agent busy mask when there's actually a model loaded to cover — skip it for
-    // first-time renders where the viewer is empty (no model to hide yet).
-    if (threadScopedAgentBusyPhase && hasRenderableModel) return true;
-    return externalViewerBusyPhase === 'rendering' || externalViewerBusyPhase === 'committing';
-  });
-  const localViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
-    if (localViewportRequests.some((request) => request.phase === 'committing')) return 'committing';
-    if (
-      localViewportRequests.some((request) =>
-        ['queued_for_render', 'rendering'].includes(request.phase),
-      )
-    ) {
-      return 'rendering';
-    }
-    if (localViewportRequests.some((request) => request.phase === 'repairing')) return 'repairing';
-    if (localViewportRequests.some((request) => request.phase === 'generating')) return 'generating';
-    if (manualViewerBusyPhase === 'rendering') return 'rendering';
-    return null;
-  });
-  const viewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
-    return localViewerBusyPhase ?? threadScopedAgentBusyPhase ?? externalViewerBusyPhase;
-  });
-  const viewerBusyText = $derived.by<string | null>(() => {
-    switch (localViewerBusyPhase) {
-      case 'repairing':
-        return $session.repairMessage || 'Reweaving the geometry lattice.';
-      case 'rendering':
-        return 'Stabilizing the geometry into manufacturable solids.';
-      case 'committing':
-        return 'Finalizing the artifact and sealing it into the thread.';
-      case 'generating':
-        return $session.cookingPhrase || 'Preparing the next transformation.';
-      default:
-        if (threadScopedAgentBusyPhase && threadAgentState) {
-          const threadStatusText = threadAgentState.statusText?.trim() ?? '';
-          if (threadStatusText) return threadStatusText;
-          switch (threadScopedAgentBusyPhase) {
-            case 'rendering':
-              return `External agent ${threadAgentState.agentLabel} is updating the model.`;
-            case 'committing':
-              return `External agent ${threadAgentState.agentLabel} is saving a version.`;
-            case 'generating':
-              return `External agent ${threadAgentState.agentLabel} is preparing an update.`;
-            default:
-              return null;
-          }
-        }
-        if (!externalViewerSession || !externalViewerBusyPhase) return null;
-        if (externalViewerSession.statusText.trim()) return externalViewerSession.statusText;
-        switch (externalViewerBusyPhase) {
-          case 'rendering':
-            return `External agent ${externalViewerSession.agentLabel} is updating the model.`;
-          case 'committing':
-            return `External agent ${externalViewerSession.agentLabel} is saving a version.`;
-          case 'generating':
-            return `External agent ${externalViewerSession.agentLabel} is preparing an update.`;
-          default:
-            return null;
-        }
-    }
-  });
-  const externalViewerStatusText = $derived.by<string | null>(() => {
-    if (!externalViewerSession || !externalViewerBusyPhase) return null;
-    if (externalViewerSession.statusText.trim()) return externalViewerSession.statusText;
-    switch (externalViewerBusyPhase) {
-      case 'rendering':
-        return `External agent ${externalViewerSession.agentLabel} is updating the model.`;
-      case 'committing':
-        return `External agent ${externalViewerSession.agentLabel} is saving a version.`;
-      case 'generating':
-        return `External agent ${externalViewerSession.agentLabel} is preparing an update.`;
-      default:
-        return null;
-    }
-  });
-
-  let viewerComponent = $state<ViewerHandle | null>(null);
-  let hiddenViewerComponent = $state<ViewerHandle | null>(null);
-  let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
-  let drawingOverlayDirty = $state(false);
-  let viewportAreaEl = $state<HTMLElement | null>(null);
-  let blueprintImageEl = $state<HTMLImageElement | null>(null);
-  let hiddenViewerSpec = $state<HiddenViewerSpec | null>(null);
-  let visibleViewerLoadNonce = $state(0);
-  let hiddenViewerLoadNonce = $state(0);
-  let versionPreviewCaptureSeq = 0;
-  let lastSavedVersionPreviewKey = '';
-  let cameraStateByTarget = $state<Record<string, ViewportCameraState>>({});
-  let lastLiveScreenshotByTarget = $state<Record<string, ViewportScreenshotCapture>>({});
-  let conceptPreviewUiByThread = $state<Record<string, ConceptPreviewUiState>>({});
-  let drawMode = $state(false);
-  let workspaceCapturePrefs = $state<Record<string, boolean>>(readWorkspaceCapturePrefs());
-  let lastAssistantMessageId = $state<string | null>(null);
-  let lastAdvisorBubble = $state('');
-  let lastAdvisorQuestion = $state('');
-  let dismissedBubbleText = $state('');
-  let agentControlBusy = $state(false);
-
   let activeAgentSessions = $state<AgentSession[]>([]);
   let threadAgentState = $state<ThreadAgentState | null>(null);
-  let genieWakeUpCount = $state(0);
-  let lastAgentPresenceConnected = false;
-  let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
-  const terminalWindowState = $derived($windowStore.terminal);
-  const projectsWindowState = $derived($windowStore.projects);
-  const paramsWindowState = $derived($windowStore.params);
-  const dialogueWindowState = $derived($windowStore.dialogue);
-  const settingsWindowState = $derived($windowStore.settings);
-  let mountedWindows = $state<Record<WindowId, boolean>>({
-    projects: false,
-    params: false,
-    dialogue: false,
-    settings: false,
-    terminal: false,
+  const primaryAgentId = $derived.by<string | null>(() =>
+    derivePrimaryAgentId($config.mcp.autoAgents ?? [], $config.mcp.primaryAgentId ?? null),
+  );
+  const primaryAgentLabel = $derived.by<string | null>(() =>
+    $config.mcp.autoAgents.find((agent) => agent.id === primaryAgentId)?.label ?? null,
+  );
+  const visibleAgentTerminal = $derived($visibleAgentTerminalStore);
+  const activeAgentTerminalAttention = $derived($agentTerminalAttentionStore);
+  const activeThread = $derived($history.find((t) => t.id === $activeThreadId));
+  const activeThreadDialogueMessages = $derived.by(() =>
+    deriveOptimisticDialogueMessages(activeThread?.messages ?? [], $activeThreadRequests),
+  );
+  const hasLiveApiConnection = $derived.by(() =>
+    hasLiveApiEngineConnection($config.connectionType, selectedEngine),
+  );
+  const activeVersionMessage = $derived.by<Message | null>(() => {
+    if (!activeThread) return null;
+    return (
+      activeThread.messages.find(
+        (message) =>
+          message.id === $activeVersionId &&
+          isRenderableVersionTimelineMessage(message),
+      ) ?? null
+    );
   });
-
-  $effect(() => {
-    const s = $windowStore;
-    for (const id of ['projects', 'params', 'dialogue', 'settings', 'terminal'] as WindowId[]) {
-      if (s[id].visible) {
-        mountedWindows[id] = true;
-      }
-    }
-  });
-
-  let agentTerminalInput = $state('');
-  let agentTerminalSurface = $state<{ focusTerminal: () => void } | null>(null);
-  let lastAgentTerminalFocusKey = $state('');
-  let lastFocusedAgentWorkingVersionKey = $state('');
-  let activeMcpMicrowaveKey = $state('');
-  let ownsMcpPhraseLoop = $state(false);
-
+  let cameraStateByTarget = $state<Record<string, ViewportCameraState>>({});
+  let conceptPreviewUiByThread = $state<Record<string, ConceptPreviewUiState>>({});
   type PendingAgentPrompt = {
     requestId: string;
     message: string | null;
@@ -710,27 +416,255 @@
   // Plain Set (non-reactive) — mutations must not re-trigger the drain effect.
   const autoDrainingPromptRequestIds = new Set<string>();
   let pendingViewportScreenshotChoices = $state<PendingViewportScreenshotChoice[]>([]);
-  const activePendingAgentPrompt = $derived.by<PendingAgentPrompt | null>(() => {
-    return resolveActivePendingPrompt({
-      prompts: pendingAgentPrompts,
-      currentThreadId: $activeThreadId,
-      connectionType: $config.connectionType,
-      mode: $config.mcp.mode,
-      autoAgents: $config.mcp.autoAgents ?? [],
-      primaryAgentId: $config.mcp.primaryAgentId ?? null,
-    }) as PendingAgentPrompt | null;
-  });
-  const threadAttentionIds = $derived.by<string[]>(() =>
-    deriveThreadAttentionIds({
-      prompts: pendingAgentPrompts,
-      screenshots: pendingViewportScreenshotChoices.map((choice) => ({
-        requestId: choice.requestId,
-        threadId: choice.threadId,
-      })),
-      activePromptRequestId: activePendingAgentPrompt?.requestId ?? null,
-      currentThreadId: $activeThreadId,
+
+  let activeControlViewId = $state<string | null>(null);
+  const contextState = $derived.by(() =>
+    deriveContextState({
+      activeArtifactBundle,
+      activeControlViewId,
+      focusedMeasurementControl,
+      paramUiSpec: $paramPanelState.uiSpec || null,
+      paramValues: $paramPanelState.params || {},
+      selectedContextTargetId,
+      selectedPartId: $session.selectedPartId ?? null,
+      sessionModelManifest,
     }),
   );
+  const effectiveUiSpec = $derived.by<UiSpec>(() => contextState.effectiveUiSpec);
+  const effectiveParameters = $derived.by<DesignParams>(() => contextState.effectiveParameters);
+  const activeModelManifest = $derived.by(() => contextState.activeModelManifest);
+  const contextSelectionTargets = $derived.by<ContextSelectionTarget[]>(
+    () => contextState.contextSelectionTargets,
+  );
+  const selectedTarget = $derived.by<ContextSelectionTarget | null>(
+    () => contextState.selectedTarget,
+  );
+  const selectedPartId = $derived.by(() => contextState.selectedPartId);
+  const importedPreviewTransforms = $derived.by<Record<string, ImportedPreviewTransform>>(
+    () => contextState.importedPreviewTransforms,
+  );
+  const overlaySelectedPart = $derived.by(() => contextState.overlaySelectedPart);
+  const overlayPreviewOnly = $derived.by(() => contextState.overlayPreviewOnly);
+  const availableControlViews = $derived.by<MaterializedSemanticView[]>(
+    () => contextState.availableControlViews,
+  );
+  const activeControlView = $derived.by(() => contextState.activeControlView);
+  const overlayControls = $derived.by(() => contextState.overlayControls);
+  const overlayAdvisories = $derived.by(() => contextState.overlayAdvisories);
+  const activeMeasurementCallout = $derived.by(() => contextState.activeMeasurementCallout);
+  $effect(() => {
+    activeControlViewId = contextState.resolvedActiveControlViewId;
+  });
+  const suppressViewportBusyUi = $derived($showCodeModal);
+  let showEnrichmentModal = $state(false);
+  let showExportChooser = $state(false);
+  const enrichmentManifest = $derived.by(() => {
+    if (!showEnrichmentModal) return null;
+    const m = sessionModelManifest;
+    if (!m || m.sourceKind !== 'importedFcstd') return null;
+    if (m.enrichmentState?.status !== 'pending') return null;
+    return m;
+  });
+  const viewerBusyState = $derived.by(() =>
+    deriveViewerBusyState({
+      activeThreadId: $activeThreadId ?? null,
+      activeVersionId: $activeVersionId ?? null,
+      activeModelId: activeArtifactBundle?.modelId ?? null,
+      activeThreadRequests: $activeThreadRequests,
+      activeAgentSessions,
+      threadAgentState,
+      phase,
+      isManual: $session.isManual,
+      manualThreadId: $session.manualThreadId ?? null,
+      manualMessageId: $session.manualMessageId ?? null,
+      repairMessage: $session.repairMessage ?? null,
+      cookingPhrase: $session.cookingPhrase ?? null,
+      hasRenderableModel,
+      suppressViewportBusyUi,
+    }),
+  );
+  const showViewerBusyMask = $derived(viewerBusyState.showViewerBusyMask);
+  const viewerBusyPhase = $derived<ViewerBusyPhase>(viewerBusyState.viewerBusyPhase);
+  const viewerBusyText = $derived<string | null>(viewerBusyState.viewerBusyText);
+
+  const viewportState = $derived.by(() =>
+    deriveViewportState({
+      activeArtifactBundle,
+      activeThreadId: $activeThreadId ?? null,
+      activeThreadMessages: activeThreadDialogueMessages,
+      activeVersionId: $activeVersionId ?? null,
+      activeVersionMessage,
+      cameraStateByTarget,
+      conceptPreviewUiByThread,
+      stlUrl,
+      toAssetUrl,
+    }),
+  );
+  const viewerAssets = $derived.by<ViewerAsset[]>(() => viewportState.viewerAssets);
+  const hasSketchPreview = $derived(Boolean(sketchPreview?.artifactBundle));
+  const sketchPreviewStlUrl = $derived.by<string | null>(() =>
+    sketchPreview?.artifactBundle ? toAssetUrl(sketchPreview.artifactBundle.previewStlPath) : null,
+  );
+  const sketchPreviewViewerAssets = $derived.by<ViewerAsset[]>(() =>
+    sketchPreview?.artifactBundle
+      ? viewerAssetsToUrls(sketchPreview.artifactBundle.viewerAssets ?? [])
+      : [],
+  );
+  const sketchPreviewEvidence = $derived.by(() => {
+    if (!sketchPreview?.artifactBundle) return null;
+    const previewName = fileBasename(sketchPreview.artifactBundle.previewStlPath);
+    const assetCount = sketchPreview.artifactBundle.viewerAssets?.length ?? 0;
+    return {
+      previewName,
+      assetCountLabel: `${assetCount} ${assetCount === 1 ? 'assets' : 'assets'}`,
+    };
+  });
+  const activeSketchGhostPreview = $derived.by(() => (sketchPreview?.artifactBundle ? null : sketchGhostPreview));
+  const sourceSilhouettePreview = $derived.by(() => (sketchPreview?.artifactBundle ? sketchGhostPreview : null));
+  const effectiveViewerStlUrl = $derived.by<string | null>(() =>
+    sketchPreview?.artifactBundle ? sketchPreviewStlUrl : ($activeThreadId ? stlUrl : null),
+  );
+  const effectiveViewerAssets = $derived.by<ViewerAsset[]>(() =>
+    sketchPreview?.artifactBundle ? sketchPreviewViewerAssets : viewerAssets,
+  );
+  const hasRenderableModel = $derived.by(() => viewportState.hasRenderableModel);
+  const activeThreadConceptPreviewState = $derived.by<ConceptPreviewUiState>(
+    () => viewportState.activeThreadConceptPreviewState,
+  );
+  const conceptPreviewMessages = $derived.by<Message[]>(() => viewportState.conceptPreviewMessages);
+  const effectiveConceptPreviewMessage = $derived.by<Message | null>(
+    () => viewportState.effectiveConceptPreviewMessage,
+  );
+  const viewportPresentationMode = $derived.by<ViewportPresentationMode>(
+    () => viewportState.viewportPresentationMode,
+  );
+  const showBlueprintViewport = $derived.by(() => viewportState.showBlueprintViewport);
+  const blueprintAttentionVisible = $derived.by(() => viewportState.blueprintAttentionVisible);
+  const currentViewportTargetKey = $derived.by<string | null>(
+    () => viewportState.currentViewportTargetKey,
+  );
+  const currentViewerModelKey = $derived.by<string | null>(
+    () => viewportState.currentViewerModelKey,
+  );
+  const effectiveViewerModelKey = $derived.by<string | null>(() =>
+    sketchPreview?.artifactBundle
+      ? [
+          'sketch-preview',
+          sketchPreview.artifactBundle.modelId,
+          sketchPreview.artifactBundle.artifactVersion ?? '',
+          sketchPreview.artifactBundle.contentHash ?? '',
+        ].join(':')
+      : currentViewerModelKey,
+  );
+  const persistedViewportCameraState = $derived.by<ViewportCameraState | null>(
+    () => viewportState.persistedViewportCameraState,
+  );
+  const activeVersionAgentLabel = $derived(viewportState.activeVersionAgentLabel);
+
+  const agentOpsState = $derived.by(() =>
+    deriveAgentOpsState({
+      activeAgentSessions,
+      activeThreadId: $activeThreadId ?? null,
+      activeThreadRequests: $activeThreadRequests,
+      activeVersionId: $activeVersionId ?? null,
+      autoAgents: $config.mcp.autoAgents ?? [],
+      connectionType: $config.connectionType,
+      cookingPhrase: $session.cookingPhrase ?? null,
+      hasRenderableModel,
+      mcpMode: $config.mcp.mode,
+      nowSecs: $nowSeconds,
+      pendingAgentPrompts,
+      pendingViewportScreenshotChoices,
+      primaryAgentId: $config.mcp.primaryAgentId ?? null,
+      primaryAgentLabel,
+      suppressViewportBusyUi,
+      threadAgentState,
+      visibleAgentTerminal,
+    }),
+  );
+  const activePendingAgentPrompt = $derived.by(() => agentOpsState.activePendingAgentPrompt);
+  const threadAttentionIds = $derived.by(() => agentOpsState.threadAttentionIds);
+  const activeViewportScreenshotChoice = $derived.by(() => agentOpsState.activeViewportScreenshotChoice);
+  const activeMcpBusy = $derived.by(() => agentOpsState.activeMcpBusy);
+  const activeMcpRenderBusy = $derived.by(() => agentOpsState.activeMcpRenderBusy);
+  const activeMcpBubbleSummary = $derived.by(() => agentOpsState.activeMcpBubbleSummary);
+  const activeAgentTerminalMetaSummary = $derived.by(() => agentOpsState.activeAgentTerminalMetaSummary);
+  const hasLiveMcpSession = $derived.by(() => agentOpsState.hasLiveMcpSession);
+  const activeMascotAgentIdentity = $derived.by(() => agentOpsState.activeMascotAgentIdentity);
+  const isAudioMuted = $derived(Boolean($config?.microwave?.muted));
+  const audioMuteLabel = $derived(isAudioMuted ? 'Unmute Ecky audio' : 'Mute Ecky audio');
+  const dialogueState = $derived.by<DialogueState>(() => {
+    return deriveDialogueState(activePendingAgentPrompt, usesQueuedAgentDialogue);
+  });
+
+  const exportState = $derived.by(() =>
+    deriveExportState({
+      activeArtifactBundle,
+      activeThreadTitle: activeThread?.title ?? null,
+      activeVersionMessage,
+    }),
+  );
+  const exportModelTitle = $derived.by(() => exportState.exportModelTitle);
+  const exportDefaultNames = $derived.by(() => exportState.exportDefaultNames);
+  const exportOptions = $derived.by(() => exportState.exportOptions);
+  const hasMultipartExportModel = $derived.by(() => exportState.hasMultipartExportModel);
+  const multipartExportParts = $derived.by(() => exportState.multipartExportParts);
+  const canExportModel = $derived.by(() => exportState.canExportModel);
+
+  let viewerComponent = $state<ViewerHandle | null>(null);
+  let hiddenViewerComponent = $state<ViewerHandle | null>(null);
+  let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
+  let drawingOverlayDirty = $state(false);
+  let viewportAreaEl = $state<HTMLElement | null>(null);
+  let blueprintImageEl = $state<HTMLImageElement | null>(null);
+  let hiddenViewerSpec = $state<HiddenViewerSpec | null>(null);
+  let visibleViewerLoadNonce = $state(0);
+  let hiddenViewerLoadNonce = $state(0);
+  let versionPreviewCaptureSeq = 0;
+  let lastSavedVersionPreviewKey = '';
+  let lastLiveScreenshotByTarget = $state<Record<string, ViewportScreenshotCapture>>({});
+  let drawMode = $state(false);
+  let workspaceCapturePrefs = $state<Record<string, boolean>>(readWorkspaceCapturePrefs());
+  let lastAssistantMessageId = $state<string | null>(null);
+  let lastSpokenAssistantKey = $state('');
+  let lastAdvisorBubble = $state('');
+  let lastAdvisorQuestion = $state('');
+  let dismissedBubbleText = $state('');
+  let agentControlBusy = $state(false);
+
+  let genieWakeUpCount = $state(0);
+  let lastAgentPresenceConnected = false;
+  let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
+  const terminalWindowState = $derived($windowStore.terminal);
+  const projectsWindowState = $derived($windowStore.projects);
+  const paramsWindowState = $derived($windowStore.params);
+  const dialogueWindowState = $derived($windowStore.dialogue);
+  const settingsWindowState = $derived($windowStore.settings);
+  const sketchWindowState = $derived($windowStore.sketch);
+  let mountedWindows = $state<Record<WindowId, boolean>>({
+    projects: false,
+    params: false,
+    dialogue: false,
+    settings: false,
+    terminal: false,
+    sketch: false,
+  });
+
+  $effect(() => {
+    const s = $windowStore;
+    for (const id of ['projects', 'params', 'dialogue', 'settings', 'terminal', 'sketch'] as WindowId[]) {
+      if (s[id].visible) {
+        mountedWindows[id] = true;
+      }
+    }
+  });
+
+  let agentTerminalInput = $state('');
+  let agentTerminalSurface = $state<{ focusTerminal: () => void } | null>(null);
+  let lastAgentTerminalFocusKey = $state('');
+  let lastFocusedAgentWorkingVersionKey = $state('');
+  let activeMcpMicrowaveKey = $state('');
+  let ownsMcpPhraseLoop = $state(false);
 
   async function collectQueuedThreadBatch(threadId: string): Promise<{
     messageIds: string[];
@@ -757,7 +691,7 @@
     const attachmentMap = new Map<string, Attachment>();
     for (const attachments of attachmentGroups) {
       for (const attachment of attachments) {
-        const key = `${attachment.path}::${attachment.name}`;
+        const key = `${attachment.path}::${attachment.dataUrl ?? ''}::${attachment.name}`;
         if (!attachmentMap.has(key)) {
           attachmentMap.set(key, attachment);
         }
@@ -808,12 +742,6 @@
         }
       })();
     }
-  });
-
-  $effect(() => {
-    if (!drawingOverlayDirty) return;
-    if (sendWorkspaceCaptureForActiveThread) return;
-    setWorkspaceCaptureForActiveThread(true);
   });
 
   $effect(() => {
@@ -912,8 +840,15 @@
   initOrchestrator({
     get viewerComponent() { return viewerComponent; },
     openCodeModalManual: (data) => {
+      codeModalMode = 'version';
       selectedCode.set($workingCopy.macroCode);
-      selectedTitle.set($workingCopy.title || data.title);
+      selectedTitle.set(
+        codeInspectorTitle(
+          $workingCopy.title || data.title,
+          $workingCopy.sourceLanguage || data.sourceLanguage,
+          $workingCopy.geometryBackend || data.geometryBackend,
+        ),
+      );
       showCodeModal.set(true);
     },
     getDrawingCanvas: () => drawingOverlay?.hasDrawing() ? drawingOverlay.getCanvas() : null,
@@ -979,7 +914,9 @@
   function handleVisibleViewerLoaded() {
     visibleViewerLoadNonce += 1;
     visibleViewerWaiters = settleViewerLoadWaiters(visibleViewerWaiters, visibleViewerLoadNonce);
-    void persistVisibleVersionPreview(visibleViewerLoadNonce);
+    if (!hasSketchPreview) {
+      void persistVisibleVersionPreview(visibleViewerLoadNonce);
+    }
   }
 
   function handleHiddenViewerLoaded() {
@@ -1050,6 +987,7 @@
   }
 
   function handleVisibleViewerCameraChange(nextCamera: ViewportCameraState) {
+    if (hasSketchPreview) return;
     if (!currentViewportTargetKey) return;
     cameraStateByTarget = rememberTargetCameraState(
       cameraStateByTarget,
@@ -1065,6 +1003,7 @@
   }
 
   function currentVisibleTargetRef() {
+    if (hasSketchPreview) return null;
     const threadId = get(activeThreadId);
     const messageId = get(activeVersionId);
     const modelId = get(session).artifactBundle?.modelId ?? null;
@@ -1122,9 +1061,6 @@
     targetThreadId: string | null,
   ): Promise<{ attachments: Attachment[]; clearDrawingAfterSend: boolean }> {
     const hadDrawing = drawingOverlay?.hasDrawing() ?? drawingOverlayDirty;
-    if (hadDrawing && !sendWorkspaceCaptureForActiveThread) {
-      setWorkspaceCaptureForActiveThread(true);
-    }
 
     let nextAttachments = attachments;
     if (sendWorkspaceCaptureForActiveThread || hadDrawing) {
@@ -1153,6 +1089,22 @@
       ...asset,
       path: toAssetUrl(asset.path),
     }));
+  }
+
+  function handleSketchPreviewChange(preview: SketchPreviewState | null) {
+    sketchPreview = preview;
+  }
+
+  function handleSketchGhostPreviewChange(preview: SketchGhostPreviewState | null) {
+    sketchGhostPreview = preview;
+  }
+
+  function openSketchPreviewCodeModal() {
+    if (!sketchPreview?.draft.source) return;
+    codeModalMode = 'sketch-preview';
+    selectedCode.set(sketchPreview.draft.source);
+    selectedTitle.set('sketch-preview.ecky');
+    showCodeModal.set(true);
   }
 
   function rememberVisibleViewportCapture(capture: ViewportScreenshotCapture) {
@@ -1527,10 +1479,6 @@
   // --- Agent confirmation requests ---
   type AgentConfirmItem = { requestId: string; message: string; buttons: string[]; agentLabel: string };
   let pendingConfirms = $state<AgentConfirmItem[]>([]);
-  const activeViewportScreenshotChoice = $derived.by<PendingViewportScreenshotChoice | null>(() =>
-    pendingViewportScreenshotChoices.find((choice) => choice.threadId === ($activeThreadId ?? '')) ??
-    null,
-  );
 
   async function answerConfirm(requestId: string, choice: string) {
     pendingConfirms = pendingConfirms.filter(c => c.requestId !== requestId);
@@ -1718,7 +1666,7 @@
 
   function pickOtherConceptPreview() {
     const nextMessageId = cycleConceptPreviewMessageId(
-      activeThread?.messages ?? [],
+      activeThreadDialogueMessages,
       effectiveConceptPreviewMessage?.id ?? activeThreadConceptPreviewState.pinnedMessageId,
     );
     if (!nextMessageId) return;
@@ -1817,6 +1765,7 @@
   }
 
   async function resolveBlueprintPromptImageOverride(): Promise<string | null> {
+    if (imageInputUnavailableReason) return null;
     if (!showBlueprintViewport || !effectiveConceptPreviewMessage) return null;
     return captureConceptPreviewCompositeDataUrl();
   }
@@ -1825,6 +1774,10 @@
     if (!effectiveConceptPreviewMessage) return;
     if (generationUnavailableReason) {
       session.setError(`Render Error: ${generationUnavailableReason}`);
+      return;
+    }
+    if (imageInputUnavailableReason) {
+      session.setError(`Render Error: ${imageInputUnavailableReason}`);
       return;
     }
     const imageDataOverride =
@@ -1964,7 +1917,6 @@
     };
   });
 
-  const activeThread = $derived($history.find(t => t.id === $activeThreadId));
   const activeAuthoringContext = $derived.by(() =>
     activeThread
       ? {
@@ -1981,6 +1933,19 @@
       activeAuthoringContext.geometryBackend,
     ),
   );
+  const selectedEngine = $derived.by(() =>
+    $config.engines.find((engine) => engine.id === $config.selectedEngineId) ?? null,
+  );
+  const selectedModelCapabilities = $derived.by(() =>
+    inferModelCapabilities(
+      selectedEngine?.provider ?? '',
+      selectedEngine?.baseUrl ?? '',
+      selectedEngine?.model ?? '',
+    ),
+  );
+  const imageInputUnavailableReason = $derived.by<string | null>(() =>
+    selectedModelCapabilities.supportsVision ? null : selectedModelCapabilities.reason,
+  );
   const generationUnavailableReason = $derived.by<string | null>(() => {
     if (isBooting) return null;
     if (!activeAuthoringCapability) return null;
@@ -1989,153 +1954,6 @@
   const freecadUnavailableReason = $derived.by<string | null>(() => {
     if (isBooting || !$runtimeCapabilities) return null;
     return $runtimeCapabilities.freecad.available ? null : $runtimeCapabilities.freecad.detail;
-  });
-  const activeThreadConceptPreviewState = $derived.by<ConceptPreviewUiState>(() => {
-    if (!$activeThreadId) return defaultConceptPreviewUiState();
-    return conceptPreviewUiByThread[$activeThreadId] ?? defaultConceptPreviewUiState();
-  });
-  const conceptPreviewMessages = $derived.by<Message[]>(() =>
-    listConceptPreviewMessages(activeThread?.messages ?? []),
-  );
-  const effectiveConceptPreviewMessage = $derived.by<Message | null>(() =>
-    resolveEffectiveConceptPreviewMessage(
-      activeThread?.messages ?? [],
-      activeThreadConceptPreviewState.pinnedMessageId,
-    ),
-  );
-  const viewportPresentationMode = $derived.by<ViewportPresentationMode>(() =>
-    activeThreadConceptPreviewState.mode,
-  );
-  const showBlueprintViewport = $derived.by(
-    () => viewportPresentationMode === 'blueprint' && !!effectiveConceptPreviewMessage,
-  );
-  const blueprintAttentionVisible = $derived.by(
-    () => hasRenderableModel && !!effectiveConceptPreviewMessage && viewportPresentationMode !== 'blueprint',
-  );
-  $effect(() => {
-    const threadId = $activeThreadId;
-    if (!threadId) return;
-    const previous = conceptPreviewUiByThread[threadId] ?? defaultConceptPreviewUiState();
-    const next = reconcileConceptPreviewUiState({
-      messages: activeThread?.messages ?? [],
-      previous,
-      hasModel: hasRenderableModel,
-    }).nextState;
-    if (sameConceptPreviewUiState(previous, next)) return;
-    conceptPreviewUiByThread = {
-      ...conceptPreviewUiByThread,
-      [threadId]: next,
-    };
-  });
-  $effect(() => {
-    if (!showBlueprintViewport) {
-      blueprintImageEl = null;
-    }
-  });
-  const activeVersionMessage = $derived.by<Message | null>(() => {
-    if (!activeThread) return null;
-    return (
-      activeThread.messages.find(
-        (message) =>
-          message.id === $activeVersionId &&
-          isRenderableVersionTimelineMessage(message),
-      ) ?? null
-    );
-  });
-  const currentViewportTargetKey = $derived.by<string | null>(() => {
-    if (!$activeThreadId || !$activeVersionId) return null;
-    return viewportTargetKey($activeThreadId, $activeVersionId);
-  });
-  const currentViewerModelKey = $derived.by<string | null>(() => {
-    if (!currentViewportTargetKey) return null;
-    return [
-      currentViewportTargetKey,
-      activeArtifactBundle?.modelId ?? '',
-      activeArtifactBundle?.artifactVersion ?? '',
-      activeArtifactBundle?.contentHash ?? '',
-    ].join(':');
-  });
-  const persistedViewportCameraState = $derived.by<ViewportCameraState | null>(() => {
-    if (!currentViewportTargetKey) return null;
-    return cameraStateByTarget[currentViewportTargetKey] ?? null;
-  });
-  const activeVersionAgentLabel = $derived(formatAgentOriginLabel(activeVersionMessage?.agentOrigin));
-  const exportModelTitle = $derived.by<string>(() =>
-    activeVersionMessage?.output?.title?.trim() ||
-    activeThread?.title?.trim() ||
-    'design',
-  );
-  const exportDefaultNames = $derived(buildExportDefaultNames(exportModelTitle));
-  const exportOptions = $derived(buildExportChooserOptions(activeArtifactBundle));
-  const hasMultipartExportModel = $derived(hasMultipartExportAssets(activeArtifactBundle));
-  const multipartExportParts = $derived(buildMultipartExportParts(activeArtifactBundle));
-  const canExportModel = $derived.by<boolean>(() =>
-    Boolean(activeArtifactBundle && exportOptions.some((option) => !option.disabled)),
-  );
-  const primaryAgentId = $derived.by<string | null>(() =>
-    derivePrimaryAgentId($config.mcp.autoAgents ?? [], $config.mcp.primaryAgentId ?? null),
-  );
-  const primaryAgentLabel = $derived.by<string | null>(() =>
-    $config.mcp.autoAgents.find((agent) => agent.id === primaryAgentId)?.label ?? null,
-  );
-  const visibleAgentTerminal = $derived($visibleAgentTerminalStore);
-  const activeAgentTerminalAttention = $derived($agentTerminalAttentionStore);
-  const activeMcpBusy = $derived.by<boolean>(() => isMcpConnection && isThreadAgentBusy(threadAgentState));
-  const activeMcpRenderBusy = $derived.by<boolean>(
-    () => isMcpConnection && threadScopedAgentBusyPhase !== null,
-  );
-  const activeMcpBubbleSummary = $derived.by<string>(() =>
-    resolveActiveMcpBubble({
-      threadAgentState,
-      visibleAgentTerminal,
-      cookingPhrase: $session.cookingPhrase,
-      nowSecs: $nowSeconds,
-    }),
-  );
-  const activeAgentTerminalMetaSummary = $derived.by<string>(() =>
-    resolveTerminalActivityMeta({
-      threadAgentState,
-      visibleAgentTerminal,
-      nowSecs: $nowSeconds,
-    }),
-  );
-  const hasLiveMcpSession = $derived.by<boolean>(() =>
-    hasLiveAgentSession(activeAgentSessions),
-  );
-  const activeMascotAgentIdentity = $derived.by<string>(() => {
-    if (activePendingAgentPrompt?.agentLabel?.trim()) {
-      return activePendingAgentPrompt.agentLabel.trim();
-    }
-    if (visibleAgentTerminal?.active && visibleAgentTerminal.agentLabel?.trim()) {
-      return visibleAgentTerminal.agentLabel.trim();
-    }
-    const connectedThreadAgent =
-      threadAgentState?.agentLabel?.trim() &&
-      ['waking', 'waiting', 'active', 'error'].includes(threadAgentState.connectionState)
-        ? threadAgentState.agentLabel.trim()
-        : null;
-    if (connectedThreadAgent) {
-      return connectedThreadAgent;
-    }
-    const primaryLiveSession =
-      primaryAgentLabel?.trim()
-        ? activeAgentSessions.find((session) => {
-            const agentLabel = session.agentLabel?.trim() ?? '';
-            const hostLabel = session.hostLabel?.trim() ?? '';
-            const primaryLabel = primaryAgentLabel.trim();
-            return agentLabel === primaryLabel || hostLabel === primaryLabel;
-          }) ?? null
-        : null;
-    if (primaryLiveSession?.agentLabel?.trim()) {
-      return primaryLiveSession.agentLabel.trim();
-    }
-    if (activeAgentSessions[0]?.agentLabel?.trim()) {
-      return activeAgentSessions[0].agentLabel.trim();
-    }
-    if (primaryAgentLabel?.trim()) {
-      return primaryAgentLabel.trim();
-    }
-    return 'Ecky';
   });
   const eckyTraits = $derived<Partial<GenieTraits>>(
     buildAgentGenieTraits(activeMascotAgentIdentity),
@@ -2148,7 +1966,7 @@
   }
 
   async function refreshThreadAgentState() {
-    if (!hasTauriIpc() || !isMcpConnection || !$activeThreadId) {
+    if (!hasTauriIpc() || !$activeThreadId) {
       threadAgentState = null;
       return;
     }
@@ -2161,7 +1979,7 @@
   }
 
   $effect(() => {
-    if (!isMcpConnection || !$activeThreadId) {
+    if (!$activeThreadId) {
       threadAgentState = null;
       return;
     }
@@ -2183,8 +2001,8 @@
   });
 
   const latestAssistantMessage = $derived.by(() => {
-    if (!activeThread?.messages?.length) return null;
-    return [...activeThread.messages].reverse().find(m => m.role === 'assistant' && m.status !== 'pending') ?? null;
+    if (!activeThreadDialogueMessages.length) return null;
+    return [...activeThreadDialogueMessages].reverse().find(m => m.role === 'assistant' && m.status !== 'pending') ?? null;
   });
 
   const assistantBubble = $derived.by(() => {
@@ -2210,6 +2028,10 @@
         dismissedBubbleText = '';
       }
     }
+  });
+
+  $effect(() => {
+    setSpeechMuted(isAudioMuted);
   });
 
   const activeThreadHighestPhase = $derived.by<ThreadPhase>(() => {
@@ -2297,6 +2119,18 @@
     return (dismissedBubbleText === raw) ? '' : raw;
   });
 
+  $effect(() => {
+    const msgId = latestAssistantMessage?.id;
+    const speechText = assistantFresh ? assistantBubble : '';
+    if (!msgId || !speechText || isAudioMuted || dismissedBubbleText === speechText) return;
+    if (genieBubble !== speechText) return;
+
+    const speechKey = `${msgId}:${speechText}`;
+    if (speechKey === lastSpokenAssistantKey) return;
+    lastSpokenAssistantKey = speechKey;
+    speakEckyText(speechText, { muted: isAudioMuted });
+  });
+
   // Reset dismiss state and waking message when a new agent prompt arrives
   $effect(() => {
     if (activePendingAgentPrompt?.requestId) {
@@ -2305,7 +2139,7 @@
   });
 
   const hasQueuedAgentMessageWithoutPrompt = $derived.by<boolean>(() => {
-    if (!isMcpConnection) return false;
+    if (!usesQueuedAgentDialogue) return false;
     if (activePendingAgentPrompt) return false;
     return (
       activeThread?.messages?.some(
@@ -2459,6 +2293,7 @@
     };
     config.set(nextConfig);
     setMuted(newMuted, nextConfig);
+    setSpeechMuted(newMuted);
     await saveConfig();
   }
 
@@ -2536,15 +2371,6 @@
     return labels[phase] || phase.toUpperCase();
   }
 
-  function toAssetUrl(path: string | null | undefined): string {
-    if (!path) return '';
-    try {
-      return convertFileSrc(path);
-    } catch {
-      return path;
-    }
-  }
-
   async function handleExport(mode: ExportMode) {
     const bundle = activeArtifactBundle;
     if (!bundle) return;
@@ -2594,6 +2420,20 @@
         return;
       }
 
+      if (mode === 'step') {
+        const sourcePath = getStepExportPath(bundle);
+        if (!sourcePath) return;
+        const path = await save({
+          filters: [{ name: 'STEP CAD Model', extensions: ['step', 'stp'] }],
+          defaultPath: exportDefaultNames.step,
+        });
+        if (typeof path === 'string') {
+          await exportFile(sourcePath, path);
+          session.setStatus('Exported STEP.');
+        }
+        return;
+      }
+
       if (!bundle.fcstdPath) return;
       const path = await save({
         filters: [{ name: 'FreeCAD Document', extensions: ['FCStd'] }],
@@ -2610,11 +2450,33 @@
 
   function dismissGenie() {
     if (genieBubble) dismissedBubbleText = genieBubble;
+    stopEckySpeech();
   }
 
   function dismissError() {
     session.setError(null);
+    errorCopied = false;
   }
+
+  async function copyError(event: Event) {
+    event.stopPropagation();
+    if (!error) return;
+    try {
+      await navigator.clipboard.writeText(error);
+      errorCopied = true;
+      if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer);
+      errorCopyResetTimer = setTimeout(() => {
+        errorCopied = false;
+        errorCopyResetTimer = null;
+      }, 1600);
+    } catch (copyError) {
+      console.error('Failed to copy error text:', copyError);
+    }
+  }
+
+  onDestroy(() => {
+    if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer);
+  });
 
   $effect(() => {
     if (terminalWindowState.visible && !visibleAgentTerminal) {
@@ -2781,6 +2643,14 @@
           DIALOGUE
         </button>
         <button
+          class="dock-btn"
+          class:dock-btn--active={$windowStore.sketch.visible}
+          onclick={() => toggleWindow('sketch')}
+          title="Sketch Workspace"
+        >
+          SKETCH
+        </button>
+        <button
           class="dock-btn dock-btn--accent"
           onclick={() => showNewProjectChooser = true}
           title="New project"
@@ -2789,11 +2659,15 @@
         </button>
       </div>
       <div class="dock-group dock-group--utility">
-        {#if $activeRequestCount > 0 || $activeMicrowaveCount > 0 || activeMcpRenderBusy}
-          <button class="overlay-icon-btn" onclick={toggleMicrowaveMute} title="Toggle Cafeteria Hum">
-            {$config?.microwave?.muted ? '🔇' : '🔊'}
-          </button>
-        {/if}
+        <button
+          class="overlay-icon-btn"
+          onclick={toggleMicrowaveMute}
+          title={audioMuteLabel}
+          aria-label={audioMuteLabel}
+          aria-pressed={isAudioMuted}
+        >
+          {isAudioMuted ? '🔇' : '🔊'}
+        </button>
         {#if visibleAgentTerminal}
           <button
             class="overlay-icon-btn terminal-overlay-btn"
@@ -2840,25 +2714,25 @@
             <div class="viewer-shell" class:viewer-shell--occluded={showBlueprintViewport}>
               <Viewer
                 bind:this={viewerComponent}
-                modelKey={currentViewerModelKey}
-                stlUrl={$activeThreadId ? stlUrl : null}
-                viewerAssets={viewerAssets}
-                manifestParts={activeModelManifest?.parts ?? []}
-                edgeTargets={activeArtifactBundle?.edgeTargets ?? []}
-                selectionTargets={contextSelectionTargets}
-                selectedTarget={selectedTarget}
-                searchQuery={sharedContextSearchQuery}
+                modelKey={effectiveViewerModelKey}
+                stlUrl={effectiveViewerStlUrl}
+                viewerAssets={effectiveViewerAssets}
+                manifestParts={hasSketchPreview ? [] : activeModelManifest?.parts ?? []}
+                edgeTargets={sketchPreview?.artifactBundle?.edgeTargets ?? activeArtifactBundle?.edgeTargets ?? []}
+                selectionTargets={hasSketchPreview ? [] : contextSelectionTargets}
+                selectedTarget={hasSketchPreview ? null : selectedTarget}
+                searchQuery={hasSketchPreview ? '' : sharedContextSearchQuery}
                 outlineEnabled={viewerOutlineEnabled}
-                persistedCameraState={persistedViewportCameraState}
-                selectedPartId={selectedPartId}
-                overlayPartLabel={selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
-                overlayPartEditable={selectedTarget?.editable ?? overlaySelectedPart?.editable ?? false}
-                overlayPreviewOnly={overlayPreviewOnly}
-                showContextOverlay={showViewportOverlayControls}
-                overlayControls={overlayControls}
-                overlayAdvisories={overlayAdvisories}
-                activeMeasurementCallout={activeMeasurementCallout}
-                previewTransforms={importedPreviewTransforms}
+                persistedCameraState={hasSketchPreview ? null : persistedViewportCameraState}
+                selectedPartId={hasSketchPreview ? null : selectedPartId}
+                overlayPartLabel={hasSketchPreview ? null : selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
+                overlayPartEditable={hasSketchPreview ? false : selectedTarget?.editable ?? overlaySelectedPart?.editable ?? false}
+                overlayPreviewOnly={hasSketchPreview ? false : overlayPreviewOnly}
+                showContextOverlay={hasSketchPreview ? false : showViewportOverlayControls}
+                overlayControls={hasSketchPreview ? [] : overlayControls}
+                overlayAdvisories={hasSketchPreview ? [] : overlayAdvisories}
+                activeMeasurementCallout={hasSketchPreview ? null : activeMeasurementCallout}
+                previewTransforms={hasSketchPreview ? {} : importedPreviewTransforms}
                 onOverlayChange={handleSemanticControlChange}
                 onControlFocusChange={(focus) => focusedMeasurementControl = focus}
                 onSearchQueryChange={(query) => sharedContextSearchQuery = query}
@@ -2872,6 +2746,31 @@
                 topologyMode={viewerTopologyMode}
               />
             </div>
+            {#if activeSketchGhostPreview}
+              <div class="viewport-sketch-ghost" aria-label="Local sketch ghost">
+                <svg class="viewport-sketch-ghost__svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  {#if activeSketchGhostPreview.closed}
+                    <path class="viewport-sketch-ghost__extrude" d={activeSketchGhostPreview.path} />
+                  {/if}
+                  <path
+                    class="viewport-sketch-ghost__profile"
+                    class:viewport-sketch-ghost__profile--closed={activeSketchGhostPreview.closed}
+                    d={activeSketchGhostPreview.path}
+                  />
+                </svg>
+              </div>
+            {/if}
+            {#if sourceSilhouettePreview}
+              <div class="viewport-source-silhouette" aria-label="Source silhouette overlay">
+                <div class="viewport-source-silhouette__label">SOURCE SILHOUETTE OVERLAY</div>
+                <svg class="viewport-source-silhouette__svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  {#if sourceSilhouettePreview.closed}
+                    <path class="viewport-source-silhouette__depth" d={sourceSilhouettePreview.path} />
+                  {/if}
+                  <path class="viewport-source-silhouette__profile" d={sourceSilhouettePreview.path} />
+                </svg>
+              </div>
+            {/if}
             {#if showBlueprintViewport && effectiveConceptPreviewMessage?.imageData}
               <section class="viewport-blueprint" aria-label="Concept preview">
                 <div class="viewport-blueprint__frame">
@@ -2893,6 +2792,11 @@
                         {effectiveConceptPreviewMessage.content}
                       </div>
                     {/if}
+                    {#if imageInputUnavailableReason}
+                      <div class="viewport-blueprint__status">
+                        {imageInputUnavailableReason}
+                      </div>
+                    {/if}
                   </div>
                   <div class="viewport-blueprint__actions">
                     <button
@@ -2905,8 +2809,8 @@
                     <button
                       class="btn btn-xs btn-primary"
                       onclick={() => void generateFromConceptPreview()}
-                      disabled={$activeThreadBusy || Boolean(generationUnavailableReason)}
-                      title={generationUnavailableReason ?? undefined}
+                      disabled={$activeThreadBusy || Boolean(generationUnavailableReason) || Boolean(imageInputUnavailableReason)}
+                      title={generationUnavailableReason ?? imageInputUnavailableReason ?? undefined}
                     >
                       GENERATE 3D FROM THIS
                     </button>
@@ -2970,7 +2874,8 @@
                 agentConnected={
                   threadAgentMascot.connected ||
                   hasLiveMcpSession ||
-                  !!visibleAgentTerminal?.active
+                  !!visibleAgentTerminal?.active ||
+                  hasLiveApiConnection
                 }
               />
             </div>
@@ -2978,6 +2883,7 @@
             {#if error}
               <div
                 class="error-banner"
+                data-testid="error-banner"
                 role="button"
                 tabindex="0"
                 aria-label="Dismiss error"
@@ -2991,6 +2897,14 @@
               >
                 <div class="error-banner__label">ERROR</div>
                 <div class="error-banner__body">{error}</div>
+                <button
+                  class="error-banner__copy"
+                  data-testid="error-banner-copy"
+                  onclick={copyError}
+                  title={errorCopied ? 'Copied' : 'Copy error'}
+                >
+                  {errorCopied ? 'COPIED' : 'COPY'}
+                </button>
                 <button
                   class="error-banner__dismiss"
                   onclick={(e) => {
@@ -3058,9 +2972,29 @@
             {/if}
             
 
-            {#if $activeThreadId && ($workingCopy.macroCode || stlUrl || effectiveConceptPreviewMessage)}
+            {#if hasSketchPreview || activeSketchGhostPreview || ($activeThreadId && ($workingCopy.macroCode || stlUrl || effectiveConceptPreviewMessage))}
               <div class="viewport-overlay">
-                {#if effectiveConceptPreviewMessage}
+                {#if hasSketchPreview}
+                  <div class="viewport-mode-panel" aria-label="Sketch preview status">
+                    <div class="viewport-mode-label">SKETCH PREVIEW</div>
+                    <div class="viewport-mode-hint">EPHEMERAL MODEL</div>
+                    {#if sketchPreviewEvidence}
+                      <div class="viewport-mode-evidence">
+                        <span>{sketchPreviewEvidence.previewName}</span>
+                        <span>{sketchPreviewEvidence.assetCountLabel}</span>
+                      </div>
+                    {/if}
+                  </div>
+                {:else if activeSketchGhostPreview}
+                  <div class="viewport-mode-panel" aria-label="Sketch preview status">
+                    <div class="viewport-mode-label">LOCAL SKETCH GHOST</div>
+                    <div class="viewport-mode-hint">{activeSketchGhostPreview.label}</div>
+                    <div class="viewport-mode-evidence">
+                      <span>{activeSketchGhostPreview.view.toUpperCase()} / {activeSketchGhostPreview.closed ? 'CLOSED' : 'OPEN'}</span>
+                      <span>EXTRUDE {activeSketchGhostPreview.extrudeDepth}MM</span>
+                    </div>
+                  </div>
+                {:else if effectiveConceptPreviewMessage}
                   <div class="viewport-mode-panel">
                     <div class="viewport-mode-label">VIEWPORT MODE</div>
                     <div
@@ -3089,25 +3023,42 @@
                   </div>
                 {/if}
                 <div class="export-actions">
-                  <button class="btn btn-xs btn-secondary" onclick={() => {
-                    if (activeVersionMessage?.output) {
-                      selectedCode.set($workingCopy.macroCode);
-                      selectedTitle.set(activeVersionMessage.output.title || $workingCopy.title || 'design');
-                      showCodeModal.set(true);
-                    }
-                  }} disabled={!activeVersionMessage?.output || showViewerBusyMask} title="View source code">
-                    📄 CODE
-                  </button>
-                  <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
-                  {#if activeArtifactBundle}
-                    <button
-                      class="btn btn-xs btn-primary"
-                      onclick={() => showExportChooser = true}
-                      disabled={!canExportModel || showViewerBusyMask}
-                      title="Open export options"
-                    >
-                      💾 EXPORT
+                  {#if hasSketchPreview}
+                    <button class="btn btn-xs btn-secondary" onclick={openSketchPreviewCodeModal} disabled={!sketchPreview?.draft.source || showViewerBusyMask} title="View sketch preview source">
+                      📄 CODE
                     </button>
+                  {:else if !activeSketchGhostPreview}
+                    <button class="btn btn-xs btn-secondary" onclick={() => {
+                      if (activeVersionMessage?.output) {
+                        codeModalMode = 'version';
+                        selectedCode.set($workingCopy.macroCode);
+                        selectedTitle.set(
+                          codeInspectorTitle(
+                            activeVersionMessage.output.title || $workingCopy.title || 'design',
+                            activeVersionMessage.artifactBundle?.sourceLanguage ??
+                              activeVersionMessage.modelManifest?.sourceLanguage ??
+                              activeVersionMessage.output.sourceLanguage,
+                            activeVersionMessage.artifactBundle?.geometryBackend ??
+                              activeVersionMessage.modelManifest?.geometryBackend ??
+                              activeVersionMessage.output.geometryBackend,
+                          ),
+                        );
+                        showCodeModal.set(true);
+                      }
+                    }} disabled={!activeVersionMessage?.output || showViewerBusyMask} title="View source code">
+                      📄 CODE
+                    </button>
+                    <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
+                    {#if activeArtifactBundle}
+                      <button
+                        class="btn btn-xs btn-primary"
+                        onclick={() => showExportChooser = true}
+                        disabled={!canExportModel || showViewerBusyMask}
+                        title="Open export options"
+                      >
+                        💾 EXPORT
+                      </button>
+                    {/if}
                   {/if}
                 </div>
               </div>
@@ -3226,8 +3177,15 @@
             viewerTopologyMode = display.topologyMode;
           }}
           onShowCode={() => {
+            codeModalMode = 'version';
             selectedCode.set($workingCopy.macroCode);
-            selectedTitle.set($workingCopy.title);
+            selectedTitle.set(
+              codeInspectorTitle(
+                $workingCopy.title,
+                $workingCopy.sourceLanguage,
+                $workingCopy.geometryBackend,
+              ),
+            );
             showCodeModal.set(true);
           }}
         />
@@ -3265,6 +3223,25 @@
     </Window>
   {/if}
 
+  {#if mountedWindows.sketch}
+    <Window
+      windowId="sketch"
+      x={sketchWindowState.x}
+      y={sketchWindowState.y}
+      width={sketchWindowState.width}
+      height={sketchWindowState.height}
+      z={sketchWindowState.z}
+      minWidth={520}
+      minHeight={360}
+      title="Sketch Workspace"
+      hidden={!sketchWindowState.visible}
+      highlighted={false}
+      onclose={() => closeWindowStore('sketch')}
+    >
+      <SketchWorkspace onPreviewResult={handleSketchPreviewChange} onGhostPreviewChange={handleSketchGhostPreviewChange} />
+    </Window>
+  {/if}
+
   {#if mountedWindows.dialogue}
     <Window
       windowId="dialogue"
@@ -3296,8 +3273,9 @@
             onGenerate={handlePromptPanelSubmit}
             isGenerating={$activeThreadBusy}
             generationUnavailableReason={generationUnavailableReason}
+            imageAttachmentUnavailableReason={imageInputUnavailableReason}
             dialogueState={dialogueState}
-            messages={activeThread?.messages || []}
+            messages={activeThreadDialogueMessages}
             messagesLoading={$activeThreadMessagesLoading}
             messagesHasMore={activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false}
             messagesPageLoading={activeThread ? ($threadMessagePageState[activeThread.id]?.isLoading ?? false) : false}
@@ -3305,11 +3283,23 @@
             activeThreadId={$activeThreadId}
             sendWorkspaceCapture={sendWorkspaceCaptureForActiveThread}
             workspaceCaptureHint={workspaceCaptureHint}
+            sttLanguageCode={$config.voice?.sttLanguageCode ?? 'en-US'}
             onToggleWorkspaceCapture={setWorkspaceCaptureForActiveThread}
             onOpenConceptPreview={openConceptPreviewInViewport}
             onPinConceptPreview={pinConceptPreviewFromMessage}
             pinnedConceptPreviewMessageId={activeThreadConceptPreviewState.pinnedMessageId}
-            onShowCode={(m) => { selectedCode.set(m.output.macroCode); selectedTitle.set(m.output.title); showCodeModal.set(true); }}
+            onShowCode={(m) => {
+              codeModalMode = 'version';
+              selectedCode.set(m.output.macroCode);
+              selectedTitle.set(
+                codeInspectorTitle(
+                  m.output.title,
+                  m.artifactBundle?.sourceLanguage ?? m.modelManifest?.sourceLanguage ?? m.output.sourceLanguage,
+                  m.artifactBundle?.geometryBackend ?? m.modelManifest?.geometryBackend ?? m.output.geometryBackend,
+                ),
+              );
+              showCodeModal.set(true);
+            }}
             onDeleteVersion={deleteVersion}
             onRestoreVersion={restoreVersion}
             bind:activeVersionId={$activeVersionId}
@@ -3450,8 +3440,8 @@
     <CodeModal
       bind:code={$selectedCode}
       title={$selectedTitle}
-      onCommit={commitManualVersion}
-      onFork={forkManualVersion}
+      onCommit={codeModalMode === 'sketch-preview' ? undefined : commitManualVersion}
+      onFork={codeModalMode === 'sketch-preview' ? undefined : forkManualVersion}
       onclose={() => showCodeModal.set(false)}
     />
   {/if}
@@ -3583,6 +3573,12 @@
     white-space: pre-wrap;
     overflow: auto;
   }
+  .viewport-blueprint__status {
+    color: var(--secondary);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    line-height: 1.5;
+  }
   .viewport-blueprint__actions {
     display: flex;
     align-items: center;
@@ -3661,10 +3657,10 @@
     position: absolute;
     top: 12px;
     right: 12px;
-    z-index: 130;
-    max-width: min(46vw, 560px);
+    z-index: 4200;
+    max-width: min(52vw, 760px);
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     gap: 10px;
     align-items: start;
     padding: 10px 12px;
@@ -3690,15 +3686,28 @@
     line-height: 1.4;
     white-space: pre-wrap;
     word-break: break-word;
+    min-width: 0;
   }
+  .error-banner__copy,
   .error-banner__dismiss {
     border: 1px solid var(--bg-400);
     background: var(--bg-200);
     color: var(--text-dim);
-    width: 24px;
-    height: 24px;
     cursor: pointer;
   }
+  .error-banner__copy {
+    min-width: 58px;
+    height: 24px;
+    padding: 0 8px;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+  }
+  .error-banner__dismiss {
+    width: 24px;
+    height: 24px;
+  }
+  .error-banner__copy:hover { border-color: var(--secondary); color: var(--text); }
   .error-banner__dismiss:hover { border-color: var(--red); color: var(--text); }
 
   /* STL Cafeteria — multi-microwave strip */
@@ -3764,6 +3773,90 @@
     visibility: hidden;
     overflow: hidden;
   }
+  .viewport-sketch-ghost {
+    position: absolute;
+    inset: 12%;
+    z-index: 35;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .viewport-sketch-ghost__svg {
+    width: min(58vw, 680px);
+    height: min(52vh, 520px);
+    max-width: 78%;
+    max-height: 78%;
+    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--primary) 34%, transparent));
+    overflow: visible;
+  }
+  .viewport-sketch-ghost__profile {
+    fill: none;
+    stroke: var(--primary);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 3 2;
+    vector-effect: non-scaling-stroke;
+  }
+  .viewport-sketch-ghost__profile--closed {
+    fill: color-mix(in srgb, var(--primary) 13%, transparent);
+    stroke-dasharray: none;
+  }
+  .viewport-sketch-ghost__extrude {
+    fill: color-mix(in srgb, var(--secondary) 9%, transparent);
+    stroke: color-mix(in srgb, var(--secondary) 72%, transparent);
+    stroke-width: 1.2;
+    transform: translate(6px, -6px);
+    vector-effect: non-scaling-stroke;
+  }
+  .viewport-source-silhouette {
+    position: absolute;
+    left: 18px;
+    top: 18px;
+    z-index: 38;
+    width: 164px;
+    padding: 8px;
+    border: 1px solid color-mix(in srgb, var(--primary) 44%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .viewport-source-silhouette__label {
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .viewport-source-silhouette__svg {
+    width: 100%;
+    height: 92px;
+    margin-top: 6px;
+    border: 1px solid var(--bg-300);
+    background:
+      linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      color-mix(in srgb, var(--bg-100) 70%, black 30%);
+    background-size: 16px 16px, 16px 16px, auto;
+  }
+  .viewport-source-silhouette__profile {
+    fill: color-mix(in srgb, var(--primary) 12%, transparent);
+    stroke: var(--primary);
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+  }
+  .viewport-source-silhouette__depth {
+    fill: none;
+    stroke: var(--secondary);
+    stroke-width: 1.4;
+    stroke-dasharray: 5 3;
+    vector-effect: non-scaling-stroke;
+  }
   .viewport-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   .viewport-mode-panel {
     display: flex;
@@ -3823,6 +3916,27 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
     text-align: right;
+  }
+  .viewport-mode-evidence {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 5px 6px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    line-height: 1.25;
+    overflow: hidden;
+    text-align: right;
+  }
+  .viewport-mode-evidence span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .export-actions { display: flex; gap: 4px; }
   .export-chooser {

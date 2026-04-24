@@ -28,6 +28,8 @@ export interface VerificationLoopOptions {
   maxVerifyAttempts: number;
   currentGenerationAttempt: number;
   maxGenerationAttempts: number;
+  /** Explicit reason to skip screenshot verification before capture. */
+  skipReason?: string | null;
   capture: CaptureFn;
   verify: VerifyFn;
   /** Reference images from user attachments (data URLs). */
@@ -44,6 +46,8 @@ export interface TwoStageOptions {
   maxVerifyAttempts: number;
   currentGenerationAttempt: number;
   maxGenerationAttempts: number;
+  /** Explicit reason to skip screenshot verification before capture. */
+  screenshotSkipReason?: string | null;
   capture: CaptureFn;
   verifyScreenshot: VerifyFn;
   verifyStructural: StructuralVerifyFn;
@@ -66,6 +70,11 @@ export async function runVerificationRound(
 ): Promise<VerificationLoopResult> {
   if (opts.maxVerifyAttempts <= 0) {
     return { kind: 'skipped', reason: 'verification disabled' };
+  }
+
+  const skipReason = `${opts.skipReason ?? ''}`.trim();
+  if (skipReason) {
+    return { kind: 'skipped', reason: skipReason };
   }
 
   const screenshots = opts.capture();
@@ -146,6 +155,7 @@ export async function runTwoStageVerification(
     maxVerifyAttempts: opts.maxVerifyAttempts,
     currentGenerationAttempt: opts.currentGenerationAttempt,
     maxGenerationAttempts: opts.maxGenerationAttempts,
+    skipReason: opts.screenshotSkipReason ?? null,
     capture: opts.capture,
     verify: opts.verifyScreenshot,
     referenceImages: opts.referenceImages,

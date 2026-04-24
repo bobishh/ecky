@@ -4,7 +4,7 @@ use crate::mcp::contracts::*;
 use crate::mcp::runtime;
 use crate::models::{
     AgentSession, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, ControlPrimitive,
-    ControlView, ControlViewSource, DesignOutput, InteractionMode, MacroDialect,
+    ControlView, ControlViewSource, DesignOutput, Engine, InteractionMode, MacroDialect,
     MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest, ModelSourceKind,
     PathResolver, UiSpec,
 };
@@ -13,7 +13,9 @@ use crate::services::agent_versions::{
 };
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::{agent_dialogue, history, render};
+use base64::Engine as _;
 use std::collections::HashMap;
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tokio::sync::oneshot;
@@ -365,6 +367,63 @@ fn dialogue_identity(ctx: &AgentContext) -> agent_dialogue::AgentDialogueIdentit
         llm_model_id: ctx.llm_model_id.clone(),
         llm_model_label: ctx.llm_model_label.clone(),
     }
+}
+
+fn selected_generation_engine(state: &AppState) -> AppResult<Engine> {
+    let config = state.config.lock().unwrap();
+    let engine = config
+        .engines
+        .iter()
+        .find(|candidate| candidate.id == config.selected_engine_id)
+        .cloned()
+        .ok_or_else(|| AppError::validation("No active engine selected."))?;
+    if engine.provider != "ollama" && engine.api_key.trim().is_empty() {
+        return Err(AppError::validation(format!(
+            "Selected engine '{}' has no API key configured.",
+            engine.name
+        )));
+    }
+    Ok(engine)
+}
+
+fn attachment_image_data_url(attachment: &crate::contracts::Attachment) -> Option<String> {
+    if attachment.kind != crate::contracts::AttachmentKind::Image {
+        return None;
+    }
+    if let Some(data_url) = attachment
+        .data_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| value.starts_with("data:image/"))
+    {
+        return Some(data_url.to_string());
+    }
+    if attachment.path.trim().is_empty() {
+        return None;
+    }
+    let bytes = fs::read(&attachment.path).ok()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let ext = attachment
+        .name
+        .split('.')
+        .next_back()
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let mime = if ext == "jpg" || ext == "jpeg" {
+        "image/jpeg"
+    } else if ext == "webp" {
+        "image/webp"
+    } else {
+        "image/png"
+    };
+    Some(format!("data:{};base64,{}", mime, b64))
+}
+
+fn attachment_image_data_urls(attachments: &[crate::contracts::Attachment]) -> Vec<String> {
+    attachments
+        .iter()
+        .filter_map(attachment_image_data_url)
+        .collect()
 }
 
 struct TraceEvent<'a> {
@@ -1567,6 +1626,88 @@ pub async fn handle_session_reply_save(
     })
 }
 
+pub async fn handle_concept_preview_generate(
+    state: &AppState,
+    req: ConceptPreviewGenerateRequest,
+    ctx: &AgentContext,
+) -> AppResult<ConceptPreviewGenerateResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let prompt = req.prompt.trim();
+    if prompt.is_empty() {
+        return Err(AppError::validation(
+            "concept_preview_generate requires a non-empty prompt.",
+        ));
+    }
+
+    let target = if let Some(explicit_target) =
+        resolve_explicit_session_target(state, req.thread_id.clone(), req.message_id.clone(), None)
+            .await?
+    {
+        if let Some(bound_target) =
+            agent_dialogue::resolve_session_thread_target(state, &ctx.session_id).await?
+        {
+            if bound_target.thread_id != explicit_target.thread_id {
+                return Err(AppError::validation(format!(
+                    "Session is already bound to thread {}. Call session_log_out and session_log_in for thread {} before sketching there.",
+                    bound_target.thread_id, explicit_target.thread_id
+                )));
+            }
+        }
+        explicit_target
+    } else {
+        agent_dialogue::resolve_session_thread_target(state, &ctx.session_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::validation(
+                    "No active session target is available for concept_preview_generate.",
+                )
+            })?
+    };
+
+    ensure_thread_claim(state, &ctx, &target.thread_id, false).await?;
+
+    let engine = selected_generation_engine(state)?;
+    let images = attachment_image_data_urls(&req.attachments);
+    let preview = crate::llm::generate_concept_preview(&engine, prompt, images)
+        .await
+        .map_err(AppError::provider)?;
+    let image_data = crate::llm::svg_to_data_url(&preview.data.svg).map_err(AppError::provider)?;
+
+    let timestamp = now_secs();
+    let message_id = Uuid::new_v4().to_string();
+    agent_dialogue::add_dialogue_message(
+        state,
+        &target.thread_id,
+        &crate::models::Message {
+            id: message_id.clone(),
+            role: crate::models::MessageRole::Assistant,
+            content: preview.data.caption.clone(),
+            status: crate::models::MessageStatus::Success,
+            output: None,
+            usage: preview.usage,
+            artifact_bundle: None,
+            model_manifest: None,
+            agent_origin: Some(agent_dialogue::build_agent_origin(
+                &dialogue_identity(&ctx),
+                timestamp,
+            )),
+            image_data: Some(image_data.clone()),
+            visual_kind: Some(crate::models::MessageVisualKind::ConceptPreview),
+            attachment_images: Vec::new(),
+            timestamp,
+        },
+    )
+    .await?;
+    state.emit_history_updated();
+
+    Ok(ConceptPreviewGenerateResponse {
+        thread_id: target.thread_id,
+        message_id,
+        image_data,
+        caption: preview.data.caption,
+    })
+}
+
 pub async fn handle_long_action_notice(
     state: &AppState,
     req: LongActionNoticeRequest,
@@ -2371,7 +2512,7 @@ fn build_target_meta_response(
 
     let is_ir = target.design_output.macro_dialect == crate::models::MacroDialect::EckyIrV0;
     let (source_language, macro_dialect) = if is_ir {
-        ("eckyIrV0".to_string(), "eckyIrV0".to_string())
+        ("ecky".to_string(), "ecky".to_string())
     } else {
         ("python".to_string(), "cadFrameworkV1".to_string())
     };
@@ -2858,15 +2999,14 @@ pub async fn handle_params_patch_and_render(
             .post_processing
             .clone()
             .or_else(|| base_design.post_processing.clone());
-        let render_geometry_backend = if let Some(explicit) = req.geometry_backend {
-            Some(explicit)
-        } else {
-            resolve_patch_render_geometry_backend(
-                &conn,
-                tracked_thread_id.as_deref(),
-                &base_design,
-            )?
-        };
+        let thread_context = resolve_thread_authoring_context(&conn, state, &target.thread_id)?;
+        let authoring_context = resolve_macro_authoring_context(
+            thread_context.source_language,
+            thread_context.geometry_backend,
+            &base_design.macro_dialect,
+            req.geometry_backend,
+        )?;
+        let render_geometry_backend = authoring_context.geometry_backend;
 
         drop(conn);
 
@@ -2874,20 +3014,22 @@ pub async fn handle_params_patch_and_render(
             &base_design.macro_code,
             &healed_params,
             Some(base_design.macro_dialect.clone()),
-            render_geometry_backend,
+            Some(render_geometry_backend),
             next_post_processing.as_ref(),
             state,
             app,
         )
         .await?;
-        let model_manifest = crate::freecad::get_model_manifest(app, &artifact_bundle.model_id)?;
+        let model_manifest =
+            crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
         tracked_model_id = Some(artifact_bundle.model_id.clone());
 
         let mut design_output = base_design.clone();
         design_output.ui_spec = healed_ui_spec;
         design_output.initial_params = healed_params.clone();
         design_output.post_processing = next_post_processing;
-        design_output.geometry_backend = render_geometry_backend.unwrap_or(base_design.geometry_backend);
+        design_output.source_language = authoring_context.source_language;
+        design_output.geometry_backend = render_geometry_backend;
         design_output.version_name.clear();
         design_output.interaction_mode = InteractionMode::Tune;
 
@@ -2956,12 +3098,86 @@ pub async fn handle_params_patch_and_render(
     result
 }
 
-fn resolve_patch_render_geometry_backend(
-    _conn: &rusqlite::Connection,
-    _thread_id: Option<&str>,
-    base_design: &DesignOutput,
-) -> AppResult<Option<crate::models::GeometryBackend>> {
-    Ok(Some(base_design.geometry_backend))
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacroAuthoringContext {
+    source_language: crate::models::SourceLanguage,
+    geometry_backend: crate::models::GeometryBackend,
+}
+
+fn infer_macro_source_language(dialect: &MacroDialect) -> crate::models::SourceLanguage {
+    match dialect {
+        MacroDialect::EckyIrV0 => crate::models::SourceLanguage::EckyIrV0,
+        MacroDialect::Build123d => crate::models::SourceLanguage::Build123d,
+        MacroDialect::Legacy | MacroDialect::CadFrameworkV1 => {
+            crate::models::SourceLanguage::LegacyPython
+        }
+    }
+}
+
+fn configured_authoring_context(state: &AppState) -> MacroAuthoringContext {
+    let config = state.config.lock().unwrap();
+    MacroAuthoringContext {
+        source_language: config.default_source_language,
+        geometry_backend: config.default_geometry_backend,
+    }
+}
+
+fn resolve_thread_authoring_context(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+    thread_id: &str,
+) -> AppResult<MacroAuthoringContext> {
+    let fallback = configured_authoring_context(state);
+    let source_language = db::get_thread_source_language(conn, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .unwrap_or(fallback.source_language);
+    let geometry_backend = db::get_thread_geometry_backend(conn, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .unwrap_or(fallback.geometry_backend);
+    Ok(MacroAuthoringContext {
+        source_language,
+        geometry_backend,
+    })
+}
+
+fn resolve_macro_authoring_context(
+    thread_source_language: crate::models::SourceLanguage,
+    thread_geometry_backend: crate::models::GeometryBackend,
+    macro_dialect: &MacroDialect,
+    requested_geometry_backend: Option<crate::models::GeometryBackend>,
+) -> AppResult<MacroAuthoringContext> {
+    let macro_source_language = infer_macro_source_language(macro_dialect);
+    if macro_source_language != thread_source_language {
+        return Err(AppError::validation(format!(
+            "Macro source language mismatch: thread setting is {}, macro is {}. Change the thread authoring context before migrating source language.",
+            thread_source_language.as_str(),
+            macro_source_language.as_str()
+        )));
+    }
+
+    if let Some(requested) = requested_geometry_backend {
+        if thread_source_language != crate::models::SourceLanguage::EckyIrV0
+            && requested != thread_geometry_backend
+        {
+            return Err(AppError::validation(format!(
+                "Geometry backend override is only valid for Ecky source. Thread setting is {} on {}; requested backend is {}.",
+                thread_source_language.as_str(),
+                thread_geometry_backend.as_str(),
+                requested.as_str()
+            )));
+        }
+    }
+
+    let geometry_backend = if thread_source_language == crate::models::SourceLanguage::EckyIrV0 {
+        requested_geometry_backend.unwrap_or(thread_geometry_backend)
+    } else {
+        thread_geometry_backend
+    };
+
+    Ok(MacroAuthoringContext {
+        source_language: thread_source_language,
+        geometry_backend,
+    })
 }
 
 pub async fn handle_macro_replace_and_render(
@@ -3224,15 +3440,14 @@ pub async fn handle_macro_replace_and_render(
         )
         .await;
 
-        let render_geometry_backend = if let Some(explicit) = req.geometry_backend {
-            Some(explicit)
-        } else {
-            resolve_patch_render_geometry_backend(
-                &conn,
-                tracked_thread_id.as_deref(),
-                &base_design,
-            )?
-        };
+        let thread_context = resolve_thread_authoring_context(&conn, state, &working_thread_id)?;
+        let authoring_context = resolve_macro_authoring_context(
+            thread_context.source_language,
+            thread_context.geometry_backend,
+            &macro_dialect,
+            req.geometry_backend,
+        )?;
+        let render_geometry_backend = authoring_context.geometry_backend;
 
         drop(conn);
 
@@ -3245,20 +3460,17 @@ pub async fn handle_macro_replace_and_render(
             &req.macro_code,
             &initial_params,
             Some(macro_dialect.clone()),
-            render_geometry_backend,
+            Some(render_geometry_backend),
             next_post_processing.as_ref(),
             state,
             app,
         )
         .await?;
-        let model_manifest = crate::freecad::get_model_manifest(app, &artifact_bundle.model_id)?;
+        let model_manifest =
+            crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
         tracked_model_id = Some(artifact_bundle.model_id.clone());
 
-        let engine_kind = if macro_dialect == MacroDialect::EckyIrV0 {
-            crate::models::EngineKind::EckyIrV0
-        } else {
-            crate::models::EngineKind::Freecad
-        };
+        let engine_kind = authoring_context.source_language.to_engine_kind();
         let design_output = DesignOutput {
             title: base_design.title.clone(),
             version_name: String::new(),
@@ -3267,8 +3479,8 @@ pub async fn handle_macro_replace_and_render(
             macro_code: req.macro_code.clone(),
             macro_dialect,
             engine_kind,
-            source_language: engine_kind.to_source_language(),
-            geometry_backend: render_geometry_backend.unwrap_or_else(|| engine_kind.to_geometry_backend()),
+            source_language: authoring_context.source_language,
+            geometry_backend: render_geometry_backend,
             ui_spec: ui_spec.clone(),
             initial_params: initial_params.clone(),
             post_processing: next_post_processing,
@@ -4609,8 +4821,8 @@ pub fn handle_verify_generated_model(
     model_id: &str,
     _original_prompt: &str,
 ) -> AppResult<VerifyGeneratedModelResponse> {
-    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
-    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
+    let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
+    let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
     Ok(VerifyGeneratedModelResponse {
         thread_id: thread_id.to_string(),
@@ -4627,8 +4839,8 @@ pub fn handle_structural_verification_summary(
     message_id: &str,
     model_id: &str,
 ) -> AppResult<StructuralVerificationSummaryResponse> {
-    let bundle = crate::freecad::get_artifact_bundle(app, model_id)?;
-    let manifest = crate::freecad::get_model_manifest(app, model_id)?;
+    let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
+    let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
     Ok(StructuralVerificationSummaryResponse {
         thread_id: thread_id.to_string(),
@@ -4729,7 +4941,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
 
     struct TestPathResolver {
         root: PathBuf,
@@ -4753,11 +4964,6 @@ mod tests {
         std::env::temp_dir().join(format!("ecky-mcp-{}-{}", name, Uuid::new_v4()))
     }
 
-    fn build123d_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn write_executable(path: &std::path::Path, body: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -4779,6 +4985,7 @@ mod tests {
             freecad_cmd: String::new(),
             assets: Vec::new(),
             microwave: None,
+            voice: crate::models::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
@@ -4810,6 +5017,74 @@ mod tests {
             llm_model_id: None,
             llm_model_label: Some("GPT-5.4".to_string()),
         }
+    }
+
+    #[test]
+    fn infer_macro_source_language_maps_dialect_to_authoring_language() {
+        assert_eq!(
+            infer_macro_source_language(&MacroDialect::Legacy),
+            crate::models::SourceLanguage::LegacyPython
+        );
+        assert_eq!(
+            infer_macro_source_language(&MacroDialect::CadFrameworkV1),
+            crate::models::SourceLanguage::LegacyPython
+        );
+        assert_eq!(
+            infer_macro_source_language(&MacroDialect::EckyIrV0),
+            crate::models::SourceLanguage::EckyIrV0
+        );
+        assert_eq!(
+            infer_macro_source_language(&MacroDialect::Build123d),
+            crate::models::SourceLanguage::Build123d
+        );
+    }
+
+    #[test]
+    fn macro_replacement_authoring_context_rejects_source_language_change() {
+        let err = resolve_macro_authoring_context(
+            crate::models::SourceLanguage::LegacyPython,
+            crate::models::GeometryBackend::Freecad,
+            &MacroDialect::EckyIrV0,
+            None,
+        )
+        .expect_err("ecky macro should not replace legacy python thread source");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("source language"));
+    }
+
+    #[test]
+    fn macro_replacement_authoring_context_rejects_non_ecky_backend_override() {
+        let err = resolve_macro_authoring_context(
+            crate::models::SourceLanguage::Build123d,
+            crate::models::GeometryBackend::Build123d,
+            &MacroDialect::Build123d,
+            Some(crate::models::GeometryBackend::Freecad),
+        )
+        .expect_err("non-ecky thread must follow thread backend setting");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("Geometry backend override"));
+    }
+
+    #[test]
+    fn macro_replacement_authoring_context_allows_ecky_backend_override() {
+        let context = resolve_macro_authoring_context(
+            crate::models::SourceLanguage::EckyIrV0,
+            crate::models::GeometryBackend::EckyRust,
+            &MacroDialect::EckyIrV0,
+            Some(crate::models::GeometryBackend::Build123d),
+        )
+        .expect("ecky source should allow geometry backend override");
+
+        assert_eq!(
+            context.source_language,
+            crate::models::SourceLanguage::EckyIrV0
+        );
+        assert_eq!(
+            context.geometry_backend,
+            crate::models::GeometryBackend::Build123d
+        );
     }
 
     fn sample_ui_spec() -> UiSpec {
@@ -5017,9 +5292,10 @@ mod tests {
         (state, resolver)
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn health_check_includes_runtime_capabilities() {
-        let _guard = build123d_env_lock().lock().unwrap();
+        let _guard = crate::build123d_test_env_lock().lock().unwrap();
         let root = std::env::temp_dir().join(format!("ecky-mcp-health-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let python = root.join("bin").join("python3");

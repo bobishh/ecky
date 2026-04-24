@@ -47,7 +47,7 @@ test.describe('First-run onboarding with floating windows', () => {
           return {
             freecad: { available: true, detail: 'Ready', path: '/mock/freecadcmd' },
             build123d: { available: true, detail: 'Ready', path: '/mock/python3' },
-            eckyRust: { available: true, detail: 'bundled', path: null },
+            mesh: { available: true, detail: 'bundled', path: null },
             recommendedAuthoringContext: {
               engineKind: 'freecad',
               sourceLanguage: 'legacyPython',

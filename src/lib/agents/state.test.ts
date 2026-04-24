@@ -14,6 +14,7 @@ import {
   shouldAutoFocusAgentWorkingVersion,
   usesMcpConnection,
   usesActiveMcpMode,
+  usesAgentDialogueMode,
 } from './state';
 
 test('normalizeMcpMode falls back to active when legacy auto-agents exist', () => {
@@ -134,6 +135,29 @@ test('usesMcpConnection enables queued dialogue for both active and passive MCP'
   assert.equal(usesMcpConnection('mcp'), true);
   assert.equal(usesMcpConnection('api_key'), false);
   assert.equal(usesMcpConnection(null), false);
+});
+
+test('usesAgentDialogueMode keeps queue-mode UI for thread-owned external agents even outside global MCP config', () => {
+  assert.equal(usesAgentDialogueMode('mcp', null), true);
+  assert.equal(
+    usesAgentDialogueMode(null, {
+      connectionState: 'waiting',
+    }),
+    true,
+  );
+  assert.equal(
+    usesAgentDialogueMode(null, {
+      connectionState: 'active',
+    }),
+    true,
+  );
+  assert.equal(
+    usesAgentDialogueMode(null, {
+      connectionState: 'disconnected',
+    }),
+    false,
+  );
+  assert.equal(usesAgentDialogueMode(null, null), false);
 });
 
 test('hasLiveAgentSession treats any live MCP session as a connected workspace agent', () => {

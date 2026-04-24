@@ -516,7 +516,8 @@ fn parse_scalar_call(
 ) -> AppResult<Option<ScalarExpr>> {
     if let Expr::Attribute(attr) = &*call.func {
         if let Expr::Name(base) = &*attr.value {
-            if base.id.as_str() == "params" && attr.attr.as_str() == "get" && call.args.len() >= 1 {
+            if base.id.as_str() == "params" && attr.attr.as_str() == "get" && !call.args.is_empty()
+            {
                 let key = parse_string_constant(&call.args[0]).ok_or_else(|| {
                     unsupported_python(
                         source_position_expr(&call.args[0]),
@@ -818,6 +819,7 @@ fn groove_profile_expr(height: &str, groove_width: &str, groove_depth: &str) -> 
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn teeth_expr(
     spec: &ThomasRampSpec,
     base_track: &str,
@@ -850,6 +852,7 @@ fn teeth_expr(
     format!("(if (and {has_teeth} (> {num_teeth} 0)) (cut {base_track} {valleys}) {base_track})")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn holes_expr(
     base_track: &str,
     flat_start: &str,
@@ -1466,7 +1469,9 @@ mod tests {
         let code = lower_to_build123d(&result.macro_code).expect("lower");
         assert!(code.contains("Polyline("), "{}", code);
         assert!(
-            code.contains("Rectangle(") || code.contains("Polygon("),
+            code.contains("Rectangle(")
+                || code.contains("Polygon(")
+                || code.contains("_ecky_polygon("),
             "{}",
             code
         );

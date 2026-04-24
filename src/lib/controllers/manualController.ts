@@ -44,8 +44,8 @@ function toAssetUrl(path: string | null | undefined): string {
 
 function workingCopyBackendLabel(design: Pick<DesignOutput, 'geometryBackend' | 'sourceLanguage' | 'macroDialect'>): string {
   if (design.geometryBackend === 'build123d' || design.sourceLanguage === 'build123d') return 'build123d';
-  if (design.macroDialect === 'eckyIrV0' || design.sourceLanguage === 'eckyIrV0') {
-    return 'Ecky IR';
+  if (design.macroDialect === 'ecky' || design.sourceLanguage === 'ecky') {
+    return 'Ecky';
   }
   return 'FreeCAD';
 }
@@ -450,6 +450,8 @@ export async function commitManualVersion(
       title: titleOverride || wc.title || "Manual Edit",
       versionName: "V-manual",
       macroCode: editedCode,
+      sourceLanguage: bundle.sourceLanguage || wc.sourceLanguage || null,
+      geometryBackend: bundle.geometryBackend || wc.geometryBackend || null,
       parameters: nextParams,
       uiSpec: nextUiSpec,
       postProcessing: wc.postProcessing ?? null,
@@ -469,11 +471,11 @@ export async function commitManualVersion(
       macroDialect:
         bundle.sourceLanguage === 'build123d'
           ? 'build123d'
-          : bundle.engineKind === 'eckyIrV0'
-            ? 'eckyIrV0'
+          : bundle.engineKind === 'ecky'
+            ? 'ecky'
             : wc.macroDialect ?? 'legacy',
-      sourceLanguage: bundle.sourceLanguage || (bundle.engineKind === 'eckyIrV0' ? 'eckyIrV0' : 'legacyPython'),
-      geometryBackend: bundle.geometryBackend || (bundle.engineKind === 'eckyIrV0' ? 'eckyRust' : 'freecad'),
+      sourceLanguage: bundle.sourceLanguage || (bundle.engineKind === 'ecky' ? 'ecky' : 'legacyPython'),
+      geometryBackend: bundle.geometryBackend || (bundle.engineKind === 'ecky' ? 'mesh' : 'freecad'),
       engineKind: bundle.engineKind,
       uiSpec: nextUiSpec,
       initialParams: nextParams,

@@ -207,6 +207,7 @@ mod tests {
             freecad_cmd: String::new(),
             assets: Vec::new(),
             microwave: None,
+            voice: crate::models::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: false,
             connection_type: None,

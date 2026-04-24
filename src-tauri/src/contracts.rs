@@ -148,6 +148,23 @@ pub struct AgentTerminalInput {
     pub submit: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribePromptAudioInput {
+    pub base64_data: String,
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTranscription {
+    pub text: String,
+    pub provider: String,
+    pub model: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewportCameraState {
@@ -363,6 +380,25 @@ pub struct MicrowaveConfig {
     pub muted: bool,
 }
 
+fn default_stt_language_code() -> String {
+    "en-US".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceConfig {
+    #[serde(default = "default_stt_language_code", alias = "stt_language_code")]
+    pub stt_language_code: String,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            stt_language_code: default_stt_language_code(),
+        }
+    }
+}
+
 /// Whether Ecky runs the embedded MCP HTTP server.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -448,6 +484,8 @@ pub struct Config {
     #[serde(default)]
     pub microwave: Option<MicrowaveConfig>,
     #[serde(default)]
+    pub voice: VoiceConfig,
+    #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default)]
     pub has_seen_onboarding: bool,
@@ -486,6 +524,8 @@ fn default_geometry_backend() -> GeometryBackend {
 pub enum EngineKind {
     #[default]
     Freecad,
+    #[serde(rename = "ecky", alias = "eckyIrV0", alias = "ecky_ir_v0")]
+    #[specta(rename = "ecky")]
     EckyIrV0,
     #[serde(rename = "build123d")]
     #[specta(rename = "build123d")]
@@ -497,6 +537,8 @@ pub enum EngineKind {
 pub enum SourceLanguage {
     #[default]
     LegacyPython,
+    #[serde(rename = "ecky", alias = "eckyIrV0", alias = "ecky_ir_v0")]
+    #[specta(rename = "ecky")]
     EckyIrV0,
     #[serde(rename = "build123d")]
     #[specta(rename = "build123d")]
@@ -510,7 +552,8 @@ pub enum GeometryBackend {
     Freecad,
     #[serde(rename = "build123d")]
     Build123d,
-    #[serde(rename = "eckyRust")]
+    #[serde(rename = "mesh", alias = "eckyRust", alias = "ecky_rust")]
+    #[specta(rename = "mesh")]
     EckyRust,
 }
 
@@ -518,7 +561,7 @@ impl EngineKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Freecad => "freecad",
-            Self::EckyIrV0 => "eckyIrV0",
+            Self::EckyIrV0 => "ecky",
             Self::Build123d => "build123d",
         }
     }
@@ -546,7 +589,7 @@ impl std::str::FromStr for EngineKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "freecad" => Ok(Self::Freecad),
-            "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
+            "ecky" | "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
             "build123d" => Ok(Self::Build123d),
             _ => Err(()),
         }
@@ -557,7 +600,7 @@ impl SourceLanguage {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::LegacyPython => "legacyPython",
-            Self::EckyIrV0 => "eckyIrV0",
+            Self::EckyIrV0 => "ecky",
             Self::Build123d => "build123d",
         }
     }
@@ -577,7 +620,7 @@ impl std::str::FromStr for SourceLanguage {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "legacyPython" | "legacy_python" => Ok(Self::LegacyPython),
-            "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
+            "ecky" | "eckyIrV0" | "ecky_ir_v0" => Ok(Self::EckyIrV0),
             "build123d" => Ok(Self::Build123d),
             _ => Err(()),
         }
@@ -589,7 +632,7 @@ impl GeometryBackend {
         match self {
             Self::Freecad => "freecad",
             Self::Build123d => "build123d",
-            Self::EckyRust => "eckyRust",
+            Self::EckyRust => "mesh",
         }
     }
 }
@@ -601,7 +644,7 @@ impl std::str::FromStr for GeometryBackend {
         match value {
             "freecad" => Ok(Self::Freecad),
             "build123d" => Ok(Self::Build123d),
-            "eckyRust" | "ecky_rust" => Ok(Self::EckyRust),
+            "mesh" | "eckyRust" | "ecky_rust" => Ok(Self::EckyRust),
             _ => Err(()),
         }
     }
@@ -629,6 +672,9 @@ pub struct RuntimeAuthoringContext {
 pub struct RuntimeCapabilities {
     pub freecad: RuntimeBackendCapability,
     pub build123d: RuntimeBackendCapability,
+    pub direct_occt: RuntimeBackendCapability,
+    #[serde(rename = "mesh", alias = "eckyRust")]
+    #[specta(rename = "mesh")]
     pub ecky_rust: RuntimeBackendCapability,
     pub recommended_authoring_context: RuntimeAuthoringContext,
 }
@@ -1125,6 +1171,8 @@ impl std::str::FromStr for InteractionMode {
 pub enum MacroDialect {
     Legacy,
     CadFrameworkV1,
+    #[serde(rename = "ecky", alias = "eckyIrV0", alias = "ecky_ir_v0")]
+    #[specta(rename = "ecky")]
     EckyIrV0,
     #[serde(rename = "build123d")]
     #[specta(rename = "build123d")]
@@ -1871,6 +1919,8 @@ pub struct Attachment {
     pub path: String,
     pub name: String,
     pub explanation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "data_url")]
+    pub data_url: Option<String>,
     #[serde(alias = "type")]
     pub kind: AttachmentKind,
 }
@@ -2677,6 +2727,604 @@ pub struct ModelManifest {
     pub warnings: Vec<String>,
     #[serde(default = "default_manifest_enrichment_state")]
     pub enrichment_state: ManifestEnrichmentState,
+}
+
+pub const COMPONENT_PACKAGE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PackageVisibility {
+    Source,
+    Compiled,
+    Locked,
+    Private,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ComponentParamKind {
+    Number,
+    Text,
+    Boolean,
+    Choice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationKind {
+    Place,
+    Mate,
+    Join,
+    Cut,
+    Fuse,
+    Mold,
+    Blend,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum KeepoutVolumeKind {
+    Box,
+    Cylinder,
+    Sphere,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", untagged)]
+pub enum ComponentInterfaceValue {
+    Number(f64),
+    Text(String),
+    Boolean(bool),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortFrame {
+    pub origin: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+    pub z_axis: [f64; 3],
+}
+
+impl PortFrame {
+    pub fn identity() -> Self {
+        Self {
+            origin: [0.0, 0.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentParam {
+    pub key: String,
+    pub label: String,
+    pub kind: ComponentParamKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentPort {
+    pub port_id: String,
+    pub type_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<PortFrame>,
+    #[serde(default)]
+    pub params: BTreeMap<String, ComponentInterfaceValue>,
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    #[serde(default)]
+    pub compatible_with: Vec<String>,
+    #[serde(default)]
+    pub allowed_ops: Vec<OperationKind>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortTypeDefinition {
+    pub type_id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    #[serde(default)]
+    pub compatible_with: Vec<String>,
+    #[serde(default)]
+    pub allowed_ops: Vec<OperationKind>,
+    #[serde(default)]
+    pub params: Vec<ComponentParam>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct MatePortTypePair {
+    pub a_type_id: String,
+    pub b_type_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MateTypeDefinition {
+    pub type_id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub allowed_port_type_pairs: Vec<MatePortTypePair>,
+    #[serde(default)]
+    pub params: Vec<ComponentParam>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SketchView {
+    Front,
+    Side,
+    Top,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SketchPrimitiveKind {
+    Point,
+    Line,
+    Polyline,
+    Spline,
+    Arc,
+    Circle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SketchConstraintKind {
+    Closed,
+    Horizontal,
+    Vertical,
+    Tangent,
+    Equal,
+    Symmetric,
+    Dimension,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchPrimitive {
+    pub primitive_id: String,
+    pub kind: SketchPrimitiveKind,
+    #[serde(default)]
+    pub points: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchConstraint {
+    pub constraint_id: String,
+    pub kind: SketchConstraintKind,
+    #[serde(default)]
+    pub target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchDefinition {
+    pub sketch_id: String,
+    pub view: SketchView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<PortFrame>,
+    #[serde(default)]
+    pub primitives: Vec<SketchPrimitive>,
+    #[serde(default)]
+    pub constraints: Vec<SketchConstraint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchDocument {
+    pub document_id: String,
+    #[serde(default)]
+    pub sketches: Vec<SketchDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_sketch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SketchDraftOperationKind {
+    Extrude,
+    Revolve,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchDraftRequest {
+    pub part_id: String,
+    pub sketch: SketchDefinition,
+    pub operation: SketchDraftOperationKind,
+    pub amount: f64,
+    #[serde(default)]
+    pub symmetric: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchPreviewHullRequest {
+    pub part_id: String,
+    pub document: SketchDocument,
+    pub fallback_depth: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateRequest {
+    pub document: SketchDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateVertex {
+    pub vertex_id: String,
+    pub point: [f64; 3],
+    #[serde(default)]
+    pub evidence_views: Vec<SketchView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateEdge {
+    pub edge_id: String,
+    pub a: String,
+    pub b: String,
+    #[serde(default)]
+    pub support_views: Vec<SketchView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateGraph {
+    #[serde(default)]
+    pub vertices: Vec<SketchBrepCandidateVertex>,
+    #[serde(default)]
+    pub edges: Vec<SketchBrepCandidateEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepProjectionValidation {
+    pub passed: bool,
+    #[serde(default)]
+    pub issues: Vec<SketchValidationIssue>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateResponse {
+    pub graph: SketchBrepCandidateGraph,
+    pub validation: SketchBrepProjectionValidation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrepHiddenLineProjectionRequest {
+    pub artifact_bundle: ArtifactBundle,
+    #[serde(default)]
+    pub views: Vec<SketchView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch_document: Option<SketchDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrepProjectedEdge2d {
+    pub edge_id: String,
+    #[serde(default)]
+    pub points: Vec<[f64; 2]>,
+    pub source_class: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrepHiddenLineProjectionView {
+    pub view: SketchView,
+    pub direction: [f64; 3],
+    #[serde(default)]
+    pub visible_edges: Vec<BrepProjectedEdge2d>,
+    #[serde(default)]
+    pub hidden_edges: Vec<BrepProjectedEdge2d>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrepHiddenLineProjectionResponse {
+    pub model_id: String,
+    pub source_artifact_path: String,
+    #[serde(default)]
+    pub views: Vec<BrepHiddenLineProjectionView>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<SketchBrepProjectionValidation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchDraftSource {
+    pub source_language: SourceLanguage,
+    pub geometry_backend: GeometryBackend,
+    pub macro_dialect: MacroDialect,
+    pub source: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchFeatureSuggestion {
+    pub suggestion_id: String,
+    pub sketch_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive_id: Option<String>,
+    pub part_id: String,
+    pub operation: SketchDraftOperationKind,
+    pub amount: f64,
+    #[serde(default)]
+    pub symmetric: bool,
+    pub confidence: f64,
+    pub reason: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchSuggestionRequest {
+    pub document: SketchDocument,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchSuggestionResponse {
+    #[serde(default)]
+    pub suggestions: Vec<SketchFeatureSuggestion>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SketchValidationSeverity {
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchValidationIssue {
+    pub sketch_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive_id: Option<String>,
+    pub severity: SketchValidationSeverity,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchValidationResult {
+    pub valid: bool,
+    #[serde(default)]
+    pub issues: Vec<SketchValidationIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentKeepoutVolume {
+    pub keepout_id: String,
+    pub label: String,
+    pub kind: KeepoutVolumeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<PortFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentFusionZone {
+    pub zone_id: String,
+    pub surface_ref: String,
+    #[serde(default)]
+    pub allowed_ops: Vec<OperationKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_blend_radius: Option<f64>,
+    #[serde(default)]
+    pub keepout_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentDefinition {
+    pub component_id: String,
+    pub version: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default)]
+    pub sketches: Vec<SketchDefinition>,
+    #[serde(default)]
+    pub keepouts: Vec<ComponentKeepoutVolume>,
+    #[serde(default)]
+    pub fusion_zones: Vec<ComponentFusionZone>,
+    #[serde(default)]
+    pub params: Vec<ComponentParam>,
+    #[serde(default)]
+    pub ports: Vec<ComponentPort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyComponentRef {
+    pub instance_id: String,
+    pub component_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortReference {
+    pub instance_id: String,
+    pub port_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyMate {
+    pub mate_id: String,
+    pub type_id: String,
+    pub a: PortReference,
+    pub b: PortReference,
+    #[serde(default)]
+    pub params: BTreeMap<String, ComponentInterfaceValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyOperation {
+    pub operation_id: String,
+    pub kind: OperationKind,
+    #[serde(default)]
+    pub target_instance_ids: Vec<String>,
+    #[serde(default)]
+    pub port_refs: Vec<PortReference>,
+    #[serde(default)]
+    pub params: BTreeMap<String, ComponentInterfaceValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AssemblyOutputMode {
+    SeparateParts,
+    JoinedAssembly,
+    FusedSolid,
+    MoldedSolid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyOutput {
+    pub mode: AssemblyOutputMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyDefinition {
+    pub assembly_id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub components: Vec<AssemblyComponentRef>,
+    #[serde(default)]
+    pub mates: Vec<AssemblyMate>,
+    #[serde(default)]
+    pub operations: Vec<AssemblyOperation>,
+    pub output: AssemblyOutput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentPackage {
+    #[serde(default = "default_component_package_schema_version")]
+    pub schema_version: u32,
+    pub package_id: String,
+    pub version: String,
+    pub display_name: String,
+    pub visibility: PackageVisibility,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub mate_types: Vec<MateTypeDefinition>,
+    #[serde(default)]
+    pub components: Vec<ComponentDefinition>,
+    #[serde(default)]
+    pub assemblies: Vec<AssemblyDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentPackageHeader {
+    pub schema_version: u32,
+    pub package_id: String,
+    pub version: String,
+    pub display_name: String,
+    pub visibility: PackageVisibility,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub mate_types: Vec<MateTypeDefinition>,
+    #[serde(default)]
+    pub components: Vec<ComponentHeader>,
+    #[serde(default)]
+    pub assemblies: Vec<AssemblyHeader>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledComponentPackage {
+    pub header: ComponentPackageHeader,
+    pub package_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentHeader {
+    pub component_id: String,
+    pub version: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub params: Vec<ComponentParam>,
+    #[serde(default)]
+    pub ports: Vec<ComponentPort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyHeader {
+    pub assembly_id: String,
+    pub display_name: String,
+    pub component_count: usize,
+    pub mate_count: usize,
+    pub operation_count: usize,
+    pub output: AssemblyOutput,
+}
+
+fn default_component_package_schema_version() -> u32 {
+    COMPONENT_PACKAGE_SCHEMA_VERSION
 }
 
 fn default_model_runtime_schema_version() -> u32 {
@@ -3533,10 +4181,1172 @@ pub fn validate_model_runtime_bundle(
     Ok(())
 }
 
+pub fn validate_component_package(package: &ComponentPackage) -> AppResult<()> {
+    if package.schema_version == 0 {
+        return Err(AppError::validation(
+            "component package schemaVersion must be greater than 0.",
+        ));
+    }
+    require_non_empty(
+        &package.package_id,
+        "component package must include a non-empty packageId.",
+    )?;
+    require_non_empty(
+        &package.version,
+        "component package must include a non-empty version.",
+    )?;
+    require_non_empty(
+        &package.display_name,
+        "component package must include a non-empty displayName.",
+    )?;
+
+    for tag in &package.tags {
+        if tag.trim().is_empty() {
+            return Err(AppError::validation(
+                "component package tags must be non-empty.",
+            ));
+        }
+    }
+
+    let mut port_type_ids = HashSet::new();
+    for port_type in &package.port_types {
+        validate_port_type_definition(port_type)?;
+        if !port_type_ids.insert(port_type.type_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package contains duplicate port typeId '{}'.",
+                port_type.type_id
+            )));
+        }
+    }
+
+    let mut mate_type_ids = HashSet::new();
+    let mut mate_types_by_id = HashMap::new();
+    for mate_type in &package.mate_types {
+        validate_mate_type_definition(mate_type)?;
+        if !mate_type_ids.insert(mate_type.type_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package contains duplicate mate typeId '{}'.",
+                mate_type.type_id
+            )));
+        }
+        mate_types_by_id.insert(mate_type.type_id.as_str(), mate_type);
+    }
+
+    if package.components.is_empty() {
+        return Err(AppError::validation(
+            "component package must include at least one component.",
+        ));
+    }
+
+    let mut component_ids = HashSet::new();
+    let mut components_by_id = HashMap::new();
+    for component in &package.components {
+        validate_component_definition(component)?;
+        if !component_ids.insert(component.component_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package contains duplicate componentId '{}'.",
+                component.component_id
+            )));
+        }
+        components_by_id.insert(component.component_id.as_str(), component);
+    }
+
+    let mut assembly_ids = HashSet::new();
+    for assembly in &package.assemblies {
+        validate_assembly_definition(assembly, &components_by_id, &mate_types_by_id)?;
+        if !assembly_ids.insert(assembly.assembly_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package contains duplicate assemblyId '{}'.",
+                assembly.assembly_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn component_package_header(package: &ComponentPackage) -> AppResult<ComponentPackageHeader> {
+    validate_component_package(package)?;
+    Ok(ComponentPackageHeader {
+        schema_version: package.schema_version,
+        package_id: package.package_id.clone(),
+        version: package.version.clone(),
+        display_name: package.display_name.clone(),
+        visibility: package.visibility.clone(),
+        tags: package.tags.clone(),
+        port_types: package.port_types.clone(),
+        mate_types: package.mate_types.clone(),
+        components: package
+            .components
+            .iter()
+            .map(|component| ComponentHeader {
+                component_id: component.component_id.clone(),
+                version: component.version.clone(),
+                display_name: component.display_name.clone(),
+                params: component.params.clone(),
+                ports: component.ports.clone(),
+            })
+            .collect(),
+        assemblies: package
+            .assemblies
+            .iter()
+            .map(|assembly| AssemblyHeader {
+                assembly_id: assembly.assembly_id.clone(),
+                display_name: assembly.display_name.clone(),
+                component_count: assembly.components.len(),
+                mate_count: assembly.mates.len(),
+                operation_count: assembly.operations.len(),
+                output: assembly.output.clone(),
+            })
+            .collect(),
+    })
+}
+
+pub fn validate_component_package_header(header: &ComponentPackageHeader) -> AppResult<()> {
+    if header.schema_version == 0 {
+        return Err(AppError::validation(
+            "component package header schemaVersion must be greater than 0.",
+        ));
+    }
+    require_non_empty(
+        &header.package_id,
+        "component package header must include a non-empty packageId.",
+    )?;
+    require_non_empty(
+        &header.version,
+        "component package header must include a non-empty version.",
+    )?;
+    require_non_empty(
+        &header.display_name,
+        "component package header must include a non-empty displayName.",
+    )?;
+
+    let mut port_type_ids = HashSet::new();
+    for port_type in &header.port_types {
+        validate_port_type_definition(port_type)?;
+        if !port_type_ids.insert(port_type.type_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package header contains duplicate port typeId '{}'.",
+                port_type.type_id
+            )));
+        }
+    }
+
+    let mut mate_type_ids = HashSet::new();
+    for mate_type in &header.mate_types {
+        validate_mate_type_definition(mate_type)?;
+        if !mate_type_ids.insert(mate_type.type_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package header contains duplicate mate typeId '{}'.",
+                mate_type.type_id
+            )));
+        }
+    }
+
+    let mut component_ids = HashSet::new();
+    for component in &header.components {
+        require_non_empty(
+            &component.component_id,
+            "component package header components must include non-empty componentId values.",
+        )?;
+        if !component_ids.insert(component.component_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package header contains duplicate componentId '{}'.",
+                component.component_id
+            )));
+        }
+        require_non_empty(
+            &component.version,
+            &format!(
+                "component package header component '{}' must include a non-empty version.",
+                component.component_id
+            ),
+        )?;
+        require_non_empty(
+            &component.display_name,
+            &format!(
+                "component package header component '{}' must include a non-empty displayName.",
+                component.component_id
+            ),
+        )?;
+        let mut param_keys = HashSet::new();
+        for param in &component.params {
+            require_non_empty(
+                &param.key,
+                &format!(
+                    "component package header component '{}' params must include non-empty keys.",
+                    component.component_id
+                ),
+            )?;
+            if !param_keys.insert(param.key.as_str()) {
+                return Err(AppError::validation(format!(
+                    "component package header component '{}' contains duplicate param key '{}'.",
+                    component.component_id, param.key
+                )));
+            }
+        }
+        let mut port_ids = HashSet::new();
+        for port in &component.ports {
+            validate_component_port(&component.component_id, port)?;
+            if !port_ids.insert(port.port_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "component package header component '{}' contains duplicate portId '{}'.",
+                    component.component_id, port.port_id
+                )));
+            }
+        }
+    }
+
+    let mut assembly_ids = HashSet::new();
+    for assembly in &header.assemblies {
+        require_non_empty(
+            &assembly.assembly_id,
+            "component package header assemblies must include non-empty assemblyId values.",
+        )?;
+        if !assembly_ids.insert(assembly.assembly_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component package header contains duplicate assemblyId '{}'.",
+                assembly.assembly_id
+            )));
+        }
+        require_non_empty(
+            &assembly.display_name,
+            &format!(
+                "component package header assembly '{}' must include a non-empty displayName.",
+                assembly.assembly_id
+            ),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_port_type_definition(port_type: &PortTypeDefinition) -> AppResult<()> {
+    require_non_empty(
+        &port_type.type_id,
+        "port type definitions must include a non-empty typeId.",
+    )?;
+    require_non_empty(
+        &port_type.display_name,
+        &format!(
+            "port type '{}' must include a non-empty displayName.",
+            port_type.type_id
+        ),
+    )?;
+    if let Some(base) = port_type.base.as_deref() {
+        if base.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "port type '{}' base must be non-empty when present.",
+                port_type.type_id
+            )));
+        }
+    }
+    validate_non_empty_strings(
+        &port_type.interfaces,
+        &format!(
+            "port type '{}' interfaces must be non-empty.",
+            port_type.type_id
+        ),
+    )?;
+    validate_non_empty_strings(
+        &port_type.compatible_with,
+        &format!(
+            "port type '{}' compatibleWith values must be non-empty.",
+            port_type.type_id
+        ),
+    )?;
+
+    let mut ops = HashSet::new();
+    for op in &port_type.allowed_ops {
+        if !ops.insert(op) {
+            return Err(AppError::validation(format!(
+                "port type '{}' contains duplicate allowedOps value {:?}.",
+                port_type.type_id, op
+            )));
+        }
+    }
+
+    let mut param_keys = HashSet::new();
+    for param in &port_type.params {
+        require_non_empty(
+            &param.key,
+            &format!(
+                "port type '{}' params must include non-empty keys.",
+                port_type.type_id
+            ),
+        )?;
+        if !param_keys.insert(param.key.as_str()) {
+            return Err(AppError::validation(format!(
+                "port type '{}' contains duplicate param key '{}'.",
+                port_type.type_id, param.key
+            )));
+        }
+        require_non_empty(
+            &param.label,
+            &format!(
+                "port type '{}' param '{}' must include a non-empty label.",
+                port_type.type_id, param.key
+            ),
+        )?;
+        if let Some(unit) = param.unit.as_deref() {
+            if unit.trim().is_empty() {
+                return Err(AppError::validation(format!(
+                    "port type '{}' param '{}' unit must be non-empty when present.",
+                    port_type.type_id, param.key
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_mate_type_definition(mate_type: &MateTypeDefinition) -> AppResult<()> {
+    require_non_empty(
+        &mate_type.type_id,
+        "mate type definitions must include a non-empty typeId.",
+    )?;
+    require_non_empty(
+        &mate_type.display_name,
+        &format!(
+            "mate type '{}' must include a non-empty displayName.",
+            mate_type.type_id
+        ),
+    )?;
+    if mate_type.allowed_port_type_pairs.is_empty() {
+        return Err(AppError::validation(format!(
+            "mate type '{}' must include at least one allowedPortTypePair.",
+            mate_type.type_id
+        )));
+    }
+
+    let mut pairs = HashSet::new();
+    for pair in &mate_type.allowed_port_type_pairs {
+        require_non_empty(
+            &pair.a_type_id,
+            &format!(
+                "mate type '{}' allowedPortTypePairs must include non-empty aTypeId values.",
+                mate_type.type_id
+            ),
+        )?;
+        require_non_empty(
+            &pair.b_type_id,
+            &format!(
+                "mate type '{}' allowedPortTypePairs must include non-empty bTypeId values.",
+                mate_type.type_id
+            ),
+        )?;
+
+        let canonical_pair = if pair.a_type_id <= pair.b_type_id {
+            (pair.a_type_id.as_str(), pair.b_type_id.as_str())
+        } else {
+            (pair.b_type_id.as_str(), pair.a_type_id.as_str())
+        };
+        if !pairs.insert(canonical_pair) {
+            return Err(AppError::validation(format!(
+                "mate type '{}' contains duplicate allowedPortTypePair '{}'-'{}'.",
+                mate_type.type_id, pair.a_type_id, pair.b_type_id
+            )));
+        }
+    }
+
+    let mut param_keys = HashSet::new();
+    for param in &mate_type.params {
+        require_non_empty(
+            &param.key,
+            &format!(
+                "mate type '{}' params must include non-empty keys.",
+                mate_type.type_id
+            ),
+        )?;
+        if !param_keys.insert(param.key.as_str()) {
+            return Err(AppError::validation(format!(
+                "mate type '{}' contains duplicate param key '{}'.",
+                mate_type.type_id, param.key
+            )));
+        }
+        require_non_empty(
+            &param.label,
+            &format!(
+                "mate type '{}' param '{}' must include a non-empty label.",
+                mate_type.type_id, param.key
+            ),
+        )?;
+        if let Some(unit) = param.unit.as_deref() {
+            if unit.trim().is_empty() {
+                return Err(AppError::validation(format!(
+                    "mate type '{}' param '{}' unit must be non-empty when present.",
+                    mate_type.type_id, param.key
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_component_definition(component: &ComponentDefinition) -> AppResult<()> {
+    require_non_empty(
+        &component.component_id,
+        "components must include a non-empty componentId.",
+    )?;
+    require_non_empty(
+        &component.version,
+        &format!(
+            "component '{}' must include a non-empty version.",
+            component.component_id
+        ),
+    )?;
+    require_non_empty(
+        &component.display_name,
+        &format!(
+            "component '{}' must include a non-empty displayName.",
+            component.component_id
+        ),
+    )?;
+
+    if let Some(source_ref) = component.source_ref.as_deref() {
+        if source_ref.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "component '{}' sourceRef must be non-empty when present.",
+                component.component_id
+            )));
+        }
+    }
+
+    let mut sketch_ids = HashSet::new();
+    for sketch in &component.sketches {
+        validate_sketch_definition(&component.component_id, sketch)?;
+        if !sketch_ids.insert(sketch.sketch_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' contains duplicate sketchId '{}'.",
+                component.component_id, sketch.sketch_id
+            )));
+        }
+    }
+
+    let mut keepout_ids = HashSet::new();
+    for keepout in &component.keepouts {
+        validate_component_keepout(&component.component_id, keepout)?;
+        if !keepout_ids.insert(keepout.keepout_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' contains duplicate keepoutId '{}'.",
+                component.component_id, keepout.keepout_id
+            )));
+        }
+    }
+
+    let mut fusion_zone_ids = HashSet::new();
+    for zone in &component.fusion_zones {
+        validate_component_fusion_zone(&component.component_id, zone, &keepout_ids)?;
+        if !fusion_zone_ids.insert(zone.zone_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' contains duplicate fusion zoneId '{}'.",
+                component.component_id, zone.zone_id
+            )));
+        }
+    }
+
+    let mut param_keys = HashSet::new();
+    for param in &component.params {
+        require_non_empty(
+            &param.key,
+            &format!(
+                "component '{}' params must include non-empty keys.",
+                component.component_id
+            ),
+        )?;
+        if !param_keys.insert(param.key.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' contains duplicate param key '{}'.",
+                component.component_id, param.key
+            )));
+        }
+        require_non_empty(
+            &param.label,
+            &format!(
+                "component '{}' param '{}' must include a non-empty label.",
+                component.component_id, param.key
+            ),
+        )?;
+        if let Some(unit) = param.unit.as_deref() {
+            if unit.trim().is_empty() {
+                return Err(AppError::validation(format!(
+                    "component '{}' param '{}' unit must be non-empty when present.",
+                    component.component_id, param.key
+                )));
+            }
+        }
+    }
+
+    let mut port_ids = HashSet::new();
+    for port in &component.ports {
+        validate_component_port(&component.component_id, port)?;
+        if !port_ids.insert(port.port_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' contains duplicate portId '{}'.",
+                component.component_id, port.port_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_sketch_definition(component_id: &str, sketch: &SketchDefinition) -> AppResult<()> {
+    require_non_empty(
+        &sketch.sketch_id,
+        &format!(
+            "component '{}' sketches must include non-empty sketchId values.",
+            component_id
+        ),
+    )?;
+    if let Some(plane) = &sketch.plane {
+        validate_port_frame(component_id, &sketch.sketch_id, plane)?;
+    }
+    if sketch.primitives.is_empty() {
+        return Err(AppError::validation(format!(
+            "component '{}' sketch '{}' must include at least one primitive.",
+            component_id, sketch.sketch_id
+        )));
+    }
+
+    let mut primitive_ids = HashSet::new();
+    for primitive in &sketch.primitives {
+        validate_sketch_primitive(component_id, &sketch.sketch_id, primitive)?;
+        if !primitive_ids.insert(primitive.primitive_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' sketch '{}' contains duplicate primitiveId '{}'.",
+                component_id, sketch.sketch_id, primitive.primitive_id
+            )));
+        }
+    }
+
+    let mut constraint_ids = HashSet::new();
+    for constraint in &sketch.constraints {
+        require_non_empty(
+            &constraint.constraint_id,
+            &format!(
+                "component '{}' sketch '{}' constraints must include non-empty constraintId values.",
+                component_id, sketch.sketch_id
+            ),
+        )?;
+        if !constraint_ids.insert(constraint.constraint_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' sketch '{}' contains duplicate constraintId '{}'.",
+                component_id, sketch.sketch_id, constraint.constraint_id
+            )));
+        }
+        if constraint.target_ids.is_empty() {
+            return Err(AppError::validation(format!(
+                "component '{}' sketch '{}' constraint '{}' must reference at least one primitiveId.",
+                component_id, sketch.sketch_id, constraint.constraint_id
+            )));
+        }
+        for target_id in &constraint.target_ids {
+            if target_id.trim().is_empty() {
+                return Err(AppError::validation(format!(
+                    "component '{}' sketch '{}' constraint '{}' targetIds must be non-empty.",
+                    component_id, sketch.sketch_id, constraint.constraint_id
+                )));
+            }
+            if !primitive_ids.contains(target_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "component '{}' sketch '{}' constraint '{}' references unknown primitiveId '{}'.",
+                    component_id, sketch.sketch_id, constraint.constraint_id, target_id
+                )));
+            }
+        }
+        if let Some(value) = constraint.value {
+            if !value.is_finite() {
+                return Err(AppError::validation(format!(
+                    "component '{}' sketch '{}' constraint '{}' value must be finite.",
+                    component_id, sketch.sketch_id, constraint.constraint_id
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_sketch_primitive(
+    component_id: &str,
+    sketch_id: &str,
+    primitive: &SketchPrimitive,
+) -> AppResult<()> {
+    require_non_empty(
+        &primitive.primitive_id,
+        &format!(
+            "component '{}' sketch '{}' primitives must include non-empty primitiveId values.",
+            component_id, sketch_id
+        ),
+    )?;
+    for point in &primitive.points {
+        if point.iter().any(|value| !value.is_finite()) {
+            return Err(AppError::validation(format!(
+                "component '{}' sketch '{}' primitive '{}' points must contain finite values.",
+                component_id, sketch_id, primitive.primitive_id
+            )));
+        }
+    }
+    if let Some(radius) = primitive.radius {
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(AppError::validation(format!(
+                "component '{}' sketch '{}' primitive '{}' radius must be positive and finite.",
+                component_id, sketch_id, primitive.primitive_id
+            )));
+        }
+    }
+
+    let point_count = primitive.points.len();
+    let valid = match primitive.kind {
+        SketchPrimitiveKind::Point => point_count == 1,
+        SketchPrimitiveKind::Line => point_count == 2,
+        SketchPrimitiveKind::Polyline => {
+            point_count >= 2 && (!primitive.closed || point_count >= 3)
+        }
+        SketchPrimitiveKind::Spline => point_count >= 2,
+        SketchPrimitiveKind::Arc => point_count >= 3,
+        SketchPrimitiveKind::Circle => point_count == 1 && primitive.radius.is_some(),
+    };
+    if !valid {
+        return Err(AppError::validation(format!(
+            "component '{}' sketch '{}' primitive '{}' has invalid geometry for kind {:?}.",
+            component_id, sketch_id, primitive.primitive_id, primitive.kind
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_component_keepout(
+    component_id: &str,
+    keepout: &ComponentKeepoutVolume,
+) -> AppResult<()> {
+    require_non_empty(
+        &keepout.keepout_id,
+        &format!(
+            "component '{}' keepouts must include non-empty keepoutId values.",
+            component_id
+        ),
+    )?;
+    require_non_empty(
+        &keepout.label,
+        &format!(
+            "component '{}' keepout '{}' must include a non-empty label.",
+            component_id, keepout.keepout_id
+        ),
+    )?;
+    if let Some(frame) = &keepout.frame {
+        validate_port_frame(component_id, &keepout.keepout_id, frame)?;
+    }
+    if let Some(size) = keepout.size {
+        if size.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+            return Err(AppError::validation(format!(
+                "component '{}' keepout '{}' size must contain positive finite values.",
+                component_id, keepout.keepout_id
+            )));
+        }
+    }
+    if let Some(radius) = keepout.radius {
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(AppError::validation(format!(
+                "component '{}' keepout '{}' radius must be positive and finite.",
+                component_id, keepout.keepout_id
+            )));
+        }
+    }
+    if let Some(height) = keepout.height {
+        if !height.is_finite() || height <= 0.0 {
+            return Err(AppError::validation(format!(
+                "component '{}' keepout '{}' height must be positive and finite.",
+                component_id, keepout.keepout_id
+            )));
+        }
+    }
+
+    let valid_shape = match keepout.kind {
+        KeepoutVolumeKind::Box => keepout.size.is_some(),
+        KeepoutVolumeKind::Cylinder => keepout.radius.is_some() && keepout.height.is_some(),
+        KeepoutVolumeKind::Sphere => keepout.radius.is_some(),
+        KeepoutVolumeKind::Custom => true,
+    };
+    if !valid_shape {
+        return Err(AppError::validation(format!(
+            "component '{}' keepout '{}' is missing required dimensions for kind {:?}.",
+            component_id, keepout.keepout_id, keepout.kind
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_component_fusion_zone(
+    component_id: &str,
+    zone: &ComponentFusionZone,
+    keepout_ids: &HashSet<&str>,
+) -> AppResult<()> {
+    require_non_empty(
+        &zone.zone_id,
+        &format!(
+            "component '{}' fusion zones must include non-empty zoneId values.",
+            component_id
+        ),
+    )?;
+    require_non_empty(
+        &zone.surface_ref,
+        &format!(
+            "component '{}' fusion zone '{}' must include a non-empty surfaceRef.",
+            component_id, zone.zone_id
+        ),
+    )?;
+    if zone.allowed_ops.is_empty() {
+        return Err(AppError::validation(format!(
+            "component '{}' fusion zone '{}' must include at least one allowedOp.",
+            component_id, zone.zone_id
+        )));
+    }
+    let mut ops = HashSet::new();
+    for op in &zone.allowed_ops {
+        if !ops.insert(op) {
+            return Err(AppError::validation(format!(
+                "component '{}' fusion zone '{}' contains duplicate allowedOps value {:?}.",
+                component_id, zone.zone_id, op
+            )));
+        }
+    }
+    if let Some(radius) = zone.max_blend_radius {
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(AppError::validation(format!(
+                "component '{}' fusion zone '{}' maxBlendRadius must be positive and finite.",
+                component_id, zone.zone_id
+            )));
+        }
+    }
+    for keepout_id in &zone.keepout_ids {
+        if keepout_id.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "component '{}' fusion zone '{}' keepoutIds must be non-empty.",
+                component_id, zone.zone_id
+            )));
+        }
+        if !keepout_ids.contains(keepout_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' fusion zone '{}' references unknown keepoutId '{}'.",
+                component_id, zone.zone_id, keepout_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_component_port(component_id: &str, port: &ComponentPort) -> AppResult<()> {
+    require_non_empty(
+        &port.port_id,
+        &format!(
+            "component '{}' ports must include non-empty portId values.",
+            component_id
+        ),
+    )?;
+    require_non_empty(
+        &port.type_id,
+        &format!(
+            "component '{}' port '{}' must include a non-empty typeId.",
+            component_id, port.port_id
+        ),
+    )?;
+    if let Some(frame) = &port.frame {
+        validate_port_frame(component_id, &port.port_id, frame)?;
+    }
+
+    validate_non_empty_strings(
+        &port.interfaces,
+        &format!(
+            "component '{}' port '{}' interfaces must be non-empty.",
+            component_id, port.port_id
+        ),
+    )?;
+    validate_non_empty_strings(
+        &port.compatible_with,
+        &format!(
+            "component '{}' port '{}' compatibleWith values must be non-empty.",
+            component_id, port.port_id
+        ),
+    )?;
+
+    let mut ops = HashSet::new();
+    for op in &port.allowed_ops {
+        if !ops.insert(op) {
+            return Err(AppError::validation(format!(
+                "component '{}' port '{}' contains duplicate allowedOps value {:?}.",
+                component_id, port.port_id, op
+            )));
+        }
+    }
+
+    for key in port.params.keys() {
+        if key.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "component '{}' port '{}' params must use non-empty keys.",
+                component_id, port.port_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_port_frame(component_id: &str, port_id: &str, frame: &PortFrame) -> AppResult<()> {
+    for (label, vector) in [
+        ("origin", frame.origin),
+        ("xAxis", frame.x_axis),
+        ("yAxis", frame.y_axis),
+        ("zAxis", frame.z_axis),
+    ] {
+        if vector.iter().any(|value| !value.is_finite()) {
+            return Err(AppError::validation(format!(
+                "component '{}' port '{}' frame {} must contain finite values.",
+                component_id, port_id, label
+            )));
+        }
+    }
+
+    for (label, vector) in [
+        ("xAxis", frame.x_axis),
+        ("yAxis", frame.y_axis),
+        ("zAxis", frame.z_axis),
+    ] {
+        let magnitude_squared = vector.iter().map(|value| value * value).sum::<f64>();
+        if magnitude_squared <= f64::EPSILON {
+            return Err(AppError::validation(format!(
+                "component '{}' port '{}' frame {} must be non-zero.",
+                component_id, port_id, label
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_assembly_definition(
+    assembly: &AssemblyDefinition,
+    components_by_id: &HashMap<&str, &ComponentDefinition>,
+    mate_types_by_id: &HashMap<&str, &MateTypeDefinition>,
+) -> AppResult<()> {
+    require_non_empty(
+        &assembly.assembly_id,
+        "assemblies must include a non-empty assemblyId.",
+    )?;
+    require_non_empty(
+        &assembly.display_name,
+        &format!(
+            "assembly '{}' must include a non-empty displayName.",
+            assembly.assembly_id
+        ),
+    )?;
+
+    if assembly.components.is_empty() {
+        return Err(AppError::validation(format!(
+            "assembly '{}' must include at least one component instance.",
+            assembly.assembly_id
+        )));
+    }
+
+    let mut instance_ids = HashSet::new();
+    let mut instance_component_ids = HashMap::new();
+    for component_ref in &assembly.components {
+        require_non_empty(
+            &component_ref.instance_id,
+            &format!(
+                "assembly '{}' component instances must include non-empty instanceId values.",
+                assembly.assembly_id
+            ),
+        )?;
+        require_non_empty(
+            &component_ref.component_id,
+            &format!(
+                "assembly '{}' instance '{}' must include a non-empty componentId.",
+                assembly.assembly_id, component_ref.instance_id
+            ),
+        )?;
+        if !instance_ids.insert(component_ref.instance_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "assembly '{}' contains duplicate instanceId '{}'.",
+                assembly.assembly_id, component_ref.instance_id
+            )));
+        }
+        if !components_by_id.contains_key(component_ref.component_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "assembly '{}' instance '{}' references unknown componentId '{}'.",
+                assembly.assembly_id, component_ref.instance_id, component_ref.component_id
+            )));
+        }
+        instance_component_ids.insert(
+            component_ref.instance_id.as_str(),
+            component_ref.component_id.as_str(),
+        );
+    }
+
+    let mut mate_ids = HashSet::new();
+    for mate in &assembly.mates {
+        require_non_empty(
+            &mate.mate_id,
+            &format!(
+                "assembly '{}' mates must include non-empty mateId values.",
+                assembly.assembly_id
+            ),
+        )?;
+        require_non_empty(
+            &mate.type_id,
+            &format!(
+                "assembly '{}' mate '{}' must include a non-empty typeId.",
+                assembly.assembly_id, mate.mate_id
+            ),
+        )?;
+        if !mate_ids.insert(mate.mate_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "assembly '{}' contains duplicate mateId '{}'.",
+                assembly.assembly_id, mate.mate_id
+            )));
+        }
+        let mate_type = if mate_types_by_id.is_empty() {
+            None
+        } else {
+            Some(mate_types_by_id.get(mate.type_id.as_str()).ok_or_else(|| {
+                AppError::validation(format!(
+                    "assembly '{}' mate '{}' references unknown mate typeId '{}'.",
+                    assembly.assembly_id, mate.mate_id, mate.type_id
+                ))
+            })?)
+        };
+        let port_a = validate_port_reference(
+            &assembly.assembly_id,
+            &mate.mate_id,
+            &mate.a,
+            &instance_component_ids,
+            components_by_id,
+        )?;
+        let port_b = validate_port_reference(
+            &assembly.assembly_id,
+            &mate.mate_id,
+            &mate.b,
+            &instance_component_ids,
+            components_by_id,
+        )?;
+        if !ports_are_compatible(port_a, port_b) {
+            return Err(AppError::validation(format!(
+                "assembly '{}' mate '{}' connects incompatible ports '{}.{}' and '{}.{}'.",
+                assembly.assembly_id,
+                mate.mate_id,
+                mate.a.instance_id,
+                mate.a.port_id,
+                mate.b.instance_id,
+                mate.b.port_id
+            )));
+        }
+        if let Some(mate_type) = mate_type {
+            if !mate_type_allows_port_pair(mate_type, &port_a.type_id, &port_b.type_id) {
+                return Err(AppError::validation(format!(
+                    "assembly '{}' mate '{}' typeId '{}' does not allow port type pair '{}' and '{}'.",
+                    assembly.assembly_id,
+                    mate.mate_id,
+                    mate.type_id,
+                    port_a.type_id,
+                    port_b.type_id
+                )));
+            }
+        }
+        for key in mate.params.keys() {
+            if key.trim().is_empty() {
+                return Err(AppError::validation(format!(
+                    "assembly '{}' mate '{}' params must use non-empty keys.",
+                    assembly.assembly_id, mate.mate_id
+                )));
+            }
+        }
+    }
+
+    let mut operation_ids = HashSet::new();
+    for operation in &assembly.operations {
+        validate_assembly_operation(
+            assembly,
+            operation,
+            &instance_component_ids,
+            components_by_id,
+        )?;
+        if !operation_ids.insert(operation.operation_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "assembly '{}' contains duplicate operationId '{}'.",
+                assembly.assembly_id, operation.operation_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_assembly_operation(
+    assembly: &AssemblyDefinition,
+    operation: &AssemblyOperation,
+    instance_component_ids: &HashMap<&str, &str>,
+    components_by_id: &HashMap<&str, &ComponentDefinition>,
+) -> AppResult<()> {
+    require_non_empty(
+        &operation.operation_id,
+        &format!(
+            "assembly '{}' operations must include non-empty operationId values.",
+            assembly.assembly_id
+        ),
+    )?;
+    for instance_id in &operation.target_instance_ids {
+        if instance_id.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "assembly '{}' operation '{}' targetInstanceIds must be non-empty.",
+                assembly.assembly_id, operation.operation_id
+            )));
+        }
+        if !instance_component_ids.contains_key(instance_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "assembly '{}' operation '{}' references unknown instanceId '{}'.",
+                assembly.assembly_id, operation.operation_id, instance_id
+            )));
+        }
+    }
+    if matches!(
+        operation.kind,
+        OperationKind::Fuse | OperationKind::Mold | OperationKind::Blend
+    ) && operation.target_instance_ids.len() < 2
+    {
+        return Err(AppError::validation(format!(
+            "assembly '{}' operation '{}' requires at least two targetInstanceIds for {:?}.",
+            assembly.assembly_id, operation.operation_id, operation.kind
+        )));
+    }
+    for port_ref in &operation.port_refs {
+        validate_port_reference(
+            &assembly.assembly_id,
+            &operation.operation_id,
+            port_ref,
+            instance_component_ids,
+            components_by_id,
+        )?;
+    }
+    for key in operation.params.keys() {
+        if key.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "assembly '{}' operation '{}' params must use non-empty keys.",
+                assembly.assembly_id, operation.operation_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_port_reference<'a>(
+    assembly_id: &str,
+    mate_id: &str,
+    port_ref: &PortReference,
+    instance_component_ids: &HashMap<&str, &str>,
+    components_by_id: &'a HashMap<&str, &ComponentDefinition>,
+) -> AppResult<&'a ComponentPort> {
+    require_non_empty(
+        &port_ref.instance_id,
+        &format!(
+            "assembly '{}' mate '{}' port references must include non-empty instanceId values.",
+            assembly_id, mate_id
+        ),
+    )?;
+    require_non_empty(
+        &port_ref.port_id,
+        &format!(
+            "assembly '{}' mate '{}' port references must include non-empty portId values.",
+            assembly_id, mate_id
+        ),
+    )?;
+
+    let Some(component_id) = instance_component_ids.get(port_ref.instance_id.as_str()) else {
+        return Err(AppError::validation(format!(
+            "assembly '{}' mate '{}' references unknown instanceId '{}'.",
+            assembly_id, mate_id, port_ref.instance_id
+        )));
+    };
+    let component = components_by_id.get(component_id).ok_or_else(|| {
+        AppError::validation(format!(
+            "assembly '{}' mate '{}' references instance '{}' with unknown componentId '{}'.",
+            assembly_id, mate_id, port_ref.instance_id, component_id
+        ))
+    })?;
+    let Some(port) = component
+        .ports
+        .iter()
+        .find(|port| port.port_id == port_ref.port_id)
+    else {
+        return Err(AppError::validation(format!(
+            "assembly '{}' mate '{}' references unknown portId '{}' on instance '{}'.",
+            assembly_id, mate_id, port_ref.port_id, port_ref.instance_id
+        )));
+    };
+
+    Ok(port)
+}
+
+fn ports_are_compatible(a: &ComponentPort, b: &ComponentPort) -> bool {
+    a.compatible_with
+        .iter()
+        .any(|type_id| type_id == &b.type_id)
+        || b.compatible_with
+            .iter()
+            .any(|type_id| type_id == &a.type_id)
+        || a.interfaces
+            .iter()
+            .any(|interface| b.interfaces.iter().any(|other| other == interface))
+}
+
+fn mate_type_allows_port_pair(
+    mate_type: &MateTypeDefinition,
+    a_type_id: &str,
+    b_type_id: &str,
+) -> bool {
+    mate_type.allowed_port_type_pairs.iter().any(|pair| {
+        (pair.a_type_id == a_type_id && pair.b_type_id == b_type_id)
+            || (pair.a_type_id == b_type_id && pair.b_type_id == a_type_id)
+    })
+}
+
+fn require_non_empty(value: &str, message: &str) -> AppResult<()> {
+    if value.trim().is_empty() {
+        return Err(AppError::validation(message.to_string()));
+    }
+    Ok(())
+}
+
+fn validate_non_empty_strings(values: &[String], message: &str) -> AppResult<()> {
+    for value in values {
+        if value.trim().is_empty() {
+            return Err(AppError::validation(message.to_string()));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn config_deserializes_missing_voice_with_default_stt_language() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "engines": [],
+            "selectedEngineId": ""
+        }))
+        .expect("config");
+
+        assert_eq!(config.voice.stt_language_code, "en-US");
+    }
 
     fn sample_manifest() -> ModelManifest {
         ModelManifest {
@@ -4148,5 +5958,85 @@ mod tests {
         let lang = SourceLanguage::Build123d;
         assert_eq!(lang.as_str(), "build123d");
         assert_eq!("build123d".parse::<SourceLanguage>().unwrap(), lang);
+    }
+
+    #[test]
+    fn source_language_ecky_mappings() {
+        let lang = SourceLanguage::EckyIrV0;
+        assert_eq!(lang.as_str(), "ecky");
+        assert_eq!("ecky".parse::<SourceLanguage>().unwrap(), lang);
+        assert_eq!("eckyIrV0".parse::<SourceLanguage>().unwrap(), lang);
+        assert_eq!("ecky_ir_v0".parse::<SourceLanguage>().unwrap(), lang);
+    }
+
+    #[test]
+    fn geometry_backend_mesh_mappings() {
+        let backend = GeometryBackend::EckyRust;
+        assert_eq!(backend.as_str(), "mesh");
+        assert_eq!("mesh".parse::<GeometryBackend>().unwrap(), backend);
+        assert_eq!("eckyRust".parse::<GeometryBackend>().unwrap(), backend);
+        assert_eq!("ecky_rust".parse::<GeometryBackend>().unwrap(), backend);
+    }
+
+    #[test]
+    fn runtime_capabilities_serialize_mesh_backend_name() {
+        let capabilities = RuntimeCapabilities {
+            freecad: RuntimeBackendCapability {
+                available: false,
+                detail: "freecad".to_string(),
+                path: None,
+            },
+            build123d: RuntimeBackendCapability {
+                available: true,
+                detail: "build123d".to_string(),
+                path: Some("/tmp/python3".to_string()),
+            },
+            direct_occt: RuntimeBackendCapability {
+                available: false,
+                detail: "direct OCCT blocked".to_string(),
+                path: None,
+            },
+            ecky_rust: RuntimeBackendCapability {
+                available: true,
+                detail: "mesh".to_string(),
+                path: None,
+            },
+            recommended_authoring_context: RuntimeAuthoringContext {
+                engine_kind: EngineKind::EckyIrV0,
+                source_language: SourceLanguage::EckyIrV0,
+                geometry_backend: GeometryBackend::EckyRust,
+            },
+        };
+
+        let json = serde_json::to_value(&capabilities).expect("serialize capabilities");
+        assert_eq!(
+            json.get("mesh")
+                .and_then(|value| value.get("detail"))
+                .and_then(|value| value.as_str()),
+            Some("mesh")
+        );
+        assert_eq!(
+            json.get("directOcct")
+                .and_then(|value| value.get("detail"))
+                .and_then(|value| value.as_str()),
+            Some("direct OCCT blocked")
+        );
+        assert!(json.get("direct_occt").is_none());
+        assert!(json.get("eckyRust").is_none());
+
+        let legacy = serde_json::json!({
+            "freecad": { "available": false, "detail": "freecad" },
+            "build123d": { "available": true, "detail": "build123d", "path": "/tmp/python3" },
+            "directOcct": { "available": false, "detail": "direct OCCT blocked" },
+            "eckyRust": { "available": true, "detail": "mesh" },
+            "recommendedAuthoringContext": {
+                "engineKind": "eckyIrV0",
+                "sourceLanguage": "ecky",
+                "geometryBackend": "mesh"
+            }
+        });
+        let decoded: RuntimeCapabilities =
+            serde_json::from_value(legacy).expect("deserialize legacy capability alias");
+        assert!(decoded.ecky_rust.available);
     }
 }

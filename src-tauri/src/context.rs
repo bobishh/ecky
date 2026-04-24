@@ -1,8 +1,15 @@
 use crate::llm_context::{build_authoring_digest, format_authoring_digest_text};
 use crate::models::{
-    infer_macro_dialect_from_code, DesignOutput, InteractionMode, Message, MessageRole,
-    ModelManifest, ThreadReference, UiSpec,
+    infer_macro_dialect_from_code, DesignOutput, EngineKind, GeometryBackend, InteractionMode,
+    Message, MessageRole, ModelManifest, SourceLanguage, ThreadReference, UiSpec,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedAuthoringContext {
+    pub engine_kind: EngineKind,
+    pub source_language: SourceLanguage,
+    pub geometry_backend: GeometryBackend,
+}
 
 pub const THREAD_SUMMARY_MAX_CHARS: usize = 1600;
 pub const SUMMARY_ITEM_MAX_CHARS: usize = 220;
@@ -191,6 +198,101 @@ pub struct PromptContext {
     pub design_digest: String,
 }
 
+fn source_language_label(source_language: SourceLanguage) -> &'static str {
+    match source_language {
+        SourceLanguage::LegacyPython => "legacyPython",
+        SourceLanguage::EckyIrV0 => "ecky",
+        SourceLanguage::Build123d => "build123d",
+    }
+}
+
+fn geometry_backend_label(geometry_backend: GeometryBackend) -> &'static str {
+    match geometry_backend {
+        GeometryBackend::Freecad => "freecad",
+        GeometryBackend::Build123d => "build123d",
+        GeometryBackend::EckyRust => "eckyRust",
+    }
+}
+
+fn source_fence_label(source_language: SourceLanguage) -> &'static str {
+    match source_language {
+        SourceLanguage::EckyIrV0 => "scheme",
+        SourceLanguage::LegacyPython | SourceLanguage::Build123d => "python",
+    }
+}
+
+fn resolved_context_from_design(design: &DesignOutput) -> ResolvedAuthoringContext {
+    ResolvedAuthoringContext {
+        engine_kind: design.engine_kind,
+        source_language: design.source_language,
+        geometry_backend: design.geometry_backend,
+    }
+}
+
+fn format_authoring_context_lines(prefix: &str, context: ResolvedAuthoringContext) -> String {
+    [
+        format!("{prefix}EngineKind: {}", context.engine_kind.as_str()),
+        format!(
+            "{prefix}SourceLanguage: {}",
+            source_language_label(context.source_language)
+        ),
+        format!(
+            "{prefix}GeometryBackend: {}",
+            geometry_backend_label(context.geometry_backend)
+        ),
+    ]
+    .join("\n")
+}
+
+fn format_full_params_json(design: &DesignOutput) -> String {
+    serde_json::to_string_pretty(&design.initial_params).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn format_migration_policy(
+    current: Option<ResolvedAuthoringContext>,
+    target: ResolvedAuthoringContext,
+) -> String {
+    let mut lines = Vec::new();
+
+    match current {
+        Some(current_ctx) => {
+            lines.push(
+                "Preserve current authoring context unless the user explicitly asks to migrate."
+                    .to_string(),
+            );
+            lines.push(
+                "Normal iterations should continue in the thread's current source language/backend."
+                    .to_string(),
+            );
+            if current_ctx != target {
+                lines.push(format!(
+                    "Current thread source is {} on {}. Selected target for this turn resolves to {} on {}.",
+                    source_language_label(current_ctx.source_language),
+                    geometry_backend_label(current_ctx.geometry_backend),
+                    source_language_label(target.source_language),
+                    geometry_backend_label(target.geometry_backend)
+                ));
+                lines.push(
+                    "If config/defaults differ from current source and the request is ambiguous, ask one short clarification question instead of silently rewriting the whole model."
+                        .to_string(),
+                );
+                lines.push(
+                    "Do not migrate solely because defaults changed in Settings. Migrate only on explicit user intent or when the current task cannot be completed faithfully without migration."
+                        .to_string(),
+                );
+            }
+        }
+        None => {
+            lines.push(
+                "No current thread source exists. Use TARGET AUTHORING CONTEXT for this turn."
+                    .to_string(),
+            );
+        }
+    }
+
+    lines.join("\n")
+}
+
 pub fn assemble_context(
     db: &rusqlite::Connection,
     thread_id: Option<String>,
@@ -279,6 +381,7 @@ pub fn format_contextual_prompt(
     system_prompt: &str,
     intent_mode: &str,
     framework_contract: Option<&str>,
+    target_authoring: ResolvedAuthoringContext,
 ) -> String {
     let framework_block = framework_contract
         .map(|value| value.trim())
@@ -300,25 +403,42 @@ pub fn format_contextual_prompt(
     } else {
         ctx.available_assets.clone()
     };
+    let current_authoring = ctx.last_output.as_ref().map(resolved_context_from_design);
+    let current_authoring_block = current_authoring
+        .map(|current| format_authoring_context_lines("current", current))
+        .unwrap_or_else(|| "[none]".to_string());
+    let target_authoring_block = format_authoring_context_lines("target", target_authoring);
+    let migration_policy_block = format_migration_policy(current_authoring, target_authoring);
 
     if let Some(previous) = &ctx.last_output {
+        let source_fence = source_fence_label(previous.source_language);
         format!(
-            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\n{}{}",
+            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nCURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT PARAMS JSON (AUTHORITATIVE)\n```json\n{}\n```\n\nACTUAL CURRENT SOURCE (AUTHORITATIVE, NOT A SAMPLE):\nsourceLanguage: {}\nsourceFence: {}\n```{}\n{}\n```\n\n{}{}",
             ctx.thread_title,
             previous.title,
             previous.version_name,
+            current_authoring_block,
+            target_authoring_block,
+            migration_policy_block,
             if ctx.summary.trim().is_empty() { "[none]" } else { &ctx.summary },
             if ctx.recent_dialogue.trim().is_empty() { "[none]" } else { &ctx.recent_dialogue },
             if ctx.pinned_references.trim().is_empty() { "[none]" } else { &ctx.pinned_references },
             available_assets_block,
             if ctx.design_digest.trim().is_empty() { "[none]" } else { &ctx.design_digest },
+            format_full_params_json(previous),
+            source_language_label(previous.source_language),
+            source_fence,
+            source_fence,
             previous.macro_code,
             framework_block,
             full_prompt
         )
     } else {
         format!(
-            "AVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\n{}{}",
+            "CURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\n{}{}",
+            current_authoring_block,
+            target_authoring_block,
+            migration_policy_block,
             available_assets_block,
             framework_block,
             full_prompt
@@ -329,7 +449,10 @@ pub fn format_contextual_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{DesignOutput, Message, MessageStatus};
+    use crate::models::{
+        DesignOutput, EngineKind, GeometryBackend, Message, MessageStatus, ParamValue,
+        SourceLanguage,
+    };
 
     fn mock_message(role: &str, content: &str, output: Option<DesignOutput>) -> Message {
         Message {
@@ -362,6 +485,32 @@ mod tests {
             macro_code: "import FreeCAD".to_string(),
             ui_spec: UiSpec::default(),
             initial_params: Default::default(),
+            post_processing: None,
+        }
+    }
+
+    fn mock_design_with_authoring(
+        title: &str,
+        source_language: SourceLanguage,
+        geometry_backend: GeometryBackend,
+        macro_code: &str,
+        initial_params: std::collections::BTreeMap<String, ParamValue>,
+    ) -> DesignOutput {
+        DesignOutput {
+            title: title.to_string(),
+            version_name: "V7".to_string(),
+            response: "Test response".to_string(),
+            interaction_mode: InteractionMode::Design,
+            macro_dialect: infer_macro_dialect_from_code(macro_code),
+            engine_kind: match source_language {
+                SourceLanguage::EckyIrV0 => EngineKind::EckyIrV0,
+                _ => EngineKind::Freecad,
+            },
+            source_language,
+            geometry_backend,
+            macro_code: macro_code.to_string(),
+            ui_spec: UiSpec::default(),
+            initial_params,
             post_processing: None,
         }
     }
@@ -551,13 +700,102 @@ mod tests {
             "rule block",
             "DESIGN_EDIT",
             Some("framework contract"),
+            ResolvedAuthoringContext {
+                engine_kind: EngineKind::Freecad,
+                source_language: SourceLanguage::LegacyPython,
+                geometry_backend: GeometryBackend::Freecad,
+            },
         );
 
-        assert!(result.contains("ACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):"));
+        assert!(result.contains("CURRENT AUTHORING CONTEXT (AUTHORITATIVE)"));
+        assert!(result.contains("TARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)"));
+        assert!(result.contains("ACTUAL CURRENT SOURCE (AUTHORITATIVE, NOT A SAMPLE):"));
+        assert!(result.contains("ACTUAL CURRENT PARAMS JSON (AUTHORITATIVE)"));
+        assert!(result.contains("MIGRATION POLICY (AUTHORITATIVE)"));
         assert!(result.contains("ACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)"));
         assert!(result.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
         assert!(result.contains("AVAILABLE LOCAL ASSETS"));
         assert!(result.contains("USER REQUEST (ACTUAL)"));
         assert!(result.contains("EXECUTION RULES (MANDATORY)"));
+    }
+
+    #[test]
+    fn format_contextual_prompt_includes_migration_guidance_when_target_differs_from_current() {
+        let ctx = PromptContext {
+            thread_id: "t1".to_string(),
+            thread_title: "Thread A".to_string(),
+            summary: "summary".to_string(),
+            recent_dialogue: "USER: continue".to_string(),
+            pinned_references: String::new(),
+            available_assets: String::new(),
+            last_output: Some(mock_design_with_authoring(
+                "Legacy Box",
+                SourceLanguage::LegacyPython,
+                GeometryBackend::Freecad,
+                "import FreeCAD\nprint('legacy')",
+                Default::default(),
+            )),
+            design_digest: "Current working snapshot\nLegacy Box [V7] (legacyPython)".to_string(),
+        };
+
+        let result = format_contextual_prompt(
+            &ctx,
+            "make wall thicker",
+            "rule block",
+            "DESIGN_EDIT",
+            None,
+            ResolvedAuthoringContext {
+                engine_kind: EngineKind::EckyIrV0,
+                source_language: SourceLanguage::EckyIrV0,
+                geometry_backend: GeometryBackend::Build123d,
+            },
+        );
+
+        assert!(result.contains("currentSourceLanguage: legacyPython"));
+        assert!(result.contains("targetSourceLanguage: ecky"));
+        assert!(result.contains(
+            "Preserve current authoring context unless the user explicitly asks to migrate."
+        ));
+        assert!(result.contains("If config/defaults differ from current source and the request is ambiguous, ask one short clarification question instead of silently rewriting the whole model."));
+    }
+
+    #[test]
+    fn format_contextual_prompt_keeps_full_current_params_json_even_when_digest_truncates() {
+        let initial_params = (1..=14)
+            .map(|index| (format!("p{}", index), ParamValue::Number(index as f64)))
+            .collect();
+        let ctx = PromptContext {
+            thread_id: "t1".to_string(),
+            thread_title: "Thread A".to_string(),
+            summary: String::new(),
+            recent_dialogue: String::new(),
+            pinned_references: String::new(),
+            available_assets: String::new(),
+            last_output: Some(mock_design_with_authoring(
+                "Dense Params",
+                SourceLanguage::Build123d,
+                GeometryBackend::Build123d,
+                "from build123d import *\nBox(1, 2, 3)\n",
+                initial_params,
+            )),
+            design_digest: "Current working snapshot\nDense Params [V7] (build123d)\n\nCurrent params: 14\n- p1: number = 1\n- … 2 more params".to_string(),
+        };
+
+        let result = format_contextual_prompt(
+            &ctx,
+            "keep editing",
+            "rule block",
+            "DESIGN_EDIT",
+            None,
+            ResolvedAuthoringContext {
+                engine_kind: EngineKind::Freecad,
+                source_language: SourceLanguage::Build123d,
+                geometry_backend: GeometryBackend::Build123d,
+            },
+        );
+
+        assert!(result.contains("\"p1\": 1.0"));
+        assert!(result.contains("\"p14\": 14.0"));
+        assert!(result.contains("sourceFence: python"));
     }
 }

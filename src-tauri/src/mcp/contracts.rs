@@ -40,6 +40,29 @@ pub struct UserPromptResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConceptPreviewGenerateRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub attachments: Vec<crate::contracts::Attachment>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConceptPreviewGenerateResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub image_data: String,
+    pub caption: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MarkAsReadRequest {
     pub message_id: String,
     #[serde(default)]

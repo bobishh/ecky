@@ -1,7 +1,10 @@
 pub mod assets;
+pub mod component_package;
 pub mod config;
 pub mod design;
 pub mod generation;
 pub mod history;
 pub mod render;
 pub mod session;
+pub mod sketch;
+pub mod speech;

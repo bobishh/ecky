@@ -16,7 +16,7 @@ test.describe('Image Parameter Types', () => {
           return {
             freecad: { available: true, detail: 'Ready at /mock/freecadcmd', path: '/mock/freecadcmd' },
             build123d: { available: true, detail: 'Ready at /mock/python3', path: '/mock/python3' },
-            eckyRust: { available: true, detail: 'bundled', path: null },
+            mesh: { available: true, detail: 'bundled', path: null },
             recommendedAuthoringContext: {
               engineKind: 'freecad',
               sourceLanguage: 'legacyPython',

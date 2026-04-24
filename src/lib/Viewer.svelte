@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
@@ -432,7 +432,7 @@
     const reloadSignature = modelLoadSignature;
     if (!scene) return;
     void reloadSignature;
-    void loadCurrentModel();
+    void untrack(() => loadCurrentModel());
   });
 
   $effect(() => {

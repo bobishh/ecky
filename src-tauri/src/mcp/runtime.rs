@@ -930,7 +930,7 @@ fn write_agent_instructions(
         4. When the user sends the first queued message:\n\
            a. Call `bootstrap_ecky` to load system guidance.\n\
            b. Call `workspace_overview` to inspect the current thread state.\n\
-           c. If the thread uses sourceLanguage `eckyIrV0`, read `ecky://guides/ecky-source` before writing macro code. Compatibility labels still say `eckyIrV0`, but authored macroCode is current `.ecky` Scheme-style source.\n\
+           c. Use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose guides before writing macro code: if sourceLanguage is `ecky`, read `ecky://guides/ecky-source` first, then read `ecky://guides/build123d` or `ecky://guides/freecad` to match the backend.\n\
            d. If `workspace_overview.defaultTarget.hasVersion` is true, call `target_meta_get`.\n\
            e. Use `target_macro_get` for macro reasoning and `target_detail_get(section=...)` \
               for exact chunks.\n\
@@ -1030,7 +1030,7 @@ fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
         absolute local files staged by Ecky; open them directly with your file/image tools \
         instead of rewriting or guessing new paths. \
         Do NOT call `bootstrap_ecky` or `workspace_overview` until the user sends the first queued message. \
-        After that, treat `bootstrap_ecky`, `workspace_overview`, and the `ecky://guides/*` resources as the modeling policy source of truth. Read `ecky://guides/ecky-source` when the thread uses sourceLanguage `eckyIrV0`; compatibility labels still say `eckyIrV0`, but authored macroCode is current `.ecky` Scheme-style source. If `workspace_overview` says the thread has no saved versions yet, \
+        After that, treat `bootstrap_ecky`, `workspace_overview`, and the `ecky://guides/*` resources as the modeling policy source of truth. Use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose the matching guide. If the source language is `ecky`, read `ecky://guides/ecky-source` first, then the backend guide for `build123d` or `freecad`. If `workspace_overview` says the thread has no saved versions yet, \
         use the guides plus the queued thread context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, and `target_detail_get(section=...)` \
         before falling back to `target_get`. Use `session_activity_set` / `session_activity_clear` for \
         long steps instead of relying on terminal text. At the end of each turn, save any final user-facing \
@@ -3221,6 +3221,7 @@ mod tests {
             freecad_cmd: String::new(),
             assets: vec![],
             microwave: None,
+            voice: crate::models::VoiceConfig::default(),
             mcp: McpConfig {
                 port: None,
                 max_sessions: None,
@@ -3678,10 +3679,14 @@ mod tests {
         assert!(prompt.contains("target_meta_get"));
         assert!(prompt.contains("target_macro_get"));
         assert!(prompt.contains("target_detail_get(section=...)"));
+        assert!(prompt.contains("agentBrief.sourceLanguage"));
+        assert!(prompt.contains("agentBrief.geometryBackend"));
 
         assert!(instructions.contains("call `target_meta_get`"));
         assert!(instructions.contains("Use `target_macro_get` for macro reasoning"));
         assert!(instructions.contains("Use `target_get` only as a last-resort full payload."));
+        assert!(instructions.contains("agentBrief.sourceLanguage"));
+        assert!(instructions.contains("agentBrief.geometryBackend"));
     }
 
     #[test]

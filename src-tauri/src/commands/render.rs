@@ -10,9 +10,9 @@ use super::session::write_last_snapshot;
 use crate::db;
 use crate::freecad;
 use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, DesignOutput, DesignParams, ExportPartInput,
-    InteractionMode, MacroDialect, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue,
-    UiField, UiSpec,
+    AppError, AppResult, AppState, ArtifactBundle, BrepHiddenLineProjectionRequest,
+    BrepHiddenLineProjectionResponse, DesignOutput, DesignParams, ExportPartInput, InteractionMode,
+    MacroDialect, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, UiField, UiSpec,
 };
 
 fn humanize_parameter_key(key: &str) -> String {
@@ -689,7 +689,21 @@ pub async fn apply_imported_model(
 #[tauri::command]
 #[specta::specta]
 pub async fn get_model_manifest(model_id: String, app: AppHandle) -> AppResult<ModelManifest> {
-    freecad::get_model_manifest(&app, &model_id)
+    crate::model_runtime::read_model_manifest(&app, &model_id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn extract_brep_hidden_line_projections(
+    request: BrepHiddenLineProjectionRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<BrepHiddenLineProjectionResponse> {
+    freecad::extract_brep_hidden_line_projections(
+        &app,
+        configured_freecad_cmd(&state).as_deref(),
+        request,
+    )
 }
 
 #[tauri::command]
@@ -701,7 +715,8 @@ pub async fn save_model_manifest(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
-    freecad::save_model_manifest(&app, &model_id, &manifest)?;
+    let manifest = crate::model_runtime::write_model_manifest(&app, &model_id, &manifest)?;
+    let refreshed_bundle = crate::model_runtime::read_artifact_bundle(&app, &model_id).ok();
 
     let mut persisted_output: Option<DesignOutput> = None;
 
@@ -710,6 +725,11 @@ pub async fn save_model_manifest(
         db::update_message_model_manifest(&db, message_id, &manifest).map_err(
             |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
         )?;
+        if let Some(bundle) = refreshed_bundle.as_ref() {
+            db::update_message_artifact_bundle(&db, message_id, bundle).map_err(
+                |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+            )?;
+        }
 
         if matches!(manifest.source_kind, ModelSourceKind::ImportedFcstd) {
             let existing_output = db::get_message_output_and_thread(&db, message_id)
@@ -747,6 +767,9 @@ pub async fn save_model_manifest(
 
         if snapshot_matches_model && snapshot_matches_message {
             snapshot.model_manifest = Some(manifest.clone());
+            if let Some(bundle) = refreshed_bundle.clone() {
+                snapshot.artifact_bundle = Some(bundle);
+            }
             if let Some(output) = persisted_output.clone() {
                 snapshot.design = Some(output);
             }

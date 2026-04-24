@@ -53,6 +53,31 @@ test('skips when the verify call throws', async () => {
   assert.match((result as any).reason, /failed/);
 });
 
+test('skips before capture when screenshot verification is disabled with explicit reason', async () => {
+  let captureCalled = false;
+  let verifyCalled = false;
+
+  const result = await runVerificationRound(1, baseOpts({
+    capture: () => {
+      captureCalled = true;
+      return SCREENSHOTS;
+    },
+    verify: async () => {
+      verifyCalled = true;
+      return visualPass();
+    },
+    skipReason: 'Selected NVIDIA NIM model looks text-only. Screenshot verification unavailable.',
+  }));
+
+  assert.equal(result.kind, 'skipped');
+  assert.equal(
+    (result as any).reason,
+    'Selected NVIDIA NIM model looks text-only. Screenshot verification unavailable.',
+  );
+  assert.equal(captureCalled, false);
+  assert.equal(verifyCalled, false);
+});
+
 // ── passed ───────────────────────────────────────────────────────────────────
 
 test('returns passed when LLM says the model is correct', async () => {

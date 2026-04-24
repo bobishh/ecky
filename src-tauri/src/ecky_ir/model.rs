@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 
 use lexpr::Value;
 
+#[cfg(test)]
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode,
-    CoreNodeKind, CoreOperation, CoreParameter, CoreParameterKind, CoreParameterValue, CorePart,
-    CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSurfaceOp, CoreSymbol,
-    CoreTransformOp,
+    CoreNodeKind, CoreOperation, CorePart, CorePathOp, CorePrimitive, CoreReference, CoreSurfaceOp,
+    CoreSymbol, CoreTransformOp,
+};
+use crate::ecky_core_ir::{
+    CoreParameter, CoreParameterKind, CoreParameterValue, CoreProgram, CoreValueKind,
 };
 use crate::models::{
     AppResult, DesignParams, ParamValue, ParsedParamsResult, SelectOption, SelectValue, UiField,
@@ -58,7 +61,7 @@ impl IrExpr {
             ));
         }
         Err(validation(
-            "Ecky IR v0 only supports scalar atoms and proper lists.",
+            "Current `.ecky` runtime only supports scalar atoms and proper lists.",
         ))
     }
 
@@ -177,6 +180,36 @@ pub(super) fn inline_let_expr(value: &IrExpr) -> AppResult<IrExpr> {
     inline_let_expr_with_scope(value, &BTreeMap::new())
 }
 
+fn let_scope_with_bindings(
+    bindings: &[IrExpr],
+    scope: &BTreeMap<String, IrExpr>,
+    sequential: bool,
+) -> AppResult<BTreeMap<String, IrExpr>> {
+    let mut next_scope = scope.clone();
+    for binding in bindings {
+        let pair = expr_list_items(binding, "let binding")?;
+        if pair.len() != 2 && pair.len() != 4 {
+            return Err(validation(
+                "Each `let`/`let*` binding must be `(name expr)`.",
+            ));
+        }
+        if pair.len() == 4 {
+            let value_kind_keyword = expr_keyword_name(&pair[2]).filter(|k| *k == "value-kind");
+            let value_kind_tag = pair[3].as_symbol().and_then(parse_value_kind_tag);
+            if value_kind_keyword.is_none() || value_kind_tag.is_none() {
+                return Err(validation(
+                    "Typed `let`/`let*` bindings must use `:value-kind <tag>` metadata.",
+                ));
+            }
+        }
+        let name = expr_parse_stringish(&pair[0], "let binding name")?;
+        let binding_scope = if sequential { &next_scope } else { scope };
+        let bound = inline_let_expr_with_scope(&pair[1], binding_scope)?;
+        next_scope.insert(name, bound);
+    }
+    Ok(next_scope)
+}
+
 fn inline_let_expr_with_scope(
     value: &IrExpr,
     scope: &BTreeMap<String, IrExpr>,
@@ -188,21 +221,13 @@ fn inline_let_expr_with_scope(
                 return Ok(value.clone());
             };
             match head.as_symbol() {
-                Some("let") => {
+                Some("let") | Some("let*") => {
                     if items.len() != 3 {
-                        return Err(validation("`let` expects bindings and a body."));
+                        return Err(validation("`let`/`let*` expects bindings and a body."));
                     }
                     let bindings = expr_list_items(&items[1], "let bindings")?;
-                    let mut local_scope = scope.clone();
-                    for binding in bindings {
-                        let pair = expr_list_items(binding, "let binding")?;
-                        if pair.len() != 2 {
-                            return Err(validation("Each `let` binding must be `(name expr)`."));
-                        }
-                        let name = expr_parse_stringish(&pair[0], "let binding name")?;
-                        let bound = inline_let_expr_with_scope(&pair[1], &local_scope)?;
-                        local_scope.insert(name, bound);
-                    }
+                    let local_scope =
+                        let_scope_with_bindings(bindings, scope, head.as_symbol() == Some("let*"))?;
                     inline_let_expr_with_scope(&items[2], &local_scope)
                 }
                 Some("build") => {
@@ -273,6 +298,7 @@ pub(super) struct TypedBuildExpr {
 pub(super) struct TypedBuildBinding {
     pub(super) name: String,
     pub(super) expr: IrExpr,
+    pub(super) value_kind: Option<CoreValueKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -286,8 +312,10 @@ pub(crate) struct IrPart {
     pub(super) part_id: String,
     pub(super) label: String,
     pub(super) expr: IrExpr,
+    pub(super) value_kind: Option<CoreValueKind>,
 }
 
+#[cfg(test)]
 pub(crate) fn core_program_to_model(program: &CoreProgram) -> AppResult<IrModel> {
     let params = program
         .parameters
@@ -310,9 +338,7 @@ pub(super) fn parse_model(source: &str) -> AppResult<IrModel> {
     let value = ir_parse(source)?;
     let forms = list_items(&value, "model")?;
     if head_symbol(&forms, "model root")? != "model" {
-        return Err(validation(
-            "Ecky IR v0 source must start with `(model ...)`.",
-        ));
+        return Err(validation("`.ecky` source must start with `(model ...)`."));
     }
 
     let mut params = Vec::new();
@@ -329,7 +355,7 @@ pub(super) fn parse_model(source: &str) -> AppResult<IrModel> {
             "meta" => {}
             other => {
                 return Err(unsupported(format!(
-                    "Top-level node `{}` is not supported by Ecky IR v0.",
+                    "Top-level node `{}` is not supported by current `.ecky` runtime.",
                     other
                 )))
             }
@@ -338,7 +364,7 @@ pub(super) fn parse_model(source: &str) -> AppResult<IrModel> {
 
     if parts.is_empty() {
         return Err(validation(
-            "Ecky IR v0 models need at least one `(part ...)` node.",
+            "`.ecky` models need at least one `(part ...)` node.",
         ));
     }
 
@@ -431,7 +457,7 @@ pub(super) fn parse_param_decl(value: &Value) -> AppResult<IrParam> {
         ),
         other => {
             return Err(unsupported(format!(
-                "Param kind `{}` is not supported by Ecky IR v0.",
+                "Param kind `{}` is not supported by current `.ecky` runtime.",
                 other
             )))
         }
@@ -476,6 +502,7 @@ pub(super) fn parse_part_decl(items: &[Value]) -> AppResult<IrPart> {
         part_id,
         label,
         expr: IrExpr::from_value(&expr)?,
+        value_kind: None,
     })
 }
 
@@ -569,7 +596,7 @@ pub(super) fn parse_typed_build_expr(value: &IrExpr) -> AppResult<TypedBuildExpr
                         "`build` cannot define more shapes after `(result ...)`.",
                     ));
                 }
-                if stmt.len() != 3 {
+                if stmt.len() != 3 && stmt.len() != 5 {
                     return Err(validation(
                         "`shape` expects a binding name and an expression.",
                     ));
@@ -581,9 +608,18 @@ pub(super) fn parse_typed_build_expr(value: &IrExpr) -> AppResult<TypedBuildExpr
                         name
                     )));
                 }
+                let value_kind = if stmt.len() == 5 {
+                    expr_keyword_name(&stmt[3])
+                        .filter(|k| *k == "value-kind")
+                        .and_then(|_| stmt[4].as_symbol())
+                        .and_then(parse_value_kind_tag)
+                } else {
+                    None
+                };
                 bindings.push(TypedBuildBinding {
                     name,
                     expr: stmt[2].dup(),
+                    value_kind,
                 });
             }
             "result" => {
@@ -638,19 +674,29 @@ pub(super) fn build_param_env(
     env
 }
 
-pub(super) fn parsed_params_from_model(model: &IrModel) -> ParsedParamsResult {
+fn parsed_params_from_ir_params(params: &[IrParam]) -> ParsedParamsResult {
     ParsedParamsResult {
-        fields: model
-            .params
-            .iter()
-            .map(|param| param.field.clone())
-            .collect(),
-        params: model
-            .params
+        fields: params.iter().map(|param| param.field.clone()).collect(),
+        params: params
             .iter()
             .map(|param| (param.field.key().to_string(), param.default_value.clone()))
             .collect(),
     }
+}
+
+pub(super) fn parsed_params_from_model(model: &IrModel) -> ParsedParamsResult {
+    parsed_params_from_ir_params(&model.params)
+}
+
+pub(crate) fn parsed_params_from_core_program(
+    program: &CoreProgram,
+) -> AppResult<ParsedParamsResult> {
+    let params = program
+        .parameters
+        .iter()
+        .map(core_param_to_ir_param)
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(parsed_params_from_ir_params(&params))
 }
 
 fn core_param_to_ir_param(param: &CoreParameter) -> AppResult<IrParam> {
@@ -712,11 +758,38 @@ fn core_param_to_ir_param(param: &CoreParameter) -> AppResult<IrParam> {
     })
 }
 
-fn core_part_to_ir_part(part: &CorePart, param_names: &BTreeMap<u64, String>) -> AppResult<IrPart> {
+pub(crate) fn core_program_param_defaults(
+    program: &CoreProgram,
+) -> AppResult<BTreeMap<String, ParamValue>> {
+    program
+        .parameters
+        .iter()
+        .map(|param| {
+            Ok((
+                param.key.clone(),
+                core_param_value_to_param_value(&param.default_value)?,
+            ))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn core_part_to_ir_part(
+    part: &CorePart,
+    param_names: &BTreeMap<u64, String>,
+) -> AppResult<IrPart> {
+    let mut used_local_names = BTreeMap::new();
     Ok(IrPart {
         part_id: part.key.clone(),
         label: part.label.clone(),
-        expr: core_node_to_ir_expr(&part.root, param_names, &BTreeMap::new())?,
+        expr: core_node_to_ir_expr(
+            &part.root,
+            param_names,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &mut used_local_names,
+        )?,
+        value_kind: Some(part.root.value_kind),
     })
 }
 
@@ -730,10 +803,13 @@ fn core_param_value_to_param_value(value: &CoreParameterValue) -> AppResult<Para
     }
 }
 
-fn core_node_to_ir_expr(
+#[cfg(test)]
+pub(crate) fn core_node_to_ir_expr(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
     refs: &BTreeMap<u64, String>,
+    locals: &BTreeMap<String, String>,
+    used_local_names: &mut BTreeMap<String, usize>,
 ) -> AppResult<IrExpr> {
     match &node.kind {
         CoreNodeKind::Literal(CoreLiteral::Number(n)) => Ok(IrExpr::number(*n)),
@@ -745,6 +821,9 @@ fn core_node_to_ir_expr(
             CoreSymbol::Xy => "xy",
             CoreSymbol::Yz => "yz",
             CoreSymbol::Xz => "xz",
+            CoreSymbol::Min => "min",
+            CoreSymbol::Center => "center",
+            CoreSymbol::Max => "max",
         })),
         CoreNodeKind::Literal(CoreLiteral::Point2([x, y])) => {
             Ok(IrExpr::list(vec![IrExpr::number(*x), IrExpr::number(*y)]))
@@ -754,7 +833,9 @@ fn core_node_to_ir_expr(
             IrExpr::number(*y),
             IrExpr::number(*z),
         ])),
-        CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(IrExpr::symbol(name.clone())),
+        CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(IrExpr::symbol(
+            locals.get(name).cloned().unwrap_or_else(|| name.clone()),
+        )),
         CoreNodeKind::Reference(CoreReference::Node(id)) => refs
             .get(&id.raw())
             .map(|name| IrExpr::symbol(name.clone()))
@@ -770,34 +851,83 @@ fn core_node_to_ir_expr(
         CoreNodeKind::Build { bindings, result } => {
             let mut items = vec![IrExpr::symbol("build")];
             let mut nested = refs.clone();
+            let mut nested_locals = locals.clone();
             for binding in bindings {
-                nested.insert(binding.value.id.raw(), binding.name.clone());
-                items.push(IrExpr::list(vec![
+                let ir_name = allocate_legacy_local_name(&binding.name, used_local_names);
+                let mut shape_items = vec![
                     IrExpr::symbol("shape"),
-                    IrExpr::symbol(binding.name.clone()),
-                    core_node_to_ir_expr(&binding.value, param_names, &nested)?,
-                ]));
+                    IrExpr::symbol(ir_name.clone()),
+                    core_node_to_ir_expr(
+                        &binding.value,
+                        param_names,
+                        &nested,
+                        &nested_locals,
+                        used_local_names,
+                    )?,
+                ];
+                if binding.value.value_kind != CoreValueKind::Any {
+                    shape_items.push(IrExpr::keyword("value-kind"));
+                    shape_items.push(IrExpr::symbol(core_value_kind_tag(
+                        binding.value.value_kind,
+                    )));
+                }
+                items.push(IrExpr::list(shape_items));
+                nested.insert(binding.value.id.raw(), ir_name.clone());
+                nested_locals.insert(binding.name.clone(), ir_name);
             }
             items.push(IrExpr::list(vec![
                 IrExpr::symbol("result"),
-                core_node_to_ir_expr(result, param_names, &nested)?,
+                core_node_to_ir_expr(
+                    result,
+                    param_names,
+                    &nested,
+                    &nested_locals,
+                    used_local_names,
+                )?,
             ]));
             Ok(IrExpr::list(items))
         }
         CoreNodeKind::Let { bindings, body } => {
-            let binding_values = bindings
+            let mut nested_locals = locals.clone();
+            let ir_binding_names = bindings
                 .iter()
                 .map(|binding| {
-                    Ok(IrExpr::list(vec![
-                        IrExpr::symbol(binding.name.clone()),
-                        core_node_to_ir_expr(&binding.value, param_names, refs)?,
-                    ]))
+                    (
+                        binding.name.clone(),
+                        allocate_legacy_local_name(&binding.name, used_local_names),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let binding_values = bindings
+                .iter()
+                .zip(ir_binding_names.iter())
+                .map(|(binding, (_, ir_name))| {
+                    let mut pair = vec![
+                        IrExpr::symbol(ir_name.clone()),
+                        core_node_to_ir_expr(
+                            &binding.value,
+                            param_names,
+                            refs,
+                            locals,
+                            used_local_names,
+                        )?,
+                    ];
+                    if binding.value.value_kind != CoreValueKind::Any {
+                        pair.push(IrExpr::keyword("value-kind"));
+                        pair.push(IrExpr::symbol(core_value_kind_tag(
+                            binding.value.value_kind,
+                        )));
+                    }
+                    Ok(IrExpr::list(pair))
                 })
                 .collect::<AppResult<Vec<_>>>()?;
+            for (original_name, ir_name) in ir_binding_names {
+                nested_locals.insert(original_name, ir_name);
+            }
             Ok(IrExpr::list(vec![
                 IrExpr::symbol("let"),
                 IrExpr::list(binding_values),
-                core_node_to_ir_expr(body, param_names, refs)?,
+                core_node_to_ir_expr(body, param_names, refs, &nested_locals, used_local_names)?,
             ]))
         }
         CoreNodeKind::If {
@@ -806,36 +936,182 @@ fn core_node_to_ir_expr(
             else_branch,
         } => Ok(IrExpr::list(vec![
             IrExpr::symbol("if"),
-            core_node_to_ir_expr(condition, param_names, refs)?,
-            core_node_to_ir_expr(then_branch, param_names, refs)?,
-            core_node_to_ir_expr(else_branch, param_names, refs)?,
+            core_node_to_ir_expr(condition, param_names, refs, locals, used_local_names)?,
+            core_node_to_ir_expr(then_branch, param_names, refs, locals, used_local_names)?,
+            core_node_to_ir_expr(else_branch, param_names, refs, locals, used_local_names)?,
         ])),
         CoreNodeKind::Call { op, args, keywords } => {
             let mut items = vec![IrExpr::symbol(core_operation_name(op))];
             for arg in args {
-                items.push(core_node_to_ir_expr(arg, param_names, refs)?);
+                items.push(core_node_to_ir_expr(
+                    arg,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?);
             }
             for CoreKeywordArg { name, value } in keywords {
                 items.push(IrExpr::keyword(name.clone()));
-                items.push(core_node_to_ir_expr(value, param_names, refs)?);
+                items.push(core_node_to_ir_expr(
+                    value,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?);
             }
+            Ok(IrExpr::list(items))
+        }
+        CoreNodeKind::Range { start, end } => Ok(IrExpr::list(vec![
+            IrExpr::symbol("range"),
+            core_node_to_ir_expr(start, param_names, refs, locals, used_local_names)?,
+            core_node_to_ir_expr(end, param_names, refs, locals, used_local_names)?,
+        ])),
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => {
+            let mut nested_locals = locals.clone();
+            let mut ir_params = Vec::new();
+            for param in params {
+                let ir_name = allocate_legacy_local_name(param, used_local_names);
+                nested_locals.insert(param.clone(), ir_name.clone());
+                ir_params.push(IrExpr::symbol(ir_name));
+            }
+            let mut items = vec![
+                IrExpr::symbol("map"),
+                IrExpr::list(vec![
+                    IrExpr::symbol("lambda"),
+                    IrExpr::list(ir_params),
+                    core_node_to_ir_expr(
+                        body,
+                        param_names,
+                        refs,
+                        &nested_locals,
+                        used_local_names,
+                    )?,
+                ]),
+            ];
+            for source in sources {
+                items.push(core_node_to_ir_expr(
+                    source,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?);
+            }
+            Ok(IrExpr::list(items))
+        }
+        CoreNodeKind::Apply { op, args, list } => {
+            let mut items = vec![
+                IrExpr::symbol("apply"),
+                IrExpr::symbol(core_operation_name(op)),
+            ];
+            for arg in args {
+                items.push(core_node_to_ir_expr(
+                    arg,
+                    param_names,
+                    refs,
+                    locals,
+                    used_local_names,
+                )?);
+            }
+            items.push(core_node_to_ir_expr(
+                list,
+                param_names,
+                refs,
+                locals,
+                used_local_names,
+            )?);
             Ok(IrExpr::list(items))
         }
         CoreNodeKind::List(items) => Ok(IrExpr::list(
             items
                 .iter()
-                .map(|item| core_node_to_ir_expr(item, param_names, refs))
+                .map(|item| core_node_to_ir_expr(item, param_names, refs, locals, used_local_names))
                 .collect::<AppResult<Vec<_>>>()?,
         )),
         CoreNodeKind::Group(items) => Ok(IrExpr::list(
             items
                 .iter()
-                .map(|item| core_node_to_ir_expr(item, param_names, refs))
+                .map(|item| core_node_to_ir_expr(item, param_names, refs, locals, used_local_names))
                 .collect::<AppResult<Vec<_>>>()?,
         )),
     }
 }
 
+pub(crate) fn allocate_legacy_local_name(name: &str, used: &mut BTreeMap<String, usize>) -> String {
+    let mut base = name.trim_start_matches('#').trim().replace('#', "");
+    if base.is_empty() {
+        base = "value".to_string();
+    }
+    let mut normalized = String::with_capacity(base.len());
+    for ch in base.chars() {
+        match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => normalized.push(ch),
+            _ => normalized.push('_'),
+        }
+    }
+    if normalized.is_empty() {
+        normalized.push_str("value");
+    }
+    if normalized
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        normalized.insert_str(0, "v_");
+    }
+
+    let slot = used.entry(normalized.clone()).or_insert(0);
+    *slot += 1;
+    if *slot == 1 {
+        normalized
+    } else {
+        format!("{}_{}", normalized, *slot)
+    }
+}
+
+#[cfg(test)]
+fn core_value_kind_tag(kind: CoreValueKind) -> &'static str {
+    match kind {
+        CoreValueKind::Any => "any",
+        CoreValueKind::Number => "number",
+        CoreValueKind::Boolean => "boolean",
+        CoreValueKind::Text => "text",
+        CoreValueKind::List => "list",
+        CoreValueKind::Point2 => "point2",
+        CoreValueKind::Point3 => "point3",
+        CoreValueKind::Sketch => "sketch",
+        CoreValueKind::Path => "path",
+        CoreValueKind::Frame => "frame",
+        CoreValueKind::Compound => "compound",
+        CoreValueKind::Solid => "solid",
+    }
+}
+
+pub(super) fn parse_value_kind_tag(tag: &str) -> Option<CoreValueKind> {
+    match tag {
+        "any" => Some(CoreValueKind::Any),
+        "number" => Some(CoreValueKind::Number),
+        "boolean" => Some(CoreValueKind::Boolean),
+        "text" => Some(CoreValueKind::Text),
+        "list" => Some(CoreValueKind::List),
+        "point2" => Some(CoreValueKind::Point2),
+        "point3" => Some(CoreValueKind::Point3),
+        "sketch" => Some(CoreValueKind::Sketch),
+        "path" => Some(CoreValueKind::Path),
+        "frame" => Some(CoreValueKind::Frame),
+        "compound" => Some(CoreValueKind::Compound),
+        "solid" => Some(CoreValueKind::Solid),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 fn core_operation_name(op: &CoreOperation) -> String {
     match op {
         CoreOperation::Primitive(CorePrimitive::Box) => "box".to_string(),
@@ -878,6 +1154,8 @@ fn core_operation_name(op: &CoreOperation) -> String {
         CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatPick) => "repeat-pick".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Plane) => "plane".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Location) => "location".to_string(),
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
         CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
@@ -891,6 +1169,19 @@ fn core_operation_name(op: &CoreOperation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecky_scheme::compile_to_core_program;
+
+    fn collect_symbols(expr: &IrExpr, out: &mut Vec<String>) {
+        match expr {
+            IrExpr::Symbol(symbol) => out.push(symbol.clone()),
+            IrExpr::List(items) => {
+                for item in items {
+                    collect_symbols(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn parse_build_expr_accepts_shapes_then_result() {
@@ -930,5 +1221,65 @@ mod tests {
         assert_eq!(build.bindings.len(), 1);
         assert_eq!(build.bindings[0].name, "track");
         assert_eq!(build.result.as_symbol(), Some("track"));
+    }
+
+    #[test]
+    fn inline_let_expr_keeps_parallel_binding_references_unresolved() {
+        let value = IrExpr::from_value(&ir_parse("(let ((a 2) (b (+ a 1))) b)").expect("parse"))
+            .expect("expr");
+        let rewritten = inline_let_expr(&value).expect("inline let");
+        let items = rewritten.as_list().expect("rewritten list");
+        assert_eq!(items[0].as_symbol(), Some("+"));
+        assert_eq!(items[1].as_symbol(), Some("a"));
+    }
+
+    #[test]
+    fn inline_let_expr_expands_let_star_sequentially() {
+        let value = IrExpr::from_value(&ir_parse("(let* ((a 2) (b (+ a 1))) b)").expect("parse"))
+            .expect("expr");
+        let rewritten = inline_let_expr(&value).expect("inline let*");
+        let items = rewritten.as_list().expect("rewritten list");
+        assert_eq!(items[0].as_symbol(), Some("+"));
+        assert_eq!(items[1].as_f64(), Some(2.0));
+    }
+
+    #[test]
+    fn inline_let_expr_accepts_typed_binding_metadata() {
+        let value = IrExpr::list(vec![
+            IrExpr::symbol("let"),
+            IrExpr::list(vec![IrExpr::list(vec![
+                IrExpr::symbol("r"),
+                IrExpr::number(4.0),
+                IrExpr::keyword("value-kind"),
+                IrExpr::symbol("number"),
+            ])]),
+            IrExpr::list(vec![IrExpr::symbol("circle"), IrExpr::symbol("r")]),
+        ]);
+        let rewritten = inline_let_expr(&value).expect("inline typed let");
+        assert_eq!(
+            rewritten,
+            IrExpr::list(vec![IrExpr::symbol("circle"), IrExpr::number(4.0)])
+        );
+    }
+
+    #[test]
+    fn core_program_to_model_sanitizes_hygienic_local_symbols() {
+        let program = compile_to_core_program(
+            "(define (track total)\n  (let* ((total-l (+ total 2)) (total-l2 (+ total-l 3)))\n    (translate total-l2 0 0 (box total-l2 10 10))))\n(model (params (number total 20)) (part body (track total)))",
+        )
+        .expect("program");
+        let model = core_program_to_model(&program).expect("model");
+        let mut symbols = Vec::new();
+        collect_symbols(&model.parts[0].expr, &mut symbols);
+        assert!(
+            symbols.iter().all(|symbol| !symbol.contains("##")),
+            "hygienic symbols leaked into legacy bridge: {:?}",
+            symbols
+        );
+        assert!(
+            symbols.iter().any(|symbol| symbol.contains("total-l2")),
+            "expected readable local symbol in {:?}",
+            symbols
+        );
     }
 }

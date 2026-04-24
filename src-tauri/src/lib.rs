@@ -3,14 +3,17 @@
 pub mod bindings;
 pub mod build123d;
 pub mod commands;
+pub mod component_package_runtime;
 pub mod context;
 pub mod contracts;
 pub mod db;
 pub mod displacement;
 pub mod ecky_cad_host;
 pub mod ecky_core_ir;
+pub mod ecky_deterministic;
 pub mod ecky_ir;
 pub mod ecky_ir_patterns;
+pub mod ecky_language_surface;
 pub mod ecky_scheme;
 pub mod freecad;
 pub mod legacy_python_to_ecky_ir;
@@ -18,9 +21,19 @@ pub mod lithophane;
 pub mod llm;
 pub mod llm_context;
 pub mod mcp;
+pub mod model_runtime;
 pub mod models;
 pub mod runtime_capabilities;
 pub mod services;
+pub mod sketch_brep_validation;
+pub mod sketch_draft_runtime;
+pub mod source_flavor;
+
+#[cfg(test)]
+pub(crate) fn build123d_test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -170,6 +183,7 @@ pub(crate) struct AttachmentReferenceMeta {
     pub name: String,
     pub explanation: String,
     pub kind: String,
+    pub data_url: Option<String>,
 }
 
 pub(crate) fn summarize_reference(kind: &str, name: &str, content: &str) -> String {
@@ -260,6 +274,8 @@ pub(crate) fn persist_user_prompt_references(
                 .path
                 .split('.')
                 .next_back()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| attachment.name.split('.').next_back())
                 .unwrap_or("png")
                 .to_lowercase();
             let is_python = matches!(ext.as_str(), "py" | "fcmacro");
@@ -287,6 +303,7 @@ pub(crate) fn persist_user_prompt_references(
                     path: attachment.path.clone(),
                     name: attachment.name.clone(),
                     explanation: attachment.explanation.clone(),
+                    data_url: attachment.data_url.clone(),
                     kind: if is_python {
                         "cad".to_string()
                     } else {
@@ -421,25 +438,26 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
 }
 
 pub const DEFAULT_PROMPT: &str = r#"You are a CAD Design Agent.
-You generate FreeCAD Python macros and a UI specification for their parameters based on the following user intent:
+You generate CAD source code and a UI specification for its parameters based on the following user intent:
 
 $USER_PROMPT
 
 Macro Requirements:
-- Write a FreeCAD Python macro using Part/OCCT BRep (no hand-built meshes).
+- Write source code that matches the TARGET AUTHORING CONTEXT for this turn.
+- If the target is FreeCAD, use Part/OCCT BRep (no hand-built meshes).
 - Units are in millimeters.
 - Create at least one visible solid.
 - Do NOT use string formatting braces like `{param_name}` in the generated code to reference parameters.
-- UI Parameters are injected globally into the macro execution context. Access them directly by name (e.g., `width = frame_width`) or via the injected `params` dictionary (e.g., `width = params.get("frame_width", 90.0)`).
 - Prefer print-friendly geometry for common 3D printing workflows (FDM/SLA): avoid non-manifold solids, inaccessible trapped volumes, fragile tiny features, and extreme unsupported overhangs unless explicitly requested.
 - Keep practical wall thickness and clearances when dimensions permit.
+- Preserve the current thread authoring context unless the user explicitly asks to migrate it.
 
 Return a JSON object with:
 1. "title": A short (2-5 words) descriptive title.
 2. "version_name": Short descriptive name for this iteration.
 3. "response": short end-user text for Ecky Einacs's speech bubble (1-4 concise sentences). If there are 3D printing risks, add a separate final sentence starting with `PRINTING RISKS:`.
 4. "interaction_mode": "design" or "question".
-5. "macro_code": The Python macro code.
+5. "macro_code": The source code for the target authoring context.
 6. "ui_spec": { 
      "fields": [
        { 
@@ -481,7 +499,7 @@ pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 2. "version_name": Short descriptive name for this iteration.
 3. "response": short end-user text for Ecky Einacs's speech bubble (1-3 concise sentences).
 4. "interaction_mode": "design" or "question".
-5. "macro_code": FreeCAD Python code.
+5. "macro_code": source code that matches TARGET AUTHORING CONTEXT for this turn.
 6. "ui_spec": { "fields": [ { "key": string, "label": string, "type": "range"|"number"|"select"|"checkbox"|"image" } ] }
 7. "initial_params": { "key": value }
 8. "post_processing": { "displacement": { "image_param": string, "projection": "planar"|"cylindrical"|"spherical", "depth_mm": number, "invert": bool } } (Optional)
@@ -489,6 +507,8 @@ pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 CRITICAL RULES:
 - UNITS: ALL dimensions are in MILLIMETERS (mm).
 - CONTEXT PRIORITY: Any section labeled "ACTUAL CURRENT ... (AUTHORITATIVE)" is the real current state. Treat it as source of truth, not an example/template.
+- TARGET PRIORITY: "TARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)" tells you which source language/backend to emit in `macro_code`.
+- MIGRATION PRIORITY: If "MIGRATION POLICY (AUTHORITATIVE)" says preserve current context, do not rewrite into another language/backend unless the user explicitly asks or faithful completion is impossible otherwise.
 - UI: Focus on 'key', 'label' and 'type'. 
   - Use 'number' for all numeric parameters. NEVER use 'range'.
   - Use 'min_from' and 'max_from' keys in the 'ui_spec' fields to link parameter boundaries to other keys (e.g., inner_radius max_from outer_radius).
@@ -496,7 +516,7 @@ CRITICAL RULES:
   - For file-picking inputs, use `type: "image"` and leave the matching initial param empty or omit it.
   - For lithophanes, expose only the image field by default. Keep projection, invert, and depth inside `post_processing` unless the user explicitly asks to tweak them.
   - If `AVAILABLE LOCAL ASSETS` is present and the user wants a lithophane without providing a new image, prefer a relevant listed asset over inventing a fake file path.
-- PARAMETERS: Access parameters directly by name (e.g. `L = connector_length`) or via `params.get("key", default)`.
+- PARAMETERS: Follow the parameter access conventions required by the active source language/framework. Keep `ui_spec`, `initial_params`, and `macro_code` aligned.
 - FRAMEWORK: If an "ACTUAL CURRENT CAD FRAMEWORK" block is present, follow it strictly and use the provided CAD SDK. Do not invent custom control classes or custom registries.
 - FRAMEWORK DEFAULT: Prefer the CAD SDK and `CONTROLS` for all new designs and substantial edits. Legacy raw-params macros are a fallback, not the default.
 - FRAMEWORK MIGRATION: If the current design is legacy and the requested edit needs richer controls such as `type: "image"` inputs, stable typed controls, or cleaner parameter structure, you MAY migrate the design to the CAD framework while preserving the existing geometry intent.
@@ -538,6 +558,7 @@ pub fn run() {
         freecad_cmd: String::new(),
         assets: vec![],
         microwave: None,
+        voice: crate::models::VoiceConfig::default(),
         mcp: crate::models::McpConfig::default(),
         has_seen_onboarding: false,
         connection_type: None,

@@ -24,6 +24,7 @@ declare global {
     __TAURI_INTERNALS__: {
       invoke: (cmd: string, args: Record<string, any>) => Promise<any>;
       metadata?: object;
+      transformCallback?: (callback: unknown, once?: boolean) => number;
     };
     __MOCK_HISTORY__: Array<Record<string, any>>;
     __MOCK_THREADS__: Record<string, MockThread>;

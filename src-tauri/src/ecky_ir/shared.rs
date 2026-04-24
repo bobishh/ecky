@@ -10,7 +10,7 @@ pub(super) type LoopPoints = Vec<[f64; 2]>;
 pub(super) fn unsupported(details: impl Into<String>) -> AppError {
     AppError::with_details(
         crate::models::AppErrorCode::Validation,
-        "Unsupported by Ecky IR v0. Switch the thread engine to FreeCAD and rerender.",
+        "Unsupported on current geometry backend. Switch backend and rerender.",
         details.into(),
     )
 }

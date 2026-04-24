@@ -4,7 +4,6 @@ use csgrs::float_types::parry3d::na::{self, Point3, Vector3};
 use csgrs::mesh::plane::Plane as IrPlane;
 use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::vertex::Vertex as IrVertex;
-use csgrs::sketch::Sketch;
 use csgrs::traits::CSG;
 
 use crate::ecky_ir_patterns::{
@@ -141,6 +140,38 @@ impl Geometry {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AxisAlign {
+    Min,
+    Center,
+    Max,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Align3d {
+    x: AxisAlign,
+    y: AxisAlign,
+    z: AxisAlign,
+}
+
+impl Align3d {
+    const fn center_center_min() -> Self {
+        Self {
+            x: AxisAlign::Center,
+            y: AxisAlign::Center,
+            z: AxisAlign::Min,
+        }
+    }
+
+    const fn center_center_center() -> Self {
+        Self {
+            x: AxisAlign::Center,
+            y: AxisAlign::Center,
+            z: AxisAlign::Center,
+        }
+    }
+}
+
 fn is_empty_mesh(mesh: &IrMesh) -> bool {
     mesh.triangulate().polygons.is_empty()
 }
@@ -268,6 +299,22 @@ fn build_clip_box(x: (f64, f64), y: (f64, f64), z: (f64, f64)) -> IrMesh {
     IrMesh::cuboid(width, depth, height, None).translate(center_x, center_y, center_z)
 }
 
+fn anchor_shift(min: f64, max: f64, align: AxisAlign) -> f64 {
+    match align {
+        AxisAlign::Min => -min,
+        AxisAlign::Center => -((min + max) * 0.5),
+        AxisAlign::Max => -max,
+    }
+}
+
+fn align_mesh_to_origin(mesh: IrMesh, align: Align3d) -> IrMesh {
+    let bb = mesh.bounding_box();
+    let tx = anchor_shift(bb.mins.x, bb.maxs.x, align.x);
+    let ty = anchor_shift(bb.mins.y, bb.maxs.y, align.y);
+    let tz = anchor_shift(bb.mins.z, bb.maxs.z, align.z);
+    mesh.translate(tx, ty, tz)
+}
+
 fn boxes_overlap(mesh: &IrMesh, x: (f64, f64), y: (f64, f64), z: (f64, f64)) -> bool {
     let bb = mesh.bounding_box();
     bb.maxs.x >= x.0
@@ -300,15 +347,125 @@ fn parse_axis_range(
     })
 }
 
-fn find_property<'a>(args: &'a [IrExpr], name: &str) -> Option<&'a IrExpr> {
+fn split_call_args<'a>(
+    node: &str,
+    args: &'a [IrExpr],
+    allowed_keywords: &[&str],
+) -> AppResult<(Vec<&'a IrExpr>, BTreeMap<String, &'a IrExpr>)> {
+    let allowed = allowed_keywords
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut positional = Vec::new();
+    let mut keywords = BTreeMap::new();
     let mut index = 0usize;
-    while index + 1 < args.len() {
-        if expr_keyword_name(&args[index]) == Some(name) {
-            return args.get(index + 1);
+
+    while index < args.len() {
+        if let Some(name) = expr_keyword_name(&args[index]) {
+            if !allowed.contains(name) {
+                return Err(validation(format!(
+                    "`{}` does not recognize option `:{}`.",
+                    node, name
+                )));
+            }
+            if index + 1 >= args.len() {
+                return Err(validation(format!("Keyword `:{}` needs a value.", name)));
+            }
+            if keywords
+                .insert(name.to_string(), &args[index + 1])
+                .is_some()
+            {
+                return Err(validation(format!(
+                    "`{}` received duplicate `:{}`.",
+                    node, name
+                )));
+            }
+            index += 2;
+            continue;
         }
-        index += 2;
+        positional.push(&args[index]);
+        index += 1;
     }
-    None
+
+    Ok((positional, keywords))
+}
+
+fn parse_align_axis(value: &IrExpr, node: &str) -> AppResult<AxisAlign> {
+    match value.as_symbol().or_else(|| value.as_str()) {
+        Some("min") => Ok(AxisAlign::Min),
+        Some("center") => Ok(AxisAlign::Center),
+        Some("max") => Ok(AxisAlign::Max),
+        Some(other) => Err(validation(format!(
+            "`{} :align` expects `min`, `center`, or `max`, got `{}`.",
+            node, other
+        ))),
+        None => Err(validation(format!(
+            "`{} :align` expects axis symbols `min`, `center`, or `max`.",
+            node
+        ))),
+    }
+}
+
+fn parse_align_3d(value: Option<&IrExpr>, default: Align3d, node: &str) -> AppResult<Align3d> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let items = if let Ok(items) = expr_list_items(value, "align tuple") {
+        if items.len() == 2 && items.first().and_then(IrExpr::as_symbol) == Some("quote") {
+            expr_list_items(&items[1], "align tuple")?
+        } else {
+            items
+        }
+    } else {
+        expr_list_items(value, "align tuple")?
+    };
+    if items.len() != 3 {
+        return Err(validation(format!("`{} :align` expects `(x y z)`.", node)));
+    }
+    Ok(Align3d {
+        x: parse_align_axis(&items[0], node)?,
+        y: parse_align_axis(&items[1], node)?,
+        z: parse_align_axis(&items[2], node)?,
+    })
+}
+
+fn parse_vec3_expr(
+    value: &IrExpr,
+    env: &BTreeMap<String, ParamValue>,
+    context: &str,
+) -> AppResult<[f64; 3]> {
+    let triple = expr_list_items(value, context)?;
+    if triple.len() != 3 {
+        return Err(validation(format!("{} expects `(x y z)`.", context)));
+    }
+    Ok([
+        eval_number(&triple[0], env)?,
+        eval_number(&triple[1], env)?,
+        eval_number(&triple[2], env)?,
+    ])
+}
+
+fn compose_frame(base_frame: &Frame3d, offset: [f64; 3], rotate: [f64; 3]) -> Frame3d {
+    let local_rot = na::Rotation3::from_euler_angles(
+        rotate[0].to_radians(),
+        rotate[1].to_radians(),
+        rotate[2].to_radians(),
+    );
+    Frame3d {
+        origin: base_frame.apply_point(offset),
+        x_axis: base_frame.apply_vector((local_rot * Vector3::x()).into()),
+        y_axis: base_frame.apply_vector((local_rot * Vector3::y()).into()),
+        z_axis: base_frame.apply_vector((local_rot * Vector3::z()).into()),
+    }
+}
+
+fn extrude_sketch(sketch: &IrSketch, height: f64, symmetric: bool) -> IrMesh {
+    let mesh = sketch.extrude(height);
+    if symmetric {
+        mesh.translate(0.0, 0.0, -height * 0.5)
+    } else {
+        mesh
+    }
 }
 
 fn pick_path_sample(
@@ -385,14 +542,14 @@ pub(super) fn parse_wall_pattern_spec(
     env: &BTreeMap<String, ParamValue>,
 ) -> AppResult<WallPatternSpec> {
     let items = expr_list_items(value, "wall-pattern options")?;
-    parse_wall_pattern_spec_items(&items, env)
+    parse_wall_pattern_spec_items(items, env)
 }
 
 fn parse_wall_pattern_spec_items(
     items: &[IrExpr],
     env: &BTreeMap<String, ParamValue>,
 ) -> AppResult<WallPatternSpec> {
-    if items.is_empty() || items.len() % 2 != 0 {
+    if items.is_empty() || !items.len().is_multiple_of(2) {
         return Err(validation(
             "`wall-pattern` expects keyword/value pairs like `(:mode ribs :depth 1.2 ...)`.",
         ));
@@ -426,9 +583,16 @@ fn parse_wall_pattern_spec_items(
                     "diamond" => WallPatternMode::Diamond,
                     "hammered" => WallPatternMode::Hammered,
                     "fourier" => WallPatternMode::Fourier,
+                    "cellular" => WallPatternMode::Cellular,
+                    "fbm" => WallPatternMode::Fbm,
+                    "gyroid" => WallPatternMode::Gyroid,
+                    "schwarz-p" => WallPatternMode::SchwarzP,
+                    "diamond-field" | "schwarz-d" => WallPatternMode::SchwarzD,
+                    "neovius" => WallPatternMode::Neovius,
+                    "attractor-field" => WallPatternMode::AttractorField,
                     other => {
                         return Err(unsupported(format!(
-                            "wall-pattern mode `{}` is not supported by Ecky IR v0.",
+                            "wall-pattern mode `{}` is not supported by current `.ecky` runtime.",
                             other
                         )))
                     }
@@ -1217,57 +1381,86 @@ pub(super) fn eval_geometry_with_bindings(
         }
         "common" => common_solids("common", args, env, bindings),
         "box" => {
-            if args.len() != 3 {
+            let (positional, keywords) = split_call_args("box", args, &["align"])?;
+            if positional.len() != 3 {
                 return Err(validation("`box` expects width, depth, and height."));
             }
-            let width = eval_number(&args[0], env)?;
-            let depth = eval_number(&args[1], env)?;
-            let height = eval_number(&args[2], env)?;
-            Ok(Geometry::Mesh(
-                Sketch::square(1.0, None)
-                    .scale(width, depth, 1.0)
-                    .extrude(height),
-            ))
+            let width = eval_number(positional[0], env)?;
+            let depth = eval_number(positional[1], env)?;
+            let height = eval_number(positional[2], env)?;
+            let align = parse_align_3d(keywords.get("align").copied(), Align3d::center_center_min(), "box")?;
+            Ok(Geometry::Mesh(align_mesh_to_origin(
+                IrMesh::cuboid(width, depth, height, None),
+                align,
+            )))
         }
         "cylinder" => {
-            if args.len() < 2 || args.len() > 3 {
+            let (positional, keywords) = split_call_args("cylinder", args, &["align"])?;
+            if positional.len() < 2 || positional.len() > 3 {
                 return Err(validation("`cylinder` expects radius, height, and optional segments."));
             }
-            let radius = eval_number(&args[0], env)?;
-            let height = eval_number(&args[1], env)?;
-            let segments = args.get(2).map(|arg| eval_number(arg, env)).transpose()?.unwrap_or(48.0) as usize;
-            Ok(Geometry::Mesh(IrMesh::cylinder(radius, height, segments.max(12), None)))
+            let radius = eval_number(positional[0], env)?;
+            let height = eval_number(positional[1], env)?;
+            let segments = positional
+                .get(2)
+                .map(|arg| eval_number(arg, env))
+                .transpose()?
+                .unwrap_or(48.0) as usize;
+            let align = parse_align_3d(
+                keywords.get("align").copied(),
+                Align3d::center_center_min(),
+                "cylinder",
+            )?;
+            Ok(Geometry::Mesh(align_mesh_to_origin(
+                IrMesh::cylinder(radius, height, segments.max(12), None),
+                align,
+            )))
         }
         "cone" => {
-            if args.len() < 3 || args.len() > 4 {
+            let (positional, keywords) = split_call_args("cone", args, &["align"])?;
+            if positional.len() < 3 || positional.len() > 4 {
                 return Err(validation(
                     "`cone` expects bottom radius, top radius, height, and optional segments.",
                 ));
             }
-            let bottom_radius = eval_number(&args[0], env)?;
-            let top_radius = eval_number(&args[1], env)?;
-            let height = eval_number(&args[2], env)?;
-            let segments = args.get(3).map(|arg| eval_number(arg, env)).transpose()?.unwrap_or(48.0) as usize;
-            Ok(Geometry::Mesh(IrMesh::frustum(
-                bottom_radius,
-                top_radius,
-                height,
-                segments.max(12),
-                None,
+            let bottom_radius = eval_number(positional[0], env)?;
+            let top_radius = eval_number(positional[1], env)?;
+            let height = eval_number(positional[2], env)?;
+            let segments = positional
+                .get(3)
+                .map(|arg| eval_number(arg, env))
+                .transpose()?
+                .unwrap_or(48.0) as usize;
+            let align = parse_align_3d(keywords.get("align").copied(), Align3d::center_center_min(), "cone")?;
+            Ok(Geometry::Mesh(align_mesh_to_origin(
+                IrMesh::frustum(bottom_radius, top_radius, height, segments.max(12), None),
+                align,
             )))
         }
         "sphere" => {
-            if args.is_empty() || args.len() > 3 {
+            let (positional, keywords) = split_call_args("sphere", args, &["align"])?;
+            if positional.is_empty() || positional.len() > 3 {
                 return Err(validation("`sphere` expects radius and optional slices/stacks."));
             }
-            let radius = eval_number(&args[0], env)?;
-            let slices = args.get(1).map(|arg| eval_number(arg, env)).transpose()?.unwrap_or(48.0) as usize;
-            let stacks = args.get(2).map(|arg| eval_number(arg, env)).transpose()?.unwrap_or(24.0) as usize;
-            Ok(Geometry::Mesh(IrMesh::sphere(
-                radius,
-                slices.max(12),
-                stacks.max(6),
-                None,
+            let radius = eval_number(positional[0], env)?;
+            let slices = positional
+                .get(1)
+                .map(|arg| eval_number(arg, env))
+                .transpose()?
+                .unwrap_or(48.0) as usize;
+            let stacks = positional
+                .get(2)
+                .map(|arg| eval_number(arg, env))
+                .transpose()?
+                .unwrap_or(24.0) as usize;
+            let align = parse_align_3d(
+                keywords.get("align").copied(),
+                Align3d::center_center_center(),
+                "sphere",
+            )?;
+            Ok(Geometry::Mesh(align_mesh_to_origin(
+                IrMesh::sphere(radius, slices.max(12), stacks.max(6), None),
+                align,
             )))
         }
         "circle" => {
@@ -1371,11 +1564,19 @@ pub(super) fn eval_geometry_with_bindings(
             )?))
         }
         "extrude" => {
-            if args.len() != 2 {
+            let (positional, keywords) = split_call_args("extrude", args, &["symmetric"])?;
+            if positional.len() != 2 {
                 return Err(validation("`extrude` expects a sketch and height."));
             }
-            let sketch = eval_geometry_with_bindings(&args[0], env, bindings)?.into_sketch("extrude")?;
-            Ok(Geometry::Mesh(sketch.extrude(eval_number(&args[1], env)?)))
+            let sketch =
+                eval_geometry_with_bindings(positional[0], env, bindings)?.into_sketch("extrude")?;
+            let height = eval_number(positional[1], env)?;
+            let symmetric = keywords
+                .get("symmetric")
+                .map(|value| eval_bool(value, env))
+                .transpose()?
+                .unwrap_or(false);
+            Ok(Geometry::Mesh(extrude_sketch(&sketch, height, symmetric)))
         }
         "revolve" => {
             if args.len() < 2 || args.len() > 3 {
@@ -1494,93 +1695,83 @@ pub(super) fn eval_geometry_with_bindings(
             };
             Ok(Geometry::Path(sample_bezier_path(&points, segments)?))
         }
+        "plane" => {
+            let (positional, keywords) = split_call_args("plane", args, &["origin", "x", "normal"])?;
+            if !positional.is_empty() {
+                return Err(validation(
+                    "`plane` expects only keyword options `:origin`, `:x`, and `:normal`.",
+                ));
+            }
+            let origin = match keywords.get("origin") {
+                Some(value) => parse_vec3_expr(value, env, "`plane :origin`")?,
+                None => [0.0, 0.0, 0.0],
+            };
+            let x_axis = match keywords.get("x") {
+                Some(value) => parse_vec3_expr(value, env, "`plane :x`")?,
+                None => [1.0, 0.0, 0.0],
+            };
+            let normal = match keywords.get("normal") {
+                Some(value) => parse_vec3_expr(value, env, "`plane :normal`")?,
+                None => [0.0, 0.0, 1.0],
+            };
+            Ok(Geometry::Frame(build_frame(origin, x_axis, normal)?))
+        }
+        "location" => {
+            let (positional, keywords) = split_call_args("location", args, &["offset", "rotate"])?;
+            if positional.len() != 1 {
+                return Err(validation(
+                    "`location` expects a plane/frame and optional `:offset` / `:rotate`.",
+                ));
+            }
+            let base_frame =
+                eval_geometry_with_bindings(positional[0], env, bindings)?.into_frame("location")?;
+            let offset = match keywords.get("offset") {
+                Some(value) => parse_vec3_expr(value, env, "`location :offset`")?,
+                None => [0.0, 0.0, 0.0],
+            };
+            let rotate = match keywords.get("rotate") {
+                Some(value) => parse_vec3_expr(value, env, "`location :rotate`")?,
+                None => [0.0, 0.0, 0.0],
+            };
+            Ok(Geometry::Frame(compose_frame(&base_frame, offset, rotate)))
+        }
         "path-frame" => {
-            if args.is_empty() {
+            let (positional, keywords) = split_call_args("path-frame", args, &["at", "up"])?;
+            if positional.len() != 1 {
                 return Err(validation("`path-frame` expects a path."));
             }
-            let path = eval_geometry_with_bindings(&args[0], env, bindings)?.into_path("path-frame")?;
-            let mut at_value = IrExpr::symbol("end");
-            let mut up = [0.0, 0.0, 1.0];
-            let mut index = 1usize;
-            while index + 1 < args.len() {
-                let Some(name) = expr_keyword_name(&args[index]) else {
-                    break;
-                };
-                match name {
-                    "at" => at_value = args[index + 1].dup(),
-                    "up" => {
-                        let triple = expr_list_items(&args[index + 1], "path-frame up vector")?;
-                        if triple.len() != 3 {
-                            return Err(validation("`path-frame :up` expects `(x y z)`."));
-                        }
-                        up = [
-                            eval_number(&triple[0], env)?,
-                            eval_number(&triple[1], env)?,
-                            eval_number(&triple[2], env)?,
-                        ];
-                    }
-                    other => {
-                        return Err(validation(format!(
-                            "`path-frame` does not recognize option `:{}`.",
-                            other
-                        )))
-                    }
-                }
-                index += 2;
-            }
+            let path =
+                eval_geometry_with_bindings(positional[0], env, bindings)?.into_path("path-frame")?;
+            let at_value = keywords
+                .get("at")
+                .map(|value| value.dup())
+                .unwrap_or_else(|| IrExpr::symbol("end"));
+            let up = match keywords.get("up") {
+                Some(value) => parse_vec3_expr(value, env, "`path-frame :up`")?,
+                None => [0.0, 0.0, 1.0],
+            };
             let (origin, tangent) = pick_path_sample(&path, &at_value, env)?;
             Ok(Geometry::Frame(build_frame(origin, tangent, up)?))
         }
         "place" => {
-            if args.len() < 2 {
+            let (positional, keywords) = split_call_args("place", args, &["offset", "rotate"])?;
+            if positional.len() != 2 {
                 return Err(validation(
                     "`place` expects a frame, geometry, and optional `:offset` / `:rotate`.",
                 ));
             }
-            let base_frame = eval_geometry_with_bindings(&args[0], env, bindings)?.into_frame("place")?;
-            let geometry = eval_geometry_with_bindings(&args[1], env, bindings)?;
-            let mut offset = [0.0, 0.0, 0.0];
-            let mut rotate = [0.0, 0.0, 0.0];
-            let mut index = 2usize;
-            while index + 1 < args.len() {
-                let Some(name) = expr_keyword_name(&args[index]) else {
-                    break;
-                };
-                let triple = expr_list_items(&args[index + 1], "place vector")?;
-                if triple.len() != 3 {
-                    return Err(validation(format!(
-                        "`place :{}` expects `(x y z)`.",
-                        name
-                    )));
-                }
-                let vector = [
-                    eval_number(&triple[0], env)?,
-                    eval_number(&triple[1], env)?,
-                    eval_number(&triple[2], env)?,
-                ];
-                match name {
-                    "offset" => offset = vector,
-                    "rotate" => rotate = vector,
-                    other => {
-                        return Err(validation(format!(
-                            "`place` does not recognize option `:{}`.",
-                            other
-                        )))
-                    }
-                }
-                index += 2;
-            }
-            let local_rot = na::Rotation3::from_euler_angles(
-                rotate[0].to_radians(),
-                rotate[1].to_radians(),
-                rotate[2].to_radians(),
-            );
-            let placed_frame = Frame3d {
-                origin: base_frame.apply_point(offset),
-                x_axis: base_frame.apply_vector((local_rot * Vector3::x()).into()),
-                y_axis: base_frame.apply_vector((local_rot * Vector3::y()).into()),
-                z_axis: base_frame.apply_vector((local_rot * Vector3::z()).into()),
+            let base_frame =
+                eval_geometry_with_bindings(positional[0], env, bindings)?.into_frame("place")?;
+            let geometry = eval_geometry_with_bindings(positional[1], env, bindings)?;
+            let offset = match keywords.get("offset") {
+                Some(value) => parse_vec3_expr(value, env, "`place :offset`")?,
+                None => [0.0, 0.0, 0.0],
             };
+            let rotate = match keywords.get("rotate") {
+                Some(value) => parse_vec3_expr(value, env, "`place :rotate`")?,
+                None => [0.0, 0.0, 0.0],
+            };
+            let placed_frame = compose_frame(&base_frame, offset, rotate);
             Ok(match geometry {
                 Geometry::Mesh(mesh) => Geometry::Mesh(transform_mesh_with_frame(&mesh, &placed_frame)),
                 Geometry::Compound(meshes) => Geometry::Compound(
@@ -1613,13 +1804,14 @@ pub(super) fn eval_geometry_with_bindings(
             })
         }
         "clip-box" => {
-            if args.is_empty() {
+            let (positional, keywords) = split_call_args("clip-box", args, &["x", "y", "z"])?;
+            if positional.len() != 1 {
                 return Err(validation("`clip-box` expects a shape and axis ranges."));
             }
-            let shape = eval_geometry_with_bindings(&args[0], env, bindings)?;
-            let x = parse_axis_range(find_property(&args[1..], "x"), env, "x")?;
-            let y = parse_axis_range(find_property(&args[1..], "y"), env, "y")?;
-            let z = parse_axis_range(find_property(&args[1..], "z"), env, "z")?;
+            let shape = eval_geometry_with_bindings(positional[0], env, bindings)?;
+            let x = parse_axis_range(keywords.get("x").copied(), env, "x")?;
+            let y = parse_axis_range(keywords.get("y").copied(), env, "y")?;
+            let z = parse_axis_range(keywords.get("z").copied(), env, "z")?;
             let clipper = build_clip_box(x, y, z);
             let mut outputs = Vec::new();
             for mesh in flatten_solids(shape, "clip-box")? {
@@ -1921,10 +2113,10 @@ pub(super) fn eval_geometry_with_bindings(
             node
         ))),
         "lithophane" => Err(unsupported(
-            "Ecky IR v0 does not use a `lithophane` source node. Generate the geometry in IR and drive lithophane through postProcessing.lithophaneAttachments / the LITHO tab instead.",
+            "`.ecky` does not use a `lithophane` source node. Generate the geometry in `.ecky` and drive lithophane through postProcessing.lithophaneAttachments / the LITHO tab instead.",
         )),
         other => Err(unsupported(format!(
-            "Node `{}` is not supported by Ecky IR v0.",
+            "Node `{}` is not supported by current `.ecky` runtime.",
             other
         ))),
     }

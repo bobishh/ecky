@@ -65,9 +65,8 @@
               (list flat_start 0)
               (list 0 0)))))
       (shape body
-        (translate (/ L 2) (- (/ width 2)) (/ (+ height dz) 2)
-          (rotate 90 0 0
-            (extrude body2d width))))
+        (rotate 90 0 0
+          (extrude body2d width :symmetric #t)))
       (shape groove2d
         (polygon
           (append
@@ -106,9 +105,8 @@
               (list flat_start (+ height (- groove_depth)))
               (list 0 (+ height (- groove_depth)))))))
       (shape groove_solid
-        (translate 0 (- (/ groove_width 2)) 0
-          (rotate 90 0 0
-            (extrude groove2d groove_width))))
+        (rotate 90 0 0
+          (extrude groove2d groove_width :symmetric #t)))
       (shape groove_left
         (translate 0 (/ gauge 2) 0 groove_solid))
       (shape groove_right
@@ -153,9 +151,8 @@
            ((/ 3.5 2) 0)
            ((/ 3.5 2) 10))))
       (shape tooth_local
-        (translate 0 (- (/ groove_width 2)) 0
-          (rotate 90 0 0
-            (extrude tooth2d groove_width))))
+        (rotate 90 0 0
+          (extrude tooth2d groove_width :symmetric #t)))
       (shape num_teeth (max 0 (floor (/ L teeth_size))))
       (shape valleys
         (repeat-compound i num_teeth

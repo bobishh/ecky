@@ -415,7 +415,7 @@ pub(super) fn parse_profile_sketch(
     let mut hole_loops: Vec<LoopPoints> = Vec::new();
 
     if args.first().and_then(expr_keyword_name).is_some() {
-        if args.len() % 2 != 0 {
+        if !args.len().is_multiple_of(2) {
             return Err(validation(
                 "`profile` clauses must use keyword/value pairs for `:outer` and `:holes`.",
             ));

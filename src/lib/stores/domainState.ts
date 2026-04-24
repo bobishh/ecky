@@ -17,6 +17,9 @@ export const config = writable<AppConfig>({
     dingId: null,
     muted: false,
   },
+  voice: {
+    sttLanguageCode: 'en-US',
+  },
   mcp: {
     port: null,
     maxSessions: null,

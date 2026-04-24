@@ -162,6 +162,19 @@ pub fn is_freecad_available(state: &AppState) -> bool {
     freecad::resolve_freecad_path(configured_freecad_cmd(state).as_deref()).is_ok()
 }
 
+fn resolve_geometry_backend(
+    effective_dialect: &MacroDialect,
+    requested_backend: Option<GeometryBackend>,
+    config_default_backend: GeometryBackend,
+) -> GeometryBackend {
+    requested_backend.unwrap_or(match effective_dialect {
+        MacroDialect::EckyIrV0 => config_default_backend,
+        MacroDialect::Build123d => GeometryBackend::Build123d,
+        MacroDialect::CadFrameworkV1 => GeometryBackend::Freecad,
+        MacroDialect::Legacy => GeometryBackend::Freecad,
+    })
+}
+
 pub async fn render_stl(
     macro_code: &str,
     parameters: &DesignParams,
@@ -194,29 +207,24 @@ pub async fn render_model(
     let _guard = state.render_lock.lock().await;
     let effective_dialect =
         macro_dialect.unwrap_or_else(|| infer_macro_dialect_from_code(macro_code));
-    let resolved_backend = geometry_backend.unwrap_or_else(|| {
-        if effective_dialect == MacroDialect::EckyIrV0 {
-            GeometryBackend::EckyRust
-        } else if effective_dialect == MacroDialect::Build123d {
-            GeometryBackend::Build123d
-        } else {
-            GeometryBackend::Freecad
-        }
-    });
+    let config_default_backend = state.config.lock().unwrap().default_geometry_backend;
+    let resolved_backend =
+        resolve_geometry_backend(&effective_dialect, geometry_backend, config_default_backend);
     crate::runtime_capabilities::ensure_backend_available(
         resolved_backend,
         configured_freecad_cmd(state).as_deref(),
         app,
     )?;
-    // For Build123d + IR, lower the IR to Python before dispatch.
-    // If it's already Python (Legacy dialect) but targeting Build123d backend,
-    // we use the code as-is.
-    let lowered = if resolved_backend == GeometryBackend::Build123d
-        && effective_dialect == MacroDialect::EckyIrV0
-    {
-        Some(crate::ecky_ir::lower_to_build123d(macro_code)?)
-    } else {
-        None
+    // Lower Ecky IR to the target backend before dispatch.
+    // Legacy Python and Build123d sources stay as-is.
+    let lowered = match (resolved_backend, effective_dialect.clone()) {
+        (GeometryBackend::Build123d, MacroDialect::EckyIrV0) => {
+            Some(crate::ecky_ir::lower_to_build123d(macro_code)?)
+        }
+        (GeometryBackend::Freecad, MacroDialect::EckyIrV0) => {
+            Some(crate::ecky_ir::lower_to_freecad(macro_code)?)
+        }
+        _ => None,
     };
     let dispatch_source = lowered.as_deref().unwrap_or(macro_code);
     let mut result = match resolved_backend {
@@ -227,19 +235,37 @@ pub async fn render_model(
             } else {
                 crate::models::SourceLanguage::Build123d
             };
-            crate::build123d::render_model_with_source_language(
+            crate::build123d::render_model_with_sources(
                 dispatch_source,
+                if effective_dialect == MacroDialect::EckyIrV0 {
+                    Some(macro_code)
+                } else {
+                    None
+                },
                 parameters,
                 app,
                 source_language,
             )
         }
-        GeometryBackend::Freecad => freecad::render_model(
-            macro_code,
-            parameters,
-            configured_freecad_cmd(state).as_deref(),
-            app,
-        ),
+        GeometryBackend::Freecad => {
+            let source_language = if effective_dialect == MacroDialect::EckyIrV0 {
+                crate::models::SourceLanguage::EckyIrV0
+            } else {
+                crate::models::SourceLanguage::LegacyPython
+            };
+            freecad::render_model_with_sources(
+                dispatch_source,
+                if effective_dialect == MacroDialect::EckyIrV0 {
+                    Some(macro_code)
+                } else {
+                    None
+                },
+                parameters,
+                configured_freecad_cmd(state).as_deref(),
+                app,
+                source_language,
+            )
+        }
     };
     if let Ok(ref mut bundle) = result {
         apply_requested_post_processing(bundle, parameters, post_processing)?;
@@ -251,13 +277,13 @@ pub async fn render_model(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_requested_post_processing;
+    use super::{apply_requested_post_processing, resolve_geometry_backend};
     use crate::contracts::{
         DisplacementSpec, LithophaneAttachment, LithophaneAttachmentSource, LithophaneColor,
         LithophaneColorMode, LithophanePlacement, LithophanePlacementMode, LithophaneRelief,
-        LithophaneSide, OverflowMode, PostProcessingSpec, ProjectionType,
+        LithophaneSide, MacroDialect, OverflowMode, PostProcessingSpec, ProjectionType,
     };
-    use crate::models::DesignParams;
+    use crate::models::{DesignParams, GeometryBackend};
 
     #[test]
     fn apply_requested_displacement_surfaces_raw_displacement_errors() {
@@ -619,34 +645,40 @@ mod tests {
     // Phase 6 / 7 verification tests
     // ------------------------------------------------------------------
 
-    /// Phase 6: EckyRust backend stays alive and is the default for IR.
-    /// Confirm that the dispatch logic selects EckyRust when no explicit
-    /// backend is requested and the source is EckyIR.
+    /// Generic Ecky source uses config backend when request omits backend.
     #[test]
-    fn ecky_rust_is_default_backend_for_ir_source() {
-        use crate::contracts::{infer_macro_dialect_from_code, MacroDialect};
-        use crate::models::GeometryBackend;
-
-        let ir_source = r#"(model (part body (extrude (rounded_rect 30 20 4) 10)))"#;
-        let dialect = infer_macro_dialect_from_code(ir_source);
+    fn ecky_source_uses_configured_backend_when_request_omits_backend() {
         assert_eq!(
-            dialect,
-            MacroDialect::EckyIrV0,
-            "IR source should be detected"
+            resolve_geometry_backend(&MacroDialect::EckyIrV0, None, GeometryBackend::Build123d),
+            GeometryBackend::Build123d
         );
-
-        // Mirror the dispatch logic from render_model
-        let resolved: GeometryBackend = {
-            if dialect == MacroDialect::EckyIrV0 {
-                GeometryBackend::EckyRust
-            } else {
-                GeometryBackend::Freecad
-            }
-        };
         assert_eq!(
-            resolved,
+            resolve_geometry_backend(&MacroDialect::EckyIrV0, None, GeometryBackend::Freecad),
+            GeometryBackend::Freecad
+        );
+        assert_eq!(
+            resolve_geometry_backend(
+                &MacroDialect::EckyIrV0,
+                Some(GeometryBackend::EckyRust),
+                GeometryBackend::Build123d
+            ),
             GeometryBackend::EckyRust,
-            "default for IR must remain EckyRust (Phase 6 invariant)"
+        );
+    }
+
+    #[test]
+    fn legacy_python_and_build123d_sources_keep_backend_defaults() {
+        assert_eq!(
+            resolve_geometry_backend(&MacroDialect::Build123d, None, GeometryBackend::Freecad),
+            GeometryBackend::Build123d
+        );
+        assert_eq!(
+            resolve_geometry_backend(
+                &MacroDialect::CadFrameworkV1,
+                None,
+                GeometryBackend::Build123d
+            ),
+            GeometryBackend::Freecad
         );
     }
 

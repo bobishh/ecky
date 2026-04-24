@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev:web",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build123d:prepare && npm run build",
+    "beforeBuildCommand": "npm run runtimes:prepare && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -33,11 +33,13 @@
     "resources": {
       "../server/freecad_runner.py": "server/freecad_runner.py",
       "../server/build123d_runner.py": "server/build123d_runner.py",
+      "../server/_ecky_build123d_helpers.py": "server/_ecky_build123d_helpers.py",
       "../model-runtime/cad_sdk.py": "model-runtime/cad_sdk.py",
       "../model-runtime/cad_framework_contract.md": "model-runtime/cad_framework_contract.md",
       "../templates/cache_pot_default.FCMacro": "templates/cache_pot_default.FCMacro",
       "../templates/mess.stl": "templates/mess.stl",
-      "../.dist/build123d-runtime": "runtime/build123d"
+      "../.dist/build123d-runtime": "runtime/build123d",
+      "../.dist/speech-runtime": "runtime/speech"
     },
     "icon": [
       "icons/32x32.png",
