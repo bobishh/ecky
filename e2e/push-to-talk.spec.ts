@@ -10,7 +10,7 @@ function installPromptVoiceMocks() {
       mockWindow.__SAVE_CONFIG_CALLS__ = [];
       mockWindow.__VOICE_TRANSCRIBE_MODE__ = 'ok';
       const config = {
-        engines: [{ id: 'mock', name: 'Mock', provider: 'openai', apiKey: '', model: 'mock', baseUrl: '', systemPrompt: '', enabled: true }],
+        engines: [{ id: 'mock', name: 'Mock', provider: 'openai', apiKey: '', model: 'mock', baseUrl: '', enabled: true }],
         selectedEngineId: 'mock',
         freecadCmd: '',
         assets: [],

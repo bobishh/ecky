@@ -646,24 +646,13 @@ async fn queue_agent_prompt_impl(
         if let Some(title) = crate::db::get_thread_title(&conn, &thread_id)
             .map_err(|err| AppError::persistence(err.to_string()))?
         {
-            crate::db::create_or_update_thread(
-                &conn, &thread_id, &title, now, None, None, None, None,
-            )
-            .map_err(|err| AppError::persistence(err.to_string()))?;
+            crate::db::create_or_update_thread(&conn, &thread_id, &title, now, None)
+                .map_err(|err| AppError::persistence(err.to_string()))?;
         } else {
             let title = build_mcp_thread_title(&input.prompt_text, &input.attachments);
             let traits = crate::generate_genie_traits();
-            crate::db::create_or_update_thread(
-                &conn,
-                &thread_id,
-                &title,
-                now,
-                Some(&traits),
-                None,
-                None,
-                None,
-            )
-            .map_err(|err| AppError::persistence(err.to_string()))?;
+            crate::db::create_or_update_thread(&conn, &thread_id, &title, now, Some(&traits))
+                .map_err(|err| AppError::persistence(err.to_string()))?;
         }
 
         crate::db::add_message(
@@ -1171,6 +1160,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_agent_prompt_impl_creates_thread_without_authoring_context() {
+        let conn =
+            crate::db::init_db(&test_db_path("queue-agent-prompt-authoring-defaults")).expect("db");
+        let mut config = test_config();
+        config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
+        config.default_geometry_backend = crate::models::GeometryBackend::Freecad;
+        let state = AppState::new(config, None, conn);
+
+        let queued = queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: None,
+                prompt_text: "Make the rim thinner.".to_string(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("queue prompt");
+
+        let stored_thread = {
+            let conn = state.db.lock().await;
+            crate::services::history::get_thread(&conn, &queued.thread_id).expect("thread")
+        };
+        assert_eq!(stored_thread.title, "Make the rim thinner.");
+        assert_eq!(stored_thread.queued_count, 1);
+    }
+
+    #[tokio::test]
+    async fn queue_agent_prompt_impl_preserves_existing_thread_identity() {
+        let conn =
+            crate::db::init_db(&test_db_path("queue-agent-prompt-existing-authoring")).expect("db");
+        let mut config = test_config();
+        config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
+        config.default_geometry_backend = crate::models::GeometryBackend::Freecad;
+        let state = AppState::new(config, None, conn);
+
+        {
+            let conn = state.db.lock().await;
+            crate::db::create_or_update_thread(&conn, "thread-existing", "Existing", 42, None)
+                .expect("thread");
+        }
+
+        queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: Some("thread-existing".to_string()),
+                prompt_text: "Make the rim thinner.".to_string(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("queue prompt");
+
+        let stored_thread = {
+            let conn = state.db.lock().await;
+            crate::services::history::get_thread(&conn, "thread-existing").expect("thread")
+        };
+        assert_eq!(stored_thread.title, "Existing");
+        assert_eq!(stored_thread.queued_count, 1);
+    }
+
+    #[tokio::test]
     async fn resolve_agent_prompt_impl_preserves_attachments() {
         let conn =
             crate::db::init_db(&test_db_path("resolve-agent-prompt-attachments")).expect("db");
@@ -1221,10 +1272,8 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            crate::db::create_or_update_thread(
-                &conn, "thread-1", "Thread", timestamp, None, None, None, None,
-            )
-            .expect("thread");
+            crate::db::create_or_update_thread(&conn, "thread-1", "Thread", timestamp, None)
+                .expect("thread");
         }
 
         state

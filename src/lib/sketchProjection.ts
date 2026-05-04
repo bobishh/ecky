@@ -1,5 +1,5 @@
 import type { SketchView } from './tauri/contracts';
-import type { SketchPoint, SketchStroke } from './sketchWorkspaceState';
+import { strokeKind, type SketchPoint, type SketchStroke } from './sketchWorkspaceState';
 
 type OrthographicSketchView = Extract<SketchView, 'front' | 'top' | 'side'>;
 type ProjectionRole = 'source' | 'derived';
@@ -47,7 +47,7 @@ export function buildSketchProjections(profile: SketchStroke, extrusionAmount: n
 
   const sourceView = orthographicView(profile.view);
   const sourceAxes = viewAxes[sourceView];
-  const profileBounds = boundsFromPoints(profile.points);
+  const profileBounds = boundsFromStroke(profile);
 
   return orthographicViews.map((view) => {
     if (view === sourceView) {
@@ -55,8 +55,8 @@ export function buildSketchProjections(profile: SketchStroke, extrusionAmount: n
         view,
         label: `${view.toUpperCase()} / SOURCE PROFILE`,
         role: 'source',
-        points: clonePoints(profile.points),
-        path: profilePath(profile.points),
+        points: profilePoints(profile),
+        path: profilePath(profile),
         explanation: `${viewLabel(view)} view shows original closed profile.`,
       };
     }
@@ -109,7 +109,19 @@ function axisExtent(
   return { start: 0, size: depth };
 }
 
-function boundsFromPoints(points: SketchPoint[]): Omit<SketchProjectionBounds, 'depth'> {
+function boundsFromStroke(stroke: SketchStroke): Omit<SketchProjectionBounds, 'depth'> {
+  if (strokeKind(stroke) === 'circle') {
+    const center = stroke.points[0];
+    const radius = stroke.radius ?? 0;
+    return {
+      left: center[0] - radius,
+      top: center[1] - radius,
+      width: radius * 2,
+      height: radius * 2,
+    };
+  }
+
+  const points = stroke.points;
   if (points.length < 3) {
     throw new Error('Closed sketch profile needs at least three points.');
   }
@@ -129,14 +141,39 @@ function boundsFromPoints(points: SketchPoint[]): Omit<SketchProjectionBounds, '
   };
 }
 
-function profilePath(points: SketchPoint[]): string {
-  const pathPoints = trimClosingPoint(points);
+function profilePath(stroke: SketchStroke): string {
+  if (strokeKind(stroke) === 'circle') {
+    const center = stroke.points[0];
+    const radius = stroke.radius ?? 0;
+    return [
+      `M${formatNumber(center[0] - radius)} ${formatNumber(center[1])}`,
+      `A${formatNumber(radius)} ${formatNumber(radius)} 0 1 0 ${formatNumber(center[0] + radius)} ${formatNumber(center[1])}`,
+      `A${formatNumber(radius)} ${formatNumber(radius)} 0 1 0 ${formatNumber(center[0] - radius)} ${formatNumber(center[1])}`,
+      'Z',
+    ].join(' ');
+  }
+  const pathPoints = trimClosingPoint(stroke.points);
   const [start, ...segments] = pathPoints;
   if (!start) {
     throw new Error('Closed sketch profile needs at least one point.');
   }
 
   return [`M${formatPoint(start)}`, ...segments.map((point) => `L${formatPoint(point)}`), 'Z'].join(' ');
+}
+
+function profilePoints(stroke: SketchStroke): SketchPoint[] {
+  if (strokeKind(stroke) === 'circle') {
+    const center = stroke.points[0];
+    const radius = stroke.radius ?? 0;
+    return [
+      [center[0] - radius, center[1]],
+      [center[0], center[1] - radius],
+      [center[0] + radius, center[1]],
+      [center[0], center[1] + radius],
+      [center[0] - radius, center[1]],
+    ];
+  }
+  return clonePoints(stroke.points);
 }
 
 function trimClosingPoint(points: SketchPoint[]): SketchPoint[] {

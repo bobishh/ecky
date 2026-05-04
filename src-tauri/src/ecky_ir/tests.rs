@@ -92,6 +92,77 @@ mod tests {
     }
 
     #[test]
+    fn source_uses_ecky_rust_only_cad_ops_detects_wall_pattern_heads() {
+        assert!(source_uses_ecky_rust_only_cad_ops(
+            r#"(model
+                (part body
+                  (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
+                    (extrude (circle 5) 18))))"#
+        ));
+        assert!(source_uses_ecky_rust_only_cad_ops(
+            r#"(model
+                (part body
+                  (pattern (:mode ribs :depth 0.4 :uFreq 8)
+                    (extrude (circle 5) 18))))"#
+        ));
+        assert!(source_uses_ecky_rust_only_cad_ops(
+            r#"
+            (define (ribbed shape)
+              (wall-pattern (:mode ribs :depth 0.4 :uFreq 8) shape))
+            (model
+              (part body
+                (ribbed (extrude (circle 5) 18))))
+            "#
+        ));
+    }
+
+    #[test]
+    fn source_uses_ecky_rust_only_cad_ops_ignores_wall_pattern_strings() {
+        assert!(!source_uses_ecky_rust_only_cad_ops(
+            r#"(model
+                (part body
+                  (extrude (text "wall-pattern") 2)))"#
+        ));
+    }
+
+    #[test]
+    fn source_uses_exact_backend_only_cad_ops_detects_sampled_radial_loft_heads() {
+        assert!(source_uses_exact_backend_only_cad_ops(
+            r#"(model
+                (part body
+                  (sampled-radial-loft
+                    (theta z fz)
+                    :height 40
+                    :z-steps 6
+                    :theta-steps 24
+                    :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))))"#
+        ));
+        assert!(source_uses_exact_backend_only_cad_ops(
+            r#"
+            (define (make-shell amp)
+              (sampled-radial-loft
+                (theta z fz)
+                :height 40
+                :z-steps 6
+                :theta-steps 24
+                :radius (+ 20 (* amp (sin (+ (* theta 6) (* fz 3.141592653589793)))))))
+            (model
+              (part body
+                (make-shell 2)))
+            "#
+        ));
+    }
+
+    #[test]
+    fn source_uses_exact_backend_only_cad_ops_ignores_strings() {
+        assert!(!source_uses_exact_backend_only_cad_ops(
+            r#"(model
+                (part body
+                  (extrude (text "sampled-radial-loft") 2)))"#
+        ));
+    }
+
+    #[test]
     fn lower_build123d_from_core_program_matches_public_entrypoint() {
         let source = r#"
             (define base-radius 14)

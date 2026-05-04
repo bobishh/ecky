@@ -4,7 +4,7 @@ import type {
   SketchPrimitive,
   SketchSuggestionRequest,
 } from './tauri/contracts';
-import { constraintsForStroke } from './sketchWorkspaceState';
+import { constraintsForStroke, strokeKind } from './sketchWorkspaceState';
 import type { SketchPoint, SketchStroke } from './sketchWorkspaceState';
 
 export const WORKSPACE_SKETCH_DOCUMENT_ID = 'workspace-sketch-document';
@@ -56,6 +56,15 @@ export function buildSketchSuggestionDocument(strokes: SketchStroke[]): SketchDo
 }
 
 function strokeToPrimitive(stroke: SketchStroke): SketchPrimitive {
+  if (strokeKind(stroke) === 'circle') {
+    return {
+      primitiveId: stroke.primitiveId,
+      kind: 'circle',
+      points: stroke.points.map(copyPoint),
+      closed: true,
+      radius: stroke.radius ?? null,
+    };
+  }
   return {
     primitiveId: stroke.primitiveId,
     kind: 'polyline',

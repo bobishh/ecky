@@ -29,12 +29,21 @@ find "$WORK_DIR/src" -type f \
   \( -name '*.h' -o -name '*.hxx' -o -name '*.hpp' -o -name '*.lxx' -o -name '*.gxx' \) \
   -exec cp {} "$INCLUDE_DIR/" \;
 
-for required in \
-  BRepPrimAPI_MakeBox.hxx \
-  BRepMesh_IncrementalMesh.hxx \
-  STEPControl_Writer.hxx \
-  StlAPI_Writer.hxx \
-  TopoDS_Shape.hxx; do
+REQUIRED_HEADERS=()
+while IFS= read -r required_header; do
+  REQUIRED_HEADERS+=("$required_header")
+done < <(
+  sed -n '/pub const REQUIRED_OCCT_HEADERS/,/];/p' \
+    "$ROOT/src-tauri/src/ecky_cad_host/direct_occt_sdk.rs" \
+    | sed -n 's/.*"\([^"]*\)".*/\1/p'
+)
+
+if [[ "${#REQUIRED_HEADERS[@]}" -eq 0 ]]; then
+  echo "Could not read required OCCT header list from direct_occt_sdk.rs" >&2
+  exit 1
+fi
+
+for required in "${REQUIRED_HEADERS[@]}"; do
   if [[ ! -f "$INCLUDE_DIR/$required" ]]; then
     echo "Missing required OCCT header after extraction: $required" >&2
     exit 1

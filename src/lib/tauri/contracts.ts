@@ -21,14 +21,6 @@ async saveConfig(config: Config) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async getSystemPrompt() : Promise<Result<string, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_system_prompt") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async listModels(provider: string, apiKey: string, baseUrl: string) : Promise<Result<string[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_models", { provider, apiKey, baseUrl }) };
@@ -64,6 +56,14 @@ async readComponentPackageManifest(projectDir: string) : Promise<Result<Componen
 async writeComponentPackageManifest(projectDir: string, componentPackage: ComponentPackage) : Promise<Result<string, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("write_component_package_manifest", { projectDir, componentPackage }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async writeArtifactBundleComponentPackageProject(projectDir: string, request: ArtifactBundleComponentPackageRequest) : Promise<Result<ComponentPackage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_artifact_bundle_component_package_project", { projectDir, request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -117,6 +117,70 @@ async listInstalledComponentPackageHeaders() : Promise<Result<ComponentPackageHe
     else return { status: "error", error: e  as any };
 }
 },
+async resolveInstalledComponentSource(packageId: string, version: string, componentId: string) : Promise<Result<InstalledComponentSource, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_installed_component_source", { packageId, version, componentId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resolveInstalledComponentControls(packageId: string, version: string, componentId: string, parameters: Partial<{ [key in string]: ParamValue }>) : Promise<Result<InstalledComponentControls, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_installed_component_controls", { packageId, version, componentId, parameters }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resolveInstalledComponentAssembly(packageId: string, version: string, assemblyId: string) : Promise<Result<InstalledAssemblySource, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_installed_component_assembly", { packageId, version, assemblyId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resolveInstalledComponentAssemblyControls(packageId: string, version: string, assemblyId: string, instanceParameters: Partial<{ [key in string]: Partial<{ [key in string]: ParamValue }> }>) : Promise<Result<InstalledAssemblyControls, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_installed_component_assembly_controls", { packageId, version, assemblyId, instanceParameters }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async renderInstalledComponentSource(packageId: string, version: string, componentId: string, parameters: Partial<{ [key in string]: ParamValue }>) : Promise<Result<InstalledComponentRuntime, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("render_installed_component_source", { packageId, version, componentId, parameters }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async renderInstalledComponentAssembly(packageId: string, version: string, assemblyId: string, instanceParameters: Partial<{ [key in string]: Partial<{ [key in string]: ParamValue }> }>) : Promise<Result<InstalledAssemblyRuntime, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("render_installed_component_assembly", { packageId, version, assemblyId, instanceParameters }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async exportInstalledComponentAssembly3mf(packageId: string, version: string, assemblyId: string, instanceParameters: Partial<{ [key in string]: Partial<{ [key in string]: ParamValue }> }>, targetPath: string, modelName: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_installed_component_assembly_3mf", { packageId, version, assemblyId, instanceParameters, targetPath, modelName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async exportInstalledComponentAssemblyMultipartStlZip(packageId: string, version: string, assemblyId: string, instanceParameters: Partial<{ [key in string]: Partial<{ [key in string]: ParamValue }> }>, targetPath: string, modelName: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_installed_component_assembly_multipart_stl_zip", { packageId, version, assemblyId, instanceParameters, targetPath, modelName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getHistory() : Promise<Result<Thread[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_history") };
@@ -136,6 +200,14 @@ async getThread(id: string) : Promise<Result<Thread, AppError>> {
 async getThreadLatestVersion(threadId: string) : Promise<Result<Message | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_thread_latest_version", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getThreadMessageVersion(threadId: string, messageId: string) : Promise<Result<Message | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_thread_message_version", { threadId, messageId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -168,22 +240,6 @@ async deleteThread(id: string) : Promise<Result<null, AppError>> {
 async renameThread(id: string, title: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("rename_thread", { id, title }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async setThreadEngineKind(id: string, engineKind: EngineKind) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_thread_engine_kind", { id, engineKind }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage, geometryBackend: GeometryBackend) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_thread_authoring_context", { id, sourceLanguage, geometryBackend }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -456,6 +512,22 @@ async generateSketchPreviewHull(request: SketchPreviewHullRequest) : Promise<Res
 async analyzeSketchBrepCandidates(request: SketchBrepCandidateRequest) : Promise<Result<SketchBrepCandidateResponse, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("analyze_sketch_brep_candidates", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async acceptedBrepCandidateToComponentPackage(request: SketchAcceptedBrepComponentPackageRequest) : Promise<Result<ComponentPackage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("accepted_brep_candidate_to_component_package", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async acceptSketchBrepCandidateSolution(request: SketchBrepCandidateAcceptRequest) : Promise<Result<SketchBrepCandidateAcceptResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("accept_sketch_brep_candidate_solution", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -764,7 +836,8 @@ vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLab
 export type AppError = { code: AppErrorCode; message: string; details?: string | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
-export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
+export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
+export type ArtifactBundleComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef?: string | null; artifactBundle: ArtifactBundle; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type AssemblyComponentRef = { instanceId: string; componentId: string }
 export type AssemblyDefinition = { assemblyId: string; displayName: string; components?: AssemblyComponentRef[]; mates?: AssemblyMate[]; operations?: AssemblyOperation[]; output: AssemblyOutput }
 export type AssemblyHeader = { assemblyId: string; displayName: string; componentCount: number; mateCount: number; operationCount: number; output: AssemblyOutput }
@@ -786,19 +859,21 @@ export type AutoAgent = { id: string; label: string; cmd: string; model?: string
 startOnDemand?: boolean }
 export type BrepHiddenLineProjectionRequest = { artifactBundle: ArtifactBundle; views?: SketchView[]; tolerance?: number | null; sketchDocument?: SketchDocument | null }
 export type BrepHiddenLineProjectionResponse = { modelId: string; sourceArtifactPath: string; views?: BrepHiddenLineProjectionView[]; warnings?: string[]; validation?: SketchBrepProjectionValidation | null }
-export type BrepHiddenLineProjectionView = { view: SketchView; direction: [number, number, number]; visibleEdges?: BrepProjectedEdge2d[]; hiddenEdges?: BrepProjectedEdge2d[] }
+export type BrepHiddenLineProjectionView = { view: SketchView; direction: [number, number, number]; visibleEdges?: BrepProjectedEdge2d[]; hiddenEdges?: BrepProjectedEdge2d[]; loops?: BrepProjectedLoop2d[] }
 export type BrepProjectedEdge2d = { edgeId: string; points?: ([number, number])[]; sourceClass: string }
+export type BrepProjectedLoop2d = { loopId: string; edgeIds?: string[]; points?: ([number, number])[]; role?: BrepProjectedLoopRole; sourceClass: string }
+export type BrepProjectedLoopRole = "outer" | "hole" | "unknown"
 export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
-export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null; sketches?: SketchDefinition[]; keepouts?: ComponentKeepoutVolume[]; fusionZones?: ComponentFusionZone[]; params?: ComponentParam[]; ports?: ComponentPort[] }
+export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null; macroDialect?: MacroDialect | null; sketches?: SketchDefinition[]; keepouts?: ComponentKeepoutVolume[]; fusionZones?: ComponentFusionZone[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type ComponentFusionZone = { zoneId: string; surfaceRef: string; allowedOps?: OperationKind[]; maxBlendRadius?: number | null; keepoutIds?: string[] }
-export type ComponentHeader = { componentId: string; version: string; displayName: string; params?: ComponentParam[]; ports?: ComponentPort[] }
+export type ComponentHeader = { componentId: string; version: string; displayName: string; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type ComponentInterfaceValue = number | string | boolean
 export type ComponentKeepoutVolume = { keepoutId: string; label: string; kind: KeepoutVolumeKind; frame?: PortFrame | null; size?: [number, number, number] | null; radius?: number | null; height?: number | null }
 export type ComponentPackage = { schemaVersion?: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentDefinition[]; assemblies?: AssemblyDefinition[] }
 export type ComponentPackageHeader = { schemaVersion: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentHeader[]; assemblies?: AssemblyHeader[] }
 export type ComponentParam = { key: string; label: string; kind: ComponentParamKind; unit?: string | null }
 export type ComponentParamKind = "number" | "text" | "boolean" | "choice"
-export type ComponentPort = { portId: string; typeId: string; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
+export type ComponentPort = { portId: string; typeId: string; targetIds?: string[]; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
 export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
@@ -812,24 +887,31 @@ export type DeletedMessage = { id: string; threadId: string; threadTitle: string
 export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
-export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; systemPrompt: string; 
-/**
- * Explicit opt-in: API calls are blocked unless this is true.
- * Defaults to true for backward compatibility with existing configs.
- */
-enabled?: boolean }
+export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; enabled?: boolean }
 export type EngineKind = "freecad" | "ecky" | "build123d"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
 export type ExportArtifact = { label: string; format: string; path: string; role: string }
-export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null }
+export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null; placementFrame?: PortFrame | null }
 export type EyeStyle = "dot" | "bar" | "slant"
 export type FinalizeStatus = "success" | "error" | "discarded"
 export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null; engineKind?: EngineKind | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null }
 export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
 export type GeometryBackend = "freecad" | "build123d" | "mesh"
+export type InstalledAssemblyComponentControls = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }
+export type InstalledAssemblyComponentRuntime = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; runtime: InstalledComponentRuntime }
+export type InstalledAssemblyComponentSource = { instanceId: string; componentId: string; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }
+export type InstalledAssemblyControls = { packageId: string; version: string; packageDisplayName: string; packageDir: string; assembly: AssemblyDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: InstalledAssemblyComponentControls[]; mateResults?: InstalledAssemblyMateResult[]; matesSolved?: boolean }
+export type InstalledAssemblyMateResult = { mateId: string; solved: boolean; requiredClearance?: number | null; availableClearance?: number | null; warning?: string | null }
+export type InstalledAssemblyOperationResult = { operationId: string; applied: boolean; groupId?: string | null; fusionZoneIdsByInstance?: Partial<{ [key in string]: string }>; warning?: string | null }
+export type InstalledAssemblyOutputRuntime = { artifactBundle: ArtifactBundle; modelManifest: ModelManifest }
+export type InstalledAssemblyRuntime = { packageId: string; version: string; packageDisplayName: string; packageDir: string; assembly: AssemblyDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: InstalledAssemblyComponentRuntime[]; mateResults?: InstalledAssemblyMateResult[]; matesSolved?: boolean; operationResults?: InstalledAssemblyOperationResult[]; operationsApplied?: boolean; outputRuntime?: InstalledAssemblyOutputRuntime | null; warnings?: string[] }
+export type InstalledAssemblySource = { packageId: string; version: string; packageDisplayName: string; packageDir: string; assembly: AssemblyDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: InstalledAssemblyComponentSource[]; mateResults?: InstalledAssemblyMateResult[] }
+export type InstalledComponentControls = { installedSource: InstalledComponentSource; parameters: Partial<{ [key in string]: ParamValue }> }
 export type InstalledComponentPackage = { header: ComponentPackageHeader; packageDir: string }
+export type InstalledComponentRuntime = { installedSource: InstalledComponentSource; parameters: Partial<{ [key in string]: ParamValue }>; artifactBundle: ArtifactBundle; modelManifest: ModelManifest }
+export type InstalledComponentSource = { packageId: string; version: string; packageDisplayName: string; packageDir: string; component: ComponentDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; sourcePath: string }
 export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
 export type InteractionMode = "design" | "question" | "tune"
 export type KeepoutVolumeKind = "box" | "cylinder" | "sphere" | "custom"
@@ -886,7 +968,7 @@ export type MessageStatus = "pending" | "working" | "success" | "error" | "disca
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
 export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
-export type ModelSourceKind = "generated" | "importedFcstd"
+export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep"
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
 export type PackageVisibility = "source" | "compiled" | "locked" | "private"
@@ -913,11 +995,18 @@ export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
-export type SelectionTargetKind = "part" | "object" | "group" | "edge"
+export type SelectionTargetKind = "part" | "object" | "group" | "edge" | "face"
+export type SketchAcceptedBrepComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef: string; artifactBundle?: ArtifactBundle | null; document: SketchDocument; solutionId: string; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
+export type SketchBrepCandidateAcceptRequest = { partId: string; document: SketchDocument; solutionId: string; tolerance?: number | null }
+export type SketchBrepCandidateAcceptResponse = { draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; hiddenLineResponse: BrepHiddenLineProjectionResponse; candidateResponse: SketchBrepCandidateResponse; acceptedSolution: SketchBrepCandidateSolution; evidence?: string[] }
+export type SketchBrepCandidateCell = { cellId: string; min: [number, number, number]; max: [number, number, number]; supportViews?: SketchView[] }
 export type SketchBrepCandidateEdge = { edgeId: string; a: string; b: string; supportViews?: SketchView[] }
 export type SketchBrepCandidateGraph = { vertices?: SketchBrepCandidateVertex[]; edges?: SketchBrepCandidateEdge[] }
 export type SketchBrepCandidateRequest = { document: SketchDocument }
-export type SketchBrepCandidateResponse = { graph: SketchBrepCandidateGraph; validation: SketchBrepProjectionValidation }
+export type SketchBrepCandidateResponse = { graph: SketchBrepCandidateGraph; search: SketchBrepCandidateSearch; validation: SketchBrepProjectionValidation }
+export type SketchBrepCandidateSearch = { cells?: SketchBrepCandidateCell[]; rejectedCellCount?: number; solutions?: SketchBrepCandidateSolution[]; evidence?: string[] }
+export type SketchBrepCandidateSolution = { solutionId: string; cellIds?: string[]; score: number; sourceStrategy?: SketchBrepCandidateSourceStrategy; evidence?: string[] }
+export type SketchBrepCandidateSourceStrategy = "cellUnion" | "frontProfilePrism"
 export type SketchBrepCandidateVertex = { vertexId: string; point: [number, number, number]; evidenceViews?: SketchView[] }
 export type SketchBrepProjectionValidation = { passed: boolean; issues?: SketchValidationIssue[]; evidence?: string[] }
 export type SketchConstraint = { constraintId: string; kind: SketchConstraintKind; targetIds?: string[]; value?: number | null }
@@ -942,9 +1031,9 @@ export type StructuralIssue = { code: string; message: string;
  * ID of the affected part, when the issue is part-specific.
  */
 partId?: string | null; numericPayload?: number | null }
-export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
+export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; previewStlTriangleCount?: number | null; previewStlComponentCount?: number | null; previewStlNonManifoldEdgeCount?: number | null; previewStlOverhangTriangleCount?: number | null; previewStlOverhangRatio?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
 export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
-export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend }
+export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
 export type ThreadAgentState = { 
 /**
  * "none" | "sleeping" | "waking" | "waiting" | "active" | "disconnected" | "error"
@@ -965,6 +1054,7 @@ export type ViewerAsset = { partId: string; nodeId: string; objectName: string; 
 export type ViewerAssetFormat = "stl" | "gltf" | "glb"
 export type ViewerEdgePoint = { x: number; y: number; z: number }
 export type ViewerEdgeTarget = { targetId: string; partId: string; viewerNodeId: string; label: string; editable: boolean; start: ViewerEdgePoint; end: ViewerEdgePoint }
+export type ViewerFaceTarget = { targetId: string; partId: string; viewerNodeId: string; label: string; editable: boolean; center: ViewerEdgePoint; normal?: [number, number, number] | null; area?: number | null }
 export type ViewportCameraState = { position: [number, number, number]; target: [number, number, number]; zoom?: number | null; fov?: number | null }
 export type VisualIssue = { category: VisualIssueCategory; description: string; partLabel?: string | null }
 export type VisualIssueCategory = "missing_part" | "floating_part" | "connector_broken" | "reference_mismatch" | "topology_broken" | "other"

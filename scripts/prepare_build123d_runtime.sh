@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_DIR="$ROOT/.dist/build123d-runtime"
 SEED_PYTHON="${BUILD123D_PYTHON:-${PYTHON_CMD:-python3}}"
 
@@ -51,3 +52,5 @@ import sys
 print(f"Prepared build123d runtime: {sys.executable}")
 print(f"build123d module: {build123d.__file__}")
 PY
+
+bash "$SCRIPT_DIR/prepare_occt_headers.sh"

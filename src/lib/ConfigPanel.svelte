@@ -8,7 +8,6 @@
     formatBackendError,
     getAppLogs,
     getMcpServerStatus,
-    getSystemPrompt,
     listAgentModels,
     saveRecordedAudio,
     uploadAsset,
@@ -21,7 +20,7 @@
     RuntimeCapabilities,
   } from './types/domain';
 
-  type ActiveSection = 'agents' | 'engines' | 'freecad' | 'sounds' | 'prompts' | 'logs';
+  type ActiveSection = 'agents' | 'engines' | 'freecad' | 'sounds' | 'logs';
   type ConnectionType = 'api_key' | 'mcp' | null;
   type McpMode = 'passive' | 'active';
   type RecordingTarget = 'hum' | 'ding';
@@ -147,15 +146,22 @@
     'session_log_out',
     'resume_session',
     'thread_list',
+    'thread_create',
+    'thread_borrow',
     'thread_get',
     'agent_identity_set',
     'target_meta_get',
     'target_macro_get',
+    'macro_buffer_get',
+    'macro_buffer_replace_range',
+    'macro_buffer_apply_patch',
+    'macro_buffer_render',
     'target_detail_get',
     'target_get',
     'get_model_screenshot',
     'params_patch_and_render',
     'macro_replace_and_render',
+    'macro_buffer_replace_and_render',
     'semantic_manifest_get',
     'control_primitive_save',
     'control_primitive_delete',
@@ -241,6 +247,7 @@
   });
   const freecadCapability = $derived(runtimeCapabilities?.freecad ?? null);
   const build123dCapability = $derived(runtimeCapabilities?.build123d ?? null);
+  const directOcctCapability = $derived(runtimeCapabilities?.directOcct ?? null);
 
   function setDefaultFreecadContext() {
     if (!freecadCapability?.available) return;
@@ -534,9 +541,8 @@
     }
   }
 
-  async function addEngine() {
+  function addEngine() {
     const id = `engine-${Date.now()}`;
-    const defaultPrompt = await getSystemPrompt();
     const newEngine = {
       id,
       name: 'New Engine',
@@ -545,7 +551,6 @@
       model: '',
       lightModel: '',
       baseUrl: '',
-      systemPrompt: defaultPrompt,
       enabled: false,
     };
     config.engines = [...config.engines, newEngine];
@@ -759,16 +764,10 @@
     }
     await refreshModels();
   }
-  async function resetPrompt() {
-    if (selectedEngine) {
-      selectedEngine.systemPrompt = await getSystemPrompt();
-    }
-  }
 </script>
 
 <div class="config-container">
   <aside class="config-sidebar">
-    <button class="nav-item {activeSection === 'prompts' ? 'active' : ''}" onclick={() => activeSection = 'prompts'}>PROMPTS</button>
     <button class="nav-item {activeSection === 'freecad' ? 'active' : ''}" onclick={() => activeSection = 'freecad'}>FREECAD</button>
     <button class="nav-item {activeSection === 'sounds' ? 'active' : ''}" onclick={() => activeSection = 'sounds'}>SOUNDS</button>
     <button class="nav-item {activeSection === 'agents' || activeSection === 'engines' ? 'active' : ''}" onclick={() => activeSection = 'agents'}>AGENTS</button>
@@ -779,30 +778,7 @@
     <div class="details-scrollable">
       <div class="details-content">
 
-      {#if activeSection === 'prompts'}
-        {#if config.engines.length === 0}
-          <div class="no-engine">
-            <p>No engines configured. Add an engine in AGENTS first.</p>
-          </div>
-        {:else}
-          {#if selectedEngine}
-            <div class="field prompt-field">
-              <div class="prompt-header">
-                <label for="e-prompt-top">SYSTEM PROMPT — {selectedEngine.name || 'selected engine'}</label>
-                <button class="btn btn-xs" onclick={resetPrompt}>RESET TO DEFAULT</button>
-              </div>
-              <textarea
-                id="e-prompt-top"
-                class="input-mono system-prompt-input"
-                spellcheck="false"
-                bind:value={selectedEngine.systemPrompt}
-                placeholder="Template for LLM. Use $USER_PROMPT as placeholder for user intent."
-              ></textarea>
-            </div>
-          {/if}
-        {/if}
-
-      {:else if activeSection === 'freecad'}
+      {#if activeSection === 'freecad'}
         {#if runtimeCapabilities}
           <div class="field">
             <div class="field-title">RUNTIME STATUS</div>
@@ -1024,6 +1000,17 @@
                 onclick={() => { config.defaultGeometryBackend = 'mesh'; }}
               >MESH</button>
             </div>
+            {#if directOcctCapability}
+              <div class="direct-occt-fastpath" aria-label="Direct OCCT STEP fast path">
+                <div class="direct-occt-fastpath__head">
+                  <span>DIRECT OCCT STEP FAST PATH</span>
+                  <strong class:direct-occt-fastpath__state--ready={directOcctCapability.available}>
+                    {directOcctCapability.available ? 'READY' : 'BLOCKED'}
+                  </strong>
+                </div>
+                <div class="direct-occt-fastpath__detail">{directOcctCapability.detail}</div>
+              </div>
+            {/if}
           {/if}
           <div class="field-help">
             New generated threads inherit this source and backend by default. Imported FCStd threads stay FreeCAD Python.
@@ -1379,20 +1366,6 @@
             </div>
           {/if}
 
-          <div class="field prompt-field">
-            <div class="prompt-header">
-              <label for="e-prompt">SYSTEM PROMPT (template with $USER_PROMPT)</label>
-              <button class="btn btn-xs" onclick={resetPrompt}>RESET TO DEFAULT</button>
-            </div>
-            <textarea 
-              id="e-prompt" 
-              class="input-mono system-prompt-input" 
-              spellcheck="false"
-              bind:value={selectedEngine.systemPrompt}
-              placeholder="Template for LLM. Use $USER_PROMPT as placeholder for user intent."
-            ></textarea>
-          </div>
-
           <div class="danger-zone">
             <button class="btn btn-xs btn-ghost" onclick={() => removeEngine(selectedEngine.id)}>REMOVE ENGINE</button>
           </div>
@@ -1626,6 +1599,42 @@
     overflow: hidden;
   }
 
+  .direct-occt-fastpath {
+    margin-top: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    overflow: hidden;
+  }
+
+  .direct-occt-fastpath__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: var(--text-dim);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+
+  .direct-occt-fastpath__head strong {
+    color: var(--red);
+    white-space: nowrap;
+  }
+
+  .direct-occt-fastpath__head strong.direct-occt-fastpath__state--ready {
+    color: var(--secondary);
+  }
+
+  .direct-occt-fastpath__detail {
+    margin-top: 5px;
+    color: var(--text-dim);
+    font-size: 0.62rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
   .flex-1 { flex: 1; }
   .flex-2 { flex: 2; }
 
@@ -1643,7 +1652,7 @@
     letter-spacing: 0.05em;
   }
 
-  input, textarea {
+  input {
     padding: 8px 12px;
     background: var(--bg-200);
     border: 1px solid var(--bg-300);
@@ -1654,15 +1663,8 @@
     width: 100%;
   }
 
-  input:focus, textarea:focus {
+  input:focus {
     border-color: var(--primary);
-  }
-
-  .prompt-field {
-    flex: 1;
-    min-height: 300px;
-    display: flex;
-    flex-direction: column;
   }
 
   .prompt-header {
@@ -1748,12 +1750,6 @@
     font-size: 0.62rem;
     color: var(--text-dim);
     word-break: break-word;
-  }
-
-  .system-prompt-input {
-    flex: 1;
-    resize: none;
-    line-height: 1.5;
   }
 
   .danger-zone {

@@ -40,7 +40,18 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     return lines.join('\n');
   }
 
-  async function setupMocks(page: Page, options: { failCanonicalCup?: boolean; stepArtifact?: boolean } = {}) {
+  async function setupMocks(
+    page: Page,
+    options: {
+      failCanonicalCup?: boolean;
+      stepArtifact?: boolean;
+      directOcctAvailable?: boolean;
+      directOcctDetail?: string;
+      forkConfirmResult?: boolean;
+      bootWithGeneratedDesign?: boolean;
+      renderModelDelayMs?: number;
+    } = {},
+  ) {
     const stlFixtures: Record<string, string> = {
       '/mock/output.stl': boxStl('output', [-35, 0, -20], [35, 28, 20]),
       '/mock/parts/shell.stl': boxStl('shell', [-120, 0, -42], [-10, 60, 42]),
@@ -76,6 +87,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       const generatedBundle = () => ({
         modelId: 'generated-box',
         sourceKind: 'generated',
+        engineKind: 'ecky',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'mesh',
         contentHash: 'abc123',
         fcstdPath: '/mock/output.FCStd',
         manifestPath: '/mock/manifest.json',
@@ -377,6 +391,29 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       window.__MOCK_MODEL_MANIFESTS__['imported-fcstd-1'] = importedManifest();
       window.__MOCK_BUNDLES__['generated-box'] = generatedBundle();
       window.__MOCK_BUNDLES__['imported-fcstd-1'] = importedBundle();
+      if (mockOptions.bootWithGeneratedDesign) {
+        window.__MOCK_LAST_DESIGN__ = {
+          design: {
+            title: 'A Box',
+            versionName: 'V1',
+            macroCode: 'create_box()',
+            initialParams: { size: 10, height: 14 },
+            uiSpec: {
+              fields: [
+                { type: 'range', key: 'size', label: 'Size', min: 1, max: 40, step: 1, frozen: false },
+                { type: 'number', key: 'height', label: 'Height', min: 1, max: 80, step: 1, frozen: false }
+              ]
+            },
+            response: 'Box created.',
+            interactionMode: 'design'
+          },
+          threadId: 'thread-restored',
+          messageId: 'msg-restored',
+          artifactBundle: generatedBundle(),
+          modelManifest: generatedManifest(),
+          selectedPartId: null,
+        };
+      }
 
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         (window as any).__MOCK_CALLS__.push({ cmd, args });
@@ -393,6 +430,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           return {
             freecad: { available: true, detail: 'Ready at /mock/freecadcmd', path: '/mock/freecadcmd' },
             build123d: { available: true, detail: 'Ready at /mock/python3', path: '/mock/python3' },
+            directOcct: {
+              available: mockOptions.directOcctAvailable ?? false,
+              detail: mockOptions.directOcctDetail ?? 'Direct OCCT unavailable: missing TKDESTEP',
+              path: mockOptions.directOcctAvailable ? '/mock/occt' : null,
+            },
             mesh: { available: true, detail: 'bundled', path: null },
             recommendedAuthoringContext: {
               engineKind: 'freecad',
@@ -423,6 +465,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
         if (cmd === 'plugin:dialog|open') return '/mock/imported.FCStd';
         if (cmd === 'plugin:dialog|save') return '/mock/exported.step';
+        if (cmd === 'plugin:dialog|confirm') return mockOptions.forkConfirmResult ?? true;
         if (cmd === 'export_file') return null;
         
         if (cmd === 'init_generation_attempt') {
@@ -516,6 +559,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         }
 
         if (cmd === 'render_model') {
+          const delayMs = Number(mockOptions.renderModelDelayMs ?? 0);
+          if (delayMs > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+          }
           return window.__MOCK_BUNDLES__['generated-box'];
         }
 
@@ -603,6 +650,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
               assistantMsg.content = args.responseText || (args.status === 'success' ? 'Success' : 'Error');
               if (args.design) assistantMsg.output = args.design;
               if (args.usage) assistantMsg.usage = args.usage;
+              if (args.artifactBundle) assistantMsg.artifactBundle = args.artifactBundle;
+              if (args.modelManifest) assistantMsg.modelManifest = args.modelManifest;
             }
           }
           if (args.status === 'success') {
@@ -623,13 +672,31 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           return null;
         }
 
+        if (cmd === 'get_thread_latest_version') {
+          const thread = window.__MOCK_THREADS__[args.threadId];
+          if (!thread) return null;
+          return [...thread.messages].reverse().find((message) =>
+            message.role === 'assistant' && (message.output || message.artifactBundle || message.modelManifest),
+          ) ?? null;
+        }
+
+        if (cmd === 'get_thread_messages_page') {
+          const thread = window.__MOCK_THREADS__[args.threadId];
+          return {
+            messages: thread?.messages ?? [],
+            nextBefore: null,
+            hasMore: false,
+          };
+        }
+
         if (cmd === 'add_manual_version') {
+          const input = args.input ?? args;
           const messageId = 'manual-' + Math.random();
-          const threadId = args.threadId;
-          const historyThread = upsertHistoryThread(threadId, args.title);
+          const threadId = input.threadId;
+          const historyThread = upsertHistoryThread(threadId, input.title);
           historyThread.versionCount = (historyThread.versionCount || 0) + 1;
           historyThread.updatedAt = Date.now() / 1000;
-          historyThread.title = args.title;
+          historyThread.title = input.title;
 
           const thread = window.__MOCK_THREADS__[threadId] || {
             id: threadId,
@@ -642,16 +709,16 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
             status: 'success',
             timestamp: Date.now(),
             output: {
-              title: args.title,
-              versionName: args.versionName,
-              macroCode: args.macroCode,
-              uiSpec: args.uiSpec,
-              initialParams: args.parameters,
+              title: input.title,
+              versionName: input.versionName,
+              macroCode: input.macroCode,
+              uiSpec: input.uiSpec,
+              initialParams: input.parameters,
               response: 'Manual edit committed as new version.',
               interactionMode: 'design',
             },
-            artifactBundle: args.artifactBundle,
-            modelManifest: args.modelManifest,
+            artifactBundle: input.artifactBundle,
+            modelManifest: input.modelManifest,
           });
           window.__MOCK_THREADS__[threadId] = thread;
           return messageId;
@@ -809,6 +876,21 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_model')).toBeTruthy();
   });
 
+  test('normal model render shows viewport transmutation outside boot initialization', async ({ page }) => {
+    await setupMocks(page, { renderModelDelayMs: 1200 });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+
+    await expect(page.locator('.viewport-transmutation')).toBeVisible();
+    await expect(page.locator('.viewport-transmutation')).toHaveCount(0, { timeout: 5000 });
+    await expect(page.locator('.viewer-shell canvas')).toBeVisible();
+  });
+
   test('design flow should use the model runtime commands', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
@@ -824,10 +906,216 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_stl')).toBeFalsy();
   });
 
-  test('Given rendered model lacks STEP artifact When export chooser opens Then STEP stays pending', async ({
+  test('Given fork confirmation is cancelled When viewer fork is clicked Then no new thread is created', async ({
     page,
   }) => {
+    await setupMocks(page, { forkConfirmResult: false });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    const forkButton = page.getByRole('button', { name: /FORK/i });
+    await expect(forkButton).toBeEnabled();
+
+    const before = await page.evaluate(() => ({
+      threadIds: Object.keys((window as any).__MOCK_THREADS__),
+      addVersionCalls: (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) =>
+        ['add_manual_version', 'add_imported_model_version'].includes(entry.cmd),
+      ).length,
+    }));
+
+    await forkButton.click();
+
+    await expect
+      .poll(async () => {
+        const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|confirm').length;
+      })
+      .toBe(1);
+    await expect
+      .poll(async () => {
+        const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
+        return calls.filter((entry: { cmd: string }) =>
+          ['add_manual_version', 'add_imported_model_version'].includes(entry.cmd),
+        ).length;
+      })
+      .toBe(before.addVersionCalls);
+
+    const afterThreadIds = await page.evaluate(() => Object.keys((window as any).__MOCK_THREADS__));
+    expect(afterThreadIds).toEqual(before.threadIds);
+  });
+
+  test('Given fork confirmation is accepted When viewer fork is clicked Then version copies into a new thread', async ({
+    page,
+  }) => {
+    await setupMocks(page, { forkConfirmResult: true });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    const forkButton = page.getByRole('button', { name: /FORK/i });
+    await expect(forkButton).toBeEnabled();
+
+    const beforeThreadCount = await page.evaluate(() => Object.keys((window as any).__MOCK_THREADS__).length);
+
+    await forkButton.click();
+
+    await expect
+      .poll(async () => {
+        const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|confirm').length;
+      })
+      .toBe(1);
+    await expect
+      .poll(async () => {
+        return page.evaluate(() => Object.keys((window as any).__MOCK_THREADS__).length);
+      })
+      .toBe(beforeThreadCount + 1);
+    const forkWrite = await page.evaluate(() =>
+      (window as any).__MOCK_CALLS__.find((entry: { cmd: string }) =>
+        ['add_manual_version', 'add_imported_model_version'].includes(entry.cmd),
+      ),
+    );
+    expect(forkWrite?.cmd).toBeTruthy();
+  });
+
+  test('Given code inspector forks a version When new thread becomes active Then code remains clickable', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await setupMocks(page, { forkConfirmResult: true, bootWithGeneratedDesign: true });
+    await gotoWorkbench(page);
+
+    const viewportCodeButton = page.locator('.export-actions').getByRole('button', { name: /CODE/i });
+    await expect(viewportCodeButton).toBeEnabled();
+    await viewportCodeButton.click();
+    await expect(page.locator('.cm-content')).toContainText('create_box()');
+
+    await page.getByRole('button', { name: /FORK TO NEW THREAD/i }).click();
+    await expect(page.locator('.code-modal-content')).toHaveCount(0);
+
+    await expect(viewportCodeButton).toBeEnabled();
+    await viewportCodeButton.click();
+    await expect(page.locator('.cm-content')).toContainText('create_box()');
+  });
+
+  test('Given floating window header is inconvenient When dragging visible content and double-clicking body Then window moves and fits viewport', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1180, height: 680 });
     await setupMocks(page);
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    const dialogueWindow = page.locator('[data-window-id="dialogue"]');
+    await expect(dialogueWindow).toBeVisible();
+
+    const toolbar = dialogueWindow.locator('.dialogue-toolbar');
+    await expect(toolbar).toBeVisible();
+    const dragPoint = await toolbar.evaluate((node) => {
+      const toolbarRect = node.getBoundingClientRect();
+      const labelRect = (node.querySelector('.dialogue-toolbar__remember') as HTMLElement | null)?.getBoundingClientRect() ?? toolbarRect;
+      const gapLeft = labelRect.right + 16;
+      const gapRight = toolbarRect.right - 16;
+      const x = gapLeft < gapRight ? (gapLeft + gapRight) / 2 : toolbarRect.left + toolbarRect.width * 0.8;
+      return {
+        x,
+        y: toolbarRect.top + toolbarRect.height / 2,
+      };
+    });
+
+    const beforeBox = await dialogueWindow.boundingBox();
+    expect(beforeBox).not.toBeNull();
+
+    const viewportSize = page.viewportSize();
+    expect(viewportSize).not.toBeNull();
+    expect((beforeBox?.x ?? 0) + (beforeBox?.width ?? 0)).toBeGreaterThan(viewportSize?.width ?? 0);
+    expect((beforeBox?.y ?? 0) + (beforeBox?.height ?? 0)).toBeGreaterThan(viewportSize?.height ?? 0);
+
+    await page.mouse.move(dragPoint.x, dragPoint.y);
+    await page.mouse.down();
+    await page.mouse.move(dragPoint.x + 90, dragPoint.y + 70, { steps: 8 });
+    await page.mouse.up();
+
+    const movedBox = await dialogueWindow.boundingBox();
+    expect(movedBox).not.toBeNull();
+    expect(Math.abs((movedBox?.x ?? 0) - (beforeBox?.x ?? 0))).toBeGreaterThan(40);
+    expect(Math.abs((movedBox?.y ?? 0) - (beforeBox?.y ?? 0))).toBeGreaterThan(30);
+
+    await page.mouse.dblclick(dragPoint.x + 90, dragPoint.y + 70);
+
+    await expect
+      .poll(async () => {
+        const box = await dialogueWindow.boundingBox();
+        if (!box || !viewportSize) return null;
+        return {
+          withinViewport:
+            box.x >= 0 &&
+            box.y >= 0 &&
+            box.x + box.width <= (viewportSize?.width ?? 0) + 1 &&
+            box.y + box.height <= (viewportSize?.height ?? 0) + 1,
+        };
+      })
+      .toEqual({ withinViewport: true });
+  });
+
+  test('Given plain text inside floating window When pointer drags across text Then window stays put', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1180, height: 680 });
+    await setupMocks(page);
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.evaluate(() => {
+      const host = document.querySelector('[data-window-id="dialogue"] .dialogue-content');
+      if (!host) return;
+      const existing = document.getElementById('window-selection-proof');
+      existing?.remove();
+      const probe = document.createElement('div');
+      probe.id = 'window-selection-proof';
+      probe.textContent = 'Selection proof text stays selectable inside floating window.';
+      probe.style.padding = '12px';
+      probe.style.fontFamily = 'var(--font-mono)';
+      probe.style.fontSize = '14px';
+      probe.style.lineHeight = '1.4';
+      probe.style.userSelect = 'text';
+      host.appendChild(probe);
+    });
+    const bubbleText = page.locator('#window-selection-proof');
+    await expect(bubbleText).toBeVisible();
+
+    const dialogueWindow = page.locator('[data-window-id="dialogue"]');
+    const beforeBox = await dialogueWindow.boundingBox();
+    const textBox = await bubbleText.boundingBox();
+    expect(beforeBox).not.toBeNull();
+    expect(textBox).not.toBeNull();
+
+    const startX = (textBox?.x ?? 0) + Math.max(12, (textBox?.width ?? 0) * 0.2);
+    const endX = (textBox?.x ?? 0) + Math.max(48, (textBox?.width ?? 0) * 0.7);
+    const y = (textBox?.y ?? 0) + Math.max(10, (textBox?.height ?? 0) * 0.5);
+
+    await page.mouse.move(startX, y);
+    await page.mouse.down();
+    await page.mouse.move(endX, y, { steps: 12 });
+    await page.mouse.up();
+
+    const afterBox = await dialogueWindow.boundingBox();
+    expect(afterBox).not.toBeNull();
+    expect(Math.abs((afterBox?.x ?? 0) - (beforeBox?.x ?? 0))).toBeLessThanOrEqual(2);
+    expect(Math.abs((afterBox?.y ?? 0) - (beforeBox?.y ?? 0))).toBeLessThanOrEqual(2);
+  });
+
+  test('Given mesh model lacks STEP artifact When export chooser opens Then direct OCCT blocker is shown', async ({
+    page,
+  }) => {
+    await setupMocks(page, { directOcctDetail: 'Direct OCCT unavailable: missing TKDESTEP' });
     await gotoWorkbench(page);
 
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
@@ -842,7 +1130,72 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     const stepButton = page.locator('.export-chooser__action', { hasText: 'STEP' });
     await expect(stepButton).toBeVisible();
     await expect(stepButton).toBeDisabled();
-    await expect(stepButton).toContainText('STEP export is pending for this model.');
+    await expect(stepButton).toContainText(
+      'STEP unavailable for mesh/EckyRust render: Direct OCCT unavailable: missing TKDESTEP',
+    );
+  });
+
+  test('Given mesh model lacks STEP artifact When model renders Then direct OCCT STEP status shows blocker', async ({
+    page,
+  }) => {
+    await setupMocks(page, { directOcctDetail: 'Direct OCCT unavailable: missing TKDESTEP' });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.prompt-input')).toBeVisible();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+
+    const status = page.getByLabel('Direct OCCT STEP status');
+    await expect(status).toBeVisible();
+    await expect(status).toContainText('DIRECT OCCT STEP FAST PATH');
+    await expect(status).toContainText('BLOCKED');
+    await expect(status).toContainText('Direct OCCT unavailable: missing TKDESTEP');
+  });
+
+  test('Given direct OCCT is ready but mesh bundle has no STEP When export chooser opens Then BRep artifact absence is shown', async ({
+    page,
+  }) => {
+    await setupMocks(page, { directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.prompt-input')).toBeVisible();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(page.getByRole('button', { name: /EXPORT/i })).toBeVisible();
+    await page.getByRole('button', { name: /EXPORT/i }).click();
+
+    const stepButton = page.locator('.export-chooser__action', { hasText: 'STEP' });
+    await expect(stepButton).toBeVisible();
+    await expect(stepButton).toBeDisabled();
+    await expect(stepButton).toContainText(
+      'STEP unavailable for mesh/EckyRust render: no BRep STEP artifact was produced.',
+    );
+  });
+
+  test('Given direct OCCT is ready but mesh bundle has no STEP When model renders Then direct OCCT status explains no BRep artifact', async ({
+    page,
+  }) => {
+    await setupMocks(page, { directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.prompt-input')).toBeVisible();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+
+    const status = page.getByLabel('Direct OCCT STEP status');
+    await expect(status).toBeVisible();
+    await expect(status).toContainText('DIRECT OCCT STEP FAST PATH');
+    await expect(status).toContainText('READY / NO STEP');
+    await expect(status).toContainText('no BRep STEP artifact was produced');
   });
 
   test('Given rendered model has STEP artifact When STEP export selected Then source artifact is copied', async ({
@@ -871,6 +1224,26 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       })
       .toEqual({ sourcePath: '/mock/output.step', targetPath: '/mock/exported.step' });
     await expect(page.locator('.export-chooser')).toHaveCount(0);
+  });
+
+  test('Given rendered model has STEP artifact When model renders Then direct OCCT status shows STEP ready', async ({
+    page,
+  }) => {
+    await setupMocks(page, { stepArtifact: true, directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
+    await gotoWorkbench(page);
+
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.prompt-input')).toBeVisible();
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+
+    const status = page.getByLabel('Direct OCCT STEP status');
+    await expect(status).toBeVisible();
+    await expect(status).toContainText('DIRECT OCCT STEP FAST PATH');
+    await expect(status).toContainText('STEP READY');
+    await expect(status).toContainText('output.step');
   });
 
   test('selected parts expose editable controls in the main viewer overlay', async ({ page }) => {

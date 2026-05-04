@@ -272,7 +272,7 @@ fn ensure_target_parent_dir(target_path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn export_multipart_stl_zip_impl(
+pub(crate) fn export_multipart_stl_zip_impl(
     parts: &[ExportPartInput],
     target_path: &str,
     _model_name: String,
@@ -293,14 +293,6 @@ fn export_multipart_stl_zip_impl(
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     for (index, part) in parts.iter().enumerate() {
-        let bytes = fs::read(&part.path).map_err(|err| {
-            AppError::persistence(format!(
-                "Failed to read export part '{}' at '{}': {}",
-                export_part_label(part),
-                part.path,
-                err
-            ))
-        })?;
         zip.start_file(export_entry_name(index, part), options)
             .map_err(|err| {
                 AppError::persistence(format!(
@@ -309,13 +301,33 @@ fn export_multipart_stl_zip_impl(
                     err
                 ))
             })?;
-        zip.write_all(&bytes).map_err(|err| {
-            AppError::persistence(format!(
-                "Failed to write '{}' into multipart STL archive: {}",
-                export_part_label(part),
-                err
-            ))
-        })?;
+        if let Some(frame) = part.placement_frame.as_ref() {
+            let triangles =
+                transform_stl_triangles(read_binary_stl_triangles(Path::new(&part.path))?, frame);
+            write_binary_stl_triangles(&mut zip, &triangles).map_err(|err| {
+                AppError::persistence(format!(
+                    "Failed to write transformed '{}' into multipart STL archive: {}",
+                    export_part_label(part),
+                    err
+                ))
+            })?;
+        } else {
+            let bytes = fs::read(&part.path).map_err(|err| {
+                AppError::persistence(format!(
+                    "Failed to read export part '{}' at '{}': {}",
+                    export_part_label(part),
+                    part.path,
+                    err
+                ))
+            })?;
+            zip.write_all(&bytes).map_err(|err| {
+                AppError::persistence(format!(
+                    "Failed to write '{}' into multipart STL archive: {}",
+                    export_part_label(part),
+                    err
+                ))
+            })?;
+        }
     }
 
     zip.finish().map_err(|err| {
@@ -333,6 +345,7 @@ struct MultipartThreeMfObject {
     id: u32,
     name: String,
     color_index: usize,
+    transform: Option<String>,
     triangles: Vec<[[f32; 3]; 3]>,
 }
 
@@ -340,7 +353,7 @@ fn read_f32<R: Read>(reader: &mut R) -> AppResult<f32> {
     let mut bytes = [0u8; 4];
     reader.read_exact(&mut bytes).map_err(|err| {
         AppError::internal(format!(
-            "Failed to read STL scalar while exporting 3MF: {}",
+            "Failed to read STL scalar while exporting multipart model: {}",
             err
         ))
     })?;
@@ -354,7 +367,7 @@ fn read_vec3<R: Read>(reader: &mut R) -> AppResult<[f32; 3]> {
 fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
     let mut file = File::open(path).map_err(|err| {
         AppError::not_found(format!(
-            "Failed to open STL part '{}' for 3MF export: {}",
+            "Failed to open STL part '{}' for multipart export: {}",
             path.display(),
             err
         ))
@@ -362,7 +375,7 @@ fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
     let mut header = [0u8; 80];
     file.read_exact(&mut header).map_err(|err| {
         AppError::internal(format!(
-            "Failed to read STL header from '{}' while exporting 3MF: {}",
+            "Failed to read STL header from '{}' while exporting multipart model: {}",
             path.display(),
             err
         ))
@@ -370,7 +383,7 @@ fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
     let mut count_bytes = [0u8; 4];
     file.read_exact(&mut count_bytes).map_err(|err| {
         AppError::internal(format!(
-            "Failed to read STL triangle count from '{}' while exporting 3MF: {}",
+            "Failed to read STL triangle count from '{}' while exporting multipart model: {}",
             path.display(),
             err
         ))
@@ -385,7 +398,7 @@ fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
         let mut attr = [0u8; 2];
         file.read_exact(&mut attr).map_err(|err| {
             AppError::internal(format!(
-                "Failed to read STL triangle attributes from '{}' while exporting 3MF: {}",
+                "Failed to read STL triangle attributes from '{}' while exporting multipart model: {}",
                 path.display(),
                 err
             ))
@@ -395,12 +408,156 @@ fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
     Ok(triangles)
 }
 
+fn transform_stl_triangles(
+    triangles: Vec<[[f32; 3]; 3]>,
+    frame: &crate::models::PortFrame,
+) -> Vec<[[f32; 3]; 3]> {
+    triangles
+        .into_iter()
+        .map(|triangle| triangle.map(|vertex| transform_stl_vertex(vertex, frame)))
+        .collect()
+}
+
+fn transform_stl_vertex(vertex: [f32; 3], frame: &crate::models::PortFrame) -> [f32; 3] {
+    [
+        (frame.origin[0]
+            + frame.x_axis[0] * vertex[0] as f64
+            + frame.y_axis[0] * vertex[1] as f64
+            + frame.z_axis[0] * vertex[2] as f64) as f32,
+        (frame.origin[1]
+            + frame.x_axis[1] * vertex[0] as f64
+            + frame.y_axis[1] * vertex[1] as f64
+            + frame.z_axis[1] * vertex[2] as f64) as f32,
+        (frame.origin[2]
+            + frame.x_axis[2] * vertex[0] as f64
+            + frame.y_axis[2] * vertex[1] as f64
+            + frame.z_axis[2] * vertex[2] as f64) as f32,
+    ]
+}
+
+fn triangle_normal(triangle: &[[f32; 3]; 3]) -> [f32; 3] {
+    let ab = [
+        triangle[1][0] - triangle[0][0],
+        triangle[1][1] - triangle[0][1],
+        triangle[1][2] - triangle[0][2],
+    ];
+    let ac = [
+        triangle[2][0] - triangle[0][0],
+        triangle[2][1] - triangle[0][1],
+        triangle[2][2] - triangle[0][2],
+    ];
+    let cross = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    if length <= f32::EPSILON {
+        [0.0, 0.0, 0.0]
+    } else {
+        [cross[0] / length, cross[1] / length, cross[2] / length]
+    }
+}
+
+fn write_binary_stl_triangles<W: Write>(
+    writer: &mut W,
+    triangles: &[[[f32; 3]; 3]],
+) -> AppResult<()> {
+    let mut header = [0u8; 80];
+    let label = b"Ecky multipart STL export";
+    header[..label.len()].copy_from_slice(label);
+    writer.write_all(&header).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to write STL header during multipart export: {}",
+            err
+        ))
+    })?;
+    writer
+        .write_all(&(triangles.len() as u32).to_le_bytes())
+        .map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to write STL triangle count during multipart export: {}",
+                err
+            ))
+        })?;
+    for triangle in triangles {
+        let normal = triangle_normal(triangle);
+        for scalar in normal {
+            writer.write_all(&scalar.to_le_bytes()).map_err(|err| {
+                AppError::persistence(format!(
+                    "Failed to write STL normal during multipart export: {}",
+                    err
+                ))
+            })?;
+        }
+        for vertex in triangle {
+            for scalar in vertex {
+                writer.write_all(&scalar.to_le_bytes()).map_err(|err| {
+                    AppError::persistence(format!(
+                        "Failed to write STL vertex during multipart export: {}",
+                        err
+                    ))
+                })?;
+            }
+        }
+        writer.write_all(&0u16.to_le_bytes()).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to write STL triangle attribute during multipart export: {}",
+                err
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+fn format_3mf_transform_scalar(value: f64) -> String {
+    if value.abs() <= 1.0e-9 {
+        return "0".to_string();
+    }
+    let rounded = value.round();
+    if (value - rounded).abs() <= 1.0e-9 {
+        return format!("{}", rounded as i64);
+    }
+    let mut text = format!("{value:.6}");
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
+fn export_part_transform_attr(part: &ExportPartInput) -> Option<String> {
+    let frame = part.placement_frame.as_ref()?;
+    Some(
+        [
+            frame.x_axis[0],
+            frame.y_axis[0],
+            frame.z_axis[0],
+            frame.origin[0],
+            frame.x_axis[1],
+            frame.y_axis[1],
+            frame.z_axis[1],
+            frame.origin[1],
+            frame.x_axis[2],
+            frame.y_axis[2],
+            frame.z_axis[2],
+            frame.origin[2],
+        ]
+        .into_iter()
+        .map(format_3mf_transform_scalar)
+        .collect::<Vec<_>>()
+        .join(" "),
+    )
 }
 
 fn write_multipart_3mf_package(
@@ -484,7 +641,15 @@ fn write_multipart_3mf_package(
     }
     xml.push_str("</resources><build>");
     for object in objects {
-        let _ = write!(xml, r#"<item objectid="{}"/>"#, object.id);
+        if let Some(transform) = object.transform.as_ref() {
+            let _ = write!(
+                xml,
+                r#"<item objectid="{}" transform="{}"/>"#,
+                object.id, transform
+            );
+        } else {
+            let _ = write!(xml, r#"<item objectid="{}"/>"#, object.id);
+        }
     }
     xml.push_str("</build></model>");
     zip.write_all(xml.as_bytes())
@@ -494,7 +659,7 @@ fn write_multipart_3mf_package(
     Ok(())
 }
 
-fn export_multipart_3mf_impl(
+pub(crate) fn export_multipart_3mf_impl(
     parts: &[ExportPartInput],
     target_path: &str,
     _model_name: String,
@@ -519,6 +684,7 @@ fn export_multipart_3mf_impl(
             id: (index + 1) as u32,
             name: export_object_name(part, index),
             color_index,
+            transform: export_part_transform_attr(part),
             triangles: read_binary_stl_triangles(Path::new(&part.path))?,
         });
     }
@@ -731,7 +897,10 @@ pub async fn save_model_manifest(
             )?;
         }
 
-        if matches!(manifest.source_kind, ModelSourceKind::ImportedFcstd) {
+        if matches!(
+            manifest.source_kind,
+            ModelSourceKind::ImportedFcstd | ModelSourceKind::ImportedStep
+        ) {
             let existing_output = db::get_message_output_and_thread(&db, message_id)
                 .map_err(|err: rusqlite::Error| {
                     crate::models::AppError::persistence(err.to_string())
@@ -1042,6 +1211,7 @@ mod tests {
                     object_name: Some("Body".to_string()),
                     part_id: Some("part-body".to_string()),
                     display_color: None,
+                    placement_frame: None,
                 },
                 ExportPartInput {
                     label: "Trim/Ring".to_string(),
@@ -1049,6 +1219,7 @@ mod tests {
                     object_name: Some("Ring".to_string()),
                     part_id: Some("part-ring".to_string()),
                     display_color: None,
+                    placement_frame: None,
                 },
             ],
             zip_path.to_string_lossy().as_ref(),
@@ -1062,6 +1233,59 @@ mod tests {
             .map(|index| archive.by_index(index).unwrap().name().to_string())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["01-shade-body.stl", "02-trim-ring.stl"]);
+    }
+
+    #[test]
+    fn export_multipart_stl_zip_bakes_placement_frame_into_written_stl() {
+        let root = temp_export_dir("multipart-zip-transform");
+        let body_path = root.join("body.stl");
+        let ring_path = root.join("ring.stl");
+        let zip_path = root.join("shade-parts.zip");
+        let extracted_path = root.join("trim-ring-exported.stl");
+        write_binary_stl(&body_path);
+        write_binary_stl(&ring_path);
+
+        export_multipart_stl_zip_impl(
+            &[
+                ExportPartInput {
+                    label: "Shade Body".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: Some("Body".to_string()),
+                    part_id: Some("part-body".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "Trim Ring".to_string(),
+                    path: ring_path.to_string_lossy().to_string(),
+                    object_name: Some("Ring".to_string()),
+                    part_id: Some("part-ring".to_string()),
+                    display_color: None,
+                    placement_frame: Some(crate::models::PortFrame {
+                        origin: [12.0, 34.0, 56.0],
+                        x_axis: [0.0, 1.0, 0.0],
+                        y_axis: [-1.0, 0.0, 0.0],
+                        z_axis: [0.0, 0.0, 1.0],
+                    }),
+                },
+            ],
+            zip_path.to_string_lossy().as_ref(),
+            "Bulb Lamp Shade".to_string(),
+        )
+        .unwrap();
+
+        let file = fs::File::open(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name("02-trim-ring.stl").unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        fs::write(&extracted_path, bytes).unwrap();
+
+        let triangles = read_binary_stl_triangles(&extracted_path).unwrap();
+        assert_eq!(
+            triangles,
+            vec![[[12.0, 34.0, 56.0], [12.0, 44.0, 56.0], [2.0, 34.0, 56.0]]]
+        );
     }
 
     #[test]
@@ -1081,6 +1305,7 @@ mod tests {
                     object_name: Some("Body".to_string()),
                     part_id: Some("part-body".to_string()),
                     display_color: Some("#D8C49AFF".to_string()),
+                    placement_frame: None,
                 },
                 ExportPartInput {
                     label: "Trim Ring".to_string(),
@@ -1088,6 +1313,12 @@ mod tests {
                     object_name: Some("Ring".to_string()),
                     part_id: Some("part-ring".to_string()),
                     display_color: Some("#2F4F6FFF".to_string()),
+                    placement_frame: Some(crate::models::PortFrame {
+                        origin: [12.0, 34.0, 56.0],
+                        x_axis: [1.0, 0.0, 0.0],
+                        y_axis: [0.0, 1.0, 0.0],
+                        z_axis: [0.0, 0.0, 1.0],
+                    }),
                 },
             ],
             output_path.to_string_lossy().as_ref(),
@@ -1109,7 +1340,9 @@ mod tests {
         assert!(model_xml.contains("displaycolor=\"#D8C49AFF\""));
         assert!(model_xml.contains("displaycolor=\"#2F4F6FFF\""));
         assert!(model_xml.contains("<item objectid=\"1\"/>"));
-        assert!(model_xml.contains("<item objectid=\"2\"/>"));
+        assert!(
+            model_xml.contains("<item objectid=\"2\" transform=\"1 0 0 12 0 1 0 34 0 0 1 56\"/>")
+        );
     }
 
     #[test]
@@ -1126,6 +1359,7 @@ mod tests {
                     object_name: Some("Body".to_string()),
                     part_id: Some("part-body".to_string()),
                     display_color: None,
+                    placement_frame: None,
                 },
                 ExportPartInput {
                     label: "Missing Ring".to_string(),
@@ -1133,6 +1367,7 @@ mod tests {
                     object_name: None,
                     part_id: Some("part-ring".to_string()),
                     display_color: None,
+                    placement_frame: None,
                 },
             ],
             zip_path.to_string_lossy().as_ref(),
@@ -1161,6 +1396,7 @@ mod tests {
                 object_name: Some("Body".to_string()),
                 part_id: Some("part-body".to_string()),
                 display_color: None,
+                placement_frame: None,
             }],
             zip_path.to_string_lossy().as_ref(),
             "Bulb Lamp Shade".to_string(),

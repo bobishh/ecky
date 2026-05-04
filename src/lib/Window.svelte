@@ -3,6 +3,7 @@
   import type { Snippet } from 'svelte';
   import type { WindowId } from './stores/windowStore';
   import { bringToFront, updateRect, closeWindow, windowRegistry } from './stores/windowStore';
+  import { fitRectToViewport } from './windowGeometry';
 
   let {
     windowId,
@@ -36,32 +37,63 @@
 
   let dragging = $state(false);
   let resizing = $state(false);
+  let pendingDrag = $state<{
+    pointerX: number;
+    pointerY: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
   let dragStartOffset = $state({ x: 0, y: 0 });
   let resizeStartDim = $state({ width: 0, height: 0, x: 0, y: 0 });
+  const DRAG_START_THRESHOLD = 6;
 
-  function clampToViewport() {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    x = Math.max(0, Math.min(x, vw - 100));
-    y = Math.max(0, Math.min(y, vh - 50));
+  function fitToViewport() {
+    const next = fitRectToViewport(
+      { x, y, width, height },
+      { width: minWidth, height: minHeight },
+      { width: window.innerWidth, height: window.innerHeight },
+    );
+    x = next.x;
+    y = next.y;
+    width = next.width;
+    height = next.height;
   }
 
-  function handlePointerDown() {
+  function isInteractiveGestureTarget(target: Element): boolean {
+    return Boolean(
+      target.closest(
+        'button, input, select, textarea, a, label, [contenteditable="true"], .cm-editor, .cm-content, .cm-scroller, .window-resize-handle, [data-window-drag-ignore]',
+      ),
+    );
+  }
+
+  function hasActiveTextSelection(): boolean {
+    const selection = window.getSelection();
+    return Boolean(selection && !selection.isCollapsed && selection.toString().trim().length > 0);
+  }
+
+  function beginDrag(pointerX: number, pointerY: number) {
+    dragging = true;
+    pendingDrag = null;
+    dragStartOffset = {
+      x: pointerX - x,
+      y: pointerY - y
+    };
+  }
+
+  function handleWindowMouseDown(event: MouseEvent) {
     if (windowId) {
       bringToFront(windowId);
     }
-  }
-
-  function handleDragStart(event: MouseEvent) {
-    if (event.target instanceof Element && (event.target.closest('button') || event.target.closest('input') || event.target.closest('select'))) return;
+    if (event.button !== 0 || !(event.target instanceof Element)) return;
+    if (isInteractiveGestureTarget(event.target)) return;
     event.stopPropagation();
-
-    dragging = true;
-    dragStartOffset = {
-      x: event.clientX - x,
-      y: event.clientY - y
+    pendingDrag = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      offsetX: event.clientX - x,
+      offsetY: event.clientY - y,
     };
-
     window.addEventListener('mousemove', onGlobalMove);
     window.addEventListener('mouseup', endInteraction);
   }
@@ -86,6 +118,21 @@
     if (dragging) {
       x = event.clientX - dragStartOffset.x;
       y = event.clientY - dragStartOffset.y;
+    } else if (pendingDrag) {
+      const dx = event.clientX - pendingDrag.pointerX;
+      const dy = event.clientY - pendingDrag.pointerY;
+      if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
+      if (hasActiveTextSelection()) {
+        pendingDrag = null;
+        window.removeEventListener('mousemove', onGlobalMove);
+        window.removeEventListener('mouseup', endInteraction);
+        return;
+      }
+      const offsetX = pendingDrag.offsetX;
+      const offsetY = pendingDrag.offsetY;
+      beginDrag(event.clientX, event.clientY);
+      x = event.clientX - offsetX;
+      y = event.clientY - offsetY;
     } else if (resizing) {
       const dx = event.clientX - resizeStartDim.x;
       const dy = event.clientY - resizeStartDim.y;
@@ -97,13 +144,25 @@
   function endInteraction() {
     const wasDragging = dragging;
     const wasResizing = resizing;
+    pendingDrag = null;
     dragging = false;
     resizing = false;
     window.removeEventListener('mousemove', onGlobalMove);
     window.removeEventListener('mouseup', endInteraction);
 
     if ((wasDragging || wasResizing) && windowId) {
-      clampToViewport();
+      fitToViewport();
+      updateRect(windowId, { x, y, width, height });
+    } else if (wasDragging || wasResizing) {
+      fitToViewport();
+    }
+  }
+
+  function handleWindowDoubleClick(event: MouseEvent) {
+    if (!(event.target instanceof Element)) return;
+    if (isInteractiveGestureTarget(event.target)) return;
+    fitToViewport();
+    if (windowId) {
       updateRect(windowId, { x, y, width, height });
     }
   }
@@ -133,12 +192,13 @@
   style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z};"
   role="dialog"
   aria-hidden={hidden}
-  onmousedown={handlePointerDown}
+  onmousedown={handleWindowMouseDown}
+  ondblclick={handleWindowDoubleClick}
 >
   {#if dragging || resizing}
     <div class="window-glass-pane"></div>
   {/if}
-  <div class="window-header" role="none" onmousedown={handleDragStart}>
+  <div class="window-header" role="none">
     <span class="window-title">{title}</span>
     <button class="window-close" onclick={handleClose}>&times;</button>
   </div>

@@ -8,7 +8,18 @@ export type SketchDocumentConstraintRepairResult =
   | { document: SketchDocument; evidence: string[] }
   | { error: string };
 
+export type SketchDocumentConstraintAutoRepairEvidence = {
+  primitiveId: string;
+  detail: string;
+};
+
+export type SketchDocumentConstraintAutoRepairResult = {
+  document: SketchDocument;
+  evidence: SketchDocumentConstraintAutoRepairEvidence[];
+};
+
 const DIMENSION_TOLERANCE = 1e-6;
+const AUTO_DIMENSION_REPAIR_MAX_DELTA = 1;
 
 export function validateSketchDocumentConstraints(document: SketchDocument): SketchDocumentConstraintValidationResult {
   const issues: string[] = [];
@@ -122,6 +133,48 @@ export function repairSketchDocumentDimensionConstraints(document: SketchDocumen
   return { document: repairedDocument, evidence };
 }
 
+export function autoRepairSketchDocumentDimensionConstraintGeometry(
+  document: SketchDocument,
+  maxDelta: number = AUTO_DIMENSION_REPAIR_MAX_DELTA,
+): SketchDocumentConstraintAutoRepairResult {
+  const repairedDocument = cloneSketchDocument(document);
+  const evidence: SketchDocumentConstraintAutoRepairEvidence[] = [];
+
+  for (const sketch of repairedDocument.sketches ?? []) {
+    const primitivesById = new Map((sketch.primitives ?? []).map((primitive) => [primitive.primitiveId, primitive]));
+
+    for (const constraint of sketch.constraints ?? []) {
+      if (constraint.kind !== 'dimension') continue;
+
+      const expectedValue = constraint.value;
+      if (typeof expectedValue !== 'number' || !Number.isFinite(expectedValue)) continue;
+
+      const dimension = constraintDimension(constraint.constraintId);
+      if (!dimension) continue;
+
+      for (const targetId of constraint.targetIds ?? []) {
+        const primitive = primitivesById.get(targetId);
+        if (!primitive) continue;
+
+        const measured = measurePrimitiveDimension(primitive, dimension);
+        if (measured === null) continue;
+
+        const delta = Math.abs(expectedValue - measured);
+        if (delta <= DIMENSION_TOLERANCE) continue;
+        if (delta > maxDelta) continue;
+        if (!resizePrimitiveDimension(primitive, dimension, expectedValue)) continue;
+
+        evidence.push({
+          primitiveId: primitive.primitiveId,
+          detail: `${dimension} dimension ${formatMm(measured)} -> ${formatMm(expectedValue)}`,
+        });
+      }
+    }
+  }
+
+  return { document: repairedDocument, evidence };
+}
+
 function constraintDimension(constraintId: string): 'width' | 'height' | null {
   if (constraintId.includes('width')) return 'width';
   if (constraintId.includes('height')) return 'height';
@@ -144,6 +197,28 @@ function primitivePoints(primitive: SketchPrimitive): [number, number][] | null 
   return logicalPoints;
 }
 
+function resizePrimitiveDimension(primitive: SketchPrimitive, dimension: 'width' | 'height', targetValue: number): boolean {
+  const points = primitivePoints(primitive);
+  if (!points) return false;
+
+  const axisIndex = dimension === 'width' ? 0 : 1;
+  const values = points.map((point) => point[axisIndex]);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const currentValue = max - min;
+  if (currentValue <= DIMENSION_TOLERANCE) return false;
+
+  const center = (min + max) / 2;
+  const scale = targetValue / currentValue;
+  primitive.points = (primitive.points ?? []).map(([x, y]) => {
+    if (dimension === 'width') {
+      return [formatGeometryValue(center + (x - center) * scale), y];
+    }
+    return [x, formatGeometryValue(center + (y - center) * scale)];
+  });
+  return true;
+}
+
 function hasClosedDuplicate(points: [number, number][]): boolean {
   if (points.length < 2) return false;
   const first = points[0];
@@ -156,6 +231,10 @@ function formatMm(value: number): string {
 }
 
 function formatConstraintValue(value: number): number {
+  return Number(value.toFixed(4));
+}
+
+function formatGeometryValue(value: number): number {
   return Number(value.toFixed(4));
 }
 

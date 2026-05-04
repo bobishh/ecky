@@ -14,9 +14,19 @@ pub const REQUIRED_OCCT_HEADERS: &[&str] = &[
     "BRepAlgoAPI_Common.hxx",
     "BRepAlgoAPI_Cut.hxx",
     "BRepAlgoAPI_Fuse.hxx",
+    "Bnd_Box.hxx",
+    "BRepAdaptor_Curve.hxx",
+    "BRepAdaptor_Surface.hxx",
+    "BRepBndLib.hxx",
+    "BRepGProp.hxx",
+    "BRepFilletAPI_MakeChamfer.hxx",
+    "BRepFilletAPI_MakeFillet.hxx",
+    "BRepBuilderAPI_GTransform.hxx",
     "BRepPrimAPI_MakeBox.hxx",
+    "BRepPrimAPI_MakeCone.hxx",
     "BRepPrimAPI_MakeCylinder.hxx",
     "BRepPrimAPI_MakePrism.hxx",
+    "BRepPrimAPI_MakeRevol.hxx",
     "BRepPrimAPI_MakeSphere.hxx",
     "BRepBuilderAPI_Transform.hxx",
     "BRepBuilderAPI_MakeEdge.hxx",
@@ -25,14 +35,39 @@ pub const REQUIRED_OCCT_HEADERS: &[&str] = &[
     "BRepBuilderAPI_MakeWire.hxx",
     "BRep_Builder.hxx",
     "BRepMesh_IncrementalMesh.hxx",
+    "BRepOffsetAPI_MakeOffset.hxx",
+    "BRepOffsetAPI_MakeOffsetShape.hxx",
+    "BRepOffsetAPI_MakePipeShell.hxx",
+    "BRepOffsetAPI_MakeThickSolid.hxx",
+    "BRepOffsetAPI_ThruSections.hxx",
+    "BRepOffset_Mode.hxx",
+    "BRepTools.hxx",
+    "GeomAbs_JoinType.hxx",
+    "GeomAbs_SurfaceType.hxx",
+    "GProp_GProps.hxx",
+    "GC_MakeArcOfCircle.hxx",
+    "Geom_BezierCurve.hxx",
+    "Geom_BSplineCurve.hxx",
+    "Geom_TrimmedCurve.hxx",
+    "GeomAPI_PointsToBSpline.hxx",
+    "IFSelect_ReturnStatus.hxx",
     "STEPControl_Writer.hxx",
     "StlAPI_Writer.hxx",
+    "TColgp_Array1OfPnt.hxx",
+    "TopAbs_ShapeEnum.hxx",
+    "TopExp_Explorer.hxx",
+    "TopoDS.hxx",
     "TopoDS_Compound.hxx",
+    "TopoDS_Edge.hxx",
+    "TopoDS_Face.hxx",
     "TopoDS_Shape.hxx",
     "TopoDS_Wire.hxx",
+    "TopTools_ListOfShape.hxx",
+    "gp_Ax1.hxx",
     "gp_Ax2.hxx",
     "gp_Circ.hxx",
     "gp_Dir.hxx",
+    "gp_GTrsf.hxx",
     "gp_Pnt.hxx",
     "gp_Trsf.hxx",
     "gp_Vec.hxx",
@@ -44,11 +79,14 @@ pub const REQUIRED_OCCT_LIBS: &[&str] = &[
     "TKG2d",
     "TKG3d",
     "TKGeomBase",
+    "TKGeomAlgo",
     "TKBRep",
     "TKTopAlgo",
     "TKBO",
     "TKBool",
     "TKPrim",
+    "TKOffset",
+    "TKFillet",
     "TKMesh",
     "TKDESTEP",
     "TKDESTL",
@@ -77,17 +115,43 @@ impl DirectOcctSdkLayout {
     pub fn blocker_summary(&self) -> Vec<String> {
         let mut blockers = Vec::new();
         if self.ocp_root.is_none() {
-            blockers.push("OCP package directory missing".to_string());
+            blockers.push(format!(
+                "OCP package directory missing; runtime root: '{}'; checked package candidates: {}",
+                self.runtime_root.display(),
+                self.describe_ocp_root_candidates()
+            ));
         }
         if self.dylib_dir.is_none() {
-            blockers.push("OCP .dylibs directory missing".to_string());
+            let dylib_path = self
+                .ocp_root
+                .as_ref()
+                .map(|root| root.join(OCP_DYLIBS))
+                .unwrap_or_else(|| {
+                    self.runtime_root
+                        .join(PYTHON_SITE_PACKAGES)
+                        .join(OCP_PACKAGE)
+                        .join(OCP_DYLIBS)
+                });
+            blockers.push(format!(
+                "OCP .dylibs directory missing at '{}'; runtime root: '{}'",
+                dylib_path.display(),
+                self.runtime_root.display()
+            ));
         }
         if self.include_dir.is_none() {
-            blockers.push("OCCT include directory missing".to_string());
-        }
-        if !self.missing_headers.is_empty() {
             blockers.push(format!(
-                "OCCT headers missing: {}",
+                "OCCT include directory missing or empty; runtime root: '{}'; checked include candidates: {}; run `npm run build123d:prepare` from the repo root",
+                self.runtime_root.display(),
+                self.describe_include_dir_candidates()
+            ));
+        }
+        if self.include_dir.is_some() && !self.missing_headers.is_empty() {
+            blockers.push(format!(
+                "OCCT headers missing in selected include directory '{}': {}",
+                self.include_dir
+                    .as_ref()
+                    .expect("checked include_dir")
+                    .display(),
                 self.missing_headers.join(", ")
             ));
         }
@@ -111,6 +175,52 @@ impl DirectOcctSdkLayout {
             AppError::validation("Direct OCCT native shim blocked: OCP dylib directory missing.")
         })
     }
+
+    fn describe_include_dir_candidates(&self) -> String {
+        include_dir_candidates(&self.runtime_root, self.ocp_root.as_deref())
+            .iter()
+            .map(|candidate| {
+                let status = if Some(candidate) == self.include_dir.as_ref() {
+                    format!(
+                        "selected with {}/{} required OCCT headers",
+                        required_header_count(candidate),
+                        REQUIRED_OCCT_HEADERS.len()
+                    )
+                } else if !candidate.is_dir() {
+                    "missing".to_string()
+                } else {
+                    let count = required_header_count(candidate);
+                    if count == 0 {
+                        "present without required OCCT headers".to_string()
+                    } else {
+                        format!(
+                            "present with {count}/{} required OCCT headers",
+                            REQUIRED_OCCT_HEADERS.len()
+                        )
+                    }
+                };
+                format!("{status} '{}'", candidate.display())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn describe_ocp_root_candidates(&self) -> String {
+        ocp_root_candidates(&self.runtime_root)
+            .iter()
+            .map(|candidate| {
+                let status = if Some(candidate) == self.ocp_root.as_ref() {
+                    "selected"
+                } else if candidate.is_dir() {
+                    "present"
+                } else {
+                    "missing"
+                };
+                format!("{status} '{}'", candidate.display())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,12 +236,11 @@ pub enum NativeExportOutcome {
 
 pub fn inspect_build123d_ocp_runtime(runtime_root: impl AsRef<Path>) -> DirectOcctSdkLayout {
     let runtime_root = runtime_root.as_ref().to_path_buf();
-    let site_packages = runtime_root.join(PYTHON_SITE_PACKAGES);
-    let ocp_root = existing_dir(site_packages.join(OCP_PACKAGE));
+    let ocp_root = find_ocp_root(&runtime_root);
     let dylib_dir = ocp_root
         .as_ref()
         .and_then(|root| existing_dir(root.join(OCP_DYLIBS)));
-    let include_dir = find_include_dir(&runtime_root, ocp_root.as_deref());
+    let include_dir = find_include_dir(&include_dir_candidates(&runtime_root, ocp_root.as_deref()));
 
     let missing_headers = REQUIRED_OCCT_HEADERS
         .iter()
@@ -283,27 +392,84 @@ fn existing_dir(path: PathBuf) -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
-fn find_include_dir(runtime_root: &Path, ocp_root: Option<&Path>) -> Option<PathBuf> {
-    [
+fn include_dir_candidates(runtime_root: &Path, ocp_root: Option<&Path>) -> Vec<PathBuf> {
+    let runtime_candidates = [
         runtime_root.join("include").join("opencascade"),
         runtime_root.join("include"),
         runtime_root
             .join("Library")
             .join("include")
             .join("opencascade"),
-    ]
-    .into_iter()
-    .chain(ocp_root.into_iter().flat_map(|root| {
-        [
-            root.join("include"),
-            root.join("include").join("opencascade"),
-        ]
-    }))
-    .find(|candidate| {
-        REQUIRED_OCCT_HEADERS
-            .iter()
-            .any(|header| candidate.join(header).is_file())
-    })
+    ];
+    runtime_candidates
+        .into_iter()
+        .chain(ocp_root.into_iter().flat_map(|root| {
+            [
+                root.join("include"),
+                root.join("include").join("opencascade"),
+            ]
+        }))
+        .collect()
+}
+
+fn ocp_root_candidates(runtime_root: &Path) -> Vec<PathBuf> {
+    site_packages_dir_candidates(runtime_root)
+        .into_iter()
+        .map(|site_packages| site_packages.join(OCP_PACKAGE))
+        .collect()
+}
+
+fn site_packages_dir_candidates(runtime_root: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![runtime_root.join(PYTHON_SITE_PACKAGES)];
+    let lib_dir = runtime_root.join("lib");
+    if let Ok(entries) = fs::read_dir(&lib_dir) {
+        let mut dynamic = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.starts_with("python"))
+                        .unwrap_or(false)
+            })
+            .map(|path| path.join("site-packages"))
+            .collect::<Vec<_>>();
+        dynamic.sort();
+        candidates.extend(dynamic);
+    }
+    candidates.dedup();
+    candidates
+}
+
+fn find_ocp_root(runtime_root: &Path) -> Option<PathBuf> {
+    ocp_root_candidates(runtime_root)
+        .into_iter()
+        .find_map(existing_dir)
+}
+
+fn required_header_count(candidate: &Path) -> usize {
+    REQUIRED_OCCT_HEADERS
+        .iter()
+        .filter(|header| candidate.join(header).is_file())
+        .count()
+}
+
+fn find_include_dir(candidates: &[PathBuf]) -> Option<PathBuf> {
+    let mut best_candidate = None;
+    let mut best_count = 0usize;
+    for candidate in candidates {
+        if !candidate.is_dir() {
+            continue;
+        }
+        let count = required_header_count(candidate);
+        if count > best_count {
+            best_count = count;
+            best_candidate = Some(candidate.clone());
+        }
+    }
+    best_candidate
 }
 
 fn find_versioned_dylib(dir: &Path, lib: &str) -> Option<PathBuf> {
@@ -439,6 +605,8 @@ mod tests {
     #[test]
     fn inspect_runtime_reports_ocp_libs_without_headers() {
         let root = temp_root("ocp-no-headers");
+        let empty_include_dir = root.join("include").join("opencascade");
+        fs::create_dir_all(&empty_include_dir).expect("mkdir empty include");
         let dylib_dir = root
             .join(PYTHON_SITE_PACKAGES)
             .join(OCP_PACKAGE)
@@ -455,10 +623,21 @@ mod tests {
         assert_eq!(layout.missing_libs, Vec::<String>::new());
         assert_eq!(layout.missing_headers.len(), REQUIRED_OCCT_HEADERS.len());
         assert!(!layout.can_compile_native_shim());
-        assert!(layout
-            .blocker_summary()
+        let blockers = layout.blocker_summary();
+        let include_blocker = blockers
             .iter()
-            .any(|blocker| blocker.contains("OCCT include directory missing")));
+            .find(|blocker| blocker.contains("OCCT include directory missing or empty"))
+            .expect("include blocker");
+        assert!(include_blocker.contains(&root.display().to_string()));
+        assert!(include_blocker.contains(&empty_include_dir.display().to_string()));
+        assert!(include_blocker.contains("present without required OCCT headers"));
+        assert!(include_blocker.contains("checked include candidates"));
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("npm run build123d:prepare")));
+        assert!(!blockers
+            .iter()
+            .any(|blocker| blocker.contains("OCCT headers missing")));
     }
 
     #[test]
@@ -485,6 +664,94 @@ mod tests {
     }
 
     #[test]
+    fn inspect_runtime_reports_specific_headers_when_include_dir_exists() {
+        let root = temp_root("ocp-partial-headers");
+        let include_dir = root.join("include").join("opencascade");
+        let dylib_dir = root
+            .join(PYTHON_SITE_PACKAGES)
+            .join(OCP_PACKAGE)
+            .join(OCP_DYLIBS);
+        for header in REQUIRED_OCCT_HEADERS.iter().skip(1) {
+            touch(&include_dir.join(header));
+        }
+        for lib in REQUIRED_OCCT_LIBS {
+            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+        }
+
+        let layout = inspect_build123d_ocp_runtime(&root);
+
+        assert_eq!(layout.include_dir.as_deref(), Some(include_dir.as_path()));
+        assert_eq!(
+            layout.missing_headers,
+            vec![REQUIRED_OCCT_HEADERS[0].to_string()]
+        );
+        let blockers = layout.blocker_summary();
+        let header_blocker = blockers
+            .iter()
+            .find(|blocker| blocker.contains("OCCT headers missing"))
+            .expect("header blocker");
+        assert!(header_blocker.contains(&include_dir.display().to_string()));
+        assert!(header_blocker.contains(REQUIRED_OCCT_HEADERS[0]));
+    }
+
+    #[test]
+    fn inspect_runtime_prefers_full_header_dir_over_partial_earlier_candidate() {
+        let root = temp_root("ocp-full-later");
+        let partial_include_dir = root.join("include").join("opencascade");
+        let ocp_root = root
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join(OCP_PACKAGE);
+        let full_include_dir = ocp_root.join("include");
+        let dylib_dir = ocp_root.join(OCP_DYLIBS);
+
+        touch(&partial_include_dir.join(REQUIRED_OCCT_HEADERS[0]));
+        for header in REQUIRED_OCCT_HEADERS {
+            touch(&full_include_dir.join(header));
+        }
+        for lib in REQUIRED_OCCT_LIBS {
+            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+        }
+
+        let layout = inspect_build123d_ocp_runtime(&root);
+
+        assert_eq!(layout.ocp_root.as_deref(), Some(ocp_root.as_path()));
+        assert_eq!(
+            layout.include_dir.as_deref(),
+            Some(full_include_dir.as_path())
+        );
+        assert!(layout.missing_headers.is_empty(), "{layout:?}");
+        assert!(layout.can_compile_native_shim(), "{layout:?}");
+    }
+
+    #[test]
+    fn inspect_runtime_discovers_non_default_python_minor_site_packages() {
+        let root = temp_root("ocp-python313");
+        let ocp_root = root
+            .join("lib")
+            .join("python3.13")
+            .join("site-packages")
+            .join(OCP_PACKAGE);
+        let include_dir = ocp_root.join("include").join("opencascade");
+        let dylib_dir = ocp_root.join(OCP_DYLIBS);
+        for header in REQUIRED_OCCT_HEADERS {
+            touch(&include_dir.join(header));
+        }
+        for lib in REQUIRED_OCCT_LIBS {
+            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+        }
+
+        let layout = inspect_build123d_ocp_runtime(&root);
+
+        assert_eq!(layout.ocp_root.as_deref(), Some(ocp_root.as_path()));
+        assert_eq!(layout.dylib_dir.as_deref(), Some(dylib_dir.as_path()));
+        assert!(layout.missing_libs.is_empty(), "{layout:?}");
+        assert!(layout.missing_headers.is_empty(), "{layout:?}");
+        assert!(layout.can_compile_native_shim(), "{layout:?}");
+    }
+
+    #[test]
     fn native_box_probe_blocks_before_compile_when_headers_missing() {
         let root = temp_root("ocp-blocked-probe");
         let dylib_dir = root
@@ -503,6 +770,9 @@ mod tests {
             panic!("expected blocked outcome");
         };
         assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("OCCT include directory missing")));
+        assert!(!blockers
             .iter()
             .any(|blocker| blocker.contains("OCCT headers missing")));
     }

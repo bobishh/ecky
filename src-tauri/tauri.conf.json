@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev:web",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run runtimes:prepare && npm run build",
+    "beforeBuildCommand": "bash scripts/cleanup_tauri_dmg_mounts.sh && npm run runtimes:prepare && npm run build",
     "frontendDist": "../dist"
   },
   "app": {

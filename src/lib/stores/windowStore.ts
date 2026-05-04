@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getThreadWindowLayout, saveThreadWindowLayout } from '../tauri/client';
 import { triggerHighlight } from './uiHighlightStore';
 import type { ThreadWindowLayout, ThreadWindowState } from '../tauri/contracts';
+import { fitRectToViewport } from '../windowGeometry';
 
 export type WindowId = 'projects' | 'params' | 'dialogue' | 'settings' | 'terminal' | 'sketch';
 
@@ -93,11 +94,7 @@ function clampRect(
 ): { x: number; y: number; width: number; height: number } {
   const vw = viewport?.width ?? (typeof window !== 'undefined' ? window.innerWidth : 1920);
   const vh = viewport?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 1080);
-  const width = Math.max(minSize.width, Math.min(rect.width, vw));
-  const height = Math.max(minSize.height, Math.min(rect.height, vh));
-  const x = Math.max(0, Math.min(rect.x, vw - 100));
-  const y = Math.max(0, Math.min(rect.y, vh - 50));
-  return { x, y, width, height };
+  return fitRectToViewport(rect, minSize, { width: vw, height: vh });
 }
 
 function mergeDbLayout(dbLayout: ThreadWindowLayout | null): WindowStoreState {

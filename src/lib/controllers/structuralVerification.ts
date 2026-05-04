@@ -92,5 +92,15 @@ function formatMetricsBlock(metrics: StructuralMetrics): string | null {
   if (metrics.totalArea != null) lines.push(`  area: ${metrics.totalArea.toFixed(2)}`);
   if (metrics.previewStlSizeBytes != null)
     lines.push(`  preview STL: ${metrics.previewStlSizeBytes} bytes`);
+  if (metrics.previewStlTriangleCount != null)
+    lines.push(`  triangles: ${metrics.previewStlTriangleCount}`);
+  if (metrics.previewStlComponentCount != null)
+    lines.push(`  components: ${metrics.previewStlComponentCount}`);
+  if (metrics.previewStlNonManifoldEdgeCount != null)
+    lines.push(`  non-manifold edges: ${metrics.previewStlNonManifoldEdgeCount}`);
+  if (metrics.previewStlOverhangTriangleCount != null)
+    lines.push(`  overhang triangles: ${metrics.previewStlOverhangTriangleCount}`);
+  if (metrics.previewStlOverhangRatio != null)
+    lines.push(`  overhang ratio: ${metrics.previewStlOverhangRatio.toFixed(3)}`);
   return lines.length > 1 ? lines.join('\n') : null;
 }

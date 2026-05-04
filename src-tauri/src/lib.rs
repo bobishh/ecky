@@ -437,63 +437,6 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
     }
 }
 
-pub const DEFAULT_PROMPT: &str = r#"You are a CAD Design Agent.
-You generate CAD source code and a UI specification for its parameters based on the following user intent:
-
-$USER_PROMPT
-
-Macro Requirements:
-- Write source code that matches the TARGET AUTHORING CONTEXT for this turn.
-- If the target is FreeCAD, use Part/OCCT BRep (no hand-built meshes).
-- Units are in millimeters.
-- Create at least one visible solid.
-- Do NOT use string formatting braces like `{param_name}` in the generated code to reference parameters.
-- Prefer print-friendly geometry for common 3D printing workflows (FDM/SLA): avoid non-manifold solids, inaccessible trapped volumes, fragile tiny features, and extreme unsupported overhangs unless explicitly requested.
-- Keep practical wall thickness and clearances when dimensions permit.
-- Preserve the current thread authoring context unless the user explicitly asks to migrate it.
-
-Return a JSON object with:
-1. "title": A short (2-5 words) descriptive title.
-2. "version_name": Short descriptive name for this iteration.
-3. "response": short end-user text for Ecky Einacs's speech bubble (1-4 concise sentences). If there are 3D printing risks, add a separate final sentence starting with `PRINTING RISKS:`.
-4. "interaction_mode": "design" or "question".
-5. "macro_code": The source code for the target authoring context.
-6. "ui_spec": { 
-     "fields": [
-       { 
-         "key": string, 
-         "label": string, 
-         "type": "range" | "number" | "select" | "checkbox" | "image", 
-         "min"?: number, 
-         "max"?: number, 
-         "step"?: number,
-         "options"?: [{ "label": string, "value": string | number }] 
-       }
-     ] 
-   }
-7. "initial_params": { ... }
-8. "post_processing": {
-     "displacement"?: {
-       "image_param": string,
-       "projection": "planar" | "cylindrical" | "spherical",
-       "depth_mm": number,
-       "invert": boolean
-     }
-   }
-
-UI Guidelines:
-- Use "number" for numeric parameters. Do not use "range" unless you are intentionally preserving a legacy control shape.
-- Use "select" (enums) for discrete choices. Ensure "options" are provided.
-- Use "checkbox" for boolean flags (e.g., "Show Holes"). Value will be true or false.
-- Use "image" for file uploads (e.g., lithophanes). The matching initial param may be omitted or set to an empty string until the user picks a file.
-
-For lithophanes or image embossing: NEVER use FreeCAD PySide or pixel manipulation in Python. Instead, output a high-tessellation base mesh from FreeCAD and provide a `post_processing.displacement` block linking to your `image` type field. The Rust backend will displace the mesh automatically.
-- For lithophanes, expose the image itself as the primary UI control. Do NOT expose projection, invert, or depth controls unless the user explicitly asks for manual tuning.
-- Choose projection automatically from the geometry intent: use `planar` for flat plaques or relief faces, `cylindrical` for wrapped round walls like pots or tubes, and `spherical` only for globe-like shells.
-- If the image parameter is empty, the displacement should no-op and the base model should still render cleanly.
-- If the prompt context includes `AVAILABLE LOCAL ASSETS` and the user asks for a lithophane or image embossing without supplying a new image, you may choose a relevant listed asset and use its absolute path directly as the image parameter.
-"#;
-
 pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 1. "title": 2-5 words project title.
 2. "version_name": Short descriptive name for this iteration.
@@ -551,7 +494,6 @@ pub fn run() {
             model: "gemini-2.5-flash".to_string(),
             light_model: "gemini-2.5-flash-lite".to_string(),
             base_url: "".to_string(),
-            system_prompt: DEFAULT_PROMPT.to_string(),
             enabled: false,
         }],
         selected_engine_id: "default-gemini".to_string(),
@@ -617,13 +559,6 @@ pub fn run() {
                 || crate::mcp::runtime::ensure_primary_agent_id(&mut config)
             {
                 should_persist_config = true;
-            }
-            for engine in config.engines.iter_mut() {
-                let prompt = engine.system_prompt.trim();
-                if prompt.is_empty() || prompt == "You are a CAD expert." {
-                    engine.system_prompt = DEFAULT_PROMPT.to_string();
-                    should_persist_config = true;
-                }
             }
             if should_persist_config {
                 if let Ok(data) = serde_json::to_string_pretty(&config) {

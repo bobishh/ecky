@@ -720,6 +720,11 @@ mod tests {
             metrics: StructuralMetrics {
                 part_count: 2,
                 preview_stl_size_bytes: Some(4096),
+                preview_stl_triangle_count: Some(256),
+                preview_stl_component_count: Some(1),
+                preview_stl_non_manifold_edge_count: Some(0),
+                preview_stl_overhang_triangle_count: Some(12),
+                preview_stl_overhang_ratio: Some(0.046875),
                 total_volume: Some(88548.0),
                 total_area: Some(15254.0),
                 bbox: Some(ManifestBounds {

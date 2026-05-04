@@ -173,9 +173,6 @@ export interface Thread {
   status?: ThreadStatus;
   finalizedAt?: number | null;
   pendingConfirm?: string | null;
-  engineKind: EngineKind;
-  sourceLanguage: SourceLanguage;
-  geometryBackend: GeometryBackend;
 }
 
 export interface DeletedMessage {
@@ -997,30 +994,6 @@ export function normalizeThread(thread: Contract.Thread | Thread): Thread {
     finalizedAt: thread.finalizedAt ?? (legacy.finalized_at as number | undefined) ?? null,
     pendingConfirm:
       thread.pendingConfirm ?? (legacy.pending_confirm as string | undefined) ?? null,
-    engineKind:
-      normalizeEngineKindValue(
-        thread.engineKind ?? (legacy.engine_kind as EngineKind | undefined),
-      ) ?? 'freecad',
-    sourceLanguage:
-      normalizeSourceLanguageValue(
-        thread.sourceLanguage ?? (legacy.source_language as SourceLanguage | undefined),
-        thread.engineKind ?? legacy.engine_kind,
-      ) ??
-      (isEckyCompat(thread.engineKind ?? legacy.engine_kind)
-        ? 'ecky'
-        : isBuild123dCompat(thread.engineKind ?? legacy.engine_kind)
-          ? 'build123d'
-          : 'legacyPython'),
-    geometryBackend:
-      normalizeGeometryBackendValue(
-        thread.geometryBackend ?? (legacy.geometry_backend as GeometryBackend | undefined),
-        thread.engineKind ?? legacy.engine_kind,
-      ) ??
-      (isEckyCompat(thread.engineKind ?? legacy.engine_kind)
-        ? 'mesh'
-        : isBuild123dCompat(thread.engineKind ?? legacy.engine_kind)
-          ? 'build123d'
-          : 'freecad'),
   };
 }
 

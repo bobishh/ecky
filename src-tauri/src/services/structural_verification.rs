@@ -7,12 +7,20 @@ use crate::contracts::{
     StructuralVerificationResult, VerifierSource, VerifierStatus,
 };
 
+const OVERHANG_NORMAL_Z_THRESHOLD: f32 = -0.70710677;
+const BUILD_PLANE_EPSILON_MM: f32 = 0.001;
+
 pub fn verify_structure(
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
 ) -> StructuralVerificationResult {
     let mut issues: Vec<StructuralIssue> = Vec::new();
     let mut preview_stl_size: Option<u64> = None;
+    let mut preview_stl_triangle_count: Option<u32> = None;
+    let mut preview_stl_component_count: Option<u32> = None;
+    let mut preview_stl_non_manifold_edge_count: Option<u32> = None;
+    let mut preview_stl_overhang_triangle_count: Option<u32> = None;
+    let mut preview_stl_overhang_ratio: Option<f64> = None;
 
     // 1. Preview STL exists and is non-empty
     let stl_path = Path::new(&bundle.preview_stl_path);
@@ -30,6 +38,11 @@ pub fn verify_structure(
             } else {
                 match preview_stl_triangles(stl_path) {
                     Ok(StlPreview::Parsed(triangles)) if triangles.is_empty() => {
+                        preview_stl_triangle_count = Some(0);
+                        preview_stl_component_count = Some(0);
+                        preview_stl_non_manifold_edge_count = Some(0);
+                        preview_stl_overhang_triangle_count = Some(0);
+                        preview_stl_overhang_ratio = Some(0.0);
                         issues.push(StructuralIssue {
                             code: "PREVIEW_STL_NO_TRIANGLES".into(),
                             message: "Preview STL file contains no triangles.".into(),
@@ -38,7 +51,15 @@ pub fn verify_structure(
                         });
                     }
                     Ok(StlPreview::Parsed(triangles)) => {
-                        add_preview_stl_topology_issues(&mut issues, &triangles);
+                        let topology = preview_stl_topology_summary(&triangles);
+                        preview_stl_triangle_count = Some(usize_metric(topology.triangle_count));
+                        preview_stl_component_count = Some(usize_metric(topology.component_count));
+                        preview_stl_non_manifold_edge_count =
+                            Some(usize_metric(topology.non_manifold_edge_count));
+                        preview_stl_overhang_triangle_count =
+                            Some(usize_metric(topology.overhang_triangle_count));
+                        preview_stl_overhang_ratio = Some(topology.overhang_ratio);
+                        add_preview_stl_topology_issues(&mut issues, topology);
                     }
                     Ok(StlPreview::Unreadable) | Err(_) => {
                         issues.push(StructuralIssue {
@@ -283,6 +304,11 @@ pub fn verify_structure(
         metrics: StructuralMetrics {
             part_count: manifest.parts.len() as u32,
             preview_stl_size_bytes: preview_stl_size,
+            preview_stl_triangle_count,
+            preview_stl_component_count,
+            preview_stl_non_manifold_edge_count,
+            preview_stl_overhang_triangle_count,
+            preview_stl_overhang_ratio,
             total_volume,
             total_area,
             bbox: merged_bbox,
@@ -321,6 +347,16 @@ struct StlVertex([u32; 3]);
 #[derive(Clone, Copy, Debug)]
 struct StlTriangle {
     vertices: [StlVertex; 3],
+    coords: [[f32; 3]; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StlTopologySummary {
+    triangle_count: usize,
+    component_count: usize,
+    non_manifold_edge_count: usize,
+    overhang_triangle_count: usize,
+    overhang_ratio: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -403,8 +439,8 @@ fn parse_binary_stl_triangles(bytes: &[u8], triangle_count: usize) -> Vec<StlTri
     let mut offset = 84;
     for _ in 0..triangle_count {
         offset += 12; // normal vector
-        let mut vertices = [StlVertex([0; 3]); 3];
-        for vertex in &mut vertices {
+        let mut coords = [[0.0_f32; 3]; 3];
+        for vertex in &mut coords {
             let x = f32::from_le_bytes([
                 bytes[offset],
                 bytes[offset + 1],
@@ -426,10 +462,13 @@ fn parse_binary_stl_triangles(bytes: &[u8], triangle_count: usize) -> Vec<StlTri
                 bytes[offset + 3],
             ]);
             offset += 4;
-            *vertex = StlVertex::new([x, y, z]);
+            *vertex = [x, y, z];
         }
         offset += 2; // attribute byte count
-        triangles.push(StlTriangle { vertices });
+        triangles.push(StlTriangle {
+            vertices: coords.map(StlVertex::new),
+            coords,
+        });
     }
     triangles
 }
@@ -441,7 +480,7 @@ fn parse_ascii_stl_triangles(text: &str) -> StlPreview {
     }
 
     let mut triangles = Vec::with_capacity(facet_count);
-    let mut current_vertices: Option<Vec<StlVertex>> = None;
+    let mut current_vertices: Option<Vec<[f32; 3]>> = None;
     for line in text.lines() {
         let trimmed = line.trim_start();
         if starts_ascii_case(trimmed, "facet") {
@@ -461,11 +500,13 @@ fn parse_ascii_stl_triangles(text: &str) -> StlPreview {
             let Some(vertices) = current_vertices.take() else {
                 continue;
             };
-            let Ok(vertices) = <Vec<StlVertex> as TryInto<[StlVertex; 3]>>::try_into(vertices)
-            else {
+            let Ok(coords) = <Vec<[f32; 3]> as TryInto<[[f32; 3]; 3]>>::try_into(vertices) else {
                 return StlPreview::Unreadable;
             };
-            triangles.push(StlTriangle { vertices });
+            triangles.push(StlTriangle {
+                vertices: coords.map(StlVertex::new),
+                coords,
+            });
         }
     }
 
@@ -476,7 +517,7 @@ fn parse_ascii_stl_triangles(text: &str) -> StlPreview {
     StlPreview::Parsed(triangles)
 }
 
-fn parse_ascii_stl_vertex(line: &str) -> Option<StlVertex> {
+fn parse_ascii_stl_vertex(line: &str) -> Option<[f32; 3]> {
     let mut parts = line.split_whitespace();
     let label = parts.next()?;
     if !label.eq_ignore_ascii_case("vertex") {
@@ -488,7 +529,7 @@ fn parse_ascii_stl_vertex(line: &str) -> Option<StlVertex> {
     if parts.next().is_some() {
         return None;
     }
-    Some(StlVertex::new([x, y, z]))
+    Some([x, y, z])
 }
 
 fn ascii_stl_facet_count(text: &str) -> usize {
@@ -507,12 +548,33 @@ fn starts_ascii_case(text: &str, prefix: &str) -> bool {
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
-fn add_preview_stl_topology_issues(issues: &mut Vec<StructuralIssue>, triangles: &[StlTriangle]) {
+fn preview_stl_topology_summary(triangles: &[StlTriangle]) -> StlTopologySummary {
     let edge_triangles = stl_edge_triangles(triangles);
     let non_manifold_edges = edge_triangles
         .values()
         .filter(|triangle_ids| triangle_ids.len() != 2)
         .count();
+    let component_count = stl_component_count(triangles.len(), &edge_triangles);
+    let overhang_triangle_count = stl_overhang_triangle_count(triangles);
+    let overhang_ratio = if triangles.is_empty() {
+        0.0
+    } else {
+        overhang_triangle_count as f64 / triangles.len() as f64
+    };
+    StlTopologySummary {
+        triangle_count: triangles.len(),
+        component_count,
+        non_manifold_edge_count: non_manifold_edges,
+        overhang_triangle_count,
+        overhang_ratio,
+    }
+}
+
+fn add_preview_stl_topology_issues(
+    issues: &mut Vec<StructuralIssue>,
+    topology: StlTopologySummary,
+) {
+    let non_manifold_edges = topology.non_manifold_edge_count;
     if non_manifold_edges > 0 {
         issues.push(StructuralIssue {
             code: "PREVIEW_STL_NON_MANIFOLD".into(),
@@ -525,7 +587,7 @@ fn add_preview_stl_topology_issues(issues: &mut Vec<StructuralIssue>, triangles:
         });
     }
 
-    let component_count = stl_component_count(triangles.len(), &edge_triangles);
+    let component_count = topology.component_count;
     if component_count > 1 {
         issues.push(StructuralIssue {
             code: "PREVIEW_STL_DISCONNECTED_COMPONENTS".into(),
@@ -537,6 +599,53 @@ fn add_preview_stl_topology_issues(issues: &mut Vec<StructuralIssue>, triangles:
             numeric_payload: Some(component_count as f64),
         });
     }
+}
+
+fn usize_metric(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn stl_overhang_triangle_count(triangles: &[StlTriangle]) -> usize {
+    let Some(min_z) = stl_min_z(triangles) else {
+        return 0;
+    };
+    triangles
+        .iter()
+        .filter(|triangle| {
+            let centroid_z = triangle.coords.iter().map(|p| p[2]).sum::<f32>() / 3.0;
+            if centroid_z <= min_z + BUILD_PLANE_EPSILON_MM {
+                return false;
+            }
+            triangle_unit_normal_z(triangle)
+                .is_some_and(|normal_z| normal_z <= OVERHANG_NORMAL_Z_THRESHOLD)
+        })
+        .count()
+}
+
+fn stl_min_z(triangles: &[StlTriangle]) -> Option<f32> {
+    triangles
+        .iter()
+        .flat_map(|triangle| triangle.coords.iter().map(|point| point[2]))
+        .filter(|z| z.is_finite())
+        .reduce(f32::min)
+}
+
+fn triangle_unit_normal_z(triangle: &StlTriangle) -> Option<f32> {
+    let [a, b, c] = triangle.coords;
+    let ux = b[0] - a[0];
+    let uy = b[1] - a[1];
+    let uz = b[2] - a[2];
+    let vx = c[0] - a[0];
+    let vy = c[1] - a[1];
+    let vz = c[2] - a[2];
+    let nx = uy * vz - uz * vy;
+    let ny = uz * vx - ux * vz;
+    let nz = ux * vy - uy * vx;
+    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+    if !len.is_finite() || len <= f32::EPSILON {
+        return None;
+    }
+    Some(nz / len)
 }
 
 fn stl_edge_triangles(triangles: &[StlTriangle]) -> HashMap<StlEdge, Vec<usize>> {
@@ -616,6 +725,7 @@ mod tests {
             preview_stl_path: stl_path.to_string_lossy().into(),
             viewer_assets: vec![],
             edge_targets: vec![],
+            face_targets: vec![],
             callout_anchors: vec![],
             measurement_guides: vec![],
             export_artifacts: vec![],
@@ -631,6 +741,16 @@ mod tests {
 
     fn write_one_triangle_binary_stl(path: &Path) {
         write_binary_stl(path, &[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]);
+    }
+
+    fn write_raised_downward_triangle_binary_stl(path: &Path) {
+        write_binary_stl(
+            path,
+            &[
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
+            ],
+        );
     }
 
     fn write_closed_tetra_binary_stl(path: &Path, x_offset: f32) {
@@ -773,6 +893,11 @@ mod tests {
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(result.passed, "Expected pass, got: {:?}", result.issues);
+        assert_eq!(result.metrics.preview_stl_triangle_count, Some(4));
+        assert_eq!(result.metrics.preview_stl_component_count, Some(1));
+        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
         assert!(!result
             .issues
             .iter()
@@ -804,6 +929,33 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
+        assert_eq!(result.metrics.preview_stl_triangle_count, Some(1));
+        assert_eq!(result.metrics.preview_stl_component_count, Some(1));
+        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(3));
+        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn raised_downward_preview_stl_reports_overhang_metric_without_failing_for_overhang() {
+        let dir = temp_dir("raised_downward_triangle");
+        let bundle = test_bundle(&dir);
+        write_raised_downward_triangle_binary_stl(Path::new(&bundle.preview_stl_path));
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+        assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_OVERHANG_RISK"));
+        assert_eq!(result.metrics.preview_stl_triangle_count, Some(2));
+        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(1));
+        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.5));
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -843,6 +995,11 @@ mod tests {
             .find(|i| i.code == "PREVIEW_STL_DISCONNECTED_COMPONENTS")
             .expect("expected disconnected component issue");
         assert_eq!(issue.numeric_payload, Some(2.0));
+        assert_eq!(result.metrics.preview_stl_triangle_count, Some(8));
+        assert_eq!(result.metrics.preview_stl_component_count, Some(2));
+        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
         assert!(!result
             .issues
             .iter()
@@ -862,6 +1019,11 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
+        assert_eq!(result.metrics.preview_stl_triangle_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_component_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
         fs::remove_dir_all(&dir).ok();
     }
 

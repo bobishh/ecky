@@ -10,6 +10,7 @@ use crate::models::{
 const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const GENERATED_ARTIFACT_DIR: &str = "generated";
 const IMPORTED_FCSTD_ARTIFACT_DIR: &str = "imported-fcstd";
+const IMPORTED_STEP_ARTIFACT_DIR: &str = "imported-step";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const FCSTD_FILE_NAME: &str = "model.FCStd";
@@ -164,6 +165,8 @@ fn source_kind_from_model_id(model_id: &str) -> AppResult<ModelSourceKind> {
         Ok(ModelSourceKind::Generated)
     } else if model_id.starts_with("imported-fcstd-") {
         Ok(ModelSourceKind::ImportedFcstd)
+    } else if model_id.starts_with("imported-step-") {
+        Ok(ModelSourceKind::ImportedStep)
     } else {
         Err(AppError::not_found(format!(
             "Unknown model id '{}'.",
@@ -187,6 +190,7 @@ fn source_kind_dir_name(source_kind: ModelSourceKind) -> &'static str {
     match source_kind {
         ModelSourceKind::Generated => GENERATED_ARTIFACT_DIR,
         ModelSourceKind::ImportedFcstd => IMPORTED_FCSTD_ARTIFACT_DIR,
+        ModelSourceKind::ImportedStep => IMPORTED_STEP_ARTIFACT_DIR,
     }
 }
 
@@ -284,7 +288,11 @@ fn bundle_from_manifest(
     bundle.geometry_backend = manifest.geometry_backend;
     bundle.manifest_path = path_to_string(&canonical_manifest_path(bundle_dir, &bundle))?;
     bundle.preview_stl_path = path_to_string(&canonical_preview_path(bundle_dir, &bundle))?;
-    if !bundle.fcstd_path.trim().is_empty() || bundle.source_kind == ModelSourceKind::ImportedFcstd
+    if !bundle.fcstd_path.trim().is_empty()
+        || matches!(
+            bundle.source_kind,
+            ModelSourceKind::ImportedFcstd | ModelSourceKind::ImportedStep
+        )
     {
         bundle.fcstd_path = path_to_string(&canonical_fcstd_path(bundle_dir, &bundle))?;
     }
@@ -451,6 +459,7 @@ mod tests {
             preview_stl_path: "preview.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
+            face_targets: Vec::new(),
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
@@ -500,6 +509,19 @@ mod tests {
             "model-runtime/imported-fcstd/imported-fcstd-test"
         )));
         assert!(!dir.ends_with(Path::new("model-runtime/generated/imported-fcstd-test")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imported_step_model_ids_use_imported_directory() {
+        let root = test_root("imported-step");
+        let resolver = TestResolver { root: root.clone() };
+        let model_id = "imported-step-test";
+        let dir = runtime_bundle_dir(&resolver, model_id).expect("dir");
+
+        assert!(dir.ends_with(Path::new("model-runtime/imported-step/imported-step-test")));
+        assert!(!dir.ends_with(Path::new("model-runtime/generated/imported-step-test")));
 
         let _ = fs::remove_dir_all(root);
     }

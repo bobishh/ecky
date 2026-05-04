@@ -1,4 +1,4 @@
-import type { ArtifactBundle } from './types/domain';
+import type { ArtifactBundle, RuntimeCapabilities } from './types/domain';
 
 export type ExportMode = '3mf' | 'multipartStlZip' | 'stl' | 'fcstd' | 'step';
 
@@ -24,6 +24,27 @@ export function hasMultipartExportAssets(bundle: ArtifactBundle | null | undefin
 
 export function getStepExportPath(bundle: ArtifactBundle | null | undefined): string | undefined {
   return bundle?.exportArtifacts?.find((a) => a.format === 'step')?.path;
+}
+
+export function stepExportDisabledReason(
+  bundle: ArtifactBundle | null | undefined,
+  runtimeCapabilities?: RuntimeCapabilities | null,
+): string | undefined {
+  if (getStepExportPath(bundle)) return undefined;
+  if (!bundle) return 'No rendered model is available.';
+
+  if (bundle.geometryBackend === 'mesh') {
+    const directOcct = runtimeCapabilities?.directOcct ?? null;
+    if (!directOcct) {
+      return 'STEP unavailable for mesh/EckyRust render: Direct OCCT capability was not probed.';
+    }
+    if (!directOcct.available) {
+      return `STEP unavailable for mesh/EckyRust render: ${directOcct.detail || 'Direct OCCT unavailable.'}`;
+    }
+    return 'STEP unavailable for mesh/EckyRust render: no BRep STEP artifact was produced.';
+  }
+
+  return 'STEP artifact is not present in this model bundle.';
 }
 
 export function buildMultipartExportParts(
@@ -61,6 +82,7 @@ export function buildExportDefaultNames(title: string | null | undefined) {
 
 export function buildExportChooserOptions(
   bundle: ArtifactBundle | null | undefined,
+  runtimeCapabilities?: RuntimeCapabilities | null,
 ): ExportChooserOption[] {
   const isMultipart = hasMultipartExportAssets(bundle);
   const options: ExportChooserOption[] = [];
@@ -99,12 +121,13 @@ export function buildExportChooserOptions(
   });
 
   const stepPath = getStepExportPath(bundle);
+  const stepDisabledReason = stepExportDisabledReason(bundle, runtimeCapabilities);
   options.push({
     id: 'step',
     title: 'STEP',
     subtitle: 'Neutral CAD exchange file.',
     disabled: !Boolean(stepPath),
-    disabledReason: stepPath ? undefined : 'STEP export is pending for this model.',
+    disabledReason: stepDisabledReason,
   });
 
   return options;

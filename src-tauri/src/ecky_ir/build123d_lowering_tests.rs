@@ -2183,6 +2183,47 @@ fn lower_to_build123d_variadic_loft() {
 }
 
 #[test]
+fn lower_to_build123d_sampled_radial_loft() {
+    let src = r#"
+        (model
+          (part body
+            (sampled-radial-loft
+              (theta z fz)
+              :height 40
+              :z-steps 6
+              :theta-steps 24
+              :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
+              :z-map (+ z (* fz 2)))))"#;
+    let code = crate::ecky_ir::lower_to_build123d(src).expect("lower");
+    assert!(code.contains("_zi in range("), "{code}");
+    assert!(code.contains("_ti in range("), "{code}");
+    assert!(code.contains("math.cos("), "{code}");
+    assert!(code.contains("math.sin("), "{code}");
+    assert!(code.contains("_ecky_face(Polygon("), "{code}");
+    assert!(code.contains("Pos(0, 0,"), "{code}");
+    assert!(code.contains("loft("), "{code}");
+}
+
+#[test]
+fn lower_to_build123d_shell_sampled_radial_loft() {
+    let src = r#"
+        (model
+          (part body
+            (shell 2
+              (sampled-radial-loft
+                (theta z fz)
+                :height 40
+                :z-steps 6
+                :theta-steps 24
+                :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
+                :z-map (+ z (* fz 2))))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(code.matches("loft(").count() >= 2, "{code}");
+    assert!(code.contains("math.sin("), "{code}");
+    assert!(code.contains(" - "), "{code}");
+}
+
+#[test]
 fn lower_to_build123d_extrude_supports_symmetric_flag() {
     let src =
         r#"(model (part body (extrude (polygon ((0 0) (10 0) (10 5) (0 5))) 8 :symmetric #t)))"#;
@@ -2197,14 +2238,13 @@ fn lower_to_build123d_extrude_supports_symmetric_flag() {
 }
 
 #[test]
-fn lower_to_build123d_scale_rejects_literal_non_uniform_scale() {
+fn lower_to_build123d_scale_accepts_literal_non_uniform_scale() {
     let src = r#"(model (part body (scale 2 1 3 (box 10 10 10))))"#;
-    let err = lower_to_build123d(src).expect_err("non-uniform scale should fail");
+    let code = lower_to_build123d(src).expect("non-uniform scale should lower");
     assert!(
-        err.to_string()
-            .contains("`scale` does not support literal non-uniform scaling"),
-        "unexpected error: {}",
-        err
+        code.contains("_ecky_non_uniform_scale("),
+        "helper call missing: {}",
+        code
     );
 }
 

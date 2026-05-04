@@ -1,0 +1,16 @@
+(model
+  (part saddle
+    (difference
+      (fillet 1.2
+        (union
+          (extrude (rounded-rect 42 24 3) 8)
+          (translate 0 0 8
+            (extrude (rounded-rect 28 14 2) 6))))
+      (translate 0 0 -2 (cylinder 9 20))
+      (translate -14 0 -2 (cylinder 2.5 20))
+      (translate 14 0 -2 (cylinder 2.5 20))))
+  (part latch
+    (translate 0 -17 5
+      (sweep
+        (circle 1.4)
+        (bezier-path ((-18 0 0) (-8 -8 4) (8 -8 4) (18 0 0)))))))

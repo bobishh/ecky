@@ -17,7 +17,26 @@
         "z_max": 12.0
       },
       "volume": 720.0,
-      "area": 420.0
+      "area": 420.0,
+      "edges": [
+        {
+          "target_id": "OuterShell001:edge:0:-18-0--12_18-0--12",
+          "edge_index": 0,
+          "label": "OuterShell001.Edge1",
+          "start": { "x": -18.0, "y": 0.0, "z": -12.0 },
+          "end": { "x": 18.0, "y": 0.0, "z": -12.0 }
+        }
+      ],
+      "faces": [
+        {
+          "target_id": "OuterShell001:face:0:0-14-0:420",
+          "face_index": 0,
+          "label": "OuterShell001.Face1",
+          "center": { "x": 0.0, "y": 14.0, "z": 0.0 },
+          "normal": { "x": 0.0, "y": -1.0, "z": 0.0 },
+          "area": 420.0
+        }
+      ]
     }
   ]
 }

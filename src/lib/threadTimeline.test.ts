@@ -83,6 +83,18 @@ test('timelineVisuals converts attachment image paths through the provided asset
   assert.equal(visuals[1]?.src, 'asset:///tmp/ref.png');
 });
 
+test('timelineVisuals preserves inline attachment image data URLs', () => {
+  const visuals = timelineVisuals(
+    sampleMessage({
+      role: 'user',
+      attachmentImages: ['data:image/png;base64,reference'],
+    }),
+    (path) => `asset://${path}`,
+  );
+
+  assert.equal(visuals[0]?.src, 'data:image/png;base64,reference');
+});
+
 test('versionTimeline helpers identify and label assistant version messages', () => {
   const versionMessage = sampleMessage({
     role: 'assistant',

@@ -22,13 +22,19 @@ test('normalizeDesignOutput resolves legacy defaults', () => {
   assert.equal(output.geometryBackend, 'freecad');
 });
 
-test('normalizeThread resolves legacy defaults', () => {
+test('normalizeThread does not synthesize authoring context', () => {
   const thread = normalizeThread({
     engine_kind: 'freecad',
+    engineKind: 'ecky',
+    source_language: 'legacyPython',
+    sourceLanguage: 'ecky',
+    geometry_backend: 'freecad',
+    geometryBackend: 'mesh',
   } as any);
 
-  assert.equal(thread.sourceLanguage, 'legacyPython');
-  assert.equal(thread.geometryBackend, 'freecad');
+  assert.equal('engineKind' in thread, false);
+  assert.equal('sourceLanguage' in thread, false);
+  assert.equal('geometryBackend' in thread, false);
 });
 
 test('toContractDesignOutput preserves authoring context fields', () => {

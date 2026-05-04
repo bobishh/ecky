@@ -18,9 +18,14 @@ type MockConfig = {
   connectionType: null;
   defaultEngineKind: 'freecad' | 'ecky';
   defaultSourceLanguage: 'legacyPython' | 'ecky';
-  defaultGeometryBackend: 'freecad' | 'build123d';
+  defaultGeometryBackend: 'freecad' | 'build123d' | 'mesh';
   maxGenerationAttempts: number;
   maxVerifyAttempts: number;
+};
+
+type CapabilityMockOptions = {
+  directOcctAvailable?: boolean;
+  directOcctDetail?: string;
 };
 
 function buildConfig(overrides: Partial<MockConfig> = {}): MockConfig {
@@ -49,8 +54,12 @@ function buildConfig(overrides: Partial<MockConfig> = {}): MockConfig {
   };
 }
 
-async function installCapabilityMock(page: Page, configOverrides: Partial<MockConfig> = {}) {
-  await page.addInitScript((mockConfig) => {
+async function installCapabilityMock(
+  page: Page,
+  configOverrides: Partial<MockConfig> = {},
+  capabilityOptions: CapabilityMockOptions = {},
+) {
+  await page.addInitScript(({ mockConfig, capabilityOptions }) => {
     const saveCalls: unknown[] = [];
     const config = { ...mockConfig };
 
@@ -82,6 +91,11 @@ async function installCapabilityMock(page: Page, configOverrides: Partial<MockCo
             detail: 'Ready at /mock/python3',
             path: '/mock/python3',
           },
+          directOcct: {
+            available: capabilityOptions.directOcctAvailable ?? false,
+            detail: capabilityOptions.directOcctDetail ?? 'Direct OCCT unavailable: missing TKDESTEP',
+            path: capabilityOptions.directOcctAvailable ? '/mock/direct-occt' : null,
+          },
           mesh: {
             available: true,
             detail: 'bundled',
@@ -112,7 +126,10 @@ async function installCapabilityMock(page: Page, configOverrides: Partial<MockCo
       if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
       return null;
     };
-  }, buildConfig(configOverrides));
+  }, {
+    mockConfig: buildConfig(configOverrides),
+    capabilityOptions,
+  });
 }
 
 test.describe('Runtime capability boot repair', () => {
@@ -270,5 +287,50 @@ test.describe('Runtime capability boot repair', () => {
     await expect(freecadDefault).toHaveAttribute('title', /FreeCAD executable not found/);
     await expect(freecadBackend).toBeDisabled();
     await expect(freecadBackend).toHaveAttribute('title', /FreeCAD executable not found/);
+  });
+
+  test('Given direct OCCT is blocked When Ecky backend settings open Then fast-path blocker is visible but not selectable', async ({ page }) => {
+    await installCapabilityMock(
+      page,
+      {
+        defaultEngineKind: 'ecky',
+        defaultSourceLanguage: 'ecky',
+        defaultGeometryBackend: 'mesh',
+      },
+      { directOcctAvailable: false, directOcctDetail: 'Direct OCCT unavailable: missing TKDESTEP' },
+    );
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+    await page.locator('button[title="Settings"]').click();
+
+    const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
+    await expect(authoringField.getByText('DIRECT OCCT STEP FAST PATH', { exact: true })).toBeVisible();
+    await expect(authoringField).toContainText('Direct OCCT unavailable: missing TKDESTEP');
+    await expect(authoringField.getByRole('button', { name: /DIRECT OCCT/i })).toHaveCount(0);
+  });
+
+  test('Given direct OCCT is ready When Ecky backend settings open Then internal STEP fast path is shown as ready', async ({ page }) => {
+    await installCapabilityMock(
+      page,
+      {
+        defaultEngineKind: 'ecky',
+        defaultSourceLanguage: 'ecky',
+        defaultGeometryBackend: 'mesh',
+      },
+      { directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' },
+    );
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+    await page.locator('button[title="Settings"]').click();
+
+    const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
+    await expect(authoringField.getByText('DIRECT OCCT STEP FAST PATH', { exact: true })).toBeVisible();
+    await expect(authoringField).toContainText('READY');
+    await expect(authoringField).toContainText('Direct OCCT ready');
+    await expect(authoringField.getByRole('button', { name: /DIRECT OCCT/i })).toHaveCount(0);
   });
 });

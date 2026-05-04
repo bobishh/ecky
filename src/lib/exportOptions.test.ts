@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { ArtifactBundle } from './types/domain';
+import type { ArtifactBundle, RuntimeCapabilities } from './types/domain';
 import {
   buildExportChooserOptions,
   buildExportDefaultNames,
@@ -32,6 +32,20 @@ function sampleBundle(viewerAssetCount: number): ArtifactBundle {
   };
 }
 
+function capabilities(directOcctAvailable: boolean, detail: string): RuntimeCapabilities {
+  return {
+    freecad: { available: true, detail: 'FreeCAD ready', path: '/tmp/freecadcmd' },
+    build123d: { available: true, detail: 'build123d ready', path: '/tmp/python3' },
+    directOcct: { available: directOcctAvailable, detail, path: directOcctAvailable ? '/tmp/occt' : null },
+    mesh: { available: true, detail: 'bundled', path: null },
+    recommendedAuthoringContext: {
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    },
+  };
+}
+
 test('buildExportChooserOptions shows only STL and FCStd for single-part models', () => {
   const options = buildExportChooserOptions(sampleBundle(1));
 
@@ -40,7 +54,41 @@ test('buildExportChooserOptions shows only STL and FCStd for single-part models'
     ['stl', 'fcstd', 'step'],
   );
   assert.equal(options[2]?.disabled, true);
-  assert.equal(options[2]?.disabledReason, 'STEP export is pending for this model.');
+  assert.equal(options[2]?.disabledReason, 'STEP artifact is not present in this model bundle.');
+});
+
+test('buildExportChooserOptions reports direct OCCT blocker for mesh STEP export', () => {
+  const bundle = sampleBundle(1);
+  bundle.sourceLanguage = 'ecky';
+  bundle.geometryBackend = 'mesh';
+
+  const step = buildExportChooserOptions(
+    bundle,
+    capabilities(false, 'Direct OCCT unavailable: missing TKDESTEP'),
+  ).find((option) => option.id === 'step');
+
+  assert.equal(step?.disabled, true);
+  assert.equal(
+    step?.disabledReason,
+    'STEP unavailable for mesh/EckyRust render: Direct OCCT unavailable: missing TKDESTEP',
+  );
+});
+
+test('buildExportChooserOptions reports mesh-only bundle when direct OCCT is available but no STEP exists', () => {
+  const bundle = sampleBundle(1);
+  bundle.sourceLanguage = 'ecky';
+  bundle.geometryBackend = 'mesh';
+
+  const step = buildExportChooserOptions(
+    bundle,
+    capabilities(true, 'Direct OCCT ready'),
+  ).find((option) => option.id === 'step');
+
+  assert.equal(step?.disabled, true);
+  assert.equal(
+    step?.disabledReason,
+    'STEP unavailable for mesh/EckyRust render: no BRep STEP artifact was produced.',
+  );
 });
 
 test('buildExportChooserOptions shows multipart options first for multipart models', () => {

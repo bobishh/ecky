@@ -20,13 +20,15 @@ import {
   getHistory,
   getLastDesign,
   getRuntimeCapabilities,
-  getThread,
+  getThreadLatestVersion,
+  getThreadMessageVersion,
+  getThreadMessagesPage,
   listModels,
   saveConfig as persistConfig,
 } from '../tauri/client';
-import { loadVersion } from '../stores/history';
+import { activeThreadMessagesLoading, loadVersion, threadMessagePageState } from '../stores/history';
 import { isRenderableVersionTimelineMessage } from '../threadTimeline';
-import type { Thread } from '../types/domain';
+import type { LastDesignSnapshot, Message, Thread, ThreadMessagesPage } from '../types/domain';
 
 type TauriBridgeWindow = Window & typeof globalThis & {
   __TAURI_INTERNALS__?: {
@@ -51,9 +53,7 @@ export async function boot() {
   const bootWatchdog = typeof window !== 'undefined'
     ? window.setTimeout(() => {
         if (get(session).phase === 'booting') {
-          console.warn('[Boot] watchdog tripped; switching to interactive mode.');
-          session.setPhase('idle');
-          session.setStatus('System ready.');
+          console.warn('[Boot] restore is still running.');
         }
       }, 1500)
     : 0;
@@ -82,7 +82,7 @@ export async function boot() {
     // 3. Load History
     await loadHistory();
 
-    // 4. Restore Last Design (Render preview only, no persistence write)
+    // 4. Restore Last Design
     await restoreLastDesign();
     
     session.setPhase('idle');
@@ -274,14 +274,10 @@ async function restoreLastDesign() {
       return;
     }
 
-    const freshThread = await getThread(last.threadId);
-    upsertRestoredThread(freshThread);
-
-    const targetMessage = freshThread.messages.find(
-      (message) =>
-        message.id === last.messageId &&
-        isRenderableVersionTimelineMessage(message),
-    );
+    activeThreadId.set(last.threadId);
+    const pointedMessage = await getThreadMessageVersion(last.threadId, last.messageId);
+    const latestMessage = pointedMessage ? null : await getThreadLatestVersion(last.threadId);
+    const targetMessage = pointedMessage ?? latestMessage ?? snapshotToMessage(last);
 
     if (!targetMessage) {
       await resetToBlankSession(true);
@@ -289,8 +285,9 @@ async function restoreLastDesign() {
       return;
     }
 
-    activeThreadId.set(last.threadId);
-    await loadVersion(targetMessage);
+    upsertRestoredMessage(last.threadId, targetMessage);
+    await loadVersion(targetMessage, last.threadId, { rebuildMissingRuntime: true });
+    void loadRestoredThreadPage(last.threadId);
 
     if (last.selectedPartId) {
       session.setSelectedPartId(last.selectedPartId);
@@ -303,12 +300,169 @@ async function restoreLastDesign() {
   }
 }
 
-function upsertRestoredThread(thread: Thread) {
+function snapshotToMessage(snapshot: LastDesignSnapshot): Message | null {
+  if (
+    !snapshot.messageId ||
+    !snapshot.artifactBundle ||
+    !snapshot.modelManifest ||
+    snapshot.modelManifest.modelId !== snapshot.artifactBundle.modelId
+  ) {
+    return null;
+  }
+  return {
+    id: snapshot.messageId,
+    role: 'assistant',
+    content:
+      snapshot.design?.title ||
+      snapshot.modelManifest?.document?.documentLabel ||
+      snapshot.modelManifest?.document?.documentName ||
+      snapshot.artifactBundle.modelId,
+    status: 'success',
+    output: snapshot.design,
+    artifactBundle: snapshot.artifactBundle,
+    modelManifest: snapshot.modelManifest,
+    usage: null,
+    agentOrigin: null,
+    imageData: null,
+    visualKind: null,
+    attachmentImages: [],
+    timestamp: Date.now() / 1000,
+  };
+}
+
+function upsertRestoredMessage(threadId: string, message: Message) {
   history.update((items) =>
-    items.some((item) => item.id === thread.id)
-      ? items.map((item) => (item.id === thread.id ? { ...thread, messages: thread.messages } : item))
-      : [{ ...thread, messages: thread.messages }, ...items],
+    items.some((item) => item.id === threadId)
+      ? items.map((item) =>
+          item.id === threadId
+            ? {
+                ...item,
+                messages: mergeRestoredMessage(item.messages ?? [], message),
+              }
+            : item,
+        )
+      : [
+          {
+            id: threadId,
+            title: message.output?.title ?? message.modelManifest?.document?.documentLabel ?? 'Restored Thread',
+            summary: '',
+            messages: [message],
+            updatedAt: message.timestamp,
+            versionCount: isRenderableVersionTimelineMessage(message) ? 1 : 0,
+            pendingCount: 0,
+            queuedCount: 0,
+            errorCount: 0,
+            status: 'active',
+            engineKind: message.artifactBundle?.engineKind ?? 'freecad',
+            sourceLanguage: message.artifactBundle?.sourceLanguage ?? message.output?.sourceLanguage ?? 'legacyPython',
+            geometryBackend: message.artifactBundle?.geometryBackend ?? message.output?.geometryBackend ?? 'freecad',
+          },
+          ...items,
+        ],
   );
+}
+
+function mergeRestoredMessage(messages: Message[], message: Message): Message[] {
+  const existingIndex = messages.findIndex((candidate) => candidate.id === message.id);
+  if (existingIndex >= 0) {
+    return messages.map((candidate, index) => (index === existingIndex ? { ...candidate, ...message } : candidate));
+  }
+  return [...messages, message];
+}
+
+async function loadRestoredThreadPage(threadId: string) {
+  activeThreadMessagesLoading.set(true);
+  threadMessagePageState.update((state) => ({
+    ...state,
+    [threadId]: {
+      isLoading: true,
+      hasMore: state[threadId]?.hasMore ?? false,
+      nextBefore: state[threadId]?.nextBefore ?? null,
+      error: null,
+    },
+  }));
+  try {
+    const page = await getThreadMessagesPage(threadId, null, 50, false);
+    if (get(activeThreadId) !== threadId) return;
+    mergeRestoredThreadPage(threadId, page);
+  } catch (e) {
+    if (get(activeThreadId) !== threadId) return;
+    threadMessagePageState.update((state) => ({
+      ...state,
+      [threadId]: {
+        isLoading: false,
+        hasMore: state[threadId]?.hasMore ?? false,
+        nextBefore: state[threadId]?.nextBefore ?? null,
+        error: formatBackendError(e),
+      },
+    }));
+    session.setError(`Thread Messages Error: ${formatBackendError(e)}`);
+  } finally {
+    if (get(activeThreadId) === threadId) {
+      activeThreadMessagesLoading.set(false);
+    }
+  }
+}
+
+function mergeRestoredThreadPage(threadId: string, page: ThreadMessagesPage) {
+  const activeMessageId = get(activeVersionId);
+  history.update((items) =>
+    items.map((thread) =>
+      thread.id === threadId
+        ? {
+            ...thread,
+            messages: mergeRestoredThreadMessages(thread.messages ?? [], page.messages, activeMessageId),
+          }
+        : thread,
+    ),
+  );
+  threadMessagePageState.update((state) => ({
+    ...state,
+    [threadId]: {
+      isLoading: false,
+      hasMore: page.hasMore,
+      nextBefore: page.nextBefore,
+      error: null,
+    },
+  }));
+}
+
+function mergeRestoredThreadMessages(
+  existingMessages: Message[],
+  incomingMessages: Message[],
+  activeMessageId: string | null,
+): Message[] {
+  const existingById = new Map(existingMessages.map((message) => [message.id, message]));
+  const incomingIds = new Set(incomingMessages.map((message) => message.id));
+  const mergedIncoming = incomingMessages.map((message) =>
+    mergeRestoredMessagePayload(existingById.get(message.id), message),
+  );
+
+  if (!activeMessageId || incomingIds.has(activeMessageId)) {
+    return mergedIncoming;
+  }
+
+  const restoredActive = existingById.get(activeMessageId);
+  return restoredActive ? [restoredActive, ...mergedIncoming] : mergedIncoming;
+}
+
+function mergeRestoredMessagePayload(existing: Message | undefined, incoming: Message): Message {
+  if (!existing) return incoming;
+  return {
+    ...existing,
+    ...incoming,
+    output: incoming.output ?? existing.output,
+    artifactBundle: incoming.artifactBundle ?? existing.artifactBundle,
+    modelManifest: incoming.modelManifest ?? existing.modelManifest,
+  };
+}
+
+export function mergeRestoredThreadMessagesForTests(
+  existingMessages: Message[],
+  incomingMessages: Message[],
+  activeMessageId: string | null,
+): Message[] {
+  return mergeRestoredThreadMessages(existingMessages, incomingMessages, activeMessageId);
 }
 
 async function fetchDefaultMacro() {

@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import type { ArtifactBundle, Message, ModelManifest } from '../types/domain';
 import {
   rememberVersionRuntimePayloadForTests,
+  mergeCommittedVersionMessageForTests,
   persistVersionRuntimePayloadForTests,
   resolveVersionRuntimePayloadForTests,
   resetVersionRuntimePayloadCacheForTests,
 } from './history';
+import type { Thread } from '../types/domain';
 
 function sampleBundle(modelId: string, previewStlPath: string): ArtifactBundle {
   return {
@@ -76,6 +78,21 @@ function sampleMessage(
   };
 }
 
+function sampleThread(id: string, messages: Message[] = []): Thread {
+  return {
+    id,
+    title: id,
+    summary: '',
+    messages,
+    updatedAt: 1,
+    versionCount: messages.length,
+    pendingCount: 0,
+    queuedCount: 0,
+    errorCount: 0,
+    status: 'active',
+  };
+}
+
 test('resolveVersionRuntimePayload prefers remembered rebuilt runtime for same message', () => {
   resetVersionRuntimePayloadCacheForTests();
 
@@ -119,4 +136,23 @@ test('persistVersionRuntimePayload stores rebuilt runtime for same message', asy
 
   assert.equal(persisted, true);
   assert.deepEqual(calls, [{ messageId: 'msg-1', modelId: 'model-1' }]);
+});
+
+test('mergeCommittedVersionMessage inserts committed fork message into new active thread', () => {
+  const bundle = sampleBundle('model-1', '/tmp/preview.stl');
+  const manifest = sampleManifest('model-1');
+  const message = sampleMessage('msg-fork', bundle, manifest);
+
+  const merged = mergeCommittedVersionMessageForTests(
+    [sampleThread('thread-old')],
+    'thread-fork',
+    'Forked Box',
+    message,
+  );
+
+  assert.equal(merged[0].id, 'thread-fork');
+  assert.equal(merged[0].title, 'Forked Box');
+  assert.equal(merged[0].messages[0]?.id, 'msg-fork');
+  assert.equal(merged[0].versionCount, 1);
+  assert.equal(merged[1].id, 'thread-old');
 });

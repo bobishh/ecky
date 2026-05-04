@@ -1,19 +1,5 @@
 import type { SketchView } from './tauri/contracts';
-
-export type SketchPoint = [number, number];
-
-export type SketchDimensionLocks = {
-  width?: boolean;
-  height?: boolean;
-};
-
-export type SketchStroke = {
-  primitiveId: string;
-  view: SketchView;
-  points: SketchPoint[];
-  closed: boolean;
-  dimensionLocks?: SketchDimensionLocks;
-};
+import { strokeKind, type SketchPoint, type SketchStroke } from './sketchWorkspaceState';
 
 export type SketchPointHit = {
   strokeIndex: number;
@@ -43,6 +29,9 @@ export type SketchStrokeBounds = {
 };
 
 export function editablePointIndices(stroke: SketchStroke): number[] {
+  if (strokeKind(stroke) === 'circle') {
+    return stroke.points.length > 0 ? [0] : [];
+  }
   if (stroke.points.length === 0) return [];
 
   if (!stroke.closed) {
@@ -61,6 +50,7 @@ export function canEditStrokePoint(stroke: SketchStroke, pointIndex: number): bo
 }
 
 export function logicalPointCount(stroke: SketchStroke): number {
+  if (strokeKind(stroke) === 'circle') return stroke.points.length > 0 ? 1 : 0;
   if (!stroke.closed || stroke.points.length <= 1) {
     return stroke.points.length;
   }
@@ -110,6 +100,16 @@ export function normalizeSketchDimension(value: unknown): number {
 export function moveClosedStrokePoint(stroke: SketchStroke, pointIndex: number, point: SketchPoint): SketchStroke {
   if (!stroke.closed) {
     throw new Error(CLOSED_STROKE_REQUIRED_ERROR);
+  }
+
+  if (strokeKind(stroke) === 'circle') {
+    if (pointIndex !== 0) {
+      throw new Error(INVALID_POINT_INDEX_ERROR);
+    }
+    return {
+      ...stroke,
+      points: [copyPoint(point)],
+    };
   }
 
   const normalizedIndex = normalizeEditablePointIndex(stroke, pointIndex);
@@ -207,6 +207,10 @@ export function deleteClosedStrokePoint(stroke: SketchStroke, pointIndex: number
     throw new Error(CLOSED_STROKE_REQUIRED_ERROR);
   }
 
+  if (strokeKind(stroke) === 'circle') {
+    throw new Error(CLOSED_PROFILE_MIN_POINTS_ERROR);
+  }
+
   const normalizedIndex = normalizeEditablePointIndex(stroke, pointIndex);
   if (normalizedIndex === null) {
     throw new Error(INVALID_POINT_INDEX_ERROR);
@@ -236,6 +240,22 @@ export function closedStrokeBounds(stroke: SketchStroke): SketchStrokeBounds {
     throw new Error(INVALID_POINT_ERROR);
   }
 
+  if (strokeKind(stroke) === 'circle') {
+    const center = copyPoint(stroke.points[0]);
+    const radius = stroke.radius;
+    if (typeof radius !== 'number' || !Number.isFinite(radius) || radius <= 0) {
+      throw new Error(INVALID_PROFILE_BOUNDS_ERROR);
+    }
+    return {
+      minX: center[0] - radius,
+      minY: center[1] - radius,
+      maxX: center[0] + radius,
+      maxY: center[1] + radius,
+      width: radius * 2,
+      height: radius * 2,
+    };
+  }
+
   const points = stroke.points.map(copyPoint);
   const logicalPoints = points.slice(0, logicalPointCount(stroke));
   const xs = logicalPoints.map((point) => point[0]);
@@ -258,6 +278,13 @@ export function resizeClosedStrokeBounds(stroke: SketchStroke, width: unknown, h
 
   const targetWidth = normalizeSketchDimension(width);
   const targetHeight = normalizeSketchDimension(height);
+  if (strokeKind(stroke) === 'circle') {
+    const radius = Math.min(targetWidth, targetHeight) / 2;
+    return {
+      ...stroke,
+      radius,
+    };
+  }
   const scaleX = targetWidth / bounds.width;
   const scaleY = targetHeight / bounds.height;
   const logicalCount = logicalPointCount(stroke);
@@ -294,6 +321,13 @@ export function setClosedStrokeBoundsOrigin(stroke: SketchStroke, minX: unknown,
   const targetMinY = normalizeSketchCoordinate(minY);
   const dx = targetMinX - bounds.minX;
   const dy = targetMinY - bounds.minY;
+  if (strokeKind(stroke) === 'circle') {
+    const center = copyPoint(stroke.points[0]);
+    return {
+      ...stroke,
+      points: [[center[0] + dx, center[1] + dy]],
+    };
+  }
   const logicalCount = logicalPointCount(stroke);
   const points = stroke.points.slice(0, logicalCount).map((point) => {
     const copiedPoint = copyPoint(point);
@@ -365,6 +399,10 @@ function normalizeEditablePointIndex(stroke: SketchStroke, pointIndex: number): 
   if (!Number.isInteger(pointIndex)) return null;
   if (pointIndex < 0) return null;
   if (stroke.points.length === 0) return null;
+
+  if (strokeKind(stroke) === 'circle') {
+    return pointIndex === 0 ? 0 : null;
+  }
 
   const lastIndex = stroke.points.length - 1;
   if (stroke.closed) {

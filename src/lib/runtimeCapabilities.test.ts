@@ -5,8 +5,9 @@ import {
   authoringContextFromConfig,
   capabilityForAuthoringContext,
   repairDefaultAuthoringContext,
+  resolveActiveAuthoringContext,
 } from './runtimeCapabilities';
-import type { AppConfig, RuntimeCapabilities } from './types/domain';
+import type { AppConfig, ArtifactBundle, ModelManifest, RuntimeCapabilities } from './types/domain';
 
 function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -87,6 +88,60 @@ test('capabilityForAuthoringContext routes legacy/freecad and ecky mesh correctl
     capabilityForAuthoringContext(capabilities, 'ecky', 'mesh')?.detail,
     'MESH ready',
   );
+});
+
+test('resolveActiveAuthoringContext prefers selected version artifact metadata over config defaults', () => {
+  const context = resolveActiveAuthoringContext({
+    config: sampleConfig(),
+    activeVersionMessage: {
+      output: null,
+      modelManifest: null,
+      artifactBundle: {
+        modelId: 'selected-model',
+        sourceKind: 'generated',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        contentHash: 'hash',
+        fcstdPath: '',
+        manifestPath: '',
+        previewStlPath: '',
+      } as ArtifactBundle,
+    },
+    sessionArtifactBundle: null,
+    sessionModelManifest: null,
+  });
+
+  assert.deepEqual(context, {
+    engineKind: 'ecky',
+    sourceLanguage: 'ecky',
+    geometryBackend: 'build123d',
+  });
+});
+
+test('resolveActiveAuthoringContext falls back to session runtime before config defaults', () => {
+  const context = resolveActiveAuthoringContext({
+    config: sampleConfig(),
+    activeVersionMessage: null,
+    sessionArtifactBundle: null,
+    sessionModelManifest: {
+      modelId: 'session-model',
+      sourceKind: 'generated',
+      sourceLanguage: 'build123d',
+      geometryBackend: 'build123d',
+      document: {
+        documentName: 'Session',
+        documentLabel: 'Session',
+        objectCount: 1,
+        warnings: [],
+      },
+    } as ModelManifest,
+  });
+
+  assert.deepEqual(context, {
+    engineKind: 'build123d',
+    sourceLanguage: 'build123d',
+    geometryBackend: 'build123d',
+  });
 });
 
 test('repairDefaultAuthoringContext keeps valid persisted default', () => {

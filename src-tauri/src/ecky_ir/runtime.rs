@@ -177,8 +177,7 @@ struct RuntimePart {
     expr: IrExpr,
 }
 
-#[allow(dead_code)]
-fn build_core_program_param_env(
+pub(crate) fn build_core_program_param_env_for_eval(
     program: &CoreProgram,
     parameters: &DesignParams,
 ) -> AppResult<BTreeMap<String, ParamValue>> {
@@ -187,6 +186,52 @@ fn build_core_program_param_env(
         env.insert(key.clone(), value.clone());
     }
     Ok(env)
+}
+
+pub(crate) fn eval_core_number_with_locals(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<f64> {
+    let expr = core_node_to_eval_ir_expr(node, param_names, env)?;
+    super::eval_scalar::eval_number(&expr, env)
+}
+
+pub(crate) fn eval_core_bool_with_locals(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<bool> {
+    let expr = core_node_to_eval_ir_expr(node, param_names, env)?;
+    super::eval_scalar::eval_bool(&expr, env)
+}
+
+pub(crate) fn eval_core_stringish_with_locals(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<String> {
+    let expr = core_node_to_eval_ir_expr(node, param_names, env)?;
+    super::eval_scalar::eval_stringish(&expr, env)
+}
+
+fn core_node_to_eval_ir_expr(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<IrExpr> {
+    let mut used_local_names = BTreeMap::new();
+    let locals = env
+        .keys()
+        .map(|key| (key.clone(), key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    runtime_core_node_to_ir_expr(
+        node,
+        param_names,
+        &BTreeMap::new(),
+        &locals,
+        &mut used_local_names,
+    )
 }
 
 fn runtime_core_part_to_runtime_part(
@@ -544,14 +589,18 @@ fn runtime_core_operation_name(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => "offset-rounded".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
         CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array".to_string(),
         CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::GridArray) => "grid-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => "arc-array".to_string(),
         CoreOperation::Array(CoreArrayOp::Repeat) => "repeat".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
@@ -710,6 +759,7 @@ fn render_prepared_parts(
         preview_stl_path: preview_path.to_string_lossy().to_string(),
         viewer_assets,
         edge_targets: Vec::new(),
+        face_targets: Vec::new(),
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: Vec::new(),
@@ -771,7 +821,7 @@ pub(crate) fn render_core_program(
         .iter()
         .map(|param| param.key.clone())
         .collect::<Vec<_>>();
-    let env = build_core_program_param_env(program, parameters)?;
+    let env = build_core_program_param_env_for_eval(program, parameters)?;
     render_prepared_parts(
         &parts,
         &parameter_keys,

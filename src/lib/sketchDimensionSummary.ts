@@ -3,8 +3,10 @@ import type { SketchPoint } from './sketchWorkspaceState';
 
 export type SketchDimensionStroke = {
   view: SketchView;
+  kind?: 'polyline' | 'circle';
   points: SketchPoint[];
   closed: boolean;
+  radius?: number;
 };
 
 export type SketchDimensionSummary = {
@@ -23,11 +25,12 @@ export function buildSketchDimensionSummary(
 ): SketchDimensionSummary | null {
   if (!stroke.closed) return null;
 
-  const profilePoints = trimClosingPoint(stroke.points);
-  if (profilePoints.length < 3) return null;
+  const kind = stroke.kind ?? 'polyline';
+  const profilePoints = kind === 'circle' ? stroke.points : trimClosingPoint(stroke.points);
+  if (kind !== 'circle' && profilePoints.length < 3) return null;
   if (!Number.isFinite(extrudeDepth)) return null;
 
-  const bounds = boundsFromPoints(profilePoints);
+  const bounds = boundsFromStroke(stroke, profilePoints, kind);
   const depth = formatDimension(extrudeDepth);
 
   return {
@@ -58,6 +61,21 @@ function boundsFromPoints(points: SketchPoint[]): { width: number; height: numbe
     width: formatDimension(maxX - minX),
     height: formatDimension(maxY - minY),
   };
+}
+
+function boundsFromStroke(
+  stroke: SketchDimensionStroke,
+  points: SketchPoint[],
+  kind: SketchDimensionStroke['kind'] | 'polyline',
+): { width: number; height: number } {
+  if (kind === 'circle') {
+    const radius = stroke.radius ?? 0;
+    return {
+      width: formatDimension(radius * 2),
+      height: formatDimension(radius * 2),
+    };
+  }
+  return boundsFromPoints(points);
 }
 
 function trimClosingPoint(points: SketchPoint[]): SketchPoint[] {

@@ -140,14 +140,18 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => "offset-rounded".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
         CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array".to_string(),
         CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::GridArray) => "grid-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => "arc-array".to_string(),
         CoreOperation::Array(CoreArrayOp::Repeat) => "repeat".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
@@ -496,6 +500,15 @@ struct ParsedCallArgs {
     keywords: BTreeMap<String, IrExpr>,
 }
 
+struct SampledRadialLoftCall {
+    binders: [String; 3],
+    height: IrExpr,
+    z_steps: IrExpr,
+    theta_steps: IrExpr,
+    radius: IrExpr,
+    z_map: Option<IrExpr>,
+}
+
 impl ParsedCallArgs {
     fn parse(node: &str, args: &[IrExpr], allowed_keywords: &[&str]) -> AppResult<Self> {
         let allowed = allowed_keywords.iter().copied().collect::<BTreeSet<_>>();
@@ -535,6 +548,58 @@ impl ParsedCallArgs {
             keywords,
         })
     }
+}
+
+fn parse_sampled_radial_loft_call(args: &[IrExpr]) -> AppResult<SampledRadialLoftCall> {
+    if args.is_empty() {
+        return Err(validation(
+            "`sampled-radial-loft` expects binder names plus keyword/value options.",
+        ));
+    }
+    let binders = expr_list_items(&args[0], "`sampled-radial-loft` binders")?;
+    if binders.len() != 3 {
+        return Err(validation(
+            "`sampled-radial-loft` binders must be `(theta z fz)`.",
+        ));
+    }
+    let parsed = ParsedCallArgs::parse(
+        "sampled-radial-loft",
+        &args[1..],
+        &["height", "z-steps", "theta-steps", "radius", "z-map"],
+    )?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`sampled-radial-loft` expects only keyword/value options after the binder list.",
+        ));
+    }
+    Ok(SampledRadialLoftCall {
+        binders: [
+            expr_parse_stringish(&binders[0], "`sampled-radial-loft` theta binder")?,
+            expr_parse_stringish(&binders[1], "`sampled-radial-loft` z binder")?,
+            expr_parse_stringish(&binders[2], "`sampled-radial-loft` fz binder")?,
+        ],
+        height: parsed
+            .keywords
+            .get("height")
+            .cloned()
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:height`."))?,
+        z_steps: parsed
+            .keywords
+            .get("z_steps")
+            .cloned()
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:z-steps`."))?,
+        theta_steps: parsed
+            .keywords
+            .get("theta_steps")
+            .cloned()
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:theta-steps`."))?,
+        radius: parsed
+            .keywords
+            .get("radius")
+            .cloned()
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:radius`."))?,
+        z_map: parsed.keywords.get("z_map").cloned(),
+    })
 }
 
 fn describe_expr(value: &IrExpr) -> String {
@@ -2641,6 +2706,75 @@ impl FreecadLowerer {
                     kind: GeomKind::Solid3d,
                 });
             }
+            "sampled-radial-loft" => {
+                let call = parse_sampled_radial_loft_call(args)?;
+                let height = self.lower_num_expr(&call.height, scope)?;
+                let z_steps = self.lower_count_expr(&call.z_steps, scope, 1)?;
+                let theta_steps = self.lower_count_expr(&call.theta_steps, scope, 3)?;
+                let sections = self.next_var();
+                let result = self.next_var();
+                let z_steps_var = self.next_var();
+                let theta_steps_var = self.next_var();
+                let theta_var = self.next_var();
+                let z_var = self.next_var();
+                let fz_var = self.next_var();
+                let section_z_var = self.next_var();
+                let radius_var = self.next_var();
+                let points_var = self.next_var();
+                let zi_var = format!("{result}_zi");
+                let ti_var = format!("{result}_ti");
+                let mut frame = BTreeMap::new();
+                frame.insert(
+                    call.binders[0].clone(),
+                    LoweredBinding::Number(theta_var.clone()),
+                );
+                frame.insert(
+                    call.binders[1].clone(),
+                    LoweredBinding::Number(z_var.clone()),
+                );
+                frame.insert(
+                    call.binders[2].clone(),
+                    LoweredBinding::Number(fz_var.clone()),
+                );
+                let child_scope = scope.with_frame(frame);
+                let radius_expr = self.lower_num_expr(&call.radius, &child_scope)?;
+                let z_map_expr = call
+                    .z_map
+                    .as_ref()
+                    .map(|value| self.lower_num_expr(value, &child_scope))
+                    .transpose()?
+                    .unwrap_or_else(|| z_var.clone());
+                self.emit(format!("{z_steps_var} = {z_steps}"));
+                self.emit(format!("{theta_steps_var} = {theta_steps}"));
+                self.emit(format!("{sections} = []"));
+                self.emit(format!("for {zi_var} in range({z_steps_var} + 1):"));
+                self.emit(format!(
+                    "    {fz_var} = 0.0 if {z_steps_var} <= 0 else float({zi_var}) / float({z_steps_var})"
+                ));
+                self.emit(format!("    {z_var} = ({height}) * {fz_var}"));
+                self.emit(format!("    {section_z_var} = float({z_map_expr})"));
+                self.emit(format!("    {points_var} = []"));
+                self.emit(format!("    for {ti_var} in range({theta_steps_var}):"));
+                self.emit(format!(
+                    "        {theta_var} = (2.0 * math.pi * float({ti_var})) / float({theta_steps_var})"
+                ));
+                self.emit(format!("        {radius_var} = float({radius_expr})"));
+                self.emit(format!(
+                    "        if {radius_var} <= 0.0: raise ValueError('sampled-radial-loft radius must stay positive')"
+                ));
+                self.emit(format!(
+                    "        {points_var}.append(App.Vector({radius_var} * math.cos({theta_var}), {radius_var} * math.sin({theta_var}), {section_z_var}))"
+                ));
+                self.emit(format!("    {points_var}.append({points_var}[0])"));
+                self.emit(format!(
+                    "    {sections}.append(Part.Wire(Part.makePolygon({points_var})))"
+                ));
+                self.emit(format!("{result} = _ecky_loft({sections})"));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Solid3d,
+                });
+            }
             "shell" => {
                 if args.len() != 2 {
                     return Err(validation(
@@ -3277,7 +3411,7 @@ fn freecad_preamble() -> Vec<String> {
         String::new(),
         "def _ecky_rotate(shape, rotate):\n    result = shape.copy()\n    rx, ry, rz = [float(v) for v in rotate]\n    if abs(rx) > 1e-12:\n        result.rotate(App.Vector(0, 0, 0), App.Vector(1, 0, 0), rx)\n    if abs(ry) > 1e-12:\n        result.rotate(App.Vector(0, 0, 0), App.Vector(0, 1, 0), ry)\n    if abs(rz) > 1e-12:\n        result.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), rz)\n    return result".into(),
         String::new(),
-        "def _ecky_scale(shape, scale):\n    result = shape.copy()\n    sx, sy, sz = [float(v) for v in scale]\n    if abs(sx - sy) < 1e-9 and abs(sy - sz) < 1e-9:\n        result.scale(sx)\n        return result\n    matrix = App.Matrix()\n    matrix.A11 = sx\n    matrix.A22 = sy\n    matrix.A33 = sz\n    result.transformGeometry(matrix)\n    return result".into(),
+        "def _ecky_scale(shape, scale):\n    result = shape.copy()\n    sx, sy, sz = [float(v) for v in scale]\n    if abs(sx - sy) < 1e-9 and abs(sy - sz) < 1e-9:\n        result.scale(sx)\n        return result\n    matrix = App.Matrix()\n    matrix.A11 = sx\n    matrix.A22 = sy\n    matrix.A33 = sz\n    transformed = result.transformGeometry(matrix)\n    return transformed if transformed is not None else result".into(),
         String::new(),
         "def _ecky_mirror(shape, axis, offset):\n    result = shape.copy()\n    axis = axis.lower()\n    point = App.Vector(0, 0, 0)\n    normal = App.Vector(1, 0, 0)\n    if axis == 'y':\n        normal = App.Vector(0, 1, 0)\n    elif axis == 'z':\n        normal = App.Vector(0, 0, 1)\n    point = App.Vector(float(offset), 0, 0)\n    result.mirror(point, normal)\n    return result".into(),
         String::new(),
@@ -3448,7 +3582,7 @@ mod tests {
     #[test]
     fn freecad_lowering_emits_runner_adapter_and_parts_list() {
         let src = r#"(model (part body (box 10 20 30)))"#;
-        let code = lower_to_freecad(src).expect("lower");
+        let code = crate::ecky_ir::lower_to_freecad(src).expect("lower");
         assert!(code.contains("_ecky_parts"), "missing parts list: {}", code);
         assert!(
             !code.contains("doc.addObject"),
@@ -3494,7 +3628,7 @@ mod tests {
                   :y (-5 5)
                   :z (-10 20)))
                 (result clipped))))"#;
-        let code = lower_to_freecad(src).expect("lower");
+        let code = crate::ecky_ir::lower_to_freecad(src).expect("lower");
         assert!(code.contains("_ecky_box"), "box align: {}", code);
         assert!(
             code.contains("(\"min\", \"center\", \"max\")"),
@@ -3670,6 +3804,27 @@ mod tests {
             "top section height: {}",
             code
         );
+    }
+
+    #[test]
+    fn freecad_lowering_supports_sampled_radial_loft_smoke() {
+        let src = r#"
+            (model
+              (part body
+                (sampled-radial-loft
+                  (theta z fz)
+                  :height 40
+                  :z-steps 6
+                  :theta-steps 24
+                  :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
+                  :z-map (+ z (* fz 2))))))"#;
+        let code = crate::ecky_ir::lower_to_freecad(src).expect("lower");
+        assert!(code.contains("_zi in range("), "{code}");
+        assert!(code.contains("_ti in range("), "{code}");
+        assert!(code.contains("App.Vector("), "{code}");
+        assert!(code.contains("Part.makePolygon("), "{code}");
+        assert!(code.contains("_ecky_loft("), "{code}");
+        assert!(code.contains("math.sin("), "{code}");
     }
 
     #[test]

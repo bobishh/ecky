@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use libc;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -165,6 +165,8 @@ pub struct AppState {
     pub render_lock: Arc<tokio::sync::Mutex<()>>,
     pub mcp_status: Arc<Mutex<McpServerStatus>>,
     pub mcp_sessions: Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>>,
+    /// MCP guide/resource URIs read by each live session.
+    pub mcp_session_read_resources: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
     /// Pending user-confirmation requests keyed by requestId.
     pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
     /// Pending user-prompt requests keyed by requestId (agent waits for text/attachments from UI).
@@ -200,6 +202,7 @@ impl AppState {
                 last_startup_error: None,
             })),
             mcp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mcp_session_read_resources: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             confirm_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             prompt_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             auto_agent_runtime: Arc::new(Mutex::new(

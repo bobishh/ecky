@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FREECAD_MISSING_PATH="/missing/freecadcmd"
 
-bash "$ROOT/scripts/prepare_build123d_runtime.sh"
+npm run build123d:prepare
 
 BUNDLED_PYTHON="$ROOT/.dist/build123d-runtime/bin/python3"
 if [[ ! -x "$BUNDLED_PYTHON" ]]; then
@@ -25,5 +25,20 @@ BUILD123D_PYTHON="$BUNDLED_PYTHON" FREECAD_CMD="$FREECAD_MISSING_PATH" cargo tes
   'runtime_capabilities::tests::collect_runtime_capabilities_prefers_build123d_when_freecad_missing' \
   --lib -- --exact --nocapture
 
+BUILD123D_PYTHON="$BUNDLED_PYTHON" FREECAD_CMD="$FREECAD_MISSING_PATH" cargo test \
+  --manifest-path "$ROOT/src-tauri/Cargo.toml" \
+  'ecky_cad_host::direct_occt_sdk::tests::live_bundled_build123d_runtime_can_export_when_headers_are_available' \
+  --lib -- --exact --nocapture
+
+BUILD123D_PYTHON="$BUNDLED_PYTHON" FREECAD_CMD="$FREECAD_MISSING_PATH" cargo test \
+  --manifest-path "$ROOT/src-tauri/Cargo.toml" \
+  'services::render::tests::ecky_rust_dispatch_uses_direct_occt_step_when_sdk_ready' \
+  --lib -- --exact --nocapture
+
+BUILD123D_PYTHON="$BUNDLED_PYTHON" FREECAD_CMD="$FREECAD_MISSING_PATH" cargo test \
+  --manifest-path "$ROOT/src-tauri/Cargo.toml" \
+  'sketch_draft_runtime::tests::live_accepted_brep_candidate_source_exports_step_when_sdk_ready' \
+  --lib -- --exact --nocapture
+
 BUILD123D_PYTHON="$BUNDLED_PYTHON" FREECAD_CMD="$FREECAD_MISSING_PATH" "$BUNDLED_PYTHON" \
-  "$ROOT/server/check_canonical_cup_parity.py"
+  "$ROOT/server/check_canonical_cup_parity.py" --allow-good

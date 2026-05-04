@@ -54,6 +54,24 @@ test('deriveOptimisticDialogueMessages adds immediate user and pending assistant
   assert.match(messages[1]?.content ?? '', /routing|processing/i);
 });
 
+test('deriveOptimisticDialogueMessages keeps inline image attachments visible', () => {
+  const messages = deriveOptimisticDialogueMessages([], [
+    request({
+      attachments: [
+        {
+          path: '',
+          name: 'reference.png',
+          explanation: '',
+          dataUrl: 'data:image/png;base64,reference',
+          type: 'image',
+        },
+      ],
+    }),
+  ]);
+
+  assert.deepEqual(messages[0]?.attachmentImages, ['data:image/png;base64,reference']);
+});
+
 test('deriveOptimisticDialogueMessages drops placeholders once persisted assistant message arrives', () => {
   const persisted = message({
     id: 'msg-persisted',

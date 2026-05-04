@@ -1,6 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { historyStore as history, activeThreadIdStore as activeThreadId, activeVersionId, config } from './domainState';
+import { historyStore as history, activeThreadIdStore as activeThreadId, activeVersionId } from './domainState';
 import { workingCopy, isDirty } from './workingCopy';
 import { session } from './sessionStore';
 import { handleParamChange, commitManualVersion } from '../controllers/manualController';
@@ -8,7 +8,8 @@ import { paramPanelState } from './paramPanelState';
 import { profileLog } from '../debug/profiler';
 import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
 import { inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
-import type { GeometryBackend, Message, SourceLanguage, Thread } from '../types/domain';
+import { confirmAction } from '../ui/confirmAction';
+import type { Message, Thread } from '../types/domain';
 import { isCurrentThreadLoad as isCurrentThreadLoadState, shouldSkipThreadSelect } from '../threadLoading';
 import { isRenderableVersionTimelineMessage } from '../threadTimeline';
 import {
@@ -26,8 +27,6 @@ import {
   getThreadLatestVersion,
   getThreadMessagesPage,
   renameThread as renameThreadCommand,
-  setThreadAuthoringContext as setThreadAuthoringContextCommand,
-  setThreadEngineKind as setThreadEngineKindCommand,
   getThread,
   restoreVersion as restoreVersionCommand,
   updateVersionRuntime,
@@ -60,6 +59,10 @@ export const threadMessagePageState = writable<Record<string, ThreadMessagePageS
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 50;
 
+export type LoadVersionOptions = {
+  rebuildMissingRuntime?: boolean;
+};
+
 function isCurrentThreadLoad(token: number, threadId: string): boolean {
   return isCurrentThreadLoadState(token, latestThreadSwitchToken, get(activeThreadId), threadId);
 }
@@ -88,6 +91,55 @@ function mergeThreadMessages(existing: Message[], incoming: Message[]): Message[
     seen.add(message.id);
     return true;
   });
+}
+
+function versionCountForMessages(messages: Message[], fallback: number): number {
+  return Math.max(fallback, messages.filter(isRenderableVersionTimelineMessage).length);
+}
+
+function mergeCommittedVersionMessage(
+  threads: Thread[],
+  threadId: string,
+  title: string,
+  message: Message,
+): Thread[] {
+  const existing = threads.find((thread) => thread.id === threadId) ?? null;
+  const nextMessages = mergeThreadMessages(existing?.messages ?? [], [message]);
+  const nextThread: Thread = existing
+    ? {
+        ...existing,
+        title: title || existing.title,
+        messages: nextMessages,
+        updatedAt: Math.max(existing.updatedAt ?? 0, message.timestamp),
+        versionCount: versionCountForMessages(nextMessages, existing.versionCount ?? 0),
+      }
+    : {
+        id: threadId,
+        title,
+        summary: '',
+        messages: nextMessages,
+        updatedAt: message.timestamp,
+        versionCount: versionCountForMessages(nextMessages, 0),
+        pendingCount: 0,
+        queuedCount: 0,
+        errorCount: 0,
+        status: 'active',
+      };
+
+  return [nextThread, ...threads.filter((thread) => thread.id !== threadId)];
+}
+
+export function rememberCommittedVersionMessage(threadId: string, title: string, message: Message) {
+  history.update((threads) => mergeCommittedVersionMessage(threads, threadId, title, message));
+}
+
+export function mergeCommittedVersionMessageForTests(
+  threads: Thread[],
+  threadId: string,
+  title: string,
+  message: Message,
+) {
+  return mergeCommittedVersionMessage(threads, threadId, title, message);
 }
 
 function toAssetUrl(path: string | null | undefined): string {
@@ -224,8 +276,13 @@ async function resolveForkRuntimePayload(message: Message): Promise<{
   return { artifactBundle: null, modelManifest: null };
 }
 
-export async function loadVersion(msg: Message | null | undefined, expectedThreadId: string | null = get(activeThreadId)) {
+export async function loadVersion(
+  msg: Message | null | undefined,
+  expectedThreadId: string | null = get(activeThreadId),
+  options: LoadVersionOptions = {},
+) {
   if (!isVersionCandidate(msg)) return;
+  const rebuildMissingRuntime = options.rebuildMissingRuntime ?? true;
   const loadToken = ++latestLoadVersionToken;
   activeVersionId.set(msg.id);
   let rebuiltRuntime = false;
@@ -265,6 +322,11 @@ export async function loadVersion(msg: Message | null | undefined, expectedThrea
     session.clearModelRuntime();
   } else if (msg.output) {
     session.clearModelRuntime();
+    if (!rebuildMissingRuntime) {
+      session.setStlUrl(null);
+      session.setStatus(`Cached runtime missing for ${versionLabel(msg)}.`);
+      return;
+    }
     session.setStatus('Cached runtime missing on disk. Rebuilding preview...');
     await handleParamChange(msg.output.initialParams || {}, msg.output.macroCode, false);
     if (isStale()) return;
@@ -468,63 +530,6 @@ export async function renameThread(id: string, title: string) {
   }
 }
 
-function resolveInternalGeometryBackend(
-  thread: Thread | undefined,
-  sourceLanguage: SourceLanguage,
-): GeometryBackend {
-  if (sourceLanguage === 'legacyPython') return 'freecad';
-  if (thread?.geometryBackend && thread.geometryBackend !== 'freecad') return thread.geometryBackend;
-  const defaultGeometryBackend = get(config).defaultGeometryBackend;
-  if (defaultGeometryBackend && defaultGeometryBackend !== 'freecad') return defaultGeometryBackend;
-  return 'build123d';
-}
-
-export async function setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage) {
-  try {
-    const existingThread = get(history).find((thread) => thread.id === id);
-    const geometryBackend = resolveInternalGeometryBackend(existingThread, sourceLanguage);
-    await setThreadAuthoringContextCommand(id, sourceLanguage, geometryBackend);
-    history.update((items) => {
-      if (items.some((thread) => thread.id === id)) {
-        return items.map((thread) =>
-          thread.id === id ? { ...thread, sourceLanguage, geometryBackend } : thread,
-        );
-      }
-      return items;
-    });
-    await refreshHistory();
-    if (get(activeThreadId) === id) {
-      session.setStatus(`Authoring context updated.`);
-    }
-  } catch (e) {
-    session.setError(`Update Error: ${formatBackendError(e)}`);
-  }
-}
-
-export async function setThreadEngineKind(id: string, engineKind: Thread['engineKind']) {
-  try {
-    await setThreadEngineKindCommand(id, engineKind);
-    history.update((items) => {
-      if (items.some((thread) => thread.id === id)) {
-        return items.map((thread) => (thread.id === id ? { ...thread, engineKind } : thread));
-      }
-      return items;
-    });
-    await refreshHistory();
-    if (get(activeThreadId) === id) {
-      session.setStatus(
-        engineKind === 'ecky'
-          ? 'Thread engine set to Ecky.'
-          : engineKind === 'build123d'
-            ? 'Thread engine set to build123d Python.'
-            : 'Thread engine set to FreeCAD.',
-      );
-    }
-  } catch (e) {
-    session.setError(`Engine Error: ${formatBackendError(e)}`);
-  }
-}
-
 export async function deleteVersion(messageId: string) {
   try {
     await deleteVersionCommand(messageId);
@@ -567,6 +572,23 @@ export async function restoreVersion(messageId: string) {
   try {
     await restoreVersionCommand(messageId);
     await refreshHistory();
+    const currentThreadId = get(activeThreadId);
+    if (currentThreadId) {
+      const page = await getThreadMessagesPage(currentThreadId, null, DEFAULT_MESSAGE_PAGE_LIMIT, false);
+      history.update((items) =>
+        items.map((thread) => (thread.id === currentThreadId ? { ...thread, messages: page.messages } : thread)),
+      );
+      setThreadPageState(currentThreadId, {
+        isLoading: false,
+        hasMore: page.hasMore,
+        nextBefore: page.nextBefore,
+        error: null,
+      });
+      const restored = page.messages.find((message) => message.id === messageId);
+      if (restored) {
+        await loadVersion(restored, currentThreadId);
+      }
+    }
     session.setStatus('Version returned to the carousel.');
   } catch (e) {
     session.setError(`Restore Error: ${formatBackendError(e)}`);
@@ -634,10 +656,7 @@ export async function forkDesign() {
     }
 
     const label = versionLabel(sourceMessage);
-    const confirmed =
-      typeof window === 'undefined'
-        ? true
-        : window.confirm(`Fork "${label}" into a new thread now?`);
+    const confirmed = await confirmAction(`Fork "${label}" into a new thread now?`);
     if (!confirmed) return;
 
     const newThreadId = crypto.randomUUID();

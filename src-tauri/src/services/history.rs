@@ -20,15 +20,6 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
 
     let genie_traits = db::get_thread_genie_traits(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
-    let engine_kind = db::get_thread_engine_kind(conn, id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or_default();
-    let source_language = db::get_thread_source_language(conn, id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or_else(|| engine_kind.to_source_language());
-    let geometry_backend = db::get_thread_geometry_backend(conn, id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or_else(|| engine_kind.to_geometry_backend());
 
     let updated_at = messages.last().map(|m| m.timestamp).unwrap_or(0);
     let version_count = messages
@@ -70,9 +61,6 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
         status: lifecycle.status,
         finalized_at: lifecycle.finalized_at,
         pending_confirm: lifecycle.pending_confirm,
-        engine_kind,
-        source_language,
-        geometry_backend,
     })
 }
 
@@ -84,6 +72,18 @@ pub fn get_thread_latest_version(
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
     db::get_thread_latest_version(conn, id).map_err(|err| AppError::persistence(err.to_string()))
+}
+
+pub fn get_thread_message_version(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> AppResult<Option<crate::models::Message>> {
+    db::get_visible_thread_title(conn, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .ok_or_else(|| AppError::not_found("Thread not found."))?;
+    db::get_thread_message_version(conn, thread_id, message_id)
+        .map_err(|err| AppError::persistence(err.to_string()))
 }
 
 pub fn get_thread_messages_page(
@@ -124,9 +124,6 @@ pub fn finalize_thread(
         .unwrap_or_default();
     let genie_traits = db::get_thread_genie_traits(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
-    let engine_kind = db::get_thread_engine_kind(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or_default();
     let messages = db::get_thread_messages(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
@@ -150,21 +147,12 @@ pub fn finalize_thread(
     let finalized_thread_id = Uuid::new_v4().to_string();
     let finalized_message_id = Uuid::new_v4().to_string();
 
-    let (source_language, geometry_backend) = if let Some(output) = &selected_message.output {
-        (Some(output.source_language), Some(output.geometry_backend))
-    } else {
-        (None, None)
-    };
-
     db::create_or_update_thread(
         conn,
         &finalized_thread_id,
         &title,
         now,
         genie_traits.as_ref(),
-        Some(engine_kind),
-        source_language,
-        geometry_backend,
     )
     .map_err(|err| AppError::persistence(err.to_string()))?;
     db::update_thread_summary(conn, &finalized_thread_id, &summary)
@@ -201,105 +189,6 @@ pub fn reopen_thread(conn: &rusqlite::Connection, thread_id: &str) -> AppResult<
 
 pub fn get_inventory(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
     db::get_inventory_threads(conn).map_err(|err| AppError::persistence(err.to_string()))
-}
-
-pub fn set_thread_authoring_context(
-    conn: &rusqlite::Connection,
-    thread_id: &str,
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: crate::models::GeometryBackend,
-) -> AppResult<()> {
-    // Determine engine_kind for legacy compatibility
-    let engine_kind = source_language.to_engine_kind();
-
-    if db::get_thread_title(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .is_none()
-    {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        db::create_or_update_thread(
-            conn,
-            thread_id,
-            "New Thread",
-            now,
-            None,
-            Some(engine_kind),
-            Some(source_language),
-            Some(geometry_backend),
-        )
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    }
-
-    // Keep imported threads pinned to FreeCAD for now (Legacy Python)
-    let messages = db::get_thread_messages_for_thread_view(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    let is_imported = messages.iter().any(|message| {
-        message
-            .artifact_bundle
-            .as_ref()
-            .map(|bundle| bundle.source_kind == crate::models::ModelSourceKind::ImportedFcstd)
-            .unwrap_or(false)
-            || message
-                .model_manifest
-                .as_ref()
-                .map(|manifest| {
-                    manifest.source_kind == crate::models::ModelSourceKind::ImportedFcstd
-                })
-                .unwrap_or(false)
-    });
-
-    if is_imported
-        && (source_language != crate::models::SourceLanguage::LegacyPython
-            || geometry_backend != crate::models::GeometryBackend::Freecad)
-    {
-        return Err(AppError::validation(
-            "Imported FCStd threads stay pinned to FreeCAD (Legacy Python).",
-        ));
-    }
-
-    // Update all three fields
-    db::update_thread_engine_kind(conn, thread_id, engine_kind)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    db::update_thread_source_language(conn, thread_id, source_language)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    db::update_thread_geometry_backend(conn, thread_id, geometry_backend)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-
-    Ok(())
-}
-
-pub fn set_thread_engine_kind(
-    conn: &rusqlite::Connection,
-    thread_id: &str,
-    engine_kind: crate::models::EngineKind,
-) -> AppResult<()> {
-    if db::get_thread_title(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .is_none()
-    {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        db::create_or_update_thread(
-            conn,
-            thread_id,
-            "New Thread",
-            now,
-            None,
-            Some(engine_kind),
-            None,
-            None,
-        )
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    }
-
-    db::update_thread_engine_kind(conn, thread_id, engine_kind)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    Ok(())
 }
 
 pub fn delete_version(conn: &rusqlite::Connection, message_id: &str) -> AppResult<()> {
@@ -383,6 +272,7 @@ mod tests {
             preview_stl_path: format!("/tmp/{model_id}.stl"),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
+            face_targets: Vec::new(),
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
@@ -423,9 +313,6 @@ mod tests {
             "Bulb Lamp Shade",
             100,
             Some(&genie_traits),
-            None,
-            None,
-            None,
         )
         .unwrap();
         db::update_thread_summary(&conn, thread_id, "Working thread").unwrap();
@@ -477,17 +364,7 @@ mod tests {
         ));
         let conn = db::init_db(&db_path).unwrap();
 
-        db::create_or_update_thread(
-            &conn,
-            "thread-queued",
-            "Queued thread",
-            100,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db::create_or_update_thread(&conn, "thread-queued", "Queued thread", 100, None).unwrap();
 
         db::add_message(
             &conn,
@@ -567,17 +444,7 @@ mod tests {
         ));
         let conn = db::init_db(&db_path).unwrap();
 
-        db::create_or_update_thread(
-            &conn,
-            "thread-carousel",
-            "Bulb",
-            100,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db::create_or_update_thread(&conn, "thread-carousel", "Bulb", 100, None).unwrap();
 
         let live = sample_message("msg-live", 100, "V-live");
         let discarded = sample_message("msg-discarded", 101, "V-discarded");
@@ -612,17 +479,7 @@ mod tests {
         ));
         let conn = db::init_db(&db_path).unwrap();
 
-        db::create_or_update_thread(
-            &conn,
-            "thread-output-only",
-            "Output only",
-            100,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db::create_or_update_thread(&conn, "thread-output-only", "Output only", 100, None).unwrap();
 
         let mut output_only = sample_message("msg-output-only", 100, "V-output-only");
         output_only.artifact_bundle = None;
@@ -650,17 +507,7 @@ mod tests {
         ));
         let conn = db::init_db(&db_path).unwrap();
 
-        db::create_or_update_thread(
-            &conn,
-            "thread-latest",
-            "Latest",
-            100,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db::create_or_update_thread(&conn, "thread-latest", "Latest", 100, None).unwrap();
         let older = sample_message("msg-older", 100, "V-old");
         let newer = sample_message("msg-newer", 200, "V-new");
         let mut failed = sample_message("msg-failed", 300, "V-failed");
@@ -686,6 +533,36 @@ mod tests {
     }
 
     #[test]
+    fn get_thread_message_version_returns_pointed_renderable_version() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-thread-pointed-version-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = db::init_db(&db_path).unwrap();
+
+        db::create_or_update_thread(&conn, "thread-pointed", "Pointed", 100, None).unwrap();
+        let older = sample_message("msg-older", 100, "V-old");
+        let newer = sample_message("msg-newer", 200, "V-new");
+        db::add_message(&conn, "thread-pointed", &older).unwrap();
+        db::add_message(&conn, "thread-pointed", &newer).unwrap();
+
+        let pointed = get_thread_message_version(&conn, "thread-pointed", "msg-older")
+            .unwrap()
+            .expect("pointed");
+
+        assert_eq!(pointed.id, "msg-older");
+        assert_eq!(
+            pointed
+                .output
+                .as_ref()
+                .map(|output| output.version_name.as_str()),
+            Some("V-old")
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
     fn get_thread_messages_page_strips_visual_payloads_and_paginates() {
         let db_path = std::env::temp_dir().join(format!(
             "ecky-thread-message-page-{}.sqlite",
@@ -693,8 +570,7 @@ mod tests {
         ));
         let conn = db::init_db(&db_path).unwrap();
 
-        db::create_or_update_thread(&conn, "thread-page", "Page", 100, None, None, None, None)
-            .unwrap();
+        db::create_or_update_thread(&conn, "thread-page", "Page", 100, None).unwrap();
         for index in 1..=3 {
             let mut message = sample_message(
                 &format!("msg-{}", index),
@@ -739,24 +615,6 @@ mod tests {
             vec!["msg-1"]
         );
         assert!(!second_page.has_more);
-
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[test]
-    fn set_thread_engine_kind_creates_blank_thread_and_persists_override() {
-        let db_path = std::env::temp_dir().join(format!(
-            "ecky-thread-engine-kind-{}.sqlite",
-            uuid::Uuid::new_v4()
-        ));
-        let conn = db::init_db(&db_path).unwrap();
-
-        set_thread_engine_kind(&conn, "blank-thread", crate::models::EngineKind::EckyIrV0).unwrap();
-
-        let stored = db::get_thread_engine_kind(&conn, "blank-thread").unwrap();
-        assert_eq!(stored, Some(crate::models::EngineKind::EckyIrV0));
-        let thread = get_thread(&conn, "blank-thread").unwrap();
-        assert_eq!(thread.engine_kind, crate::models::EngineKind::EckyIrV0);
 
         let _ = std::fs::remove_file(db_path);
     }

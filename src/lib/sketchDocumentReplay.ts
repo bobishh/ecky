@@ -104,6 +104,30 @@ function primitiveToStroke(
   primitive: SketchPrimitive,
   constraints: SketchConstraint[],
 ): { stroke: SketchStroke } | { error: string } {
+  if (primitive.kind === 'circle') {
+    const center = primitive.points?.[0];
+    if (!isValidPoint(center)) {
+      return {
+        error: `sketch '${sketchId}' primitive '${primitive.primitiveId}' has invalid point at index 0.`,
+      };
+    }
+    if (typeof primitive.radius !== 'number' || !Number.isFinite(primitive.radius) || primitive.radius <= 0) {
+      return {
+        error: `sketch '${sketchId}' primitive '${primitive.primitiveId}' has invalid radius.`,
+      };
+    }
+    return {
+      stroke: {
+        primitiveId: primitive.primitiveId,
+        view,
+        kind: 'circle',
+        points: [[center[0], center[1]]],
+        closed: true,
+        radius: primitive.radius,
+      },
+    };
+  }
+
   if (primitive.kind !== 'polyline') {
     return {
       error: `sketch '${sketchId}' primitive '${primitive.primitiveId}' has unsupported kind '${primitive.kind}'.`,
@@ -139,6 +163,7 @@ function primitiveToStroke(
     stroke: {
       primitiveId: primitive.primitiveId,
       view,
+      kind: 'polyline',
       points: strokePoints,
       closed: true,
       ...dimensionLocksForPrimitive(primitive.primitiveId, constraints),

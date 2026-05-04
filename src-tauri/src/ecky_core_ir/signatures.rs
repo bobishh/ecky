@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 
 use super::{
-    CompilerError, CompilerErrorKind, CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreKeywordArg,
-    CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CorePathOp, CorePrimitive,
-    CoreProgram, CoreReference, CoreResult, CoreSurfaceOp, CoreTransformOp, CoreValueKind, NodeId,
-    SourceSpan,
+    CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp,
+    CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CorePathOp,
+    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSurfaceOp, CoreTransformOp,
+    CoreValueKind, NodeId, SourceSpan,
 };
 
 #[derive(Debug, Clone, Default)]
 struct KindEnv {
     locals: HashMap<String, CoreValueKind>,
+    local_list_items: HashMap<String, CoreValueKind>,
     nodes: HashMap<NodeId, CoreValueKind>,
+    node_list_items: HashMap<NodeId, CoreValueKind>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +56,9 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
                 nested
                     .nodes
                     .insert(binding.value.id, effective_kind(&binding.value, &nested));
+                if let Some(item_kind) = list_item_kind(&binding.value, &nested) {
+                    nested.node_list_items.insert(binding.value.id, item_kind);
+                }
             }
             verify_node(result, &nested)
         }
@@ -64,6 +69,14 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
                 let kind = effective_kind(&binding.value, &nested);
                 nested.locals.insert(binding.name.clone(), kind);
                 nested.nodes.insert(binding.value.id, kind);
+                if let Some(item_kind) = list_item_kind(&binding.value, &nested) {
+                    nested
+                        .local_list_items
+                        .insert(binding.name.clone(), item_kind);
+                    nested.node_list_items.insert(binding.value.id, item_kind);
+                } else {
+                    nested.local_list_items.remove(&binding.name);
+                }
             }
             verify_node(body, &nested)
         }
@@ -107,26 +120,42 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
             verify_expected_node("range", 0, "start", ExpectedKind::Number, start, env)?;
             verify_expected_node("range", 1, "end", ExpectedKind::Number, end, env)
         }
-        CoreNodeKind::Map { sources, body, .. } => {
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => {
+            if params.len() != sources.len() {
+                return Err(type_error(
+                    "map",
+                    "expected one parameter per source",
+                    &format!(
+                        "got {} parameter(s) and {} source(s)",
+                        params.len(),
+                        sources.len()
+                    ),
+                    node.span,
+                ));
+            }
+            let mut nested = env.clone();
             for (index, source) in sources.iter().enumerate() {
                 verify_node(source, env)?;
                 verify_expected_node("map", index, "source", ExpectedKind::List, source, env)?;
+                if let Some(item_kind) = list_item_kind(source, env) {
+                    nested.locals.insert(params[index].clone(), item_kind);
+                } else {
+                    nested.locals.remove(&params[index]);
+                    nested.local_list_items.remove(&params[index]);
+                }
             }
-            verify_node(body, env)
+            verify_node(body, &nested)
         }
         CoreNodeKind::Apply { op, args, list } => {
             for arg in args {
                 verify_node(arg, env)?;
             }
             verify_node(list, env)?;
-            verify_expected_node(
-                &operation_name(op),
-                args.len(),
-                "list",
-                ExpectedKind::List,
-                list,
-                env,
-            )
+            verify_apply(op, args, list, node, env)
         }
         CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
             for item in items {
@@ -418,7 +447,7 @@ fn verify_surface(
         CoreSurfaceOp::Shell => {
             verify_exact(name, args, &[num("thickness"), solid("solid")], env)?;
         }
-        CoreSurfaceOp::Offset => {
+        CoreSurfaceOp::Offset | CoreSurfaceOp::OffsetRounded => {
             verify_min_arity(name, args, 2, "amount and profile")?;
             verify_expected_node(name, 0, "amount", ExpectedKind::Number, &args[0], env)?;
             verify_expected_node(name, 1, "profile", ExpectedKind::Sketch, &args[1], env)?;
@@ -427,6 +456,34 @@ fn verify_surface(
         }
         CoreSurfaceOp::Fillet | CoreSurfaceOp::Chamfer => {
             verify_exact(name, args, &[num("radius"), solid("solid")], env)?;
+        }
+        CoreSurfaceOp::Taper => {
+            verify_between(
+                name,
+                args,
+                3,
+                4,
+                "height, scale, profile or height, scale-x, scale-y, profile",
+            )?;
+            verify_expected_node(name, 0, "height", ExpectedKind::Number, &args[0], env)?;
+            for index in 1..args.len() - 1 {
+                verify_expected_node(
+                    name,
+                    index,
+                    "scale",
+                    ExpectedKind::Number,
+                    &args[index],
+                    env,
+                )?;
+            }
+            verify_expected_node(
+                name,
+                args.len() - 1,
+                "profile",
+                ExpectedKind::Sketch,
+                args.last().expect("taper profile"),
+                env,
+            )?;
         }
         CoreSurfaceOp::Twist => {
             verify_exact(
@@ -499,6 +556,28 @@ fn verify_array(
                 env,
             )?;
         }
+        CoreArrayOp::GridArray => {
+            verify_exact(
+                name,
+                args,
+                &[num("rows"), num("cols"), num("x"), num("y"), shape("shape")],
+                env,
+            )?;
+        }
+        CoreArrayOp::ArcArray => {
+            verify_exact(
+                name,
+                args,
+                &[
+                    num("count"),
+                    num("radius"),
+                    num("start-angle"),
+                    num("end-angle"),
+                    shape("shape"),
+                ],
+                env,
+            )?;
+        }
         CoreArrayOp::Repeat
         | CoreArrayOp::RepeatUnion
         | CoreArrayOp::RepeatCompound
@@ -554,12 +633,41 @@ fn verify_meta(
     }
 }
 
+fn verify_apply(
+    op: &CoreOperation,
+    args: &[CoreNode],
+    list: &CoreNode,
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    let name = operation_name(op);
+    verify_expected_node(&name, args.len(), "list", ExpectedKind::List, list, env)?;
+    match op {
+        CoreOperation::Boolean(_) | CoreOperation::Meta(CoreMetaOp::Group) => {
+            for (index, arg) in args.iter().enumerate() {
+                verify_expected_node(&name, index, "shape", ExpectedKind::Shape, arg, env)?;
+            }
+            verify_expected_list_items(
+                &name,
+                args.len(),
+                "list item",
+                ExpectedKind::Shape,
+                list,
+                env,
+            )?;
+            verify_result(&name, ExpectedKind::Shape, node, env)
+        }
+        _ => Ok(()),
+    }
+}
+
 fn verify_keywords(name: &str, keywords: &[CoreKeywordArg], env: &KindEnv) -> CoreResult<()> {
     for keyword in keywords {
-        let expected = match keyword.name.as_str() {
-            "offset" | "rotate" | "origin" | "x" | "normal" => Some(ExpectedKind::Point3),
-            "openings" => Some(ExpectedKind::Sketch),
-            _ => None,
+        let expected = match (name, keyword.name.as_str()) {
+            ("clip-box", "x" | "y" | "z") => Some(ExpectedKind::List),
+            (_, "offset" | "rotate" | "origin" | "x" | "normal") => Some(ExpectedKind::Point3),
+            (_, "openings") => Some(ExpectedKind::Sketch),
+            (_, _) => None,
         };
         if let Some(expected) = expected {
             verify_expected_node(name, 0, &keyword.name, expected, &keyword.value, env)?;
@@ -624,6 +732,9 @@ fn verify_expected_node(
     ) {
         return verify_expected_point_list(op_name, index, arg_name, expected, node, env);
     }
+    if matches!(expected, ExpectedKind::Point3) {
+        return verify_expected_point3(op_name, index, arg_name, node, env);
+    }
     let actual = effective_kind(node, env);
     if kind_matches(expected, actual) {
         return Ok(());
@@ -640,6 +751,62 @@ fn verify_expected_node(
         ),
     )
     .with_span(node.span.unwrap_or(SourceSpan::new(None, 0, 0))))
+}
+
+fn verify_expected_point3(
+    op_name: &str,
+    index: usize,
+    arg_name: &str,
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    let actual = effective_kind(node, env);
+    if !matches!(
+        actual,
+        CoreValueKind::Any | CoreValueKind::List | CoreValueKind::Point3
+    ) {
+        return Err(CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!(
+                "op `{}` arg {} `{}` expected {}, got {}.",
+                op_name,
+                index,
+                arg_name,
+                expected_label(ExpectedKind::Point3),
+                kind_label(actual)
+            ),
+        )
+        .with_span(node.span.unwrap_or(SourceSpan::new(None, 0, 0))));
+    }
+
+    let (CoreNodeKind::List(items) | CoreNodeKind::Group(items)) = &node.kind else {
+        return Ok(());
+    };
+    if items.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!(
+                "op `{}` arg {} `{}` expected {}, got {} component(s).",
+                op_name,
+                index,
+                arg_name,
+                expected_label(ExpectedKind::Point3),
+                items.len()
+            ),
+        )
+        .with_span(node.span.unwrap_or(SourceSpan::new(None, 0, 0))));
+    }
+    for (component_index, item) in items.iter().enumerate() {
+        verify_expected_node(
+            op_name,
+            component_index,
+            "point component",
+            ExpectedKind::Number,
+            item,
+            env,
+        )?;
+    }
+    Ok(())
 }
 
 fn verify_expected_point_list(
@@ -669,7 +836,7 @@ fn verify_expected_point_list(
         .with_span(node.span.unwrap_or(SourceSpan::new(None, 0, 0))));
     }
 
-    let Some(list_kind) = known_point_list_kind(node, env) else {
+    let Some(list_kind) = list_item_kind(node, env) else {
         return Ok(());
     };
     let expected_item = match expected {
@@ -689,6 +856,34 @@ fn verify_expected_point_list(
             arg_name,
             expected_label(expected),
             kind_label(list_kind)
+        ),
+    )
+    .with_span(node.span.unwrap_or(SourceSpan::new(None, 0, 0))))
+}
+
+fn verify_expected_list_items(
+    op_name: &str,
+    index: usize,
+    arg_name: &str,
+    expected: ExpectedKind,
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    let Some(item_kind) = list_item_kind(node, env) else {
+        return Ok(());
+    };
+    if kind_matches(expected, item_kind) {
+        return Ok(());
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::TypeMismatch,
+        format!(
+            "op `{}` arg {} `{}` expected {} items, got {} list.",
+            op_name,
+            index,
+            arg_name,
+            expected_label(expected),
+            kind_label(item_kind)
         ),
     )
     .with_span(node.span.unwrap_or(SourceSpan::new(None, 0, 0))))
@@ -746,28 +941,84 @@ fn kind_matches(expected: ExpectedKind, actual: CoreValueKind) -> bool {
     }
 }
 
-fn known_point_list_kind(node: &CoreNode, env: &KindEnv) -> Option<CoreValueKind> {
+fn list_item_kind(node: &CoreNode, env: &KindEnv) -> Option<CoreValueKind> {
     match &node.kind {
-        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => point_items_kind(items, env),
-        CoreNodeKind::Let { body, .. } => known_point_list_kind(body, env),
+        CoreNodeKind::Range { .. } => Some(CoreValueKind::Number),
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => homogeneous_item_kind(items, env),
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => {
+            let nested = env_with_sequence_item_bindings(params, sources, env)?;
+            let item_kind =
+                point_tuple_kind(body, &nested).unwrap_or_else(|| effective_kind(body, &nested));
+            (item_kind != CoreValueKind::Any).then_some(item_kind)
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            let nested = env_with_let_bindings(bindings, env);
+            list_item_kind(body, &nested)
+        }
         CoreNodeKind::If {
             then_branch,
             else_branch,
             ..
         } => {
-            let then_kind = known_point_list_kind(then_branch, env)?;
-            let else_kind = known_point_list_kind(else_branch, env)?;
+            let then_kind = list_item_kind(then_branch, env)?;
+            let else_kind = list_item_kind(else_branch, env)?;
             (then_kind == else_kind).then_some(then_kind)
         }
+        CoreNodeKind::Reference(CoreReference::Local(name)) => {
+            env.local_list_items.get(name).copied()
+        }
+        CoreNodeKind::Reference(CoreReference::Node(id)) => env.node_list_items.get(id).copied(),
         _ => None,
     }
 }
 
-fn point_items_kind(items: &[CoreNode], env: &KindEnv) -> Option<CoreValueKind> {
+fn env_with_sequence_item_bindings(
+    params: &[String],
+    sources: &[CoreNode],
+    env: &KindEnv,
+) -> Option<KindEnv> {
+    if params.len() != sources.len() {
+        return None;
+    }
+    let mut nested = env.clone();
+    for (index, source) in sources.iter().enumerate() {
+        if let Some(item_kind) = list_item_kind(source, env) {
+            nested.locals.insert(params[index].clone(), item_kind);
+        } else {
+            nested.locals.remove(&params[index]);
+            nested.local_list_items.remove(&params[index]);
+        }
+    }
+    Some(nested)
+}
+
+fn env_with_let_bindings(bindings: &[CoreBinding], env: &KindEnv) -> KindEnv {
+    let mut nested = env.clone();
+    for binding in bindings {
+        let kind = effective_kind(&binding.value, &nested);
+        nested.locals.insert(binding.name.clone(), kind);
+        nested.nodes.insert(binding.value.id, kind);
+        if let Some(item_kind) = list_item_kind(&binding.value, &nested) {
+            nested
+                .local_list_items
+                .insert(binding.name.clone(), item_kind);
+            nested.node_list_items.insert(binding.value.id, item_kind);
+        } else {
+            nested.local_list_items.remove(&binding.name);
+        }
+    }
+    nested
+}
+
+fn homogeneous_item_kind(items: &[CoreNode], env: &KindEnv) -> Option<CoreValueKind> {
     let mut known = None;
     for item in items {
-        let item_kind = effective_kind(item, env);
-        if !matches!(item_kind, CoreValueKind::Point2 | CoreValueKind::Point3) {
+        let item_kind = point_tuple_kind(item, env).unwrap_or_else(|| effective_kind(item, env));
+        if matches!(item_kind, CoreValueKind::Any) {
             return None;
         }
         match known {
@@ -777,6 +1028,40 @@ fn point_items_kind(items: &[CoreNode], env: &KindEnv) -> Option<CoreValueKind> 
         }
     }
     known
+}
+
+fn point_tuple_kind(node: &CoreNode, env: &KindEnv) -> Option<CoreValueKind> {
+    let actual = effective_kind(node, env);
+    if matches!(actual, CoreValueKind::Point2 | CoreValueKind::Point3) {
+        return Some(actual);
+    }
+    match &node.kind {
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            let tuple_kind = match items.len() {
+                2 => CoreValueKind::Point2,
+                3 => CoreValueKind::Point3,
+                _ => return None,
+            };
+            items
+                .iter()
+                .all(|item| effective_kind(item, env) == CoreValueKind::Number)
+                .then_some(tuple_kind)
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            let nested = env_with_let_bindings(bindings, env);
+            point_tuple_kind(body, &nested)
+        }
+        CoreNodeKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_kind = point_tuple_kind(then_branch, env)?;
+            let else_kind = point_tuple_kind(else_branch, env)?;
+            (then_kind == else_kind).then_some(then_kind)
+        }
+        _ => None,
+    }
 }
 
 fn typed_hole_kind(type_name: &str) -> Option<ExpectedKind> {
@@ -995,7 +1280,7 @@ fn expected_label(expected: ExpectedKind) -> &'static str {
         ExpectedKind::List => "list",
         ExpectedKind::Point2List => "2D point list",
         ExpectedKind::Point3List => "3D point list",
-        ExpectedKind::Point3 => "3D point or point list",
+        ExpectedKind::Point3 => "3D point",
         ExpectedKind::Sketch => "2D sketch (sketch)",
         ExpectedKind::Path => "3D path (path)",
         ExpectedKind::Frame => "frame",
@@ -1051,14 +1336,18 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => "offset-rounded".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
         CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array".to_string(),
         CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::GridArray) => "grid-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => "arc-array".to_string(),
         CoreOperation::Array(CoreArrayOp::Repeat) => "repeat".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
@@ -1079,8 +1368,9 @@ fn operation_name(op: &CoreOperation) -> String {
 mod tests {
     use super::*;
     use crate::ecky_core_ir::{
-        CompilerErrorKind, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart,
-        CorePrimitive, CoreSurfaceOp, CoreTransformOp, CoreValueKind, NodeId, PartId, ProgramId,
+        CompilerErrorKind, CoreBinding, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation,
+        CorePart, CorePathOp, CorePrimitive, CoreSurfaceOp, CoreTransformOp, CoreValueKind, NodeId,
+        PartId, ProgramId,
     };
 
     fn num(id: u64, value: f64) -> CoreNode {
@@ -1096,6 +1386,49 @@ mod tests {
             NodeId::new(id),
             CoreNodeKind::Literal(CoreLiteral::Boolean(value)),
             CoreValueKind::Boolean,
+        )
+    }
+
+    fn local_ref(id: u64, name: &str) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Local(name.into())),
+            CoreValueKind::Any,
+        )
+    }
+
+    fn point2(id: u64, x: f64, y: f64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Group(vec![num(id + 1, x), num(id + 2, y)]),
+            CoreValueKind::Point2,
+        )
+    }
+
+    fn point3(id: u64, x: f64, y: f64, z: f64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Group(vec![num(id + 1, x), num(id + 2, y), num(id + 3, z)]),
+            CoreValueKind::Point3,
+        )
+    }
+
+    fn list_node(id: u64, items: Vec<CoreNode>) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::List(items),
+            CoreValueKind::List,
+        )
+    }
+
+    fn range_node(id: u64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Range {
+                start: Box::new(num(id + 1, 0.0)),
+                end: Box::new(num(id + 2, 3.0)),
+            },
+            CoreValueKind::List,
         )
     }
 
@@ -1139,6 +1472,48 @@ mod tests {
             CoreOperation::Primitive(CorePrimitive::Circle),
             vec![num(id + 1, 3.0)],
             CoreValueKind::Sketch,
+        )
+    }
+
+    fn polygon_node(id: u64, points: CoreNode) -> CoreNode {
+        call(
+            id,
+            CoreOperation::Primitive(CorePrimitive::Polygon),
+            vec![points],
+            CoreValueKind::Sketch,
+        )
+    }
+
+    fn path_node(id: u64, points: Vec<CoreNode>) -> CoreNode {
+        call(
+            id,
+            CoreOperation::Path(CorePathOp::Polyline),
+            points,
+            CoreValueKind::Path,
+        )
+    }
+
+    fn dynamic_map_node(id: u64, param: &str, source: CoreNode, body: CoreNode) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Map {
+                params: vec![param.into()],
+                sources: vec![source],
+                body: Box::new(body),
+            },
+            CoreValueKind::List,
+        )
+    }
+
+    fn apply_node(id: u64, op: CoreOperation, args: Vec<CoreNode>, list: CoreNode) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Apply {
+                op,
+                args,
+                list: Box::new(list),
+            },
+            CoreValueKind::Solid,
         )
     }
 
@@ -1249,6 +1624,188 @@ mod tests {
         assert!(message.contains("arg 3"), "{message}");
         assert!(message.contains("shape"), "{message}");
         assert!(message.contains("number"), "{message}");
+    }
+
+    #[test]
+    fn map_binds_range_items_as_numbers_inside_body() {
+        let program = part(dynamic_map_node(
+            10,
+            "r",
+            range_node(20),
+            call(
+                30,
+                CoreOperation::Primitive(CorePrimitive::Circle),
+                vec![local_ref(31, "r")],
+                CoreValueKind::Sketch,
+            ),
+        ));
+
+        verify_core_program(&program).expect("range map item should typecheck as number");
+    }
+
+    #[test]
+    fn polygon_accepts_dynamic_map_of_numeric_tuples() {
+        let points = dynamic_map_node(
+            10,
+            "i",
+            range_node(20),
+            CoreNode::new(
+                NodeId::new(30),
+                CoreNodeKind::List(vec![local_ref(31, "i"), local_ref(32, "i")]),
+                CoreValueKind::List,
+            ),
+        );
+        let program = part(polygon_node(40, points));
+
+        verify_core_program(&program).expect("dynamic map numeric tuples should typecheck");
+    }
+
+    #[test]
+    fn polygon_rejects_numeric_list() {
+        let message = verify_err(part(polygon_node(
+            10,
+            list_node(20, vec![num(21, 1.0), num(22, 2.0)]),
+        )));
+
+        assert!(message.contains("polygon"), "{message}");
+        assert!(message.contains("2D point list"), "{message}");
+        assert!(message.contains("number list"), "{message}");
+    }
+
+    #[test]
+    fn polygon_rejects_dynamic_map_of_solids() {
+        let points = dynamic_map_node(10, "i", range_node(20), box_node(30));
+        let message = verify_err(part(polygon_node(40, points)));
+
+        assert!(message.contains("polygon"), "{message}");
+        assert!(message.contains("2D point list"), "{message}");
+        assert!(message.contains("solid list"), "{message}");
+    }
+
+    #[test]
+    fn map_rejects_point_item_used_as_number() {
+        let point_source = list_node(20, vec![point2(21, 0.0, 0.0), point2(24, 2.0, 0.0)]);
+        let message = verify_err(part(CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Map {
+                params: vec!["p".into()],
+                sources: vec![point_source],
+                body: Box::new(call(
+                    30,
+                    CoreOperation::Primitive(CorePrimitive::Circle),
+                    vec![local_ref(31, "p")],
+                    CoreValueKind::Sketch,
+                )),
+            },
+            CoreValueKind::List,
+        )));
+
+        assert!(message.contains("circle"), "{message}");
+        assert!(message.contains("radius"), "{message}");
+        assert!(message.contains("point2"), "{message}");
+    }
+
+    #[test]
+    fn map_binds_point3_items_for_path_body() {
+        let point_source = list_node(
+            20,
+            vec![point3(21, 0.0, 0.0, 0.0), point3(25, 2.0, 0.0, 0.0)],
+        );
+        let program = part(CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Map {
+                params: vec!["p".into()],
+                sources: vec![point_source],
+                body: Box::new(path_node(
+                    30,
+                    vec![local_ref(31, "p"), point3(40, 1.0, 0.0, 0.0)],
+                )),
+            },
+            CoreValueKind::List,
+        ));
+
+        verify_core_program(&program).expect("map point3 item should typecheck as path point");
+    }
+
+    #[test]
+    fn apply_union_rejects_numeric_list_items() {
+        let message = verify_err(part(apply_node(
+            10,
+            CoreOperation::Boolean(CoreBooleanOp::Union),
+            vec![],
+            range_node(20),
+        )));
+
+        assert!(message.contains("union"), "{message}");
+        assert!(message.contains("shape"), "{message}");
+        assert!(message.contains("number list"), "{message}");
+    }
+
+    #[test]
+    fn apply_union_accepts_dynamic_shape_map_items() {
+        let solids = dynamic_map_node(10, "i", range_node(20), box_node(30));
+        let program = part(apply_node(
+            40,
+            CoreOperation::Boolean(CoreBooleanOp::Union),
+            vec![box_node(50)],
+            solids,
+        ));
+
+        verify_core_program(&program).expect("apply union should accept solid list items");
+    }
+
+    #[test]
+    fn path_rejects_raw_two_component_list_as_3d_point() {
+        let message = verify_err(part(path_node(
+            10,
+            vec![
+                list_node(20, vec![num(21, 0.0), num(22, 0.0)]),
+                point3(30, 1.0, 0.0, 0.0),
+            ],
+        )));
+
+        assert!(message.contains("path"), "{message}");
+        assert!(message.contains("3D point"), "{message}");
+        assert!(message.contains("2 component"), "{message}");
+    }
+
+    #[test]
+    fn map_rejects_parameter_source_count_mismatch() {
+        let message = verify_err(part(CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Map {
+                params: vec!["x".into(), "y".into()],
+                sources: vec![range_node(20)],
+                body: Box::new(circle_node(30)),
+            },
+            CoreValueKind::List,
+        )));
+
+        assert!(message.contains("map"), "{message}");
+        assert!(message.contains("one parameter per source"), "{message}");
+    }
+
+    #[test]
+    fn let_bound_point_list_preserves_item_kind_for_polygon() {
+        let points = list_node(
+            20,
+            vec![point3(21, 0.0, 0.0, 0.0), point3(25, 2.0, 0.0, 0.0)],
+        );
+        let message = verify_err(part(CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Let {
+                bindings: vec![CoreBinding {
+                    name: "points".into(),
+                    value: points,
+                }],
+                body: Box::new(polygon_node(30, local_ref(31, "points"))),
+            },
+            CoreValueKind::Sketch,
+        )));
+
+        assert!(message.contains("polygon"), "{message}");
+        assert!(message.contains("2D point list"), "{message}");
+        assert!(message.contains("point3"), "{message}");
     }
 
     #[test]

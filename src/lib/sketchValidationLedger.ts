@@ -4,6 +4,7 @@ import { basename, sourceLineCount } from './sketchWorkspaceState';
 import { buildSketchBuildValidationSummary } from './sketchBuildValidation';
 import { buildSketchFitValidationSeed } from './sketchFitValidation';
 import { closedStrokeBounds } from './sketchEditState';
+import type { SketchSourcePatchEntry } from './sketchSourcePatchLedger';
 
 export type SketchValidationStatus = 'pass' | 'fail' | 'pending';
 
@@ -26,6 +27,7 @@ export type SketchValidationLedgerInput = {
   extrudeDepth?: number;
   projectionsCount: number;
   errorText: string;
+  sourcePatchEntries?: SketchSourcePatchEntry[];
 };
 
 export function buildSketchValidationRows(input: SketchValidationLedgerInput): SketchValidationRow[] {
@@ -50,10 +52,25 @@ export function buildSketchValidationRows(input: SketchValidationLedgerInput): S
     sourceRow(hasClosedProfile, hasSourceDraft, hasBackendError, input),
     previewArtifactRow(buildValidationRows[1]),
     sourceFitCheckRow(input),
+    ...sourcePatchEvidenceRows(input.sourcePatchEntries ?? []),
     ...constraintSolverRows(input.strokes),
     ...constraintValueRows(input.strokes),
     meshRow(hasClosedProfile, hasSourceDraft, hasMeshPreview, hasBackendError, input),
     projectionsRow(hasMeshPreview, input.projectionsCount),
+  ];
+}
+
+function sourcePatchEvidenceRows(sourcePatchEntries: SketchSourcePatchEntry[]): SketchValidationRow[] {
+  const autoSnapEntries = sourcePatchEntries.filter((entry) => entry.action === 'AUTO SNAP');
+  if (autoSnapEntries.length === 0) return [];
+
+  return [
+    {
+      id: 'sourcePatchEvidence',
+      label: 'Source patch evidence',
+      status: 'pass',
+      detail: autoSnapEntries.map((entry) => `${entry.action} ${entry.primitiveId}: ${entry.detail}`).join('; '),
+    },
   ];
 }
 

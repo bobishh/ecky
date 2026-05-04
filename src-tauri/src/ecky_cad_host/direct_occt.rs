@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use crate::ecky_core_ir::{
-    CoreBinding, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode,
-    CoreNodeKind, CoreOperation, CoreParameterKind, CorePathOp, CorePrimitive, CoreProgram,
-    CoreReference, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
+    CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp,
+    CoreNode, CoreNodeKind, CoreOperation, CoreParameterKind, CorePart, CorePathOp, CorePrimitive,
+    CoreProgram, CoreReference, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
+    CoreValueKind, NodeId,
 };
-use crate::models::{AppError, AppResult};
+use crate::models::{AppError, AppResult, DesignParams, ParamValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcctParameterKind {
@@ -55,11 +56,33 @@ pub enum OcctOp {
     Box,
     Sphere,
     Cylinder,
+    Cone,
     Circle,
     Rectangle,
+    RoundedRectangle,
+    RoundedPolygon,
     Polygon,
+    Profile,
+    MakeFace,
     Extrude,
     Revolve,
+    Loft,
+    Sweep,
+    Twist,
+    Taper,
+    Offset,
+    Path,
+    BezierPath,
+    Bspline,
+    Plane,
+    Location,
+    PathFrame,
+    Place,
+    ClipBox,
+    LinearArray,
+    RadialArray,
+    GridArray,
+    ArcArray,
     Union,
     Difference,
     Intersection,
@@ -69,6 +92,7 @@ pub enum OcctOp {
     Translate,
     Rotate,
     Scale,
+    Mirror,
     Compound,
 }
 
@@ -101,6 +125,18 @@ pub struct OcctPlan {
 }
 
 pub fn plan_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
+    plan_core_program_with_params(program, &DesignParams::new())
+}
+
+pub fn plan_core_program_with_params(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+) -> AppResult<OcctPlan> {
+    let expanded = expand_core_program_for_direct_occt(program, parameters)?;
+    plan_expanded_core_program(&expanded)
+}
+
+fn plan_expanded_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
     crate::ecky_core_ir::verify_core_program(program).map_err(|err| {
         AppError::validation(format!(
             "Direct OCCT adapter rejected invalid Core IR before planning: {}",
@@ -138,6 +174,647 @@ pub fn plan_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
         .collect::<AppResult<Vec<_>>>()?;
 
     Ok(OcctPlan { parameters, parts })
+}
+
+fn expand_core_program_for_direct_occt(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+) -> AppResult<CoreProgram> {
+    let param_names = program
+        .parameters
+        .iter()
+        .map(|param| (param.id.raw(), param.key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let env = crate::ecky_ir::build_core_program_param_env_for_eval(program, parameters)?;
+    let mut next_node_id = next_program_node_id(program);
+    let parts = program
+        .parts
+        .iter()
+        .map(|part| {
+            Ok(CorePart {
+                id: part.id,
+                key: part.key.clone(),
+                label: part.label.clone(),
+                root: expand_node_for_direct_occt(
+                    &part.root,
+                    &param_names,
+                    &env,
+                    &mut next_node_id,
+                )?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(CoreProgram::new(
+        program.id,
+        program.parameters.clone(),
+        parts,
+    ))
+}
+
+fn expand_node_for_direct_occt(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    match &node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => Ok(node.clone()),
+        CoreNodeKind::Build { bindings, result } => {
+            let bindings = bindings
+                .iter()
+                .map(|binding| {
+                    Ok(CoreShapeBinding {
+                        name: binding.name.clone(),
+                        value: expand_node_for_direct_occt(
+                            &binding.value,
+                            param_names,
+                            env,
+                            next_node_id,
+                        )?,
+                    })
+                })
+                .collect::<AppResult<Vec<_>>>()?;
+            Ok(rebuild_node(
+                node,
+                CoreNodeKind::Build {
+                    bindings,
+                    result: Box::new(expand_node_for_direct_occt(
+                        result,
+                        param_names,
+                        env,
+                        next_node_id,
+                    )?),
+                },
+            ))
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            let mut nested_env = env.clone();
+            let mut expanded_bindings = Vec::with_capacity(bindings.len());
+            for binding in bindings {
+                let value = expand_node_for_direct_occt(
+                    &binding.value,
+                    param_names,
+                    &nested_env,
+                    next_node_id,
+                )?;
+                if let Some(param_value) =
+                    eval_scalar_binding_for_direct_occt(&value, param_names, &nested_env)?
+                {
+                    nested_env.insert(binding.name.clone(), param_value);
+                }
+                expanded_bindings.push(CoreBinding {
+                    name: binding.name.clone(),
+                    value,
+                });
+            }
+            Ok(rebuild_node(
+                node,
+                CoreNodeKind::Let {
+                    bindings: expanded_bindings,
+                    body: Box::new(expand_node_for_direct_occt(
+                        body,
+                        param_names,
+                        &nested_env,
+                        next_node_id,
+                    )?),
+                },
+            ))
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => Ok(rebuild_node(
+            node,
+            CoreNodeKind::If {
+                condition: Box::new(expand_node_for_direct_occt(
+                    condition,
+                    param_names,
+                    env,
+                    next_node_id,
+                )?),
+                then_branch: Box::new(expand_node_for_direct_occt(
+                    then_branch,
+                    param_names,
+                    env,
+                    next_node_id,
+                )?),
+                else_branch: Box::new(expand_node_for_direct_occt(
+                    else_branch,
+                    param_names,
+                    env,
+                    next_node_id,
+                )?),
+            },
+        )),
+        CoreNodeKind::Call { op, args, keywords }
+            if matches!(op, CoreOperation::Surface(CoreSurfaceOp::Shell))
+                && sampled_radial_loft_target(args).is_some() =>
+        {
+            expand_shell_sampled_radial_loft_node(
+                node,
+                args,
+                keywords,
+                param_names,
+                env,
+                next_node_id,
+            )
+        }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "sampled-radial-loft") => {
+            expand_sampled_radial_loft_node(node, args, keywords, param_names, env, next_node_id)
+        }
+        CoreNodeKind::Call { op, args, keywords } => Ok(rebuild_node(
+            node,
+            CoreNodeKind::Call {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| expand_node_for_direct_occt(arg, param_names, env, next_node_id))
+                    .collect::<AppResult<Vec<_>>>()?,
+                keywords: keywords
+                    .iter()
+                    .map(|keyword| {
+                        Ok(CoreKeywordArg {
+                            name: keyword.name.clone(),
+                            value: expand_node_for_direct_occt(
+                                &keyword.value,
+                                param_names,
+                                env,
+                                next_node_id,
+                            )?,
+                        })
+                    })
+                    .collect::<AppResult<Vec<_>>>()?,
+            },
+        )),
+        CoreNodeKind::Range { start, end } => Ok(rebuild_node(
+            node,
+            CoreNodeKind::Range {
+                start: Box::new(expand_node_for_direct_occt(
+                    start,
+                    param_names,
+                    env,
+                    next_node_id,
+                )?),
+                end: Box::new(expand_node_for_direct_occt(
+                    end,
+                    param_names,
+                    env,
+                    next_node_id,
+                )?),
+            },
+        )),
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => Ok(rebuild_node(
+            node,
+            CoreNodeKind::Map {
+                params: params.clone(),
+                sources: sources
+                    .iter()
+                    .map(|source| {
+                        expand_node_for_direct_occt(source, param_names, env, next_node_id)
+                    })
+                    .collect::<AppResult<Vec<_>>>()?,
+                body: Box::new(expand_node_for_direct_occt(
+                    body,
+                    param_names,
+                    env,
+                    next_node_id,
+                )?),
+            },
+        )),
+        CoreNodeKind::Apply { op, args, list } => Ok(rebuild_node(
+            node,
+            CoreNodeKind::Apply {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| expand_node_for_direct_occt(arg, param_names, env, next_node_id))
+                    .collect::<AppResult<Vec<_>>>()?,
+                list: Box::new(expand_node_for_direct_occt(
+                    list,
+                    param_names,
+                    env,
+                    next_node_id,
+                )?),
+            },
+        )),
+        CoreNodeKind::List(items) => Ok(rebuild_node(
+            node,
+            CoreNodeKind::List(
+                items
+                    .iter()
+                    .map(|item| expand_node_for_direct_occt(item, param_names, env, next_node_id))
+                    .collect::<AppResult<Vec<_>>>()?,
+            ),
+        )),
+        CoreNodeKind::Group(items) => Ok(rebuild_node(
+            node,
+            CoreNodeKind::Group(
+                items
+                    .iter()
+                    .map(|item| expand_node_for_direct_occt(item, param_names, env, next_node_id))
+                    .collect::<AppResult<Vec<_>>>()?,
+            ),
+        )),
+    }
+}
+
+fn expand_sampled_radial_loft_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.len() != 1 {
+        return Err(AppError::validation(
+            "`sampled-radial-loft` expects binder names plus keyword/value options.",
+        ));
+    }
+    let binders = sampled_radial_loft_binders(&args[0])?;
+    let height_node = sampled_keyword_node(keywords, "height")?;
+    let z_steps_node = sampled_keyword_node(keywords, "z-steps")?;
+    let theta_steps_node = sampled_keyword_node(keywords, "theta-steps")?;
+    let radius_node = sampled_keyword_node(keywords, "radius")?;
+    let z_map_node = sampled_optional_keyword_node(keywords, "z-map");
+
+    let height = crate::ecky_ir::eval_core_number_with_locals(height_node, param_names, env)?;
+    let z_steps = sampled_count(
+        crate::ecky_ir::eval_core_number_with_locals(z_steps_node, param_names, env)?,
+        1,
+        "z-steps",
+    )?;
+    let theta_steps = sampled_count(
+        crate::ecky_ir::eval_core_number_with_locals(theta_steps_node, param_names, env)?,
+        3,
+        "theta-steps",
+    )?;
+
+    let mut loft_args = Vec::with_capacity(z_steps + 3);
+    loft_args.push(number_node(next_node_id, 0.0));
+
+    for zi in 0..=z_steps {
+        let fz = zi as f64 / z_steps as f64;
+        let z = height * fz;
+        let mut section_env = env.clone();
+        section_env.insert(binders[1].clone(), ParamValue::Number(z));
+        section_env.insert(binders[2].clone(), ParamValue::Number(fz));
+
+        let mut points = Vec::with_capacity(theta_steps);
+        for ti in 0..theta_steps {
+            let theta = 2.0 * std::f64::consts::PI * ti as f64 / theta_steps as f64;
+            section_env.insert(binders[0].clone(), ParamValue::Number(theta));
+            let radius = crate::ecky_ir::eval_core_number_with_locals(
+                radius_node,
+                param_names,
+                &section_env,
+            )?;
+            if !radius.is_finite() || radius <= 0.0 {
+                return Err(AppError::validation(
+                    "sampled-radial-loft radius must stay positive",
+                ));
+            }
+            points.push(CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::Literal(CoreLiteral::Point2([
+                    radius * theta.cos(),
+                    radius * theta.sin(),
+                ])),
+                CoreValueKind::Point2,
+            ));
+        }
+
+        let section_z = z_map_node
+            .map(|z_map| {
+                crate::ecky_ir::eval_core_number_with_locals(z_map, param_names, &section_env)
+            })
+            .transpose()?
+            .unwrap_or(z);
+        let polygon = CoreNode::new(
+            next_id(next_node_id),
+            CoreNodeKind::Call {
+                op: CoreOperation::Primitive(CorePrimitive::Polygon),
+                args: vec![CoreNode::new(
+                    next_id(next_node_id),
+                    CoreNodeKind::List(points),
+                    CoreValueKind::List,
+                )],
+                keywords: Vec::new(),
+            },
+            CoreValueKind::Sketch,
+        );
+        let translated = CoreNode::new(
+            next_id(next_node_id),
+            CoreNodeKind::Call {
+                op: CoreOperation::Transform(CoreTransformOp::Translate),
+                args: vec![
+                    number_node(next_node_id, 0.0),
+                    number_node(next_node_id, 0.0),
+                    number_node(next_node_id, section_z),
+                    polygon,
+                ],
+                keywords: Vec::new(),
+            },
+            CoreValueKind::Sketch,
+        );
+        loft_args.push(translated);
+    }
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Surface(CoreSurfaceOp::Loft),
+            args: loft_args,
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_shell_sampled_radial_loft_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if !keywords.is_empty() || args.len() != 2 {
+        return Err(AppError::validation(
+            "`shell` sampled-radial-loft expects thickness and shape only.",
+        ));
+    }
+    let target = sampled_radial_loft_target(args).ok_or_else(|| {
+        AppError::validation("`shell` sampled-radial-loft requires a sampled-radial-loft target.")
+    })?;
+    let target_args = match &target.kind {
+        CoreNodeKind::Call { args, .. } => args,
+        _ => unreachable!(),
+    };
+    let target_keywords = match &target.kind {
+        CoreNodeKind::Call { keywords, .. } => keywords,
+        _ => unreachable!(),
+    };
+
+    let outer = expand_sampled_radial_loft_node(
+        target,
+        target_args,
+        target_keywords,
+        param_names,
+        env,
+        next_node_id,
+    )?;
+    let inner_radius = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom("-".to_string()),
+            args: vec![
+                sampled_keyword_node(target_keywords, "radius")?.clone(),
+                args[0].clone(),
+            ],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Number,
+    );
+    let inner_sampled = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom("sampled-radial-loft".to_string()),
+            args: target_args.to_vec(),
+            keywords: sampled_replaced_keywords(target_keywords, "radius", inner_radius),
+        },
+        CoreValueKind::Solid,
+    );
+    let inner = match &inner_sampled.kind {
+        CoreNodeKind::Call { args, keywords, .. } => expand_sampled_radial_loft_node(
+            &inner_sampled,
+            args,
+            keywords,
+            param_names,
+            env,
+            next_node_id,
+        )?,
+        _ => unreachable!(),
+    };
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(CoreBooleanOp::Difference),
+            args: vec![outer, inner],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn sampled_radial_loft_target(args: &[CoreNode]) -> Option<&CoreNode> {
+    match args {
+        [_, target]
+            if matches!(
+                target.kind,
+                CoreNodeKind::Call {
+                    op: CoreOperation::Custom(ref name),
+                    ..
+                } if name == "sampled-radial-loft"
+            ) =>
+        {
+            Some(target)
+        }
+        _ => None,
+    }
+}
+
+fn sampled_replaced_keywords(
+    keywords: &[CoreKeywordArg],
+    name: &str,
+    value: CoreNode,
+) -> Vec<CoreKeywordArg> {
+    keywords
+        .iter()
+        .map(|keyword| {
+            if keyword.name == name {
+                CoreKeywordArg {
+                    name: keyword.name.clone(),
+                    value: value.clone(),
+                }
+            } else {
+                keyword.clone()
+            }
+        })
+        .collect()
+}
+
+fn sampled_radial_loft_binders(arg: &CoreNode) -> AppResult<[String; 3]> {
+    match &arg.kind {
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            if items.len() != 3 {
+                return Err(AppError::validation(
+                    "`sampled-radial-loft` binders must be `(theta z fz)`.",
+                ));
+            }
+            Ok([
+                sampled_binder_name(&items[0])?,
+                sampled_binder_name(&items[1])?,
+                sampled_binder_name(&items[2])?,
+            ])
+        }
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom(head),
+            args,
+            keywords,
+        } if keywords.is_empty() && args.len() == 2 => Ok([
+            head.clone(),
+            sampled_binder_name(&args[0])?,
+            sampled_binder_name(&args[1])?,
+        ]),
+        _ => Err(AppError::validation(
+            "`sampled-radial-loft` binders must be `(theta z fz)`.",
+        )),
+    }
+}
+
+fn sampled_binder_name(node: &CoreNode) -> AppResult<String> {
+    match &node.kind {
+        CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(name.clone()),
+        CoreNodeKind::Literal(CoreLiteral::Text(text)) => Ok(text.clone()),
+        CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => Ok(symbol_name(symbol).to_string()),
+        _ => Err(AppError::validation(
+            "`sampled-radial-loft` binders must be symbols.",
+        )),
+    }
+}
+
+fn sampled_keyword_node<'a>(keywords: &'a [CoreKeywordArg], name: &str) -> AppResult<&'a CoreNode> {
+    sampled_optional_keyword_node(keywords, name)
+        .ok_or_else(|| AppError::validation(format!("`sampled-radial-loft` requires `:{}`.", name)))
+}
+
+fn sampled_optional_keyword_node<'a>(
+    keywords: &'a [CoreKeywordArg],
+    name: &str,
+) -> Option<&'a CoreNode> {
+    keywords
+        .iter()
+        .find(|keyword| keyword.name == name)
+        .map(|keyword| &keyword.value)
+}
+
+fn sampled_count(value: f64, minimum: usize, label: &str) -> AppResult<usize> {
+    if !value.is_finite() {
+        return Err(AppError::validation(format!(
+            "`sampled-radial-loft` {label} must be finite."
+        )));
+    }
+    Ok((value.round() as isize).max(minimum as isize) as usize)
+}
+
+fn eval_scalar_binding_for_direct_occt(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<Option<ParamValue>> {
+    match node.value_kind {
+        CoreValueKind::Number => Ok(Some(ParamValue::Number(
+            crate::ecky_ir::eval_core_number_with_locals(node, param_names, env)?,
+        ))),
+        CoreValueKind::Boolean => Ok(Some(ParamValue::Boolean(
+            crate::ecky_ir::eval_core_bool_with_locals(node, param_names, env)?,
+        ))),
+        CoreValueKind::Text => Ok(Some(ParamValue::String(
+            crate::ecky_ir::eval_core_stringish_with_locals(node, param_names, env)?,
+        ))),
+        _ => Ok(None),
+    }
+}
+
+fn rebuild_node(node: &CoreNode, kind: CoreNodeKind) -> CoreNode {
+    let mut rebuilt = CoreNode::new(node.id, kind, node.value_kind);
+    rebuilt.span = node.span;
+    rebuilt
+}
+
+fn number_node(next_node_id: &mut u64, value: f64) -> CoreNode {
+    CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Literal(CoreLiteral::Number(value)),
+        CoreValueKind::Number,
+    )
+}
+
+fn next_program_node_id(program: &CoreProgram) -> u64 {
+    program
+        .parts
+        .iter()
+        .map(|part| max_node_id(&part.root))
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn max_node_id(node: &CoreNode) -> u64 {
+    let child_max = match &node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => 0,
+        CoreNodeKind::Build { bindings, result } => bindings
+            .iter()
+            .map(|binding| max_node_id(&binding.value))
+            .chain(std::iter::once(max_node_id(result)))
+            .max()
+            .unwrap_or(0),
+        CoreNodeKind::Let { bindings, body } => bindings
+            .iter()
+            .map(|binding| max_node_id(&binding.value))
+            .chain(std::iter::once(max_node_id(body)))
+            .max()
+            .unwrap_or(0),
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => [
+            max_node_id(condition),
+            max_node_id(then_branch),
+            max_node_id(else_branch),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0),
+        CoreNodeKind::Call { args, keywords, .. } => args
+            .iter()
+            .map(max_node_id)
+            .chain(keywords.iter().map(|keyword| max_node_id(&keyword.value)))
+            .max()
+            .unwrap_or(0),
+        CoreNodeKind::Range { start, end } => [max_node_id(start), max_node_id(end)]
+            .into_iter()
+            .max()
+            .unwrap_or(0),
+        CoreNodeKind::Map { sources, body, .. } => sources
+            .iter()
+            .map(max_node_id)
+            .chain(std::iter::once(max_node_id(body)))
+            .max()
+            .unwrap_or(0),
+        CoreNodeKind::Apply { args, list, .. } => args
+            .iter()
+            .map(max_node_id)
+            .chain(std::iter::once(max_node_id(list)))
+            .max()
+            .unwrap_or(0),
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            items.iter().map(max_node_id).max().unwrap_or(0)
+        }
+    };
+    node.id.raw().max(child_max)
+}
+
+fn next_id(next_node_id: &mut u64) -> NodeId {
+    let id = *next_node_id;
+    *next_node_id += 1;
+    NodeId::new(id)
 }
 
 struct PartPlanner<'a> {
@@ -312,20 +989,44 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Primitive(CorePrimitive::Box) => Ok(OcctOp::Box),
         CoreOperation::Primitive(CorePrimitive::Sphere) => Ok(OcctOp::Sphere),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => Ok(OcctOp::Cylinder),
+        CoreOperation::Primitive(CorePrimitive::Cone) => Ok(OcctOp::Cone),
         CoreOperation::Primitive(CorePrimitive::Circle) => Ok(OcctOp::Circle),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => Ok(OcctOp::Rectangle),
+        CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => Ok(OcctOp::RoundedRectangle),
+        CoreOperation::Primitive(CorePrimitive::RoundedPolygon) => Ok(OcctOp::RoundedPolygon),
         CoreOperation::Primitive(CorePrimitive::Polygon) => Ok(OcctOp::Polygon),
+        CoreOperation::Primitive(CorePrimitive::Profile) => Ok(OcctOp::Profile),
+        CoreOperation::Primitive(CorePrimitive::MakeFace) => Ok(OcctOp::MakeFace),
         CoreOperation::Surface(CoreSurfaceOp::Extrude) => Ok(OcctOp::Extrude),
         CoreOperation::Surface(CoreSurfaceOp::Revolve) => Ok(OcctOp::Revolve),
+        CoreOperation::Surface(CoreSurfaceOp::Loft) => Ok(OcctOp::Loft),
+        CoreOperation::Surface(CoreSurfaceOp::Sweep) => Ok(OcctOp::Sweep),
+        CoreOperation::Surface(CoreSurfaceOp::Twist) => Ok(OcctOp::Twist),
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => Ok(OcctOp::Taper),
+        CoreOperation::Surface(CoreSurfaceOp::Offset) => Ok(OcctOp::Offset),
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => Ok(OcctOp::Offset),
         CoreOperation::Surface(CoreSurfaceOp::Fillet) => Ok(OcctOp::Fillet),
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => Ok(OcctOp::Chamfer),
         CoreOperation::Surface(CoreSurfaceOp::Shell) => Ok(OcctOp::Shell),
+        CoreOperation::Path(CorePathOp::Polyline) => Ok(OcctOp::Path),
+        CoreOperation::Path(CorePathOp::BezierPath) => Ok(OcctOp::BezierPath),
+        CoreOperation::Path(CorePathOp::Bspline) => Ok(OcctOp::Bspline),
+        CoreOperation::Frame(CoreFrameOp::Plane) => Ok(OcctOp::Plane),
+        CoreOperation::Frame(CoreFrameOp::Location) => Ok(OcctOp::Location),
+        CoreOperation::Frame(CoreFrameOp::PathFrame) => Ok(OcctOp::PathFrame),
+        CoreOperation::Frame(CoreFrameOp::Place) => Ok(OcctOp::Place),
+        CoreOperation::Frame(CoreFrameOp::ClipBox) => Ok(OcctOp::ClipBox),
+        CoreOperation::Array(CoreArrayOp::LinearArray) => Ok(OcctOp::LinearArray),
+        CoreOperation::Array(CoreArrayOp::RadialArray) => Ok(OcctOp::RadialArray),
+        CoreOperation::Array(CoreArrayOp::GridArray) => Ok(OcctOp::GridArray),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => Ok(OcctOp::ArcArray),
         CoreOperation::Boolean(CoreBooleanOp::Union) => Ok(OcctOp::Union),
         CoreOperation::Boolean(CoreBooleanOp::Difference) => Ok(OcctOp::Difference),
         CoreOperation::Boolean(CoreBooleanOp::Intersection) => Ok(OcctOp::Intersection),
         CoreOperation::Transform(CoreTransformOp::Translate) => Ok(OcctOp::Translate),
         CoreOperation::Transform(CoreTransformOp::Rotate) => Ok(OcctOp::Rotate),
         CoreOperation::Transform(CoreTransformOp::Scale) => Ok(OcctOp::Scale),
+        CoreOperation::Transform(CoreTransformOp::Mirror) => Ok(OcctOp::Mirror),
         CoreOperation::Meta(CoreMetaOp::Group) => Ok(OcctOp::Compound),
         CoreOperation::Custom(name) if name == "hole" => Err(AppError::validation(
             "Typed hole must be filled before direct OCCT planning.",
@@ -403,13 +1104,22 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep",
         CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell",
         CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset",
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => "offset-rounded",
         CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet",
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer",
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper",
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist",
         CoreOperation::Path(CorePathOp::Polyline) => "path",
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path",
         CoreOperation::Path(CorePathOp::Bspline) => "bspline",
-        CoreOperation::Array(_) => "array",
+        CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array",
+        CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array",
+        CoreOperation::Array(CoreArrayOp::GridArray) => "grid-array",
+        CoreOperation::Array(CoreArrayOp::ArcArray) => "arc-array",
+        CoreOperation::Array(CoreArrayOp::Repeat) => "repeat",
+        CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union",
+        CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound",
+        CoreOperation::Array(CoreArrayOp::RepeatPick) => "repeat-pick",
         CoreOperation::Frame(CoreFrameOp::Plane) => "plane",
         CoreOperation::Frame(CoreFrameOp::Location) => "location",
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame",
@@ -515,20 +1225,474 @@ mod tests {
     }
 
     #[test]
+    fn plans_cone_primitive_for_direct_occt() {
+        let program = compile("(model (part body (cone 10 4 30 32)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts[0].commands.len(), 1);
+        assert_eq!(plan.parts[0].commands[0].op, OcctOp::Cone);
+        assert_eq!(
+            plan.parts[0].commands[0].args[..3],
+            [
+                OcctArg::Number(10.0),
+                OcctArg::Number(4.0),
+                OcctArg::Number(30.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_rounded_rectangle_profile_for_direct_occt() {
+        let program = compile("(model (part body (extrude (rounded_rect 20 10 2) 5)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::RoundedRectangle, OcctOp::Extrude]
+        );
+    }
+
+    #[test]
+    fn plans_rounded_polygon_profile_for_direct_occt() {
+        let program = compile(
+            "(model (part body (extrude (rounded-polygon ((0 0) (20 0) (20 10) (0 10)) 2) 5)))",
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::RoundedPolygon, OcctOp::Extrude]
+        );
+    }
+
+    #[test]
+    fn plans_loft_for_direct_occt() {
+        let program = compile("(model (part body (loft 30 (circle 10) (rounded-rect 12 8 2))))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Circle, OcctOp::RoundedRectangle, OcctOp::Loft]
+        );
+    }
+
+    #[test]
+    fn plans_sweep_path_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (sweep
+                  (circle 5)
+                  (path ((0 0 0) (0 0 24))))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts[0].commands.len(), 3);
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Circle, OcctOp::Path, OcctOp::Sweep]
+        );
+    }
+
+    #[test]
+    fn plans_bezier_path_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (sweep
+                  (circle 2)
+                  (bezier-path ((0 0 0) (8 0 0) (8 8 12) (16 8 12))))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Circle, OcctOp::BezierPath, OcctOp::Sweep]
+        );
+    }
+
+    #[test]
+    fn plans_bspline_profile_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (bspline ((0 6) (5 2) (6 -4) (0 -6) (-6 -4) (-5 2)) #t)
+                  4)))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Bspline, OcctOp::Extrude]
+        );
+    }
+
+    #[test]
+    fn plans_twist_for_direct_occt() {
+        let program = compile("(model (part body (twist 24 90 (circle 5))))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Circle, OcctOp::Twist]
+        );
+    }
+
+    #[test]
+    fn plans_sampled_radial_loft_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (sampled-radial-loft
+                  (theta z fz)
+                  :height 40
+                  :z-steps 2
+                  :theta-steps 4
+                  :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
+                  :z-map (+ z (* fz 2)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ops,
+            vec![
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Loft,
+            ]
+        );
+        let loft = plan.parts[0].commands.last().expect("loft");
+        assert_eq!(loft.op, OcctOp::Loft);
+        assert_eq!(loft.args[0], OcctArg::Number(0.0));
+    }
+
+    #[test]
+    fn plans_shell_sampled_radial_loft_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 2
+                  (sampled-radial-loft
+                    (theta z fz)
+                    :height 40
+                    :z-steps 2
+                    :theta-steps 4
+                    :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ops,
+            vec![
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Loft,
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Polygon,
+                OcctOp::Translate,
+                OcctOp::Loft,
+                OcctOp::Difference,
+            ]
+        );
+        let difference = plan.parts[0].commands.last().expect("difference");
+        assert_eq!(difference.op, OcctOp::Difference);
+        assert_eq!(plan.parts[0].root, difference.output);
+    }
+
+    #[test]
+    fn plans_profile_with_holes_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (profile :outer (circle 10) :holes (circle 3))
+                  4)))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![
+                OcctOp::Circle,
+                OcctOp::Circle,
+                OcctOp::Profile,
+                OcctOp::Extrude
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_make_face_for_direct_occt() {
+        let program = compile(
+            "(model (part body (extrude (make-face (polygon ((0 0) (8 0) (8 6) (0 6)))) 4)))",
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Polygon, OcctOp::MakeFace, OcctOp::Extrude]
+        );
+    }
+
+    #[test]
+    fn plans_offset_for_direct_occt() {
+        let program = compile("(model (part body (extrude (offset 2 (circle 10)) 4)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Circle, OcctOp::Offset, OcctOp::Extrude]
+        );
+    }
+
+    #[test]
+    fn plans_mirror_taper_and_offset_rounded_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (compound
+                  (mirror "x" 0 (box 4 5 6))
+                  (translate 14 0 0
+                    (taper 12 0.55 0.8 (rounded-rect 8 6 1)))
+                  (translate 28 0 0
+                    (extrude (offset-rounded 1.5 (circle 5)) 4)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![
+                OcctOp::Box,
+                OcctOp::Mirror,
+                OcctOp::RoundedRectangle,
+                OcctOp::Taper,
+                OcctOp::Translate,
+                OcctOp::Circle,
+                OcctOp::Offset,
+                OcctOp::Extrude,
+                OcctOp::Translate,
+                OcctOp::Compound,
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_path_frame_place_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape rail (path ((0 0 0) (0 0 20))))
+                  (shape peg (cylinder 2 6))
+                  (shape end-frame (path-frame rail :at end))
+                  (result (place end-frame peg :offset (0 0 -3))))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![
+                OcctOp::Path,
+                OcctOp::Cylinder,
+                OcctOp::PathFrame,
+                OcctOp::Place
+            ]
+        );
+        let frame = &plan.parts[0].commands[2];
+        assert_eq!(frame.keywords[0].name, "at");
+        assert_eq!(frame.keywords[0].value, OcctArg::Symbol("end".into()));
+        let place = &plan.parts[0].commands[3];
+        assert_eq!(place.keywords[0].name, "offset");
+        assert_eq!(place.keywords[0].value, OcctArg::Point3([0.0, 0.0, -3.0]));
+    }
+
+    #[test]
+    fn plans_plane_location_place_clip_box_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape base (plane :origin (0 0 4) :normal (0 0 1)))
+                  (shape loc (location base :offset (5 0 0) :rotate (0 0 90)))
+                  (shape peg (box 2 4 6))
+                  (shape placed (place loc peg))
+                  (result
+                    (clip-box placed :x (0 10) :y (-5 5) :z (0 12))))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![
+                OcctOp::Plane,
+                OcctOp::Location,
+                OcctOp::Box,
+                OcctOp::Place,
+                OcctOp::ClipBox
+            ]
+        );
+        assert_eq!(plan.parts[0].commands[0].keywords[0].name, "origin");
+        assert_eq!(plan.parts[0].commands[1].keywords[0].name, "offset");
+        assert_eq!(plan.parts[0].commands[4].keywords[0].name, "x");
+    }
+
+    #[test]
+    fn plans_array_ops_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (compound
+                  (linear-array 3 10 0 0 (box 2 2 2))
+                  (radial-array 4 90 20 (cylinder 2 5))
+                  (grid-array 2 3 8 9 (sphere 2))
+                  (arc-array 5 30 0 180 (cone 2 1 4)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![
+                OcctOp::Box,
+                OcctOp::LinearArray,
+                OcctOp::Cylinder,
+                OcctOp::RadialArray,
+                OcctOp::Sphere,
+                OcctOp::GridArray,
+                OcctOp::Cone,
+                OcctOp::ArcArray,
+                OcctOp::Compound,
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_first_surface_ops_by_name() {
         let program = compile(
             r#"
             (model
               (part body
-                (loft 10 (circle 1) (circle 2))))
+                (xor (box 2 2 2) (sphere 1))))
             "#,
         );
 
-        let err = plan_core_program(&program).expect_err("loft unsupported");
+        let err = plan_core_program(&program).expect_err("xor unsupported");
         let message = err.to_string();
 
         assert!(message.contains("Direct OCCT adapter"), "{message}");
-        assert!(message.contains("loft"), "{message}");
+        assert!(message.contains("xor"), "{message}");
         assert!(message.contains("first surface"), "{message}");
     }
 

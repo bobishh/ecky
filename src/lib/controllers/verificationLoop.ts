@@ -188,6 +188,14 @@ function buildVisualRepairPrompt(
   if (opts.structuralMetrics) {
     const m = opts.structuralMetrics;
     const metricLines = [`  parts: ${m.partCount}`];
+    if (m.previewStlTriangleCount != null) metricLines.push(`  triangles: ${m.previewStlTriangleCount}`);
+    if (m.previewStlComponentCount != null) metricLines.push(`  components: ${m.previewStlComponentCount}`);
+    if (m.previewStlNonManifoldEdgeCount != null)
+      metricLines.push(`  non-manifold edges: ${m.previewStlNonManifoldEdgeCount}`);
+    if (m.previewStlOverhangTriangleCount != null)
+      metricLines.push(`  overhang triangles: ${m.previewStlOverhangTriangleCount}`);
+    if (m.previewStlOverhangRatio != null)
+      metricLines.push(`  overhang ratio: ${m.previewStlOverhangRatio.toFixed(3)}`);
     if (m.totalVolume != null) metricLines.push(`  volume: ${m.totalVolume.toFixed(2)}`);
     if (m.totalArea != null) metricLines.push(`  area: ${m.totalArea.toFixed(2)}`);
     sections.push(`Structural context:\n${metricLines.join('\n')}`);
@@ -226,6 +234,11 @@ function formatStructuralSummaryForVisual(metrics: StructuralMetrics): string {
     `Structural checks passed.`,
     `Parts: ${metrics.partCount}`,
   ];
+  if (metrics.previewStlTriangleCount != null) lines.push(`Triangles: ${metrics.previewStlTriangleCount}`);
+  if (metrics.previewStlComponentCount != null) lines.push(`Components: ${metrics.previewStlComponentCount}`);
+  if (metrics.previewStlNonManifoldEdgeCount != null) lines.push(`Non-manifold edges: ${metrics.previewStlNonManifoldEdgeCount}`);
+  if (metrics.previewStlOverhangTriangleCount != null) lines.push(`Overhang triangles: ${metrics.previewStlOverhangTriangleCount}`);
+  if (metrics.previewStlOverhangRatio != null) lines.push(`Overhang ratio: ${metrics.previewStlOverhangRatio.toFixed(3)}`);
   if (metrics.totalVolume != null) lines.push(`Volume: ${metrics.totalVolume.toFixed(2)}mm³`);
   if (metrics.totalArea != null) lines.push(`Area: ${metrics.totalArea.toFixed(2)}mm²`);
   if (metrics.bbox) {

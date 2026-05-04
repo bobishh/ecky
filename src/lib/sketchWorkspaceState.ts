@@ -1,4 +1,4 @@
-import type { SketchConstraint, SketchDraftRequest, SketchPrimitive, SketchView } from './tauri/contracts';
+import type { SketchConstraint, SketchDraftRequest, SketchPrimitive, SketchPrimitiveKind, SketchView } from './tauri/contracts';
 
 export type SketchPoint = [number, number];
 
@@ -10,9 +10,40 @@ export type SketchDimensionLocks = {
 export type SketchStroke = {
   primitiveId: string;
   view: SketchView;
+  kind?: Extract<SketchPrimitiveKind, 'polyline' | 'circle'>;
   points: SketchPoint[];
   closed: boolean;
+  radius?: number;
   dimensionLocks?: SketchDimensionLocks;
+};
+
+export type SketchOrthographicRepairAction =
+  | {
+      kind: 'scaleViewAxis';
+      primitiveId: string;
+      view: SketchView;
+      axis: 'x' | 'y';
+      sourceView: SketchView;
+      current: number;
+      target: number;
+      message: string;
+    }
+  | {
+      kind: 'translateViewAxisRange';
+      primitiveId: string;
+      view: SketchView;
+      axis: 'x' | 'y';
+      sourceView: SketchView;
+      currentMin: number;
+      currentMax: number;
+      targetMin: number;
+      targetMax: number;
+      message: string;
+    };
+
+export type SketchDraftError = {
+  error: string;
+  repairAction?: SketchOrthographicRepairAction;
 };
 
 export type PaneBounds = {
@@ -69,6 +100,12 @@ export function basename(path: string): string {
 }
 
 export function finishStroke(stroke: SketchStroke): SketchStroke {
+  if (strokeKind(stroke) !== 'polyline') {
+    return {
+      ...stroke,
+      closed: true,
+    };
+  }
   if (stroke.points.length < 2) return stroke;
 
   const first = stroke.points[0];
@@ -84,6 +121,12 @@ export function finishStroke(stroke: SketchStroke): SketchStroke {
 }
 
 export function closeStroke(stroke: SketchStroke): SketchStroke {
+  if (strokeKind(stroke) !== 'polyline') {
+    return {
+      ...stroke,
+      closed: true,
+    };
+  }
   if (stroke.closed || stroke.points.length < 3) return stroke;
 
   return {
@@ -93,7 +136,7 @@ export function closeStroke(stroke: SketchStroke): SketchStroke {
   };
 }
 
-export function buildSketchDraftRequest(strokes: SketchStroke[]): SketchDraftRequest | { error: string } {
+export function buildSketchDraftRequest(strokes: SketchStroke[]): SketchDraftRequest | SketchDraftError {
   const profile = primaryClosedProfile(strokes);
   if (!profile) return { error: 'Close profile before preview.' };
 
@@ -102,9 +145,10 @@ export function buildSketchDraftRequest(strokes: SketchStroke[]): SketchDraftReq
 
   const primitive: SketchPrimitive = {
     primitiveId: profile.primitiveId,
-    kind: 'polyline',
-    points: profile.points,
+    kind: strokeKind(profile),
+    points: profile.points.map(copyPoint),
     closed: true,
+    radius: strokeKind(profile) === 'circle' ? profile.radius ?? null : null,
   };
 
   return {
@@ -158,7 +202,7 @@ export function constraintsForStroke(stroke: SketchStroke): SketchConstraint[] {
     { constraintId: `${stroke.primitiveId}-closed`, kind: 'closed', targetIds: [stroke.primitiveId] },
   ];
 
-  if (!stroke.closed || !stroke.dimensionLocks) return constraints;
+  if (strokeKind(stroke) !== 'polyline' || !stroke.closed || !stroke.dimensionLocks) return constraints;
 
   const bounds = strokeBounds(stroke);
   if (stroke.dimensionLocks.width) {
@@ -181,13 +225,36 @@ export function constraintsForStroke(stroke: SketchStroke): SketchConstraint[] {
   return constraints;
 }
 
-function strokeBounds(stroke: SketchStroke): { width: number; height: number } {
+function strokeBounds(stroke: SketchStroke): { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number } {
+  if (strokeKind(stroke) === 'circle') {
+    const center = stroke.points[0];
+    const radius = stroke.radius;
+    if (!center || typeof radius !== 'number' || !Number.isFinite(radius) || radius <= 0) {
+      throw new Error('Circle radius must be positive and finite.');
+    }
+    return {
+      minX: center[0] - radius,
+      minY: center[1] - radius,
+      maxX: center[0] + radius,
+      maxY: center[1] + radius,
+      width: radius * 2,
+      height: radius * 2,
+    };
+  }
   const points = stroke.closed ? stroke.points.slice(0, -1) : stroke.points;
   const xs = points.map(([x]) => x);
   const ys = points.map(([, y]) => y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
   return {
-    width: Math.max(...xs) - Math.min(...xs),
-    height: Math.max(...ys) - Math.min(...ys),
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX,
+    height: maxY - minY,
   };
 }
 
@@ -195,10 +262,18 @@ function primaryClosedProfile(strokes: SketchStroke[]): SketchStroke | undefined
   return strokes.find((stroke) => stroke.closed && stroke.view === 'front') ?? strokes.find((stroke) => stroke.closed);
 }
 
+export function strokeKind(stroke: SketchStroke): Extract<SketchPrimitiveKind, 'polyline' | 'circle'> {
+  return stroke.kind === 'circle' ? 'circle' : 'polyline';
+}
+
+function copyPoint(point: SketchPoint): SketchPoint {
+  return [point[0], point[1]];
+}
+
 function extrudeDepthForProfile(
   strokes: SketchStroke[],
   profile: SketchStroke,
-): { amount: number; source: 'default' | 'top' | 'side' } | { error: string } {
+): { amount: number; source: 'default' | 'top' | 'side' } | SketchDraftError {
   if (profile.view !== 'front') return { amount: DEFAULT_EXTRUDE_DEPTH, source: 'default' };
 
   const frontBounds = strokeBounds(profile);
@@ -207,21 +282,111 @@ function extrudeDepthForProfile(
   const topBounds = topProfile ? strokeBounds(topProfile) : null;
   const sideBounds = sideProfile ? strokeBounds(sideProfile) : null;
 
-  if (topBounds && !sameDimension(topBounds.width, frontBounds.width)) {
+  if (topProfile && topBounds && !sameDimension(topBounds.width, frontBounds.width)) {
+    const error = `Top view width ${formatDimension(topBounds.width)}mm must match Front view width ${formatDimension(frontBounds.width)}mm.`;
     return {
-      error: `Top view width ${formatDimension(topBounds.width)}mm must match Front view width ${formatDimension(frontBounds.width)}mm.`,
+      error,
+      repairAction: {
+        kind: 'scaleViewAxis',
+        primitiveId: topProfile.primitiveId,
+        view: 'top',
+        axis: 'x',
+        sourceView: 'front',
+        current: formatConstraintValue(topBounds.width),
+        target: formatConstraintValue(frontBounds.width),
+        message: error,
+      },
     };
   }
 
-  if (sideBounds && !sameDimension(sideBounds.height, frontBounds.height)) {
+  if (topProfile && topBounds && !sameRange(topBounds.minX, topBounds.maxX, frontBounds.minX, frontBounds.maxX)) {
+    const error = `Top view x range ${formatRange(topBounds.minX, topBounds.maxX)}mm must match Front view x range ${formatRange(frontBounds.minX, frontBounds.maxX)}mm.`;
     return {
-      error: `Side view height ${formatDimension(sideBounds.height)}mm must match Front view height ${formatDimension(frontBounds.height)}mm.`,
+      error,
+      repairAction: {
+        kind: 'translateViewAxisRange',
+        primitiveId: topProfile.primitiveId,
+        view: 'top',
+        axis: 'x',
+        sourceView: 'front',
+        currentMin: formatConstraintValue(topBounds.minX),
+        currentMax: formatConstraintValue(topBounds.maxX),
+        targetMin: formatConstraintValue(frontBounds.minX),
+        targetMax: formatConstraintValue(frontBounds.maxX),
+        message: error,
+      },
     };
   }
 
-  if (topBounds && sideBounds && !sameDimension(topBounds.height, sideBounds.width)) {
+  if (sideProfile && sideBounds && !sameDimension(sideBounds.height, frontBounds.height)) {
+    const error = `Side view height ${formatDimension(sideBounds.height)}mm must match Front view height ${formatDimension(frontBounds.height)}mm.`;
     return {
-      error: `Top view depth ${formatDimension(topBounds.height)}mm must match Side view depth ${formatDimension(sideBounds.width)}mm.`,
+      error,
+      repairAction: {
+        kind: 'scaleViewAxis',
+        primitiveId: sideProfile.primitiveId,
+        view: 'side',
+        axis: 'y',
+        sourceView: 'front',
+        current: formatConstraintValue(sideBounds.height),
+        target: formatConstraintValue(frontBounds.height),
+        message: error,
+      },
+    };
+  }
+
+  if (sideProfile && sideBounds && !sameRange(sideBounds.minY, sideBounds.maxY, frontBounds.minY, frontBounds.maxY)) {
+    const error = `Side view y range ${formatRange(sideBounds.minY, sideBounds.maxY)}mm must match Front view y range ${formatRange(frontBounds.minY, frontBounds.maxY)}mm.`;
+    return {
+      error,
+      repairAction: {
+        kind: 'translateViewAxisRange',
+        primitiveId: sideProfile.primitiveId,
+        view: 'side',
+        axis: 'y',
+        sourceView: 'front',
+        currentMin: formatConstraintValue(sideBounds.minY),
+        currentMax: formatConstraintValue(sideBounds.maxY),
+        targetMin: formatConstraintValue(frontBounds.minY),
+        targetMax: formatConstraintValue(frontBounds.maxY),
+        message: error,
+      },
+    };
+  }
+
+  if (sideProfile && topBounds && sideBounds && !sameDimension(topBounds.height, sideBounds.width)) {
+    const error = `Top view depth ${formatDimension(topBounds.height)}mm must match Side view depth ${formatDimension(sideBounds.width)}mm.`;
+    return {
+      error,
+      repairAction: {
+        kind: 'scaleViewAxis',
+        primitiveId: sideProfile.primitiveId,
+        view: 'side',
+        axis: 'x',
+        sourceView: 'top',
+        current: formatConstraintValue(sideBounds.width),
+        target: formatConstraintValue(topBounds.height),
+        message: error,
+      },
+    };
+  }
+
+  if (sideProfile && topBounds && sideBounds && !sameRange(topBounds.minY, topBounds.maxY, sideBounds.minX, sideBounds.maxX)) {
+    const error = `Top view depth range ${formatRange(topBounds.minY, topBounds.maxY)}mm must match Side view depth range ${formatRange(sideBounds.minX, sideBounds.maxX)}mm.`;
+    return {
+      error,
+      repairAction: {
+        kind: 'translateViewAxisRange',
+        primitiveId: sideProfile.primitiveId,
+        view: 'side',
+        axis: 'x',
+        sourceView: 'top',
+        currentMin: formatConstraintValue(sideBounds.minX),
+        currentMax: formatConstraintValue(sideBounds.maxX),
+        targetMin: formatConstraintValue(topBounds.minY),
+        targetMax: formatConstraintValue(topBounds.maxY),
+        message: error,
+      },
     };
   }
 
@@ -234,9 +399,17 @@ function sameDimension(left: number, right: number): boolean {
   return Math.abs(left - right) <= DIMENSION_TOLERANCE;
 }
 
+function sameRange(leftMin: number, leftMax: number, rightMin: number, rightMax: number): boolean {
+  return sameDimension(leftMin, rightMin) && sameDimension(leftMax, rightMax);
+}
+
 function formatDimension(value: number): string {
   if (Number.isInteger(value)) return String(value);
   return value.toFixed(2).replace(/\.?0+$/, '');
+}
+
+function formatRange(min: number, max: number): string {
+  return `${formatDimension(min)}..${formatDimension(max)}`;
 }
 
 function formatConstraintValue(value: number): number {

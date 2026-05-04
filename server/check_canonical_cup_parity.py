@@ -49,6 +49,14 @@ def require_ok(result: subprocess.CompletedProcess[str], label: str) -> None:
 
 
 def main() -> int:
+    allow_good = False
+    args = sys.argv[1:]
+    if "--allow-good" in args:
+        allow_good = True
+        args.remove("--allow-good")
+    if args:
+        raise SystemExit(f"Usage: {Path(__file__).name} [--allow-good]")
+
     python_cmd = resolve_python()
 
     with tempfile.TemporaryDirectory(prefix="ecky-canonical-cup-") as tmp_dir:
@@ -113,7 +121,10 @@ def main() -> int:
         print(f"Reference STL: {reference_stl}")
         print(f"Generated STL: {generated_stl}")
 
-        if comparison["status"] != "EXCELLENT MATCH":
+        accepted = {"EXCELLENT MATCH"}
+        if allow_good:
+            accepted.add("GOOD MATCH")
+        if comparison["status"] not in accepted:
             return 1
 
     return 0

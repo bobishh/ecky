@@ -17,7 +17,9 @@ import type {
   DesignOutput,
   GenerateOutput,
   IntentDecision,
+  Message,
   Request,
+  RuntimeAuthoringContext,
   StructuralMetrics,
   UsageSummary,
 } from '../types/domain';
@@ -27,6 +29,7 @@ import { needsGeneratedQuestionAnswer, pendingQuestionCopy } from './questionAns
 import { runStructuralCheck } from './structuralVerification';
 import { runVerificationRound } from './verificationLoop';
 import { buildAuthoringDigest } from '../llmContextDigest';
+import { resolveActiveAuthoringContext } from '../runtimeCapabilities';
 import {
   classifyIntent,
   finalizeGenerationAttempt,
@@ -163,6 +166,11 @@ function toAssetUrl(path: string | null | undefined): string {
 
 function formatStructuralSummary(metrics: StructuralMetrics): string {
   const lines = [`Structural checks passed.`, `Parts: ${metrics.partCount}`];
+  if (metrics.previewStlTriangleCount != null) lines.push(`Triangles: ${metrics.previewStlTriangleCount}`);
+  if (metrics.previewStlComponentCount != null) lines.push(`Components: ${metrics.previewStlComponentCount}`);
+  if (metrics.previewStlNonManifoldEdgeCount != null) lines.push(`Non-manifold edges: ${metrics.previewStlNonManifoldEdgeCount}`);
+  if (metrics.previewStlOverhangTriangleCount != null) lines.push(`Overhang triangles: ${metrics.previewStlOverhangTriangleCount}`);
+  if (metrics.previewStlOverhangRatio != null) lines.push(`Overhang ratio: ${metrics.previewStlOverhangRatio.toFixed(3)}`);
   if (metrics.totalVolume != null) lines.push(`Volume: ${metrics.totalVolume.toFixed(2)}mm³`);
   if (metrics.totalArea != null) lines.push(`Area: ${metrics.totalArea.toFixed(2)}mm²`);
   if (metrics.bbox) {
@@ -429,6 +437,7 @@ function buildWorkingDesignSnapshot(): DesignOutput | null {
     interactionMode: 'design',
     macroCode: wc.macroCode,
     macroDialect: wc.macroDialect ?? 'legacy',
+    engineKind: wc.engineKind ?? 'freecad',
     sourceLanguage: wc.sourceLanguage ?? 'legacyPython',
     geometryBackend: wc.geometryBackend ?? 'freecad',
     uiSpec: panel.uiSpec || { fields: [] },
@@ -437,12 +446,22 @@ function buildWorkingDesignSnapshot(): DesignOutput | null {
   };
 }
 
-function configAuthoringContext(currentConfig: AppConfig): Pick<DesignOutput, 'engineKind' | 'sourceLanguage' | 'geometryBackend'> {
-  return {
-    engineKind: currentConfig.defaultEngineKind,
-    sourceLanguage: currentConfig.defaultSourceLanguage,
-    geometryBackend: currentConfig.defaultGeometryBackend,
-  };
+function selectedVersionMessage(): Pick<Message, 'output' | 'artifactBundle' | 'modelManifest'> | null {
+  const threadId = get(activeThreadId);
+  const versionId = get(activeVersionId);
+  if (!threadId || !versionId) return null;
+  const thread = get(history).find((candidate) => candidate.id === threadId);
+  return thread?.messages.find((message) => message.id === versionId) ?? null;
+}
+
+function currentAuthoringContext(currentConfig: AppConfig): RuntimeAuthoringContext {
+  const currentSession = get(session);
+  return resolveActiveAuthoringContext({
+    config: currentConfig,
+    activeVersionMessage: selectedVersionMessage(),
+    sessionArtifactBundle: currentSession.artifactBundle,
+    sessionModelManifest: currentSession.modelManifest,
+  });
 }
 
 type GenerateSubmissionOptions = {
@@ -535,6 +554,7 @@ class GenerationPipeline {
   snapshotThreadId: string;
   snapshotParentMacroCode: string | null;
   snapshotWorkingDesign: DesignOutput | null;
+  snapshotAuthoringContext: RuntimeAuthoringContext;
   currentConfig: AppConfig;
   
   assistantMessageId: string | null = null;
@@ -569,6 +589,7 @@ class GenerationPipeline {
     this.snapshotParentMacroCode = get(workingCopy).macroCode || null;
     this.snapshotWorkingDesign = buildWorkingDesignSnapshot();
     this.currentConfig = get(config);
+    this.snapshotAuthoringContext = currentAuthoringContext(this.currentConfig);
     this.modelFacingAttachments = this.req.attachments;
   }
 
@@ -663,7 +684,7 @@ class GenerationPipeline {
 
     let questionReplyText = this.finalResponse.trim();
     if (needsGeneratedQuestionAnswer(questionReplyText)) {
-      const authoringContext = this.snapshotWorkingDesign ?? configAuthoringContext(this.currentConfig);
+      const authoringContext = this.snapshotWorkingDesign ?? this.snapshotAuthoringContext;
       try {
         const result = await generateDesign({
           prompt: this.req.prompt,
@@ -747,7 +768,7 @@ class GenerationPipeline {
       this.updateStatus(`Consulting LLM (Attempt ${attempt}/${this.req.maxAttempts})...`);
 
       try {
-        const authoringContext = this.snapshotWorkingDesign ?? configAuthoringContext(this.currentConfig);
+        const authoringContext = this.snapshotWorkingDesign ?? this.snapshotAuthoringContext;
         const result = await generateDesign({
           prompt: currentPrompt,
           threadId: this.snapshotThreadId,

@@ -54,7 +54,7 @@ pub async fn generate_design(
                 &client,
                 engine,
                 engine.model.as_str(),
-                &engine.system_prompt,
+                crate::TECHNICAL_SYSTEM_PROMPT,
                 prompt,
                 images,
                 "generate",
@@ -72,7 +72,7 @@ pub async fn generate_design(
                 &client,
                 engine,
                 engine.model.as_str(),
-                &engine.system_prompt,
+                crate::TECHNICAL_SYSTEM_PROMPT,
                 prompt,
                 images,
                 "generate",
@@ -1027,11 +1027,7 @@ async fn call_openai_compatible(
 ) -> Result<LlmOutcome<serde_json::Value>, String> {
     let url = openai_chat_completions_url(&engine.base_url);
 
-    let system_content = if system_prompt.contains("$USER_PROMPT") {
-        system_prompt.replace("$USER_PROMPT", user_prompt)
-    } else {
-        system_prompt.to_string()
-    };
+    let system_content = system_prompt.to_string();
 
     let mut user_content = vec![json!({ "type": "text", "text": user_prompt })];
 
@@ -1125,11 +1121,7 @@ async fn call_gemini(
         }
     }
 
-    let system_content = if system_prompt.contains("$USER_PROMPT") {
-        system_prompt.replace("$USER_PROMPT", user_prompt)
-    } else {
-        system_prompt.to_string()
-    };
+    let system_content = system_prompt.to_string();
 
     let payload = json!({
         "system_instruction": {
@@ -1466,7 +1458,6 @@ mod tests {
             model: "gpt-4o".to_string(),
             light_model: "gpt-4.1-nano".to_string(),
             base_url: String::new(),
-            system_prompt: String::new(),
             enabled: true,
         };
 
@@ -1484,7 +1475,6 @@ mod tests {
             model: "gpt-4o".to_string(),
             light_model: String::new(),
             base_url: String::new(),
-            system_prompt: String::new(),
             enabled: true,
         };
 

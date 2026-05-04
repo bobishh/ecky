@@ -41,6 +41,7 @@
     stopMicrowaveHum,
   } from './lib/audio/microwave';
   import { setSpeechMuted, speakEckyText, stopEckySpeech } from './lib/audio/tts';
+  import { resolveGenieSpeechCue } from './lib/genie/speechPolicy';
   import { onboarding } from './lib/stores/onboarding';
   import { session } from './lib/stores/sessionStore';
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
@@ -164,20 +165,17 @@
     type ViewportPresentationMode,
   } from './lib/viewportBlueprint';
   import {
-    buildExportChooserOptions,
-    buildExportDefaultNames,
-    buildMultipartExportParts,
     getStepExportPath,
-    hasMultipartExportAssets,
     type ExportMode,
   } from './lib/exportOptions';
+  import { buildDirectOcctStepStatus } from './lib/directOcctStepStatus';
   import { deriveContextState } from './lib/composables/contextState';
   import { deriveViewportState } from './lib/composables/viewportState';
   import { deriveAgentOpsState, type PendingViewportScreenshotChoice } from './lib/composables/agentOps';
   import { deriveExportState } from './lib/composables/exportOps';
   import {
-    authoringContextFromConfig,
     capabilityForAuthoringContext,
+    resolveActiveAuthoringContext,
   } from './lib/runtimeCapabilities';
   import { isRenderableVersionTimelineMessage } from './lib/threadTimeline';
   import {
@@ -214,7 +212,6 @@
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
   import type { SketchDraftSource } from './lib/tauri/contracts';
-  import type { SketchGhostPreviewState } from './lib/sketchGhostPreview';
   import type {
     AgentSession,
     AgentTerminalInput,
@@ -285,6 +282,13 @@
   type SketchPreviewState = {
     draft: SketchDraftSource;
     artifactBundle: ArtifactBundle;
+  };
+  type SketchViewportStatus = {
+    title: string;
+    verdict: string;
+    detail: string;
+    backend: string;
+    artifactName: string;
   };
 
   function defaultConceptPreviewUiState(): ConceptPreviewUiState {
@@ -358,7 +362,6 @@
   let showNewProjectChooser = $state(false);
   let showNewProjectImport = $state(false);
   let sketchPreview = $state<SketchPreviewState | null>(null);
-  let sketchGhostPreview = $state<SketchGhostPreviewState | null>(null);
   let codeModalMode = $state<'version' | 'sketch-preview'>('version');
 
   const isBooting = $derived(phase === 'booting');
@@ -455,7 +458,7 @@
   $effect(() => {
     activeControlViewId = contextState.resolvedActiveControlViewId;
   });
-  const suppressViewportBusyUi = $derived($showCodeModal);
+  const suppressViewportBusyUi = $derived(isBooting);
   let showEnrichmentModal = $state(false);
   let showExportChooser = $state(false);
   const enrichmentManifest = $derived.by(() => {
@@ -510,17 +513,23 @@
       ? viewerAssetsToUrls(sketchPreview.artifactBundle.viewerAssets ?? [])
       : [],
   );
-  const sketchPreviewEvidence = $derived.by(() => {
+  const sketchPreviewStatus = $derived.by<SketchViewportStatus | null>(() => {
     if (!sketchPreview?.artifactBundle) return null;
-    const previewName = fileBasename(sketchPreview.artifactBundle.previewStlPath);
-    const assetCount = sketchPreview.artifactBundle.viewerAssets?.length ?? 0;
+
+    const warnings = sketchPreview.draft.warnings ?? [];
+    const warningText = warnings.join(' ').toLowerCase();
+    const isPreviewHull =
+      warningText.includes('preview hull') ||
+      sketchPreview.artifactBundle.modelId.toLowerCase().includes('preview-hull');
+
     return {
-      previewName,
-      assetCountLabel: `${assetCount} ${assetCount === 1 ? 'assets' : 'assets'}`,
+      title: isPreviewHull ? 'PREVIEW HULL' : 'SKETCH PREVIEW',
+      verdict: 'NOT ACCEPTED CAD',
+      detail: 'Diagnostic mesh from sketch evidence. Accepted CAD needs exact BRep/STEP validation.',
+      backend: (sketchPreview.artifactBundle.geometryBackend ?? 'unknown').toUpperCase(),
+      artifactName: fileBasename(sketchPreview.artifactBundle.previewStlPath) || 'preview.stl',
     };
   });
-  const activeSketchGhostPreview = $derived.by(() => (sketchPreview?.artifactBundle ? null : sketchGhostPreview));
-  const sourceSilhouettePreview = $derived.by(() => (sketchPreview?.artifactBundle ? sketchGhostPreview : null));
   const effectiveViewerStlUrl = $derived.by<string | null>(() =>
     sketchPreview?.artifactBundle ? sketchPreviewStlUrl : ($activeThreadId ? stlUrl : null),
   );
@@ -602,6 +611,7 @@
       activeArtifactBundle,
       activeThreadTitle: activeThread?.title ?? null,
       activeVersionMessage,
+      runtimeCapabilities: $runtimeCapabilities,
     }),
   );
   const exportModelTitle = $derived.by(() => exportState.exportModelTitle);
@@ -610,6 +620,9 @@
   const hasMultipartExportModel = $derived.by(() => exportState.hasMultipartExportModel);
   const multipartExportParts = $derived.by(() => exportState.multipartExportParts);
   const canExportModel = $derived.by(() => exportState.canExportModel);
+  const directOcctStepStatus = $derived.by(() =>
+    buildDirectOcctStepStatus(activeArtifactBundle, $runtimeCapabilities),
+  );
 
   let viewerComponent = $state<ViewerHandle | null>(null);
   let hiddenViewerComponent = $state<ViewerHandle | null>(null);
@@ -640,7 +653,6 @@
   const paramsWindowState = $derived($windowStore.params);
   const dialogueWindowState = $derived($windowStore.dialogue);
   const settingsWindowState = $derived($windowStore.settings);
-  const sketchWindowState = $derived($windowStore.sketch);
   let mountedWindows = $state<Record<WindowId, boolean>>({
     projects: false,
     params: false,
@@ -649,13 +661,20 @@
     terminal: false,
     sketch: false,
   });
+  let sketchModeMounted = $state(false);
 
   $effect(() => {
     const s = $windowStore;
-    for (const id of ['projects', 'params', 'dialogue', 'settings', 'terminal', 'sketch'] as WindowId[]) {
+    for (const id of ['projects', 'params', 'dialogue', 'settings', 'terminal'] as WindowId[]) {
       if (s[id].visible) {
         mountedWindows[id] = true;
       }
+    }
+  });
+
+  $effect(() => {
+    if ($currentView === 'sketch') {
+      sketchModeMounted = true;
     }
   });
 
@@ -1095,16 +1114,10 @@
     sketchPreview = preview;
   }
 
-  function handleSketchGhostPreviewChange(preview: SketchGhostPreviewState | null) {
-    sketchGhostPreview = preview;
-  }
-
-  function openSketchPreviewCodeModal() {
-    if (!sketchPreview?.draft.source) return;
-    codeModalMode = 'sketch-preview';
-    selectedCode.set(sketchPreview.draft.source);
-    selectedTitle.set('sketch-preview.ecky');
-    showCodeModal.set(true);
+  function handleSketchManualPreviewResult(preview: SketchPreviewState | null) {
+    if (preview?.artifactBundle) {
+      currentView.set('workbench');
+    }
   }
 
   function rememberVisibleViewportCapture(capture: ViewportScreenshotCapture) {
@@ -1918,13 +1931,12 @@
   });
 
   const activeAuthoringContext = $derived.by(() =>
-    activeThread
-      ? {
-          engineKind: activeThread.engineKind,
-          sourceLanguage: activeThread.sourceLanguage,
-          geometryBackend: activeThread.geometryBackend,
-        }
-      : authoringContextFromConfig($config),
+    resolveActiveAuthoringContext({
+      config: $config,
+      activeVersionMessage,
+      sessionArtifactBundle: activeArtifactBundle,
+      sessionModelManifest,
+    }),
   );
   const activeAuthoringCapability = $derived.by<RuntimeBackendCapability | null>(() =>
     capabilityForAuthoringContext(
@@ -2054,6 +2066,10 @@
 
     return 'idle';
   });
+  const activeThreadLatestErrorRequest = $derived.by(() =>
+    [...$activeThreadRequests].reverse().find((request) => request.phase === 'error' && request.error) ?? null,
+  );
+  const activeThreadErrorText = $derived(activeThreadLatestErrorRequest?.error ?? '');
 
   const activeConfirm = $derived(pendingConfirms[0] ?? null);
   const threadAgentMascot = $derived.by(() => deriveMascotStateForThreadAgent(threadAgentState));
@@ -2107,10 +2123,7 @@
     } else {
       const atPhase = activeThreadHighestPhase;
       const threadError =
-        atPhase === 'error'
-          ? [...$activeThreadRequests].reverse().find((request) => request.phase === 'error' && request.error)
-              ?.error
-          : null;
+        atPhase === 'error' ? activeThreadErrorText : null;
       raw = threadError ||
             (atPhase === 'repairing' ? $session.repairMessage : null) ||
             (['classifying', 'generating', 'answering'].includes(atPhase) ? $session.cookingPhrase : null) ||
@@ -2120,15 +2133,17 @@
   });
 
   $effect(() => {
-    const msgId = latestAssistantMessage?.id;
-    const speechText = assistantFresh ? assistantBubble : '';
-    if (!msgId || !speechText || isAudioMuted || dismissedBubbleText === speechText) return;
-    if (genieBubble !== speechText) return;
-
-    const speechKey = `${msgId}:${speechText}`;
-    if (speechKey === lastSpokenAssistantKey) return;
-    lastSpokenAssistantKey = speechKey;
-    speakEckyText(speechText, { muted: isAudioMuted });
+    const speechCue = resolveGenieSpeechCue({
+      latestAssistantMessage,
+      assistantFresh,
+      visibleBubble: genieBubble,
+      activeErrorId: activeThreadLatestErrorRequest?.id ?? null,
+      activeErrorText: activeThreadErrorText,
+    });
+    if (!speechCue || isAudioMuted || dismissedBubbleText === speechCue.text) return;
+    if (speechCue.key === lastSpokenAssistantKey) return;
+    lastSpokenAssistantKey = speechCue.key;
+    speakEckyText(speechCue.text, { muted: isAudioMuted });
   });
 
   // Reset dismiss state and waking message when a new agent prompt arrives
@@ -2644,8 +2659,10 @@
         </button>
         <button
           class="dock-btn"
-          class:dock-btn--active={$windowStore.sketch.visible}
-          onclick={() => toggleWindow('sketch')}
+          onclick={() => {
+            closeWindowStore('sketch');
+            currentView.set('sketch');
+          }}
           title="Sketch Workspace"
         >
           SKETCH
@@ -2689,7 +2706,7 @@
         </button>
         <button class="settings-overlay-btn" onclick={() => toggleWindow('settings')} title="Settings">⚙️</button>
       </div>
-    {:else}
+    {:else if $currentView !== 'sketch'}
       <button
         class="settings-overlay-btn"
         onclick={() => currentView.set('workbench')}
@@ -2701,6 +2718,15 @@
   </div>
 
   <div class="app-container">
+    {#if sketchModeMounted}
+      <section class="sketch-mode-workspace" hidden={$currentView !== 'sketch'} aria-label="Sketch mode">
+        <SketchWorkspace
+          onPreviewResult={handleSketchPreviewChange}
+          onManualPreviewResult={handleSketchManualPreviewResult}
+          onClose={() => currentView.set('workbench')}
+        />
+      </section>
+    {/if}
     {#if $currentView === 'workbench' || $currentView === 'inventory-model'}
       <div class="workbench">
         <div class="main-workbench">
@@ -2745,32 +2771,21 @@
                 busyText={viewerBusyText}
                 topologyMode={viewerTopologyMode}
               />
+              {#if sketchPreviewStatus}
+                <section class="sketch-preview-status" aria-label="Sketch preview status">
+                  <div class="sketch-preview-status__head">
+                    <span>{sketchPreviewStatus.title}</span>
+                    <strong>{sketchPreviewStatus.verdict}</strong>
+                  </div>
+                  <div class="sketch-preview-status__detail">{sketchPreviewStatus.detail}</div>
+                  <div class="sketch-preview-status__meta">
+                    <span>{sketchPreviewStatus.backend}</span>
+                    <span>EXPORT LOCKED</span>
+                    <span>{sketchPreviewStatus.artifactName}</span>
+                  </div>
+                </section>
+              {/if}
             </div>
-            {#if activeSketchGhostPreview}
-              <div class="viewport-sketch-ghost" aria-label="Local sketch ghost">
-                <svg class="viewport-sketch-ghost__svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                  {#if activeSketchGhostPreview.closed}
-                    <path class="viewport-sketch-ghost__extrude" d={activeSketchGhostPreview.path} />
-                  {/if}
-                  <path
-                    class="viewport-sketch-ghost__profile"
-                    class:viewport-sketch-ghost__profile--closed={activeSketchGhostPreview.closed}
-                    d={activeSketchGhostPreview.path}
-                  />
-                </svg>
-              </div>
-            {/if}
-            {#if sourceSilhouettePreview}
-              <div class="viewport-source-silhouette" aria-label="Source silhouette overlay">
-                <div class="viewport-source-silhouette__label">SOURCE SILHOUETTE OVERLAY</div>
-                <svg class="viewport-source-silhouette__svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                  {#if sourceSilhouettePreview.closed}
-                    <path class="viewport-source-silhouette__depth" d={sourceSilhouettePreview.path} />
-                  {/if}
-                  <path class="viewport-source-silhouette__profile" d={sourceSilhouettePreview.path} />
-                </svg>
-              </div>
-            {/if}
             {#if showBlueprintViewport && effectiveConceptPreviewMessage?.imageData}
               <section class="viewport-blueprint" aria-label="Concept preview">
                 <div class="viewport-blueprint__frame">
@@ -2972,29 +2987,9 @@
             {/if}
             
 
-            {#if hasSketchPreview || activeSketchGhostPreview || ($activeThreadId && ($workingCopy.macroCode || stlUrl || effectiveConceptPreviewMessage))}
+            {#if $activeThreadId && ($workingCopy.macroCode || stlUrl || effectiveConceptPreviewMessage)}
               <div class="viewport-overlay">
-                {#if hasSketchPreview}
-                  <div class="viewport-mode-panel" aria-label="Sketch preview status">
-                    <div class="viewport-mode-label">SKETCH PREVIEW</div>
-                    <div class="viewport-mode-hint">EPHEMERAL MODEL</div>
-                    {#if sketchPreviewEvidence}
-                      <div class="viewport-mode-evidence">
-                        <span>{sketchPreviewEvidence.previewName}</span>
-                        <span>{sketchPreviewEvidence.assetCountLabel}</span>
-                      </div>
-                    {/if}
-                  </div>
-                {:else if activeSketchGhostPreview}
-                  <div class="viewport-mode-panel" aria-label="Sketch preview status">
-                    <div class="viewport-mode-label">LOCAL SKETCH GHOST</div>
-                    <div class="viewport-mode-hint">{activeSketchGhostPreview.label}</div>
-                    <div class="viewport-mode-evidence">
-                      <span>{activeSketchGhostPreview.view.toUpperCase()} / {activeSketchGhostPreview.closed ? 'CLOSED' : 'OPEN'}</span>
-                      <span>EXTRUDE {activeSketchGhostPreview.extrudeDepth}MM</span>
-                    </div>
-                  </div>
-                {:else if effectiveConceptPreviewMessage}
+                {#if effectiveConceptPreviewMessage}
                   <div class="viewport-mode-panel">
                     <div class="viewport-mode-label">VIEWPORT MODE</div>
                     <div
@@ -3022,43 +3017,51 @@
                     {/if}
                   </div>
                 {/if}
+                {#if directOcctStepStatus && !hasSketchPreview}
+                  <div
+                    class="direct-occt-step-status"
+                    class:direct-occt-step-status--ready={directOcctStepStatus.tone === 'ready'}
+                    class:direct-occt-step-status--blocked={directOcctStepStatus.tone === 'blocked'}
+                    aria-label="Direct OCCT STEP status"
+                  >
+                    <div class="direct-occt-step-status__head">
+                      <span>{directOcctStepStatus.label}</span>
+                      <strong>{directOcctStepStatus.status}</strong>
+                    </div>
+                    <div class="direct-occt-step-status__detail">{directOcctStepStatus.detail}</div>
+                  </div>
+                {/if}
                 <div class="export-actions">
-                  {#if hasSketchPreview}
-                    <button class="btn btn-xs btn-secondary" onclick={openSketchPreviewCodeModal} disabled={!sketchPreview?.draft.source || showViewerBusyMask} title="View sketch preview source">
-                      📄 CODE
+                  <button class="btn btn-xs btn-secondary" onclick={() => {
+                    if (activeVersionMessage?.output) {
+                      codeModalMode = 'version';
+                      selectedCode.set($workingCopy.macroCode);
+                      selectedTitle.set(
+                        codeInspectorTitle(
+                          activeVersionMessage.output.title || $workingCopy.title || 'design',
+                          activeVersionMessage.artifactBundle?.sourceLanguage ??
+                            activeVersionMessage.modelManifest?.sourceLanguage ??
+                            activeVersionMessage.output.sourceLanguage,
+                          activeVersionMessage.artifactBundle?.geometryBackend ??
+                            activeVersionMessage.modelManifest?.geometryBackend ??
+                            activeVersionMessage.output.geometryBackend,
+                        ),
+                      );
+                      showCodeModal.set(true);
+                    }
+                  }} disabled={!activeVersionMessage?.output || showViewerBusyMask} title="View source code">
+                    📄 CODE
+                  </button>
+                  <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
+                  {#if activeArtifactBundle}
+                    <button
+                      class="btn btn-xs btn-primary"
+                      onclick={() => showExportChooser = true}
+                      disabled={!canExportModel || showViewerBusyMask || hasSketchPreview}
+                      title={hasSketchPreview ? 'Sketch preview is diagnostic only. Accepted CAD export needs exact BRep/STEP validation.' : 'Open export options'}
+                    >
+                      💾 EXPORT
                     </button>
-                  {:else if !activeSketchGhostPreview}
-                    <button class="btn btn-xs btn-secondary" onclick={() => {
-                      if (activeVersionMessage?.output) {
-                        codeModalMode = 'version';
-                        selectedCode.set($workingCopy.macroCode);
-                        selectedTitle.set(
-                          codeInspectorTitle(
-                            activeVersionMessage.output.title || $workingCopy.title || 'design',
-                            activeVersionMessage.artifactBundle?.sourceLanguage ??
-                              activeVersionMessage.modelManifest?.sourceLanguage ??
-                              activeVersionMessage.output.sourceLanguage,
-                            activeVersionMessage.artifactBundle?.geometryBackend ??
-                              activeVersionMessage.modelManifest?.geometryBackend ??
-                              activeVersionMessage.output.geometryBackend,
-                          ),
-                        );
-                        showCodeModal.set(true);
-                      }
-                    }} disabled={!activeVersionMessage?.output || showViewerBusyMask} title="View source code">
-                      📄 CODE
-                    </button>
-                    <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
-                    {#if activeArtifactBundle}
-                      <button
-                        class="btn btn-xs btn-primary"
-                        onclick={() => showExportChooser = true}
-                        disabled={!canExportModel || showViewerBusyMask}
-                        title="Open export options"
-                      >
-                        💾 EXPORT
-                      </button>
-                    {/if}
                   {/if}
                 </div>
               </div>
@@ -3098,7 +3101,7 @@
         <div class="boot-overlay__ecky">
           <VertexGenie mode="thinking" bubble="" />
         </div>
-        <div class="boot-overlay__status">Restoring environment...</div>
+        <div class="boot-overlay__status">{status || 'Restoring environment...'}</div>
       </div>
     </div>
   {/if}
@@ -3220,25 +3223,6 @@
           onsave={saveConfig}
         />
       </div>
-    </Window>
-  {/if}
-
-  {#if mountedWindows.sketch}
-    <Window
-      windowId="sketch"
-      x={sketchWindowState.x}
-      y={sketchWindowState.y}
-      width={sketchWindowState.width}
-      height={sketchWindowState.height}
-      z={sketchWindowState.z}
-      minWidth={520}
-      minHeight={360}
-      title="Sketch Workspace"
-      hidden={!sketchWindowState.visible}
-      highlighted={false}
-      onclose={() => closeWindowStore('sketch')}
-    >
-      <SketchWorkspace onPreviewResult={handleSketchPreviewChange} onGhostPreviewChange={handleSketchGhostPreviewChange} />
     </Window>
   {/if}
 
@@ -3463,6 +3447,16 @@
 <style>
   .app-page { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
   .app-container { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .sketch-mode-workspace {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    overflow: hidden;
+  }
+  .sketch-mode-workspace[hidden] {
+    display: none;
+  }
   .workbench { display: flex; height: 100%; width: 100%; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
@@ -3471,11 +3465,66 @@
     inset: 0;
     z-index: 5;
     transition: opacity 180ms ease, filter 180ms ease;
+    overflow: hidden;
   }
   .viewer-shell--occluded {
     opacity: 0.08;
     filter: saturate(0.45);
     pointer-events: none;
+  }
+  .sketch-preview-status {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 35;
+    width: min(360px, calc(100% - 24px));
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--primary) 44%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
+    box-shadow: var(--shadow);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .sketch-preview-status__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    color: var(--primary);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+  }
+  .sketch-preview-status__head strong {
+    color: var(--red);
+    font-size: 0.6rem;
+    white-space: nowrap;
+  }
+  .sketch-preview-status__detail {
+    margin-top: 6px;
+    color: var(--text-dim);
+    font-size: 0.62rem;
+    line-height: 1.45;
+    text-transform: none;
+  }
+  .sketch-preview-status__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    color: var(--secondary);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+  }
+  .sketch-preview-status__meta span {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .viewport-blueprint {
     position: absolute;
@@ -3773,91 +3822,7 @@
     visibility: hidden;
     overflow: hidden;
   }
-  .viewport-sketch-ghost {
-    position: absolute;
-    inset: 12%;
-    z-index: 35;
-    pointer-events: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-  }
-  .viewport-sketch-ghost__svg {
-    width: min(58vw, 680px);
-    height: min(52vh, 520px);
-    max-width: 78%;
-    max-height: 78%;
-    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--primary) 34%, transparent));
-    overflow: visible;
-  }
-  .viewport-sketch-ghost__profile {
-    fill: none;
-    stroke: var(--primary);
-    stroke-width: 1.8;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-dasharray: 3 2;
-    vector-effect: non-scaling-stroke;
-  }
-  .viewport-sketch-ghost__profile--closed {
-    fill: color-mix(in srgb, var(--primary) 13%, transparent);
-    stroke-dasharray: none;
-  }
-  .viewport-sketch-ghost__extrude {
-    fill: color-mix(in srgb, var(--secondary) 9%, transparent);
-    stroke: color-mix(in srgb, var(--secondary) 72%, transparent);
-    stroke-width: 1.2;
-    transform: translate(6px, -6px);
-    vector-effect: non-scaling-stroke;
-  }
-  .viewport-source-silhouette {
-    position: absolute;
-    left: 18px;
-    top: 18px;
-    z-index: 38;
-    width: 164px;
-    padding: 8px;
-    border: 1px solid color-mix(in srgb, var(--primary) 44%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg) 78%, transparent);
-    pointer-events: none;
-    overflow: hidden;
-  }
-  .viewport-source-silhouette__label {
-    color: var(--primary);
-    font-family: var(--font-mono);
-    font-size: 0.56rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .viewport-source-silhouette__svg {
-    width: 100%;
-    height: 92px;
-    margin-top: 6px;
-    border: 1px solid var(--bg-300);
-    background:
-      linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-      color-mix(in srgb, var(--bg-100) 70%, black 30%);
-    background-size: 16px 16px, 16px 16px, auto;
-  }
-  .viewport-source-silhouette__profile {
-    fill: color-mix(in srgb, var(--primary) 12%, transparent);
-    stroke: var(--primary);
-    stroke-width: 2;
-    vector-effect: non-scaling-stroke;
-  }
-  .viewport-source-silhouette__depth {
-    fill: none;
-    stroke: var(--secondary);
-    stroke-width: 1.4;
-    stroke-dasharray: 5 3;
-    vector-effect: non-scaling-stroke;
-  }
-  .viewport-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .viewport-overlay { position: absolute; bottom: 12px; right: 12px; max-width: min(420px, calc(100vw - 24px)); background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; overflow: hidden; }
   .viewport-mode-panel {
     display: flex;
     flex-direction: column;
@@ -3917,26 +3882,57 @@
     text-transform: uppercase;
     text-align: right;
   }
-  .viewport-mode-evidence {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 5px 6px;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
-    color: var(--text);
+  .direct-occt-step-status {
+    width: 100%;
+    min-width: min(330px, 100%);
+    max-width: 100%;
+    padding: 7px 8px;
+    border: 1px solid var(--secondary);
+    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
+    color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 0.58rem;
-    line-height: 1.25;
     overflow: hidden;
-    text-align: right;
   }
-  .viewport-mode-evidence span {
+  .direct-occt-step-status--ready {
+    border-color: var(--primary);
+  }
+  .direct-occt-step-status--blocked {
+    border-color: #b96868;
+  }
+  .direct-occt-step-status__head {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    overflow: hidden;
+  }
+  .direct-occt-step-status__head span,
+  .direct-occt-step-status__head strong,
+  .direct-occt-step-status__detail {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .direct-occt-step-status__head span {
+    color: var(--secondary);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+  .direct-occt-step-status__head strong {
+    color: var(--primary);
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+  }
+  .direct-occt-step-status--blocked .direct-occt-step-status__head strong {
+    color: #e3a3a3;
+  }
+  .direct-occt-step-status__detail {
+    margin-top: 4px;
+    font-size: 0.62rem;
+    color: var(--text-dim);
   }
   .export-actions { display: flex; gap: 4px; }
   .export-chooser {

@@ -1,7 +1,7 @@
 use crate::llm_context::{build_authoring_digest, format_authoring_digest_text};
 use crate::models::{
-    infer_macro_dialect_from_code, DesignOutput, EngineKind, GeometryBackend, InteractionMode,
-    Message, MessageRole, ModelManifest, SourceLanguage, ThreadReference, UiSpec,
+    infer_macro_dialect_from_code, ArtifactBundle, DesignOutput, EngineKind, GeometryBackend,
+    InteractionMode, Message, MessageRole, ModelManifest, SourceLanguage, ThreadReference, UiSpec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,14 @@ pub fn latest_manifest(messages: &[Message]) -> Option<ModelManifest> {
         .and_then(|m| m.model_manifest.clone())
 }
 
+pub fn latest_artifact_bundle(messages: &[Message]) -> Option<ArtifactBundle> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant && m.artifact_bundle.is_some())
+        .and_then(|m| m.artifact_bundle.clone())
+}
+
 pub fn build_design_digest(
     output: Option<&DesignOutput>,
     manifest: Option<&ModelManifest>,
@@ -56,6 +64,57 @@ pub fn build_design_digest(
     output
         .map(|design| format_authoring_digest_text(&build_authoring_digest(design, manifest, None)))
         .unwrap_or_default()
+}
+
+pub fn build_artifact_digest(bundle: Option<&ArtifactBundle>) -> String {
+    let Some(bundle) = bundle else {
+        return String::new();
+    };
+
+    let mut export_formats = bundle
+        .export_artifacts
+        .iter()
+        .map(|artifact| artifact.format.trim().to_ascii_lowercase())
+        .filter(|format| !format.is_empty())
+        .collect::<Vec<_>>();
+    export_formats.sort();
+    export_formats.dedup();
+
+    let step_export_path = bundle
+        .export_artifacts
+        .iter()
+        .find(|artifact| artifact.format.eq_ignore_ascii_case("step"))
+        .map(|artifact| artifact.path.as_str())
+        .filter(|path| !path.trim().is_empty());
+
+    [
+        format!("modelId: {}", bundle.model_id),
+        format!("sourceLanguage: {}", source_language_label(bundle.source_language)),
+        format!(
+            "geometryBackend: {}",
+            geometry_backend_label(bundle.geometry_backend)
+        ),
+        format!("hasPreviewStl: {}", !bundle.preview_stl_path.trim().is_empty()),
+        format!("viewerAssetCount: {}", bundle.viewer_assets.len()),
+        format!("edgeTargetCount: {}", bundle.edge_targets.len()),
+        format!("faceTargetCount: {}", bundle.face_targets.len()),
+        format!("exportFormatCount: {}", bundle.export_artifacts.len()),
+        format!(
+            "exportFormats: {}",
+            if export_formats.is_empty() {
+                "[none]".to_string()
+            } else {
+                export_formats.join(", ")
+            }
+        ),
+        format!("hasStepExport: {}", step_export_path.is_some()),
+        format!(
+            "stepExportPath: {}",
+            step_export_path.unwrap_or("[none]")
+        ),
+        "STEP rule: only offer STEP for this exact artifact when hasStepExport is true; do not infer STEP from backend or capability.".to_string(),
+    ]
+    .join("\n")
 }
 
 pub fn build_thread_summary(title: &str, messages: &[Message]) -> String {
@@ -196,6 +255,7 @@ pub struct PromptContext {
     pub available_assets: String,
     pub last_output: Option<DesignOutput>,
     pub design_digest: String,
+    pub artifact_digest: String,
 }
 
 fn source_language_label(source_language: SourceLanguage) -> &'static str {
@@ -303,6 +363,7 @@ pub fn assemble_context(
         let messages = crate::db::get_thread_messages_for_context(db, &tid).unwrap_or_default();
         let last_o = latest_output(&messages);
         let last_manifest = latest_manifest(&messages);
+        let last_artifact_bundle = latest_artifact_bundle(&messages);
         let summary = crate::db::get_thread_summary(db, &tid)
             .ok()
             .flatten()
@@ -325,6 +386,7 @@ pub fn assemble_context(
 
         let last_output = working_design.or(last_o);
         let design_digest = build_design_digest(last_output.as_ref(), last_manifest.as_ref());
+        let artifact_digest = build_artifact_digest(last_artifact_bundle.as_ref());
 
         PromptContext {
             thread_id: tid,
@@ -335,6 +397,7 @@ pub fn assemble_context(
             available_assets: String::new(),
             last_output,
             design_digest,
+            artifact_digest,
         }
     } else {
         let fallback_output = parent_macro_code.map(|code| {
@@ -370,6 +433,7 @@ pub fn assemble_context(
             pinned_references: String::new(),
             available_assets: String::new(),
             design_digest: build_design_digest(last_output.as_ref(), None),
+            artifact_digest: String::new(),
             last_output,
         }
     }
@@ -413,7 +477,7 @@ pub fn format_contextual_prompt(
     if let Some(previous) = &ctx.last_output {
         let source_fence = source_fence_label(previous.source_language);
         format!(
-            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nCURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT PARAMS JSON (AUTHORITATIVE)\n```json\n{}\n```\n\nACTUAL CURRENT SOURCE (AUTHORITATIVE, NOT A SAMPLE):\nsourceLanguage: {}\nsourceFence: {}\n```{}\n{}\n```\n\n{}{}",
+            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nCURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT ARTIFACT DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT PARAMS JSON (AUTHORITATIVE)\n```json\n{}\n```\n\nACTUAL CURRENT SOURCE (AUTHORITATIVE, NOT A SAMPLE):\nsourceLanguage: {}\nsourceFence: {}\n```{}\n{}\n```\n\n{}{}",
             ctx.thread_title,
             previous.title,
             previous.version_name,
@@ -425,6 +489,7 @@ pub fn format_contextual_prompt(
             if ctx.pinned_references.trim().is_empty() { "[none]" } else { &ctx.pinned_references },
             available_assets_block,
             if ctx.design_digest.trim().is_empty() { "[none]" } else { &ctx.design_digest },
+            if ctx.artifact_digest.trim().is_empty() { "[none]" } else { &ctx.artifact_digest },
             format_full_params_json(previous),
             source_language_label(previous.source_language),
             source_fence,
@@ -450,8 +515,8 @@ pub fn format_contextual_prompt(
 mod tests {
     use super::*;
     use crate::models::{
-        DesignOutput, EngineKind, GeometryBackend, Message, MessageStatus, ParamValue,
-        SourceLanguage,
+        ArtifactBundle, DesignOutput, EngineKind, ExportArtifact, GeometryBackend, Message,
+        MessageStatus, ModelSourceKind, ParamValue, SourceLanguage,
     };
 
     fn mock_message(role: &str, content: &str, output: Option<DesignOutput>) -> Message {
@@ -486,6 +551,41 @@ mod tests {
             ui_spec: UiSpec::default(),
             initial_params: Default::default(),
             post_processing: None,
+        }
+    }
+
+    fn mock_artifact_bundle(
+        model_id: &str,
+        export_artifacts: Vec<ExportArtifact>,
+    ) -> ArtifactBundle {
+        ArtifactBundle {
+            schema_version: 1,
+            model_id: model_id.to_string(),
+            source_kind: ModelSourceKind::Generated,
+            engine_kind: EngineKind::EckyIrV0,
+            source_language: SourceLanguage::EckyIrV0,
+            geometry_backend: GeometryBackend::EckyRust,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: String::new(),
+            manifest_path: format!("/tmp/{model_id}/manifest.json"),
+            macro_path: None,
+            preview_stl_path: format!("/tmp/{model_id}/preview.stl"),
+            viewer_assets: Vec::new(),
+            edge_targets: Vec::new(),
+            face_targets: Vec::new(),
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts,
+        }
+    }
+
+    fn step_export(path: &str) -> ExportArtifact {
+        ExportArtifact {
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: path.to_string(),
+            role: "primary".to_string(),
         }
     }
 
@@ -681,6 +781,69 @@ mod tests {
     }
 
     #[test]
+    fn latest_artifact_bundle_returns_latest_assistant_artifact() {
+        let mut first = mock_message("assistant", "first", Some(mock_design("First")));
+        first.artifact_bundle = Some(mock_artifact_bundle("model-first", Vec::new()));
+        let mut second = mock_message("assistant", "second", Some(mock_design("Second")));
+        second.artifact_bundle = Some(mock_artifact_bundle(
+            "model-second",
+            vec![step_export("/tmp/model-second/model.step")],
+        ));
+
+        let result = latest_artifact_bundle(&[first, second]).unwrap();
+
+        assert_eq!(result.model_id, "model-second");
+    }
+
+    #[test]
+    fn build_artifact_digest_reports_step_truth_from_exports_only() {
+        let no_step = build_artifact_digest(Some(&mock_artifact_bundle("mesh-only", Vec::new())));
+        assert!(no_step.contains("hasStepExport: false"));
+        assert!(no_step.contains("stepExportPath: [none]"));
+        assert!(no_step.contains("edgeTargetCount: 0"));
+        assert!(no_step.contains("faceTargetCount: 0"));
+
+        let mut bundle =
+            mock_artifact_bundle("cad-step", vec![step_export("/tmp/cad-step/model.step")]);
+        bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
+            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Edge1".to_string(),
+            editable: true,
+            start: crate::models::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::models::ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+        bundle.face_targets.push(crate::models::ViewerFaceTarget {
+            target_id: "body:face:0:5-5-5:100".to_string(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Face1".to_string(),
+            editable: true,
+            center: crate::models::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
+        let with_step = build_artifact_digest(Some(&bundle));
+        assert!(with_step.contains("hasStepExport: true"));
+        assert!(with_step.contains("stepExportPath: /tmp/cad-step/model.step"));
+        assert!(with_step.contains("edgeTargetCount: 1"));
+        assert!(with_step.contains("faceTargetCount: 1"));
+    }
+
+    #[test]
     fn format_contextual_prompt_marks_actual_state_as_authoritative() {
         let ctx = PromptContext {
             thread_id: "t1".to_string(),
@@ -692,6 +855,10 @@ mod tests {
             last_output: Some(mock_design("Lens")),
             design_digest: "Current working snapshot\nLens [V1] (legacyPython)\n\nUI fields: 0"
                 .to_string(),
+            artifact_digest: build_artifact_digest(Some(&mock_artifact_bundle(
+                "lens-runtime",
+                vec![step_export("/tmp/lens-runtime/model.step")],
+            ))),
         };
 
         let result = format_contextual_prompt(
@@ -713,6 +880,9 @@ mod tests {
         assert!(result.contains("ACTUAL CURRENT PARAMS JSON (AUTHORITATIVE)"));
         assert!(result.contains("MIGRATION POLICY (AUTHORITATIVE)"));
         assert!(result.contains("ACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)"));
+        assert!(result.contains("ACTUAL CURRENT ARTIFACT DIGEST (AUTHORITATIVE)"));
+        assert!(result.contains("hasStepExport: true"));
+        assert!(result.contains("stepExportPath: /tmp/lens-runtime/model.step"));
         assert!(result.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
         assert!(result.contains("AVAILABLE LOCAL ASSETS"));
         assert!(result.contains("USER REQUEST (ACTUAL)"));
@@ -736,6 +906,7 @@ mod tests {
                 Default::default(),
             )),
             design_digest: "Current working snapshot\nLegacy Box [V7] (legacyPython)".to_string(),
+            artifact_digest: String::new(),
         };
 
         let result = format_contextual_prompt(
@@ -779,6 +950,7 @@ mod tests {
                 initial_params,
             )),
             design_digest: "Current working snapshot\nDense Params [V7] (build123d)\n\nCurrent params: 14\n- p1: number = 1\n- … 2 more params".to_string(),
+            artifact_digest: String::new(),
         };
 
         let result = format_contextual_prompt(

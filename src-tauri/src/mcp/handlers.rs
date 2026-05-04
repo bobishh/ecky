@@ -16,6 +16,7 @@ use crate::services::{agent_dialogue, history, render};
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tokio::sync::oneshot;
@@ -562,14 +563,6 @@ async fn resolve_request_user_prompt_target(
     let bound_target = agent_dialogue::resolve_session_thread_target(state, session_id).await?;
 
     if let Some(explicit_target) = explicit_target {
-        if let Some(bound_target) = bound_target.as_ref() {
-            if bound_target.thread_id != explicit_target.thread_id {
-                return Err(AppError::validation(format!(
-                    "Session is already bound to thread {}. Call session_log_out and session_log_in for thread {} before requesting user input there.",
-                    bound_target.thread_id, explicit_target.thread_id
-                )));
-            }
-        }
         return Ok(Some(explicit_target));
     }
 
@@ -1048,9 +1041,9 @@ pub async fn handle_request_user_prompt(
         resolve_prompt_thread_context(state, prompt_target.as_ref()).await?;
     if prompt_target.is_none() {
         let details = if has_managed_runtime_session(state, &ctx.session_id) {
-            "Wake the agent from a selected thread/version before the first request_user_prompt."
+            "Use a wake target, call thread_borrow/thread_create, or pass threadId/messageId before request_user_prompt."
         } else {
-            "Call thread_list/thread_get first, then session_log_in(threadId=...) before requesting user input."
+            "Call thread_list/thread_get plus thread_borrow, or call thread_create, before requesting user input."
         };
         push_trace_event(
             state,
@@ -1067,7 +1060,7 @@ pub async fn handle_request_user_prompt(
             },
         );
         return Err(AppError::validation(
-            "request_user_prompt requires a bound thread target. Call session_log_in(threadId=...) first, or pass threadId/messageId explicitly.",
+            "request_user_prompt requires a thread target. Call thread_borrow/thread_create first, or pass threadId/messageId explicitly.",
         ));
     }
     if let Some(target) = prompt_target.as_ref() {
@@ -1643,16 +1636,6 @@ pub async fn handle_concept_preview_generate(
         resolve_explicit_session_target(state, req.thread_id.clone(), req.message_id.clone(), None)
             .await?
     {
-        if let Some(bound_target) =
-            agent_dialogue::resolve_session_thread_target(state, &ctx.session_id).await?
-        {
-            if bound_target.thread_id != explicit_target.thread_id {
-                return Err(AppError::validation(format!(
-                    "Session is already bound to thread {}. Call session_log_out and session_log_in for thread {} before sketching there.",
-                    bound_target.thread_id, explicit_target.thread_id
-                )));
-            }
-        }
         explicit_target
     } else {
         agent_dialogue::resolve_session_thread_target(state, &ctx.session_id)
@@ -1988,6 +1971,150 @@ pub async fn handle_thread_list(state: &AppState) -> AppResult<ThreadListRespons
     Ok(ThreadListResponse { threads: entries })
 }
 
+fn normalize_created_thread_title(title: Option<String>) -> String {
+    title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("New Thread")
+        .to_string()
+}
+
+async fn mark_live_session_thread_idle(
+    state: &AppState,
+    ctx: &AgentContext,
+    thread_id: Option<String>,
+    status_text: String,
+) {
+    mutate_live_session(state, ctx, move |session| {
+        session.bound_thread_id = thread_id.clone();
+        session.last_target = None;
+        session.phase = Some("idle".to_string());
+        session.status_text = Some(status_text.clone());
+        session.busy = false;
+        session.activity_label = None;
+        session.activity_started_at = None;
+        session.attention_kind = None;
+        session.waiting_on_prompt = false;
+    })
+    .await;
+}
+
+pub async fn handle_thread_create(
+    state: &AppState,
+    req: ThreadCreateRequest,
+    ctx: &AgentContext,
+) -> AppResult<ThreadCreateResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let title = normalize_created_thread_title(req.title);
+    let thread_id = Uuid::new_v4().to_string();
+    let now = now_secs();
+
+    {
+        let conn = state.db.lock().await;
+        db::create_or_update_thread(&conn, &thread_id, &title, now, None)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        persist_agent_session(
+            &conn,
+            &ctx,
+            Some(thread_id.clone()),
+            None,
+            None,
+            "idle",
+            format!("Created new thread '{}'.", title),
+        )?;
+    }
+
+    mark_live_session_thread_idle(
+        state,
+        &ctx,
+        Some(thread_id.clone()),
+        format!("Created new thread '{}'.", title),
+    )
+    .await;
+    state.emit_history_updated();
+
+    Ok(ThreadCreateResponse { thread_id, title })
+}
+
+pub async fn handle_thread_borrow(
+    state: &AppState,
+    req: ThreadBorrowRequest,
+    ctx: &AgentContext,
+) -> AppResult<ThreadBorrowResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let target = resolve_explicit_session_target(
+        state,
+        req.thread_id.clone(),
+        req.message_id.clone(),
+        req.model_id.clone(),
+    )
+    .await?
+    .ok_or_else(|| AppError::validation("thread_borrow requires threadId or messageId."))?;
+
+    ensure_thread_claim(state, &ctx, &target.thread_id, req.steal_thread).await?;
+
+    let conn = state.db.lock().await;
+    let title = db::get_visible_thread_title(&conn, &target.thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .unwrap_or_else(|| target.thread_id.clone());
+    persist_agent_session(
+        &conn,
+        &ctx,
+        Some(target.thread_id.clone()),
+        target.message_id.clone(),
+        target.model_id.clone(),
+        "idle",
+        format!("Borrowed thread '{}'.", title),
+    )?;
+    drop(conn);
+
+    if let Some(message_id) = target.message_id.clone() {
+        mark_live_session_idle(
+            state,
+            &ctx,
+            Some(session_target_ref(
+                target.thread_id.clone(),
+                message_id,
+                target.model_id.clone(),
+            )),
+            "idle",
+            Some(format!("Borrowed thread '{}'.", title)),
+        )
+        .await;
+    } else {
+        mark_live_session_thread_idle(
+            state,
+            &ctx,
+            Some(target.thread_id.clone()),
+            format!("Borrowed thread '{}'.", title),
+        )
+        .await;
+    }
+
+    push_trace_event(
+        state,
+        &ctx,
+        TraceEvent {
+            thread_id: Some(target.thread_id.clone()),
+            message_id: target.message_id.clone(),
+            model_id: target.model_id.clone(),
+            phase: "idle",
+            kind: "thread_borrowed",
+            summary: format!("Borrowed thread '{}'.", title),
+            details: None,
+        },
+    );
+
+    Ok(ThreadBorrowResponse {
+        session_id: ctx.session_id,
+        thread_id: target.thread_id,
+        title,
+        message_id: target.message_id,
+        model_id: target.model_id,
+    })
+}
+
 pub async fn handle_thread_meta_get(
     state: &AppState,
     req: ThreadMetaRequest,
@@ -2029,7 +2156,6 @@ pub async fn handle_session_log_in(
     ctx: &AgentContext,
 ) -> AppResult<SessionLoginResponse> {
     let ctx = ctx.with_override(&req.identity);
-    let managed_session = has_managed_runtime_session(state, &ctx.session_id);
     let runtime_target = managed_pending_target(state, &ctx.session_id);
     let explicit_target = resolve_explicit_session_target(
         state,
@@ -2077,30 +2203,6 @@ pub async fn handle_session_log_in(
                 .flatten()
         });
 
-    if resolved_thread_id.is_none() {
-        push_trace_event(
-            state,
-            &ctx,
-            TraceEvent {
-                thread_id: None,
-                message_id: None,
-                model_id: None,
-                phase: "error",
-                kind: "session_bind_failed",
-                summary: "Agent session could not bind to an explicit thread target.".to_string(),
-                details: Some(if managed_session {
-                    "Wake the active agent from a selected thread/version before the first request_user_prompt."
-                            .to_string()
-                } else {
-                    "Call thread_list/thread_get first, then session_log_in(threadId=...) to bind this session."
-                            .to_string()
-                }),
-            },
-        );
-        return Err(AppError::validation(
-            "session_log_in requires an explicit thread target. Pass threadId/messageId, or wake the managed agent from a selected thread first.",
-        ));
-    }
     if let Some(thread_id) = resolved_thread_id.as_deref() {
         ensure_thread_claim(state, &ctx, thread_id, req.steal_thread).await?;
     }
@@ -2161,16 +2263,11 @@ pub async fn handle_session_log_in(
         )
         .await;
     } else {
-        mutate_live_session(state, &ctx, |session| {
-            session.bound_thread_id = resolved_thread_id.clone();
-        })
-        .await;
-        mark_live_session_idle(
+        mark_live_session_thread_idle(
             state,
             &ctx,
-            None,
-            "idle",
-            Some("Agent joined the workspace.".to_string()),
+            resolved_thread_id.clone(),
+            "Agent joined the workspace.".to_string(),
         )
         .await;
     }
@@ -2457,6 +2554,8 @@ pub async fn handle_target_get(
             .design
             .ok_or_else(|| AppError::validation("Target has no design output."))?;
 
+        let artifact_digest = target.artifact_bundle.as_ref().map(artifact_bundle_digest);
+
         Ok(TargetGetResponse {
             thread_id: target.thread_id,
             message_id: target.message_id,
@@ -2466,6 +2565,7 @@ pub async fn handle_target_get(
             ui_spec: design.ui_spec,
             initial_params: design.initial_params,
             artifact_bundle: target.artifact_bundle,
+            artifact_digest,
             model_manifest: target.model_manifest,
             latest_draft: None,
         })
@@ -2510,12 +2610,37 @@ fn build_target_meta_response(
             crate::models::UiField::Image { .. } => acc,
         });
 
-    let is_ir = target.design_output.macro_dialect == crate::models::MacroDialect::EckyIrV0;
-    let (source_language, macro_dialect) = if is_ir {
-        ("ecky".to_string(), "ecky".to_string())
-    } else {
-        ("python".to_string(), "cadFrameworkV1".to_string())
-    };
+    let export_formats = target
+        .artifact_bundle
+        .as_ref()
+        .map(|bundle| {
+            bundle
+                .export_artifacts
+                .iter()
+                .map(|artifact| artifact.format.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let has_step_export = export_formats
+        .iter()
+        .any(|format| format.eq_ignore_ascii_case("step"));
+    let step_export_path = target.artifact_bundle.as_ref().and_then(|bundle| {
+        bundle
+            .export_artifacts
+            .iter()
+            .find(|artifact| artifact.format.eq_ignore_ascii_case("step"))
+            .map(|artifact| artifact.path.clone())
+    });
+    let edge_target_count = target
+        .artifact_bundle
+        .as_ref()
+        .map(|bundle| bundle.edge_targets.len())
+        .unwrap_or(0);
+    let face_target_count = target
+        .artifact_bundle
+        .as_ref()
+        .map(|bundle| bundle.face_targets.len())
+        .unwrap_or(0);
 
     TargetMetaResponse {
         thread_id: target.thread_id.clone(),
@@ -2523,10 +2648,21 @@ fn build_target_meta_response(
         title: target.design_output.title.clone(),
         version_name: target.design_output.version_name.clone(),
         model_id: target.model_id(),
-        source_language,
-        macro_dialect,
+        source_language: target.design_output.source_language.as_str().to_string(),
+        macro_dialect: crate::mcp::authoring::macro_dialect_label(
+            &target.design_output.macro_dialect,
+        )
+        .to_string(),
+        geometry_backend: target.design_output.geometry_backend.as_str().to_string(),
         has_draft: false,
         resolved_from: map_target_resolved_from(target.resolved_from),
+        has_artifact_bundle: target.artifact_bundle.is_some(),
+        has_runtime_manifest: target.artifact_bundle.is_some() && target.model_manifest.is_some(),
+        export_formats,
+        has_step_export,
+        step_export_path,
+        edge_target_count,
+        face_target_count,
         ui_field_count: target.design_output.ui_spec.fields.len(),
         range_count,
         number_count,
@@ -2662,6 +2798,10 @@ pub async fn handle_target_macro_get(
             "",
         )?;
 
+        let authoring_context =
+            crate::mcp::authoring::target_authoring_context(&target.design_output);
+        let artifact_digest = target.artifact_bundle.as_ref().map(artifact_bundle_digest);
+
         Ok(TargetMacroResponse {
             thread_id: target.thread_id,
             message_id: target.message_id,
@@ -2671,6 +2811,226 @@ pub async fn handle_target_macro_get(
             macro_code: target.design_output.macro_code,
             macro_dialect: target.design_output.macro_dialect,
             post_processing: target.design_output.post_processing,
+            authoring_context,
+            artifact_digest,
+        })
+    })();
+
+    if let Err(err) = &result {
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+#[derive(Debug, Clone)]
+struct SessionMacroBuffer {
+    thread_id: String,
+    message_id: String,
+    macro_code: String,
+    macro_dialect: MacroDialect,
+    post_processing: Option<crate::models::PostProcessingSpec>,
+    geometry_backend: crate::models::GeometryBackend,
+}
+
+static MACRO_BUFFERS: OnceLock<StdMutex<HashMap<String, SessionMacroBuffer>>> = OnceLock::new();
+
+fn macro_buffers() -> &'static StdMutex<HashMap<String, SessionMacroBuffer>> {
+    MACRO_BUFFERS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn macro_buffer_digest(macro_code: &str) -> String {
+    crate::mcp::macro_buffer::source_digest(macro_code)
+}
+
+fn macro_buffer_lines(macro_code: &str) -> Vec<MacroBufferLine> {
+    macro_code
+        .lines()
+        .enumerate()
+        .map(|(idx, text)| MacroBufferLine {
+            line_number: idx + 1,
+            text: text.to_string(),
+        })
+        .collect()
+}
+
+fn apply_macro_buffer_replacements(
+    macro_code: &str,
+    expected_digest: &str,
+    replacements: &[MacroBufferReplacement],
+) -> AppResult<String> {
+    crate::mcp::macro_buffer::assert_expected_digest(macro_code, expected_digest).map_err(
+        |err| {
+            AppError::validation(format!(
+                "Macro {} Read macro_buffer_get again before patching.",
+                err.message.replacen("Buffer", "buffer", 1)
+            ))
+        },
+    )?;
+
+    if replacements.is_empty() {
+        return Err(AppError::validation(
+            "macro_buffer_replace_and_render requires at least one replacement.",
+        ));
+    }
+
+    let had_trailing_newline = macro_code.ends_with('\n');
+    let mut lines: Vec<String> = macro_code.lines().map(str::to_string).collect();
+    let line_count = lines.len();
+    let mut sorted = replacements.to_vec();
+    sorted.sort_by_key(|replacement| replacement.start_line);
+
+    let mut previous_end = 0usize;
+    for replacement in &sorted {
+        if replacement.start_line == 0 {
+            return Err(AppError::validation(
+                "Macro buffer replacement startLine is 1-based and must be >= 1.",
+            ));
+        }
+        if replacement.end_line < replacement.start_line {
+            return Err(AppError::validation(format!(
+                "Macro buffer replacement has endLine {} before startLine {}.",
+                replacement.end_line, replacement.start_line
+            )));
+        }
+        if replacement.end_line > line_count {
+            return Err(AppError::validation(format!(
+                "Macro buffer replacement line range {}..{} exceeds line count {}.",
+                replacement.start_line, replacement.end_line, line_count
+            )));
+        }
+        if replacement.start_line <= previous_end {
+            return Err(AppError::validation(
+                "Macro buffer replacements must not overlap.",
+            ));
+        }
+        previous_end = replacement.end_line;
+    }
+
+    for replacement in sorted.iter().rev() {
+        let start_idx = replacement.start_line - 1;
+        let end_idx = replacement.end_line;
+        let replacement_lines: Vec<String> =
+            replacement.new_text.lines().map(str::to_string).collect();
+        lines.splice(start_idx..end_idx, replacement_lines);
+    }
+
+    let mut patched = lines.join("\n");
+    if had_trailing_newline {
+        patched.push('\n');
+    }
+    Ok(patched)
+}
+
+fn get_session_macro_buffer(ctx: &AgentContext) -> AppResult<SessionMacroBuffer> {
+    macro_buffers()
+        .lock()
+        .unwrap()
+        .get(&ctx.session_id)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::validation(
+                "No macro buffer for this session. Call macro_buffer_get before editing.",
+            )
+        })
+}
+
+fn set_session_macro_buffer(ctx: &AgentContext, buffer: SessionMacroBuffer) {
+    macro_buffers()
+        .lock()
+        .unwrap()
+        .insert(ctx.session_id.clone(), buffer);
+}
+
+pub async fn handle_macro_buffer_get(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: MacroBufferGetRequest,
+    ctx: &AgentContext,
+) -> AppResult<MacroBufferGetResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = None;
+
+    let result = (|| -> AppResult<MacroBufferGetResponse> {
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            None,
+            "reading",
+            "Reading macro buffer.",
+        )?;
+
+        let target = crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            req.thread_id.clone(),
+            req.message_id.clone(),
+        )?;
+
+        tracked_thread_id = Some(target.thread_id.clone());
+        tracked_message_id = Some(target.message_id.clone());
+        tracked_model_id = target.model_id();
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            tracked_model_id.clone(),
+            "reading",
+            "",
+        )?;
+
+        let authoring_context =
+            crate::mcp::authoring::target_authoring_context(&target.design_output);
+        let artifact_digest = target.artifact_bundle.as_ref().map(artifact_bundle_digest);
+        let macro_code = target.design_output.macro_code;
+        let lines = macro_buffer_lines(&macro_code);
+        let line_count = lines.len();
+        let digest = macro_buffer_digest(&macro_code);
+        set_session_macro_buffer(
+            ctx,
+            SessionMacroBuffer {
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                macro_code: macro_code.clone(),
+                macro_dialect: target.design_output.macro_dialect.clone(),
+                post_processing: target.design_output.post_processing.clone(),
+                geometry_backend: target.design_output.geometry_backend,
+            },
+        );
+
+        Ok(MacroBufferGetResponse {
+            thread_id: target.thread_id,
+            message_id: target.message_id,
+            title: target.design_output.title,
+            version_name: target.design_output.version_name,
+            resolved_from: map_target_resolved_from(target.resolved_from),
+            digest,
+            line_count,
+            macro_code,
+            lines,
+            source_language: target.design_output.source_language.as_str().to_string(),
+            macro_dialect: target.design_output.macro_dialect,
+            geometry_backend: target.design_output.geometry_backend.as_str().to_string(),
+            post_processing: target.design_output.post_processing,
+            authoring_context,
+            artifact_digest,
         })
     })();
 
@@ -2763,20 +3123,7 @@ pub async fn handle_target_detail_get(
                 None,
             ),
             TargetDetailSection::ArtifactBundle => {
-                let digest = target
-                    .artifact_bundle
-                    .as_ref()
-                    .map(|b| ArtifactBundleDigest {
-                        model_id: b.model_id.clone(),
-                        source_language: serde_json::to_value(b.source_language)
-                            .ok()
-                            .and_then(|v| v.as_str().map(String::from))
-                            .unwrap_or_default(),
-                        has_preview_stl: !b.preview_stl_path.is_empty(),
-                        viewer_asset_count: b.viewer_assets.len(),
-                        export_format_count: b.export_artifacts.len(),
-                        multipart: b.viewer_assets.len() > 1,
-                    });
+                let digest = target.artifact_bundle.as_ref().map(artifact_bundle_digest);
                 (None, None, Some(digest), None, None, None, None)
             }
             TargetDetailSection::ArtifactPaths => {
@@ -2819,6 +3166,9 @@ pub async fn handle_target_detail_get(
             TargetDetailSection::LatestDraft => (None, None, None, None, None, None, Some(None)),
         };
 
+        let authoring_context =
+            crate::mcp::authoring::target_authoring_context(&target.design_output);
+
         Ok(TargetDetailResponse {
             thread_id: target.thread_id,
             message_id: target.message_id,
@@ -2826,6 +3176,7 @@ pub async fn handle_target_detail_get(
             version_name: target.design_output.version_name,
             resolved_from: map_target_resolved_from(target.resolved_from),
             section: req.section,
+            authoring_context,
             ui_spec,
             initial_params,
             artifact_bundle,
@@ -2849,6 +3200,97 @@ pub async fn handle_target_detail_get(
     }
 
     result
+}
+
+fn artifact_bundle_digest(bundle: &ArtifactBundle) -> ArtifactBundleDigest {
+    let export_formats: Vec<String> = bundle
+        .export_artifacts
+        .iter()
+        .map(|artifact| artifact.format.as_str().to_string())
+        .collect();
+    let step_export_path = bundle
+        .export_artifacts
+        .iter()
+        .find(|artifact| artifact.format.eq_ignore_ascii_case("step"))
+        .map(|artifact| artifact.path.clone());
+    ArtifactBundleDigest {
+        model_id: bundle.model_id.clone(),
+        source_language: bundle.source_language.as_str().to_string(),
+        geometry_backend: bundle.geometry_backend.as_str().to_string(),
+        has_preview_stl: !bundle.preview_stl_path.is_empty(),
+        viewer_asset_count: bundle.viewer_assets.len(),
+        edge_target_count: bundle.edge_targets.len(),
+        face_target_count: bundle.face_targets.len(),
+        export_format_count: bundle.export_artifacts.len(),
+        export_formats,
+        has_step_export: step_export_path.is_some(),
+        step_export_path,
+        multipart: bundle.viewer_assets.len() > 1,
+    }
+}
+
+pub async fn handle_artifact_manifest_get(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: ArtifactManifestRequest,
+    ctx: &AgentContext,
+) -> AppResult<ArtifactManifestResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+    let target = crate::services::target::resolve_editable_target(
+        &conn,
+        app,
+        req.thread_id.clone(),
+        req.message_id.clone(),
+    )?;
+    drop(conn);
+
+    let requested_model_id = req
+        .model_id
+        .clone()
+        .or_else(|| target.model_id())
+        .ok_or_else(|| AppError::validation("Target has no artifact modelId."))?;
+
+    {
+        let conn = state.db.lock().await;
+        persist_agent_session(
+            &conn,
+            ctx,
+            Some(target.thread_id.clone()),
+            Some(target.message_id.clone()),
+            Some(requested_model_id.clone()),
+            "reading",
+            "Reading runtime artifact manifest.",
+        )?;
+    }
+
+    let (artifact_bundle, model_manifest) = match (
+        target.artifact_bundle.clone(),
+        target.model_manifest.clone(),
+    ) {
+        (Some(bundle), Some(manifest)) if bundle.model_id == requested_model_id => {
+            (bundle, manifest)
+        }
+        _ => {
+            let bundle = crate::model_runtime::read_artifact_bundle(app, &requested_model_id)?;
+            let manifest = crate::model_runtime::read_model_manifest(app, &requested_model_id)?;
+            (bundle, manifest)
+        }
+    };
+
+    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    let digest = artifact_bundle_digest(&artifact_bundle);
+
+    Ok(ArtifactManifestResponse {
+        thread_id: target.thread_id,
+        message_id: target.message_id,
+        model_id: requested_model_id,
+        digest,
+        artifact_bundle,
+        model_manifest,
+        runtime_manifest_valid: true,
+    })
 }
 
 pub async fn handle_params_patch_and_render(
@@ -2999,10 +3441,9 @@ pub async fn handle_params_patch_and_render(
             .post_processing
             .clone()
             .or_else(|| base_design.post_processing.clone());
-        let thread_context = resolve_thread_authoring_context(&conn, state, &target.thread_id)?;
         let authoring_context = resolve_macro_authoring_context(
-            thread_context.source_language,
-            thread_context.geometry_backend,
+            base_design.source_language,
+            base_design.geometry_backend,
             &base_design.macro_dialect,
             req.geometry_backend,
         )?;
@@ -3064,6 +3505,7 @@ pub async fn handle_params_patch_and_render(
             thread_id: target.thread_id,
             message_id: save_result.message_id,
             merged_params: healed_params,
+            artifact_digest: artifact_bundle_digest(&artifact_bundle),
             artifact_bundle,
             model_manifest,
             design_output,
@@ -3098,6 +3540,152 @@ pub async fn handle_params_patch_and_render(
     result
 }
 
+pub async fn handle_macro_buffer_replace_and_render(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: MacroBufferReplaceAndRenderRequest,
+    ctx: &AgentContext,
+) -> AppResult<MacroBufferReplaceAndRenderResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let mut buffer = get_session_macro_buffer(ctx)?;
+    if let Some(thread_id) = &req.thread_id {
+        if thread_id != &buffer.thread_id {
+            return Err(AppError::validation(
+                "macro_buffer_replace_and_render threadId does not match session buffer.",
+            ));
+        }
+    }
+    if let Some(message_id) = &req.message_id {
+        if message_id != &buffer.message_id {
+            return Err(AppError::validation(
+                "macro_buffer_replace_and_render messageId does not match session buffer.",
+            ));
+        }
+    }
+    let patched_macro_code = apply_macro_buffer_replacements(
+        &buffer.macro_code,
+        &req.expected_digest,
+        &req.replacements,
+    )?;
+    buffer.macro_code = patched_macro_code.clone();
+    set_session_macro_buffer(ctx, buffer.clone());
+
+    let render_response = handle_macro_replace_and_render(
+        state,
+        app,
+        MacroReplaceRequest {
+            identity: req.identity,
+            thread_id: Some(buffer.thread_id.clone()),
+            message_id: Some(buffer.message_id.clone()),
+            macro_code: patched_macro_code,
+            macro_dialect: Some(buffer.macro_dialect.clone()),
+            ui_spec: req.ui_spec,
+            parameters: req.parameters,
+            post_processing: req.post_processing.or(buffer.post_processing.clone()),
+            geometry_backend: Some(buffer.geometry_backend),
+        },
+        ctx,
+    )
+    .await?;
+
+    let digest = macro_buffer_digest(&render_response.macro_code);
+    let line_count = macro_buffer_lines(&render_response.macro_code).len();
+    buffer.thread_id = render_response.thread_id.clone();
+    buffer.message_id = render_response.message_id.clone();
+    buffer.macro_code = render_response.macro_code.clone();
+    set_session_macro_buffer(ctx, buffer);
+    Ok(MacroBufferReplaceAndRenderResponse {
+        thread_id: render_response.thread_id,
+        message_id: render_response.message_id,
+        digest,
+        line_count,
+        macro_code: render_response.macro_code,
+        ui_spec: render_response.ui_spec,
+        initial_params: render_response.initial_params,
+        artifact_bundle: render_response.artifact_bundle,
+        model_manifest: render_response.model_manifest,
+        structural_verification: render_response.structural_verification,
+        artifact_digest: render_response.artifact_digest,
+    })
+}
+
+pub async fn handle_macro_buffer_replace_range(
+    req: MacroBufferReplaceAndRenderRequest,
+    ctx: &AgentContext,
+) -> AppResult<MacroBufferEditResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let mut buffer = get_session_macro_buffer(&ctx)?;
+    buffer.macro_code = apply_macro_buffer_replacements(
+        &buffer.macro_code,
+        &req.expected_digest,
+        &req.replacements,
+    )?;
+    let lines = macro_buffer_lines(&buffer.macro_code);
+    let response = MacroBufferEditResponse {
+        digest: macro_buffer_digest(&buffer.macro_code),
+        line_count: lines.len(),
+        macro_code: buffer.macro_code.clone(),
+        lines,
+    };
+    set_session_macro_buffer(&ctx, buffer);
+    Ok(response)
+}
+
+pub async fn handle_macro_buffer_apply_patch(
+    req: MacroBufferApplyPatchRequest,
+    ctx: &AgentContext,
+) -> AppResult<MacroBufferEditResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let mut buffer = get_session_macro_buffer(&ctx)?;
+    crate::mcp::macro_buffer::assert_expected_digest(&buffer.macro_code, &req.expected_digest)?;
+    buffer.macro_code =
+        crate::mcp::macro_buffer::apply_unified_patch(&buffer.macro_code, &req.patch)?;
+    let lines = macro_buffer_lines(&buffer.macro_code);
+    let response = MacroBufferEditResponse {
+        digest: macro_buffer_digest(&buffer.macro_code),
+        line_count: lines.len(),
+        macro_code: buffer.macro_code.clone(),
+        lines,
+    };
+    set_session_macro_buffer(&ctx, buffer);
+    Ok(response)
+}
+
+pub async fn handle_macro_buffer_render(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: MacroBufferRenderRequest,
+    ctx: &AgentContext,
+) -> AppResult<MacroReplaceResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let mut buffer = get_session_macro_buffer(ctx)?;
+    crate::mcp::macro_buffer::assert_expected_digest(&buffer.macro_code, &req.expected_digest)?;
+    let response = handle_macro_replace_and_render(
+        state,
+        app,
+        MacroReplaceRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(buffer.thread_id.clone()),
+            message_id: Some(buffer.message_id.clone()),
+            macro_code: buffer.macro_code.clone(),
+            macro_dialect: Some(buffer.macro_dialect.clone()),
+            ui_spec: req.ui_spec,
+            parameters: req.parameters,
+            post_processing: req.post_processing.or(buffer.post_processing.clone()),
+            geometry_backend: Some(buffer.geometry_backend),
+        },
+        ctx,
+    )
+    .await?;
+    buffer.thread_id = response.thread_id.clone();
+    buffer.message_id = response.message_id.clone();
+    buffer.macro_code = response.macro_code.clone();
+    set_session_macro_buffer(ctx, buffer);
+    Ok(response)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MacroAuthoringContext {
     source_language: crate::models::SourceLanguage,
@@ -3122,62 +3710,68 @@ fn configured_authoring_context(state: &AppState) -> MacroAuthoringContext {
     }
 }
 
-fn resolve_thread_authoring_context(
-    conn: &rusqlite::Connection,
-    state: &AppState,
-    thread_id: &str,
-) -> AppResult<MacroAuthoringContext> {
-    let fallback = configured_authoring_context(state);
-    let source_language = db::get_thread_source_language(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or(fallback.source_language);
-    let geometry_backend = db::get_thread_geometry_backend(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or(fallback.geometry_backend);
-    Ok(MacroAuthoringContext {
-        source_language,
-        geometry_backend,
-    })
-}
-
 fn resolve_macro_authoring_context(
-    thread_source_language: crate::models::SourceLanguage,
-    thread_geometry_backend: crate::models::GeometryBackend,
+    base_source_language: crate::models::SourceLanguage,
+    base_geometry_backend: crate::models::GeometryBackend,
     macro_dialect: &MacroDialect,
     requested_geometry_backend: Option<crate::models::GeometryBackend>,
 ) -> AppResult<MacroAuthoringContext> {
     let macro_source_language = infer_macro_source_language(macro_dialect);
-    if macro_source_language != thread_source_language {
+    if macro_source_language != base_source_language {
         return Err(AppError::validation(format!(
-            "Macro source language mismatch: thread setting is {}, macro is {}. Change the thread authoring context before migrating source language.",
-            thread_source_language.as_str(),
+            "Macro source language mismatch: target model is {}, macro is {}. Fork or create a new version before migrating source language.",
+            base_source_language.as_str(),
             macro_source_language.as_str()
         )));
     }
 
     if let Some(requested) = requested_geometry_backend {
-        if thread_source_language != crate::models::SourceLanguage::EckyIrV0
-            && requested != thread_geometry_backend
+        if base_source_language != crate::models::SourceLanguage::EckyIrV0
+            && requested != base_geometry_backend
         {
             return Err(AppError::validation(format!(
-                "Geometry backend override is only valid for Ecky source. Thread setting is {} on {}; requested backend is {}.",
-                thread_source_language.as_str(),
-                thread_geometry_backend.as_str(),
+                "Geometry backend override is only valid for Ecky source. Target model is {} on {}; requested backend is {}.",
+                base_source_language.as_str(),
+                base_geometry_backend.as_str(),
                 requested.as_str()
             )));
         }
     }
 
-    let geometry_backend = if thread_source_language == crate::models::SourceLanguage::EckyIrV0 {
-        requested_geometry_backend.unwrap_or(thread_geometry_backend)
+    let geometry_backend = if base_source_language == crate::models::SourceLanguage::EckyIrV0 {
+        requested_geometry_backend.unwrap_or(base_geometry_backend)
     } else {
-        thread_geometry_backend
+        base_geometry_backend
     };
 
     Ok(MacroAuthoringContext {
-        source_language: thread_source_language,
+        source_language: base_source_language,
         geometry_backend,
     })
+}
+
+fn first_version_authoring_context(
+    state: &AppState,
+    macro_dialect: &MacroDialect,
+    requested_geometry_backend: Option<crate::models::GeometryBackend>,
+) -> MacroAuthoringContext {
+    match infer_macro_source_language(macro_dialect) {
+        crate::models::SourceLanguage::LegacyPython => MacroAuthoringContext {
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+        },
+        crate::models::SourceLanguage::Build123d => MacroAuthoringContext {
+            source_language: crate::models::SourceLanguage::Build123d,
+            geometry_backend: crate::models::GeometryBackend::Build123d,
+        },
+        crate::models::SourceLanguage::EckyIrV0 => {
+            let fallback = configured_authoring_context(state);
+            MacroAuthoringContext {
+                source_language: crate::models::SourceLanguage::EckyIrV0,
+                geometry_backend: requested_geometry_backend.unwrap_or(fallback.geometry_backend),
+            }
+        }
+    }
 }
 
 pub async fn handle_macro_replace_and_render(
@@ -3287,14 +3881,21 @@ pub async fn handle_macro_replace_and_render(
             },
         );
 
-        let is_ir = crate::contracts::infer_macro_dialect_from_code(&req.macro_code)
-            == MacroDialect::EckyIrV0;
-        let framework_parsed = if is_ir {
-            None
-        } else {
+        let requested_macro_dialect = req
+            .macro_dialect
+            .clone()
+            .unwrap_or_else(|| crate::contracts::infer_macro_dialect_from_code(&req.macro_code));
+        let is_ir = requested_macro_dialect == MacroDialect::EckyIrV0;
+        let framework_parsed = if requested_macro_dialect == MacroDialect::CadFrameworkV1 {
             crate::commands::design::derive_framework_controls(&req.macro_code)?
+        } else if requested_macro_dialect == MacroDialect::Legacy {
+            crate::commands::design::derive_framework_controls(&req.macro_code)?
+        } else {
+            None
         };
-        let parsed_legacy = if framework_parsed.is_none() {
+        let parsed_legacy = if framework_parsed.is_none()
+            && requested_macro_dialect != MacroDialect::Build123d
+        {
             Some(crate::commands::design::parse_macro_params(req.macro_code.clone()))
         } else {
             None
@@ -3329,6 +3930,16 @@ pub async fn handle_macro_replace_and_render(
                 }),
                 params,
                 MacroDialect::EckyIrV0,
+            )
+        } else if requested_macro_dialect == MacroDialect::Build123d {
+            (
+                req.ui_spec
+                    .clone()
+                    .unwrap_or_else(|| base_design.ui_spec.clone()),
+                req.parameters
+                    .clone()
+                    .unwrap_or_else(|| base_design.initial_params.clone()),
+                MacroDialect::Build123d,
             )
         } else {
             let parsed_legacy = parsed_legacy
@@ -3440,10 +4051,17 @@ pub async fn handle_macro_replace_and_render(
         )
         .await;
 
-        let thread_context = resolve_thread_authoring_context(&conn, state, &working_thread_id)?;
+        let base_context = if base_design.macro_code.trim().is_empty() {
+            first_version_authoring_context(state, &macro_dialect, req.geometry_backend)
+        } else {
+            MacroAuthoringContext {
+                source_language: base_design.source_language,
+                geometry_backend: base_design.geometry_backend,
+            }
+        };
         let authoring_context = resolve_macro_authoring_context(
-            thread_context.source_language,
-            thread_context.geometry_backend,
+            base_context.source_language,
+            base_context.geometry_backend,
             &macro_dialect,
             req.geometry_backend,
         )?;
@@ -3521,6 +4139,7 @@ pub async fn handle_macro_replace_and_render(
             macro_code: req.macro_code.clone(),
             ui_spec,
             initial_params,
+            artifact_digest: artifact_bundle_digest(&artifact_bundle),
             artifact_bundle,
             model_manifest,
             structural_verification: Some(sv),
@@ -3692,11 +4311,17 @@ pub async fn handle_version_restore(
         )?;
 
         history::restore_version(&conn, &req.message_id)?;
+        state.emit_history_updated();
 
         let tid = db::get_message_thread_id(&conn, &req.message_id)
             .map_err(|e| AppError::persistence(e.to_string()))?
             .ok_or_else(|| AppError::not_found("Restored message not found."))?;
         tracked_thread_id = Some(tid.clone());
+        let artifact_digest = db::get_message_runtime_and_thread(&conn, &req.message_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+            .and_then(|(artifact_bundle, _, _)| {
+                artifact_bundle.as_ref().map(artifact_bundle_digest)
+            });
 
         persist_agent_session(
             &conn,
@@ -3711,6 +4336,7 @@ pub async fn handle_version_restore(
         Ok(VersionRestoreResponse {
             thread_id: tid,
             message_id: req.message_id.clone(),
+            artifact_digest,
         })
     }
     .await;
@@ -4823,11 +5449,13 @@ pub fn handle_verify_generated_model(
 ) -> AppResult<VerifyGeneratedModelResponse> {
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
+    let artifact_digest = artifact_bundle_digest(&bundle);
     let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
     Ok(VerifyGeneratedModelResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
         model_id: model_id.to_string(),
+        artifact_digest,
         result,
     })
 }
@@ -4841,11 +5469,13 @@ pub fn handle_structural_verification_summary(
 ) -> AppResult<StructuralVerificationSummaryResponse> {
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
+    let artifact_digest = artifact_bundle_digest(&bundle);
     let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
     Ok(StructuralVerificationSummaryResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
         model_id: model_id.to_string(),
+        artifact_digest,
         passed: result.passed,
         summary: result.summary,
         issue_count: result.issues.len(),
@@ -5047,7 +5677,7 @@ mod tests {
             &MacroDialect::EckyIrV0,
             None,
         )
-        .expect_err("ecky macro should not replace legacy python thread source");
+        .expect_err("ecky macro should not replace legacy python model source");
 
         assert_eq!(err.code, AppErrorCode::Validation);
         assert!(err.message.contains("source language"));
@@ -5061,7 +5691,7 @@ mod tests {
             &MacroDialect::Build123d,
             Some(crate::models::GeometryBackend::Freecad),
         )
-        .expect_err("non-ecky thread must follow thread backend setting");
+        .expect_err("non-ecky model must follow version backend setting");
 
         assert_eq!(err.code, AppErrorCode::Validation);
         assert!(err.message.contains("Geometry backend override"));
@@ -5162,6 +5792,7 @@ mod tests {
             preview_stl_path: format!("/tmp/{}", preview_name),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
+            face_targets: Vec::new(),
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
@@ -5259,14 +5890,56 @@ mod tests {
         let resolver = TestPathResolver { root };
         let now = now_secs();
 
-        let base_bundle = sample_bundle("model-base", "base.stl");
+        let mut base_bundle = sample_bundle("model-base", "base.stl");
+        base_bundle
+            .export_artifacts
+            .push(crate::models::ExportArtifact {
+                label: "STEP".to_string(),
+                format: "step".to_string(),
+                path: "/tmp/model-base.step".to_string(),
+                role: "cad-exchange".to_string(),
+            });
+        base_bundle
+            .edge_targets
+            .push(crate::models::ViewerEdgeTarget {
+                target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+                part_id: "body".to_string(),
+                viewer_node_id: "body".to_string(),
+                label: "Body.Edge1".to_string(),
+                editable: true,
+                start: crate::models::ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: crate::models::ViewerEdgePoint {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            });
+        base_bundle
+            .face_targets
+            .push(crate::models::ViewerFaceTarget {
+                target_id: "body:face:0:5-5-5:100".to_string(),
+                part_id: "body".to_string(),
+                viewer_node_id: "body".to_string(),
+                label: "Body.Face1".to_string(),
+                editable: true,
+                center: crate::models::ViewerEdgePoint {
+                    x: 5.0,
+                    y: 5.0,
+                    z: 5.0,
+                },
+                normal: Some([0.0, 0.0, 1.0]),
+                area: Some(100.0),
+            });
         let base_manifest = sample_manifest("model-base");
         let base_design = sample_design("Base Pot", "V-base", "base_macro()");
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
-                .unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
             db::add_message(
                 &conn,
                 "thread-1",
@@ -5359,6 +6032,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_create_creates_blank_thread_and_binds_session() {
+        let conn = crate::db::init_db(&test_db_path("thread-create")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        seed_live_session(&state).await;
+
+        let response = handle_thread_create(
+            &state,
+            ThreadCreateRequest {
+                identity: AgentIdentityOverride::default(),
+                title: Some("Seven Petal Badge".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("thread create");
+
+        assert_eq!(response.title, "Seven Petal Badge");
+
+        let conn = state.db.lock().await;
+        let thread = history::get_thread(&conn, &response.thread_id).expect("created thread");
+        assert_eq!(thread.title, "Seven Petal Badge");
+        assert_eq!(thread.version_count, 0);
+        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+            .expect("stored session")
+            .into_iter()
+            .next()
+            .expect("session row");
+        assert_eq!(
+            stored_session.thread_id.as_deref(),
+            Some(response.thread_id.as_str())
+        );
+        assert!(stored_session.message_id.is_none());
+        drop(conn);
+
+        let live_session = state
+            .mcp_sessions
+            .lock()
+            .await
+            .get("session-1")
+            .cloned()
+            .expect("live session");
+        assert_eq!(
+            live_session.bound_thread_id.as_deref(),
+            Some(response.thread_id.as_str())
+        );
+        assert!(live_session.last_target.is_none());
+        assert!(!live_session.busy);
+    }
+
+    #[tokio::test]
+    async fn thread_borrow_switches_current_session_target_without_logout() {
+        let (state, _resolver) = seed_target().await;
+        seed_live_session(&state).await;
+        {
+            let conn = state.db.lock().await;
+            db::create_or_update_thread(&conn, "thread-2", "Thread Two", now_secs(), None).unwrap();
+        }
+
+        let response = handle_thread_borrow(
+            &state,
+            ThreadBorrowRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-2".to_string()),
+                message_id: None,
+                model_id: None,
+                steal_thread: false,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("borrow thread");
+
+        assert_eq!(response.thread_id, "thread-2");
+        assert_eq!(response.title, "Thread Two");
+        assert_eq!(response.message_id, None);
+
+        let live_session = state
+            .mcp_sessions
+            .lock()
+            .await
+            .get("session-1")
+            .cloned()
+            .expect("live session");
+        assert_eq!(live_session.bound_thread_id.as_deref(), Some("thread-2"));
+        assert!(live_session.last_target.is_none());
+
+        let conn = state.db.lock().await;
+        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+            .expect("stored session")
+            .into_iter()
+            .next()
+            .expect("session row");
+        assert_eq!(stored_session.thread_id.as_deref(), Some("thread-2"));
+        assert!(stored_session.message_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn thread_borrow_message_target_sets_last_target() {
+        let (state, _resolver) = seed_target().await;
+        state.mcp_sessions.lock().await.insert(
+            "session-1".to_string(),
+            crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
+        );
+
+        let response = handle_thread_borrow(
+            &state,
+            ThreadBorrowRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: None,
+                message_id: Some("msg-1".to_string()),
+                model_id: Some("model-base".to_string()),
+                steal_thread: false,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("borrow message target");
+
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.message_id.as_deref(), Some("msg-1"));
+        assert_eq!(response.model_id.as_deref(), Some("model-base"));
+
+        let live_session = state
+            .mcp_sessions
+            .lock()
+            .await
+            .get("session-1")
+            .cloned()
+            .expect("live session");
+        assert_eq!(live_session.bound_thread_id.as_deref(), Some("thread-1"));
+        let last_target = live_session.last_target.expect("last target");
+        assert_eq!(last_target.thread_id, "thread-1");
+        assert_eq!(last_target.message_id, "msg-1");
+        assert_eq!(last_target.model_id.as_deref(), Some("model-base"));
+    }
+
+    #[tokio::test]
     async fn resolve_prompt_thread_context_returns_bound_thread_identity() {
         let (state, _resolver) = seed_target().await;
 
@@ -5424,25 +6234,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_user_prompt_rejects_cross_thread_override_for_bound_session() {
+    async fn request_user_prompt_allows_explicit_cross_thread_target() {
         let (state, _resolver) = seed_target().await;
         seed_live_session(&state).await;
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(
-                &conn,
-                "thread-2",
-                "Thread 2",
-                now_secs(),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+            db::create_or_update_thread(&conn, "thread-2", "Thread 2", now_secs(), None).unwrap();
         }
 
-        let err = resolve_request_user_prompt_target(
+        let target = resolve_request_user_prompt_target(
             &state,
             "session-1",
             &UserPromptRequest {
@@ -5455,13 +6255,11 @@ mod tests {
             },
         )
         .await
-        .expect_err("cross-thread prompt override should fail");
+        .expect("cross-thread prompt override should resolve");
 
-        assert!(
-            err.message.contains("already bound to thread thread-1"),
-            "unexpected error: {}",
-            err.message
-        );
+        let target = target.expect("explicit target");
+        assert_eq!(target.thread_id, "thread-2");
+        assert_eq!(target.message_id, None);
     }
 
     #[tokio::test]
@@ -5482,7 +6280,20 @@ mod tests {
 
         assert_eq!(response.resolved_from, TargetResolvedFrom::Base);
         assert_eq!(response.model_id.as_deref(), Some("model-base"));
+        assert_eq!(response.source_language, "legacyPython");
+        assert_eq!(response.macro_dialect, "legacy");
+        assert_eq!(response.geometry_backend, "freecad");
         assert!(!response.has_draft);
+        assert!(response.has_artifact_bundle);
+        assert!(response.has_runtime_manifest);
+        assert_eq!(response.export_formats, vec!["step".to_string()]);
+        assert!(response.has_step_export);
+        assert_eq!(
+            response.step_export_path.as_deref(),
+            Some("/tmp/model-base.step")
+        );
+        assert_eq!(response.edge_target_count, 1);
+        assert_eq!(response.face_target_count, 1);
         assert_eq!(response.ui_field_count, 3);
         assert_eq!(response.range_count, 1);
         assert_eq!(response.select_count, 1);
@@ -5502,7 +6313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_session_log_in_fails_fast_without_a_bound_target() {
+    async fn managed_session_log_in_allows_no_bound_target() {
         let conn = crate::db::init_db(&test_db_path("managed-session-login-target")).expect("db");
         let mut config = test_config();
         config.connection_type = Some("mcp".to_string());
@@ -5525,8 +6336,12 @@ mod tests {
             "session-1",
             Some("Connected to Ecky.".to_string()),
         );
+        state.mcp_sessions.lock().await.insert(
+            "session-1".to_string(),
+            crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
+        );
 
-        let err = handle_session_log_in(
+        let response = handle_session_log_in(
             &state,
             SessionLoginRequest {
                 identity: AgentIdentityOverride::default(),
@@ -5538,23 +6353,36 @@ mod tests {
             &test_ctx(),
         )
         .await
-        .expect_err("managed session should fail without a bound target");
+        .expect("managed session should log in without a bound target");
 
-        assert!(
-            err.message.contains("explicit thread target"),
-            "unexpected error: {}",
-            err.message
-        );
+        assert_eq!(response.thread_id, None);
+        assert_eq!(response.message_id, None);
+        assert_eq!(response.model_id, None);
 
-        let logs = state.app_logs.lock().unwrap();
-        let last = logs.back().expect("log entry");
-        assert!(last.message.contains("[MCP]"));
-        assert!(last.message.contains("kind=session_bind_failed"));
-        assert!(last.message.contains("could not bind"));
+        let conn = state.db.lock().await;
+        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+            .expect("stored session")
+            .into_iter()
+            .next()
+            .expect("session row");
+        assert_eq!(stored_session.thread_id, None);
+        assert_eq!(stored_session.message_id, None);
+        drop(conn);
+
+        let live_session = state
+            .mcp_sessions
+            .lock()
+            .await
+            .get("session-1")
+            .cloned()
+            .expect("live session");
+        assert_eq!(live_session.bound_thread_id, None);
+        assert!(live_session.last_target.is_none());
+        assert!(!live_session.busy);
     }
 
     #[tokio::test]
-    async fn passive_session_log_in_requires_explicit_thread_target() {
+    async fn passive_session_log_in_allows_no_thread_target_without_snapshot_fallback() {
         let (state, _resolver) = seed_target().await;
         {
             let mut snapshot = state.last_snapshot.lock().unwrap();
@@ -5568,7 +6396,7 @@ mod tests {
             });
         }
 
-        let err = handle_session_log_in(
+        let response = handle_session_log_in(
             &state,
             SessionLoginRequest {
                 identity: AgentIdentityOverride::default(),
@@ -5580,13 +6408,20 @@ mod tests {
             &test_ctx(),
         )
         .await
-        .expect_err("passive session log in should require an explicit thread target");
+        .expect("passive session log in should allow no thread target");
 
-        assert!(
-            err.message.contains("thread"),
-            "unexpected error: {}",
-            err.message
-        );
+        assert_eq!(response.thread_id, None);
+        assert_eq!(response.message_id, None);
+        assert_eq!(response.model_id, None);
+
+        let conn = state.db.lock().await;
+        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+            .expect("stored session")
+            .into_iter()
+            .next()
+            .expect("session row");
+        assert_eq!(stored_session.thread_id, None);
+        assert_eq!(stored_session.message_id, None);
     }
 
     #[tokio::test]
@@ -5968,7 +6803,206 @@ mod tests {
         assert_eq!(response.resolved_from, TargetResolvedFrom::Base);
         assert_eq!(response.macro_code, "base_macro()");
         assert_eq!(response.macro_dialect, MacroDialect::Legacy);
+        let artifact_digest = response.artifact_digest.expect("artifact digest");
+        assert_eq!(artifact_digest.model_id, "model-base");
+        assert!(artifact_digest.has_step_export);
+        assert_eq!(
+            artifact_digest.step_export_path.as_deref(),
+            Some("/tmp/model-base.step")
+        );
         assert!(response.post_processing.is_none());
+        assert_eq!(response.authoring_context.source_language, "legacyPython");
+        assert_eq!(response.authoring_context.macro_dialect, "legacy");
+        assert_eq!(response.authoring_context.geometry_backend, "freecad");
+        assert!(response
+            .authoring_context
+            .authoring_card
+            .contains("Ecky authoring card"));
+        assert!(response
+            .authoring_context
+            .guide_uris
+            .iter()
+            .any(|uri| uri == "ecky://guides/authoring-card"));
+    }
+
+    #[tokio::test]
+    async fn target_get_returns_artifact_digest_for_export_truth() {
+        let (state, resolver) = seed_target().await;
+        let response = handle_target_get(
+            &state,
+            &resolver,
+            TargetGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("target get");
+
+        let artifact_digest = response.artifact_digest.expect("artifact digest");
+        assert_eq!(artifact_digest.model_id, "model-base");
+        assert_eq!(artifact_digest.export_formats, vec!["step"]);
+        assert!(artifact_digest.has_step_export);
+        assert_eq!(
+            artifact_digest.step_export_path.as_deref(),
+            Some("/tmp/model-base.step")
+        );
+    }
+
+    #[test]
+    fn artifact_bundle_digest_reports_topology_target_counts() {
+        let mut bundle = sample_bundle("model-topology", "topology.stl");
+        bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
+            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Edge1".to_string(),
+            editable: true,
+            start: crate::models::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::models::ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+        bundle.face_targets.push(crate::models::ViewerFaceTarget {
+            target_id: "body:face:0:5-5-5:100".to_string(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Face1".to_string(),
+            editable: true,
+            center: crate::models::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
+
+        let digest = artifact_bundle_digest(&bundle);
+
+        assert_eq!(digest.edge_target_count, 1);
+        assert_eq!(digest.face_target_count, 1);
+    }
+
+    #[test]
+    fn render_mutation_responses_include_artifact_digest_for_export_truth() {
+        let mut bundle = sample_bundle("model-render", "render.stl");
+        bundle.export_artifacts.push(crate::models::ExportArtifact {
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/model-render.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
+        let digest = artifact_bundle_digest(&bundle);
+        let manifest = sample_manifest("model-render");
+        let design = sample_design("Render", "V-render", "render_macro()");
+        let sv = crate::services::structural_verification::verify_structure(&bundle, &manifest);
+
+        let macro_response = MacroReplaceResponse {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-render".to_string(),
+            macro_code: design.macro_code.clone(),
+            ui_spec: design.ui_spec.clone(),
+            initial_params: design.initial_params.clone(),
+            artifact_bundle: bundle.clone(),
+            model_manifest: manifest.clone(),
+            structural_verification: Some(sv.clone()),
+            artifact_digest: digest.clone(),
+        };
+        let params_response = ParamsPatchResponse {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-render".to_string(),
+            merged_params: design.initial_params.clone(),
+            artifact_bundle: bundle.clone(),
+            model_manifest: manifest.clone(),
+            design_output: design.clone(),
+            structural_verification: Some(sv.clone()),
+            artifact_digest: digest.clone(),
+        };
+        let buffer_response = MacroBufferReplaceAndRenderResponse {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-render".to_string(),
+            digest: "source-digest".to_string(),
+            line_count: 1,
+            macro_code: design.macro_code.clone(),
+            ui_spec: design.ui_spec.clone(),
+            initial_params: design.initial_params.clone(),
+            artifact_bundle: bundle,
+            model_manifest: manifest,
+            structural_verification: Some(sv),
+            artifact_digest: digest,
+        };
+
+        for value in [
+            serde_json::to_value(macro_response).expect("macro response json"),
+            serde_json::to_value(params_response).expect("params response json"),
+            serde_json::to_value(buffer_response).expect("buffer response json"),
+        ] {
+            assert_eq!(value["artifactDigest"]["modelId"], "model-render");
+            assert_eq!(value["artifactDigest"]["hasStepExport"], true);
+            assert_eq!(
+                value["artifactDigest"]["stepExportPath"],
+                "/tmp/model-render.step"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn macro_buffer_get_returns_artifact_digest_for_export_truth() {
+        let (state, resolver) = seed_target().await;
+        let response = handle_macro_buffer_get(
+            &state,
+            &resolver,
+            MacroBufferGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("macro buffer");
+
+        let artifact_digest = response.artifact_digest.expect("artifact digest");
+        assert_eq!(artifact_digest.model_id, "model-base");
+        assert!(artifact_digest.has_step_export);
+        assert_eq!(
+            artifact_digest.step_export_path.as_deref(),
+            Some("/tmp/model-base.step")
+        );
+    }
+
+    #[tokio::test]
+    async fn version_restore_returns_artifact_digest_for_export_truth() {
+        let (state, _resolver) = seed_target().await;
+        let response = handle_version_restore(
+            &state,
+            VersionRestoreRequest {
+                identity: AgentIdentityOverride::default(),
+                message_id: "msg-1".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("version restore");
+
+        let artifact_digest = response.artifact_digest.expect("artifact digest");
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.message_id, "msg-1");
+        assert_eq!(artifact_digest.model_id, "model-base");
+        assert!(artifact_digest.has_step_export);
+        assert_eq!(
+            artifact_digest.step_export_path.as_deref(),
+            Some("/tmp/model-base.step")
+        );
     }
 
     #[tokio::test]
@@ -5990,6 +7024,12 @@ mod tests {
 
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["section"], "uiSpec");
+        assert_eq!(value["authoringContext"]["sourceLanguage"], "legacyPython");
+        assert_eq!(value["authoringContext"]["geometryBackend"], "freecad");
+        assert!(value["authoringContext"]["authoringCard"]
+            .as_str()
+            .unwrap()
+            .contains("Ecky authoring card"));
         assert!(value.get("uiSpec").is_some());
         assert!(value.get("initialParams").is_none());
         assert!(value.get("artifactBundle").is_none());
@@ -6041,10 +7081,150 @@ mod tests {
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["section"], "artifactBundle");
         assert_eq!(value["artifactBundle"]["modelId"], "model-base");
+        assert_eq!(value["artifactBundle"]["sourceLanguage"], "legacyPython");
+        assert_eq!(value["artifactBundle"]["geometryBackend"], "freecad");
         assert_eq!(value["artifactBundle"]["hasPreviewStl"], true);
+        assert_eq!(
+            value["artifactBundle"]["exportFormats"],
+            serde_json::json!(["step"])
+        );
+        assert_eq!(value["artifactBundle"]["hasStepExport"], true);
+        assert_eq!(
+            value["artifactBundle"]["stepExportPath"],
+            "/tmp/model-base.step"
+        );
         assert!(value.get("uiSpec").is_none());
         assert!(value.get("initialParams").is_none());
         assert!(value.get("latestDraft").is_none());
+    }
+
+    #[tokio::test]
+    async fn artifact_manifest_get_returns_full_valid_runtime_manifest() {
+        let (state, resolver) = seed_target().await;
+        let response = handle_artifact_manifest_get(
+            &state,
+            &resolver,
+            ArtifactManifestRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                model_id: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("artifact manifest");
+
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.message_id, "msg-1");
+        assert_eq!(response.model_id, "model-base");
+        assert!(response.runtime_manifest_valid);
+        assert_eq!(response.digest.model_id, "model-base");
+        assert_eq!(response.digest.geometry_backend, "freecad");
+        assert!(response.digest.has_step_export);
+        assert_eq!(
+            response.digest.step_export_path.as_deref(),
+            Some("/tmp/model-base.step")
+        );
+        assert_eq!(response.artifact_bundle.model_id, "model-base");
+        assert_eq!(response.model_manifest.model_id, "model-base");
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["runtimeManifestValid"], true);
+        assert_eq!(
+            value["artifactBundle"]["exportArtifacts"][0]["format"],
+            "step"
+        );
+        assert_eq!(
+            value["modelManifest"]["controlPrimitives"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_manifest_get_rejects_bundle_manifest_mismatch() {
+        let (state, resolver) = seed_target().await;
+        let mut bad_bundle = sample_bundle("model-bad", "bad.stl");
+        bad_bundle
+            .export_artifacts
+            .push(crate::models::ExportArtifact {
+                label: "STEP".to_string(),
+                format: "step".to_string(),
+                path: "/tmp/model-bad.step".to_string(),
+                role: "cad-exchange".to_string(),
+            });
+        let bad_manifest = sample_manifest("model-other");
+        {
+            let conn = state.db.lock().await;
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "msg-bad".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Bad version".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_design("Bad", "V-bad", "bad_macro()")),
+                    usage: None,
+                    artifact_bundle: Some(bad_bundle),
+                    model_manifest: Some(bad_manifest),
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now_secs() + 1,
+                },
+            )
+            .unwrap();
+        }
+
+        let err = handle_artifact_manifest_get(
+            &state,
+            &resolver,
+            ArtifactManifestRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-bad".to_string()),
+                model_id: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("mismatched runtime manifest should be rejected");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("model id"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn structural_verification_summary_includes_artifact_digest() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-verify";
+        let mut bundle = sample_bundle(model_id, "verify.stl");
+        bundle.export_artifacts.push(crate::models::ExportArtifact {
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/generated-verify.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
+        let manifest = sample_manifest(model_id);
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let response = handle_structural_verification_summary(
+            &state, &resolver, "thread-1", "msg-1", model_id,
+        )
+        .expect("verification summary");
+
+        assert_eq!(response.artifact_digest.model_id, model_id);
+        assert!(response.artifact_digest.has_step_export);
+        assert_eq!(
+            response.artifact_digest.step_export_path.as_deref(),
+            Some("/tmp/generated-verify.step")
+        );
     }
 
     #[tokio::test]
@@ -6559,5 +7739,39 @@ mod tests {
         assert!(active
             .into_iter()
             .all(|session| session.session_id != "session-1"));
+    }
+
+    #[test]
+    fn macro_buffer_replaces_line_range_with_digest_guard() {
+        let source = "(model\n  (part body (box 1 1 1))\n)\n";
+        let digest = macro_buffer_digest(source);
+        let patched = apply_macro_buffer_replacements(
+            source,
+            &digest,
+            &[MacroBufferReplacement {
+                start_line: 2,
+                end_line: 2,
+                new_text: "  (part body (box 2 2 2))".to_string(),
+            }],
+        )
+        .expect("patched macro");
+
+        assert_eq!(patched, "(model\n  (part body (box 2 2 2))\n)\n");
+    }
+
+    #[test]
+    fn macro_buffer_rejects_stale_digest() {
+        let err = apply_macro_buffer_replacements(
+            "(model)\n",
+            "stale",
+            &[MacroBufferReplacement {
+                start_line: 1,
+                end_line: 1,
+                new_text: "(model\n)".to_string(),
+            }],
+        )
+        .expect_err("stale digest should fail");
+
+        assert!(err.message.contains("Macro buffer digest mismatch"));
     }
 }

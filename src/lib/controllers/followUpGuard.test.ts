@@ -35,9 +35,6 @@ function makeThread(messages: Message[]): Thread {
     status: 'active',
     finalizedAt: null,
     pendingConfirm: null,
-    engineKind: 'freecad',
-    sourceLanguage: 'legacyPython',
-    geometryBackend: 'freecad',
   };
 }
 

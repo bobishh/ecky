@@ -1,6 +1,9 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import SketchInspectorSection from './SketchInspectorSection.svelte';
   import {
+    acceptSketchBrepCandidateSolution,
+    acceptedBrepCandidateToComponentPackage,
     analyzeSketchBrepCandidates,
     extractBrepHiddenLineProjections,
     formatBackendError,
@@ -9,6 +12,9 @@
     suggestSketchFeatures,
   } from './tauri/client';
   import type {
+    ComponentPackage,
+    ComponentPort,
+    PortTypeDefinition,
     SketchDraftRequest,
     SketchDraftSource,
     BrepHiddenLineProjectionResponse,
@@ -29,11 +35,12 @@
     finishStroke,
     pointsToSvg,
     sourceLineCount,
+    strokeKind,
     summarizeSketchDraftMode,
     type SketchPoint,
     type SketchStroke,
   } from './sketchWorkspaceState';
-  import { extrudeLearningLens } from './sketchLearningLens';
+  import { buildSketchLearningLens } from './sketchLearningLens';
   import { buildSketchProjections, type SketchProjection, type SketchProjectionBounds } from './sketchProjection';
   import { summarizeSketchPreviewStep, type SketchPreviewStepState } from './sketchAutoPreview';
   import {
@@ -62,9 +69,25 @@
   import { buildSketchDimensionSummary } from './sketchDimensionSummary';
   import { buildSketchValidationRows, type SketchValidationRow } from './sketchValidationLedger';
   import { buildSketchFitValidationSeed } from './sketchFitValidation';
-  import { buildSketchBrepProjectionValidationSummary } from './sketchBrepProjectionValidation';
+  import {
+    buildSketchBrepProjectionRepairTargets,
+    buildSketchBrepProjectionValidationSummary,
+  } from './sketchBrepProjectionValidation';
+  import { autoRepairSketchDocumentFromBrepProjection } from './sketchBrepAutoRepair';
+  import { buildSketchDocumentFromBrepProjection } from './sketchBrepDerivedSketch';
+  import {
+    applySketchTopologyRepairProposal,
+    buildSketchTopologyRepairProposals,
+    type SketchTopologyRepairProposal,
+  } from './sketchTopologyRepairProposal';
+  import { buildSketchAcceptedCadRow } from './sketchAcceptedCad';
   import { cleanupSketchStrokes } from './sketchCleanup';
-  import { repairSketchDocumentDimensionConstraints } from './sketchConstraintValidation';
+  import { repairSketchDocumentEndpointGaps } from './sketchEndpointRepair';
+  import { autoRepairOrthographicSketchStrokes } from './sketchOrthographicRepair';
+  import {
+    autoRepairSketchDocumentDimensionConstraintGeometry,
+    repairSketchDocumentDimensionConstraints,
+  } from './sketchConstraintValidation';
   import { buildSketchPreviewHullRequest, shouldUseSketchPreviewHull } from './sketchPreviewHull';
   import {
     appendSketchSourcePatch,
@@ -76,29 +99,63 @@
   type PreviewResult = { draft: SketchDraftSource; artifactBundle: ArtifactBundle } | null;
   type ProjectionRect = { x: number; y: number; width: number; height: number };
   type PreviewMode = 'manual' | 'auto';
+  type GenerateDraftOptions = { preserveBrepAutoRepairAttempts?: boolean };
   type PointDragState = {
     primitiveId: string;
     pointIndex: number;
     pointerId: number;
     view: SketchView;
     originalPoint: SketchPoint;
+    startClientX: number;
+    startClientY: number;
+    moved: boolean;
   };
   type SelectedPointState = {
     primitiveId: string;
     pointIndex: number;
     view: SketchView;
   };
+  type SketchTool = 'select' | 'polyline' | 'rectangle' | 'circle';
+  type ShapeDraftState = {
+    kind: 'rectangle' | 'circle';
+    primitiveId: string;
+    view: SketchView;
+    pointerId: number;
+    start: SketchPoint;
+    current: SketchPoint;
+  };
+  type PaneCamera = {
+    zoom: number;
+    panX: number;
+    panY: number;
+  };
+  type PanePanState = {
+    view: SketchView;
+    pointerId: number;
+    origin: SketchPoint;
+    startCamera: PaneCamera;
+  };
 
   const EXTRUDE_AMOUNT = 12;
   const AUTO_PREVIEW_DEBOUNCE_MS = 650;
   const DEFAULT_SNAP_GRID_SIZE = '10';
+  const DEFAULT_PANE_ZOOM = 1;
+  const POINT_DRAG_THRESHOLD_PX = 6;
+  const ACCEPTED_BREP_COMPONENT_ID = 'sketch-preview-hull';
+  const ACCEPTED_BREP_PACKAGE_ID = 'sketch-preview-hull.accepted-brep';
+  const ACCEPTED_BREP_PORT_ID = 'front_mount';
+  const ACCEPTED_BREP_PORT_TYPE_ID = 'mechanical.plane.mount.v1';
 
   let {
     onPreviewResult = null,
+    onManualPreviewResult = null,
     onGhostPreviewChange = null,
+    onClose = null,
   }: {
     onPreviewResult?: ((result: PreviewResult) => void) | null;
+    onManualPreviewResult?: ((result: PreviewResult) => void) | null;
     onGhostPreviewChange?: ((result: SketchGhostPreviewState | null) => void) | null;
+    onClose?: (() => void) | null;
   } = $props();
   const dispatch = createEventDispatcher<{ previewResult: PreviewResult }>();
 
@@ -122,10 +179,23 @@
   let acceptedSuggestionLabel = $state('');
   let sketchDocumentSnapshot = $state<SketchDocument | null>(null);
   let sketchDocumentImportText = $state('');
+  let sketchDocumentEditorDirty = $state(false);
   let pointDrag = $state<PointDragState | null>(null);
   let selectedPoint = $state<SelectedPointState | null>(null);
   let snapToGrid = $state(false);
   let sketchGridSize = $state(DEFAULT_SNAP_GRID_SIZE);
+  let activeTool = $state<SketchTool>('polyline');
+  let hoverView = $state<SketchView | null>(null);
+  let hoverPoint = $state<SketchPoint | null>(null);
+  let shapeDraft = $state<ShapeDraftState | null>(null);
+  let panePan = $state<PanePanState | null>(null);
+  let suppressNextPaneClick = $state(false);
+  let paneCameras = $state<Record<SketchView, PaneCamera>>({
+    front: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
+    top: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
+    side: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
+    custom: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
+  });
   let selectedPointX = $state('');
   let selectedPointY = $state('');
   let profileX = $state('');
@@ -139,12 +209,24 @@
   let brepCandidateResponse = $state<SketchBrepCandidateResponse | null>(null);
   let brepCandidateErrorText = $state('');
   let brepCandidateLoading = $state(false);
+  let brepCandidateDocument = $state<SketchDocument | null>(null);
+  let brepCandidateAcceptingSolutionId = $state<string | null>(null);
+  let brepCandidateAcceptedSolutionId = $state<string | null>(null);
+  let brepCandidateAcceptErrorText = $state('');
+  let brepCandidateAcceptEvidence = $state<string[]>([]);
+  let brepComponentPackage = $state<ComponentPackage | null>(null);
+  let brepComponentPackageLoading = $state(false);
+  let brepComponentPackageErrorText = $state('');
   let hiddenLineResponse = $state<BrepHiddenLineProjectionResponse | null>(null);
   let hiddenLineErrorText = $state('');
   let hiddenLineLoading = $state(false);
+  let brepAutoRepairAttempts = $state(0);
   const frontHiddenLineOverlay = $derived(hiddenLineResponse?.views?.find((view) => view.view === 'front') ?? null);
   const topHiddenLineOverlay = $derived(hiddenLineResponse?.views?.find((view) => view.view === 'top') ?? null);
   const sideHiddenLineOverlay = $derived(hiddenLineResponse?.views?.find((view) => view.view === 'side') ?? null);
+  const brepDerivedSketch = $derived.by(() =>
+    hiddenLineResponse ? buildSketchDocumentFromBrepProjection(hiddenLineResponse) : null,
+  );
   let autoPreviewTimer: ReturnType<typeof setTimeout> | null = null;
   let autoPreviewRunId = 0;
   let suggestionRunId = 0;
@@ -157,14 +239,14 @@
     const request = buildSketchDraftRequest(strokes);
     return 'error' in request ? EXTRUDE_AMOUNT : request.amount;
   });
-  const learningLens = $derived.by(() => extrudeLearningLens(draftDepth));
+  const learningLens = $derived.by(() => buildSketchLearningLens(draftDepth, sourcePatchEntries));
   const projections = $derived.by(() => (projectionProfile ? buildSketchProjections(projectionProfile, draftDepth) : []));
   const dimensionSummary = $derived.by(() => (projectionProfile ? buildSketchDimensionSummary(projectionProfile, draftDepth) : null));
   const dimensionConstraintSummary = $derived.by(() => summarizeDimensionConstraints(profileSizeTarget));
   const sourceFitSeed = $derived.by(() =>
     projectionProfile
       ? buildSketchFitValidationSeed({
-          profilePoints: projectionProfile.points.map(([x, y]) => ({ x, y })),
+          profilePoints: displayStrokePoints(projectionProfile).map(([x, y]) => ({ x, y })),
           view: { width: 100, height: 100 },
           extrudeDepth: draftDepth,
           artifactEvidence: {
@@ -194,6 +276,7 @@
       extrudeDepth: draftDepth,
       projectionsCount: projections.length,
       errorText,
+      sourcePatchEntries,
     }),
   );
   const brepSketchValidationSummary = $derived.by(() =>
@@ -201,13 +284,33 @@
       ? buildSketchBrepProjectionValidationSummary(sketchDocumentSource, hiddenLineResponse)
       : null,
   );
+  const brepSketchRepairTargets = $derived.by(() =>
+    sketchDocumentSource && hiddenLineResponse
+      ? buildSketchBrepProjectionRepairTargets(sketchDocumentSource, hiddenLineResponse)
+      : [],
+  );
+  const brepTopologyRepairProposals = $derived.by(() =>
+    sketchDocumentSource && hiddenLineResponse
+      ? buildSketchTopologyRepairProposals(sketchDocumentSource, hiddenLineResponse)
+      : [],
+  );
+  const acceptedCadValidationRow = $derived.by(() =>
+    buildSketchAcceptedCadRow({
+      artifactBundle,
+      hiddenLineResponse,
+      hiddenLineErrorText,
+      hiddenLineLoading,
+    }),
+  );
   const visibleValidationRows = $derived.by(() => [
     ...validationRows,
     ...(brepSketchValidationSummary ? [brepSketchValidationLedgerRow(brepSketchValidationSummary)] : []),
+    ...(acceptedCadValidationRow ? [acceptedCadValidationRow] : []),
   ]);
   const sketchDocumentSource = $derived.by(() => {
     const request = buildSketchSuggestionRequest(strokes);
-    return 'error' in request ? null : request.document;
+    if ('error' in request) return null;
+    return preserveSketchDocumentEnvelope(request.document, strokes, sketchDocumentSnapshot);
   });
   const sketchDocumentSourceSummary = $derived.by(() => buildSketchDocumentSourceSummary(sketchDocumentSource));
   const sketchDocumentJson = $derived.by(() => formatSketchDocumentSource(sketchDocumentSource));
@@ -261,7 +364,7 @@
     if (acceptingSuggestionId) return acceptingSuggestionId;
     if (acceptedSuggestionId) return acceptedSuggestionLabel || acceptedSuggestionId;
     if (suggestionErrorText) return suggestionErrorText;
-    if (suggestingFeatures) return 'pending';
+    if (suggestingFeatures) return 'Suggestion request running.';
     if (featureSuggestions.length > 0) return `${featureSuggestions.length} available`;
     return 'none';
   });
@@ -278,9 +381,14 @@
   });
 
   $effect(() => {
-    if (sketchDocumentSource) {
+    if (sketchDocumentSource && !sketchDocumentSnapshot) {
       sketchDocumentSnapshot = sketchDocumentSource;
     }
+  });
+
+  $effect(() => {
+    if (sketchDocumentEditorDirty) return;
+    sketchDocumentImportText = sketchDocumentJson;
   });
 
   $effect(() => {
@@ -306,70 +414,237 @@
     }
   });
 
-  function beginStroke(event: PointerEvent, view: SketchView) {
+  function handlePanePointerDown(event: PointerEvent, view: SketchView) {
     if (generating) return;
-
-    const pointResult = pointForEditEvent(event, view);
-    if ('error' in pointResult) {
-      errorText = pointResult.error;
-      activeStroke = null;
+    if (event.button === 1 || activeTool === 'select' || event.altKey) {
+      beginPanePan(event, view);
       return;
     }
-    const point = pointResult.point;
-    const target = event.currentTarget as HTMLElement;
-    target.setPointerCapture(event.pointerId);
+    if (activeTool === 'rectangle' || activeTool === 'circle') {
+      beginShapeDraft(event, view, activeTool);
+    }
+  }
+
+  function handlePanePointerMove(event: PointerEvent, view: SketchView) {
+    if (pointDrag) {
+      dragPoint(event);
+      return;
+    }
+    if (panePan) {
+      dragPanePan(event);
+      return;
+    }
+    if (shapeDraft) {
+      dragShapeDraft(event);
+      return;
+    }
+    updateHoverPoint(event, view);
+  }
+
+  function handlePanePointerUp(event: PointerEvent, view: SketchView) {
+    if (pointDrag) {
+      endPointDrag(event);
+      return;
+    }
+    if (panePan) {
+      endPanePan(event);
+      return;
+    }
+    if (shapeDraft) {
+      endShapeDraft(event);
+      return;
+    }
+    updateHoverPoint(event, view);
+  }
+
+  function handlePaneClick(event: MouseEvent, view: SketchView) {
+    if (generating || suppressNextPaneClick || activeTool !== 'polyline') {
+      suppressNextPaneClick = false;
+      return;
+    }
+    const pointResult = pointForEditEvent(event as unknown as PointerEvent, view);
+    if ('error' in pointResult) {
+      errorText = pointResult.error;
+      return;
+    }
+    addPolylinePoint(view, pointResult.point);
+  }
+
+  function addPolylinePoint(view: SketchView, point: SketchPoint) {
+    prepareSketchMutation();
+    if (activeStroke && !activeStroke.closed && activeStroke.view === view && strokeKind(activeStroke) === 'polyline') {
+      activeStroke = {
+        ...activeStroke,
+        points: [...activeStroke.points, point],
+      };
+      return;
+    }
+
     activeStroke = {
       primitiveId: `primitive-${view}-${++primitiveSequence}`,
       view,
+      kind: 'polyline',
       points: [point],
       closed: false,
     };
-    clearAutoPreviewQueue();
-    clearFeatureSuggestions();
-    clearImportRepair();
-    clearSourcePatchLedger();
-    clearPreviewResult();
-    cleanupEvidenceText = '';
-    errorText = '';
   }
 
-  function extendStroke(event: PointerEvent) {
-    if (!activeStroke || !event.buttons) return;
+  function closeActivePolyline() {
+    if (!activeStroke || activeStroke.closed || strokeKind(activeStroke) !== 'polyline') return;
+    const finished = finishStroke({
+      ...activeStroke,
+      points: [...activeStroke.points, activeStroke.points[0]],
+    });
+    commitFinishedPrimitive(finished);
+  }
 
-    const pointResult = pointForEditEvent(event, activeStroke.view);
+  function commitFinishedPrimitive(finished: SketchStroke) {
+    if (finished.points.length === 0) return;
+    strokes = [...strokes, finished];
+    activeStroke = null;
+    clearSelectedPoint();
+    errorText = '';
+    cleanupEvidenceText = '';
+    clearPreviewResult();
+    requestFeatureSuggestions(strokes);
+    if (finished.closed) {
+      queueAutoPreview(finished);
+    }
+  }
+
+  function beginShapeDraft(event: PointerEvent, view: SketchView, kind: 'rectangle' | 'circle') {
+    const pointResult = pointForEditEvent(event, view);
     if ('error' in pointResult) {
       errorText = pointResult.error;
-      activeStroke = null;
-      clearPreviewResult();
       return;
     }
-    const point = pointResult.point;
-    const last = activeStroke.points[activeStroke.points.length - 1];
-    if (last && Math.hypot(point[0] - last[0], point[1] - last[1]) < 0.8) return;
-
-    activeStroke = {
-      ...activeStroke,
-      points: [...activeStroke.points, point],
+    const target = event.currentTarget as HTMLElement;
+    target.setPointerCapture(event.pointerId);
+    prepareSketchMutation();
+    suppressNextPaneClick = true;
+    shapeDraft = {
+      kind,
+      primitiveId: `primitive-${view}-${++primitiveSequence}`,
+      view,
+      pointerId: event.pointerId,
+      start: pointResult.point,
+      current: pointResult.point,
     };
   }
 
-  function endStroke(event: PointerEvent) {
-    if (!activeStroke) return;
+  function dragShapeDraft(event: PointerEvent) {
+    if (!shapeDraft) return;
+    const pointResult = pointForEditEvent(event, shapeDraft.view);
+    if ('error' in pointResult) {
+      errorText = pointResult.error;
+      return;
+    }
+    shapeDraft = {
+      ...shapeDraft,
+      current: pointResult.point,
+    };
+  }
 
+  function endShapeDraft(event: PointerEvent) {
+    if (!shapeDraft) return;
     const target = event.currentTarget as HTMLElement;
-    if (target.hasPointerCapture(event.pointerId)) {
-      target.releasePointerCapture(event.pointerId);
+    if (target.hasPointerCapture(shapeDraft.pointerId)) {
+      target.releasePointerCapture(shapeDraft.pointerId);
     }
-    const finished = finishStroke(activeStroke);
-    if (finished.points.length > 1) {
-      strokes = [...strokes, finished];
-      if (finished.closed) {
-        queueAutoPreview(finished);
-        requestFeatureSuggestions(strokes);
-      }
+    const pointResult = pointForEditEvent(event, shapeDraft.view);
+    if ('error' in pointResult) {
+      errorText = pointResult.error;
+      shapeDraft = null;
+      return;
     }
-    activeStroke = null;
-    clearSelectedPoint();
+    const draft = {
+      ...shapeDraft,
+      current: pointResult.point,
+    };
+    shapeDraft = null;
+    const finished = draft.kind === 'rectangle' ? rectangleStrokeFromDraft(draft) : circleStrokeFromDraft(draft);
+    if (!finished) return;
+    commitFinishedPrimitive(finished);
+  }
+
+  function rectangleStrokeFromDraft(draft: ShapeDraftState): SketchStroke | null {
+    const [x0, y0] = draft.start;
+    const [x1, y1] = draft.current;
+    if (Math.abs(x1 - x0) < 0.01 || Math.abs(y1 - y0) < 0.01) return null;
+    const minX = Math.min(x0, x1);
+    const maxX = Math.max(x0, x1);
+    const minY = Math.min(y0, y1);
+    const maxY = Math.max(y0, y1);
+    return {
+      primitiveId: draft.primitiveId,
+      view: draft.view,
+      kind: 'polyline',
+      points: [
+        [minX, minY],
+        [maxX, minY],
+        [maxX, maxY],
+        [minX, maxY],
+        [minX, minY],
+      ],
+      closed: true,
+    };
+  }
+
+  function circleStrokeFromDraft(draft: ShapeDraftState): SketchStroke | null {
+    const radius = Math.hypot(draft.current[0] - draft.start[0], draft.current[1] - draft.start[1]);
+    if (radius < 0.01) return null;
+    return {
+      primitiveId: draft.primitiveId,
+      view: draft.view,
+      kind: 'circle',
+      points: [draft.start],
+      closed: true,
+      radius,
+    };
+  }
+
+  function beginPanePan(event: PointerEvent, view: SketchView) {
+    const point = eventPoint(event, view);
+    const target = event.currentTarget as HTMLElement;
+    target.setPointerCapture(event.pointerId);
+    suppressNextPaneClick = true;
+    panePan = {
+      view,
+      pointerId: event.pointerId,
+      origin: point,
+      startCamera: { ...paneCameras[view] },
+    };
+  }
+
+  function dragPanePan(event: PointerEvent) {
+    if (!panePan) return;
+    const point = eventPoint(event, panePan.view);
+    const dx = panePan.origin[0] - point[0];
+    const dy = panePan.origin[1] - point[1];
+    paneCameras = {
+      ...paneCameras,
+      [panePan.view]: {
+        ...panePan.startCamera,
+        panX: Number((panePan.startCamera.panX + dx).toFixed(2)),
+        panY: Number((panePan.startCamera.panY + dy).toFixed(2)),
+      },
+    };
+  }
+
+  function endPanePan(event: PointerEvent) {
+    if (!panePan) return;
+    const target = event.currentTarget as HTMLElement;
+    if (target.hasPointerCapture(panePan.pointerId)) {
+      target.releasePointerCapture(panePan.pointerId);
+    }
+    panePan = null;
+  }
+
+  function updateHoverPoint(event: PointerEvent, view: SketchView) {
+    const pointResult = pointForEditEvent(event, view);
+    if ('error' in pointResult) return;
+    hoverView = view;
+    hoverPoint = pointResult.point;
   }
 
   function beginPointDrag(event: PointerEvent, stroke: SketchStroke, pointIndex: number) {
@@ -377,7 +652,8 @@
 
     event.preventDefault();
     event.stopPropagation();
-    const target = event.currentTarget as Element;
+    suppressNextPaneClick = true;
+    const target = ((event.currentTarget as Element | null)?.closest('.sketch-pane') as HTMLElement | null) ?? (event.currentTarget as HTMLElement);
     target.setPointerCapture(event.pointerId);
     pointDrag = {
       primitiveId: stroke.primitiveId,
@@ -385,15 +661,11 @@
       pointerId: event.pointerId,
       view: stroke.view,
       originalPoint: stroke.points[pointIndex],
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      moved: false,
     };
     selectPoint(stroke, pointIndex);
-    clearAutoPreviewQueue();
-    clearFeatureSuggestions();
-    clearAcceptedSuggestion();
-    clearImportRepair();
-    clearPreviewResult();
-    cleanupEvidenceText = '';
-    errorText = '';
   }
 
   function dragPoint(event: PointerEvent) {
@@ -409,11 +681,26 @@
       return;
     }
 
-    if (isSamePoint(pointResult.point, pointDrag.originalPoint)) {
-      pointDrag = null;
+    const pointerDistance = Math.hypot(
+      event.clientX - pointDrag.startClientX,
+      event.clientY - pointDrag.startClientY,
+    );
+    if (pointerDistance < POINT_DRAG_THRESHOLD_PX) {
       return;
     }
 
+    if (!pointDrag.moved) {
+      pointDrag = {
+        ...pointDrag,
+        moved: true,
+      };
+    }
+
+    if (isSamePoint(pointResult.point, pointDrag.originalPoint)) {
+      return;
+    }
+
+    prepareSketchMutation();
     const result = moveDraggedPoint(pointResult.point);
     if ('error' in result) {
       errorText = result.error;
@@ -426,7 +713,7 @@
 
     event.preventDefault();
     event.stopPropagation();
-    const target = event.currentTarget as Element;
+    const target = ((event.currentTarget as Element | null)?.closest('.sketch-pane') as HTMLElement | null) ?? (event.currentTarget as HTMLElement);
     if (target.hasPointerCapture(pointDrag.pointerId)) {
       target.releasePointerCapture(pointDrag.pointerId);
     }
@@ -439,6 +726,18 @@
       return;
     }
 
+    const originalPoint = pointDrag.originalPoint;
+    if (!pointDrag.moved || isSamePoint(pointResult.point, originalPoint)) {
+      if (activeStroke?.primitiveId === pointDrag.primitiveId && !activeStroke.closed && pointDrag.pointIndex === 0) {
+        pointDrag = null;
+        closeActivePolyline();
+        return;
+      }
+      pointDrag = null;
+      return;
+    }
+
+    prepareSketchMutation();
     const result = moveDraggedPoint(pointResult.point);
     pointDrag = null;
     if ('error' in result) {
@@ -454,13 +753,25 @@
   }
 
   function moveDraggedPoint(point: SketchPoint): { stroke: SketchStroke; strokes: SketchStroke[] } | { error: string } {
-    if (!pointDrag) return { error: 'Sketch point target missing.' };
+    const dragState = pointDrag;
+    if (!dragState) return { error: 'Sketch point target missing.' };
 
     let movedStroke: SketchStroke | null = null;
-    const nextStrokes = strokes.map((stroke) => {
-      if (stroke.primitiveId !== pointDrag?.primitiveId || stroke.view !== pointDrag.view) return stroke;
+    const nextStrokes: SketchStroke[] = strokes.map((stroke) => {
+      if (stroke.primitiveId !== dragState.primitiveId || stroke.view !== dragState.view) return stroke;
 
-      movedStroke = moveClosedStrokePointWithDimensionLocks(stroke, pointDrag.pointIndex, point);
+      if (!stroke.closed && strokeKind(stroke) === 'polyline') {
+        const points: SketchPoint[] = stroke.points.map((candidate, index) =>
+          index === dragState.pointIndex ? [point[0], point[1]] : [candidate[0], candidate[1]],
+        );
+        movedStroke = {
+          ...stroke,
+          points,
+        };
+        return movedStroke;
+      }
+
+      movedStroke = moveClosedStrokePointWithDimensionLocks(stroke, dragState.pointIndex, point);
       assertLockedDimensionsPreserved(stroke, movedStroke);
       return movedStroke;
     });
@@ -468,12 +779,22 @@
     if (!movedStroke) return { error: 'Sketch point target missing.' };
 
     strokes = nextStrokes;
-    syncSelectedPointInputs(movedStroke, pointDrag.pointIndex);
+    syncSelectedPointInputs(movedStroke, dragState.pointIndex);
     return { stroke: movedStroke, strokes: nextStrokes };
   }
 
   function isSamePoint(left: SketchPoint, right: SketchPoint): boolean {
     return Math.hypot(left[0] - right[0], left[1] - right[1]) < 0.01;
+  }
+
+  function prepareSketchMutation() {
+    clearAutoPreviewQueue();
+    clearFeatureSuggestions();
+    clearAcceptedSuggestion();
+    clearImportRepair();
+    clearPreviewResult();
+    cleanupEvidenceText = '';
+    errorText = '';
   }
 
   function selectPoint(stroke: SketchStroke, pointIndex: number) {
@@ -808,13 +1129,15 @@
     return [
       ...strokes.filter((stroke) => stroke.view === view),
       ...(activeStroke?.view === view ? [activeStroke] : []),
+      ...(shapeDraft?.view === view ? [shapeDraft.kind === 'rectangle' ? rectangleStrokeFromDraft(shapeDraft) : circleStrokeFromDraft(shapeDraft)].filter(Boolean) as SketchStroke[] : []),
     ];
   }
 
   function closeOpenProfiles() {
+    const closedActiveStroke = activeStroke && !activeStroke.closed ? closeStroke(activeStroke) : activeStroke;
     const hadOpenProfile = Boolean(activeStroke && !activeStroke.closed) || strokes.some((stroke) => !stroke.closed);
-    strokes = strokes.map((stroke) => closeStroke(stroke));
-    activeStroke = activeStroke ? closeStroke(activeStroke) : null;
+    strokes = [...strokes.map((stroke) => closeStroke(stroke)), ...(closedActiveStroke ? [closedActiveStroke] : [])];
+    activeStroke = null;
     errorText = '';
     cleanupEvidenceText = '';
     const closedProfiles = strokes.filter((stroke) => stroke.closed);
@@ -882,6 +1205,7 @@
     activeStroke = null;
     clearSelectedPoint();
     primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
+    sketchDocumentEditorDirty = false;
     errorText = '';
     cleanupEvidenceText = '';
     clearPreviewResult();
@@ -905,11 +1229,14 @@
       return;
     }
 
-    const replay = sketchDocumentToStrokes(parsed.document);
+    const endpointRepair = repairSketchDocumentEndpointGaps(parsed.document);
+    const dimensionRepair = autoRepairSketchDocumentDimensionConstraintGeometry(endpointRepair.document);
+    const autoRepairEvidence = [...endpointRepair.evidence, ...dimensionRepair.evidence];
+    const replay = sketchDocumentToStrokes(dimensionRepair.document);
     if ('error' in replay) {
       errorText = replay.error;
       cleanupEvidenceText = '';
-      primeImportRepair(parsed.document);
+      primeImportRepair(dimensionRepair.document);
       clearPreviewResult();
       return;
     }
@@ -918,10 +1245,24 @@
     activeStroke = null;
     clearSelectedPoint();
     primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
-    sketchDocumentSnapshot = parsed.document;
-    sketchDocumentImportText = formatSketchDocumentSource(parsed.document);
+    sketchDocumentSnapshot = dimensionRepair.document;
+    sketchDocumentImportText = formatSketchDocumentSource(dimensionRepair.document);
+    sketchDocumentEditorDirty = false;
     errorText = '';
-    cleanupEvidenceText = '';
+    cleanupEvidenceText = autoRepairEvidence.length
+      ? `AUTO SNAP IMPORT / ${autoRepairEvidence.map((entry) => entry.detail).join(' / ')}`
+      : '';
+    if (autoRepairEvidence.length) {
+      sourcePatchEntries = autoRepairEvidence.reduce(
+        (entries, entry) =>
+          appendSketchSourcePatch(entries, {
+            action: 'AUTO SNAP',
+            primitiveId: entry.primitiveId,
+            detail: entry.detail,
+          }),
+        sourcePatchEntries,
+      );
+    }
     clearPreviewResult();
     requestFeatureSuggestions(replay.strokes);
 
@@ -957,6 +1298,7 @@
     primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
     sketchDocumentSnapshot = importRepairDocument;
     sketchDocumentImportText = formatSketchDocumentSource(importRepairDocument);
+    sketchDocumentEditorDirty = false;
     errorText = '';
     cleanupEvidenceText = '';
     if (repairedStroke) {
@@ -973,9 +1315,16 @@
     void generateDraft('auto', replay.strokes);
   }
 
-  async function generateDraft(mode: PreviewMode = 'manual', currentStrokes: SketchStroke[] = strokes) {
+  async function generateDraft(
+    mode: PreviewMode = 'manual',
+    currentStrokes: SketchStroke[] = strokes,
+    options: GenerateDraftOptions = {},
+  ) {
     clearAutoPreviewQueue();
     clearAcceptedSuggestion();
+    if (!options.preserveBrepAutoRepairAttempts) {
+      brepAutoRepairAttempts = 0;
+    }
     const openError = currentStrokes.some((stroke) => !stroke.closed) || (activeStroke && !activeStroke.closed) ? 'Close profile before preview.' : '';
     if (openError) {
       errorText = openError;
@@ -984,7 +1333,26 @@
       return;
     }
 
-    const request = buildSketchDraftRequest(currentStrokes);
+    let draftStrokes = currentStrokes;
+    const repairResult = autoRepairOrthographicSketchStrokes(draftStrokes);
+    if (repairResult.repairs.length) {
+      draftStrokes = repairResult.strokes;
+      strokes = repairResult.strokes;
+      activeStroke = null;
+      clearSelectedPoint();
+      cleanupEvidenceText = `AUTO SNAP ORTHOGRAPHIC / ${repairResult.repairs.map((repair) => repair.detail).join(' / ')}`;
+      sourcePatchEntries = repairResult.repairs.reduce(
+        (entries, repair) =>
+          appendSketchSourcePatch(entries, {
+            action: 'AUTO SNAP',
+            primitiveId: repair.primitiveId,
+            detail: repair.detail,
+          }),
+        sourcePatchEntries,
+      );
+    }
+
+    const request = buildSketchDraftRequest(draftStrokes);
     if ('error' in request) {
       errorText = request.error;
       cleanupEvidenceText = '';
@@ -993,7 +1361,7 @@
     }
 
     if (!suggestingFeatures && !suggestionResponse) {
-      requestFeatureSuggestions(currentStrokes);
+      requestFeatureSuggestions(draftStrokes);
     }
     generating = true;
     autoQueued = mode === 'auto';
@@ -1002,18 +1370,21 @@
     clearPreviewResult();
     const runId = ++autoPreviewRunId;
     try {
-      const usePreviewHull = shouldUseSketchPreviewHull(currentStrokes);
-      const previewHullRequest = usePreviewHull ? assertPreviewHullRequest(currentStrokes) : null;
+      const usePreviewHull = shouldUseSketchPreviewHull(draftStrokes);
+      const previewHullRequest = usePreviewHull ? assertPreviewHullRequest(draftStrokes) : null;
       const result = previewHullRequest
         ? await generateSketchPreviewHull(previewHullRequest)
         : await generateSketchDraftPreview(request);
       if (runId !== autoPreviewRunId) return;
       draft = result.draft;
       artifactBundle = result.artifactBundle;
-      previewProfile = previewProfileFor(request.sketch.view, currentStrokes);
+      previewProfile = previewProfileFor(request.sketch.view, draftStrokes);
       syncSketchDocumentEnvelope(result.draft.source);
       autoQueued = false;
       publishPreviewResult(result);
+      if (mode === 'manual') {
+        onManualPreviewResult?.(result);
+      }
       if (previewHullRequest) {
         void loadBrepCandidateGraph(previewHullRequest.document, runId);
         void loadHiddenLineProjection(result.artifactBundle, previewHullRequest.document, runId);
@@ -1044,6 +1415,13 @@
     brepCandidateLoading = true;
     brepCandidateErrorText = '';
     brepCandidateResponse = null;
+    brepCandidateDocument = document;
+    brepCandidateAcceptedSolutionId = null;
+    brepCandidateAcceptErrorText = '';
+    brepCandidateAcceptEvidence = [];
+    brepComponentPackage = null;
+    brepComponentPackageErrorText = '';
+    brepComponentPackageLoading = false;
     try {
       const response = await analyzeSketchBrepCandidates({ document });
       if (runId !== autoPreviewRunId) return;
@@ -1062,12 +1440,139 @@
     brepCandidateResponse = null;
     brepCandidateErrorText = '';
     brepCandidateLoading = false;
+    brepCandidateDocument = null;
+    brepCandidateAcceptingSolutionId = null;
+    brepCandidateAcceptedSolutionId = null;
+    brepCandidateAcceptErrorText = '';
+    brepCandidateAcceptEvidence = [];
+    brepComponentPackage = null;
+    brepComponentPackageErrorText = '';
+    brepComponentPackageLoading = false;
+  }
+
+  async function acceptBrepCandidateSolution(solutionId: string) {
+    if (!brepCandidateDocument || brepCandidateAcceptingSolutionId) return;
+    const runId = autoPreviewRunId;
+    brepCandidateAcceptingSolutionId = solutionId;
+    brepCandidateAcceptErrorText = '';
+    brepCandidateAcceptEvidence = [];
+    brepComponentPackage = null;
+    brepComponentPackageErrorText = '';
+    brepComponentPackageLoading = false;
+    try {
+      const response = await acceptSketchBrepCandidateSolution({
+        partId: 'sketch-preview-hull',
+        document: brepCandidateDocument,
+        solutionId,
+        tolerance: 0.1,
+      });
+      if (runId !== autoPreviewRunId) return;
+      draft = response.draftSource;
+      artifactBundle = response.artifactBundle;
+      brepCandidateResponse = response.candidateResponse;
+      hiddenLineResponse = response.hiddenLineResponse;
+      hiddenLineErrorText = '';
+      hiddenLineLoading = false;
+      brepCandidateAcceptedSolutionId = response.acceptedSolution.solutionId;
+      brepCandidateAcceptEvidence = response.evidence ?? [];
+      publishPreviewResult({ draft: response.draftSource, artifactBundle: response.artifactBundle });
+    } catch (error) {
+      if (runId !== autoPreviewRunId) return;
+      brepCandidateAcceptErrorText = formatBackendError(error);
+    } finally {
+      if (runId === autoPreviewRunId) {
+        brepCandidateAcceptingSolutionId = null;
+      }
+    }
+  }
+
+  function acceptedBrepStepSourceRef(): string | null {
+    return artifactBundle?.exportArtifacts?.find((artifact) => artifact.format.toLowerCase() === 'step')?.path ?? null;
+  }
+
+  function acceptedBrepTopologySummary(): string {
+    const edgeCount = artifactBundle?.edgeTargets?.length ?? 0;
+    if (edgeCount > 0) {
+      return `EXACT BREP TOPOLOGY ${edgeCount} ${edgeCount === 1 ? 'EDGE' : 'EDGES'}`;
+    }
+    return 'EXACT BREP TOPOLOGY PENDING';
+  }
+
+  function acceptedBrepPortTypes(): PortTypeDefinition[] {
+    return [
+      {
+        typeId: ACCEPTED_BREP_PORT_TYPE_ID,
+        displayName: 'Mechanical plane mount',
+        base: 'mechanical.plane',
+        interfaces: ['mechanical.mount'],
+        compatibleWith: [ACCEPTED_BREP_PORT_TYPE_ID],
+        allowedOps: ['place', 'mate'],
+        params: [],
+      },
+    ];
+  }
+
+  function acceptedBrepPorts(): ComponentPort[] {
+    return [
+      {
+        portId: ACCEPTED_BREP_PORT_ID,
+        typeId: ACCEPTED_BREP_PORT_TYPE_ID,
+        frame: {
+          origin: [0, 0, 0],
+          xAxis: [1, 0, 0],
+          yAxis: [0, 1, 0],
+          zAxis: [0, 0, 1],
+        },
+        params: {},
+        interfaces: ['mechanical.mount'],
+        compatibleWith: [ACCEPTED_BREP_PORT_TYPE_ID],
+        allowedOps: ['place', 'mate'],
+      },
+    ];
+  }
+
+  async function createAcceptedBrepComponentPackage() {
+    if (!brepCandidateDocument || !brepCandidateAcceptedSolutionId || brepComponentPackageLoading) return;
+    const sourceRef = acceptedBrepStepSourceRef();
+    if (!sourceRef) {
+      brepComponentPackageErrorText = 'Accepted BRep component package requires an accepted STEP sourceRef.';
+      return;
+    }
+    const runId = autoPreviewRunId;
+    brepComponentPackageLoading = true;
+    brepComponentPackageErrorText = '';
+    brepComponentPackage = null;
+    try {
+      const componentPackage = await acceptedBrepCandidateToComponentPackage({
+        packageId: ACCEPTED_BREP_PACKAGE_ID,
+        version: '0.1.0',
+        displayName: 'Accepted BRep Candidate',
+        tags: ['accepted-brep', 'sketch-candidate'],
+        componentId: ACCEPTED_BREP_COMPONENT_ID,
+        componentVersion: '0.1.0',
+        componentDisplayName: 'Sketch Preview Hull',
+        sourceRef,
+        document: brepCandidateDocument,
+        solutionId: brepCandidateAcceptedSolutionId,
+        portTypes: acceptedBrepPortTypes(),
+        ports: acceptedBrepPorts(),
+      });
+      if (runId !== autoPreviewRunId) return;
+      brepComponentPackage = componentPackage;
+    } catch (error) {
+      if (runId !== autoPreviewRunId) return;
+      brepComponentPackageErrorText = formatBackendError(error);
+    } finally {
+      if (runId === autoPreviewRunId) {
+        brepComponentPackageLoading = false;
+      }
+    }
   }
 
   async function loadHiddenLineProjection(bundle: ArtifactBundle, document: SketchDocument, runId: number) {
     hiddenLineResponse = null;
     hiddenLineErrorText = '';
-    if (bundle.geometryBackend !== 'freecad' || !bundle.fcstdPath) {
+    if (!hasBrepProjectionArtifact(bundle)) {
       hiddenLineLoading = false;
       return;
     }
@@ -1081,6 +1586,9 @@
         tolerance: 0.1,
       });
       if (runId !== autoPreviewRunId) return;
+      if (!response.validation?.passed && applyBrepAutoRepairProjection(document, response)) {
+        return;
+      }
       hiddenLineResponse = response;
     } catch (error) {
       if (runId !== autoPreviewRunId) return;
@@ -1090,6 +1598,130 @@
         hiddenLineLoading = false;
       }
     }
+  }
+
+  function applyBrepAutoRepairProjection(
+    document: SketchDocument,
+    response: BrepHiddenLineProjectionResponse,
+  ): boolean {
+    if (brepAutoRepairAttempts >= 1) return false;
+
+    const repair = autoRepairSketchDocumentFromBrepProjection(document, response);
+    if (!repair.repaired || repair.evidence.length === 0) return false;
+
+    const replay = sketchDocumentToStrokes(repair.document);
+    if ('error' in replay) return false;
+
+    brepAutoRepairAttempts += 1;
+    strokes = replay.strokes;
+    activeStroke = null;
+    clearSelectedPoint();
+    primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
+    sketchDocumentSnapshot = repair.document;
+    sketchDocumentImportText = formatSketchDocumentSource(repair.document);
+    errorText = '';
+    cleanupEvidenceText = repair.evidence.map((entry) => entry.detail).join(' / ');
+    sourcePatchEntries = repair.evidence.reduce(
+      (entries, entry) =>
+        appendSketchSourcePatch(entries, {
+          action: 'AUTO SNAP',
+          primitiveId: entry.primitiveId,
+          detail: entry.detail,
+        }),
+      sourcePatchEntries,
+    );
+    clearFeatureSuggestions();
+    hiddenLineResponse = null;
+    hiddenLineErrorText = '';
+    hiddenLineLoading = false;
+
+    void generateDraft('auto', replay.strokes, { preserveBrepAutoRepairAttempts: true });
+    return true;
+  }
+
+  function convertDerivedBrepSketches() {
+    if (!brepDerivedSketch) {
+      errorText = 'BRep derived sketch unavailable.';
+      return;
+    }
+    if ('error' in brepDerivedSketch) {
+      errorText = brepDerivedSketch.error;
+      return;
+    }
+
+    const replay = sketchDocumentToStrokes(brepDerivedSketch.document);
+    if ('error' in replay) {
+      errorText = replay.error;
+      return;
+    }
+
+    clearAutoPreviewQueue();
+    clearFeatureSuggestions();
+    clearAcceptedSuggestion();
+    clearImportRepair();
+    strokes = replay.strokes;
+    activeStroke = null;
+    clearSelectedPoint();
+    primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
+    sketchDocumentSnapshot = brepDerivedSketch.document;
+    sketchDocumentImportText = formatSketchDocumentSource(brepDerivedSketch.document);
+    errorText = '';
+    cleanupEvidenceText = brepDerivedSketch.evidence;
+    sourcePatchEntries = appendSketchSourcePatch(sourcePatchEntries, {
+      action: 'DERIVE BREP',
+      primitiveId: brepDerivedSketch.views.map((view) => view.toUpperCase()).join(','),
+      detail: brepDerivedSketch.evidence,
+    });
+    clearPreviewResult();
+    requestFeatureSuggestions(replay.strokes);
+
+    void generateDraft('auto', replay.strokes);
+  }
+
+  function applyBrepTopologyRepair(proposal: SketchTopologyRepairProposal) {
+    if (!sketchDocumentSource || !hiddenLineResponse) {
+      errorText = 'Topology repair source unavailable.';
+      return;
+    }
+
+    const repair = applySketchTopologyRepairProposal(sketchDocumentSource, hiddenLineResponse, proposal.proposalId);
+    if ('error' in repair) {
+      errorText = repair.error;
+      return;
+    }
+
+    const replay = sketchDocumentToStrokes(repair.document);
+    if ('error' in replay) {
+      errorText = replay.error;
+      return;
+    }
+
+    clearAutoPreviewQueue();
+    clearFeatureSuggestions();
+    clearAcceptedSuggestion();
+    clearImportRepair();
+    strokes = replay.strokes;
+    activeStroke = null;
+    clearSelectedPoint();
+    primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
+    sketchDocumentSnapshot = repair.document;
+    sketchDocumentImportText = formatSketchDocumentSource(repair.document);
+    errorText = '';
+    cleanupEvidenceText = repair.evidence.detail;
+    sourcePatchEntries = appendSketchSourcePatch(sourcePatchEntries, {
+      action: 'TOPOLOGY REDRAW',
+      primitiveId: repair.evidence.primitiveId,
+      detail: repair.evidence.detail,
+    });
+    clearPreviewResult();
+    requestFeatureSuggestions(replay.strokes);
+
+    void generateDraft('auto', replay.strokes);
+  }
+
+  function hasBrepProjectionArtifact(bundle: ArtifactBundle): boolean {
+    if (bundle.fcstdPath) return true;
+    return Boolean(bundle.exportArtifacts?.some((artifact) => artifact.format === 'step' && artifact.path));
   }
 
   function clearHiddenLineProjection() {
@@ -1240,6 +1872,34 @@
       if (stroke.closed) return stroke;
     }
     return null;
+  }
+
+  function preserveSketchDocumentEnvelope(
+    document: SketchDocument,
+    currentStrokes: SketchStroke[],
+    snapshot: SketchDocument | null,
+  ): SketchDocument {
+    if (!snapshot || !strokesMatchDocumentLineage(currentStrokes, snapshot)) {
+      return document;
+    }
+
+    return {
+      ...document,
+      documentId: snapshot.documentId,
+      activeSketchId: snapshot.activeSketchId,
+      units: snapshot.units,
+      metadata: snapshot.metadata,
+    };
+  }
+
+  function strokesMatchDocumentLineage(currentStrokes: SketchStroke[], document: SketchDocument): boolean {
+    const documentSignatures = new Set(
+      (document.sketches ?? []).flatMap((sketch) =>
+        (sketch.primitives ?? []).map((primitive) => `${primitive.primitiveId}:${sketch.view}`),
+      ),
+    );
+
+    return currentStrokes.length > 0 && currentStrokes.every((stroke) => documentSignatures.has(`${stroke.primitiveId}:${stroke.view}`));
   }
 
   function syncSketchDocumentEnvelope(source: string) {
@@ -1407,8 +2067,92 @@
     return value.toFixed(2).replace(/\.?0+$/, '');
   }
 
+  function displayStrokePoints(stroke: SketchStroke): SketchPoint[] {
+    if (strokeKind(stroke) === 'circle') {
+      const center = stroke.points[0];
+      const radius = stroke.radius ?? 0;
+      const segments = 24;
+      const points: SketchPoint[] = [];
+      for (let index = 0; index <= segments; index += 1) {
+        const angle = (Math.PI * 2 * index) / segments;
+        points.push([
+          Number((center[0] + Math.cos(angle) * radius).toFixed(2)),
+          Number((center[1] + Math.sin(angle) * radius).toFixed(2)),
+        ]);
+      }
+      return points;
+    }
+    return stroke.points.map(([x, y]) => [x, y]);
+  }
+
   function validationStatusLabel(row: SketchValidationRow): string {
     return row.status.toUpperCase();
+  }
+
+  function compactInspectorDetail(detail: string): string {
+    const trimmed = detail.trim();
+    if (!trimmed) return '';
+    return trimmed.replace(/^Waiting for\s+/i, '').replace(/\.$/, '');
+  }
+
+  function paneViewBox(view: SketchView): string {
+    const camera = paneCameras[view];
+    const span = 100 / Math.max(camera.zoom, 0.25);
+    const min = 50 - span / 2;
+    return `${formatNumber(min + camera.panX)} ${formatNumber(min + camera.panY)} ${formatNumber(span)} ${formatNumber(span)}`;
+  }
+
+  function zoomPane(view: SketchView, deltaY: number) {
+    const camera = paneCameras[view];
+    const zoomFactor = deltaY < 0 ? 1.12 : 1 / 1.12;
+    paneCameras = {
+      ...paneCameras,
+      [view]: {
+        ...camera,
+        zoom: Number(Math.min(8, Math.max(0.5, camera.zoom * zoomFactor)).toFixed(3)),
+      },
+    };
+  }
+
+  function resetPaneCamera(view: SketchView) {
+    paneCameras = {
+      ...paneCameras,
+      [view]: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
+    };
+  }
+
+  function handlePaneWheel(event: WheelEvent, view: SketchView) {
+    event.preventDefault();
+    zoomPane(view, event.deltaY);
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      activeStroke = null;
+      shapeDraft = null;
+      panePan = null;
+      return;
+    }
+
+    if (event.key === 'Enter' && activeTool === 'polyline' && activeStroke && !activeStroke.closed) {
+      event.preventDefault();
+      closeActivePolyline();
+      return;
+    }
+
+    if ((event.key === 'Backspace' || event.key === 'Delete') && activeStroke && !activeStroke.closed && strokeKind(activeStroke) === 'polyline') {
+      event.preventDefault();
+      const nextPoints = activeStroke.points.slice(0, -1);
+      activeStroke = nextPoints.length
+        ? {
+            ...activeStroke,
+            points: nextPoints,
+          }
+        : null;
+      if (nextPoints.length === 0) {
+        activeStroke = null;
+      }
+    }
   }
 
   function summarizeDimensionConstraints(stroke: SketchStroke | null): {
@@ -1437,6 +2181,8 @@
   }
 </script>
 
+<svelte:window onkeydown={handleWindowKeydown} />
+
 <div class="sketch-workspace">
   <header class="sketch-workspace__header">
     <div>
@@ -1444,6 +2190,10 @@
       <div class="sketch-workspace__meta">ORTHOGRAPHIC SKETCH / EXTRUDE 12MM</div>
     </div>
     <div class="sketch-workspace__actions">
+      <button class="btn btn-xs" class:btn-primary={activeTool === 'select'} onclick={() => (activeTool = 'select')} disabled={generating}>SELECT</button>
+      <button class="btn btn-xs" class:btn-primary={activeTool === 'polyline'} onclick={() => (activeTool = 'polyline')} disabled={generating}>POLYLINE</button>
+      <button class="btn btn-xs" class:btn-primary={activeTool === 'rectangle'} onclick={() => (activeTool = 'rectangle')} disabled={generating}>RECTANGLE</button>
+      <button class="btn btn-xs" class:btn-primary={activeTool === 'circle'} onclick={() => (activeTool = 'circle')} disabled={generating}>CIRCLE</button>
       <button class="btn btn-xs" onclick={closeOpenProfiles} disabled={generating || (!strokes.length && !activeStroke)}>CLOSE OPEN</button>
       <button
         class="btn btn-xs"
@@ -1474,7 +2224,10 @@
       <button class="btn btn-xs" onclick={undoLastStroke} disabled={generating || (!strokes.length && !activeStroke)}>UNDO</button>
       <button class="btn btn-xs" onclick={clearSketch} disabled={generating || (!strokes.length && !activeStroke && !draft && !errorText)}>CLEAR</button>
       <button class="btn btn-xs" onclick={replaySketchDocumentSnapshot} disabled={generating || !sketchDocumentSnapshot}>REPLAY IR</button>
-      <button class="btn btn-xs btn-primary" onclick={() => generateDraft('manual')} disabled={generating}>
+      {#if onClose}
+        <button class="btn btn-xs" onclick={() => onClose?.()}>CLOSE SKETCH</button>
+      {/if}
+      <button class="btn btn-xs btn-primary sketch-workspace__primary-action" onclick={() => generateDraft('manual')} disabled={generating}>
         {generating ? 'GENERATING...' : 'PREVIEW NOW'}
       </button>
     </div>
@@ -1486,37 +2239,48 @@
         class="sketch-pane sketch-pane--front"
         role="application"
         aria-label="Front sketch pane"
-        onpointerdown={(event) => beginStroke(event, 'front')}
-        onpointermove={(event) => (pointDrag ? dragPoint(event) : extendStroke(event))}
-        onpointerup={(event) => (pointDrag ? endPointDrag(event) : endStroke(event))}
-        onpointercancel={(event) => (pointDrag ? endPointDrag(event) : endStroke(event))}
+        onpointerdown={(event) => handlePanePointerDown(event, 'front')}
+        onpointermove={(event) => handlePanePointerMove(event, 'front')}
+        onpointerup={(event) => handlePanePointerUp(event, 'front')}
+        onpointercancel={(event) => handlePanePointerUp(event, 'front')}
+        onclick={(event) => handlePaneClick(event, 'front')}
+        onwheel={(event) => handlePaneWheel(event, 'front')}
       >
-        <div class="sketch-pane__label">FRONT</div>
-        <svg bind:this={frontSvg} class="sketch-pane__drawing" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <div class="sketch-pane__label">FRONT <button class="sketch-pane__label-action" type="button" onclick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          resetPaneCamera('front');
+        }}>RESET PAN</button></div>
+        <svg bind:this={frontSvg} class="sketch-pane__drawing" viewBox={paneViewBox('front')} preserveAspectRatio="none" aria-hidden="true">
           {#each visibleStrokes('front') as stroke (stroke.primitiveId)}
-            <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(stroke.points)} fill="none" />
-            {#if stroke.closed}
-              {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
-                {@const point = stroke.points[pointIndex]}
-                <circle
-                  class="sketch-point-handle"
-                  class:sketch-point-handle--active={(pointDrag?.primitiveId === stroke.primitiveId && pointDrag.pointIndex === pointIndex) ||
-                    (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
-                  cx={point[0]}
-                  cy={point[1]}
-                  r="2.8"
-                  role="button"
-                  tabindex="0"
-                  aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
-                  data-sketch-point-handle
-                  data-point-handle
-                  onpointerdown={(event) => beginPointDrag(event, stroke, pointIndex)}
-                  onpointermove={dragPoint}
-                  onpointerup={endPointDrag}
-                  onpointercancel={endPointDrag}
-                />
-              {/each}
-            {/if}
+            <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(displayStrokePoints(stroke))} fill="none" />
+            {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
+              {@const point = stroke.points[pointIndex]}
+              <circle
+                class="sketch-point-handle"
+                class:sketch-point-handle--active={(pointDrag?.primitiveId === stroke.primitiveId && pointDrag.pointIndex === pointIndex) ||
+                  (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
+                cx={point[0]}
+                cy={point[1]}
+                r="2.2"
+                role="button"
+                tabindex="0"
+                aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
+                data-sketch-point-handle
+                data-point-handle
+                onclick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  suppressNextPaneClick = true;
+                  if (activeStroke?.primitiveId === stroke.primitiveId && !stroke.closed && pointIndex === 0) {
+                    closeActivePolyline();
+                  } else {
+                    selectPoint(stroke, pointIndex);
+                  }
+                }}
+                onpointerdown={(event) => beginPointDrag(event, stroke, pointIndex)}
+              />
+            {/each}
           {/each}
           {#if frontHiddenLineOverlay}
             <g
@@ -1543,37 +2307,48 @@
         class="sketch-pane"
         role="application"
         aria-label="Top sketch pane"
-        onpointerdown={(event) => beginStroke(event, 'top')}
-        onpointermove={(event) => (pointDrag ? dragPoint(event) : extendStroke(event))}
-        onpointerup={(event) => (pointDrag ? endPointDrag(event) : endStroke(event))}
-        onpointercancel={(event) => (pointDrag ? endPointDrag(event) : endStroke(event))}
+        onpointerdown={(event) => handlePanePointerDown(event, 'top')}
+        onpointermove={(event) => handlePanePointerMove(event, 'top')}
+        onpointerup={(event) => handlePanePointerUp(event, 'top')}
+        onpointercancel={(event) => handlePanePointerUp(event, 'top')}
+        onclick={(event) => handlePaneClick(event, 'top')}
+        onwheel={(event) => handlePaneWheel(event, 'top')}
       >
-        <div class="sketch-pane__label">TOP</div>
-        <svg bind:this={topSvg} class="sketch-pane__drawing" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <div class="sketch-pane__label">TOP <button class="sketch-pane__label-action" type="button" onclick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          resetPaneCamera('top');
+        }}>RESET PAN</button></div>
+        <svg bind:this={topSvg} class="sketch-pane__drawing" viewBox={paneViewBox('top')} preserveAspectRatio="none" aria-hidden="true">
           {#each visibleStrokes('top') as stroke (stroke.primitiveId)}
-            <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(stroke.points)} fill="none" />
-            {#if stroke.closed}
-              {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
-                {@const point = stroke.points[pointIndex]}
-                <circle
-                  class="sketch-point-handle"
-                  class:sketch-point-handle--active={(pointDrag?.primitiveId === stroke.primitiveId && pointDrag.pointIndex === pointIndex) ||
-                    (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
-                  cx={point[0]}
-                  cy={point[1]}
-                  r="2.8"
-                  role="button"
-                  tabindex="0"
-                  aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
-                  data-sketch-point-handle
-                  data-point-handle
-                  onpointerdown={(event) => beginPointDrag(event, stroke, pointIndex)}
-                  onpointermove={dragPoint}
-                  onpointerup={endPointDrag}
-                  onpointercancel={endPointDrag}
-                />
-              {/each}
-            {/if}
+            <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(displayStrokePoints(stroke))} fill="none" />
+            {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
+              {@const point = stroke.points[pointIndex]}
+              <circle
+                class="sketch-point-handle"
+                class:sketch-point-handle--active={(pointDrag?.primitiveId === stroke.primitiveId && pointDrag.pointIndex === pointIndex) ||
+                  (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
+                cx={point[0]}
+                cy={point[1]}
+                r="2.2"
+                role="button"
+                tabindex="0"
+                aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
+                data-sketch-point-handle
+                data-point-handle
+                onclick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  suppressNextPaneClick = true;
+                  if (activeStroke?.primitiveId === stroke.primitiveId && !stroke.closed && pointIndex === 0) {
+                    closeActivePolyline();
+                  } else {
+                    selectPoint(stroke, pointIndex);
+                  }
+                }}
+                onpointerdown={(event) => beginPointDrag(event, stroke, pointIndex)}
+              />
+            {/each}
           {/each}
           {#if topHiddenLineOverlay}
             <g
@@ -1600,37 +2375,48 @@
         class="sketch-pane"
         role="application"
         aria-label="Side sketch pane"
-        onpointerdown={(event) => beginStroke(event, 'side')}
-        onpointermove={(event) => (pointDrag ? dragPoint(event) : extendStroke(event))}
-        onpointerup={(event) => (pointDrag ? endPointDrag(event) : endStroke(event))}
-        onpointercancel={(event) => (pointDrag ? endPointDrag(event) : endStroke(event))}
+        onpointerdown={(event) => handlePanePointerDown(event, 'side')}
+        onpointermove={(event) => handlePanePointerMove(event, 'side')}
+        onpointerup={(event) => handlePanePointerUp(event, 'side')}
+        onpointercancel={(event) => handlePanePointerUp(event, 'side')}
+        onclick={(event) => handlePaneClick(event, 'side')}
+        onwheel={(event) => handlePaneWheel(event, 'side')}
       >
-        <div class="sketch-pane__label">SIDE</div>
-        <svg bind:this={sideSvg} class="sketch-pane__drawing" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <div class="sketch-pane__label">SIDE <button class="sketch-pane__label-action" type="button" onclick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          resetPaneCamera('side');
+        }}>RESET PAN</button></div>
+        <svg bind:this={sideSvg} class="sketch-pane__drawing" viewBox={paneViewBox('side')} preserveAspectRatio="none" aria-hidden="true">
           {#each visibleStrokes('side') as stroke (stroke.primitiveId)}
-            <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(stroke.points)} fill="none" />
-            {#if stroke.closed}
-              {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
-                {@const point = stroke.points[pointIndex]}
-                <circle
-                  class="sketch-point-handle"
-                  class:sketch-point-handle--active={(pointDrag?.primitiveId === stroke.primitiveId && pointDrag.pointIndex === pointIndex) ||
-                    (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
-                  cx={point[0]}
-                  cy={point[1]}
-                  r="2.8"
-                  role="button"
-                  tabindex="0"
-                  aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
-                  data-sketch-point-handle
-                  data-point-handle
-                  onpointerdown={(event) => beginPointDrag(event, stroke, pointIndex)}
-                  onpointermove={dragPoint}
-                  onpointerup={endPointDrag}
-                  onpointercancel={endPointDrag}
-                />
-              {/each}
-            {/if}
+            <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(displayStrokePoints(stroke))} fill="none" />
+            {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
+              {@const point = stroke.points[pointIndex]}
+              <circle
+                class="sketch-point-handle"
+                class:sketch-point-handle--active={(pointDrag?.primitiveId === stroke.primitiveId && pointDrag.pointIndex === pointIndex) ||
+                  (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
+                cx={point[0]}
+                cy={point[1]}
+                r="2.2"
+                role="button"
+                tabindex="0"
+                aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
+                data-sketch-point-handle
+                data-point-handle
+                onclick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  suppressNextPaneClick = true;
+                  if (activeStroke?.primitiveId === stroke.primitiveId && !stroke.closed && pointIndex === 0) {
+                    closeActivePolyline();
+                  } else {
+                    selectPoint(stroke, pointIndex);
+                  }
+                }}
+                onpointerdown={(event) => beginPointDrag(event, stroke, pointIndex)}
+              />
+            {/each}
           {/each}
           {#if sideHiddenLineOverlay}
             <g
@@ -1656,21 +2442,29 @@
     </div>
 
     <div class="sketch-workspace__inspect">
-      <div class="sketch-workspace__section sketch-workspace__section--primitives">
-        <div class="sketch-workspace__section-title">PRIMITIVES</div>
-        <div class="sketch-primitive-list">
-          {#each strokes as stroke (stroke.primitiveId)}
-            <div class="sketch-token">{stroke.primitiveId} / {stroke.view} / {stroke.closed ? 'closed' : 'open'}</div>
-          {:else}
-            <div class="sketch-token">NO PROFILE</div>
-          {/each}
+      <SketchInspectorSection title="PRIMITIVES" ariaLabel="Sketch primitives">
+        {#snippet summaryExtra()}
+          <span>{strokes.length ? `${strokes.length} profile${strokes.length === 1 ? '' : 's'}` : 'EMPTY'}</span>
+        {/snippet}
+        <div class="sketch-workspace__section sketch-workspace__section--primitives">
+          <div class="sketch-primitive-list">
+            {#each [...strokes, ...(activeStroke ? [activeStroke] : [])] as stroke (stroke.primitiveId)}
+              <div class="sketch-token">{stroke.primitiveId} / {stroke.view} / {stroke.closed ? 'closed' : 'open'}</div>
+            {:else}
+              <div class="sketch-token">NO PROFILE</div>
+            {/each}
+          </div>
         </div>
-	      </div>
+      </SketchInspectorSection>
 
-	      <div class="sketch-draft-mode" aria-label="Draft mode">
-	        <div class="sketch-workspace__section-title">DRAFT MODE</div>
-	        <div class="sketch-token">{draftModeSummary.label} / {draftModeSummary.detail}</div>
-	      </div>
+      <SketchInspectorSection title="DRAFT MODE" ariaLabel="Draft mode">
+        {#snippet summaryExtra()}
+          <span>{draftModeSummary.label}</span>
+        {/snippet}
+        <div class="sketch-draft-mode">
+          <div class="sketch-token">{draftModeSummary.detail}</div>
+        </div>
+      </SketchInspectorSection>
 
 	      {#if dimensionSummary}
 	        <div class="sketch-dimensions" aria-label="Dimensions and constraints">
@@ -1733,140 +2527,163 @@
         </div>
       {/if}
 
-      <div class="sketch-ledger" aria-label="Step ledger">
-        <div class="sketch-workspace__section-title">STEP LEDGER</div>
+      <SketchInspectorSection title="STEP LEDGER" ariaLabel="Step ledger">
+        {#snippet summaryExtra()}
+          <span>{previewStep.label}</span>
+        {/snippet}
+        <div class="sketch-ledger">
         <div class="sketch-ledger__rows">
-          <div class="sketch-ledger__row" data-state={profileLedgerState}>
-            <span class="sketch-ledger__dot"></span>
-            <span class="sketch-ledger__label">PROFILE</span>
-            <span class="sketch-ledger__state">{profileLedgerState}</span>
-            <span class="sketch-ledger__detail">{profileLedgerDetail}</span>
-          </div>
-          <div class="sketch-ledger__row" data-state={previewStep.state}>
-            <span class="sketch-ledger__dot"></span>
-            <span class="sketch-ledger__label">PREVIEW</span>
-            <span class="sketch-ledger__state">{previewStep.label}</span>
-            <span class="sketch-ledger__detail">
+          <details class="sketch-ledger__row" data-state={profileLedgerState} data-step-ledger-row open={profileLedgerState === 'failed'}>
+            <summary class="sketch-ledger__row-summary">
+              <span class="sketch-ledger__dot"></span>
+              <span class="sketch-ledger__label">PROFILE</span>
+              <span class="sketch-ledger__state">{profileLedgerState}</span>
+              <span class="sketch-ledger__summary-detail">{compactInspectorDetail(profileLedgerDetail)}</span>
+            </summary>
+            <div class="sketch-ledger__detail">{profileLedgerDetail}</div>
+          </details>
+          <details class="sketch-ledger__row" data-state={previewStep.state} data-step-ledger-row open={previewStep.state === 'failed'}>
+            <summary class="sketch-ledger__row-summary">
+              <span class="sketch-ledger__dot"></span>
+              <span class="sketch-ledger__label">PREVIEW</span>
+              <span class="sketch-ledger__state">{previewStep.label}</span>
+              <span class="sketch-ledger__summary-detail">
+                {compactInspectorDetail(`${autoPreviewPrimitiveId ? `${autoPreviewPrimitiveId} / ` : ''}${previewStep.detail}`)}
+              </span>
+            </summary>
+            <div class="sketch-ledger__detail">
               {#if autoPreviewPrimitiveId}{autoPreviewPrimitiveId} / {/if}{previewStep.detail}
-            </span>
-          </div>
-          <div class="sketch-ledger__row" data-state={suggestionLedgerState}>
-            <span class="sketch-ledger__dot"></span>
-            <span class="sketch-ledger__label">FEATURE</span>
-            <span class="sketch-ledger__state">{suggestionLedgerLabel}</span>
-            <span class="sketch-ledger__detail">{suggestionLedgerDetail}</span>
-          </div>
+            </div>
+          </details>
+          <details class="sketch-ledger__row" data-state={suggestionLedgerState} data-step-ledger-row open={suggestionLedgerState === 'failed'}>
+            <summary class="sketch-ledger__row-summary">
+              <span class="sketch-ledger__dot"></span>
+              <span class="sketch-ledger__label">FEATURE</span>
+              <span class="sketch-ledger__state">{suggestionLedgerLabel}</span>
+              <span class="sketch-ledger__summary-detail">{compactInspectorDetail(suggestionLedgerDetail)}</span>
+            </summary>
+            <div class="sketch-ledger__detail">{suggestionLedgerDetail}</div>
+          </details>
         </div>
-      </div>
+        </div>
+      </SketchInspectorSection>
 
-      <div class="sketch-point-editor" aria-label="Point editor">
-        <div class="sketch-workspace__section-title">POINT EDITOR</div>
-        <label class="sketch-point-editor__field">
-          <span>POINT X</span>
-          <input
-            class="sketch-point-editor__input"
-            type="text"
-            inputmode="decimal"
-            aria-label="POINT X"
-            value={selectedPointX}
-            oninput={(event) => {
-              selectedPointX = event.currentTarget.value;
-            }}
-            disabled={generating || !selectedPoint}
-          />
-        </label>
-        <label class="sketch-point-editor__field">
-          <span>POINT Y</span>
-          <input
-            class="sketch-point-editor__input"
-            type="text"
-            inputmode="decimal"
-            aria-label="POINT Y"
-            value={selectedPointY}
-            oninput={(event) => {
-              selectedPointY = event.currentTarget.value;
-            }}
-            disabled={generating || !selectedPoint}
-          />
-        </label>
-        <button class="btn btn-xs btn-primary" type="button" onclick={applySelectedPointCoordinates} disabled={generating || !selectedPoint}>
-          APPLY POINT
-        </button>
-      </div>
+      <SketchInspectorSection title="POINT EDITOR" ariaLabel="Point editor">
+        {#snippet summaryExtra()}
+          <span>{selectedPoint ? `${selectedPoint.primitiveId} / ${selectedPoint.pointIndex}` : 'NO POINT'}</span>
+        {/snippet}
+        <div class="sketch-point-editor">
+          <label class="sketch-point-editor__field">
+            <span>POINT X</span>
+            <input
+              class="sketch-point-editor__input"
+              type="text"
+              inputmode="decimal"
+              aria-label="POINT X"
+              value={selectedPointX}
+              oninput={(event) => {
+                selectedPointX = event.currentTarget.value;
+              }}
+              disabled={generating || !selectedPoint}
+            />
+          </label>
+          <label class="sketch-point-editor__field">
+            <span>POINT Y</span>
+            <input
+              class="sketch-point-editor__input"
+              type="text"
+              inputmode="decimal"
+              aria-label="POINT Y"
+              value={selectedPointY}
+              oninput={(event) => {
+                selectedPointY = event.currentTarget.value;
+              }}
+              disabled={generating || !selectedPoint}
+            />
+          </label>
+          <button class="btn btn-xs btn-primary" type="button" onclick={applySelectedPointCoordinates} disabled={generating || !selectedPoint}>
+            APPLY POINT
+          </button>
+        </div>
+      </SketchInspectorSection>
 
-      <div class="sketch-profile-size-editor" aria-label="Profile size editor">
-        <div class="sketch-workspace__section-title">PROFILE SIZE</div>
-        <label class="sketch-profile-size-editor__field">
-          <span>PROFILE X</span>
-          <input
-            class="sketch-profile-size-editor__input"
-            type="text"
-            inputmode="decimal"
-            aria-label="PROFILE X"
-            value={profileX}
-            oninput={(event) => {
-              profileX = event.currentTarget.value;
-            }}
+      <SketchInspectorSection title="PROFILE SIZE" ariaLabel="Profile size">
+        {#snippet summaryExtra()}
+          <span>{profileSizeTarget ? profileSizeTarget.primitiveId : 'NO PROFILE'}</span>
+        {/snippet}
+        <div class="sketch-profile-size-editor">
+          <label class="sketch-profile-size-editor__field">
+            <span>PROFILE X</span>
+            <input
+              class="sketch-profile-size-editor__input"
+              type="text"
+              inputmode="decimal"
+              aria-label="PROFILE X"
+              value={profileX}
+              oninput={(event) => {
+                profileX = event.currentTarget.value;
+              }}
+              disabled={generating || !profileSizeTarget}
+            />
+          </label>
+          <label class="sketch-profile-size-editor__field">
+            <span>PROFILE Y</span>
+            <input
+              class="sketch-profile-size-editor__input"
+              type="text"
+              inputmode="decimal"
+              aria-label="PROFILE Y"
+              value={profileY}
+              oninput={(event) => {
+                profileY = event.currentTarget.value;
+              }}
+              disabled={generating || !profileSizeTarget}
+            />
+          </label>
+          <label class="sketch-profile-size-editor__field">
+            <span>PROFILE WIDTH</span>
+            <input
+              class="sketch-profile-size-editor__input"
+              type="text"
+              inputmode="decimal"
+              aria-label="PROFILE WIDTH"
+              value={profileWidth}
+              oninput={(event) => {
+                profileWidth = event.currentTarget.value;
+              }}
+              disabled={generating || !profileSizeTarget}
+            />
+          </label>
+          <label class="sketch-profile-size-editor__field">
+            <span>PROFILE HEIGHT</span>
+            <input
+              class="sketch-profile-size-editor__input"
+              type="text"
+              inputmode="decimal"
+              aria-label="PROFILE HEIGHT"
+              value={profileHeight}
+              oninput={(event) => {
+                profileHeight = event.currentTarget.value;
+              }}
+              disabled={generating || !profileSizeTarget}
+            />
+          </label>
+          <button class="btn btn-xs btn-primary" type="button" onclick={applyProfileSize} disabled={generating || !profileSizeTarget}>
+            APPLY SIZE
+          </button>
+          <button class="btn btn-xs btn-primary" type="button" onclick={applyProfilePosition} disabled={generating || !profileSizeTarget}>
+            APPLY POSITION
+          </button>
+          <button
+            class="btn btn-xs btn-secondary"
+            type="button"
+            onclick={toggleProfileDimensionLocks}
             disabled={generating || !profileSizeTarget}
-          />
-        </label>
-        <label class="sketch-profile-size-editor__field">
-          <span>PROFILE Y</span>
-          <input
-            class="sketch-profile-size-editor__input"
-            type="text"
-            inputmode="decimal"
-            aria-label="PROFILE Y"
-            value={profileY}
-            oninput={(event) => {
-              profileY = event.currentTarget.value;
-            }}
-            disabled={generating || !profileSizeTarget}
-          />
-        </label>
-        <label class="sketch-profile-size-editor__field">
-          <span>PROFILE WIDTH</span>
-          <input
-            class="sketch-profile-size-editor__input"
-            type="text"
-            inputmode="decimal"
-            aria-label="PROFILE WIDTH"
-            value={profileWidth}
-            oninput={(event) => {
-              profileWidth = event.currentTarget.value;
-            }}
-            disabled={generating || !profileSizeTarget}
-          />
-        </label>
-        <label class="sketch-profile-size-editor__field">
-          <span>PROFILE HEIGHT</span>
-          <input
-            class="sketch-profile-size-editor__input"
-            type="text"
-            inputmode="decimal"
-            aria-label="PROFILE HEIGHT"
-            value={profileHeight}
-            oninput={(event) => {
-              profileHeight = event.currentTarget.value;
-            }}
-            disabled={generating || !profileSizeTarget}
-          />
-        </label>
-        <button class="btn btn-xs btn-primary" type="button" onclick={applyProfileSize} disabled={generating || !profileSizeTarget}>
-          APPLY SIZE
-        </button>
-        <button class="btn btn-xs btn-primary" type="button" onclick={applyProfilePosition} disabled={generating || !profileSizeTarget}>
-          APPLY POSITION
-        </button>
-        <button
-          class="btn btn-xs btn-secondary"
-          type="button"
-          onclick={toggleProfileDimensionLocks}
-          disabled={generating || !profileSizeTarget}
-        >
-          {dimensionConstraintSummary?.allLocked ? 'UNLOCK DIMENSIONS' : 'LOCK DIMENSIONS'}
-        </button>
-      </div>
+          >
+            {dimensionConstraintSummary?.allLocked ? 'UNLOCK DIMENSIONS' : 'LOCK DIMENSIONS'}
+          </button>
+        </div>
+      </SketchInspectorSection>
 
       {#if errorText}
         <div class="sketch-error" role="alert">{errorText}</div>
@@ -1886,8 +2703,7 @@
       {/if}
 
       {#if sourcePatchEntries.length}
-        <div class="sketch-source-patch-ledger" aria-label="Source patch ledger">
-          <div class="sketch-workspace__section-title">SOURCE PATCH LEDGER</div>
+        <SketchInspectorSection title="SOURCE PATCH LEDGER" ariaLabel="Source patch ledger" className="sketch-source-patch-ledger">
           <div class="sketch-source-patch-ledger__rows">
             {#each sourcePatchEntries as entry (entry.patchId)}
               <div class="sketch-source-patch-ledger__row">
@@ -1897,27 +2713,44 @@
               </div>
             {/each}
           </div>
+        </SketchInspectorSection>
+      {/if}
+
+      {#if brepTopologyRepairProposals.length}
+        <div class="sketch-topology-repair" aria-label="BRep topology repair proposals">
+          <div class="sketch-workspace__section-title">TOPOLOGY REPAIR PROPOSALS</div>
+          <div class="sketch-topology-repair__rows">
+            {#each brepTopologyRepairProposals as proposal}
+              <div class="sketch-topology-repair-proposal" data-brep-topology-repair-proposal={proposal.proposalId}>
+                <span>{proposal.kind.toUpperCase()} {proposal.view?.toUpperCase() ?? 'UNKNOWN'} / {proposal.primitiveId ?? 'UNBOUND'} / {proposal.reason}</span>
+                <button class="btn btn-xs btn-primary" type="button" onclick={() => applyBrepTopologyRepair(proposal)} disabled={generating}>
+                  APPLY REDRAW SEED
+                </button>
+              </div>
+            {/each}
+          </div>
         </div>
       {/if}
 
-      <div class="sketch-validation-ledger" aria-label="Validation ledger">
-        <div class="sketch-workspace__section-title">VALIDATION LEDGER</div>
+      <SketchInspectorSection title="VALIDATION LEDGER" ariaLabel="Validation ledger" className="sketch-validation-ledger">
         <div class="sketch-validation-ledger__rows">
           {#each visibleValidationRows as row (row.id)}
-            <div class="sketch-validation-ledger__row validation-row" data-status={row.status} data-validation-ledger-row>
-              <span class="sketch-validation-ledger__label">{row.label.toUpperCase()}</span>
-              <span class="sketch-validation-ledger__status">{validationStatusLabel(row)}</span>
-              <span class="sketch-validation-ledger__detail">{row.detail}</span>
-            </div>
+            <details class="sketch-validation-ledger__row validation-row" data-status={row.status} data-validation-ledger-row open={row.status === 'fail'}>
+              <summary class="sketch-validation-ledger__row-summary">
+                <span class="sketch-validation-ledger__label">{row.label.toUpperCase()}</span>
+                <span class="sketch-validation-ledger__status">{validationStatusLabel(row)}</span>
+                <span class="sketch-validation-ledger__summary-detail">{compactInspectorDetail(row.detail)}</span>
+              </summary>
+              <div class="sketch-validation-ledger__detail">{row.detail}</div>
+            </details>
           {/each}
         </div>
-      </div>
+      </SketchInspectorSection>
 
-      <div class="sketch-document-source" aria-label="Sketch document source">
-        <div class="sketch-document-source__header">
-          <div class="sketch-workspace__section-title">SKETCH DOCUMENT / SKETCH IR</div>
+      <SketchInspectorSection title="SKETCH DOCUMENT / SKETCH IR" ariaLabel="Sketch document source" className="sketch-document-source">
+        {#snippet summaryExtra()}
           <span class="sketch-document-source__status">{sketchDocumentStatus}</span>
-        </div>
+        {/snippet}
 
         {#if !sketchDocumentSourceSummary.error}
           <div class="sketch-token sketch-document-source__summary-line">{sketchDocumentSourceSummary.summary}</div>
@@ -1938,30 +2771,33 @@
             {openProfileCount > 0 ? 'CLOSE PROFILE TO BUILD IR' : 'DRAW CLOSED PROFILE TO BUILD IR'}
           </div>
         {/if}
-      </div>
+      </SketchInspectorSection>
 
-      <div class="sketch-document-import" aria-label="Sketch document import">
-        <div class="sketch-document-import__header">
-          <div class="sketch-workspace__section-title">SKETCH DOCUMENT / ECKY IMPORT</div>
-          <button class="btn btn-xs btn-primary" type="button" onclick={importSketchDocumentSource} disabled={generating}>IMPORT</button>
+      <SketchInspectorSection title="SKETCH SOURCE" ariaLabel="Sketch import tools" className="sketch-document-import-shell">
+        <div class="sketch-document-import" aria-label="Sketch document import">
+          <div class="sketch-document-import__header">
+            <div class="sketch-workspace__section-title">SKETCH DOCUMENT / IR</div>
+            <button class="btn btn-xs btn-primary" type="button" onclick={importSketchDocumentSource} disabled={generating}>APPLY</button>
+          </div>
+          <textarea
+            class="sketch-document-import__editor"
+            aria-label="Sketch document or ecky source"
+            spellcheck="false"
+            bind:value={sketchDocumentImportText}
+            oninput={() => {
+              sketchDocumentEditorDirty = true;
+            }}
+          ></textarea>
         </div>
-        <textarea
-          class="sketch-document-import__editor"
-          aria-label="Sketch document or ecky source"
-          spellcheck="false"
-          bind:value={sketchDocumentImportText}
-        ></textarea>
-      </div>
+      </SketchInspectorSection>
 
       {#if showSuggestionPanel}
-        <div class="sketch-suggestions" aria-label="Suggested features">
-          <div class="sketch-suggestions__header">
-            <div class="sketch-workspace__section-title">SUGGESTED FEATURES</div>
+        <SketchInspectorSection title="SUGGESTED FEATURES" ariaLabel="Suggested features" className="sketch-suggestions">
+          {#snippet summaryExtra()}
             {#if suggestingFeatures}
-              <div class="sketch-suggestions__status">PENDING</div>
+              <span class="sketch-suggestions__status">PENDING</span>
             {/if}
-          </div>
-
+          {/snippet}
           {#if suggestionErrorText}
             <div class="sketch-suggestions__error" role="alert">{suggestionErrorText}</div>
           {/if}
@@ -2012,7 +2848,7 @@
               {/each}
             </div>
           {/if}
-        </div>
+        </SketchInspectorSection>
       {/if}
 
       {#if !draft}
@@ -2023,30 +2859,30 @@
       {/if}
 
       {#if draft}
-        <div class="sketch-learning-lens" aria-label="Learning lens">
-          <div class="sketch-workspace__section-title">{learningLens.title}</div>
-          <div class="sketch-learning-lens__grid">
-            <div class="sketch-learning-lens__diagram" aria-hidden="true">
-              <svg viewBox="0 0 120 70" class="sketch-learning-lens__svg">
-                <polygon class="sketch-learning-lens__depth" points="42,16 78,28 78,56 42,44" />
-                <polygon class="sketch-learning-lens__profile" points="22,12 58,24 58,52 22,40" />
-                <line class="sketch-learning-lens__axis" x1="58" y1="24" x2="78" y2="28" />
-                <line class="sketch-learning-lens__axis" x1="58" y1="52" x2="78" y2="56" />
-                <path class="sketch-learning-lens__motion" d="M24 58 H78" />
-              </svg>
-            </div>
-            <div class="sketch-learning-lens__copy">
-              <div class="sketch-token">{learningLens.operationLabel}</div>
-              <div>{learningLens.explanation}</div>
-              <div class="sketch-learning-lens__math">{learningLens.formula}</div>
-              <div class="sketch-learning-lens__math">{learningLens.domain}</div>
+        <SketchInspectorSection title={learningLens.title} ariaLabel="Learning lens" className="sketch-learning-lens-shell" open={false}>
+          <div class="sketch-learning-lens">
+            <div class="sketch-learning-lens__grid">
+              <div class="sketch-learning-lens__diagram" aria-hidden="true">
+                <svg viewBox="0 0 120 70" class="sketch-learning-lens__svg">
+                  <polygon class="sketch-learning-lens__depth" points="42,16 78,28 78,56 42,44" />
+                  <polygon class="sketch-learning-lens__profile" points="22,12 58,24 58,52 22,40" />
+                  <line class="sketch-learning-lens__axis" x1="58" y1="24" x2="78" y2="28" />
+                  <line class="sketch-learning-lens__axis" x1="58" y1="52" x2="78" y2="56" />
+                  <path class="sketch-learning-lens__motion" d="M24 58 H78" />
+                </svg>
+              </div>
+              <div class="sketch-learning-lens__copy">
+                <div class="sketch-token">{learningLens.operationLabel}</div>
+                <div>{learningLens.explanation}</div>
+                <div class="sketch-learning-lens__math">{learningLens.formula}</div>
+                <div class="sketch-learning-lens__math">{learningLens.domain}</div>
+              </div>
             </div>
           </div>
-        </div>
+        </SketchInspectorSection>
 
         {#if projections.length}
-          <div class="sketch-projections" aria-label="Projection panel">
-            <div class="sketch-workspace__section-title">PROJECTIONS</div>
+          <SketchInspectorSection title="PROJECTIONS" ariaLabel="Projection panel" className="sketch-projections">
             <div class="sketch-projections__list">
               {#each projections as projection (projection.view)}
                 <div class="sketch-projection" aria-label={`${projection.view.toUpperCase()} projection`}>
@@ -2066,7 +2902,7 @@
                 </div>
               {/each}
             </div>
-          </div>
+          </SketchInspectorSection>
         {/if}
 
         {#if brepCandidateLoading || brepCandidateResponse || brepCandidateErrorText}
@@ -2088,7 +2924,88 @@
                   <span>EDGES</span>
                   <strong>{brepCandidateResponse.graph.edges?.length ?? 0}</strong>
                 </div>
+                <div class="sketch-dimensions__cell">
+                  <span>CELLS</span>
+                  <strong>{brepCandidateResponse.search?.cells?.length ?? 0}</strong>
+                </div>
+                <div class="sketch-dimensions__cell">
+                  <span>SOLUTIONS</span>
+                  <strong>{brepCandidateResponse.search?.solutions?.length ?? 0}</strong>
+                </div>
               </div>
+              <div class="sketch-token">
+                CANDIDATE SEARCH {(brepCandidateResponse.search?.solutions?.length ?? 0) > 0 ? 'READY' : 'PENDING'}
+              </div>
+              {#if brepCandidateResponse.validation.passed && brepCandidateResponse.search?.solutions?.length}
+                <div class="sketch-brep-candidates__actions">
+                  {#each brepCandidateResponse.search.solutions as solution (solution.solutionId)}
+                    <button
+                      class="btn btn-xs btn-primary"
+                      type="button"
+                      aria-label={`Accept candidate ${solution.solutionId}`}
+                      disabled={generating || brepCandidateLoading || brepCandidateAcceptingSolutionId !== null || !brepCandidateDocument}
+                      onclick={() => acceptBrepCandidateSolution(solution.solutionId)}
+                    >
+                      {brepCandidateAcceptingSolutionId === solution.solutionId
+                        ? 'ACCEPTING...'
+                        : brepCandidateAcceptedSolutionId === solution.solutionId
+                          ? 'ACCEPTED'
+                          : 'ACCEPT CANDIDATE'}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+              {#if brepCandidateAcceptErrorText}
+                <div class="sketch-suggestions__error" role="alert">{brepCandidateAcceptErrorText}</div>
+              {/if}
+              {#if brepCandidateAcceptedSolutionId}
+                <div class="sketch-token">ACCEPTED BREP {brepCandidateAcceptedSolutionId}</div>
+                <div class="sketch-token">{acceptedBrepTopologySummary()}</div>
+                <div class="sketch-brep-candidates__actions">
+                  <button
+                    class="btn btn-xs btn-primary"
+                    type="button"
+                    aria-label="Create reusable package"
+                    disabled={generating || brepComponentPackageLoading || !brepCandidateDocument || !acceptedBrepStepSourceRef()}
+                    onclick={createAcceptedBrepComponentPackage}
+                  >
+                    {brepComponentPackageLoading ? 'PACKAGING...' : 'CREATE REUSABLE PACKAGE'}
+                  </button>
+                </div>
+              {/if}
+              {#if brepComponentPackageErrorText}
+                <div class="sketch-suggestions__error" role="alert">{brepComponentPackageErrorText}</div>
+              {/if}
+              {#if brepComponentPackage}
+                <div class="sketch-component-package" aria-label="Accepted BRep component package">
+                  <div class="sketch-workspace__section-title">REUSABLE PACKAGE</div>
+                  <div class="sketch-token">PACKAGE {brepComponentPackage.packageId}</div>
+                  <div class="sketch-token">VERSION {brepComponentPackage.version}</div>
+                  {#each brepComponentPackage.components ?? [] as component (component.componentId)}
+                    <div class="sketch-token">COMPONENT {component.componentId}</div>
+                    <div class="sketch-token">SKETCHES {component.sketches?.length ?? 0}</div>
+                    <div class="sketch-token">SOURCE {component.sourceRef ? basename(component.sourceRef) : 'none'}</div>
+                    {#each component.ports ?? [] as port (port.portId)}
+                      <div class="sketch-token">PORT {port.portId}</div>
+                      <div class="sketch-token">TYPE {port.typeId}</div>
+                    {/each}
+                  {/each}
+                </div>
+              {/if}
+              {#if brepCandidateAcceptEvidence.length}
+                <div class="sketch-validation-ledger__rows">
+                  {#each brepCandidateAcceptEvidence as evidence}
+                    <div class="sketch-token">{evidence}</div>
+                  {/each}
+                </div>
+              {/if}
+              {#if brepCandidateResponse.search?.evidence?.length}
+                <div class="sketch-validation-ledger__rows">
+                  {#each brepCandidateResponse.search.evidence as evidence}
+                    <div class="sketch-token">{evidence}</div>
+                  {/each}
+                </div>
+              {/if}
               <div class="sketch-token">
                 PROJECTION REPLAY {brepCandidateResponse.validation.passed ? 'PASS' : 'FAIL'}
               </div>
@@ -2126,6 +3043,22 @@
                 {/each}
               </div>
               <div class="sketch-token">SOURCE {basename(hiddenLineResponse.sourceArtifactPath)}</div>
+              {#if brepDerivedSketch && !('error' in brepDerivedSketch)}
+                <div class="sketch-derived-brep" aria-label="Derived BRep sketches">
+                  <div class="sketch-workspace__section-title">DERIVED BREP SKETCHES</div>
+                  <div class="sketch-token">DERIVED FROM BREP / NOT AUTHORING HISTORY</div>
+                  <div class="sketch-validation-ledger__rows">
+                    {#each brepDerivedSketch.views as view}
+                      <div class="sketch-token">{view.toUpperCase()} editable seed</div>
+                    {/each}
+                  </div>
+                  <button class="btn btn-xs btn-primary" type="button" onclick={convertDerivedBrepSketches} disabled={generating}>
+                    CONVERT DERIVED SKETCHES
+                  </button>
+                </div>
+              {:else if brepDerivedSketch && 'error' in brepDerivedSketch}
+                <div class="sketch-token">{brepDerivedSketch.error}</div>
+              {/if}
               {#if hiddenLineResponse.warnings?.length}
                 <div class="sketch-suggestion__warnings">
                   {#each hiddenLineResponse.warnings as warning}
@@ -2149,13 +3082,34 @@
                     {/each}
                   </div>
                 {/if}
+                {#if brepSketchRepairTargets.length}
+                  <div class="sketch-validation-ledger__rows" aria-label="BRep repair targets">
+                    <div class="sketch-workspace__section-title">REPAIR TARGETS</div>
+                    {#each brepSketchRepairTargets as target}
+                      <div class="sketch-token" data-brep-repair-target={target.targetId}>
+                        {target.severity.toUpperCase()} {target.label} / {target.reason}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
               {/if}
             {/if}
           </div>
         {/if}
 
-        <div class="sketch-workspace__section">
-          <div class="sketch-workspace__section-title">SOURCE STATUS</div>
+        {#if artifactBundle}
+          <div class="sketch-preview-summary" aria-label="Preview artifact summary">
+            <div class="sketch-token">{basename(artifactBundle.previewStlPath)}</div>
+            <div class="sketch-token">{artifactBundle.viewerAssets?.length ?? 0} assets</div>
+            {#if draft.warnings?.length}
+              {#each draft.warnings as warning}
+                <div class="sketch-preview-summary__warning">{warning}</div>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+
+        <SketchInspectorSection title="ARTIFACT EVIDENCE / SOURCE STATUS" ariaLabel="Sketch artifact evidence" className="sketch-workspace__section" open={false}>
           <div class="sketch-token">
             {draft.sourceLanguage} / {draft.geometryBackend} / {sourceLineCount(draft.source)} lines
           </div>
@@ -2178,7 +3132,7 @@
               <div class="sketch-token">{artifactBundle.viewerAssets?.length ?? 0} assets</div>
             </div>
           {/if}
-        </div>
+        </SketchInspectorSection>
       {/if}
     </div>
   </div>
@@ -2186,10 +3140,14 @@
 
 <style>
   .sketch-workspace {
+    flex: 1 1 auto;
+    width: 100%;
     height: 100%;
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
+    box-sizing: border-box;
     overflow: hidden;
     background: var(--bg);
   }
@@ -2197,12 +3155,18 @@
   .sketch-workspace__header {
     flex: 0 0 auto;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
     padding: 10px 12px;
     border-bottom: 1px solid var(--bg-300);
     background: color-mix(in srgb, var(--bg-200) 88%, black 12%);
+    overflow: hidden;
+  }
+
+  .sketch-workspace__header > div:first-child {
+    flex: 0 1 240px;
+    min-width: 160px;
     overflow: hidden;
   }
 
@@ -2215,11 +3179,19 @@
   }
 
   .sketch-workspace__actions {
-    flex: 0 0 auto;
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
     overflow: hidden;
+  }
+
+  .sketch-workspace__primary-action {
+    order: -1;
+    flex: 0 0 auto;
   }
 
   .sketch-grid-control {
@@ -2268,7 +3240,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(190px, 260px);
+    grid-template-columns: minmax(0, 1fr) clamp(300px, 22vw, 420px);
     overflow: hidden;
   }
 
@@ -2381,10 +3353,11 @@
     padding: 10px;
     border-left: 1px solid var(--bg-300);
     background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
-    overflow: hidden;
+    overflow: auto;
   }
 
   .sketch-workspace__section {
+    flex: 0 0 auto;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -2394,7 +3367,7 @@
 
   .sketch-workspace__section--primitives {
     flex: 0 0 auto;
-    max-height: 88px;
+    max-height: none;
   }
 
   .sketch-primitive-list {
@@ -2402,7 +3375,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .sketch-token {
@@ -2434,7 +3407,7 @@
 
   .sketch-source {
     flex: 1;
-    max-height: 180px;
+    max-height: none;
     margin: 0;
     padding: 10px;
     border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--bg-300));
@@ -2444,30 +3417,22 @@
     font-size: 0.72rem;
     line-height: 1.5;
     white-space: pre-wrap;
-    overflow: auto;
+    overflow: visible;
   }
 
-	  .sketch-warnings,
-	  .sketch-error,
-	  .sketch-cleanup-evidence,
-	  .sketch-import-repair,
-	  .sketch-source-patch-ledger,
-	  .sketch-draft-mode,
+  .sketch-warnings,
+  .sketch-error,
+  .sketch-cleanup-evidence,
+  .sketch-import-repair,
   .sketch-brep-candidates,
   .sketch-hidden-line,
-	  .sketch-preview,
+  .sketch-preview,
   .sketch-coach,
-  .sketch-validation-ledger,
+  .sketch-preview-summary,
   .sketch-source-fit,
   .sketch-dimension-constraints,
-  .sketch-document-source,
   .sketch-document-import,
-  .sketch-ledger,
-  .sketch-point-editor,
-  .sketch-profile-size-editor,
-  .sketch-learning-lens,
-  .sketch-projections,
-  .sketch-suggestions {
+  .sketch-learning-lens {
     padding: 8px;
     border: 1px solid color-mix(in srgb, var(--secondary) 40%, var(--bg-300));
     color: var(--secondary);
@@ -2476,20 +3441,35 @@
     font-size: 0.68rem;
     line-height: 1.45;
     white-space: pre-wrap;
-    overflow: auto;
+    overflow: hidden;
+  }
+
+  .sketch-preview-summary {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  .sketch-preview-summary__warning {
+    grid-column: 1 / -1;
+    min-width: 0;
+    padding: 5px 6px;
+    border: 1px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
+    color: var(--primary);
+    background: color-mix(in srgb, var(--bg) 78%, black 22%);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .sketch-coach {
     color: var(--text-dim);
-    overflow: hidden;
-  }
-
-  .sketch-validation-ledger {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    color: var(--text);
     overflow: hidden;
   }
 
@@ -2613,20 +3593,46 @@
     color: var(--primary);
   }
 
-  .sketch-validation-ledger__rows {
+  .sketch-validation-ledger__rows,
+  .sketch-topology-repair__rows {
     display: flex;
     flex-direction: column;
     gap: 4px;
     overflow: hidden;
   }
 
-  .sketch-validation-ledger__row {
+  .sketch-topology-repair {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  .sketch-topology-repair-proposal {
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(88px, 1fr) 46px minmax(0, 1.2fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 6px;
-    align-items: start;
-    padding: 4px 5px;
+    align-items: center;
+    padding: 6px 8px;
+    border: 1px solid var(--bg-300);
+    color: var(--text);
+    background: var(--bg-200);
+    overflow: hidden;
+  }
+
+  .sketch-topology-repair-proposal span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sketch-validation-ledger__row {
+    min-width: 0;
+    display: block;
+    padding: 0;
     border: 1px solid var(--bg-300);
     background: color-mix(in srgb, var(--bg) 78%, black 22%);
     overflow: hidden;
@@ -2634,6 +3640,7 @@
 
   .sketch-validation-ledger__label,
   .sketch-validation-ledger__status,
+  .sketch-validation-ledger__summary-detail,
   .sketch-validation-ledger__detail {
     min-width: 0;
     font-family: var(--font-mono);
@@ -2651,10 +3658,33 @@
     color: var(--secondary);
   }
 
-  .sketch-validation-ledger__detail {
+  .sketch-validation-ledger__row-summary {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px;
+    align-items: start;
+    padding: 5px 6px;
+    cursor: pointer;
+    overflow: hidden;
+  }
+
+  .sketch-validation-ledger__row-summary::-webkit-details-marker {
+    color: var(--primary);
+  }
+
+  .sketch-validation-ledger__summary-detail {
+    grid-column: 1 / -1;
     color: var(--text-dim);
-    white-space: nowrap;
-    text-overflow: ellipsis;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .sketch-validation-ledger__detail {
+    padding: 0 6px 6px;
+    color: var(--text-dim);
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .sketch-validation-ledger__row[data-status='pass'] {
@@ -2670,43 +3700,13 @@
   }
 
   .sketch-validation-ledger__row[data-status='fail'] .sketch-validation-ledger__status,
+  .sketch-validation-ledger__row[data-status='fail'] .sketch-validation-ledger__summary-detail,
   .sketch-validation-ledger__row[data-status='fail'] .sketch-validation-ledger__detail {
     color: #ffb1aa;
   }
 
-  .sketch-validation-ledger__row[data-status='fail'] .sketch-validation-ledger__detail {
-    max-height: 54px;
-    white-space: pre-wrap;
-    overflow: auto;
-    text-overflow: clip;
-  }
-
   .sketch-validation-ledger__row[data-status='pending'] {
     color: var(--text-dim);
-  }
-
-  .sketch-document-source {
-    flex: 0 0 auto;
-    max-height: 178px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    color: var(--text);
-    white-space: normal;
-    overflow: hidden;
-  }
-
-  .sketch-document-source:has(.sketch-document-source__details[open]) {
-    max-height: 320px;
-  }
-
-  .sketch-document-source__header {
-    min-width: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
-    align-items: center;
-    overflow: hidden;
   }
 
   .sketch-document-source__status {
@@ -2763,7 +3763,7 @@
   }
 
   .sketch-document-source__json {
-    max-height: 132px;
+    max-height: none;
     font-size: 0.62rem;
     line-height: 1.35;
     white-space: pre;
@@ -2771,7 +3771,7 @@
 
   .sketch-document-import {
     flex: 0 0 auto;
-    max-height: 170px;
+    max-height: none;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -2800,7 +3800,7 @@
     font-size: 0.64rem;
     line-height: 1.35;
     outline: none;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .sketch-document-import__editor:focus {
@@ -2813,6 +3813,25 @@
     gap: 6px;
     color: var(--text);
     overflow: hidden;
+  }
+
+  .sketch-draft-mode {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  .sketch-draft-mode .sketch-token,
+  .sketch-ledger__detail,
+  .sketch-validation-ledger__detail {
+    text-overflow: clip;
+  }
+
+  .sketch-draft-mode .sketch-token {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .sketch-point-editor,
@@ -2839,11 +3858,6 @@
   }
 
   .sketch-profile-size-editor > .btn-secondary {
-    grid-column: 1 / -1;
-  }
-
-  .sketch-point-editor .sketch-workspace__section-title,
-  .sketch-profile-size-editor .sketch-workspace__section-title {
     grid-column: 1 / -1;
   }
 
@@ -2889,11 +3903,8 @@
 
   .sketch-ledger__row {
     min-width: 0;
-    display: grid;
-    grid-template-columns: 8px minmax(50px, 0.7fr) minmax(58px, 0.7fr) minmax(0, 1.4fr);
-    gap: 6px;
-    align-items: center;
-    padding: 5px 6px;
+    display: block;
+    padding: 0;
     border: 1px solid var(--bg-300);
     background: color-mix(in srgb, var(--bg) 76%, black 24%);
     overflow: hidden;
@@ -2908,11 +3919,10 @@
 
   .sketch-ledger__label,
   .sketch-ledger__state,
+  .sketch-ledger__summary-detail,
   .sketch-ledger__detail {
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .sketch-ledger__label,
@@ -2926,8 +3936,33 @@
     color: var(--secondary);
   }
 
-  .sketch-ledger__detail {
+  .sketch-ledger__row-summary {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 8px minmax(64px, 0.9fr) auto;
+    gap: 6px;
+    align-items: start;
+    padding: 5px 6px;
+    cursor: pointer;
+    overflow: hidden;
+  }
+
+  .sketch-ledger__row-summary::-webkit-details-marker {
+    color: var(--primary);
+  }
+
+  .sketch-ledger__summary-detail {
+    grid-column: 2 / -1;
     color: var(--text-dim);
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .sketch-ledger__detail {
+    padding: 0 6px 6px 20px;
+    color: var(--text-dim);
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .sketch-ledger__row[data-state='blocked'],
@@ -2969,18 +4004,11 @@
 	    color: #9ee6b3;
 	  }
 
-	  .sketch-source-patch-ledger {
-	    display: flex;
-	    flex-direction: column;
-	    gap: 6px;
-	    overflow: hidden;
-	  }
-
 	  .sketch-source-patch-ledger__rows {
 	    display: flex;
 	    flex-direction: column;
 	    gap: 4px;
-	    overflow: auto;
+	    overflow: hidden;
 	  }
 
 	  .sketch-source-patch-ledger__row {
@@ -3027,26 +4055,11 @@
     gap: 6px;
   }
 
-  .sketch-suggestions {
-    flex: 0 0 auto;
-    max-height: 135px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    color: var(--text);
-    overflow: hidden;
-  }
-
-  .sketch-suggestions__header,
   .sketch-suggestion__top {
     display: grid;
     gap: 8px;
     align-items: center;
     overflow: hidden;
-  }
-
-  .sketch-suggestions__header {
-    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .sketch-suggestion__top {
@@ -3081,7 +4094,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .sketch-suggestion {
@@ -3128,7 +4141,7 @@
     background: color-mix(in srgb, var(--bg) 78%, black 22%);
     font-size: 0.62rem;
     line-height: 1.35;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .sketch-suggestions__error {
@@ -3137,7 +4150,8 @@
     white-space: pre-wrap;
   }
 
-  .sketch-projections {
+  .sketch-brep-candidates {
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -3145,11 +4159,17 @@
     overflow: hidden;
   }
 
-  .sketch-brep-candidates {
+  .sketch-brep-candidates__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .sketch-component-package {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    color: var(--text);
+    gap: 5px;
     overflow: hidden;
   }
 
@@ -3421,7 +4441,7 @@
     }
   }
 
-  @media (max-width: 760px) {
+  @media (max-width: 900px) {
     .sketch-workspace__body {
       grid-template-columns: 1fr;
       grid-template-rows: minmax(0, 1fr) minmax(180px, 220px);

@@ -143,6 +143,149 @@ def shape_bounds(shape):
     }
 
 
+def point_to_xyz(point):
+    x = getattr(point, "x", None)
+    if x is None:
+        x = getattr(point, "X", 0.0)
+    if callable(x):
+        x = x()
+    y = getattr(point, "y", None)
+    if y is None:
+        y = getattr(point, "Y", 0.0)
+    if callable(y):
+        y = y()
+    z = getattr(point, "z", None)
+    if z is None:
+        z = getattr(point, "Z", 0.0)
+    if callable(z):
+        z = z()
+    return {"x": float(x), "y": float(y), "z": float(z)}
+
+
+def edge_endpoints(edge):
+    try:
+        vertexes = getattr(edge, "Vertexes", []) or []
+        if len(vertexes) >= 2:
+            return point_to_xyz(vertexes[0].Point), point_to_xyz(vertexes[-1].Point)
+    except Exception:
+        pass
+
+    try:
+        start = edge.valueAt(edge.FirstParameter)
+        end = edge.valueAt(edge.LastParameter)
+        return point_to_xyz(start), point_to_xyz(end)
+    except Exception:
+        return None
+
+
+def edge_point_signature(point):
+    return "-".join(
+        number_signature(point[axis])
+        for axis in ("x", "y", "z")
+    )
+
+
+def number_signature(value):
+    return format(float(value), ".3f").rstrip("0").rstrip(".") or "0"
+
+
+def edge_signature(start, end):
+    first = edge_point_signature(start)
+    second = edge_point_signature(end)
+    return "_".join(sorted((first, second)))
+
+
+def face_center(face):
+    try:
+        return point_to_xyz(face.CenterOfMass)
+    except Exception:
+        return None
+
+
+def face_normal(face):
+    try:
+        parameter_range = getattr(face, "ParameterRange", None)
+        if parameter_range and len(parameter_range) == 4:
+            u = (float(parameter_range[0]) + float(parameter_range[1])) / 2.0
+            v = (float(parameter_range[2]) + float(parameter_range[3])) / 2.0
+            return point_to_xyz(face.normalAt(u, v))
+    except Exception:
+        pass
+
+    try:
+        surface = getattr(face, "Surface", None)
+        axis = getattr(surface, "Axis", None)
+        if axis is not None:
+            return point_to_xyz(axis)
+    except Exception:
+        pass
+
+    return None
+
+
+def shape_edges(shape, object_name):
+    edges = []
+    try:
+        source_edges = getattr(shape, "Edges", []) or []
+    except Exception:
+        return edges
+
+    for edge_index, edge in enumerate(source_edges):
+        try:
+            endpoints = edge_endpoints(edge)
+            if endpoints is None:
+                continue
+            start, end = endpoints
+            label = f"{object_name}.Edge{edge_index + 1}"
+            edges.append(
+                {
+                    "target_id": f"{object_name}:edge:{edge_index}:{edge_signature(start, end)}",
+                    "edge_index": edge_index,
+                    "label": label,
+                    "start": start,
+                    "end": end,
+                }
+            )
+        except Exception:
+            continue
+
+    return edges
+
+
+def shape_faces(shape, object_name):
+    faces = []
+    try:
+        source_faces = getattr(shape, "Faces", []) or []
+    except Exception:
+        return faces
+
+    for face_index, face in enumerate(source_faces):
+        try:
+            center = face_center(face)
+            if center is None:
+                continue
+            area = float(getattr(face, "Area", 0.0))
+            label = f"{object_name}.Face{face_index + 1}"
+            face_id = (
+                f"{object_name}:face:{face_index}:"
+                f"{edge_point_signature(center)}:{number_signature(area)}"
+            )
+            faces.append(
+                {
+                    "target_id": face_id,
+                    "face_index": face_index,
+                    "label": label,
+                    "center": center,
+                    "normal": face_normal(face),
+                    "area": area,
+                }
+            )
+        except Exception:
+            continue
+
+    return faces
+
+
 def export_report(doc, exportable, parts_dir):
     import Mesh
 
@@ -153,15 +296,18 @@ def export_report(doc, exportable, parts_dir):
         export_path = os.path.abspath(os.path.join(parts_dir, file_name))
         Mesh.export([obj], export_path)
         shape = getattr(obj, "Shape", None)
+        object_name = getattr(obj, "Name", f"Object{index}")
         objects.append(
             {
-                "object_name": getattr(obj, "Name", f"Object{index}"),
+                "object_name": object_name,
                 "label": getattr(obj, "Label", getattr(obj, "Name", f"Object{index}")),
                 "type_id": getattr(obj, "TypeId", ""),
                 "export_path": export_path,
                 "bounds": shape_bounds(shape) if shape is not None else None,
                 "volume": float(getattr(shape, "Volume", 0.0)) if shape is not None else None,
                 "area": float(getattr(shape, "Area", 0.0)) if shape is not None else None,
+                "edges": shape_edges(shape, object_name) if shape is not None else [],
+                "faces": shape_faces(shape, object_name) if shape is not None else [],
             }
         )
 
@@ -318,6 +464,87 @@ def open_fcstd(path):
     return doc
 
 
+def open_step(path):
+    import FreeCAD as App
+    import Import
+
+    doc = App.newDocument("EckyStepHiddenLine")
+    Import.insert(path, doc.Name)
+    App.setActiveDocument(doc.Name)
+    doc.recompute()
+    return doc
+
+
+def frame_list(frame, *keys):
+    values = first_value(frame, *keys)
+    if not isinstance(values, (list, tuple)) or len(values) != 3:
+        return None
+    try:
+        return [float(values[0]), float(values[1]), float(values[2])]
+    except Exception:
+        return None
+
+
+def frame_matrix(frame):
+    import FreeCAD as App
+
+    origin = frame_list(frame, "origin")
+    x_axis = frame_list(frame, "x_axis", "xAxis")
+    y_axis = frame_list(frame, "y_axis", "yAxis")
+    z_axis = frame_list(frame, "z_axis", "zAxis")
+    if origin is None or x_axis is None or y_axis is None or z_axis is None:
+        raise RuntimeError(f"Invalid assembly placement frame: {frame}")
+
+    matrix = App.Matrix()
+    matrix.A11 = x_axis[0]
+    matrix.A12 = y_axis[0]
+    matrix.A13 = z_axis[0]
+    matrix.A14 = origin[0]
+    matrix.A21 = x_axis[1]
+    matrix.A22 = y_axis[1]
+    matrix.A23 = z_axis[1]
+    matrix.A24 = origin[1]
+    matrix.A31 = x_axis[2]
+    matrix.A32 = y_axis[2]
+    matrix.A33 = z_axis[2]
+    matrix.A34 = origin[2]
+    return matrix
+
+
+def transform_shape_copy(shape, placement_frame):
+    transformed = shape.copy()
+    if not placement_frame:
+        return transformed
+    transformed.transformGeometry(frame_matrix(placement_frame))
+    return transformed
+
+
+def load_step_exportable_shapes(step_path):
+    import FreeCAD as App
+
+    temp_doc = open_step(step_path)
+    try:
+        exportable = collect_exportable(temp_doc)
+        if not exportable:
+            raise RuntimeError(f"No solid objects found in assembly STEP part '{step_path}'.")
+
+        loaded = []
+        for index, obj in enumerate(exportable):
+            shape = getattr(obj, "Shape", None)
+            if shape is None:
+                continue
+            loaded.append(
+                {
+                    "object_name": getattr(obj, "Name", f"StepPart{index}"),
+                    "label": getattr(obj, "Label", getattr(obj, "Name", f"StepPart{index}")),
+                    "shape": shape.copy(),
+                }
+            )
+        return loaded
+    finally:
+        App.closeDocument(temp_doc.Name)
+
+
 def run_generate(macro_path, stl_path, fcstd_path, step_path, parts_dir, report_path, params_dict):
     import Mesh
 
@@ -345,6 +572,151 @@ def run_import_fcstd(fcstd_path, stl_path, step_path, parts_dir, report_path):
 
     Mesh.export(exportable, stl_path)
     export_step(exportable, step_path)
+    report = export_report(active, exportable, parts_dir)
+    with open(report_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+
+
+def run_import_step(step_source_path, output_fcstd_path, stl_path, step_path, parts_dir, report_path):
+    import Mesh
+
+    active = open_step(step_source_path)
+    exportable = collect_exportable(active)
+    if not exportable:
+        raise RuntimeError("No solid objects found in imported STEP.")
+
+    Mesh.export(exportable, stl_path)
+    export_step(exportable, step_path)
+    active.saveAs(output_fcstd_path)
+    report = export_report(active, exportable, parts_dir)
+    with open(report_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+
+
+def run_assemble_step_parts(assembly_parts_path, output_fcstd_path, stl_path, step_path, parts_dir, report_path):
+    import FreeCAD as App
+    import Mesh
+
+    with open(assembly_parts_path, "r", encoding="utf-8") as handle:
+        assembly_parts = json.load(handle)
+    if not isinstance(assembly_parts, list) or not assembly_parts:
+        raise RuntimeError("Assembly STEP input must contain at least one part.")
+
+    active = App.newDocument("EckyAssembly")
+    active.Label = "Joined Assembly"
+    global_index = 0
+    fused_groups = {}
+    fused_group_labels = {}
+    cut_groups = {}
+    cut_group_labels = {}
+
+    for part_index, part in enumerate(assembly_parts):
+        if not isinstance(part, dict):
+            raise RuntimeError(f"Assembly STEP part #{part_index + 1} is not an object.")
+        step_path_value = first_value(part, "step_path", "stepPath")
+        if not step_path_value:
+            raise RuntimeError(f"Assembly STEP part #{part_index + 1} is missing stepPath.")
+        instance_id = normalize_part_text(first_value(part, "instance_id", "instanceId")) or f"instance_{part_index}"
+        instance_label = normalize_part_text(part.get("label")) or instance_id
+        fuse_group_id = normalize_part_text(first_value(part, "fuse_group_id", "fuseGroupId"))
+        cut_group_id = normalize_part_text(first_value(part, "cut_group_id", "cutGroupId"))
+        cut_role = normalize_part_text(first_value(part, "cut_role", "cutRole"))
+        placement_frame = first_value(part, "placement_frame", "placementFrame")
+        source_shapes = load_step_exportable_shapes(step_path_value)
+        if fuse_group_id and cut_group_id:
+            raise RuntimeError(
+                f"Assembly STEP part #{part_index + 1} cannot use both fuseGroupId and cutGroupId."
+            )
+
+        combined_transformed = None
+        for source_shape in source_shapes:
+            transformed = transform_shape_copy(source_shape["shape"], placement_frame)
+            combined_transformed = (
+                transformed
+                if combined_transformed is None
+                else combined_transformed.fuse(transformed)
+            )
+
+        if cut_group_id:
+            if cut_role not in ("base", "tool"):
+                raise RuntimeError(
+                    f"Assembly STEP part #{part_index + 1} cutGroupId requires cutRole=base|tool."
+                )
+            group = cut_groups.setdefault(cut_group_id, {"base": None, "tools": []})
+            labels = cut_group_labels.setdefault(cut_group_id, {"base": None, "tools": []})
+            if cut_role == "base":
+                if group["base"] is not None:
+                    raise RuntimeError(f"Cut group '{cut_group_id}' has multiple base parts.")
+                group["base"] = combined_transformed
+                labels["base"] = instance_label
+            else:
+                group["tools"].append(combined_transformed)
+                labels["tools"].append(instance_label)
+            continue
+
+        for source_shape in source_shapes:
+            transformed = transform_shape_copy(source_shape["shape"], placement_frame)
+            if fuse_group_id:
+                fused_groups[fuse_group_id] = (
+                    transformed
+                    if fuse_group_id not in fused_groups
+                    else fused_groups[fuse_group_id].fuse(transformed)
+                )
+                fused_group_labels.setdefault(fuse_group_id, []).append(instance_label)
+                continue
+            object_name = freecad_object_name(
+                f"{instance_id}_{source_shape['object_name']}", global_index
+            )
+            label = instance_label
+            if len(source_shapes) > 1:
+                label = f"{instance_label} / {source_shape['label']}"
+            obj = active.addObject("Part::Feature", object_name)
+            obj.Label = label
+            obj.Shape = transformed
+            global_index += 1
+
+    for fuse_group_id in sorted(fused_groups.keys()):
+        object_name = freecad_object_name(fuse_group_id, global_index)
+        unique_labels = []
+        for label in fused_group_labels.get(fuse_group_id, []):
+            if label not in unique_labels:
+                unique_labels.append(label)
+        label = " + ".join(unique_labels) if unique_labels else fuse_group_id
+        obj = active.addObject("Part::Feature", object_name)
+        obj.Label = label
+        obj.Shape = fused_groups[fuse_group_id]
+        global_index += 1
+
+    for cut_group_id in sorted(cut_groups.keys()):
+        group = cut_groups[cut_group_id]
+        if group["base"] is None:
+            raise RuntimeError(f"Cut group '{cut_group_id}' is missing a base part.")
+        if not group["tools"]:
+            raise RuntimeError(f"Cut group '{cut_group_id}' is missing tool parts.")
+        cut_shape = group["base"]
+        for tool_shape in group["tools"]:
+            cut_shape = cut_shape.cut(tool_shape)
+        object_name = freecad_object_name(cut_group_id, global_index)
+        labels = cut_group_labels.get(cut_group_id, {})
+        base_label = labels.get("base") or cut_group_id
+        tool_labels = []
+        for label in labels.get("tools", []):
+            if label not in tool_labels:
+                tool_labels.append(label)
+        label = f"{base_label} - {' - '.join(tool_labels)}" if tool_labels else base_label
+        obj = active.addObject("Part::Feature", object_name)
+        obj.Label = label
+        obj.Shape = cut_shape
+        global_index += 1
+
+    active.recompute()
+    exportable = collect_exportable(active)
+    if not exportable:
+        raise RuntimeError("No solid objects found in assembled STEP output.")
+
+    Mesh.export(exportable, stl_path)
+    export_step(exportable, step_path)
+    active.saveAs(output_fcstd_path)
     report = export_report(active, exportable, parts_dir)
     with open(report_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
@@ -478,13 +850,13 @@ def project_shape_hidden_lines(shape, view, direction_tuple):
     return visible_edges, hidden_edges
 
 
-def run_hidden_line_projection(fcstd_path, report_path, views, tolerance):
+def run_hidden_line_projection(artifact_path, report_path, views, tolerance, artifact_kind="fcstd"):
     import Part
 
-    active = open_fcstd(fcstd_path)
+    active = open_step(artifact_path) if artifact_kind == "step" else open_fcstd(artifact_path)
     exportable = collect_exportable(active)
     if not exportable:
-        raise RuntimeError("No solid objects found in FCStd for hidden-line projection.")
+        raise RuntimeError(f"No solid objects found in {artifact_kind.upper()} for hidden-line projection.")
 
     shapes = [obj.Shape.copy() for obj in exportable]
     compound = shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)
@@ -508,7 +880,7 @@ def run_hidden_line_projection(fcstd_path, report_path, views, tolerance):
         )
 
     report = {
-        "sourceArtifactPath": os.path.abspath(fcstd_path),
+        "sourceArtifactPath": os.path.abspath(artifact_path),
         "views": projection_views,
         "warnings": warnings,
         "tolerance": tolerance,
@@ -524,6 +896,8 @@ def main():
     step_path = os.environ.get("ECKYCAD_STEP")
     fcstd_path = os.environ.get("ECKYCAD_FCSTD")
     import_fcstd_path = os.environ.get("ECKYCAD_IMPORT_FCSTD")
+    import_step_path = os.environ.get("ECKYCAD_IMPORT_STEP")
+    assembly_parts_path = os.environ.get("ECKYCAD_ASSEMBLY_PARTS")
     parts_dir = os.environ.get("ECKYCAD_PARTS_DIR")
     report_path = os.environ.get("ECKYCAD_REPORT") or os.environ.get("ECKYCAD_PROJECTION_REPORT")
     params_str = os.environ.get("ECKYCAD_PARAMS", "{}")
@@ -536,15 +910,18 @@ def main():
         bindings = json.loads(bindings_str)
 
         if mode == "hidden_line_projection":
-            if not import_fcstd_path or not report_path:
-                print("Missing ECKYCAD_IMPORT_FCSTD or ECKYCAD_REPORT for hidden_line_projection mode.")
+            projection_artifact_path = import_step_path or import_fcstd_path
+            projection_artifact_kind = "step" if import_step_path else "fcstd"
+            if not projection_artifact_path or not report_path:
+                print("Missing ECKYCAD_IMPORT_FCSTD/ECKYCAD_IMPORT_STEP or ECKYCAD_REPORT for hidden_line_projection mode.")
                 sys.exit(1)
             ensure_dir(os.path.dirname(os.path.abspath(report_path)))
             run_hidden_line_projection(
-                import_fcstd_path,
+                projection_artifact_path,
                 report_path,
                 parse_hidden_line_views(projection_views_str),
                 projection_tolerance,
+                projection_artifact_kind,
             )
         elif mode == "generate":
             if not stl_path or not parts_dir or not report_path:
@@ -569,6 +946,18 @@ def main():
                 print("Missing ECKYCAD_IMPORT_FCSTD for import_fcstd mode.")
                 sys.exit(1)
             run_import_fcstd(import_fcstd_path, stl_path, step_path, parts_dir, report_path)
+        elif mode == "import_step":
+            if not stl_path or not parts_dir or not report_path:
+                print("Missing one of ECKYCAD_STL, ECKYCAD_PARTS_DIR, or ECKYCAD_REPORT.")
+                sys.exit(1)
+            ensure_dir(os.path.dirname(os.path.abspath(stl_path)))
+            ensure_dir(os.path.abspath(parts_dir))
+            ensure_dir(os.path.dirname(os.path.abspath(report_path)))
+            if not import_step_path or not fcstd_path:
+                print("Missing ECKYCAD_IMPORT_STEP or ECKYCAD_FCSTD for import_step mode.")
+                sys.exit(1)
+            ensure_dir(os.path.dirname(os.path.abspath(fcstd_path)))
+            run_import_step(import_step_path, fcstd_path, stl_path, step_path, parts_dir, report_path)
         elif mode == "apply_imported_fcstd":
             if not stl_path or not parts_dir or not report_path:
                 print("Missing one of ECKYCAD_STL, ECKYCAD_PARTS_DIR, or ECKYCAD_REPORT.")
@@ -589,6 +978,25 @@ def main():
                 report_path,
                 params_dict,
                 bindings,
+            )
+        elif mode == "assemble_step_parts":
+            if not stl_path or not parts_dir or not report_path:
+                print("Missing one of ECKYCAD_STL, ECKYCAD_PARTS_DIR, or ECKYCAD_REPORT.")
+                sys.exit(1)
+            ensure_dir(os.path.dirname(os.path.abspath(stl_path)))
+            ensure_dir(os.path.abspath(parts_dir))
+            ensure_dir(os.path.dirname(os.path.abspath(report_path)))
+            if not assembly_parts_path or not fcstd_path:
+                print("Missing ECKYCAD_ASSEMBLY_PARTS or ECKYCAD_FCSTD for assemble_step_parts mode.")
+                sys.exit(1)
+            ensure_dir(os.path.dirname(os.path.abspath(fcstd_path)))
+            run_assemble_step_parts(
+                assembly_parts_path,
+                fcstd_path,
+                stl_path,
+                step_path,
+                parts_dir,
+                report_path,
             )
         else:
             print(f"Unsupported ECKYCAD_MODE: {mode}")

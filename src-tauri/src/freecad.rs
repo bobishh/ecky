@@ -9,8 +9,9 @@ use crate::models::{
     validate_model_manifest, AppError, AppResult, ArtifactBundle, BrepHiddenLineProjectionRequest,
     BrepHiddenLineProjectionResponse, BrepHiddenLineProjectionView, DesignParams, DocumentMetadata,
     EnrichmentProposal, EnrichmentStatus, ExportArtifact, ManifestBounds, ManifestEnrichmentState,
-    ModelManifest, ModelSourceKind, ParameterGroup, PartBinding, PathResolver, SelectionTarget,
-    SelectionTargetKind, SketchView, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    ModelManifest, ModelSourceKind, ParameterGroup, PartBinding, PathResolver, PortFrame,
+    SelectionTarget, SelectionTargetKind, SketchView, ViewerAsset, ViewerAssetFormat,
+    ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 const RUNNER_RESOURCE_PATH: &str = "server/freecad_runner.py";
@@ -19,6 +20,7 @@ const CAD_SDK_RESOURCE_PATH: &str = "model-runtime/cad_sdk.py";
 const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const GENERATED_ARTIFACT_DIR: &str = "generated";
 const IMPORTED_FCSTD_ARTIFACT_DIR: &str = "imported-fcstd";
+const IMPORTED_STEP_ARTIFACT_DIR: &str = "imported-step";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const RUNNER_REPORT_FILE_NAME: &str = "runner-report.json";
@@ -26,6 +28,7 @@ const HIDDEN_LINE_REPORT_FILE_NAME: &str = "hidden-line-projections.json";
 const FCSTD_FILE_NAME: &str = "model.FCStd";
 const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
 const STEP_FILE_NAME: &str = "model.step";
+const IMPORT_STEP_SOURCE_FILE_NAME: &str = "source.step";
 const PARTS_DIR_NAME: &str = "parts";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +57,47 @@ struct RunnerObject {
     volume: Option<f64>,
     #[serde(default)]
     area: Option<f64>,
+    #[serde(default)]
+    edges: Vec<RunnerEdgeTarget>,
+    #[serde(default)]
+    faces: Vec<RunnerFaceTarget>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RunnerEdgeTarget {
+    #[serde(default)]
+    target_id: String,
+    #[serde(default)]
+    edge_index: Option<u32>,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    start: Option<RunnerEdgePoint>,
+    #[serde(default)]
+    end: Option<RunnerEdgePoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RunnerEdgePoint {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RunnerFaceTarget {
+    #[serde(default)]
+    target_id: String,
+    #[serde(default)]
+    face_index: Option<u32>,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    center: Option<RunnerEdgePoint>,
+    #[serde(default)]
+    normal: Option<RunnerEdgePoint>,
+    #[serde(default)]
+    area: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,10 +120,39 @@ struct HiddenLineProjectionReport {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HiddenLineArtifactKind {
+    Fcstd,
+    Step,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HiddenLineArtifact {
+    path: PathBuf,
+    kind: HiddenLineArtifactKind,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct RunnerBinding {
     object_name: String,
     parameter_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyStepPartInput {
+    pub instance_id: String,
+    pub object_name: String,
+    pub label: String,
+    pub step_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuse_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_frame: Option<PortFrame>,
 }
 
 pub fn render(
@@ -191,6 +264,7 @@ pub fn render_model_with_sources(
         &preview_stl_path,
         &step_path,
         &manifest,
+        &report,
         source_language,
     )?;
     write_bundle(&bundle_dir, &bundle)?;
@@ -275,10 +349,198 @@ pub fn import_fcstd(
         &preview_stl_path,
         &step_path,
         &manifest,
+        &report,
         crate::models::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &bundle)?;
     Ok(bundle)
+}
+
+pub fn import_step(
+    source_path: &str,
+    configured_freecad_cmd: Option<&str>,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    let source_path = PathBuf::from(source_path);
+    if !source_path.exists() {
+        return Err(AppError::not_found(format!(
+            "STEP file '{}' was not found.",
+            source_path.display()
+        )));
+    }
+
+    let source_bytes =
+        fs::read(&source_path).map_err(|err| AppError::persistence(err.to_string()))?;
+    let content_hash = digest_segments([source_bytes.as_slice()]);
+    let model_id = format!("imported-step-{}", short_digest(&content_hash));
+    let bundle_dir = artifact_dir(app, ModelSourceKind::ImportedStep, &model_id)?;
+
+    if let Some(bundle) = load_cached_bundle(&bundle_dir)? {
+        return Ok(bundle);
+    }
+
+    fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
+
+    let import_step_path = bundle_dir.join(IMPORT_STEP_SOURCE_FILE_NAME);
+    let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
+    let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let step_path = bundle_dir.join(STEP_FILE_NAME);
+    let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
+    let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
+    fs::create_dir_all(&parts_dir).map_err(|err| AppError::persistence(err.to_string()))?;
+    fs::copy(&source_path, &import_step_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to persist imported STEP '{}': {}",
+            source_path.display(),
+            err
+        ))
+    })?;
+
+    run_import_step_runner(
+        app,
+        configured_freecad_cmd,
+        &import_step_path,
+        &fcstd_path,
+        &preview_stl_path,
+        &step_path,
+        &parts_dir,
+        &runner_report_path,
+    )?;
+
+    let report =
+        normalize_runner_report_paths(&bundle_dir, read_runner_report(&runner_report_path)?)?;
+    let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
+    let manifest = build_manifest(
+        &model_id,
+        ModelSourceKind::ImportedStep,
+        Vec::new(),
+        &report,
+        Some(
+            source_path
+                .to_str()
+                .ok_or_else(|| AppError::internal("Invalid STEP source path."))?
+                .to_string(),
+        ),
+        crate::models::SourceLanguage::LegacyPython,
+    )?;
+    write_manifest(&manifest_path, &manifest)?;
+
+    let bundle = build_bundle(
+        &model_id,
+        ModelSourceKind::ImportedStep,
+        &content_hash,
+        1,
+        &fcstd_path,
+        &manifest_path,
+        None,
+        &preview_stl_path,
+        &step_path,
+        &manifest,
+        &report,
+        crate::models::SourceLanguage::LegacyPython,
+    )?;
+    write_bundle(&bundle_dir, &bundle)?;
+    Ok(bundle)
+}
+
+pub fn assemble_step_parts(
+    app: &dyn PathResolver,
+    configured_freecad_cmd: Option<&str>,
+    assembly_id: &str,
+    display_name: &str,
+    parts: &[AssemblyStepPartInput],
+) -> AppResult<(ArtifactBundle, ModelManifest)> {
+    if parts.is_empty() {
+        return Err(AppError::validation(format!(
+            "Assembly '{}' has no STEP parts to assemble.",
+            assembly_id
+        )));
+    }
+
+    let parts_json =
+        serde_json::to_vec(parts).map_err(|err| AppError::validation(err.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(assembly_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(display_name.as_bytes());
+    hasher.update(b"|");
+    hasher.update(parts_json.as_slice());
+    for part in parts {
+        let step_bytes = fs::read(&part.step_path).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to read STEP part '{}' for assembly '{}': {}",
+                part.step_path, assembly_id, err
+            ))
+        })?;
+        hasher.update(b"|");
+        hasher.update(step_bytes.as_slice());
+    }
+    let content_hash = format!("{:x}", hasher.finalize());
+    let model_id = format!("imported-step-assembly-{}", short_digest(&content_hash));
+    let bundle_dir = artifact_dir(app, ModelSourceKind::ImportedStep, &model_id)?;
+
+    if let Some(bundle) = load_cached_bundle(&bundle_dir)? {
+        let manifest = crate::model_runtime::read_model_manifest(app, &bundle.model_id)?;
+        return Ok((bundle, manifest));
+    }
+
+    fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
+
+    let assembly_input_path = bundle_dir.join("assembly-input.json");
+    let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
+    let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let step_path = bundle_dir.join(STEP_FILE_NAME);
+    let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
+    let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
+    fs::create_dir_all(&parts_dir).map_err(|err| AppError::persistence(err.to_string()))?;
+    fs::write(&assembly_input_path, &parts_json).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to persist assembly STEP input '{}': {}",
+            assembly_input_path.display(),
+            err
+        ))
+    })?;
+
+    run_assemble_step_runner(
+        app,
+        configured_freecad_cmd,
+        &assembly_input_path,
+        &fcstd_path,
+        &preview_stl_path,
+        &step_path,
+        &parts_dir,
+        &runner_report_path,
+    )?;
+
+    let report =
+        normalize_runner_report_paths(&bundle_dir, read_runner_report(&runner_report_path)?)?;
+    let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
+    let manifest = build_manifest(
+        &model_id,
+        ModelSourceKind::ImportedStep,
+        Vec::new(),
+        &report,
+        Some(path_to_string(&step_path)?),
+        crate::models::SourceLanguage::LegacyPython,
+    )?;
+    write_manifest(&manifest_path, &manifest)?;
+
+    let bundle = build_bundle(
+        &model_id,
+        ModelSourceKind::ImportedStep,
+        &content_hash,
+        1,
+        &fcstd_path,
+        &manifest_path,
+        None,
+        &preview_stl_path,
+        &step_path,
+        &manifest,
+        &report,
+        crate::models::SourceLanguage::LegacyPython,
+    )?;
+    write_bundle(&bundle_dir, &bundle)?;
+    Ok((bundle, manifest))
 }
 
 pub fn apply_imported_model(
@@ -288,14 +550,14 @@ pub fn apply_imported_model(
     configured_freecad_cmd: Option<&str>,
     app: &dyn PathResolver,
 ) -> AppResult<(ArtifactBundle, ModelManifest)> {
-    if bundle.source_kind != ModelSourceKind::ImportedFcstd {
+    if !is_imported_source_kind(&bundle.source_kind) {
         return Err(AppError::validation(
-            "apply_imported_model only supports imported FCStd bundles.",
+            "apply_imported_model only supports imported FreeCAD bundles.",
         ));
     }
-    if manifest.source_kind != ModelSourceKind::ImportedFcstd {
+    if !is_imported_source_kind(&manifest.source_kind) {
         return Err(AppError::validation(
-            "apply_imported_model requires an imported FCStd manifest.",
+            "apply_imported_model requires an imported FreeCAD manifest.",
         ));
     }
     if bundle.model_id != manifest.model_id {
@@ -340,7 +602,7 @@ pub fn apply_imported_model(
     let content_hash = content_hash_for_path(&fcstd_path)?;
     let next_bundle = build_bundle(
         &bundle.model_id,
-        ModelSourceKind::ImportedFcstd,
+        manifest.source_kind.clone(),
         &content_hash,
         bundle.artifact_version.saturating_add(1),
         &fcstd_path,
@@ -349,6 +611,7 @@ pub fn apply_imported_model(
         &preview_stl_path,
         &step_path,
         &next_manifest,
+        &report,
         crate::models::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &next_bundle)?;
@@ -384,7 +647,7 @@ pub fn extract_brep_hidden_line_projections(
     let artifact_bundle = request.artifact_bundle;
     let sketch_document = request.sketch_document;
     let tolerance = request.tolerance.unwrap_or(0.1);
-    let fcstd_path = validate_hidden_line_artifact(&artifact_bundle)?;
+    let artifact = validate_hidden_line_artifact(&artifact_bundle)?;
     if request
         .views
         .iter()
@@ -395,9 +658,10 @@ pub fn extract_brep_hidden_line_projections(
         ));
     }
 
-    let bundle_dir = fcstd_path
+    let bundle_dir = artifact
+        .path
         .parent()
-        .ok_or_else(|| AppError::validation("FCStd artifact path has no parent directory."))?;
+        .ok_or_else(|| AppError::validation("BRep artifact path has no parent directory."))?;
     let report_path = bundle_dir.join(HIDDEN_LINE_REPORT_FILE_NAME);
     let views_json = serde_json::to_string(&request.views).map_err(|err| {
         AppError::validation(format!("Failed to serialize projection views: {}", err))
@@ -406,7 +670,7 @@ pub fn extract_brep_hidden_line_projections(
     run_hidden_line_runner(
         app,
         configured_freecad_cmd,
-        &fcstd_path,
+        &artifact,
         &report_path,
         &views_json,
         tolerance,
@@ -571,6 +835,7 @@ fn build_bundle(
     preview_stl_path: &Path,
     step_path: &Path,
     manifest: &ModelManifest,
+    report: &RunnerReport,
     source_language: crate::models::SourceLanguage,
 ) -> AppResult<ArtifactBundle> {
     let bundle_dir = manifest_path
@@ -590,7 +855,8 @@ fn build_bundle(
         macro_path: macro_path.map(path_to_string).transpose()?,
         preview_stl_path: path_to_string(preview_stl_path)?,
         viewer_assets: viewer_assets_from_manifest(bundle_dir, manifest)?,
-        edge_targets: Vec::new(),
+        edge_targets: edge_targets_from_report(report, manifest),
+        face_targets: face_targets_from_report(report, manifest),
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: step_export_artifacts(step_path)?,
@@ -629,6 +895,212 @@ fn viewer_assets_from_manifest(
         }));
     }
     Ok(assets)
+}
+
+fn edge_targets_from_report(
+    report: &RunnerReport,
+    manifest: &ModelManifest,
+) -> Vec<ViewerEdgeTarget> {
+    let selection_targets_by_id = manifest
+        .selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Edge)
+        .filter_map(|target| {
+            target
+                .target_id
+                .as_deref()
+                .map(|target_id| (target_id, target))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut edge_targets = Vec::new();
+
+    for object in &report.objects {
+        for edge in object.edges.iter().filter(|edge| valid_runner_edge(edge)) {
+            let target_id = runner_edge_target_id(&object.object_name, edge);
+            let Some(selection_target) = selection_targets_by_id.get(target_id.as_str()) else {
+                continue;
+            };
+            let Some(start) = edge.start.as_ref() else {
+                continue;
+            };
+            let Some(end) = edge.end.as_ref() else {
+                continue;
+            };
+
+            edge_targets.push(ViewerEdgeTarget {
+                target_id,
+                part_id: selection_target.part_id.clone(),
+                viewer_node_id: selection_target.viewer_node_id.clone(),
+                label: runner_edge_label(&object.object_name, edge),
+                editable: selection_target.editable,
+                start: runner_point_to_viewer(start),
+                end: runner_point_to_viewer(end),
+            });
+        }
+    }
+
+    edge_targets
+}
+
+fn face_targets_from_report(
+    report: &RunnerReport,
+    manifest: &ModelManifest,
+) -> Vec<ViewerFaceTarget> {
+    let selection_targets_by_id = manifest
+        .selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Face)
+        .filter_map(|target| {
+            target
+                .target_id
+                .as_deref()
+                .map(|target_id| (target_id, target))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut face_targets = Vec::new();
+
+    for object in &report.objects {
+        for face in object.faces.iter().filter(|face| valid_runner_face(face)) {
+            let target_id = runner_face_target_id(&object.object_name, face);
+            let Some(selection_target) = selection_targets_by_id.get(target_id.as_str()) else {
+                continue;
+            };
+            let Some(center) = face.center.as_ref() else {
+                continue;
+            };
+
+            face_targets.push(ViewerFaceTarget {
+                target_id,
+                part_id: selection_target.part_id.clone(),
+                viewer_node_id: selection_target.viewer_node_id.clone(),
+                label: runner_face_label(&object.object_name, face),
+                editable: selection_target.editable,
+                center: runner_point_to_viewer(center),
+                normal: face.normal.as_ref().map(runner_point_to_array),
+                area: face.area,
+            });
+        }
+    }
+
+    face_targets
+}
+
+fn valid_runner_edge(edge: &RunnerEdgeTarget) -> bool {
+    edge.start.is_some() && edge.end.is_some()
+}
+
+fn valid_runner_face(face: &RunnerFaceTarget) -> bool {
+    face.center.is_some()
+}
+
+fn runner_edge_target_id(object_name: &str, edge: &RunnerEdgeTarget) -> String {
+    let target_id = edge.target_id.trim();
+    if !target_id.is_empty() {
+        return target_id.to_string();
+    }
+
+    let edge_index = edge
+        .edge_index
+        .map(|index| index.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let edge_signature = edge
+        .start
+        .as_ref()
+        .zip(edge.end.as_ref())
+        .map(|(start, end)| runner_edge_signature(start, end));
+    match edge_signature {
+        Some(signature) => format!("{}:edge:{}:{}", object_name, edge_index, signature),
+        None => format!("{}:edge:{}", object_name, edge_index),
+    }
+}
+
+fn runner_edge_label(object_name: &str, edge: &RunnerEdgeTarget) -> String {
+    let label = edge.label.trim();
+    if !label.is_empty() {
+        return label.to_string();
+    }
+
+    let edge_index = edge
+        .edge_index
+        .map(|index| index.saturating_add(1).to_string())
+        .unwrap_or_else(|| "?".to_string());
+    format!("{}.Edge{}", object_name, edge_index)
+}
+
+fn runner_face_target_id(object_name: &str, face: &RunnerFaceTarget) -> String {
+    let target_id = face.target_id.trim();
+    if !target_id.is_empty() {
+        return target_id.to_string();
+    }
+
+    let face_index = face
+        .face_index
+        .map(|index| index.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let face_signature = face.center.as_ref().map(|center| {
+        let center_signature = runner_edge_point_signature(center);
+        let area_signature = face
+            .area
+            .map(format_edge_coordinate)
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("{center_signature}:{area_signature}")
+    });
+    match face_signature {
+        Some(signature) => format!("{}:face:{}:{}", object_name, face_index, signature),
+        None => format!("{}:face:{}", object_name, face_index),
+    }
+}
+
+fn runner_face_label(object_name: &str, face: &RunnerFaceTarget) -> String {
+    let label = face.label.trim();
+    if !label.is_empty() {
+        return label.to_string();
+    }
+
+    let face_index = face
+        .face_index
+        .map(|index| index.saturating_add(1).to_string())
+        .unwrap_or_else(|| "?".to_string());
+    format!("{}.Face{}", object_name, face_index)
+}
+
+fn runner_point_to_viewer(point: &RunnerEdgePoint) -> ViewerEdgePoint {
+    ViewerEdgePoint {
+        x: point.x,
+        y: point.y,
+        z: point.z,
+    }
+}
+
+fn runner_point_to_array(point: &RunnerEdgePoint) -> [f64; 3] {
+    [point.x, point.y, point.z]
+}
+
+fn runner_edge_signature(start: &RunnerEdgePoint, end: &RunnerEdgePoint) -> String {
+    let mut endpoints = [
+        runner_edge_point_signature(start),
+        runner_edge_point_signature(end),
+    ];
+    endpoints.sort();
+    endpoints.join("_")
+}
+
+fn runner_edge_point_signature(point: &RunnerEdgePoint) -> String {
+    [point.x, point.y, point.z]
+        .into_iter()
+        .map(format_edge_coordinate)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn format_edge_coordinate(value: f64) -> String {
+    let formatted = format!("{value:.3}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    if trimmed == "-0" || trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn step_export_artifacts(step_path: &Path) -> AppResult<Vec<ExportArtifact>> {
@@ -694,7 +1166,7 @@ fn build_manifest(
         selection_targets.push(SelectionTarget {
             target_id: Some(format!("target-{}", part_id)),
             part_id: part_id.clone(),
-            viewer_node_id: node_id,
+            viewer_node_id: node_id.clone(),
             label: label.clone(),
             kind: SelectionTargetKind::Object,
             editable: is_part_editable,
@@ -702,6 +1174,34 @@ fn build_manifest(
             primitive_ids: Vec::new(),
             view_ids: Vec::new(),
         });
+
+        for edge in object.edges.iter().filter(|edge| valid_runner_edge(edge)) {
+            selection_targets.push(SelectionTarget {
+                target_id: Some(runner_edge_target_id(&object.object_name, edge)),
+                part_id: part_id.clone(),
+                viewer_node_id: node_id.clone(),
+                label: runner_edge_label(&object.object_name, edge),
+                kind: SelectionTargetKind::Edge,
+                editable: is_part_editable,
+                parameter_keys: object_parameter_keys.clone(),
+                primitive_ids: Vec::new(),
+                view_ids: Vec::new(),
+            });
+        }
+
+        for face in object.faces.iter().filter(|face| valid_runner_face(face)) {
+            selection_targets.push(SelectionTarget {
+                target_id: Some(runner_face_target_id(&object.object_name, face)),
+                part_id: part_id.clone(),
+                viewer_node_id: node_id.clone(),
+                label: runner_face_label(&object.object_name, face),
+                kind: SelectionTargetKind::Face,
+                editable: is_part_editable,
+                parameter_keys: object_parameter_keys.clone(),
+                primitive_ids: Vec::new(),
+                view_ids: Vec::new(),
+            });
+        }
 
         if is_part_editable {
             parameter_groups.push(ParameterGroup {
@@ -715,15 +1215,13 @@ fn build_manifest(
             });
         }
 
-        if matches!(source_kind, ModelSourceKind::ImportedFcstd) {
+        if is_imported_source_kind(&source_kind) {
             enrichment_proposals.push(import_enrichment_proposal(&part_id, &label, object));
         }
     }
 
-    if matches!(source_kind, ModelSourceKind::ImportedFcstd) {
-        warnings.push(
-            "Imported FCStd models are inspect-only until bindings are confirmed.".to_string(),
-        );
+    if is_imported_source_kind(&source_kind) {
+        warnings.push(imported_inspect_only_warning(&source_kind).to_string());
     }
 
     let manifest = ModelManifest {
@@ -823,11 +1321,11 @@ fn rebuild_imported_manifest(
 ) -> AppResult<ModelManifest> {
     let mut base_manifest = build_manifest(
         &previous_manifest.model_id,
-        ModelSourceKind::ImportedFcstd,
+        previous_manifest.source_kind.clone(),
         Vec::new(),
         report,
         previous_manifest.document.source_path.clone(),
-        crate::models::SourceLanguage::LegacyPython,
+        previous_manifest.source_language,
     )?;
 
     let merged_proposals = merge_imported_proposals(
@@ -889,18 +1387,17 @@ fn rebuild_imported_manifest(
         target.editable = editable_part_ids.contains(&target.part_id);
     }
 
-    base_manifest.warnings.retain(|warning| {
-        warning != "Imported FCStd models are inspect-only until bindings are confirmed."
-            && warning != "Imported FCStd bindings were accepted from heuristic proposals."
-    });
+    let inspect_only_warning = imported_inspect_only_warning(&previous_manifest.source_kind);
+    let accepted_warning = imported_accepted_warning(&previous_manifest.source_kind);
+    base_manifest
+        .warnings
+        .retain(|warning| warning != inspect_only_warning && warning != accepted_warning);
     if accepted.is_empty() {
-        base_manifest.warnings.push(
-            "Imported FCStd models are inspect-only until bindings are confirmed.".to_string(),
-        );
-    } else {
         base_manifest
             .warnings
-            .push("Imported FCStd bindings were accepted from heuristic proposals.".to_string());
+            .push(inspect_only_warning.to_string());
+    } else {
+        base_manifest.warnings.push(accepted_warning.to_string());
     }
 
     validate_model_manifest(&base_manifest)?;
@@ -938,6 +1435,37 @@ fn unique_strings(values: Vec<String>) -> Vec<String> {
         }
     }
     unique
+}
+
+fn is_imported_source_kind(source_kind: &ModelSourceKind) -> bool {
+    matches!(
+        source_kind,
+        ModelSourceKind::ImportedFcstd | ModelSourceKind::ImportedStep
+    )
+}
+
+fn imported_inspect_only_warning(source_kind: &ModelSourceKind) -> &'static str {
+    match source_kind {
+        ModelSourceKind::ImportedFcstd => {
+            "Imported FCStd models are inspect-only until bindings are confirmed."
+        }
+        ModelSourceKind::ImportedStep => {
+            "Imported STEP models are inspect-only until bindings are confirmed."
+        }
+        ModelSourceKind::Generated => "Generated models do not use imported warnings.",
+    }
+}
+
+fn imported_accepted_warning(source_kind: &ModelSourceKind) -> &'static str {
+    match source_kind {
+        ModelSourceKind::ImportedFcstd => {
+            "Imported FCStd bindings were accepted from heuristic proposals."
+        }
+        ModelSourceKind::ImportedStep => {
+            "Imported STEP bindings were accepted from heuristic proposals."
+        }
+        ModelSourceKind::Generated => "Generated models do not use imported warnings.",
+    }
 }
 
 fn runner_bindings_from_manifest(manifest: &ModelManifest) -> Vec<RunnerBinding> {
@@ -1086,8 +1614,68 @@ fn bundle_from_manifest(
     bundle.preview_stl_path = path_to_string(&canonical_preview_path(bundle_dir, &bundle))?;
     bundle.export_artifacts = step_export_artifacts(&canonical_step_path(bundle_dir, &bundle))?;
     bundle.viewer_assets = viewer_assets_from_manifest(bundle_dir, manifest)?;
+    bundle.edge_targets = reconcile_edge_targets_with_manifest(bundle.edge_targets, manifest);
+    bundle.face_targets = reconcile_face_targets_with_manifest(bundle.face_targets, manifest);
     crate::models::validate_model_runtime_bundle(manifest, &bundle)?;
     Ok(bundle)
+}
+
+fn reconcile_edge_targets_with_manifest(
+    edge_targets: Vec<ViewerEdgeTarget>,
+    manifest: &ModelManifest,
+) -> Vec<ViewerEdgeTarget> {
+    let selection_targets_by_id = manifest
+        .selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Edge)
+        .filter_map(|target| {
+            target
+                .target_id
+                .as_deref()
+                .map(|target_id| (target_id, target))
+        })
+        .collect::<HashMap<_, _>>();
+
+    edge_targets
+        .into_iter()
+        .filter_map(|mut edge_target| {
+            let selection_target = selection_targets_by_id.get(edge_target.target_id.as_str())?;
+            edge_target.part_id = selection_target.part_id.clone();
+            edge_target.viewer_node_id = selection_target.viewer_node_id.clone();
+            edge_target.label = selection_target.label.clone();
+            edge_target.editable = selection_target.editable;
+            Some(edge_target)
+        })
+        .collect()
+}
+
+fn reconcile_face_targets_with_manifest(
+    face_targets: Vec<ViewerFaceTarget>,
+    manifest: &ModelManifest,
+) -> Vec<ViewerFaceTarget> {
+    let selection_targets_by_id = manifest
+        .selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Face)
+        .filter_map(|target| {
+            target
+                .target_id
+                .as_deref()
+                .map(|target_id| (target_id, target))
+        })
+        .collect::<HashMap<_, _>>();
+
+    face_targets
+        .into_iter()
+        .filter_map(|mut face_target| {
+            let selection_target = selection_targets_by_id.get(face_target.target_id.as_str())?;
+            face_target.part_id = selection_target.part_id.clone();
+            face_target.viewer_node_id = selection_target.viewer_node_id.clone();
+            face_target.label = selection_target.label.clone();
+            face_target.editable = selection_target.editable;
+            Some(face_target)
+        })
+        .collect()
 }
 
 fn canonical_fcstd_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
@@ -1173,28 +1761,55 @@ fn read_runner_report(path: &Path) -> AppResult<RunnerReport> {
     Ok(report)
 }
 
-fn validate_hidden_line_artifact(bundle: &ArtifactBundle) -> AppResult<PathBuf> {
+fn validate_hidden_line_artifact(bundle: &ArtifactBundle) -> AppResult<HiddenLineArtifact> {
     let fcstd_path = bundle.fcstd_path.trim();
-    if bundle.geometry_backend != crate::models::GeometryBackend::Freecad || fcstd_path.is_empty() {
-        return Err(AppError::with_details(
-            crate::models::AppErrorCode::Validation,
-            "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd artifact.",
-            format!(
-                "geometryBackend={}; fcstdPath={}",
-                bundle.geometry_backend.as_str(),
-                bundle.fcstd_path
-            ),
-        ));
+    if !fcstd_path.is_empty() {
+        let path = PathBuf::from(fcstd_path);
+        if !path.exists() {
+            return Err(AppError::not_found(format!(
+                "FCStd artifact for exact BRep hidden-line was not found at '{}'.",
+                path.display()
+            )));
+        }
+        return Ok(HiddenLineArtifact {
+            path,
+            kind: HiddenLineArtifactKind::Fcstd,
+        });
     }
 
-    let path = PathBuf::from(fcstd_path);
-    if !path.exists() {
-        return Err(AppError::not_found(format!(
-            "FCStd artifact for exact BRep hidden-line was not found at '{}'.",
-            path.display()
-        )));
+    let step_path = hidden_line_step_artifact_path(bundle);
+    if let Some(path) = step_path.as_ref() {
+        if !path.exists() {
+            return Err(AppError::not_found(format!(
+                "STEP artifact for exact BRep hidden-line was not found at '{}'.",
+                path.display()
+            )));
+        }
+        return Ok(HiddenLineArtifact {
+            path: path.clone(),
+            kind: HiddenLineArtifactKind::Step,
+        });
     }
-    Ok(path)
+
+    Err(AppError::with_details(
+        crate::models::AppErrorCode::Validation,
+        "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd or STEP artifact.",
+        format!(
+            "geometryBackend={}; fcstdPath={}; stepPath=",
+            bundle.geometry_backend.as_str(),
+            bundle.fcstd_path
+        ),
+    ))
+}
+
+fn hidden_line_step_artifact_path(bundle: &ArtifactBundle) -> Option<PathBuf> {
+    bundle
+        .export_artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.format.eq_ignore_ascii_case("step") && !artifact.path.trim().is_empty()
+        })
+        .map(|artifact| PathBuf::from(artifact.path.trim()))
 }
 
 fn read_hidden_line_projection_report(path: &Path) -> AppResult<HiddenLineProjectionReport> {
@@ -1268,10 +1883,59 @@ fn run_import_runner(
     run_command(command)
 }
 
+fn run_import_step_runner(
+    app: &dyn PathResolver,
+    configured_freecad_cmd: Option<&str>,
+    import_step_path: &Path,
+    fcstd_path: &Path,
+    preview_stl_path: &Path,
+    step_path: &Path,
+    parts_dir: &Path,
+    runner_report_path: &Path,
+) -> AppResult<()> {
+    let mut command = base_runner_command(app, configured_freecad_cmd)?;
+    command
+        .env("ECKYCAD_MODE", "import_step")
+        .env("ECKYCAD_IMPORT_STEP", path_to_string(import_step_path)?)
+        .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
+        .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STEP", path_to_string(step_path)?)
+        .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
+        .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
+        .env("ECKYCAD_PARAMS", "{}");
+    run_command(command)
+}
+
+fn run_assemble_step_runner(
+    app: &dyn PathResolver,
+    configured_freecad_cmd: Option<&str>,
+    assembly_input_path: &Path,
+    fcstd_path: &Path,
+    preview_stl_path: &Path,
+    step_path: &Path,
+    parts_dir: &Path,
+    runner_report_path: &Path,
+) -> AppResult<()> {
+    let mut command = base_runner_command(app, configured_freecad_cmd)?;
+    command
+        .env("ECKYCAD_MODE", "assemble_step_parts")
+        .env(
+            "ECKYCAD_ASSEMBLY_PARTS",
+            path_to_string(assembly_input_path)?,
+        )
+        .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
+        .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STEP", path_to_string(step_path)?)
+        .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
+        .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
+        .env("ECKYCAD_PARAMS", "{}");
+    run_command(command)
+}
+
 fn run_hidden_line_runner(
     app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
-    fcstd_path: &Path,
+    artifact: &HiddenLineArtifact,
     projection_report_path: &Path,
     views_json: &str,
     tolerance: f64,
@@ -1279,11 +1943,18 @@ fn run_hidden_line_runner(
     let mut command = base_runner_command(app, configured_freecad_cmd)?;
     command
         .env("ECKYCAD_MODE", "hidden_line_projection")
-        .env("ECKYCAD_IMPORT_FCSTD", path_to_string(fcstd_path)?)
         .env("ECKYCAD_REPORT", path_to_string(projection_report_path)?)
         .env("ECKYCAD_PROJECTION_VIEWS", views_json)
         .env("ECKYCAD_PROJECTION_TOLERANCE", tolerance.to_string())
         .env("ECKYCAD_PARAMS", "{}");
+    match artifact.kind {
+        HiddenLineArtifactKind::Fcstd => {
+            command.env("ECKYCAD_IMPORT_FCSTD", path_to_string(&artifact.path)?);
+        }
+        HiddenLineArtifactKind::Step => {
+            command.env("ECKYCAD_IMPORT_STEP", path_to_string(&artifact.path)?);
+        }
+    }
     run_command(command)
 }
 
@@ -1362,6 +2033,8 @@ fn bundle_dir_from_model_id(app: &dyn PathResolver, model_id: &str) -> AppResult
         ModelSourceKind::Generated
     } else if model_id.starts_with("imported-fcstd-") {
         ModelSourceKind::ImportedFcstd
+    } else if model_id.starts_with("imported-step-") {
+        ModelSourceKind::ImportedStep
     } else {
         return Err(AppError::not_found(format!(
             "Unknown model id '{}'.",
@@ -1375,6 +2048,7 @@ fn source_kind_dir_name(source_kind: ModelSourceKind) -> &'static str {
     match source_kind {
         ModelSourceKind::Generated => GENERATED_ARTIFACT_DIR,
         ModelSourceKind::ImportedFcstd => IMPORTED_FCSTD_ARTIFACT_DIR,
+        ModelSourceKind::ImportedStep => IMPORTED_STEP_ARTIFACT_DIR,
     }
 }
 
@@ -1885,6 +2559,7 @@ mod tests {
                 format: ViewerAssetFormat::Stl,
             }],
             edge_targets: Vec::new(),
+            face_targets: Vec::new(),
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
@@ -1901,6 +2576,7 @@ mod tests {
         let step_path = root.join(STEP_FILE_NAME);
         let asset_path = root.join(PARTS_DIR_NAME).join("000-outershell.stl");
         let manifest = sample_manifest("generated-step", ModelSourceKind::Generated, &asset_path);
+        let report = sample_report(Vec::new());
 
         let bundle = build_bundle(
             "generated-step",
@@ -1913,6 +2589,7 @@ mod tests {
             &preview_stl_path,
             &step_path,
             &manifest,
+            &report,
             crate::models::SourceLanguage::LegacyPython,
         )
         .expect("bundle");
@@ -1922,6 +2599,164 @@ mod tests {
         assert_eq!(bundle.export_artifacts[0].format, "step");
         assert_eq!(bundle.export_artifacts[0].role, "primary");
         assert_eq!(bundle.export_artifacts[0].path, step_path.to_string_lossy());
+    }
+
+    #[test]
+    fn build_bundle_exposes_reported_brep_edge_targets() {
+        let root = std::env::temp_dir().join(format!("ecky-edge-bundle-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(PARTS_DIR_NAME)).expect("bundle dirs");
+        let fcstd_path = root.join(FCSTD_FILE_NAME);
+        let manifest_path = root.join(MANIFEST_FILE_NAME);
+        let preview_stl_path = root.join(PREVIEW_STL_FILE_NAME);
+        let step_path = root.join(STEP_FILE_NAME);
+        let report = sample_report(vec![RunnerObject {
+            object_name: "OuterShell".to_string(),
+            label: "Outer Shell".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: root
+                .join(PARTS_DIR_NAME)
+                .join("000-outershell.stl")
+                .to_string_lossy()
+                .to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+            edges: vec![RunnerEdgeTarget {
+                target_id: "OuterShell:edge:0:0-0-0_10-0-0".to_string(),
+                edge_index: Some(0),
+                label: "OuterShell.Edge1".to_string(),
+                start: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                end: Some(RunnerEdgePoint {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+            }],
+            faces: Vec::new(),
+        }]);
+        let manifest = build_manifest(
+            "generated-edge",
+            ModelSourceKind::Generated,
+            vec!["outer_shell_width".to_string()],
+            &report,
+            None,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("manifest");
+
+        let bundle = build_bundle(
+            "generated-edge",
+            ModelSourceKind::Generated,
+            "hash",
+            1,
+            &fcstd_path,
+            &manifest_path,
+            None,
+            &preview_stl_path,
+            &step_path,
+            &manifest,
+            &report,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("bundle");
+
+        crate::models::validate_model_runtime_bundle(&manifest, &bundle)
+            .expect("edge target bundle should validate");
+        assert_eq!(bundle.edge_targets.len(), 1);
+        assert_eq!(
+            bundle.edge_targets[0].target_id,
+            "OuterShell:edge:0:0-0-0_10-0-0"
+        );
+        assert_eq!(bundle.edge_targets[0].part_id, manifest.parts[0].part_id);
+        assert_eq!(bundle.edge_targets[0].viewer_node_id, "OuterShell");
+        assert_eq!(bundle.edge_targets[0].label, "OuterShell.Edge1");
+        assert!(bundle.edge_targets[0].editable);
+        assert_eq!(bundle.edge_targets[0].start.x, 0.0);
+        assert_eq!(bundle.edge_targets[0].end.x, 10.0);
+    }
+
+    #[test]
+    fn build_bundle_exposes_reported_brep_face_targets() {
+        let root = std::env::temp_dir().join(format!("ecky-face-bundle-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(PARTS_DIR_NAME)).expect("bundle dirs");
+        let fcstd_path = root.join(FCSTD_FILE_NAME);
+        let manifest_path = root.join(MANIFEST_FILE_NAME);
+        let preview_stl_path = root.join(PREVIEW_STL_FILE_NAME);
+        let step_path = root.join(STEP_FILE_NAME);
+        let report = sample_report(vec![RunnerObject {
+            object_name: "OuterShell".to_string(),
+            label: "Outer Shell".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: root
+                .join(PARTS_DIR_NAME)
+                .join("000-outershell.stl")
+                .to_string_lossy()
+                .to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+            edges: Vec::new(),
+            faces: vec![RunnerFaceTarget {
+                target_id: "OuterShell:face:0:5-0-0:100".to_string(),
+                face_index: Some(0),
+                label: "OuterShell.Face1".to_string(),
+                center: Some(RunnerEdgePoint {
+                    x: 5.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                normal: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: -1.0,
+                    z: 0.0,
+                }),
+                area: Some(100.0),
+            }],
+        }]);
+        let manifest = build_manifest(
+            "generated-face",
+            ModelSourceKind::Generated,
+            vec!["outer_shell_width".to_string()],
+            &report,
+            None,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("manifest");
+
+        let bundle = build_bundle(
+            "generated-face",
+            ModelSourceKind::Generated,
+            "hash",
+            1,
+            &fcstd_path,
+            &manifest_path,
+            None,
+            &preview_stl_path,
+            &step_path,
+            &manifest,
+            &report,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("bundle");
+
+        crate::models::validate_model_runtime_bundle(&manifest, &bundle)
+            .expect("face target bundle should validate");
+        assert_eq!(bundle.face_targets.len(), 1);
+        assert_eq!(
+            bundle.face_targets[0].target_id,
+            "OuterShell:face:0:5-0-0:100"
+        );
+        assert_eq!(bundle.face_targets[0].part_id, manifest.parts[0].part_id);
+        assert_eq!(bundle.face_targets[0].viewer_node_id, "OuterShell");
+        assert_eq!(bundle.face_targets[0].label, "OuterShell.Face1");
+        assert!(bundle.face_targets[0].editable);
+        assert_eq!(bundle.face_targets[0].center.x, 5.0);
+        assert_eq!(bundle.face_targets[0].normal, Some([0.0, -1.0, 0.0]));
+        assert_eq!(bundle.face_targets[0].area, Some(100.0));
     }
 
     #[test]
@@ -1935,11 +2770,11 @@ mod tests {
         assert_eq!(err.code, crate::models::AppErrorCode::Validation);
         assert_eq!(
             err.message,
-            "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd artifact."
+            "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd or STEP artifact."
         );
         assert_eq!(
             err.details.as_deref(),
-            Some("geometryBackend=mesh; fcstdPath=")
+            Some("geometryBackend=mesh; fcstdPath=; stepPath=")
         );
     }
 
@@ -1953,7 +2788,30 @@ mod tests {
 
         let accepted = validate_hidden_line_artifact(&bundle).expect("valid hidden-line artifact");
 
-        assert_eq!(accepted, fcstd_path);
+        assert_eq!(accepted.path, fcstd_path);
+        assert!(matches!(accepted.kind, HiddenLineArtifactKind::Fcstd));
+    }
+
+    #[test]
+    fn hidden_line_validation_accepts_existing_step_export_artifact() {
+        let resolver = TestResolver::new("hidden-line-existing-step");
+        let step_path = resolver.root.join("model.step");
+        fs::write(&step_path, b"ISO-10303-21;").expect("write step");
+        let mut bundle = sample_bundle("direct-occt-preview", ModelSourceKind::Generated);
+        bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        bundle.fcstd_path = String::new();
+        bundle.export_artifacts = vec![ExportArtifact {
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: step_path.to_string_lossy().to_string(),
+            role: "primary".to_string(),
+        }];
+
+        let accepted =
+            validate_hidden_line_artifact(&bundle).expect("valid STEP hidden-line artifact");
+
+        assert_eq!(accepted.path, step_path);
+        assert!(matches!(accepted.kind, HiddenLineArtifactKind::Step));
     }
 
     #[test]
@@ -1973,6 +2831,15 @@ mod tests {
                   ],
                   "hiddenEdges": [
                     {"edgeId": "front-h-0", "points": [[0, 5], [10, 5]], "sourceClass": "H"}
+                  ],
+                  "loops": [
+                    {
+                      "loopId": "front-loop-0",
+                      "edgeIds": ["front-v-0", "front-h-0"],
+                      "points": [[0, 0], [10, 0], [10, 5], [0, 5], [0, 0]],
+                      "role": "outer",
+                      "sourceClass": "derived"
+                    }
                   ]
                 }
               ],
@@ -1988,6 +2855,11 @@ mod tests {
         assert_eq!(report.views[0].view, SketchView::Front);
         assert_eq!(report.views[0].visible_edges.len(), 1);
         assert_eq!(report.views[0].hidden_edges[0].source_class, "H");
+        assert_eq!(report.views[0].loops.len(), 1);
+        assert_eq!(
+            report.views[0].loops[0].role,
+            crate::models::BrepProjectedLoopRole::Outer
+        );
     }
 
     #[test]
@@ -2013,6 +2885,8 @@ mod tests {
                 bounds: None,
                 volume: None,
                 area: None,
+                edges: Vec::new(),
+                faces: Vec::new(),
             },
             RunnerObject {
                 object_name: "Lid".to_string(),
@@ -2022,6 +2896,8 @@ mod tests {
                 bounds: None,
                 volume: None,
                 area: None,
+                edges: Vec::new(),
+                faces: Vec::new(),
             },
         ]);
 
@@ -2061,6 +2937,176 @@ mod tests {
     }
 
     #[test]
+    fn build_manifest_exposes_reported_brep_edges_as_selection_targets() {
+        let report = sample_report(vec![RunnerObject {
+            object_name: "OuterShell".to_string(),
+            label: "Outer Shell".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: "/tmp/shell.stl".to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+            edges: vec![RunnerEdgeTarget {
+                target_id: "OuterShell:edge:0:0-0-0_10-0-0".to_string(),
+                edge_index: Some(0),
+                label: "OuterShell.Edge1".to_string(),
+                start: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                end: Some(RunnerEdgePoint {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+            }],
+            faces: Vec::new(),
+        }]);
+
+        let manifest = build_manifest(
+            "generated-edge-targets",
+            ModelSourceKind::Generated,
+            vec!["outer_shell_width".to_string()],
+            &report,
+            None,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("manifest should build");
+
+        validate_model_manifest(&manifest).expect("manifest should validate");
+        let edge_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .expect("edge selection target");
+
+        assert_eq!(
+            edge_target.target_id.as_deref(),
+            Some("OuterShell:edge:0:0-0-0_10-0-0")
+        );
+        assert_eq!(edge_target.part_id, manifest.parts[0].part_id);
+        assert_eq!(edge_target.viewer_node_id, "OuterShell");
+        assert_eq!(edge_target.label, "OuterShell.Edge1");
+        assert!(edge_target.editable);
+        assert_eq!(
+            edge_target.parameter_keys,
+            vec!["outer_shell_width".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_manifest_exposes_reported_brep_faces_as_selection_targets() {
+        let report = sample_report(vec![RunnerObject {
+            object_name: "OuterShell".to_string(),
+            label: "Outer Shell".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: "/tmp/shell.stl".to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+            edges: Vec::new(),
+            faces: vec![RunnerFaceTarget {
+                target_id: "OuterShell:face:0:5-0-0:100".to_string(),
+                face_index: Some(0),
+                label: "OuterShell.Face1".to_string(),
+                center: Some(RunnerEdgePoint {
+                    x: 5.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                normal: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: -1.0,
+                    z: 0.0,
+                }),
+                area: Some(100.0),
+            }],
+        }]);
+
+        let manifest = build_manifest(
+            "generated-face-targets",
+            ModelSourceKind::Generated,
+            vec!["outer_shell_width".to_string()],
+            &report,
+            None,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("manifest should build");
+
+        validate_model_manifest(&manifest).expect("manifest should validate");
+        let face_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .expect("face selection target");
+
+        assert_eq!(
+            face_target.target_id.as_deref(),
+            Some("OuterShell:face:0:5-0-0:100")
+        );
+        assert_eq!(face_target.part_id, manifest.parts[0].part_id);
+        assert_eq!(face_target.viewer_node_id, "OuterShell");
+        assert_eq!(face_target.label, "OuterShell.Face1");
+        assert!(face_target.editable);
+        assert_eq!(
+            face_target.parameter_keys,
+            vec!["outer_shell_width".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_manifest_generates_endpoint_stable_edge_target_id_when_runner_id_missing() {
+        let report = sample_report(vec![RunnerObject {
+            object_name: "OuterShell".to_string(),
+            label: "Outer Shell".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: "/tmp/shell.stl".to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+            edges: vec![RunnerEdgeTarget {
+                target_id: String::new(),
+                edge_index: Some(4),
+                label: String::new(),
+                start: Some(RunnerEdgePoint {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                end: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+            }],
+            faces: Vec::new(),
+        }]);
+
+        let manifest = build_manifest(
+            "generated-edge-fallback",
+            ModelSourceKind::Generated,
+            Vec::new(),
+            &report,
+            None,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("manifest should build");
+
+        let edge_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .expect("edge selection target");
+
+        assert_eq!(
+            edge_target.target_id.as_deref(),
+            Some("OuterShell:edge:4:0-0-0_10-0-0")
+        );
+        assert_eq!(edge_target.label, "OuterShell.Edge5");
+    }
+
+    #[test]
     fn build_manifest_marks_unbound_generated_parts_as_inspect_only() {
         let report = sample_report(vec![
             RunnerObject {
@@ -2071,6 +3117,8 @@ mod tests {
                 bounds: None,
                 volume: None,
                 area: None,
+                edges: Vec::new(),
+                faces: Vec::new(),
             },
             RunnerObject {
                 object_name: "Spout".to_string(),
@@ -2080,6 +3128,8 @@ mod tests {
                 bounds: None,
                 volume: None,
                 area: None,
+                edges: Vec::new(),
+                faces: Vec::new(),
             },
         ]);
 
@@ -2135,6 +3185,8 @@ mod tests {
             }),
             volume: None,
             area: None,
+            edges: Vec::new(),
+            faces: Vec::new(),
         }]);
 
         let manifest = build_manifest(
@@ -2161,6 +3213,44 @@ mod tests {
         );
         assert_eq!(proposal.status, EnrichmentStatus::Pending);
         assert_eq!(proposal.provenance, "heuristic.import.bounds");
+    }
+
+    #[test]
+    fn build_manifest_for_imported_step_seeds_pending_proposals() {
+        let report = sample_report(vec![RunnerObject {
+            object_name: "OuterShell001".to_string(),
+            label: String::new(),
+            type_id: "Part::Feature".to_string(),
+            export_path: "/tmp/shell.stl".to_string(),
+            bounds: Some(RunnerBounds {
+                x_min: 0.0,
+                y_min: 0.0,
+                z_min: 0.0,
+                x_max: 20.0,
+                y_max: 10.0,
+                z_max: 12.0,
+            }),
+            volume: None,
+            area: None,
+            edges: Vec::new(),
+            faces: Vec::new(),
+        }]);
+
+        let manifest = build_manifest(
+            "imported-step-test",
+            ModelSourceKind::ImportedStep,
+            Vec::new(),
+            &report,
+            Some("/tmp/model.step".to_string()),
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("manifest should build");
+
+        assert_eq!(manifest.enrichment_state.status, EnrichmentStatus::Pending);
+        assert_eq!(manifest.enrichment_state.proposals.len(), 1);
+        assert!(manifest.warnings.iter().any(|warning| {
+            warning == "Imported STEP models are inspect-only until bindings are confirmed."
+        }));
     }
 
     #[test]
@@ -2203,6 +3293,34 @@ mod tests {
             .contains(&"outer_shell_height".to_string()));
         assert!(lid.editable);
         assert_eq!(lid.parameter_keys, vec!["lid_height".to_string()]);
+        let edge_targets = manifest
+            .selection_targets
+            .iter()
+            .filter(|target| target.kind == SelectionTargetKind::Edge)
+            .collect::<Vec<_>>();
+        assert_eq!(edge_targets.len(), 2);
+        assert!(edge_targets.iter().any(|target| {
+            target.target_id.as_deref() == Some("OuterShell:edge:0:-24-0--20_24-0--20")
+                && target.viewer_node_id == "OuterShell"
+        }));
+        assert!(edge_targets.iter().any(|target| {
+            target.target_id.as_deref() == Some("Lid:edge:0:-20-32--18_20-32--18")
+                && target.viewer_node_id == "Lid"
+        }));
+        let face_targets = manifest
+            .selection_targets
+            .iter()
+            .filter(|target| target.kind == SelectionTargetKind::Face)
+            .collect::<Vec<_>>();
+        assert_eq!(face_targets.len(), 2);
+        assert!(face_targets.iter().any(|target| {
+            target.target_id.as_deref() == Some("OuterShell:face:0:0-18-0:640")
+                && target.viewer_node_id == "OuterShell"
+        }));
+        assert!(face_targets.iter().any(|target| {
+            target.target_id.as_deref() == Some("Lid:face:0:0-37-0:320")
+                && target.viewer_node_id == "Lid"
+        }));
     }
 
     #[test]
@@ -2470,6 +3588,78 @@ mod tests {
     }
 
     #[test]
+    fn load_cached_bundle_refreshes_edge_target_metadata_from_manifest() {
+        let resolver = TestResolver::new("edge-cache-repair");
+        let bundle_dir = artifact_dir(
+            &resolver,
+            ModelSourceKind::Generated,
+            "generated-edge-cache",
+        )
+        .expect("bundle dir");
+        fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
+
+        let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
+        fs::write(&fcstd_path, b"fcstd").expect("fcstd");
+        fs::write(&preview_path, b"preview").expect("preview");
+        fs::write(&step_path, b"step").expect("step");
+        fs::write(&asset_path, b"part").expect("part");
+
+        let mut manifest = sample_manifest(
+            "generated-edge-cache",
+            ModelSourceKind::Generated,
+            &asset_path,
+        );
+        let part_id = manifest.parts[0].part_id.clone();
+        manifest.selection_targets.push(SelectionTarget {
+            target_id: Some("OuterShell:edge:0:0-0-0_10-0-0".to_string()),
+            part_id: part_id.clone(),
+            viewer_node_id: "OuterShell".to_string(),
+            label: "Mounting edge".to_string(),
+            kind: SelectionTargetKind::Edge,
+            editable: true,
+            parameter_keys: Vec::new(),
+            primitive_ids: Vec::new(),
+            view_ids: Vec::new(),
+        });
+        write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+
+        let mut bundle = sample_bundle("generated-edge-cache", ModelSourceKind::Generated);
+        bundle.edge_targets.push(ViewerEdgeTarget {
+            target_id: "OuterShell:edge:0:0-0-0_10-0-0".to_string(),
+            part_id: "stale-part".to_string(),
+            viewer_node_id: "stale-node".to_string(),
+            label: "Stale edge".to_string(),
+            editable: false,
+            start: ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+        write_bundle(&bundle_dir, &bundle).expect("bundle");
+
+        let cached = load_cached_bundle(&bundle_dir)
+            .expect("load cached bundle")
+            .expect("cached bundle");
+
+        assert_eq!(cached.edge_targets.len(), 1);
+        assert_eq!(cached.edge_targets[0].part_id, part_id);
+        assert_eq!(cached.edge_targets[0].viewer_node_id, "OuterShell");
+        assert_eq!(cached.edge_targets[0].label, "Mounting edge");
+        assert!(cached.edge_targets[0].editable);
+        assert_eq!(cached.edge_targets[0].start.x, 0.0);
+        assert_eq!(cached.edge_targets[0].end.x, 10.0);
+    }
+
+    #[test]
     fn save_model_manifest_normalizes_relative_viewer_asset_paths() {
         let resolver = TestResolver::new("save-relative");
         let model_id = "generated-save-relative";
@@ -2573,6 +3763,8 @@ mod tests {
             bounds: None,
             volume: None,
             area: None,
+            edges: Vec::new(),
+            faces: Vec::new(),
         }]);
 
         let normalized =
@@ -2785,6 +3977,42 @@ mod tests {
         )
         .expect("parse manifest");
         assert!(!manifest.parts.is_empty());
+    }
+
+    #[test]
+    fn render_model_with_sources_applies_non_uniform_scale_via_freecad() {
+        let freecad_cmd = match resolve_freecad_path(None) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let resolver = TestResolver::new("non-uniform-scale");
+        let source = r#"(model
+            (part body
+              (scale 0.5 0.25 1
+                (box 20 20 10))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            Some(freecad_cmd.to_string_lossy().as_ref()),
+            &resolver,
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        let manifest: ModelManifest = serde_json::from_str(
+            &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        let part = manifest.parts.first().expect("part");
+        let bounds = part.bounds.as_ref().expect("bounds");
+        assert!((bounds.x_min + 5.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.x_max - 5.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.y_min + 2.5).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.y_max - 2.5).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.z_min - 0.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.z_max - 10.0).abs() < 0.25, "bounds: {:?}", bounds);
     }
 
     #[test]

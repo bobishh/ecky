@@ -20,6 +20,11 @@ use crate::ecky_deterministic;
 
 use super::bootstrap;
 
+const ECKY_COMPILE_STACK_SIZE: usize = 32 * 1024 * 1024;
+const ECKY_SOURCE_MAX_BYTES: usize = 512 * 1024;
+const ECKY_SOURCE_MAX_LIST_FORMS: usize = 20_000;
+const ECKY_SOURCE_MAX_PAREN_DEPTH: usize = 256;
+
 pub fn try_compile_to_legacy_source(source: &str) -> Option<AppResult<String>> {
     match compile_to_legacy_source(source) {
         Ok(compiled) => Some(Ok(compiled)),
@@ -42,22 +47,138 @@ pub fn compile_to_legacy_source(source: &str) -> AppResult<String> {
 }
 
 pub fn compile_to_core_program(source: &str) -> CoreResult<CoreProgram> {
+    validate_source_budget_before_steel(source)?;
+    compile_to_core_program_on_guarded_stack(source)
+}
+
+fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProgram> {
+    let source = source.to_owned();
+    let handle = std::thread::Builder::new()
+        .name("ecky-scheme-compile".into())
+        .stack_size(ECKY_COMPILE_STACK_SIZE)
+        .spawn(move || compile_to_core_program_inner(&source))
+        .map_err(|err| {
+            CompilerError::new(
+                CompilerErrorKind::Internal,
+                format!("Failed to start guarded Ecky compiler thread: {err}"),
+            )
+        })?;
+
+    handle.join().map_err(|_| {
+        CompilerError::new(
+            CompilerErrorKind::Internal,
+            "Ecky compiler panicked while lowering source.",
+        )
+    })?
+}
+
+fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     bootstrap::validate_user_source(source)
         .map_err(|err| CompilerError::new(CompilerErrorKind::Parse, err))?;
-    reject_model_level_sequence_forms(source)?;
+    let source = rewrite_sequence_destructuring_source(source)?;
+    reject_model_level_sequence_forms(&source)?;
 
-    if can_use_expanded_ast(source) {
-        if let Ok(program) = compile_to_core_program_from_expanded_ast(source) {
+    if can_use_expanded_ast(&source) {
+        if let Ok(program) = compile_to_core_program_from_expanded_ast(&source) {
             return verify_compiled_core_program(program);
         }
     }
 
-    compile_to_core_program_via_runtime(source).and_then(verify_compiled_core_program)
+    compile_to_core_program_via_runtime(&source).and_then(verify_compiled_core_program)
 }
 
 fn verify_compiled_core_program(program: CoreProgram) -> CoreResult<CoreProgram> {
     crate::ecky_core_ir::verify_core_program(&program)?;
     Ok(program)
+}
+
+fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
+    if source.len() > ECKY_SOURCE_MAX_BYTES {
+        return Err(source_budget_error(format!(
+            "Ecky source is too large before Steel lowering: {} bytes exceeds limit {} bytes.",
+            source.len(),
+            ECKY_SOURCE_MAX_BYTES
+        )));
+    }
+
+    let mut depth = 0usize;
+    let mut list_forms = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    for (offset, ch) in source.char_indices() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            ';' => in_comment = true,
+            '"' => in_string = true,
+            '(' => {
+                depth += 1;
+                list_forms += 1;
+                if depth > ECKY_SOURCE_MAX_PAREN_DEPTH {
+                    return Err(source_budget_error(format!(
+                        "Ecky source nesting depth is too high before Steel lowering: depth {} at byte {} exceeds limit {}.",
+                        depth, offset, ECKY_SOURCE_MAX_PAREN_DEPTH
+                    )));
+                }
+                if list_forms > ECKY_SOURCE_MAX_LIST_FORMS {
+                    return Err(source_budget_error(format!(
+                        "Ecky source has too many list forms before Steel lowering: {} exceeds limit {}.",
+                        list_forms, ECKY_SOURCE_MAX_LIST_FORMS
+                    )));
+                }
+            }
+            ')' => {
+                if depth == 0 {
+                    return Err(CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        format!("Unexpected `)` at byte {offset}."),
+                    ));
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    if in_string {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Unterminated string literal in Ecky source.",
+        ));
+    }
+
+    if depth != 0 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Unclosed `(` in Ecky source.",
+        ));
+    }
+
+    Ok(())
+}
+
+fn source_budget_error(message: String) -> CompilerError {
+    CompilerError::new(CompilerErrorKind::UnsupportedFeature, message).with_help(
+        "Reduce generated repetition, use `range`/`map`/`repeat-*` helpers, or split the model into smaller parts before rendering.",
+    )
 }
 
 fn can_use_expanded_ast(source: &str) -> bool {
@@ -259,13 +380,206 @@ fn model_level_sequence_form_error(name: &str) -> CompilerError {
 }
 
 fn compile_to_core_program_from_expanded_ast(source: &str) -> CoreResult<CoreProgram> {
+    validate_source_budget_before_steel(source)?;
+    let source = rewrite_sequence_destructuring_source(source)?;
     let mut engine = bootstrap::new_engine();
-    let wrapped = wrap_expanded_ast_source(source);
+    let wrapped = wrap_expanded_ast_source(&source);
     let forms = engine
         .emit_expanded_ast_without_optimizations(&wrapped, None)
         .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
     let decoded = forms.iter().map(decode_expanded_expr).collect::<Vec<_>>();
     parse_expanded_program(&decoded)
+}
+
+fn rewrite_sequence_destructuring_source(source: &str) -> CoreResult<String> {
+    if !source.contains("(lambda ((") {
+        return Ok(source.to_string());
+    }
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+    forms
+        .iter()
+        .map(rewrite_sequence_destructuring_expr)
+        .collect::<CoreResult<Vec<_>>>()
+        .map(|forms| forms.join("\n"))
+}
+
+fn rewrite_sequence_destructuring_expr(expr: &ExprKind) -> CoreResult<String> {
+    match expr {
+        ExprKind::List(list) => {
+            if expr_list_head_is(&list.args, "map") && list.args.len() == 3 {
+                if let Some((names, body_source)) = sequence_destructuring_lambda(&list.args[1])? {
+                    return rewrite_map_destructuring(&names, &body_source, &list.args[2]);
+                }
+            }
+            let rendered = list
+                .args
+                .iter()
+                .map(rewrite_sequence_destructuring_expr)
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok(format!("({})", rendered.join(" ")))
+        }
+        ExprKind::LambdaFunction(_) => {
+            if sequence_destructuring_lambda(expr)?.is_some() {
+                return Err(sequence_callable_kind_error(
+                    "`map` lambda parameter",
+                    "symbol outside supported static destructuring",
+                    "destructuring",
+                    expr_source_span(expr),
+                ));
+            }
+            Ok(expr.to_string())
+        }
+        _ => Ok(expr.to_string()),
+    }
+}
+
+fn sequence_destructuring_lambda(expr: &ExprKind) -> CoreResult<Option<(Vec<String>, String)>> {
+    let (pattern, body_source) = match expr {
+        ExprKind::LambdaFunction(lambda) => {
+            if lambda.args.len() != 1 {
+                return Ok(None);
+            }
+            (
+                lambda.args[0].clone(),
+                rewrite_sequence_destructuring_expr(&lambda.body)?,
+            )
+        }
+        ExprKind::List(list) => {
+            if !expr_list_head_is(&list.args, "lambda") || list.args.len() < 3 {
+                return Ok(None);
+            }
+            let params =
+                expr_list_items(&list.args[1], "`map` lambda destructuring parameter list")?;
+            if params.len() != 1 {
+                return Ok(None);
+            }
+            let body_parts = list.args[2..]
+                .iter()
+                .map(rewrite_sequence_destructuring_expr)
+                .collect::<CoreResult<Vec<_>>>()?;
+            let body_source = if body_parts.len() == 1 {
+                body_parts[0].clone()
+            } else {
+                format!("(begin {})", body_parts.join(" "))
+            };
+            (params[0].clone(), body_source)
+        }
+        _ => return Ok(None),
+    };
+    let Ok(pattern_items) = expr_list_items(&pattern, "`map` lambda destructuring parameter")
+    else {
+        return Ok(None);
+    };
+    let names = pattern_items
+        .iter()
+        .map(|item| {
+            expr_identifier(item).ok_or_else(|| {
+                sequence_callable_kind_error(
+                    "`map` lambda parameter",
+                    "symbol in destructuring pattern",
+                    &expr_actual_kind_label(item),
+                    expr_source_span(item),
+                )
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    if names.is_empty() {
+        return Err(sequence_callable_arity_error(
+            "`map` lambda parameter",
+            1,
+            0,
+            expr_source_span(&pattern),
+        ));
+    }
+    Ok(Some((names, body_source)))
+}
+
+fn rewrite_map_destructuring(
+    names: &[String],
+    body_source: &str,
+    source: &ExprKind,
+) -> CoreResult<String> {
+    let source_items = expr_list_items(source, "`map` destructuring source")?;
+    let source_head = source_items
+        .first()
+        .and_then(expr_identifier)
+        .map(|name| normalize_hygienic_op_name(&name))
+        .unwrap_or_default();
+    let params = names.join(" ");
+    match source_head.as_str() {
+        "zip" => {
+            if source_items.len() - 1 != names.len() {
+                return Err(sequence_callable_arity_error(
+                    "`map` lambda parameter",
+                    source_items.len() - 1,
+                    names.len(),
+                    expr_source_span(source),
+                ));
+            }
+            let sources = source_items[1..]
+                .iter()
+                .map(rewrite_sequence_destructuring_expr)
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok(format!(
+                "(map (lambda ({params}) {body_source}) {})",
+                sources.join(" ")
+            ))
+        }
+        "enumerate" => {
+            if names.len() != 2 {
+                return Err(sequence_callable_arity_error(
+                    "`map` lambda parameter",
+                    2,
+                    names.len(),
+                    expr_source_span(source),
+                ));
+            }
+            if source_items.len() != 2 {
+                return Err(sequence_arity_error(
+                    "`enumerate`",
+                    "one list",
+                    source_items.len().saturating_sub(1),
+                    expr_source_span(source),
+                ));
+            }
+            let count = static_sequence_length(&source_items[1]).ok_or_else(|| {
+                sequence_callable_kind_error(
+                    "`map` lambda parameter",
+                    "static `enumerate` source for destructuring",
+                    "dynamic destructuring",
+                    expr_source_span(source),
+                )
+            })?;
+            let source = rewrite_sequence_destructuring_expr(&source_items[1])?;
+            Ok(format!(
+                "(map (lambda ({params}) {body_source}) (range 0 {count}) {source})"
+            ))
+        }
+        _ => Err(sequence_callable_kind_error(
+            "`map` lambda parameter",
+            "`zip` or static `enumerate` source for destructuring",
+            "destructuring",
+            expr_source_span(source),
+        )),
+    }
+}
+
+fn static_sequence_length(expr: &ExprKind) -> Option<i64> {
+    let items = expr_list_items(expr, "static sequence").ok()?;
+    let head = items
+        .first()
+        .and_then(expr_identifier)
+        .map(|name| normalize_hygienic_op_name(&name))?;
+    match head.as_str() {
+        "list" => Some(items.len().saturating_sub(1) as i64),
+        "range" if items.len() == 3 => {
+            let start = parse_integer_literal(&items[1], "range start").ok()?;
+            let end = parse_integer_literal(&items[2], "range end").ok()?;
+            Some((end - start).max(0))
+        }
+        _ => None,
+    }
 }
 
 fn wrap_expanded_ast_source(source: &str) -> String {
@@ -2236,8 +2550,8 @@ fn parse_expanded_enumerate_node(
         .enumerate()
         .map(|(index, item)| {
             let pair = vec![
-                item,
                 number_literal_node(index as f64, next_node, expr_source_span(&args[0])),
+                item,
             ];
             core_node_with_span(
                 alloc_node_id(next_node),
@@ -4884,6 +5198,8 @@ fn should_fallback_to_legacy(source: &str, err: &AppError) -> bool {
         && !source.contains("(define-syntax ")
         && !message.contains("set!")
         && !message.contains("blocked")
+        && !message.contains("before steel lowering")
+        && !message.contains("source budget")
 }
 
 fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
@@ -5616,14 +5932,18 @@ fn map_operation(name: &str) -> CoreOperation {
         "sweep" => CoreOperation::Surface(CoreSurfaceOp::Sweep),
         "shell" => CoreOperation::Surface(CoreSurfaceOp::Shell),
         "offset" => CoreOperation::Surface(CoreSurfaceOp::Offset),
+        "offset-rounded" | "offset_rounded" => CoreOperation::Surface(CoreSurfaceOp::OffsetRounded),
         "fillet" => CoreOperation::Surface(CoreSurfaceOp::Fillet),
         "chamfer" => CoreOperation::Surface(CoreSurfaceOp::Chamfer),
+        "taper" => CoreOperation::Surface(CoreSurfaceOp::Taper),
         "twist" => CoreOperation::Surface(CoreSurfaceOp::Twist),
         "polyline" | "path" => CoreOperation::Path(CorePathOp::Polyline),
         "bezier-path" => CoreOperation::Path(CorePathOp::BezierPath),
         "bspline" => CoreOperation::Path(CorePathOp::Bspline),
         "linear-array" => CoreOperation::Array(CoreArrayOp::LinearArray),
         "radial-array" => CoreOperation::Array(CoreArrayOp::RadialArray),
+        "grid-array" => CoreOperation::Array(CoreArrayOp::GridArray),
+        "arc-array" => CoreOperation::Array(CoreArrayOp::ArcArray),
         "repeat" => CoreOperation::Array(CoreArrayOp::Repeat),
         "repeat-union" => CoreOperation::Array(CoreArrayOp::RepeatUnion),
         "repeat-compound" => CoreOperation::Array(CoreArrayOp::RepeatCompound),
@@ -5669,10 +5989,9 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
         | "logistic-bifurcation-points"
         | "henon-points" => CoreValueKind::List,
         "jitter2" | "superellipse-point" => CoreValueKind::Point2,
-        "circle" | "rectangle" | "rounded-rect" | "rounded-polygon" | "rounded_polygon"
-        | "polygon" | "profile" | "make-face" | "text" | "svg" | "offset-rounded" => {
-            CoreValueKind::Sketch
-        }
+        "circle" | "rectangle" | "rounded-rect" | "rounded_rect" | "rounded-polygon"
+        | "rounded_polygon" | "polygon" | "profile" | "make-face" | "text" | "svg" | "offset"
+        | "offset-rounded" => CoreValueKind::Sketch,
         "bezier-path" | "path" | "polyline" => CoreValueKind::Path,
         "bspline" => CoreValueKind::Sketch,
         "plane" | "location" | "path-frame" => CoreValueKind::Frame,
@@ -5991,14 +6310,18 @@ fn emit_operation(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => "offset-rounded".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
         CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array".to_string(),
         CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::GridArray) => "grid-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => "arc-array".to_string(),
         CoreOperation::Array(CoreArrayOp::Repeat) => "repeat".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
@@ -6072,6 +6395,43 @@ mod tests {
             compile_to_core_program("(define x 1) (set! x 2) (model (part body (box 1 1 1)))")
                 .expect_err("set! blocked");
         assert!(err.to_string().contains("set!"));
+    }
+
+    #[test]
+    fn rejects_deep_source_before_steel_lowering() {
+        let depth = ECKY_SOURCE_MAX_PAREN_DEPTH + 1;
+        let source = format!("{}{}", "(".repeat(depth), ")".repeat(depth));
+        let err = compile_to_core_program(&source).expect_err("deep source rejected");
+
+        assert_eq!(err.kind, CompilerErrorKind::UnsupportedFeature);
+        assert!(err.message.contains("before Steel lowering"), "{}", err);
+        assert!(err.message.contains("nesting depth"), "{}", err);
+    }
+
+    #[test]
+    fn source_budget_errors_do_not_fallback_to_legacy() {
+        let depth = ECKY_SOURCE_MAX_PAREN_DEPTH + 1;
+        let source = format!("{}{}", "(".repeat(depth), ")".repeat(depth));
+        let result = try_compile_to_core_program(&source).expect("budget error is authoritative");
+        let err = result.expect_err("deep source rejected");
+
+        assert!(
+            err.message.contains("before Steel lowering"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn compiles_wide_let_source_on_guarded_stack() {
+        let bindings = (0..220)
+            .map(|index| format!("(v{index} {index}.0)"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = format!("(model (part body (let* ({bindings}) (box v1 v2 v3))))");
+        let program = compile_to_core_program(&source).expect("wide let compiles");
+
+        assert_eq!(program.parts.len(), 1);
     }
 
     #[test]
@@ -6451,6 +6811,28 @@ mod tests {
     }
 
     #[test]
+    fn rounded_rect_alias_infers_sketch_kind_before_typecheck() {
+        let program =
+            compile_to_core_program("(model (part body (extrude (rounded_rect 20 10 2) 5)))")
+                .expect("rounded_rect alias should infer sketch kind");
+
+        let CoreNodeKind::Call { op, args, .. } = &program.parts[0].root.kind else {
+            panic!(
+                "expected extrude call, got {:?}",
+                program.parts[0].root.kind
+            );
+        };
+        assert!(matches!(op, CoreOperation::Surface(CoreSurfaceOp::Extrude)));
+        let CoreNodeKind::Call { op: profile_op, .. } = &args[0].kind else {
+            panic!("expected rounded rect profile call, got {:?}", args[0].kind);
+        };
+        assert!(matches!(
+            profile_op,
+            CoreOperation::Primitive(CorePrimitive::RoundedRectangle)
+        ));
+    }
+
+    #[test]
     fn polygon_rejects_known_3d_point_lists_before_lowering() {
         let literal_err = compile_to_core_program(
             r#"
@@ -6544,12 +6926,16 @@ mod tests {
         compile_to_core_program(
             r#"
             (model
+              (params (number n 2))
               (part body
                 (build
                   (shape pts
                     (map
-                      (lambda (i) (list i 0))
-                      (range 0 2)))
+                      (lambda (i)
+                        (if (< i 1)
+                          n
+                          (list i 0 0)))
+                      (range 0 n)))
                   (result
                     (path pts)))))
             "#,
@@ -6657,11 +7043,11 @@ mod tests {
         };
         assert!(matches!(
             first_pair[0].kind,
-            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(5.0))
+            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(0.0))
         ));
         assert!(matches!(
             first_pair[1].kind,
-            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(0.0))
+            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(5.0))
         ));
 
         let CoreNodeKind::List(linspace) = &groups[3].kind else {
@@ -6713,6 +7099,102 @@ mod tests {
     }
 
     #[test]
+    fn compiles_static_zip_destructuring_in_map_lambda() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (polygon
+                    (map
+                      (lambda ((x y))
+                        (list x y))
+                      (zip (range 0 3) (range 10 13))))
+                  2)))
+            "#,
+        )
+        .expect("compile static zip destructuring");
+
+        let CoreNodeKind::Call { op, args, .. } = &program.parts[0].root.kind else {
+            panic!("expected extrude, got {:?}", program.parts[0].root.kind);
+        };
+        assert!(matches!(op, CoreOperation::Surface(CoreSurfaceOp::Extrude)));
+        let CoreNodeKind::Call {
+            op: polygon_op,
+            args: polygon_args,
+            ..
+        } = &args[0].kind
+        else {
+            panic!("expected polygon, got {:?}", args[0].kind);
+        };
+        assert!(matches!(
+            polygon_op,
+            CoreOperation::Primitive(CorePrimitive::Polygon)
+        ));
+        let CoreNodeKind::List(mapped) = &polygon_args[0].kind else {
+            panic!("expected mapped point list, got {:?}", polygon_args[0].kind);
+        };
+        assert_eq!(mapped.len(), 3);
+        for item in mapped {
+            let CoreNodeKind::Let { bindings, body } = &item.kind else {
+                panic!("expected destructuring let item, got {:?}", item.kind);
+            };
+            assert_eq!(bindings.len(), 2);
+            assert!(bindings[0].name.contains("x"), "{}", bindings[0].name);
+            assert!(bindings[1].name.contains("y"), "{}", bindings[1].name);
+            assert!(matches!(body.kind, CoreNodeKind::List(_)));
+        }
+    }
+
+    #[test]
+    fn compiles_static_enumerate_destructuring_in_map_lambda() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (part body
+                (apply union
+                  (map
+                    (lambda ((index value))
+                      (translate (* index 4) value 0 (box 1 1 1)))
+                    (enumerate (range 1 4))))))
+            "#,
+        )
+        .expect("compile static enumerate destructuring");
+
+        let CoreNodeKind::Apply { op, list, .. } = &program.parts[0].root.kind else {
+            panic!("expected apply union, got {:?}", program.parts[0].root.kind);
+        };
+        assert!(matches!(op, CoreOperation::Boolean(CoreBooleanOp::Union)));
+        let CoreNodeKind::List(mapped) = &list.kind else {
+            panic!("expected mapped solids, got {:?}", list.kind);
+        };
+        assert_eq!(mapped.len(), 3);
+        assert!(mapped
+            .iter()
+            .all(|item| matches!(item.kind, CoreNodeKind::Let { .. })));
+    }
+
+    #[test]
+    fn dynamic_map_rejects_lambda_destructuring_with_clear_message() {
+        let err = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (params (number n 3))
+              (part body
+                (map
+                  (lambda ((x y)) (list x y))
+                  (map (lambda (i) (list i i)) (range 0 n)))))
+            "#,
+        )
+        .expect_err("dynamic destructuring requires runtime tuple access");
+
+        let message = err.to_string();
+        assert!(message.contains("`map` lambda parameter"), "{message}");
+        assert!(message.contains("`zip` or static `enumerate`"), "{message}");
+        assert!(message.contains("destructuring"), "{message}");
+    }
+
+    #[test]
     fn compiles_deterministic_fancy_helpers_into_portable_points() {
         let program = compile_to_core_program(
             r#"
@@ -6727,6 +7209,175 @@ mod tests {
         .expect("compile");
 
         assert_eq!(program.parts.len(), 1);
+    }
+
+    #[test]
+    fn compiles_organic_loop_bspline_fixture_with_seeded_closed_profile() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (params (number seed 17 :label "Seed" :min 0 :max 99))
+              (part body
+                (let ((rim (organic-loop 24 22 4 seed)))
+                  (extrude
+                    (bspline rim :closed #t)
+                    6))))
+            "#,
+        )
+        .expect("compile organic bspline fixture");
+
+        assert_eq!(program.parameters.len(), 1);
+        assert_eq!(program.parts.len(), 1);
+        let CoreNodeKind::Let { bindings, body } = &program.parts[0].root.kind else {
+            panic!(
+                "expected seeded rim let, got {:?}",
+                program.parts[0].root.kind
+            );
+        };
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0].name.contains("rim"), "{}", bindings[0].name);
+        assert_point_list(&bindings[0].value, 24, CoreValueKind::Point2, "organic rim");
+        assert_eq!(count_custom_calls(&bindings[0].value, "hash-signed"), 48);
+
+        let CoreNodeKind::Call { op, args, .. } = &body.kind else {
+            panic!("expected extrude body, got {:?}", body.kind);
+        };
+        assert!(matches!(op, CoreOperation::Surface(CoreSurfaceOp::Extrude)));
+        let CoreNodeKind::Call {
+            op: bspline_op,
+            args: bspline_args,
+            keywords,
+        } = &args[0].kind
+        else {
+            panic!("expected bspline profile, got {:?}", args[0].kind);
+        };
+        assert!(matches!(
+            bspline_op,
+            CoreOperation::Path(CorePathOp::Bspline)
+        ));
+        assert!(matches!(
+            bspline_args[0].kind,
+            CoreNodeKind::Reference(CoreReference::Local(ref name)) if name == &bindings[0].name
+        ));
+        let closed = keywords
+            .iter()
+            .find(|keyword| keyword.name == "closed")
+            .expect("closed keyword");
+        assert!(matches!(
+            closed.value.kind,
+            CoreNodeKind::Literal(CoreLiteral::Boolean(true))
+        ));
+    }
+
+    #[test]
+    fn compiles_voronoi_cell_fixture_for_sites_and_perforated_panel() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (params
+                (number seed 23 :label "Seed" :min 0 :max 99)
+                (number cell-count 12 :label "Cell count" :min 4 :max 24 :step 1))
+              (part sites
+                (extrude
+                  (polygon (voronoi-cells 3 4 14 12 2 seed))
+                  1))
+              (part panel
+                (build
+                  (shape plate (box 72 48 4 :align '(center center min)))
+                  (result
+                    (difference
+                      plate
+                      (apply union
+                        (map
+                          (lambda (cell)
+                            (let* ((col (- cell (* 4 (floor (/ cell 4)))))
+                                   (row (floor (/ cell 4)))
+                                   (x (* (- col 1.5) 14))
+                                   (y (* (- row 1.0) 12))
+                                   (jx (+ x (* 2.4 (hash-signed col row seed))))
+                                   (jy (+ y (* 2.4 (hash-signed (+ col 19.19) (+ row 7.73) seed))))
+                                   (r (+ 2.2 (* 1.1 (voronoi2 (/ jx 14.0) (/ jy 12.0) seed)))))
+                              (translate jx jy 0
+                                (cylinder r 8 24))))
+                          (range 0 cell-count))))))))
+            "#,
+        )
+        .expect("compile voronoi cell fixture");
+
+        assert_eq!(program.parts.len(), 2);
+        let CoreNodeKind::Call {
+            op: site_extrude,
+            args: site_args,
+            ..
+        } = &program.parts[0].root.kind
+        else {
+            panic!(
+                "expected sites extrude, got {:?}",
+                program.parts[0].root.kind
+            );
+        };
+        assert!(matches!(
+            site_extrude,
+            CoreOperation::Surface(CoreSurfaceOp::Extrude)
+        ));
+        let CoreNodeKind::Call {
+            op: polygon_op,
+            args: polygon_args,
+            ..
+        } = &site_args[0].kind
+        else {
+            panic!("expected polygon sites, got {:?}", site_args[0].kind);
+        };
+        assert!(matches!(
+            polygon_op,
+            CoreOperation::Primitive(CorePrimitive::Polygon)
+        ));
+        assert_point_list(&polygon_args[0], 12, CoreValueKind::Point2, "voronoi sites");
+        assert_eq!(count_custom_calls(&polygon_args[0], "hash-signed"), 24);
+
+        let CoreNodeKind::Build { bindings, result } = &program.parts[1].root.kind else {
+            panic!("expected panel build, got {:?}", program.parts[1].root.kind);
+        };
+        assert_eq!(bindings.len(), 1);
+        let CoreNodeKind::Call {
+            op: difference_op,
+            args: difference_args,
+            ..
+        } = &result.kind
+        else {
+            panic!("expected panel difference, got {:?}", result.kind);
+        };
+        assert!(matches!(
+            difference_op,
+            CoreOperation::Boolean(CoreBooleanOp::Difference)
+        ));
+        let CoreNodeKind::Apply {
+            op: apply_op, list, ..
+        } = &difference_args[1].kind
+        else {
+            panic!(
+                "expected apply union cutters, got {:?}",
+                difference_args[1].kind
+            );
+        };
+        assert!(matches!(
+            apply_op,
+            CoreOperation::Boolean(CoreBooleanOp::Union)
+        ));
+        let CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } = &list.kind
+        else {
+            panic!("expected mapped cutters, got {:?}", list.kind);
+        };
+        assert_eq!(params.len(), 1);
+        assert!(params[0].contains("cell"), "{}", params[0]);
+        assert_eq!(sources.len(), 1);
+        assert!(matches!(sources[0].kind, CoreNodeKind::Range { .. }));
+        assert_eq!(count_custom_calls(body, "hash-signed"), 2);
+        assert_eq!(count_custom_calls(body, "voronoi2"), 1);
     }
 
     #[test]
@@ -6773,6 +7424,89 @@ mod tests {
         };
         assert_eq!(henon.len(), 7);
         assert_eq!(henon[0].value_kind, CoreValueKind::Point2);
+    }
+
+    #[test]
+    fn compiles_chaotic_helpers_into_bounded_geometry_fixtures() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (part attractor-path
+                (path (lorenz-points 9 0.01 18)))
+              (part henon-ridge
+                (extrude
+                  (bspline (henon-points 16 12) :closed #f)
+                  2))
+              (part chaotic-cloud
+                (list
+                  (rossler-points 7 0.05 14)
+                  (logistic-bifurcation-points 4 3 6 10))))
+            "#,
+        )
+        .expect("compile chaotic geometry fixtures");
+
+        assert_eq!(program.parts.len(), 3);
+        let CoreNodeKind::Call {
+            op: path_op,
+            args: path_args,
+            ..
+        } = &program.parts[0].root.kind
+        else {
+            panic!(
+                "expected attractor path call, got {:?}",
+                program.parts[0].root.kind
+            );
+        };
+        assert!(matches!(path_op, CoreOperation::Path(CorePathOp::Polyline)));
+        assert_point_list(&path_args[0], 9, CoreValueKind::Point3, "lorenz path");
+        assert_eq!(count_custom_calls(&path_args[0], "clamp"), 27);
+
+        let CoreNodeKind::Call {
+            op: ridge_op,
+            args: ridge_args,
+            ..
+        } = &program.parts[1].root.kind
+        else {
+            panic!(
+                "expected henon ridge extrude, got {:?}",
+                program.parts[1].root.kind
+            );
+        };
+        assert!(matches!(
+            ridge_op,
+            CoreOperation::Surface(CoreSurfaceOp::Extrude)
+        ));
+        let CoreNodeKind::Call {
+            op: ridge_profile_op,
+            args: ridge_profile_args,
+            ..
+        } = &ridge_args[0].kind
+        else {
+            panic!("expected henon bspline, got {:?}", ridge_args[0].kind);
+        };
+        assert!(matches!(
+            ridge_profile_op,
+            CoreOperation::Path(CorePathOp::Bspline)
+        ));
+        assert_point_list(
+            &ridge_profile_args[0],
+            16,
+            CoreValueKind::Point2,
+            "henon ridge",
+        );
+        assert_eq!(count_custom_calls(&ridge_profile_args[0], "clamp"), 32);
+
+        let CoreNodeKind::List(groups) = &program.parts[2].root.kind else {
+            panic!(
+                "expected chaotic cloud lists, got {:?}",
+                program.parts[2].root.kind
+            );
+        };
+        assert_eq!(groups.len(), 2);
+        assert_point_list(&groups[0], 7, CoreValueKind::Point3, "rossler cloud");
+        assert_point_list(&groups[1], 12, CoreValueKind::Point2, "logistic cloud");
+        assert_eq!(count_custom_calls(&groups[0], "clamp"), 21);
+        assert_eq!(count_custom_calls(&groups[1], "clamp"), 24);
     }
 
     #[test]
@@ -6985,5 +7719,68 @@ mod tests {
         assert!(message.contains("extrude"), "{message}");
         assert!(message.contains("sketch"), "{message}");
         assert!(message.contains("solid"), "{message}");
+    }
+
+    fn assert_point_list(node: &CoreNode, len: usize, kind: CoreValueKind, label: &str) {
+        let CoreNodeKind::List(points) = &node.kind else {
+            panic!("expected {label} point list, got {:?}", node.kind);
+        };
+        assert_eq!(points.len(), len, "{label} point count");
+        assert!(
+            points.iter().all(|point| point.value_kind == kind),
+            "{label} point kind"
+        );
+    }
+
+    fn count_custom_calls(node: &CoreNode, name: &str) -> usize {
+        let here = match &node.kind {
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom(op_name),
+                ..
+            } if op_name == name => 1,
+            _ => 0,
+        };
+        here + node_children(node)
+            .into_iter()
+            .map(|child| count_custom_calls(child, name))
+            .sum::<usize>()
+    }
+
+    fn node_children(node: &CoreNode) -> Vec<&CoreNode> {
+        match &node.kind {
+            CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => Vec::new(),
+            CoreNodeKind::Build { bindings, result } => bindings
+                .iter()
+                .map(|binding| &binding.value)
+                .chain(std::iter::once(result.as_ref()))
+                .collect(),
+            CoreNodeKind::Let { bindings, body } => bindings
+                .iter()
+                .map(|binding| &binding.value)
+                .chain(std::iter::once(body.as_ref()))
+                .collect(),
+            CoreNodeKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => vec![
+                condition.as_ref(),
+                then_branch.as_ref(),
+                else_branch.as_ref(),
+            ],
+            CoreNodeKind::Call { args, keywords, .. } => args
+                .iter()
+                .chain(keywords.iter().map(|keyword| &keyword.value))
+                .collect(),
+            CoreNodeKind::Range { start, end } => vec![start.as_ref(), end.as_ref()],
+            CoreNodeKind::Map { sources, body, .. } => sources
+                .iter()
+                .chain(std::iter::once(body.as_ref()))
+                .collect(),
+            CoreNodeKind::Apply { args, list, .. } => {
+                args.iter().chain(std::iter::once(list.as_ref())).collect()
+            }
+            CoreNodeKind::List(items) | CoreNodeKind::Group(items) => items.iter().collect(),
+        }
     }
 }

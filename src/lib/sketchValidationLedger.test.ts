@@ -148,6 +148,35 @@ test('buildSketchValidationRows shows source constraint value evidence for locke
   });
 });
 
+test('buildSketchValidationRows includes auto snap source patch evidence in validation ledger', () => {
+  const rows = buildSketchValidationRows({
+    strokes: [closedProfile],
+    draft,
+    artifactBundle: {
+      previewStlPath: '/tmp/ecky/sketch-preview.stl',
+      viewerAssets: [{ path: '/tmp/ecky/sketch-preview.glb' }],
+    },
+    projectionsCount: 3,
+    extrudeDepth: 12,
+    errorText: '',
+    sourcePatchEntries: [
+      {
+        patchId: 'source-patch-1',
+        action: 'AUTO SNAP',
+        primitiveId: 'primitive-top-narrow',
+        detail: 'TOP X 40MM -> 50MM',
+      },
+    ],
+  });
+
+  assert.deepEqual(rows.find((row) => row.id === 'sourcePatchEvidence'), {
+    id: 'sourcePatchEvidence',
+    label: 'Source patch evidence',
+    status: 'pass',
+    detail: 'AUTO SNAP primitive-top-narrow: TOP X 40MM -> 50MM',
+  });
+});
+
 test('buildSketchValidationRows fails open profile and leaves downstream rows pending', () => {
   const rows = buildSketchValidationRows({
     strokes: [openProfile],

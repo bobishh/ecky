@@ -23,7 +23,11 @@ __all__ = [
     "_ecky_place",
     "_ecky_extrude",
     "_ecky_clip_box",
+    "_ecky_non_uniform_scale",
 ]
+
+from OCP.BRepBuilderAPI import BRepBuilderAPI_GTransform
+from OCP.gp import gp_GTrsf
 
 
 def _ecky_intersect_x(shape, z):
@@ -111,6 +115,21 @@ def _ecky_apply_transform(transform, shape):
         return transform * shape
     except Exception:
         return Compound(children=[])
+
+
+def _ecky_non_uniform_scale(shape, sx, sy, sz):
+    gtrsf = gp_GTrsf()
+    gtrsf.SetValue(1, 1, float(sx))
+    gtrsf.SetValue(2, 2, float(sy))
+    gtrsf.SetValue(3, 3, float(sz))
+    transformed = BRepBuilderAPI_GTransform(shape.wrapped, gtrsf, True).Shape()
+    for caster in (Solid.cast, Compound.cast, Face.cast, Wire.cast, Edge.cast, Vertex.cast):
+        try:
+            wrapped = caster(transformed)
+            return _ecky_solid(wrapped) if _ecky_has_solids(wrapped) else wrapped
+        except Exception:
+            continue
+    return shape
 
 
 def _ecky_solid(shape):

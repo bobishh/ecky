@@ -36,12 +36,6 @@ pub async fn save_config(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_system_prompt() -> AppResult<String> {
-    Ok(crate::DEFAULT_PROMPT.to_string())
-}
-
-#[tauri::command]
-#[specta::specta]
 pub async fn list_agent_models(cmd: String) -> AppResult<crate::contracts::AgentModelList> {
     crate::llm::list_agent_models(&cmd)
         .await

@@ -4,6 +4,14 @@ type ApiEngineLike = Pick<EngineConfig, 'enabled' | 'provider' | 'apiKey'> | nul
 
 const TERMINAL_PHASES = new Set<Request['phase']>(['canceled']);
 
+function imageAttachmentSource(attachment: Request['attachments'][number]): string | null {
+  if (attachment.type !== 'image') return null;
+  const inline = attachment.dataUrl?.trim();
+  if (inline) return inline;
+  const path = attachment.path?.trim();
+  return path || null;
+}
+
 function requestTimestampSeconds(request: Request): number {
   return Math.max(0, Math.floor(request.createdAt / 1000));
 }
@@ -75,9 +83,8 @@ export function deriveOptimisticDialogueMessages(
       timestamp,
       imageData: request.screenshot,
       attachmentImages: request.attachments
-        .filter((attachment) => attachment.type === 'image')
-        .map((attachment) => attachment.path)
-        .filter((path): path is string => Boolean(path)),
+        .map(imageAttachmentSource)
+        .filter((source): source is string => Boolean(source)),
     });
 
     if (TERMINAL_PHASES.has(request.phase)) continue;

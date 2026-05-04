@@ -757,14 +757,18 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => "offset-rounded".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
         CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array".to_string(),
         CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::GridArray) => "grid-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => "arc-array".to_string(),
         CoreOperation::Array(CoreArrayOp::Repeat) => "repeat".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
         CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
@@ -788,10 +792,6 @@ fn fmt_f64(n: f64) -> String {
         // Use Rust's default Display which gives enough precision
         format!("{}", n)
     }
-}
-
-fn value_literal_f64(value: &Value) -> Option<f64> {
-    value.as_f64()
 }
 
 fn python_local_ident(symbol: &str, prefix: &str) -> String {
@@ -1048,6 +1048,15 @@ struct LinearArrayCall {
     geometry: Value,
 }
 
+struct SampledRadialLoftCall {
+    binders: [String; 3],
+    height: Value,
+    z_steps: Value,
+    theta_steps: Value,
+    radius: Value,
+    z_map: Option<Value>,
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct ParsedCallArgs {
     positional: Vec<Value>,
@@ -1230,6 +1239,58 @@ fn parse_linear_array_call(args: &[Value]) -> AppResult<LinearArrayCall> {
         dy: parsed.positional[2].dup(),
         dz: parsed.positional[3].dup(),
         geometry: parsed.positional[4].dup(),
+    })
+}
+
+fn parse_sampled_radial_loft_call(args: &[Value]) -> AppResult<SampledRadialLoftCall> {
+    if args.is_empty() {
+        return Err(validation(
+            "`sampled-radial-loft` expects binder names plus keyword/value options.",
+        ));
+    }
+    let binders = list_items(&args[0], "`sampled-radial-loft` binders")?;
+    if binders.len() != 3 {
+        return Err(validation(
+            "`sampled-radial-loft` binders must be `(theta z fz)`.",
+        ));
+    }
+    let parsed = ParsedCallArgs::parse(
+        "sampled-radial-loft",
+        &args[1..],
+        &["height", "z-steps", "theta-steps", "radius", "z-map"],
+    )?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`sampled-radial-loft` expects only keyword/value options after the binder list.",
+        ));
+    }
+    Ok(SampledRadialLoftCall {
+        binders: [
+            parse_stringish(&binders[0], "`sampled-radial-loft` theta binder")?,
+            parse_stringish(&binders[1], "`sampled-radial-loft` z binder")?,
+            parse_stringish(&binders[2], "`sampled-radial-loft` fz binder")?,
+        ],
+        height: parsed
+            .keywords
+            .get("height")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:height`."))?,
+        z_steps: parsed
+            .keywords
+            .get("z_steps")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:z-steps`."))?,
+        theta_steps: parsed
+            .keywords
+            .get("theta_steps")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:theta-steps`."))?,
+        radius: parsed
+            .keywords
+            .get("radius")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`sampled-radial-loft` requires `:radius`."))?,
+        z_map: parsed.keywords.get("z_map").map(Value::dup),
     })
 }
 
@@ -2844,6 +2905,25 @@ impl<'a> ExprLowerer<'a> {
                     self.shell_offset_sketch(&target_args[sketch_index], wall);
                 ShellLoweringPlan::BooleanInner(self.shell_target_value("twist", inner_args))
             }
+            "sampled-radial-loft" => {
+                let call = parse_sampled_radial_loft_call(target_args)?;
+                let mut inner_args = vec![target_args[0].dup()];
+                inner_args.push(Value::keyword("height"));
+                inner_args.push(call.height.dup());
+                inner_args.push(Value::keyword("z-steps"));
+                inner_args.push(call.z_steps.dup());
+                inner_args.push(Value::keyword("theta-steps"));
+                inner_args.push(call.theta_steps.dup());
+                inner_args.push(Value::keyword("radius"));
+                inner_args.push(self.shell_subtract_wall(&call.radius, wall));
+                if let Some(z_map) = call.z_map {
+                    inner_args.push(Value::keyword("z-map"));
+                    inner_args.push(z_map);
+                }
+                ShellLoweringPlan::BooleanInner(
+                    self.shell_target_value("sampled-radial-loft", inner_args),
+                )
+            }
             other => {
                 return Err(unsupported(format!(
                     "Node `shell` with target `{}` is not yet supported by the build123d lowerer. \
@@ -3838,17 +3918,6 @@ impl<'a> ExprLowerer<'a> {
                 if args.len() != 4 {
                     return Err(validation("`scale` expects x, y, z, and a geometry node."));
                 }
-                if let (Some(sx), Some(sy), Some(sz)) = (
-                    value_literal_f64(&args[0]),
-                    value_literal_f64(&args[1]),
-                    value_literal_f64(&args[2]),
-                ) {
-                    if (sx - sy).abs() >= 1e-9 || (sy - sz).abs() >= 1e-9 {
-                        return Err(validation(format!(
-                            "`scale` does not support literal non-uniform scaling on build123d: ({sx}, {sy}, {sz})."
-                        )));
-                    }
-                }
                 let sx = lower_num_expr(&args[0], scope)?;
                 let sy = lower_num_expr(&args[1], scope)?;
                 let sz = lower_num_expr(&args[2], scope)?;
@@ -3857,11 +3926,12 @@ impl<'a> ExprLowerer<'a> {
                 let result = self.next_imp_var();
                 let lines = vec![
                     format!("_sx, _sy, _sz = {sx}, {sy}, {sz}"),
-                    "if not (abs(_sx - _sy) < 1e-9 and abs(_sy - _sz) < 1e-9): \
-                     raise ValueError(f'build123d lowerer: non-uniform scale not supported \
-                     ({{_sx}}, {{_sy}}, {{_sz}}).')"
-                        .to_string(),
-                    format!("{result} = {inner_var}.scale(_sx)"),
+                    format!(
+                        "if abs(_sx - _sy) < 1e-9 and abs(_sy - _sz) < 1e-9: {result} = {inner_var}.scale(_sx)"
+                    ),
+                    format!(
+                        "else: {result} = _ecky_non_uniform_scale({inner_var}, _sx, _sy, _sz)"
+                    ),
                 ];
                 (
                     PyExpr::Imperative {
@@ -4126,6 +4196,80 @@ impl<'a> ExprLowerer<'a> {
                 (
                     PyExpr::Imperative {
                         lines,
+                        result_var: result,
+                    },
+                    B123dGeomKind::Solid3d,
+                )
+            }
+            "sampled-radial-loft" => {
+                let call = parse_sampled_radial_loft_call(args)?;
+                let height = lower_num_expr(&call.height, scope)?;
+                let z_steps = self.lower_count(&call.z_steps, scope)?;
+                let theta_steps = self.lower_count(&call.theta_steps, scope)?;
+                let result = self.next_imp_var();
+                let sections = self.next_imp_var();
+                let z_steps_var = self.next_imp_var();
+                let theta_steps_var = self.next_imp_var();
+                let theta_var = self.next_imp_var();
+                let z_var = self.next_imp_var();
+                let fz_var = self.next_imp_var();
+                let section_z_var = self.next_imp_var();
+                let radius_var = self.next_imp_var();
+                let points_var = self.next_imp_var();
+                let zi_var = format!("{result}_zi");
+                let ti_var = format!("{result}_ti");
+                let mut frame = BTreeMap::new();
+                frame.insert(
+                    call.binders[0].clone(),
+                    LoweredBinding::Number(theta_var.clone()),
+                );
+                frame.insert(
+                    call.binders[1].clone(),
+                    LoweredBinding::Number(z_var.clone()),
+                );
+                frame.insert(
+                    call.binders[2].clone(),
+                    LoweredBinding::Number(fz_var.clone()),
+                );
+                let child_scope = scope.with_frame(frame);
+                let radius_expr = lower_num_expr(&call.radius, &child_scope)?;
+                let z_map_expr = call
+                    .z_map
+                    .as_ref()
+                    .map(|value| lower_num_expr(value, &child_scope))
+                    .transpose()?
+                    .unwrap_or_else(|| z_var.clone());
+                (
+                    PyExpr::Imperative {
+                        lines: vec![
+                            format!("{z_steps_var} = max(1, int(round(float({z_steps}))))"),
+                            format!(
+                                "{theta_steps_var} = max(3, int(round(float({theta_steps}))))"
+                            ),
+                            format!("{sections} = []"),
+                            format!("for {zi_var} in range({z_steps_var} + 1):"),
+                            format!(
+                                "    {fz_var} = 0.0 if {z_steps_var} <= 0 else float({zi_var}) / float({z_steps_var})"
+                            ),
+                            format!("    {z_var} = ({height}) * {fz_var}"),
+                            format!("    {section_z_var} = float({z_map_expr})"),
+                            format!("    {points_var} = []"),
+                            format!("    for {ti_var} in range({theta_steps_var}):"),
+                            format!(
+                                "        {theta_var} = (2.0 * math.pi * float({ti_var})) / float({theta_steps_var})"
+                            ),
+                            format!("        {radius_var} = float({radius_expr})"),
+                            format!(
+                                "        if {radius_var} <= 0.0: raise ValueError('sampled-radial-loft radius must stay positive')"
+                            ),
+                            format!(
+                                "        {points_var}.append(({radius_var} * math.cos({theta_var}), {radius_var} * math.sin({theta_var})))"
+                            ),
+                            format!(
+                                "    {sections}.append(Pos(0, 0, {section_z_var}) * _ecky_face(Polygon({points_var})))"
+                            ),
+                            format!("{result} = loft({sections})"),
+                        ],
                         result_var: result,
                     },
                     B123dGeomKind::Solid3d,

@@ -8,7 +8,6 @@ type MockEngine = {
   model: string;
   lightModel: string;
   baseUrl: string;
-  systemPrompt: string;
   enabled: boolean;
 };
 
@@ -44,7 +43,6 @@ function buildConfig(model: string): {
         model,
         lightModel: model,
         baseUrl: 'https://integrate.api.nvidia.com/v1',
-        systemPrompt: 'test prompt',
         enabled: true,
       },
     ],
@@ -81,7 +79,6 @@ async function installNimMock(page: Page, model: string) {
         Object.assign(config, args.config);
         return null;
       }
-      if (cmd === 'get_system_prompt') return 'test prompt';
       if (cmd === 'list_models') {
         return [
           'meta/llama-3.1-70b-instruct',
@@ -145,5 +142,14 @@ test.describe('NVIDIA NIM vision capability hints', () => {
     await openNimEngineSettings(page);
 
     await expect(page.getByTestId('engine-vision-warning')).toHaveCount(0);
+  });
+
+  test('Given engine settings When opened Then raw system prompt editor is hidden', async ({ page }) => {
+    await installNimMock(page, 'microsoft/phi-4-multimodal-instruct');
+    await openNimEngineSettings(page);
+
+    await expect(page.getByRole('button', { name: 'PROMPTS' })).toHaveCount(0);
+    await expect(page.getByLabel(/SYSTEM PROMPT/i)).toHaveCount(0);
+    await expect(page.locator('.system-prompt-input')).toHaveCount(0);
   });
 });

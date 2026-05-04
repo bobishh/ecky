@@ -1,4 +1,9 @@
-export type SketchSourcePatchAction = 'CLEAN UP' | 'REPAIR IMPORT';
+export type SketchSourcePatchAction =
+  | 'CLEAN UP'
+  | 'REPAIR IMPORT'
+  | 'AUTO SNAP'
+  | 'DERIVE BREP'
+  | 'TOPOLOGY REDRAW';
 
 export type SketchSourcePatchEntry = {
   patchId: string;

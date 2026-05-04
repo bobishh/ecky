@@ -194,28 +194,8 @@ mod tests {
         let resolver = TestPathResolver { root };
         let conn = crate::db::init_db(&test_db_path("target-mismatch")).expect("db");
 
-        crate::db::create_or_update_thread(
-            &conn,
-            "thread-1",
-            "Thread One",
-            1,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        crate::db::create_or_update_thread(
-            &conn,
-            "thread-2",
-            "Thread Two",
-            1,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        crate::db::create_or_update_thread(&conn, "thread-1", "Thread One", 1, None).unwrap();
+        crate::db::create_or_update_thread(&conn, "thread-2", "Thread Two", 1, None).unwrap();
         crate::db::add_message(
             &conn,
             "thread-1",
@@ -259,17 +239,7 @@ mod tests {
         let resolver = TestPathResolver { root };
         let conn = crate::db::init_db(&test_db_path("target-deleted")).expect("db");
 
-        crate::db::create_or_update_thread(
-            &conn,
-            "thread-1",
-            "Thread One",
-            1,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        crate::db::create_or_update_thread(&conn, "thread-1", "Thread One", 1, None).unwrap();
         crate::db::add_message(
             &conn,
             "thread-1",

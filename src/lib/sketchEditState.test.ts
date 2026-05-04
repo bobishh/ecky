@@ -20,8 +20,8 @@ import {
   setClosedStrokeBoundsOrigin,
   setClosedStrokeBoundsOriginSnapped,
   snapPointToGrid,
-  type SketchStroke,
 } from './sketchEditState';
+import type { SketchStroke } from './sketchWorkspaceState';
 
 const closedStroke: SketchStroke = {
   primitiveId: 'primitive-front-1',

@@ -232,17 +232,8 @@ pub async fn add_manual_version(
     } else {
         None
     };
-    db::create_or_update_thread(
-        &db,
-        &thread_id,
-        &title,
-        now,
-        thread_traits.as_ref(),
-        Some(output.engine_kind),
-        Some(output.source_language),
-        Some(output.geometry_backend),
-    )
-    .map_err(|err| AppError::persistence(err.to_string()))?;
+    db::create_or_update_thread(&db, &thread_id, &title, now, thread_traits.as_ref())
+        .map_err(|err| AppError::persistence(err.to_string()))?;
 
     let msg_id = Uuid::new_v4().to_string();
     let msg = Message {

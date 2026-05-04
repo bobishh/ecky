@@ -16,7 +16,11 @@ function boxStl(name: string) {
 
 type ApiDialogueMockMode = 'design' | 'questionWithoutFinal';
 
-async function installApiDialogueMocks(page: Page, mode: ApiDialogueMockMode = 'design') {
+async function installApiDialogueMocks(
+  page: Page,
+  mode: ApiDialogueMockMode = 'design',
+  options: { initialHistory?: any[] } = {},
+) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -25,7 +29,7 @@ async function installApiDialogueMocks(page: Page, mode: ApiDialogueMockMode = '
     });
   });
 
-  await page.addInitScript((mockMode) => {
+  await page.addInitScript(({ mockMode, initialHistory }) => {
     const mockWindow = window as any;
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -57,7 +61,7 @@ async function installApiDialogueMocks(page: Page, mode: ApiDialogueMockMode = '
     };
 
     mockWindow.__MOCK_THREADS__ = {};
-    mockWindow.__MOCK_HISTORY__ = [];
+    mockWindow.__MOCK_HISTORY__ = Array.isArray(initialHistory) ? initialHistory : [];
     mockWindow.__MOCK_LAST_DESIGN__ = null;
     mockWindow.__MOCK_PENDING_PROMPT__ = null;
     mockWindow.__MOCK_BUNDLE__ = bundle;
@@ -78,7 +82,6 @@ async function installApiDialogueMocks(page: Page, mode: ApiDialogueMockMode = '
               model: 'gpt-4.1',
               lightModel: 'gpt-4.1-mini',
               baseUrl: '',
-              systemPrompt: 'CAD $USER_PROMPT',
               enabled: true,
             },
           ],
@@ -124,6 +127,15 @@ async function installApiDialogueMocks(page: Page, mode: ApiDialogueMockMode = '
       if (cmd === 'get_thread') {
         return mockWindow.__MOCK_THREADS__?.[args?.threadId ?? ''] ?? null;
       }
+      if (cmd === 'get_thread_messages_page') {
+        const thread = mockWindow.__MOCK_HISTORY__.find((item: any) => item.id === args?.threadId) ?? null;
+        return {
+          messages: thread?.messages ?? [],
+          hasMore: false,
+          nextBefore: null,
+        };
+      }
+      if (cmd === 'get_thread_latest_version') return null;
       if (cmd === 'get_active_agent_sessions') return [];
       if (cmd === 'get_agent_terminal_snapshots') return [];
       if (cmd === 'get_thread_agent_state') {
@@ -280,7 +292,7 @@ async function installApiDialogueMocks(page: Page, mode: ApiDialogueMockMode = '
       if (cmd === 'get_message_attachments') return [];
       return null;
     };
-  }, mode);
+  }, { mockMode: mode, initialHistory: options.initialHistory ?? [] });
 }
 
 async function openDialogue(page: Page) {
@@ -314,6 +326,51 @@ test.describe('API dialogue mode', () => {
     await expect(page.getByRole('button', { name: /DONE .*make me a teapot/i })).toBeVisible({
       timeout: 10000,
     });
+  });
+
+  test('Given inline reference image in thread When dialogue renders Then message image loads', async ({ page }) => {
+    const referenceImage =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+    await installApiDialogueMocks(page, 'design', {
+      initialHistory: [
+        {
+          id: 'thread-inline-reference',
+          title: 'Inline Reference',
+          summary: '',
+          updatedAt: Math.floor(Date.now() / 1000),
+          versionCount: 0,
+          pendingCount: 1,
+          queuedCount: 1,
+          errorCount: 0,
+          status: 'active',
+          finalizedAt: null,
+          pendingConfirm: null,
+          engineKind: 'build123d',
+          sourceLanguage: 'build123d',
+          geometryBackend: 'build123d',
+          messages: [
+            {
+              id: 'msg-inline-reference',
+              role: 'user',
+              content: 'shape like this',
+              status: 'pending',
+              timestamp: Math.floor(Date.now() / 1000),
+              attachmentImages: [referenceImage],
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN' }).first().click();
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+    const image = page.getByAltText('Attached reference image');
+    await expect(image).toBeVisible();
+    await expect(image).toHaveAttribute('src', referenceImage);
+    await expect(image).toHaveJSProperty('naturalWidth', 1);
   });
 
   test('Given classifier routes question without final answer When prompt submits Then chat persists generated answer', async ({ page }) => {

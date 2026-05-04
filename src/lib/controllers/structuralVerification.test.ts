@@ -12,6 +12,11 @@ const PASS_RESULT: StructuralVerificationResult = {
   metrics: {
     partCount: 1,
     previewStlSizeBytes: 1024,
+    previewStlTriangleCount: 128,
+    previewStlComponentCount: 1,
+    previewStlNonManifoldEdgeCount: 0,
+    previewStlOverhangTriangleCount: 0,
+    previewStlOverhangRatio: 0,
     totalVolume: 1000,
     totalArea: 600,
     bbox: { xMin: -10, yMin: -10, zMin: 0, xMax: 10, yMax: 10, zMax: 20 },
@@ -33,6 +38,11 @@ const FAIL_RESULT: StructuralVerificationResult = {
   metrics: {
     partCount: 0,
     previewStlSizeBytes: null,
+    previewStlTriangleCount: null,
+    previewStlComponentCount: null,
+    previewStlNonManifoldEdgeCount: null,
+    previewStlOverhangTriangleCount: null,
+    previewStlOverhangRatio: null,
     totalVolume: null,
     totalArea: null,
     bbox: null,
@@ -47,6 +57,11 @@ const SKIPPED_RESULT: StructuralVerificationResult = {
   metrics: {
     partCount: 0,
     previewStlSizeBytes: null,
+    previewStlTriangleCount: null,
+    previewStlComponentCount: null,
+    previewStlNonManifoldEdgeCount: null,
+    previewStlOverhangTriangleCount: null,
+    previewStlOverhangRatio: null,
     totalVolume: null,
     totalArea: null,
     bbox: null,
@@ -103,6 +118,32 @@ test('repair prompt includes issue codes and summary', async () => {
   assert.ok('repairPrompt' in result);
   assert.match(result.repairPrompt, /PREVIEW_STL_MISSING/);
   assert.match(result.repairPrompt, /MANIFEST_PARTS_EMPTY/);
+});
+
+test('repair prompt includes parsed STL topology metrics', async () => {
+  const result = await runStructuralCheck(baseOpts({
+    verify: async () => ({
+      ...FAIL_RESULT,
+      metrics: {
+        ...FAIL_RESULT.metrics,
+        partCount: 1,
+        previewStlSizeBytes: 2048,
+        previewStlTriangleCount: 64,
+        previewStlComponentCount: 3,
+        previewStlNonManifoldEdgeCount: 7,
+        previewStlOverhangTriangleCount: 9,
+        previewStlOverhangRatio: 0.140625,
+      },
+    }),
+  }));
+  assert.equal(result.kind, 'repair_needed');
+  assert.ok('repairPrompt' in result);
+  assert.match(result.repairPrompt, /preview STL: 2048 bytes/);
+  assert.match(result.repairPrompt, /triangles: 64/);
+  assert.match(result.repairPrompt, /components: 3/);
+  assert.match(result.repairPrompt, /non-manifold edges: 7/);
+  assert.match(result.repairPrompt, /overhang triangles: 9/);
+  assert.match(result.repairPrompt, /overhang ratio: 0\.141/);
 });
 
 // ── terminal failure ────────────────────────────────────────────────────────

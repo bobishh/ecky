@@ -183,6 +183,7 @@ pub fn render_model_with_sources(
         preview_stl_path: path_to_string(&preview_stl_path)?,
         viewer_assets,
         edge_targets: Vec::new(),
+        face_targets: Vec::new(),
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: step_export_artifacts(&step_path)?,
@@ -718,5 +719,39 @@ _ecky_parts = [("body", _body)]
             manifest.document.source_path.as_deref(),
             Some("/tmp/source.ecky")
         );
+    }
+
+    #[test]
+    fn render_model_with_sources_applies_non_uniform_scale_via_build123d() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-build123d-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = RepoResourceResolver { root };
+        let source = r#"(model
+            (part body
+              (scale 0.5 0.25 1
+                (box 20 20 10))))"#;
+
+        let bundle = render_model_with_sources(
+            &crate::ecky_ir::lower_to_build123d(source).expect("lower"),
+            Some(source),
+            &BTreeMap::new(),
+            &resolver,
+            SourceLanguage::EckyIrV0,
+        )
+        .expect("render");
+
+        let manifest: crate::models::ModelManifest = serde_json::from_str(
+            &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        let part = manifest.parts.first().expect("part");
+        let bounds = part.bounds.as_ref().expect("bounds");
+        assert!((bounds.x_min + 5.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.x_max - 5.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.y_min + 2.5).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.y_max - 2.5).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.z_min - 0.0).abs() < 0.25, "bounds: {:?}", bounds);
+        assert!((bounds.z_max - 10.0).abs() < 0.25, "bounds: {:?}", bounds);
     }
 }

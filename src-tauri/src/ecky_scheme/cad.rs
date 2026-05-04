@@ -37,6 +37,7 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "rotate",
         "scale",
         "mirror",
+        "sampled-radial-loft",
         "bezier-path",
         "bspline",
         "path",

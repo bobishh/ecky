@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { repairSketchDocumentDimensionConstraints, validateSketchDocumentConstraints } from './sketchConstraintValidation';
+import {
+  autoRepairSketchDocumentDimensionConstraintGeometry,
+  repairSketchDocumentDimensionConstraints,
+  validateSketchDocumentConstraints,
+} from './sketchConstraintValidation';
 import type { SketchDocument } from './tauri/contracts';
 
 function documentWithConstraints(constraints: NonNullable<NonNullable<SketchDocument['sketches']>[number]['constraints']>): SketchDocument {
@@ -154,6 +158,54 @@ test('repairs stale dimension constraints to measured primitive bounds', () => {
   assert.deepEqual(result.evidence, [
     "sketch 'sketch-front' primitive 'primitive-front-1' width dimension repaired 99mm -> 50mm.",
   ]);
+});
+
+test('auto repairs tiny dimension mismatch by resizing primitive geometry to constraint value', () => {
+  const sourceDocument = documentWithConstraints([
+    {
+      constraintId: 'primitive-front-1-width-dimension',
+      kind: 'dimension',
+      targetIds: ['primitive-front-1'],
+      value: 50.4,
+    },
+  ]);
+
+  const result = autoRepairSketchDocumentDimensionConstraintGeometry(sourceDocument);
+
+  assert.equal(sourceDocument.sketches?.[0]?.primitives?.[0]?.points?.[0]?.[0], 10);
+  assert.deepEqual(result.evidence, [
+    {
+      primitiveId: 'primitive-front-1',
+      detail: 'width dimension 50mm -> 50.4mm',
+    },
+  ]);
+  assert.deepEqual(result.document.sketches?.[0]?.primitives?.[0]?.points, [
+    [9.8, 20],
+    [60.2, 20],
+    [60.2, 45],
+    [9.8, 45],
+    [9.8, 20],
+  ]);
+  assert.deepEqual(validateSketchDocumentConstraints(result.document), {
+    passed: true,
+    evidence: ["sketch 'sketch-front' primitive 'primitive-front-1' width dimension matched 50.4mm."],
+  });
+});
+
+test('auto repair leaves large dimension mismatch for explicit repair flow', () => {
+  const sourceDocument = documentWithConstraints([
+    {
+      constraintId: 'primitive-front-1-width-dimension',
+      kind: 'dimension',
+      targetIds: ['primitive-front-1'],
+      value: 99,
+    },
+  ]);
+
+  const result = autoRepairSketchDocumentDimensionConstraintGeometry(sourceDocument);
+
+  assert.deepEqual(result.evidence, []);
+  assert.deepEqual(result.document, sourceDocument);
 });
 
 test('repair reports no repairable dimension mismatch for matching constraints', () => {

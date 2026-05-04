@@ -5,6 +5,7 @@ import type {
   SketchDefinition,
   SketchDocument,
   SketchPrimitive,
+  SketchValidationIssue,
   SketchView,
 } from './tauri/contracts';
 
@@ -53,6 +54,17 @@ export type SketchBrepProjectionValidationSummary = {
   rows: SketchBrepProjectionValidationRow[];
   viewSummaries: SketchBrepProjectionViewSummary[];
   boundsComparisonSeed: SketchBrepProjectionBoundsComparisonSeed;
+};
+
+export type SketchBrepProjectionRepairTarget = {
+  targetId: string;
+  sketchId: string;
+  primitiveId: string | null;
+  view: SketchView | null;
+  severity: SketchValidationIssue['severity'];
+  label: string;
+  reason: string;
+  evidence: string;
 };
 
 const boundsTolerance = 0.01;
@@ -130,6 +142,64 @@ export function sketchBrepProjectionBoundsSeed(
     units: document.units ?? null,
     views,
   };
+}
+
+export function buildSketchBrepProjectionRepairTargets(
+  document: SketchDocument,
+  projection: BrepHiddenLineProjectionResponse | null | undefined,
+): SketchBrepProjectionRepairTarget[] {
+  const validation = projection?.validation;
+  if (!validation || validation.passed) return [];
+
+  return (validation.issues ?? []).map((issue, index) => repairTargetFromIssue(document, issue, index));
+}
+
+function repairTargetFromIssue(
+  document: SketchDocument,
+  issue: SketchValidationIssue,
+  index: number,
+): SketchBrepProjectionRepairTarget {
+  const match = sketchIssueMatch(document, issue);
+  const sketchId = issue.sketchId || match?.sketch.sketchId || 'model';
+  const primitiveId = issue.primitiveId ?? match?.primitive?.primitiveId ?? null;
+  const view = match?.sketch.view ?? inferViewFromText(issue.message);
+  const targetName = primitiveId ?? sketchId;
+  const labelPrefix = view ? view.toUpperCase() : 'MODEL';
+
+  return {
+    targetId: `brep-repair-${slugPart(sketchId)}-${slugPart(primitiveId ?? 'sketch')}-${index}`,
+    sketchId,
+    primitiveId,
+    view,
+    severity: issue.severity,
+    label: `${labelPrefix} / ${targetName}`,
+    reason: issue.message,
+    evidence: [sketchId, primitiveId, issue.message].filter(Boolean).join(' / '),
+  };
+}
+
+function sketchIssueMatch(
+  document: SketchDocument,
+  issue: SketchValidationIssue,
+): { sketch: SketchDefinition; primitive: SketchPrimitive | null } | null {
+  const sketches = document.sketches ?? [];
+  for (const sketch of sketches) {
+    const primitive = (sketch.primitives ?? []).find((item) => item.primitiveId === issue.primitiveId) ?? null;
+    if (primitive) return { sketch, primitive };
+  }
+  const sketch = sketches.find((item) => item.sketchId === issue.sketchId) ?? null;
+  if (sketch) return { sketch, primitive: null };
+  const view = inferViewFromText([issue.sketchId, issue.primitiveId ?? '', issue.message].join(' '));
+  const viewSketch = view ? sketches.find((item) => item.view === view) ?? null : null;
+  return viewSketch ? { sketch: viewSketch, primitive: null } : null;
+}
+
+function inferViewFromText(text: string): SketchView | null {
+  const lower = text.toLowerCase();
+  if (lower.includes('front')) return 'front';
+  if (lower.includes('top')) return 'top';
+  if (lower.includes('side')) return 'side';
+  return null;
 }
 
 function missingProjectionRows(
@@ -268,4 +338,12 @@ function formatSize(bounds: SketchBrepProjectionBounds): string {
 
 function formatNumber(value: number): number {
   return Number(value.toFixed(4));
+}
+
+function slugPart(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'target';
 }

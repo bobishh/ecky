@@ -456,6 +456,7 @@ mod tests {
                     preview_stl_path: "/tmp/preview.stl".to_string(),
                     viewer_assets: Vec::new(),
                     edge_targets: Vec::new(),
+                    face_targets: Vec::new(),
                     callout_anchors: Vec::new(),
                     measurement_guides: Vec::new(),
                     export_artifacts: Vec::new(),

@@ -199,7 +199,62 @@ test('buildSketchDraftRequest rejects mismatched front and top widths before bac
     },
   ]);
 
-  assert.deepEqual(request, { error: 'Top view width 40mm must match Front view width 50mm.' });
+  assert.ok('error' in request);
+  assert.equal(request.error, 'Top view width 40mm must match Front view width 50mm.');
+  assert.deepEqual(request.repairAction, {
+    kind: 'scaleViewAxis',
+    primitiveId: 'primitive-top-2',
+    view: 'top',
+    axis: 'x',
+    sourceView: 'front',
+    current: 40,
+    target: 50,
+    message: 'Top view width 40mm must match Front view width 50mm.',
+  });
+});
+
+test('buildSketchDraftRequest rejects matching front and top widths with shifted x range before backend', () => {
+  const request = buildSketchDraftRequest([
+    {
+      primitiveId: 'primitive-front-1',
+      view: 'front',
+      points: [
+        [10, 20],
+        [60, 20],
+        [60, 50],
+        [10, 50],
+        [10, 20],
+      ],
+      closed: true,
+    },
+    {
+      primitiveId: 'primitive-top-shifted',
+      view: 'top',
+      points: [
+        [30, 10],
+        [80, 10],
+        [80, 32],
+        [30, 32],
+        [30, 10],
+      ],
+      closed: true,
+    },
+  ]);
+
+  assert.ok('error' in request);
+  assert.equal(request.error, 'Top view x range 30..80mm must match Front view x range 10..60mm.');
+  assert.deepEqual(request.repairAction, {
+    kind: 'translateViewAxisRange',
+    primitiveId: 'primitive-top-shifted',
+    view: 'top',
+    axis: 'x',
+    sourceView: 'front',
+    currentMin: 30,
+    currentMax: 80,
+    targetMin: 10,
+    targetMax: 60,
+    message: 'Top view x range 30..80mm must match Front view x range 10..60mm.',
+  });
 });
 
 test('summarizeSketchDraftMode labels single and multi view honestly', () => {

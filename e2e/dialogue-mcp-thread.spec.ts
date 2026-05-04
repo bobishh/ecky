@@ -72,7 +72,6 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
       }
       if (cmd === 'check_freecad') return false;
       if (cmd === 'get_default_macro') return '(model)';
-      if (cmd === 'get_system_prompt') return 'prompt';
       if (cmd === 'get_history') return [thread];
       if (cmd === 'get_last_design') return null;
       if (cmd === 'get_thread') return thread;

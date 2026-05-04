@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { deriveExportState } from './exportOps';
-import type { ArtifactBundle, Message } from '../types/domain';
+import type { ArtifactBundle, Message, RuntimeCapabilities } from '../types/domain';
 
 function bundle(viewerAssetCount: number): ArtifactBundle {
   return {
@@ -29,6 +29,20 @@ function bundle(viewerAssetCount: number): ArtifactBundle {
     edgeTargets: [],
     calloutAnchors: [],
     measurementGuides: [],
+  };
+}
+
+function capabilities(): RuntimeCapabilities {
+  return {
+    freecad: { available: true, detail: 'FreeCAD ready', path: '/tmp/freecadcmd' },
+    build123d: { available: true, detail: 'build123d ready', path: '/tmp/python3' },
+    directOcct: { available: false, detail: 'Direct OCCT unavailable: missing TKDESTEP', path: null },
+    mesh: { available: true, detail: 'bundled', path: null },
+    recommendedAuthoringContext: {
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    },
   };
 }
 
@@ -66,6 +80,7 @@ test('deriveExportState resolves filenames and multipart export options from the
     activeArtifactBundle: bundle(2),
     activeVersionMessage: versionMessage(),
     activeThreadTitle: 'Thread Title',
+    runtimeCapabilities: capabilities(),
   });
 
   assert.equal(state.exportModelTitle, 'Lamp Shade / Final');

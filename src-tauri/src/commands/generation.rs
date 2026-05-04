@@ -54,11 +54,11 @@ pub fn build123d_python_guide_text() -> String {
 fn ecky_backend_guide_text(
     backend: crate::models::GeometryBackend,
     backend_label: &str,
-    metadata_backend: bool,
+    implicit_backend: bool,
 ) -> String {
     let surface = crate::ecky_language_surface::supported_surface_manifest(backend);
-    let target_line = if metadata_backend {
-        "Target geometryBackend comes from thread metadata.\n".to_string()
+    let target_line = if implicit_backend {
+        "Target geometryBackend comes from current request, model version, or config default; never from thread metadata.\n".to_string()
     } else {
         format!("Target geometryBackend: `{backend_label}`.\n")
     };
@@ -66,7 +66,8 @@ fn ecky_backend_guide_text(
         "\
          EckyRust CAD VM direction:\n\
          - EckyRust is a controlled CAD runtime pipeline: parse -> expand -> typecheck -> lower -> validate.\n\
-         - Today this is mesh/eckyRust lowering, not direct OCCT.\n\
+         - Public authoring backend is still `mesh`/`eckyRust`; direct OCCT is an internal STEP/STL fast path for the supported Core IR subset when the bundled SDK is ready.\n\
+         - Do not promise STEP for every mesh/eckyRust render. Check `ArtifactBundle.exportArtifacts` for a `format=step` artifact after render.\n\
          - Prefer typed/static errors and structural verification first; screenshot verification second.\n\
          - Wall-pattern is mesh/eckyRust only. Point/list helpers are portable across `.ecky` backends.\n\n"
             .to_string()
@@ -103,6 +104,8 @@ fn ecky_backend_guide_text(
          Expression/list forms:\n\
          - Supported forms: {}.\n\
          - `let` is parallel; use `let*` for sequential bindings.\n\
+         - `map` supports multiple source lists: `(map (lambda (x y) ...) xs ys)`.\n\
+         - Static tuple destructuring is supported only for `zip` and static `enumerate`: `(map (lambda ((x y)) ...) (zip xs ys))`, `(map (lambda ((index value)) ...) (enumerate (range 8)))`.\n\
          - Keep code pure: no `set!`, assignment, mutation, or hidden side effects.\n\n\
          Numeric and generative helpers:\n\
          - Numeric helpers: {}.\n\
@@ -140,10 +143,23 @@ fn ecky_backend_guide_text(
              (difference\n\
                (box 90 60 4 :align '(center center min))\n\
                (apply union\n\
-                 (map (lambda (p)\n\
-                        (translate (list-ref p 0) (list-ref p 1) -1\n\
-                          (cylinder 2.2 8 16)))\n\
-                      (voronoi-cells 4 6 14 12 2 seed))))))\n",
+                 (map (lambda (cell)\n\
+                        (let* ((col (- cell (* 6 (floor (/ cell 6)))))\n\
+                               (row (floor (/ cell 6)))\n\
+                               (x (* (- col 2.5) 14))\n\
+                               (y (* (- row 1.5) 12))\n\
+                               (jx (+ x (* 2 (hash-signed col row seed))))\n\
+                               (jy (+ y (* 2 (hash-signed (+ col 17) (+ row 5) seed)))))\n\
+                          (translate jx jy -1 (cylinder 2.2 8 16))))\n\
+                      (range 24))))))\n\n\
+         Zip destructuring:\n\
+         (model\n\
+           (part body\n\
+             (extrude\n\
+               (polygon\n\
+                 (map (lambda ((x y)) (list x y))\n\
+                      (zip (range 0 4) (list 0 12 12 0))))\n\
+               2)))\n",
         crate::ecky_language_surface::join_backticked(surface.model_clauses),
         crate::ecky_language_surface::join_backticked(surface.model_wrappers),
         crate::ecky_language_surface::join_backticked(surface.expression_forms),
@@ -201,46 +217,15 @@ fn default_geometry_backend(app_state: &AppState) -> crate::models::GeometryBack
     app_state.config.lock().unwrap().default_geometry_backend
 }
 
-async fn resolve_thread_authoring_context(
-    app_state: &AppState,
-    thread_id: Option<&str>,
-) -> AppResult<Option<crate::context::ResolvedAuthoringContext>> {
-    let Some(thread_id) = thread_id.filter(|value| !value.trim().is_empty()) else {
-        return Ok(None);
-    };
-
-    let db = app_state.db.lock().await;
-    let engine_kind = crate::db::get_thread_engine_kind(&db, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    let source_language = crate::db::get_thread_source_language(&db, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    let geometry_backend = crate::db::get_thread_geometry_backend(&db, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-
-    let Some(engine_kind) = engine_kind else {
-        return Ok(None);
-    };
-
-    Ok(Some(crate::context::ResolvedAuthoringContext {
-        engine_kind,
-        source_language: source_language.unwrap_or_else(|| engine_kind.to_source_language()),
-        geometry_backend: geometry_backend.unwrap_or_else(|| engine_kind.to_geometry_backend()),
-    }))
-}
-
 async fn resolve_generation_engine_kind(
     app_state: &AppState,
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
     explicit: Option<crate::models::EngineKind>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
 ) -> AppResult<crate::models::EngineKind> {
     if let Some(engine_kind) = explicit {
         return Ok(engine_kind);
-    }
-
-    if let Some(thread_context) = resolve_thread_authoring_context(app_state, thread_id).await? {
-        return Ok(thread_context.engine_kind);
     }
 
     if let Some(design) = working_design {
@@ -256,17 +241,13 @@ async fn resolve_generation_engine_kind(
 
 async fn resolve_generation_source_language(
     app_state: &AppState,
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
     explicit: Option<crate::models::SourceLanguage>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
 ) -> AppResult<crate::models::SourceLanguage> {
     if let Some(source_language) = explicit {
         return Ok(source_language);
-    }
-
-    if let Some(thread_context) = resolve_thread_authoring_context(app_state, thread_id).await? {
-        return Ok(thread_context.source_language);
     }
 
     if let Some(design) = working_design {
@@ -282,17 +263,13 @@ async fn resolve_generation_source_language(
 
 async fn resolve_generation_geometry_backend(
     app_state: &AppState,
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
     explicit: Option<crate::models::GeometryBackend>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
 ) -> AppResult<crate::models::GeometryBackend> {
     if let Some(geometry_backend) = explicit {
         return Ok(geometry_backend);
-    }
-
-    if let Some(thread_context) = resolve_thread_authoring_context(app_state, thread_id).await? {
-        return Ok(thread_context.geometry_backend);
     }
 
     if let Some(design) = working_design {
@@ -724,7 +701,6 @@ pub async fn init_generation_attempt(
         .as_secs();
     let assistant_message_id = Uuid::new_v4().to_string();
     let user_message_id = Uuid::new_v4().to_string();
-    let default_engine_kind = default_engine_kind(state.inner());
 
     {
         let db = state.db.lock().await;
@@ -741,19 +717,8 @@ pub async fn init_generation_attempt(
                     prompt.clone()
                 }
             };
-            let default_source_language = default_source_language(state.inner());
-            let default_geometry_backend = default_geometry_backend(state.inner());
-            db::create_or_update_thread(
-                &db,
-                &thread_id,
-                &initial_title,
-                now,
-                Some(&traits),
-                Some(default_engine_kind),
-                Some(default_source_language),
-                Some(default_geometry_backend),
-            )
-            .map_err(|err| AppError::persistence(err.to_string()))?;
+            db::create_or_update_thread(&db, &thread_id, &initial_title, now, Some(&traits))
+                .map_err(|err| AppError::persistence(err.to_string()))?;
         }
 
         let attachment_images = collect_attachment_images(attachments.as_ref());
@@ -1122,6 +1087,7 @@ mod tests {
                 post_processing: None,
             }),
             design_digest: "Current working snapshot\nDesign [v1]".to_string(),
+            artifact_digest: String::new(),
         }
     }
 
@@ -1170,6 +1136,8 @@ mod tests {
         assert!(build123d.contains("Direct clauses: `params`, `part`, `meta`."));
         assert!(build123d.contains("wrapper bodies splice model clauses"));
         assert!(build123d.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(build123d.contains("Static tuple destructuring is supported only for `zip`"));
+        assert!(build123d.contains("Zip destructuring"));
         assert!(build123d.contains("Deterministic point/list helpers"));
         assert!(build123d.contains("`organic-loop`"));
         assert!(build123d.contains("`voronoi-cells`"));
@@ -1197,10 +1165,12 @@ mod tests {
         let ecky = ecky_ir_v0_guide_text(crate::models::GeometryBackend::EckyRust);
         assert!(ecky.contains("Current fileExtension: `.ecky`."));
         assert!(ecky.contains("Current sourceLanguage: `ecky`."));
-        assert!(ecky.contains("Target geometryBackend comes from thread metadata"));
+        assert!(ecky.contains("never from thread metadata"));
         assert!(ecky.contains("EckyRust is a controlled CAD runtime pipeline"));
         assert!(ecky.contains("parse -> expand -> typecheck -> lower -> validate"));
-        assert!(ecky.contains("not direct OCCT"));
+        assert!(ecky.contains("direct OCCT is an internal STEP/STL fast path"));
+        assert!(ecky.contains("Do not promise STEP for every mesh/eckyRust render"));
+        assert!(ecky.contains("ArtifactBundle.exportArtifacts"));
         assert!(ecky.contains("typed/static errors and structural verification first"));
         assert!(ecky.contains("Point/list helpers are portable"));
         assert!(ecky.contains("Typed holes are supported only as CAD-VM planning placeholders"));
@@ -1208,6 +1178,8 @@ mod tests {
         assert!(ecky.contains("Direct clauses: `params`, `part`, `meta`."));
         assert!(ecky.contains("wrapper bodies splice model clauses"));
         assert!(ecky.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(ecky.contains("Static tuple destructuring is supported only for `zip`"));
+        assert!(ecky.contains("Zip destructuring"));
         assert!(ecky.contains("Model-level let* splicing clauses"));
         assert!(ecky.contains("`wall-pattern`"));
         assert!(ecky.contains("`cellular`"));
@@ -1229,6 +1201,8 @@ mod tests {
         assert!(freecad.contains("unfilled holes intentionally reject during render/lowering"));
         assert!(freecad.contains("Direct clauses: `params`, `part`, `meta`."));
         assert!(freecad.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(freecad.contains("Static tuple destructuring is supported only for `zip`"));
+        assert!(freecad.contains("Zip destructuring"));
         assert!(freecad.contains("`grid-array`"));
         assert!(freecad.contains("`arc-array`"));
         assert!(!freecad.contains("`wall-pattern`"));
@@ -1270,24 +1244,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolver_uses_stored_thread_authoring_context_before_config_defaults() {
+    async fn resolver_uses_config_authoring_context_without_version_context() {
         let conn = crate::db::init_db(&test_db_path("thread-authoring-precedence")).expect("db");
-        let state = AppState::new(test_config(), None, conn);
+        let mut config = test_config();
+        config.default_engine_kind = EngineKind::EckyIrV0;
+        config.default_source_language = SourceLanguage::EckyIrV0;
+        config.default_geometry_backend = GeometryBackend::Build123d;
+        let state = AppState::new(config, None, conn);
         let thread_id = "thread-authoring";
 
         {
             let db = state.db.lock().await;
-            crate::db::create_or_update_thread(
-                &db,
-                thread_id,
-                "Thread",
-                100,
-                None,
-                Some(EngineKind::EckyIrV0),
-                Some(SourceLanguage::EckyIrV0),
-                Some(GeometryBackend::Build123d),
-            )
-            .expect("thread");
+            crate::db::create_or_update_thread(&db, thread_id, "Thread", 100, None)
+                .expect("thread");
         }
 
         let engine_kind = resolve_generation_engine_kind(&state, Some(thread_id), None, None, None)
@@ -1308,7 +1277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolver_uses_thread_authoring_context_before_stale_version_metadata() {
+    async fn resolver_uses_version_metadata_before_config_defaults() {
         let conn =
             crate::db::init_db(&test_db_path("thread-authoring-before-version")).expect("db");
         let state = AppState::new(test_config(), None, conn);
@@ -1319,17 +1288,8 @@ mod tests {
 
         {
             let db = state.db.lock().await;
-            crate::db::create_or_update_thread(
-                &db,
-                thread_id,
-                "Thread",
-                100,
-                None,
-                Some(EngineKind::EckyIrV0),
-                Some(SourceLanguage::EckyIrV0),
-                Some(GeometryBackend::Build123d),
-            )
-            .expect("thread");
+            crate::db::create_or_update_thread(&db, thread_id, "Thread", 100, None)
+                .expect("thread");
         }
 
         let engine_kind = resolve_generation_engine_kind(
@@ -1360,8 +1320,8 @@ mod tests {
         .await
         .expect("geometry backend");
 
-        assert_eq!(engine_kind, EngineKind::EckyIrV0);
-        assert_eq!(source_language, SourceLanguage::EckyIrV0);
-        assert_eq!(geometry_backend, GeometryBackend::Build123d);
+        assert_eq!(engine_kind, stale_design.engine_kind);
+        assert_eq!(source_language, stale_design.source_language);
+        assert_eq!(geometry_backend, stale_design.geometry_backend);
     }
 }

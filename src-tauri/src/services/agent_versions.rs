@@ -230,9 +230,6 @@ pub async fn save_or_update_agent_version_for_session(
             &design_output.title,
             now,
             thread_traits.as_ref(),
-            Some(design_output.engine_kind),
-            Some(design_output.source_language),
-            Some(design_output.geometry_backend),
         )
         .map_err(|e| AppError::persistence(e.to_string()))?;
 
@@ -477,8 +474,7 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
-                .unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
             db::add_message(
                 &conn,
                 "thread-1",
@@ -600,8 +596,7 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
-                .unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
             db::upsert_agent_session(
                 &conn,
                 &AgentSession {
@@ -686,8 +681,7 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
-                .unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
             db::add_message(
                 &conn,
                 "thread-1",
@@ -824,8 +818,7 @@ mod tests {
 
         {
             let conn = state.db.lock().await;
-            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None, None, None, None)
-                .unwrap();
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now, None).unwrap();
             db::add_message(
                 &conn,
                 "thread-1",

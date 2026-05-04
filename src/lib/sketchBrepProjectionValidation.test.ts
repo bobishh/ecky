@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildSketchBrepProjectionRepairTargets,
   buildSketchBrepProjectionValidationSummary,
   sketchBrepProjectionBoundsSeed,
 } from './sketchBrepProjectionValidation';
@@ -163,6 +164,51 @@ test('Given projection extents differ from SketchDocument When summary builds Th
   assert.equal(summary.rows[1]?.status, 'fail');
   assert.equal(summary.rows[1]?.issue, 'bounds mismatch');
   assert.equal(summary.rows[1]?.evidence, 'sketch 20 x 10; projection 20 x 8; 2 visible / 1 hidden.');
+});
+
+test('Given backend BRep validation issue When repair targets build Then target is keyed by sketch primitive and view', () => {
+  const targets = buildSketchBrepProjectionRepairTargets(document, {
+    ...matchingProjection,
+    validation: {
+      passed: false,
+      issues: [
+        {
+          sketchId: 'front-sketch',
+          primitiveId: 'front-profile',
+          severity: 'error',
+          message: 'raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
+        },
+      ],
+      evidence: ['backend BRep/sketch validation failed'],
+    },
+  });
+
+  assert.deepEqual(targets, [
+    {
+      targetId: 'brep-repair-front-sketch-front-profile-0',
+      sketchId: 'front-sketch',
+      primitiveId: 'front-profile',
+      view: 'front',
+      severity: 'error',
+      label: 'FRONT / front-profile',
+      reason: 'raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
+      evidence:
+        'front-sketch / front-profile / raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
+    },
+  ]);
+});
+
+test('Given passing backend BRep validation When repair targets build Then no targets are emitted', () => {
+  const targets = buildSketchBrepProjectionRepairTargets(document, {
+    ...matchingProjection,
+    validation: {
+      passed: true,
+      issues: [],
+      evidence: ['backend BRep/sketch validation passed'],
+    },
+  });
+
+  assert.deepEqual(targets, []);
 });
 
 test('Given missing BRep projection When summary builds Then projection row pending', () => {

@@ -20,6 +20,7 @@ use crate::contracts::{
     ThreadAgentState,
 };
 use crate::db;
+use crate::mcp::authoring::authoring_card_text;
 use crate::models::{AppState, McpSessionState, McpTargetRef};
 
 const MCP_READY_ATTEMPTS: usize = 75;
@@ -909,18 +910,19 @@ fn write_agent_instructions(
         ## Identity\n\
         - Your stable Ecky agent label is `{agent_label}`.\n\
         - On startup, call `agent_identity_set` with `agentLabel: \"{agent_label}\"`.\n\
-        - Before `session_log_in`, choose the thread you will work on. Use `thread_list` / `thread_get` first unless Ecky already woke you from a selected thread.\n\
-        - Then call `session_log_in` with the same `agentLabel` and an explicit `threadId` whenever you are choosing the thread yourself.\n\n\
+        - Then call `session_log_in` with the same `agentLabel`. `threadId` is optional; omit it when you do not have a target yet.\n\
+        - Choose targets with `thread_borrow` for existing threads or `thread_create` for a brand-new design. Explicit `threadId` / `messageId` per tool is still valid for one-off targeting.\n\n\
         ## MCP Server\n\
         Connect to: `{endpoint_url}`\n\n\
+        ## Immediate authoring card\n\
+        {authoring_card}\n\
         ## Startup sequence (token-efficient — follow exactly)\n\
         1. Call `agent_identity_set` with `agentLabel: \"{agent_label}\"`.\n\
-        2. If Ecky already woke you from a selected thread, call `session_log_in` with `agentLabel: \"{agent_label}\"` to inherit that bound target. \
-           Otherwise call `thread_list` / `thread_get`, choose a thread, then call `session_log_in` with `agentLabel: \"{agent_label}\"` and that `threadId`.\n\
-        3. Call `request_user_prompt` with a SHORT friendly greeting only \
+        2. Call `session_log_in` with `agentLabel: \"{agent_label}\"`; include `threadId` only if Ecky woke you from a known selected thread or you already chose a target.\n\
+        3. Before `request_user_prompt`, ensure a target exists: use the wake target, call `thread_borrow`, pass explicit `threadId`, or call `thread_create` for a new design. Then call `request_user_prompt` with a SHORT friendly greeting only \
            (for example \"Hello! What would you like to design?\"). \
            The response may include local image/CAD attachments from the Ecky prompt panel, \
-           plus `threadId` / `threadTitle` for the exact bound thread. Ecky will NOT infer a thread from whatever happens to be visible in the workspace. \
+           plus `threadId` / `threadTitle` for the exact target thread. Ecky will NOT infer a thread from whatever happens to be visible in the workspace. \
            Attachment paths are already absolute local files staged by Ecky, so open them \
            directly with your normal file/image tools instead of guessing or rewriting paths. \
            Do NOT call `bootstrap_ecky` or `workspace_overview` yet. \
@@ -930,23 +932,24 @@ fn write_agent_instructions(
         4. When the user sends the first queued message:\n\
            a. Call `bootstrap_ecky` to load system guidance.\n\
            b. Call `workspace_overview` to inspect the current thread state.\n\
-           c. Use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose guides before writing macro code: if sourceLanguage is `ecky`, read `ecky://guides/ecky-source` first, then read `ecky://guides/build123d` or `ecky://guides/freecad` to match the backend.\n\
+           c. Read `ecky://guides/authoring-card`, then use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose guides before writing macro code: if sourceLanguage is `ecky`, read `ecky://guides/ecky-source` first, then read `ecky://guides/build123d`, `ecky://guides/freecad`, or `ecky://guides/ecky-rust` to match the backend.\n\
            d. If `workspace_overview.defaultTarget.hasVersion` is true, call `target_meta_get`.\n\
-           e. Use `target_macro_get` for macro reasoning and `target_detail_get(section=...)` \
-              for exact chunks.\n\
+              If false, use `agentBrief` config/session defaults for the first version.\n\
+           e. Use `target_macro_get` for macro reasoning, `macro_buffer_get` for digest-checked line edits, \
+              `artifact_manifest_get` for full artifact JSON, and `target_detail_get(section=...)` for exact chunks.\n\
            f. Use `semantic_manifest_get` only when semantic bindings matter.\n\
            g. Use `target_get` only as a last-resort full payload.\n\
            h. Use `measurement_annotation_save/delete` when you need to encode what a dimension \
               means in the manifest.\n\
            i. If a step will take more than a few seconds, call `session_activity_set`, and call \
               `session_activity_clear` when that step finishes.\n\
-           j. Act on the request using `macro_replace_and_render` or `params_patch_and_render`.\n\
+           j. Act on the request using `macro_buffer_replace_and_render`, `macro_replace_and_render`, or `params_patch_and_render`; prefer buffer replacement for non-trivial edits.\n\
         5. When you finish a user-facing turn, call `session_reply_save` for the final reply \
            (or fatal error) if the user should see text in the thread history.\n\
         6. Immediately after the turn completes, call `request_user_prompt` again so Ecky can \
            hibernate you between user messages. Do NOT wait for terminal input and do NOT \
            restart or re-bootstrap between turns.\n\n\
-        7. If you need to move to a different thread, call `session_log_out`, then `session_log_in` again for that thread. Do not silently hop threads inside `request_user_prompt`.\n\n\
+        7. If you need to move to a different thread, call `thread_borrow` for that thread or pass explicit `threadId` / `messageId` to the next target-specific tool. Do not logout/login solely to switch threads.\n\n\
         8. If you read queued thread messages via `thread_get` instead of receiving a live \
            `request_user_prompt`, call `mark_as_read` on any one pending user message from that \
            thread before you start. Ecky will drain the whole pending batch for that thread into \
@@ -957,6 +960,7 @@ fn write_agent_instructions(
         - Do not treat this file as the CAD design policy source of truth.\n",
         agent_label = agent.label,
         endpoint_url = endpoint_url,
+        authoring_card = authoring_card_text(),
     );
 
     fs::write(work_dir.join("AGENTS.md"), agents_md)
@@ -1022,21 +1026,22 @@ fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
         "You are an Ecky CAD design assistant. \
         Read AGENTS.md in your current directory for MCP runtime instructions only. \
         The Ecky MCP server is at {endpoint_url}. \
+        Immediate source-writing rules: {authoring_card} \
         Start now: call `agent_identity_set` with `agentLabel: \"{agent_label}\"`, then \
-        choose the thread you will work on via `thread_list` / `thread_get` unless Ecky already woke you from a selected thread, \
-        then call `session_log_in` with the same `agentLabel` and that thread target, then call `request_user_prompt` \
+        call `session_log_in` with the same `agentLabel` and no thread unless Ecky already provided one. Before `request_user_prompt`, ensure a target exists via wake target, `thread_borrow`, explicit `threadId`, or `thread_create`; then call `request_user_prompt` \
         with a short friendly greeting. The response may include local image/CAD attachments \
-        plus `threadId` / `threadTitle` for the exact bound thread. Ecky will not infer a thread from the current workspace view. Attachment paths are already \
+        plus `threadId` / `threadTitle` for the exact target thread. Ecky will not infer a thread from the current workspace view. Attachment paths are already \
         absolute local files staged by Ecky; open them directly with your file/image tools \
         instead of rewriting or guessing new paths. \
         Do NOT call `bootstrap_ecky` or `workspace_overview` until the user sends the first queued message. \
-        After that, treat `bootstrap_ecky`, `workspace_overview`, and the `ecky://guides/*` resources as the modeling policy source of truth. Use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose the matching guide. If the source language is `ecky`, read `ecky://guides/ecky-source` first, then the backend guide for `build123d` or `freecad`. If `workspace_overview` says the thread has no saved versions yet, \
-        use the guides plus the queued thread context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, and `target_detail_get(section=...)` \
+        After that, treat `bootstrap_ecky`, `workspace_overview`, `ecky://guides/authoring-card`, and the `ecky://guides/*` resources as the modeling policy source of truth. Use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose the matching guide. If the source language is `ecky`, read `ecky://guides/ecky-source` first, then the backend guide for `build123d`, `freecad`, or `mesh`. If `workspace_overview` says the thread has no saved versions yet, \
+        use agentBrief config/session defaults plus queued user context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, `macro_buffer_get`, `artifact_manifest_get`, and `target_detail_get(section=...)` \
         before falling back to `target_get`. Use `session_activity_set` / `session_activity_clear` for \
         long steps instead of relying on terminal text. At the end of each turn, save any final user-facing \
         reply with `session_reply_save` and then immediately call `request_user_prompt` again.",
         endpoint_url = endpoint_url,
         agent_label = agent.label,
+        authoring_card = authoring_card_text(),
     )
 }
 
@@ -1093,6 +1098,8 @@ fn extract_safe_managed_mcp_tool_prompt(output: &str) -> Option<&'static str> {
     for tool_name in [
         "agent_identity_set",
         "session_log_in",
+        "thread_borrow",
+        "thread_create",
         "request_user_prompt",
     ] {
         let marker = format!("ecky_mcp - {}", tool_name);
@@ -3678,15 +3685,25 @@ mod tests {
 
         assert!(prompt.contains("target_meta_get"));
         assert!(prompt.contains("target_macro_get"));
+        assert!(prompt.contains("artifact_manifest_get"));
         assert!(prompt.contains("target_detail_get(section=...)"));
         assert!(prompt.contains("agentBrief.sourceLanguage"));
         assert!(prompt.contains("agentBrief.geometryBackend"));
+        assert!(prompt.contains("Ecky authoring card"));
+        assert!(prompt.contains("(extrude (polygon"));
+        assert!(prompt.contains("let*"));
+        assert!(prompt.contains("macro_replace_and_render"));
+        assert!(prompt.contains("config/session defaults"));
 
         assert!(instructions.contains("call `target_meta_get`"));
-        assert!(instructions.contains("Use `target_macro_get` for macro reasoning"));
+        assert!(instructions.contains("`artifact_manifest_get` for full artifact JSON"));
         assert!(instructions.contains("Use `target_get` only as a last-resort full payload."));
         assert!(instructions.contains("agentBrief.sourceLanguage"));
         assert!(instructions.contains("agentBrief.geometryBackend"));
+        assert!(instructions.contains("Ecky authoring card"));
+        assert!(instructions.contains("ecky://guides/authoring-card"));
+        assert!(instructions.contains("macro_replace_and_render"));
+        assert!(instructions.contains("config/session defaults"));
     }
 
     #[test]

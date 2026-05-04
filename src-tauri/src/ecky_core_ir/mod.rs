@@ -313,8 +313,10 @@ pub enum CoreSurfaceOp {
     Sweep,
     Shell,
     Offset,
+    OffsetRounded,
     Fillet,
     Chamfer,
+    Taper,
     Twist,
 }
 
@@ -329,6 +331,8 @@ pub enum CorePathOp {
 pub enum CoreArrayOp {
     LinearArray,
     RadialArray,
+    GridArray,
+    ArcArray,
     Repeat,
     RepeatUnion,
     RepeatCompound,

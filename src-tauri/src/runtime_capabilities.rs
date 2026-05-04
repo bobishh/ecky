@@ -176,7 +176,7 @@ fn unavailable_capability(detail: String) -> RuntimeBackendCapability {
     }
 }
 
-fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
+pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
     if let Ok(path) = std::env::var("BUILD123D_RUNTIME_DIR") {
         let path = PathBuf::from(path.trim());
         if path.is_dir() {
@@ -561,6 +561,14 @@ mod tests {
 
         assert!(!capability.available);
         assert!(capability.detail.contains("Direct OCCT"), "{capability:?}");
+        assert!(
+            capability.detail.contains("npm run build123d:prepare"),
+            "{capability:?}"
+        );
+        assert!(
+            !capability.detail.contains("OCCT headers missing"),
+            "{capability:?}"
+        );
 
         let recommended = recommended_authoring_context(false, true);
         assert_eq!(recommended.geometry_backend, GeometryBackend::Build123d);

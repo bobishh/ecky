@@ -352,10 +352,6 @@ pub struct Engine {
     pub light_model: String,
     #[serde(alias = "base_url")]
     pub base_url: String,
-    #[serde(alias = "system_prompt")]
-    pub system_prompt: String,
-    /// Explicit opt-in: API calls are blocked unless this is true.
-    /// Defaults to true for backward compatibility with existing configs.
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -1817,12 +1813,6 @@ pub struct Thread {
     pub finalized_at: Option<u64>,
     #[serde(default, alias = "pending_confirm")]
     pub pending_confirm: Option<String>,
-    #[serde(default = "default_engine_kind", alias = "engine_kind")]
-    pub engine_kind: EngineKind,
-    #[serde(default = "default_source_language", alias = "source_language")]
-    pub source_language: SourceLanguage,
-    #[serde(default = "default_geometry_backend", alias = "geometry_backend")]
-    pub geometry_backend: GeometryBackend,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -2020,6 +2010,16 @@ pub struct StructuralMetrics {
     pub part_count: u32,
     #[serde(default)]
     pub preview_stl_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub preview_stl_triangle_count: Option<u32>,
+    #[serde(default)]
+    pub preview_stl_component_count: Option<u32>,
+    #[serde(default)]
+    pub preview_stl_non_manifold_edge_count: Option<u32>,
+    #[serde(default)]
+    pub preview_stl_overhang_triangle_count: Option<u32>,
+    #[serde(default)]
+    pub preview_stl_overhang_ratio: Option<f64>,
     #[serde(default)]
     pub total_volume: Option<f64>,
     #[serde(default)]
@@ -2239,6 +2239,7 @@ pub const MODEL_RUNTIME_SCHEMA_VERSION: u32 = 2;
 pub enum ModelSourceKind {
     Generated,
     ImportedFcstd,
+    ImportedStep,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -2256,6 +2257,7 @@ pub enum SelectionTargetKind {
     Object,
     Group,
     Edge,
+    Face,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
@@ -2396,6 +2398,21 @@ pub struct ViewerEdgeTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct ViewerFaceTarget {
+    pub target_id: String,
+    pub part_id: String,
+    pub viewer_node_id: String,
+    pub label: String,
+    pub editable: bool,
+    pub center: ViewerEdgePoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CalloutAnchor {
     pub anchor_id: String,
     pub position: [f64; 3],
@@ -2442,6 +2459,8 @@ pub struct ArtifactBundle {
     #[serde(default)]
     pub edge_targets: Vec<ViewerEdgeTarget>,
     #[serde(default)]
+    pub face_targets: Vec<ViewerFaceTarget>,
+    #[serde(default)]
     pub callout_anchors: Vec<CalloutAnchor>,
     #[serde(default)]
     pub measurement_guides: Vec<MeasurementGuide>,
@@ -2458,7 +2477,7 @@ pub struct ExportArtifact {
     pub role: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportPartInput {
     pub label: String,
@@ -2469,6 +2488,8 @@ pub struct ExportPartInput {
     pub part_id: Option<String>,
     #[serde(default)]
     pub display_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_frame: Option<PortFrame>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -2813,6 +2834,8 @@ pub struct ComponentParam {
 pub struct ComponentPort {
     pub port_id: String,
     pub type_id: String,
+    #[serde(default)]
+    pub target_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<PortFrame>,
     #[serde(default)]
@@ -2977,6 +3000,70 @@ pub struct SketchBrepCandidateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateAcceptRequest {
+    pub part_id: String,
+    pub document: SketchDocument,
+    pub solution_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchAcceptedBrepComponentPackageRequest {
+    pub package_id: String,
+    pub version: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub component_id: String,
+    pub component_version: String,
+    pub component_display_name: String,
+    pub source_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bundle: Option<ArtifactBundle>,
+    pub document: SketchDocument,
+    pub solution_id: String,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub params: Vec<ComponentParam>,
+    #[serde(default, alias = "ui_spec")]
+    pub ui_spec: UiSpec,
+    #[serde(default, alias = "initial_params")]
+    pub initial_params: DesignParams,
+    #[serde(default)]
+    pub ports: Vec<ComponentPort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactBundleComponentPackageRequest {
+    pub package_id: String,
+    pub version: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub component_id: String,
+    pub component_version: String,
+    pub component_display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    pub artifact_bundle: ArtifactBundle,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub params: Vec<ComponentParam>,
+    #[serde(default, alias = "ui_spec")]
+    pub ui_spec: UiSpec,
+    #[serde(default, alias = "initial_params")]
+    pub initial_params: DesignParams,
+    #[serde(default)]
+    pub ports: Vec<ComponentPort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SketchBrepCandidateVertex {
     pub vertex_id: String,
     pub point: [f64; 3],
@@ -3005,6 +3092,55 @@ pub struct SketchBrepCandidateGraph {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateCell {
+    pub cell_id: String,
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    #[serde(default)]
+    pub support_views: Vec<SketchView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum SketchBrepCandidateSourceStrategy {
+    CellUnion,
+    FrontProfilePrism,
+}
+
+impl Default for SketchBrepCandidateSourceStrategy {
+    fn default() -> Self {
+        Self::CellUnion
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateSolution {
+    pub solution_id: String,
+    #[serde(default)]
+    pub cell_ids: Vec<String>,
+    pub score: f64,
+    #[serde(default)]
+    pub source_strategy: SketchBrepCandidateSourceStrategy,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateSearch {
+    #[serde(default)]
+    pub cells: Vec<SketchBrepCandidateCell>,
+    #[serde(default)]
+    pub rejected_cell_count: usize,
+    #[serde(default)]
+    pub solutions: Vec<SketchBrepCandidateSolution>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SketchBrepProjectionValidation {
     pub passed: bool,
     #[serde(default)]
@@ -3017,7 +3153,30 @@ pub struct SketchBrepProjectionValidation {
 #[serde(rename_all = "camelCase")]
 pub struct SketchBrepCandidateResponse {
     pub graph: SketchBrepCandidateGraph,
+    pub search: SketchBrepCandidateSearch,
     pub validation: SketchBrepProjectionValidation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchAcceptedBrepCandidateSource {
+    pub draft_source: SketchDraftSource,
+    pub candidate_response: SketchBrepCandidateResponse,
+    pub accepted_solution: SketchBrepCandidateSolution,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchBrepCandidateAcceptResponse {
+    pub draft_source: SketchDraftSource,
+    pub artifact_bundle: ArtifactBundle,
+    pub hidden_line_response: BrepHiddenLineProjectionResponse,
+    pub candidate_response: SketchBrepCandidateResponse,
+    pub accepted_solution: SketchBrepCandidateSolution,
+    #[serde(default)]
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -3041,6 +3200,28 @@ pub struct BrepProjectedEdge2d {
     pub source_class: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum BrepProjectedLoopRole {
+    Outer,
+    Hole,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrepProjectedLoop2d {
+    pub loop_id: String,
+    #[serde(default)]
+    pub edge_ids: Vec<String>,
+    #[serde(default)]
+    pub points: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub role: BrepProjectedLoopRole,
+    pub source_class: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BrepHiddenLineProjectionView {
@@ -3050,6 +3231,8 @@ pub struct BrepHiddenLineProjectionView {
     pub visible_edges: Vec<BrepProjectedEdge2d>,
     #[serde(default)]
     pub hidden_edges: Vec<BrepProjectedEdge2d>,
+    #[serde(default)]
+    pub loops: Vec<BrepProjectedLoop2d>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -3173,6 +3356,12 @@ pub struct ComponentDefinition {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_language: Option<SourceLanguage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_backend: Option<GeometryBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_dialect: Option<MacroDialect>,
     #[serde(default)]
     pub sketches: Vec<SketchDefinition>,
     #[serde(default)]
@@ -3181,6 +3370,10 @@ pub struct ComponentDefinition {
     pub fusion_zones: Vec<ComponentFusionZone>,
     #[serde(default)]
     pub params: Vec<ComponentParam>,
+    #[serde(default, alias = "ui_spec")]
+    pub ui_spec: UiSpec,
+    #[serde(default, alias = "initial_params")]
+    pub initial_params: DesignParams,
     #[serde(default)]
     pub ports: Vec<ComponentPort>,
 }
@@ -3302,12 +3495,178 @@ pub struct InstalledComponentPackage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct InstalledComponentSource {
+    pub package_id: String,
+    pub version: String,
+    pub package_display_name: String,
+    pub package_dir: String,
+    pub component: ComponentDefinition,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub mate_types: Vec<MateTypeDefinition>,
+    pub source_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledComponentRuntime {
+    pub installed_source: InstalledComponentSource,
+    pub parameters: DesignParams,
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledComponentControls {
+    pub installed_source: InstalledComponentSource,
+    pub parameters: DesignParams,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyComponentControls {
+    pub instance_id: String,
+    pub component_id: String,
+    pub parameters: DesignParams,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_frame: Option<PortFrame>,
+    pub installed_source: InstalledComponentSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyControls {
+    pub package_id: String,
+    pub version: String,
+    pub package_display_name: String,
+    pub package_dir: String,
+    pub assembly: AssemblyDefinition,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub mate_types: Vec<MateTypeDefinition>,
+    #[serde(default)]
+    pub components: Vec<InstalledAssemblyComponentControls>,
+    #[serde(default)]
+    pub mate_results: Vec<InstalledAssemblyMateResult>,
+    #[serde(default)]
+    pub mates_solved: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyComponentSource {
+    pub instance_id: String,
+    pub component_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_frame: Option<PortFrame>,
+    pub installed_source: InstalledComponentSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblySource {
+    pub package_id: String,
+    pub version: String,
+    pub package_display_name: String,
+    pub package_dir: String,
+    pub assembly: AssemblyDefinition,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub mate_types: Vec<MateTypeDefinition>,
+    #[serde(default)]
+    pub components: Vec<InstalledAssemblyComponentSource>,
+    #[serde(default)]
+    pub mate_results: Vec<InstalledAssemblyMateResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyMateResult {
+    pub mate_id: String,
+    pub solved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_clearance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_clearance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyOperationResult {
+    pub operation_id: String,
+    pub applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub fusion_zone_ids_by_instance: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyOutputRuntime {
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyComponentRuntime {
+    pub instance_id: String,
+    pub component_id: String,
+    pub parameters: DesignParams,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_frame: Option<PortFrame>,
+    pub runtime: InstalledComponentRuntime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAssemblyRuntime {
+    pub package_id: String,
+    pub version: String,
+    pub package_display_name: String,
+    pub package_dir: String,
+    pub assembly: AssemblyDefinition,
+    #[serde(default)]
+    pub port_types: Vec<PortTypeDefinition>,
+    #[serde(default)]
+    pub mate_types: Vec<MateTypeDefinition>,
+    #[serde(default)]
+    pub components: Vec<InstalledAssemblyComponentRuntime>,
+    #[serde(default)]
+    pub mate_results: Vec<InstalledAssemblyMateResult>,
+    #[serde(default)]
+    pub mates_solved: bool,
+    #[serde(default)]
+    pub operation_results: Vec<InstalledAssemblyOperationResult>,
+    #[serde(default)]
+    pub operations_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_runtime: Option<InstalledAssemblyOutputRuntime>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ComponentHeader {
     pub component_id: String,
     pub version: String,
     pub display_name: String,
     #[serde(default)]
     pub params: Vec<ComponentParam>,
+    #[serde(default, alias = "ui_spec")]
+    pub ui_spec: UiSpec,
+    #[serde(default, alias = "initial_params")]
+    pub initial_params: DesignParams,
     #[serde(default)]
     pub ports: Vec<ComponentPort>,
 }
@@ -4167,6 +4526,24 @@ pub fn validate_model_runtime_bundle(
         }
     }
 
+    for edge_target in &bundle.edge_targets {
+        if !selection_target_ids.contains(edge_target.target_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "edge target '{}' references unknown targetId '{}'.",
+                edge_target.label, edge_target.target_id
+            )));
+        }
+    }
+
+    for face_target in &bundle.face_targets {
+        if !selection_target_ids.contains(face_target.target_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "face target '{}' references unknown targetId '{}'.",
+                face_target.label, face_target.target_id
+            )));
+        }
+    }
+
     for annotation in &manifest.measurement_annotations {
         if let Some(guide_id) = annotation.guide_id.as_deref() {
             if !guide_ids.contains(guide_id) {
@@ -4284,6 +4661,8 @@ pub fn component_package_header(package: &ComponentPackage) -> AppResult<Compone
                 version: component.version.clone(),
                 display_name: component.display_name.clone(),
                 params: component.params.clone(),
+                ui_spec: component.ui_spec.clone(),
+                initial_params: component.initial_params.clone(),
                 ports: component.ports.clone(),
             })
             .collect(),
@@ -4385,6 +4764,8 @@ pub fn validate_component_package_header(header: &ComponentPackageHeader) -> App
                 )));
             }
         }
+        validate_ui_spec(&component.ui_spec)?;
+        validate_design_params(&component.initial_params, &component.ui_spec)?;
         let mut port_ids = HashSet::new();
         for port in &component.ports {
             validate_component_port(&component.component_id, port)?;
@@ -4678,6 +5059,8 @@ fn validate_component_definition(component: &ComponentDefinition) -> AppResult<(
             }
         }
     }
+    validate_ui_spec(&component.ui_spec)?;
+    validate_design_params(&component.initial_params, &component.ui_spec)?;
 
     let mut port_ids = HashSet::new();
     for port in &component.ports {
@@ -4960,6 +5343,22 @@ fn validate_component_port(component_id: &str, port: &ComponentPort) -> AppResul
     if let Some(frame) = &port.frame {
         validate_port_frame(component_id, &port.port_id, frame)?;
     }
+    validate_non_empty_strings(
+        &port.target_ids,
+        &format!(
+            "component '{}' port '{}' targetIds must be non-empty.",
+            component_id, port.port_id
+        ),
+    )?;
+    let mut target_ids = HashSet::new();
+    for target_id in &port.target_ids {
+        if !target_ids.insert(target_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "component '{}' port '{}' contains duplicate targetId '{}'.",
+                component_id, port.port_id, target_id
+            )));
+        }
+    }
 
     validate_non_empty_strings(
         &port.interfaces,
@@ -5216,7 +5615,7 @@ fn validate_assembly_operation(
     }
     if matches!(
         operation.kind,
-        OperationKind::Fuse | OperationKind::Mold | OperationKind::Blend
+        OperationKind::Fuse | OperationKind::Cut | OperationKind::Mold | OperationKind::Blend
     ) && operation.target_instance_ids.len() < 2
     {
         return Err(AppError::validation(format!(
@@ -5677,6 +6076,7 @@ mod tests {
             preview_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
+            face_targets: Vec::new(),
             callout_anchors: vec![CalloutAnchor {
                 anchor_id: "anchor-shell-center".to_string(),
                 position: [0.0, 0.0, 0.0],
@@ -5689,6 +6089,95 @@ mod tests {
         let err = validate_model_runtime_bundle(&manifest, &bundle)
             .expect_err("runtime pair should reject bad guide id");
         assert!(err.message.contains("unknown guideId"));
+    }
+
+    #[test]
+    fn validate_model_runtime_bundle_rejects_edge_target_without_manifest_target() {
+        let manifest = sample_manifest();
+        let bundle = ArtifactBundle {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: manifest.model_id.clone(),
+            source_kind: ModelSourceKind::Generated,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: "/tmp/model.json".to_string(),
+            macro_path: Some("/tmp/model.py".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: vec![ViewerEdgeTarget {
+                target_id: "missing-edge-target".to_string(),
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell edge".to_string(),
+                editable: false,
+                start: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: ViewerEdgePoint {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            }],
+            face_targets: Vec::new(),
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
+        };
+
+        let err = validate_model_runtime_bundle(&manifest, &bundle)
+            .expect_err("runtime pair should reject unmatched edge target");
+        assert!(err.message.contains("unknown targetId"));
+        assert!(err.message.contains("missing-edge-target"));
+    }
+
+    #[test]
+    fn validate_model_runtime_bundle_rejects_face_target_without_manifest_target() {
+        let manifest = sample_manifest();
+        let bundle = ArtifactBundle {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: manifest.model_id.clone(),
+            source_kind: ModelSourceKind::Generated,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: "/tmp/model.json".to_string(),
+            macro_path: Some("/tmp/model.py".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: Vec::new(),
+            face_targets: vec![ViewerFaceTarget {
+                target_id: "missing-face-target".to_string(),
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell face".to_string(),
+                editable: false,
+                center: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                normal: Some([0.0, 0.0, 1.0]),
+                area: Some(10.0),
+            }],
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
+        };
+
+        let err = validate_model_runtime_bundle(&manifest, &bundle)
+            .expect_err("runtime pair should reject unmatched face target");
+        assert!(err.message.contains("unknown targetId"));
+        assert!(err.message.contains("missing-face-target"));
     }
 
     #[test]

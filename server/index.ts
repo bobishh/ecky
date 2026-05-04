@@ -41,7 +41,6 @@ function createDefaultConfig(): AppConfig {
       model: 'gemini-2.5-flash',
       lightModel: 'gemini-2.5-flash-lite',
       baseUrl: '',
-      systemPrompt: MODEL_SYSTEM_PROMPT,
     },
     {
       id: 'default-openai',
@@ -51,7 +50,6 @@ function createDefaultConfig(): AppConfig {
       model: 'gpt-4o',
       lightModel: 'gpt-4o-mini',
       baseUrl: '',
-      systemPrompt: MODEL_SYSTEM_PROMPT,
     },
   ];
 
@@ -159,7 +157,7 @@ async function parseJsonResponse(response: globalThis.Response): Promise<ServerM
 
 async function generateMacroWithModel(userPrompt: string): Promise<ServerModelOutput> {
   const engine = activeEngine();
-  const { provider, apiKey, model, systemPrompt, baseUrl } = engine;
+  const { provider, apiKey, model, baseUrl } = engine;
 
   if (!apiKey && provider !== 'ollama') {
     throw new Error(`API key for ${engine.name} is not set.`);
@@ -176,7 +174,7 @@ async function generateMacroWithModel(userPrompt: string): Promise<ServerModelOu
       body: JSON.stringify({
         model,
         messages: [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: MODEL_SYSTEM_PROMPT },
           { role: 'user', content: buildUserPrompt(userPrompt) },
         ],
         response_format: { type: 'json_object' },
@@ -201,7 +199,7 @@ async function generateMacroWithModel(userPrompt: string): Promise<ServerModelOu
         contents: [
           {
             role: 'user',
-            parts: [{ text: `${systemPrompt}\n\n${buildUserPrompt(userPrompt)}` }],
+            parts: [{ text: `${MODEL_SYSTEM_PROMPT}\n\n${buildUserPrompt(userPrompt)}` }],
           },
         ],
         generationConfig: {

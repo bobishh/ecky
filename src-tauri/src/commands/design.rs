@@ -8,9 +8,9 @@ use uuid::Uuid;
 use super::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::models::{
     validate_design_output, validate_design_params, validate_ui_spec, AppError, AppResult,
-    AppState, ArtifactBundle, DesignParams, EngineKind, GeometryBackend, Message, MessageRole,
-    MessageStatus, ModelManifest, ParamValue, ParsedParamsResult, SelectOption, SelectValue,
-    SourceLanguage, UiField, UiSpec,
+    AppState, ArtifactBundle, DesignParams, GeometryBackend, Message, MessageRole, MessageStatus,
+    ModelManifest, ParamValue, ParsedParamsResult, SelectOption, SelectValue, SourceLanguage,
+    UiField, UiSpec,
 };
 use crate::{db, persist_thread_summary};
 
@@ -915,17 +915,8 @@ pub async fn add_imported_model_version(
     } else {
         None
     };
-    db::create_or_update_thread(
-        &db,
-        &thread_id,
-        &title,
-        now,
-        thread_traits.as_ref(),
-        Some(EngineKind::Freecad),
-        Some(SourceLanguage::LegacyPython),
-        Some(GeometryBackend::Freecad),
-    )
-    .map_err(|err| AppError::persistence(err.to_string()))?;
+    db::create_or_update_thread(&db, &thread_id, &title, now, thread_traits.as_ref())
+        .map_err(|err| AppError::persistence(err.to_string()))?;
 
     let msg_id = Uuid::new_v4().to_string();
     let label = model_manifest.document.document_label.trim();

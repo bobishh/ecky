@@ -61,7 +61,10 @@ import type {
   RejectViewportScreenshotInput,
   ResolveAgentPromptInput,
   ResolveViewportScreenshotInput,
+  SketchAcceptedBrepComponentPackageRequest,
   SketchBrepCandidateRequest,
+  SketchBrepCandidateAcceptRequest,
+  SketchBrepCandidateAcceptResponse,
   SketchBrepCandidateResponse,
   SketchDraftRequest,
   SketchDraftSource,
@@ -123,10 +126,6 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   unwrapResult(await commands.saveConfig(config));
 }
 
-export async function getSystemPrompt(): Promise<string> {
-  return unwrapResult(await commands.getSystemPrompt());
-}
-
 export async function listModels(
   provider: string,
   apiKey: string,
@@ -149,6 +148,14 @@ export async function getThread(id: string): Promise<Thread> {
 
 export async function getThreadLatestVersion(threadId: string): Promise<Message | null> {
   const message = unwrapResult(await commands.getThreadLatestVersion(threadId));
+  return message ? normalizeMessage(message) : null;
+}
+
+export async function getThreadMessageVersion(
+  threadId: string,
+  messageId: string,
+): Promise<Message | null> {
+  const message = unwrapResult(await commands.getThreadMessageVersion(threadId, messageId));
   return message ? normalizeMessage(message) : null;
 }
 
@@ -180,14 +187,6 @@ export async function deleteThread(id: string): Promise<void> {
 
 export async function renameThread(id: string, title: string): Promise<void> {
   unwrapResult(await commands.renameThread(id, title));
-}
-
-export async function setThreadAuthoringContext(id: string, sourceLanguage: SourceLanguage, geometryBackend: GeometryBackend): Promise<void> {
-  unwrapResult(await commands.setThreadAuthoringContext(id, sourceLanguage, geometryBackend));
-}
-
-export async function setThreadEngineKind(id: string, engineKind: EngineKind): Promise<void> {
-  unwrapResult(await commands.setThreadEngineKind(id, engineKind));
 }
 
 export async function deleteVersion(messageId: string): Promise<void> {
@@ -471,6 +470,22 @@ export async function analyzeSketchBrepCandidates(
   request: SketchBrepCandidateRequest,
 ): Promise<SketchBrepCandidateResponse> {
   return unwrapResult(await commands.analyzeSketchBrepCandidates(request));
+}
+
+export async function acceptSketchBrepCandidateSolution(
+  request: SketchBrepCandidateAcceptRequest,
+): Promise<Omit<SketchBrepCandidateAcceptResponse, 'artifactBundle'> & { artifactBundle: ArtifactBundle }> {
+  const response = unwrapResult(await commands.acceptSketchBrepCandidateSolution(request));
+  return {
+    ...response,
+    artifactBundle: normalizeArtifactBundle(response.artifactBundle),
+  };
+}
+
+export async function acceptedBrepCandidateToComponentPackage(
+  request: SketchAcceptedBrepComponentPackageRequest,
+): Promise<ComponentPackage> {
+  return unwrapResult(await commands.acceptedBrepCandidateToComponentPackage(request));
 }
 
 export async function extractBrepHiddenLineProjections(

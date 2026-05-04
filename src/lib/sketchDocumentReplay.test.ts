@@ -314,7 +314,7 @@ test('sketchDocumentToStrokes rejects empty sketches', () => {
   );
 });
 
-test('sketchDocumentJsonToStrokes rejects unsupported primitive kind', () => {
+test('sketchDocumentJsonToStrokes replays circle primitives with center and radius', () => {
   assert.deepEqual(
     sketchDocumentJsonToStrokes(
       JSON.stringify({
@@ -330,6 +330,7 @@ test('sketchDocumentJsonToStrokes rejects unsupported primitive kind', () => {
                   kind: 'circle',
                   points: [[10, 20]],
                   closed: true,
+                  radius: 12,
                 },
               ],
             },
@@ -340,7 +341,16 @@ test('sketchDocumentJsonToStrokes rejects unsupported primitive kind', () => {
       }),
     ),
     {
-      error: "sketch 'sketch-front' primitive 'primitive-front-1' has unsupported kind 'circle'.",
+      strokes: [
+        {
+          primitiveId: 'primitive-front-1',
+          view: 'front',
+          kind: 'circle',
+          points: [[10, 20]],
+          closed: true,
+          radius: 12,
+        },
+      ],
     },
   );
 });
@@ -415,7 +425,7 @@ test('sketchDocumentJsonToStrokes rejects open primitive', () => {
   );
 });
 
-test('sketchDocumentToStrokes rejects unsupported primitive kind', () => {
+test('sketchDocumentToStrokes rejects circle primitives without radius', () => {
   assert.deepEqual(
     sketchDocumentToStrokes({
       documentId: 'doc-kind',
@@ -437,7 +447,7 @@ test('sketchDocumentToStrokes rejects unsupported primitive kind', () => {
       units: 'mm',
     }),
     {
-      error: "sketch 'sketch-front' primitive 'primitive-front-1' has unsupported kind 'circle'.",
+      error: "sketch 'sketch-front' primitive 'primitive-front-1' has invalid radius.",
     },
   );
 });

@@ -8,14 +8,23 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::models::{
     component_package_header, validate_component_package, validate_component_package_header,
-    AppError, AppResult, ComponentPackage, ComponentPackageHeader, InstalledComponentPackage,
-    PathResolver,
+    validate_design_params, validate_ui_spec, AppError, AppResult, ComponentDefinition,
+    ComponentPackage, ComponentPackageHeader, ComponentParam, ComponentParamKind, DesignParams,
+    InstalledAssemblyComponentSource, InstalledAssemblySource, InstalledComponentPackage,
+    InstalledComponentSource, ParamValue, ParsedParamsResult, PathResolver, UiField, UiSpec,
 };
 
 pub const COMPONENT_PACKAGE_FILE_NAME: &str = "ecky-package.json";
 pub const COMPONENT_PACKAGE_HEADER_FILE_NAME: &str = "ecky-header.json";
 pub const COMPONENT_PACKAGE_PAYLOAD_FILE_NAME: &str = "ecky-payload.b64";
 const COMPONENT_LIBRARY_DIR_NAME: &str = "component-library";
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DerivedComponentSourceContract {
+    pub params: Vec<ComponentParam>,
+    pub ui_spec: UiSpec,
+    pub initial_params: DesignParams,
+}
 
 pub fn read_component_package_manifest(project_dir: &Path) -> AppResult<ComponentPackage> {
     let path = project_dir.join(COMPONENT_PACKAGE_FILE_NAME);
@@ -86,6 +95,7 @@ pub fn write_component_package_archive(project_dir: &Path, archive_path: &Path) 
         .unix_permissions(0o644);
 
     let package = read_component_package_manifest(project_dir)?;
+    validate_component_source_refs(project_dir, &package)?;
     let header = component_package_header(&package)?;
     writer
         .start_file(COMPONENT_PACKAGE_HEADER_FILE_NAME, options)
@@ -347,6 +357,263 @@ pub fn list_installed_component_package_headers(
     Ok(headers)
 }
 
+pub fn resolve_installed_component_source(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+    component_id: &str,
+) -> AppResult<InstalledComponentSource> {
+    let (package_dir, package) = load_installed_package(app, package_id, version)?;
+    resolve_component_source_from_package(package_id, version, &package_dir, &package, component_id)
+}
+
+pub fn resolve_installed_component_assembly(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+    assembly_id: &str,
+) -> AppResult<InstalledAssemblySource> {
+    let (package_dir, package) = load_installed_package(app, package_id, version)?;
+    let assembly = package
+        .assemblies
+        .iter()
+        .find(|assembly| assembly.assembly_id == assembly_id)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::not_found(format!(
+                "Installed component package '{}@{}' does not contain assemblyId '{}'.",
+                package_id, version, assembly_id
+            ))
+        })?;
+    let components = assembly
+        .components
+        .iter()
+        .map(|component_ref| {
+            Ok(InstalledAssemblyComponentSource {
+                instance_id: component_ref.instance_id.clone(),
+                component_id: component_ref.component_id.clone(),
+                placement_frame: None,
+                installed_source: resolve_component_source_from_package(
+                    package_id,
+                    version,
+                    &package_dir,
+                    &package,
+                    &component_ref.component_id,
+                )?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+
+    Ok(InstalledAssemblySource {
+        package_id: package.package_id.clone(),
+        version: package.version.clone(),
+        package_display_name: package.display_name.clone(),
+        package_dir: package_dir.to_string_lossy().to_string(),
+        assembly,
+        port_types: package.port_types.clone(),
+        mate_types: package.mate_types.clone(),
+        components,
+        mate_results: Vec::new(),
+    })
+}
+
+fn load_installed_package(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+) -> AppResult<(PathBuf, ComponentPackage)> {
+    let package_dir = component_package_install_dir(app, package_id, version)?;
+    let package = read_component_package_manifest(&package_dir)?;
+    Ok((package_dir, package))
+}
+
+fn resolve_component_source_from_package(
+    package_id: &str,
+    version: &str,
+    package_dir: &Path,
+    package: &ComponentPackage,
+    component_id: &str,
+) -> AppResult<InstalledComponentSource> {
+    let mut component = package
+        .components
+        .iter()
+        .find(|component| component.component_id == component_id)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::not_found(format!(
+                "Installed component package '{}@{}' does not contain componentId '{}'.",
+                package_id, version, component_id
+            ))
+        })?;
+    let source_ref = component.source_ref.as_deref().ok_or_else(|| {
+        AppError::validation(format!(
+            "Installed component '{}@{}:{}' is missing sourceRef.",
+            package_id, version, component_id
+        ))
+    })?;
+    let relative_source_path = safe_archive_path(source_ref).map_err(|_| {
+        AppError::validation(format!(
+            "Installed component '{}@{}:{}' sourceRef '{}' must be a safe package-local relative path.",
+            package_id, version, component_id, source_ref
+        ))
+    })?;
+    let source_path = package_dir.join(relative_source_path);
+    if !source_path.is_file() {
+        return Err(AppError::not_found(format!(
+            "Installed component '{}@{}:{}' source file '{}' was not found in '{}'.",
+            package_id,
+            version,
+            component_id,
+            source_ref,
+            package_dir.display()
+        )));
+    }
+    maybe_backfill_component_contract_from_source(&mut component, &source_path)?;
+
+    Ok(InstalledComponentSource {
+        package_id: package.package_id.clone(),
+        version: package.version.clone(),
+        package_display_name: package.display_name.clone(),
+        package_dir: package_dir.to_string_lossy().to_string(),
+        component,
+        port_types: package.port_types.clone(),
+        mate_types: package.mate_types.clone(),
+        source_path: source_path.to_string_lossy().to_string(),
+    })
+}
+
+pub(crate) fn derive_component_source_contract_from_path(
+    source_path: &Path,
+) -> AppResult<DerivedComponentSourceContract> {
+    let source = fs::read_to_string(source_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read reusable component source '{}' for param derivation: {}",
+            source_path.display(),
+            err
+        ))
+    })?;
+    let parsed = crate::commands::design::parse_macro_params(source);
+    let derived = DerivedComponentSourceContract {
+        params: component_params_from_parsed_params(&parsed),
+        ui_spec: UiSpec {
+            fields: parsed.fields,
+        },
+        initial_params: parsed.params,
+    };
+    validate_ui_spec(&derived.ui_spec)?;
+    validate_design_params(&derived.initial_params, &derived.ui_spec)?;
+    Ok(derived)
+}
+
+fn maybe_backfill_component_contract_from_source(
+    component: &mut ComponentDefinition,
+    source_path: &Path,
+) -> AppResult<()> {
+    if !source_path_supports_param_derivation(source_path) {
+        return Ok(());
+    }
+    let derived = derive_component_source_contract_from_path(source_path)?;
+    if component.params.is_empty() {
+        component.params = derived.params.clone();
+    }
+    if component.ui_spec.fields.is_empty() {
+        component.ui_spec = derived.ui_spec.clone();
+    }
+    if component.initial_params.is_empty() {
+        component.initial_params = derived.initial_params;
+    }
+    Ok(())
+}
+
+fn source_path_supports_param_derivation(source_path: &Path) -> bool {
+    source_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "ecky" | "py" | "fcmacro"))
+        .unwrap_or(false)
+}
+
+pub(crate) fn component_params_from_parsed_params(
+    parsed: &ParsedParamsResult,
+) -> Vec<ComponentParam> {
+    let mut params = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for field in &parsed.fields {
+        if seen.insert(field.key().to_string()) {
+            params.push(component_param_from_field(field));
+        }
+    }
+
+    for (key, value) in &parsed.params {
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        if let Some(param) = component_param_from_value(key, value) {
+            params.push(param);
+        }
+    }
+
+    params
+}
+
+pub(crate) fn component_params_from_ui_contract(
+    ui_spec: &UiSpec,
+    initial_params: &DesignParams,
+) -> Vec<ComponentParam> {
+    component_params_from_parsed_params(&ParsedParamsResult {
+        fields: ui_spec.fields.clone(),
+        params: initial_params.clone(),
+    })
+}
+
+fn component_param_from_field(field: &UiField) -> ComponentParam {
+    ComponentParam {
+        key: field.key().to_string(),
+        label: component_param_label(field.key(), field.label()),
+        kind: match field {
+            UiField::Range { .. } | UiField::Number { .. } => ComponentParamKind::Number,
+            UiField::Select { .. } => ComponentParamKind::Choice,
+            UiField::Checkbox { .. } => ComponentParamKind::Boolean,
+            UiField::Image { .. } => ComponentParamKind::Text,
+        },
+        unit: None,
+    }
+}
+
+fn component_param_from_value(key: &str, value: &ParamValue) -> Option<ComponentParam> {
+    let kind = match value {
+        ParamValue::Number(_) => ComponentParamKind::Number,
+        ParamValue::String(_) => ComponentParamKind::Text,
+        ParamValue::Boolean(_) => ComponentParamKind::Boolean,
+        ParamValue::Null => return None,
+    };
+    Some(ComponentParam {
+        key: key.to_string(),
+        label: component_param_label(key, ""),
+        kind,
+        unit: None,
+    })
+}
+
+pub(crate) fn component_param_label(key: &str, label: &str) -> String {
+    let trimmed = label.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    key.split(['_', '-', '.'])
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            let mut chars = token.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn component_library_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
     let root = app.app_data_dir().join(COMPONENT_LIBRARY_DIR_NAME);
     fs::create_dir_all(&root).map_err(|err| {
@@ -457,6 +724,30 @@ fn build_component_package_payload(project_dir: &Path, archive_path: &Path) -> A
         ))
     })?;
     Ok(cursor.into_inner())
+}
+
+fn validate_component_source_refs(project_dir: &Path, package: &ComponentPackage) -> AppResult<()> {
+    for component in &package.components {
+        let Some(source_ref) = component.source_ref.as_deref() else {
+            continue;
+        };
+        let relative_path = safe_archive_path(source_ref).map_err(|_| {
+            AppError::validation(format!(
+                "Component package component '{}' sourceRef '{}' must be a safe package-local relative path.",
+                component.component_id, source_ref
+            ))
+        })?;
+        let source_path = project_dir.join(relative_path);
+        if !source_path.is_file() {
+            return Err(AppError::validation(format!(
+                "Component package component '{}' sourceRef '{}' was not found under project dir '{}'.",
+                component.component_id,
+                source_ref,
+                project_dir.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn read_payload_archive_bytes<R: Read + Seek>(
@@ -614,7 +905,7 @@ fn safe_library_segment(value: &str, label: &str) -> AppResult<String> {
     Ok(trimmed.to_string())
 }
 
-fn safe_archive_path(entry_name: &str) -> AppResult<PathBuf> {
+pub(crate) fn safe_archive_path(entry_name: &str) -> AppResult<PathBuf> {
     let path = Path::new(entry_name);
     let mut output = PathBuf::new();
     for component in path.components() {

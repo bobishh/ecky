@@ -34,9 +34,6 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             summary TEXT NOT NULL DEFAULT '',
             updated_at INTEGER NOT NULL,
             genie_traits TEXT,
-            engine_kind TEXT NOT NULL DEFAULT 'freecad',
-            source_language TEXT NOT NULL DEFAULT 'legacyPython',
-            geometry_backend TEXT NOT NULL DEFAULT 'freecad',
             deleted_at INTEGER
         )",
         [],
@@ -156,22 +153,6 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         [],
     );
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN genie_traits TEXT", []);
-    let _ = conn.execute(
-        "ALTER TABLE threads ADD COLUMN engine_kind TEXT NOT NULL DEFAULT 'freecad'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE threads ADD COLUMN source_language TEXT NOT NULL DEFAULT 'legacyPython'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE threads ADD COLUMN geometry_backend TEXT NOT NULL DEFAULT 'freecad'",
-        [],
-    );
-    let _ = conn.execute(
-        "UPDATE threads SET source_language = 'eckyIrV0', geometry_backend = 'eckyRust' WHERE engine_kind = 'eckyIrV0'",
-        [],
-    );
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN image_data TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN visual_kind TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN attachment_images TEXT", []);
@@ -196,6 +177,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     );
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
+    migrate_threads_drop_authoring_columns(&conn)?;
     let _ = conn.execute(
         "ALTER TABLE agent_sessions ADD COLUMN host_label TEXT NOT NULL DEFAULT ''",
         [],
@@ -250,6 +232,70 @@ fn migrate_thread_genie_traits(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> SqlResult<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn migrate_threads_drop_authoring_columns(conn: &Connection) -> SqlResult<()> {
+    let has_engine_kind = table_has_column(conn, "threads", "engine_kind")?;
+    let has_source_language = table_has_column(conn, "threads", "source_language")?;
+    let has_geometry_backend = table_has_column(conn, "threads", "geometry_backend")?;
+
+    if !has_engine_kind && !has_source_language && !has_geometry_backend {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE IF NOT EXISTS threads_new (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL,
+            genie_traits TEXT,
+            deleted_at INTEGER,
+            status TEXT NOT NULL DEFAULT 'active',
+            finalized_at INTEGER,
+            pending_confirm TEXT
+        );
+        INSERT OR REPLACE INTO threads_new (
+            id,
+            title,
+            summary,
+            updated_at,
+            genie_traits,
+            deleted_at,
+            status,
+            finalized_at,
+            pending_confirm
+        )
+        SELECT
+            id,
+            title,
+            COALESCE(summary, ''),
+            updated_at,
+            genie_traits,
+            deleted_at,
+            COALESCE(status, 'active'),
+            finalized_at,
+            pending_confirm
+        FROM threads;
+        DROP TABLE threads;
+        ALTER TABLE threads_new RENAME TO threads;
+        PRAGMA foreign_keys = ON;
+        ",
+    )?;
+    Ok(())
+}
+
 pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
     let mut stmt = conn.prepare("
         SELECT id, title, summary,
@@ -270,10 +316,7 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
-        pending_confirm,
-        COALESCE(engine_kind, 'freecad'),
-        COALESCE(source_language, 'legacyPython'),
-        COALESCE(geometry_backend, 'freecad')
+        pending_confirm
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -300,9 +343,6 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
                 .unwrap_or(crate::models::ThreadStatus::Active),
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
-            engine_kind: row.get(12)?,
-            source_language: row.get(13)?,
-            geometry_backend: row.get(14)?,
         })
     })?;
 
@@ -334,10 +374,7 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
-        pending_confirm,
-        COALESCE(engine_kind, 'freecad'),
-        COALESCE(source_language, 'legacyPython'),
-        COALESCE(geometry_backend, 'freecad')
+        pending_confirm
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -366,9 +403,6 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
                 .unwrap_or(crate::models::ThreadStatus::Active),
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
-            engine_kind: row.get(12)?,
-            source_language: row.get(13)?,
-            geometry_backend: row.get(14)?,
         })
     })?;
 
@@ -442,115 +476,26 @@ pub fn get_latest_successful_target_in_most_recent_thread(
     .optional()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn create_or_update_thread(
     conn: &Connection,
     thread_id: &str,
     title: &str,
     updated_at: u64,
     genie_traits: Option<&GenieTraits>,
-    engine_kind: Option<crate::models::EngineKind>,
-    source_language: Option<crate::models::SourceLanguage>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
 ) -> SqlResult<()> {
     let traits_str = genie_traits.and_then(|t| serde_json::to_string(t).ok());
     conn.execute(
-        "INSERT INTO threads (id, title, updated_at, genie_traits, engine_kind, source_language, geometry_backend) VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'freecad'), COALESCE(?6, 'legacyPython'), COALESCE(?7, 'freecad'))
-         ON CONFLICT(id) DO UPDATE SET 
+        "INSERT INTO threads (id, title, updated_at, genie_traits) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
             title=CASE
                 WHEN threads.title IS NULL OR trim(threads.title) = '' THEN excluded.title
                 ELSE threads.title
             END,
-            updated_at=excluded.updated_at, 
-            genie_traits=COALESCE(excluded.genie_traits, threads.genie_traits),
-            engine_kind=COALESCE(excluded.engine_kind, threads.engine_kind),
-            source_language=COALESCE(excluded.source_language, threads.source_language),
-            geometry_backend=COALESCE(excluded.geometry_backend, threads.geometry_backend)",
-        params![
-            thread_id,
-            title,
-            updated_at as i64,
-            traits_str,
-            engine_kind,
-            source_language,
-            geometry_backend
-        ],
+            updated_at=excluded.updated_at,
+            genie_traits=COALESCE(excluded.genie_traits, threads.genie_traits)",
+        params![thread_id, title, updated_at as i64, traits_str],
     )?;
     Ok(())
-}
-
-pub fn get_thread_engine_kind(
-    conn: &Connection,
-    thread_id: &str,
-) -> SqlResult<Option<crate::models::EngineKind>> {
-    conn.query_row(
-        "SELECT COALESCE(engine_kind, 'freecad') FROM threads WHERE id = ?1",
-        [thread_id],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
-pub fn get_thread_source_language(
-    conn: &Connection,
-    thread_id: &str,
-) -> SqlResult<Option<crate::models::SourceLanguage>> {
-    conn.query_row(
-        "SELECT COALESCE(source_language, 'legacyPython') FROM threads WHERE id = ?1",
-        [thread_id],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
-pub fn get_thread_geometry_backend(
-    conn: &Connection,
-    thread_id: &str,
-) -> SqlResult<Option<crate::models::GeometryBackend>> {
-    conn.query_row(
-        "SELECT COALESCE(geometry_backend, 'freecad') FROM threads WHERE id = ?1",
-        [thread_id],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
-pub fn update_thread_engine_kind(
-    conn: &Connection,
-    thread_id: &str,
-    engine_kind: crate::models::EngineKind,
-) -> SqlResult<bool> {
-    let source_language = engine_kind.to_source_language();
-    let geometry_backend = engine_kind.to_geometry_backend();
-    let changed = conn.execute(
-        "UPDATE threads SET engine_kind = ?1, source_language = ?2, geometry_backend = ?3 WHERE id = ?4 AND deleted_at IS NULL",
-        params![engine_kind, source_language, geometry_backend, thread_id],
-    )?;
-    Ok(changed > 0)
-}
-
-pub fn update_thread_source_language(
-    conn: &Connection,
-    thread_id: &str,
-    source_language: crate::models::SourceLanguage,
-) -> SqlResult<bool> {
-    let changed = conn.execute(
-        "UPDATE threads SET source_language = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-        params![source_language, thread_id],
-    )?;
-    Ok(changed > 0)
-}
-
-pub fn update_thread_geometry_backend(
-    conn: &Connection,
-    thread_id: &str,
-    geometry_backend: crate::models::GeometryBackend,
-) -> SqlResult<bool> {
-    let changed = conn.execute(
-        "UPDATE threads SET geometry_backend = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-        params![geometry_backend, thread_id],
-    )?;
-    Ok(changed > 0)
 }
 
 pub fn get_thread_genie_traits(
@@ -676,10 +621,7 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
-        pending_confirm,
-        COALESCE(engine_kind, 'freecad'),
-        COALESCE(source_language, 'legacyPython'),
-        COALESCE(geometry_backend, 'freecad')
+        pending_confirm
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'finalized'
         ORDER BY finalized_at DESC, id DESC
@@ -706,9 +648,6 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
                 .unwrap_or(crate::models::ThreadStatus::Finalized),
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
-            engine_kind: row.get(12)?,
-            source_language: row.get(13)?,
-            geometry_backend: row.get(14)?,
         })
     })?;
 
@@ -841,6 +780,26 @@ pub fn get_thread_latest_version(conn: &Connection, thread_id: &str) -> SqlResul
          AND status = 'success'
          AND artifact_bundle IS NOT NULL",
         &[&thread_id],
+        "timestamp DESC, rowid DESC",
+        Some(1),
+    )?;
+    Ok(rows.into_iter().next().map(|row| row.message))
+}
+
+pub fn get_thread_message_version(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<Option<Message>> {
+    let rows = load_thread_message_rows_with_clause(
+        conn,
+        "thread_id = ?1
+         AND id = ?2
+         AND deleted_at IS NULL
+         AND role = 'assistant'
+         AND status = 'success'
+         AND artifact_bundle IS NOT NULL",
+        &[&thread_id, &message_id],
         "timestamp DESC, rowid DESC",
         Some(1),
     )?;
@@ -1330,13 +1289,18 @@ pub fn restore_version_cluster(conn: &Connection, id: &str) -> SqlResult<Option<
     let Some(message) = get_message_context_info(conn, id)? else {
         return Ok(None);
     };
+    let now = unix_now_i64();
 
     conn.execute(
-        "UPDATE messages SET deleted_at = NULL, trash_hidden_at = NULL WHERE id = ?1",
-        [id],
+        "UPDATE messages SET deleted_at = NULL, trash_hidden_at = NULL, timestamp = ?2 WHERE id = ?1",
+        params![id, now],
     )?;
 
     set_thread_deleted_at(conn, &message.thread_id, None)?;
+    conn.execute(
+        "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
+        params![now, message.thread_id],
+    )?;
     Ok(Some(message.thread_id))
 }
 
@@ -2050,18 +2014,6 @@ mod tests {
         );
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
-        let _ = conn.execute(
-            "ALTER TABLE threads ADD COLUMN engine_kind TEXT NOT NULL DEFAULT 'freecad'",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE threads ADD COLUMN source_language TEXT NOT NULL DEFAULT 'legacyPython'",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE threads ADD COLUMN geometry_backend TEXT NOT NULL DEFAULT 'freecad'",
-            [],
-        );
         Ok(())
     }
 
@@ -2098,6 +2050,7 @@ mod tests {
             preview_stl_path: format!("/tmp/{model_id}.stl"),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
+            face_targets: Vec::new(),
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
@@ -2113,8 +2066,7 @@ mod tests {
         let msg_id = "test-msg";
         let now = 123456789;
 
-        create_or_update_thread(&conn, thread_id, "Test Thread", now, None, None, None, None)
-            .unwrap();
+        create_or_update_thread(&conn, thread_id, "Test Thread", now, None).unwrap();
 
         let msg = Message {
             id: msg_id.to_string(),
@@ -2171,7 +2123,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-1";
-        create_or_update_thread(&conn, thread_id, "Thread", 100, None, None, None, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Thread", 100, None).unwrap();
 
         let user_msg = Message {
             id: "user-1".to_string(),
@@ -2251,7 +2203,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-2";
-        create_or_update_thread(&conn, thread_id, "Manual", 200, None, None, None, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Manual", 200, None).unwrap();
 
         let assistant_msg = Message {
             id: "assistant-manual".to_string(),
@@ -2280,12 +2232,72 @@ mod tests {
     }
 
     #[test]
+    fn test_restored_version_becomes_latest_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "thread-restore-latest";
+        create_or_update_thread(&conn, thread_id, "Restore Latest", 100, None).unwrap();
+
+        let older_msg = Message {
+            id: "assistant-older".to_string(),
+            role: MessageRole::Assistant,
+            content: "Older version".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: Some(sample_artifact_bundle("assistant-older")),
+            model_manifest: None,
+            agent_origin: None,
+            timestamp: 100,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        let newer_msg = Message {
+            id: "assistant-newer".to_string(),
+            role: MessageRole::Assistant,
+            content: "Newer version".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: Some(sample_artifact_bundle("assistant-newer")),
+            model_manifest: None,
+            agent_origin: None,
+            timestamp: 200,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+
+        add_message(&conn, thread_id, &older_msg).unwrap();
+        add_message(&conn, thread_id, &newer_msg).unwrap();
+        delete_version_cluster(&conn, &older_msg.id).unwrap();
+        assert_eq!(
+            get_thread_latest_version(&conn, thread_id)
+                .unwrap()
+                .unwrap()
+                .id,
+            "assistant-newer"
+        );
+
+        restore_version_cluster(&conn, &older_msg.id).unwrap();
+        assert_eq!(
+            get_thread_latest_version(&conn, thread_id)
+                .unwrap()
+                .unwrap()
+                .id,
+            "assistant-older"
+        );
+    }
+
+    #[test]
     fn test_hide_deleted_message_removes_it_from_trash_listing() {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-trash";
-        create_or_update_thread(&conn, thread_id, "Trash", 250, None, None, None, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Trash", 250, None).unwrap();
 
         let assistant_msg = Message {
             id: "assistant-trash".to_string(),
@@ -2320,7 +2332,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-images";
-        create_or_update_thread(&conn, thread_id, "Images", 300, None, None, None, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Images", 300, None).unwrap();
 
         let msg = Message {
             id: "user-images".to_string(),
@@ -2368,7 +2380,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-preview";
-        create_or_update_thread(&conn, thread_id, "Preview", 400, None, None, None, None).unwrap();
+        create_or_update_thread(&conn, thread_id, "Preview", 400, None).unwrap();
 
         let msg = Message {
             id: "assistant-preview".to_string(),
@@ -2408,8 +2420,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-renderable-count";
-        create_or_update_thread(&conn, thread_id, "Renderable", 500, None, None, None, None)
-            .unwrap();
+        create_or_update_thread(&conn, thread_id, "Renderable", 500, None).unwrap();
 
         let output_only = Message {
             id: "assistant-output-only".to_string(),
@@ -2461,10 +2472,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        create_or_update_thread(&conn, "older-thread", "Older", 100, None, None, None, None)
-            .unwrap();
-        create_or_update_thread(&conn, "newer-thread", "Newer", 50, None, None, None, None)
-            .unwrap();
+        create_or_update_thread(&conn, "older-thread", "Older", 100, None).unwrap();
+        create_or_update_thread(&conn, "newer-thread", "Newer", 50, None).unwrap();
 
         add_message(
             &conn,
@@ -2521,17 +2530,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        create_or_update_thread(
-            &conn,
-            "pending-thread",
-            "Pending",
-            100,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        create_or_update_thread(&conn, "pending-thread", "Pending", 100, None).unwrap();
 
         add_message(
             &conn,
@@ -2570,8 +2569,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        create_or_update_thread(&conn, "thread-order", "Thread", 100, None, None, None, None)
-            .unwrap();
+        create_or_update_thread(&conn, "thread-order", "Thread", 100, None).unwrap();
 
         add_message(
             &conn,
@@ -2630,28 +2628,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        create_or_update_thread(
-            &conn,
-            "thread-keep-title",
-            "Original Thread",
-            100,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        create_or_update_thread(
-            &conn,
-            "thread-keep-title",
-            "Version Name Noise",
-            200,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        create_or_update_thread(&conn, "thread-keep-title", "Original Thread", 100, None).unwrap();
+        create_or_update_thread(&conn, "thread-keep-title", "Version Name Noise", 200, None)
+            .unwrap();
 
         let thread = get_all_threads(&conn)
             .unwrap()
@@ -2660,6 +2639,61 @@ mod tests {
             .expect("thread exists");
         assert_eq!(thread.title, "Original Thread");
         assert_eq!(thread.updated_at, 200);
+    }
+
+    #[test]
+    fn create_or_update_thread_inserts_thread_without_authoring_context() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        create_or_update_thread(&conn, "thread-no-context", "No Context", 100, None).unwrap();
+
+        let thread = get_all_threads(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|thread| thread.id == "thread-no-context")
+            .expect("thread exists");
+        assert_eq!(thread.title, "No Context");
+    }
+
+    #[test]
+    fn migrate_threads_drop_authoring_columns_removes_legacy_thread_context() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+        conn.execute(
+            "ALTER TABLE threads ADD COLUMN engine_kind TEXT NOT NULL DEFAULT 'freecad'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "ALTER TABLE threads ADD COLUMN source_language TEXT NOT NULL DEFAULT 'legacyPython'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "ALTER TABLE threads ADD COLUMN geometry_backend TEXT NOT NULL DEFAULT 'freecad'",
+            [],
+        )
+        .unwrap();
+        create_or_update_thread(&conn, "thread-context", "Context", 100, None).unwrap();
+        conn.execute(
+            "UPDATE threads SET status = 'finalized', finalized_at = 123, pending_confirm = 'review' WHERE id = 'thread-context'",
+            [],
+        )
+        .unwrap();
+
+        migrate_threads_drop_authoring_columns(&conn).unwrap();
+
+        assert!(!table_has_column(&conn, "threads", "engine_kind").unwrap());
+        assert!(!table_has_column(&conn, "threads", "source_language").unwrap());
+        assert!(!table_has_column(&conn, "threads", "geometry_backend").unwrap());
+        let thread = get_inventory_threads(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|thread| thread.id == "thread-context")
+            .expect("thread survives migration");
+        assert_eq!(thread.finalized_at, Some(123));
+        assert_eq!(thread.pending_confirm.as_deref(), Some("review"));
     }
 
     #[test]
@@ -2857,17 +2891,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-layout-1";
-        create_or_update_thread(
-            &conn,
-            thread_id,
-            "Layout Thread",
-            100,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        create_or_update_thread(&conn, thread_id, "Layout Thread", 100, None).unwrap();
 
         let mut windows = std::collections::HashMap::new();
         windows.insert(
@@ -2901,8 +2925,7 @@ mod tests {
         init_db_internal(&conn).unwrap();
 
         let thread_id = "thread-no-layout";
-        create_or_update_thread(&conn, thread_id, "No Layout", 100, None, None, None, None)
-            .unwrap();
+        create_or_update_thread(&conn, thread_id, "No Layout", 100, None).unwrap();
 
         let loaded = get_thread_window_layout(&conn, thread_id).unwrap();
         assert_eq!(loaded, None);
@@ -2930,8 +2953,8 @@ mod tests {
 
         let t1 = "thread-a";
         let t2 = "thread-b";
-        create_or_update_thread(&conn, t1, "A", 100, None, None, None, None).unwrap();
-        create_or_update_thread(&conn, t2, "B", 100, None, None, None, None).unwrap();
+        create_or_update_thread(&conn, t1, "A", 100, None).unwrap();
+        create_or_update_thread(&conn, t2, "B", 100, None).unwrap();
 
         let layout1 = crate::models::ThreadWindowLayout {
             schema_version: 1,

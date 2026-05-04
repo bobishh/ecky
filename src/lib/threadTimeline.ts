@@ -83,7 +83,7 @@ export function timelineVisuals(
     });
   }
   for (const image of message.attachmentImages || []) {
-    const src = toAssetUrl(image);
+    const src = timelineImageSrc(image, toAssetUrl);
     if (!src) continue;
     visuals.push({
       src,
@@ -92,4 +92,14 @@ export function timelineVisuals(
     });
   }
   return visuals;
+}
+
+function timelineImageSrc(
+  raw: string | null | undefined,
+  toAssetUrl: (path: string | null | undefined) => string,
+): string {
+  const value = raw?.trim();
+  if (!value) return '';
+  if (/^(data:image\/|blob:|https?:|asset:|tauri:)/i.test(value)) return value;
+  return toAssetUrl(value);
 }

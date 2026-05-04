@@ -351,7 +351,6 @@ mod tests {
             model: "deepseek-ai/deepseek-v4-pro".to_string(),
             light_model: String::new(),
             base_url: base_url.to_string(),
-            system_prompt: String::new(),
             enabled,
         }
     }

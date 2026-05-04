@@ -2,7 +2,7 @@ import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { workingCopy } from '../stores/workingCopy';
 import { activeThreadIdStore as activeThreadId, activeVersionId, config } from '../stores/domainState';
-import { refreshHistory } from '../stores/history';
+import { refreshHistory, rememberCommittedVersionMessage } from '../stores/history';
 import { showCodeModal } from '../stores/viewState';
 import { session, setManualRenderActive } from '../stores/sessionStore';
 import { startMicrowaveHum, stopMicrowaveHum, ensureContext } from '../audio/microwave';
@@ -11,6 +11,7 @@ import { persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
 import { buildImportedSyntheticDesign } from '../modelRuntime/importedRuntime';
 import { getRenderableRuntimeBundle, inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
 import { ensureSemanticManifest } from '../modelRuntime/semanticControls';
+import { confirmAction } from '../ui/confirmAction';
 import type { DesignOutput, DesignParams, ParamValue, UiField, UiSpec } from '../types/domain';
 import {
   addManualVersion,
@@ -445,9 +446,10 @@ export async function commitManualVersion(
       ensureSemanticManifest(rawManifest, nextUiSpec, nextParams, previousManifest) ??
       rawManifest;
 
+    const committedTitle = titleOverride || wc.title || "Manual Edit";
     const newMsgId = await addManualVersion({
       threadId: snapshotThreadId,
-      title: titleOverride || wc.title || "Manual Edit",
+      title: committedTitle,
       versionName: "V-manual",
       macroCode: editedCode,
       sourceLanguage: bundle.sourceLanguage || wc.sourceLanguage || null,
@@ -463,7 +465,7 @@ export async function commitManualVersion(
     }
 
     const committedDesign: DesignOutput = {
-      title: titleOverride || wc.title || "Manual Edit",
+      title: committedTitle,
       versionName: "V-manual",
       response: "Manual edit committed as new version.",
       interactionMode: "design",
@@ -481,6 +483,21 @@ export async function commitManualVersion(
       initialParams: nextParams,
       postProcessing: wc.postProcessing ?? null,
     };
+    rememberCommittedVersionMessage(snapshotThreadId, committedTitle, {
+      id: newMsgId,
+      role: 'assistant',
+      content: committedDesign.response,
+      status: 'success',
+      output: committedDesign,
+      usage: null,
+      artifactBundle: renderableBundle,
+      modelManifest: manifest,
+      agentOrigin: null,
+      imageData: null,
+      visualKind: null,
+      attachmentImages: [],
+      timestamp: Date.now() / 1000,
+    });
 
     if (activateTargetOnSuccess) {
       activeThreadId.set(snapshotThreadId);
@@ -533,10 +550,7 @@ export async function forkManualVersion(
 ) {
   const wc = get(workingCopy);
   const label = titleOverride || wc.title || 'Manual Edit';
-  const confirmed =
-    typeof window === 'undefined'
-      ? true
-      : window.confirm(`Fork "${label}" into a new thread with this code?`);
+  const confirmed = await confirmAction(`Fork "${label}" into a new thread with this code?`);
   if (!confirmed) return;
 
   await commitManualVersion(editedCode, titleOverride, {

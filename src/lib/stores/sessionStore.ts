@@ -107,11 +107,14 @@ export function syncSessionPhaseFromQueue() {
   const q = get(requestQueue);
   const requests = Object.values(q.byId);
   const phases = requests.map(r => r.phase);
+  const currentSession = get(session);
 
   let newPhase: SessionPhase = 'idle';
   const hasActiveLLM = phases.some(p => ['classifying', 'answering', 'generating', 'repairing', 'rendering', 'queued_for_render', 'committing'].includes(p));
   
-  if (phases.some(p => p === 'rendering' || p === 'queued_for_render' || p === 'committing')) {
+  if (currentSession.phase === 'booting') {
+    newPhase = 'booting';
+  } else if (phases.some(p => p === 'rendering' || p === 'queued_for_render' || p === 'committing')) {
     newPhase = 'rendering';
   } else if (phases.some(p => p === 'repairing')) {
     newPhase = 'repairing';
@@ -124,12 +127,7 @@ export function syncSessionPhaseFromQueue() {
   } else if (manualRenderActive) {
     newPhase = 'rendering';
   } else {
-    const s = get(session);
-    if (s.phase === 'booting') {
-      newPhase = 'booting';
-    } else {
-      newPhase = 'idle';
-    }
+    newPhase = 'idle';
   }
 
   session.update(s => ({ 
