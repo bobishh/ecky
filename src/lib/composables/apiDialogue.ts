@@ -1,4 +1,4 @@
-import type { EngineConfig, Message, Request } from '../types/domain';
+import type { Attachment, EngineConfig, Message, Request } from '../types/domain';
 
 type ApiEngineLike = Pick<EngineConfig, 'enabled' | 'provider' | 'apiKey'> | null | undefined;
 
@@ -12,8 +12,17 @@ function imageAttachmentSource(attachment: Request['attachments'][number]): stri
   return path || null;
 }
 
+export type OptimisticQueuedDialogueMessage = {
+  threadId: string;
+  message: Message;
+};
+
+function timestampSeconds(timestampMs: number): number {
+  return Math.max(0, Math.floor(timestampMs / 1000));
+}
+
 function requestTimestampSeconds(request: Request): number {
-  return Math.max(0, Math.floor(request.createdAt / 1000));
+  return timestampSeconds(request.createdAt);
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -98,6 +107,40 @@ export function deriveOptimisticDialogueMessages(
     });
   }
 
+  return merged;
+}
+
+export function buildOptimisticQueuedDialogueMessage(input: {
+  id: string;
+  prompt: string;
+  attachments: Attachment[];
+  timestampMs?: number;
+}): Message {
+  return {
+    id: input.id,
+    role: 'user',
+    content: input.prompt,
+    status: 'pending',
+    timestamp: timestampSeconds(input.timestampMs ?? Date.now()),
+    attachmentImages: input.attachments
+      .map(imageAttachmentSource)
+      .filter((source): source is string => Boolean(source)),
+  };
+}
+
+export function mergeOptimisticQueuedDialogueMessages(
+  messages: Message[],
+  optimisticMessages: OptimisticQueuedDialogueMessage[],
+  activeThreadId: string | null,
+): Message[] {
+  if (!activeThreadId || optimisticMessages.length === 0) return messages;
+  const persistedIds = new Set(messages.map((message) => message.id));
+  const merged = [...messages];
+  for (const optimistic of optimisticMessages) {
+    if (optimistic.threadId !== activeThreadId) continue;
+    if (persistedIds.has(optimistic.message.id)) continue;
+    merged.push(optimistic.message);
+  }
   return merged;
 }
 

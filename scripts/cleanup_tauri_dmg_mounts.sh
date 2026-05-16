@@ -34,6 +34,7 @@ mounts_for_image() {
 
 find "$BUNDLE_DIR" -maxdepth 1 -type f -name 'rw.*.dmg' -print | while IFS= read -r image; do
   mounts="$(mounts_for_image "$image")"
+  detached_all=1
   if [[ -n "$mounts" ]]; then
     while IFS= read -r mount; do
       [[ -z "$mount" ]] && continue
@@ -41,15 +42,20 @@ find "$BUNDLE_DIR" -maxdepth 1 -type f -name 'rw.*.dmg' -print | while IFS= read
         echo "Would detach stale Tauri DMG mount: $mount"
       else
         echo "Detaching stale Tauri DMG mount: $mount"
-        hdiutil detach "$mount"
+        if ! hdiutil detach "$mount"; then
+          echo "Warning: failed to detach stale Tauri DMG mount: $mount" >&2
+          detached_all=0
+        fi
       fi
     done <<< "$mounts"
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "Would remove stale Tauri DMG image: $image"
-  else
+  elif [[ "$detached_all" -eq 1 ]]; then
     echo "Removing stale Tauri DMG image: $image"
     rm -f "$image"
+  else
+    echo "Skipping removal for mounted stale Tauri DMG image: $image" >&2
   fi
 done

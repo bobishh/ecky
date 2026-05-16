@@ -69,15 +69,9 @@ export async function boot() {
     // 1. Load Config (Idempotent)
     const loadedConfig = await loadConfig();
 
-    // 2. Probe runtime capabilities and repair invalid defaults if needed.
-    const capabilities = await getRuntimeCapabilities();
-    runtimeCapabilities.set(capabilities);
-
-    const repaired = repairDefaultAuthoringContext(loadedConfig, capabilities);
-    if (repaired.repaired) {
-      config.set(repaired.config);
-      await persistConfig(repaired.config);
-    }
+    // 2. Probe runtime capabilities in the background. Cold FreeCAD/build123d probes
+    // can be slow; cached model restore should not wait on them.
+    const capabilitiesRefresh = refreshRuntimeCapabilities(loadedConfig);
 
     // 3. Load History
     await loadHistory();
@@ -87,12 +81,28 @@ export async function boot() {
     
     session.setPhase('idle');
     session.setStatus('System ready.');
+    void capabilitiesRefresh;
   } catch (e) {
     console.error('[Boot] failed:', e);
     session.setPhase('error');
     session.setError('Boot failed: ' + e);
   } finally {
     if (bootWatchdog) window.clearTimeout(bootWatchdog);
+  }
+}
+
+async function refreshRuntimeCapabilities(loadedConfig: Awaited<ReturnType<typeof loadConfig>>) {
+  try {
+    const capabilities = await getRuntimeCapabilities();
+    runtimeCapabilities.set(capabilities);
+
+    const repaired = repairDefaultAuthoringContext(loadedConfig, capabilities);
+    if (repaired.repaired) {
+      config.set(repaired.config);
+      await persistConfig(repaired.config);
+    }
+  } catch (e) {
+    console.warn('[Boot] Runtime capability probe failed:', e);
   }
 }
 
@@ -157,6 +167,7 @@ async function loadConfig() {
       mode: loadedConfig.connectionType === 'mcp' ? 'active' : 'passive',
       primaryAgentId: null,
       promptTimeoutSecs: 1800,
+      eckyAstAuthoring: false,
       autoAgents: [],
     };
     needsSave = true;
@@ -187,6 +198,10 @@ async function loadConfig() {
       loadedConfig.mcp.promptTimeoutSecs > 1800
     ) {
       loadedConfig.mcp.promptTimeoutSecs = 1800;
+      needsSave = true;
+    }
+    if (typeof loadedConfig.mcp.eckyAstAuthoring !== 'boolean') {
+      loadedConfig.mcp.eckyAstAuthoring = false;
       needsSave = true;
     }
   }

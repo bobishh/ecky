@@ -61,3 +61,54 @@ test('buildSketchPreviewHullRequest carries all orthographic SketchDocument view
   assert.equal(request.document.sketches?.[1]?.primitives?.[0]?.primitiveId, 'top-footprint');
   assert.equal(request.document.sketches?.[2]?.primitives?.[0]?.primitiveId, 'side-footprint');
 });
+
+test('buildSketchPreviewHullRequest keeps multiple closed front primitives for hole-aware replay', () => {
+  const frontHole: SketchStroke = {
+    primitiveId: 'front-hole',
+    view: 'front',
+    closed: true,
+    points: [
+      [25, 25],
+      [45, 25],
+      [45, 35],
+      [25, 35],
+      [25, 25],
+    ],
+    topology: {
+      loopId: 'front-hole',
+      edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+      loopRole: 'hole',
+      sourceClass: 'derived',
+    },
+  };
+
+  const request = buildSketchPreviewHullRequest([
+    {
+      ...front,
+      topology: {
+        loopId: 'front-outer',
+        edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+        loopRole: 'outer',
+        sourceClass: 'derived',
+      },
+    },
+    frontHole,
+    top,
+    side,
+  ]);
+
+  assert.ok(!('error' in request));
+  const frontSketch = request.document.sketches?.find((sketch) => sketch.view === 'front');
+  assert.deepEqual(
+    frontSketch?.primitives?.map((primitive) => primitive.primitiveId),
+    ['front-box', 'front-hole'],
+  );
+  assert.deepEqual(
+    frontSketch?.primitives?.map((primitive) => primitive.topology?.loopId),
+    ['front-outer', 'front-hole'],
+  );
+  assert.deepEqual(
+    frontSketch?.primitives?.map((primitive) => primitive.topology?.loopRole),
+    ['outer', 'hole'],
+  );
+});

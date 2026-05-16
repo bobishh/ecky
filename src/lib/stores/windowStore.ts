@@ -295,7 +295,9 @@ export function bringToFront(id: WindowId) {
 
 export function showWindow(id: WindowId) {
   const next = cloneState(currentState());
-  next[id] = { ...next[id], visible: true, minimized: false, z: nextZ++ };
+  const reg = windowRegistry[id];
+  const clamped = clampRect(next[id], reg.minSize);
+  next[id] = { ...next[id], ...clamped, visible: true, minimized: false, z: nextZ++ };
   commitState(next);
 }
 
@@ -308,7 +310,9 @@ export function toggleWindow(id: WindowId) {
   if (next[id].visible) {
     next[id] = { ...next[id], visible: false };
   } else {
-    next[id] = { ...next[id], visible: true, minimized: false, z: nextZ++ };
+    const reg = windowRegistry[id];
+    const clamped = clampRect(next[id], reg.minSize);
+    next[id] = { ...next[id], ...clamped, visible: true, minimized: false, z: nextZ++ };
   }
   commitState(next);
 }

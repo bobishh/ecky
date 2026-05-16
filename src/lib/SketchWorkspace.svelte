@@ -73,6 +73,7 @@
     buildSketchBrepProjectionRepairTargets,
     buildSketchBrepProjectionValidationSummary,
   } from './sketchBrepProjectionValidation';
+  import { findSketchIssueMatch } from './sketchIssueLocator';
   import { autoRepairSketchDocumentFromBrepProjection } from './sketchBrepAutoRepair';
   import { buildSketchDocumentFromBrepProjection } from './sketchBrepDerivedSketch';
   import {
@@ -81,6 +82,11 @@
     type SketchTopologyRepairProposal,
   } from './sketchTopologyRepairProposal';
   import { buildSketchAcceptedCadRow } from './sketchAcceptedCad';
+  import { summarizeSketchValidationIssue, summarizeSketchValidationIssues } from './sketchValidationIssueSummary';
+  import {
+    brepHiddenLineViewHasWarning,
+    brepHiddenLineWarningMessages,
+  } from './sketchHiddenLineWarnings';
   import { cleanupSketchStrokes } from './sketchCleanup';
   import { repairSketchDocumentEndpointGaps } from './sketchEndpointRepair';
   import { autoRepairOrthographicSketchStrokes } from './sketchOrthographicRepair';
@@ -94,6 +100,12 @@
     compactRepairDetail,
     type SketchSourcePatchEntry,
   } from './sketchSourcePatchLedger';
+  import {
+    buildSketchWorkspaceSceneState,
+    sceneSignatureFromStrokes,
+    workspaceSceneActionLabel,
+    type SketchWorkspaceLens,
+  } from './sketchWorkspaceScene';
   import type { ArtifactBundle } from './types/domain';
 
   type PreviewResult = { draft: SketchDraftSource; artifactBundle: ArtifactBundle } | null;
@@ -119,6 +131,7 @@
   type ShapeDraftState = {
     kind: 'rectangle' | 'circle';
     primitiveId: string;
+    sketchId: string;
     view: SketchView;
     pointerId: number;
     start: SketchPoint;
@@ -141,6 +154,7 @@
   const DEFAULT_SNAP_GRID_SIZE = '10';
   const DEFAULT_PANE_ZOOM = 1;
   const POINT_DRAG_THRESHOLD_PX = 6;
+  const POINT_HANDLE_RADIUS = 1.1;
   const ACCEPTED_BREP_COMPONENT_ID = 'sketch-preview-hull';
   const ACCEPTED_BREP_PACKAGE_ID = 'sketch-preview-hull.accepted-brep';
   const ACCEPTED_BREP_PORT_ID = 'front_mount';
@@ -190,6 +204,9 @@
   let shapeDraft = $state<ShapeDraftState | null>(null);
   let panePan = $state<PanePanState | null>(null);
   let suppressNextPaneClick = $state(false);
+  let activeLens = $state<SketchWorkspaceLens>('sketch');
+  let draftSceneSignature = $state<string | null>(null);
+  let acceptedExactState = $state<{ solutionId: string; sceneSignature: string | null } | null>(null);
   let paneCameras = $state<Record<SketchView, PaneCamera>>({
     front: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
     top: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
@@ -314,11 +331,33 @@
   });
   const sketchDocumentSourceSummary = $derived.by(() => buildSketchDocumentSourceSummary(sketchDocumentSource));
   const sketchDocumentJson = $derived.by(() => formatSketchDocumentSource(sketchDocumentSource));
+  const currentSceneSignature = $derived.by(() => sceneSignatureFromStrokes(strokes));
+  const exactSceneActionSolutionId = $derived.by(() => {
+    const solutions = brepCandidateResponse?.validation?.passed ? (brepCandidateResponse.search?.solutions ?? []) : [];
+    return solutions.length === 1 ? solutions[0]?.solutionId ?? null : null;
+  });
   const sketchDocumentStatus = $derived.by(() => {
     if (!sketchDocumentSourceSummary.error) return 'READY';
     if (openProfileCount > 0) return 'PROFILE OPEN';
     return 'WAITING';
   });
+  const workspaceScene = $derived.by(() =>
+    buildSketchWorkspaceSceneState({
+      currentSceneSignature,
+      draftSceneSignature,
+      exactSceneSignature: acceptedExactState?.sceneSignature ?? null,
+      hasSketch: Boolean(sketchDocumentSource),
+      hasDraft: Boolean(draft),
+      hasAcceptedExact: Boolean(acceptedExactState),
+      hasRebuildableExact: Boolean(brepCandidateResponse?.validation?.passed && (brepCandidateResponse.search?.solutions?.length ?? 0) > 0),
+      exactCandidateSolutionId: exactSceneActionSolutionId,
+      draftErrorText: errorText && !draft ? errorText : '',
+      exactErrorText: hiddenLineErrorText || brepCandidateAcceptErrorText || '',
+      activeLens,
+    }),
+  );
+  const draftSceneRow = $derived.by(() => workspaceScene.rows.find((row) => row.key === 'draft') ?? null);
+  const exactSceneRow = $derived.by(() => workspaceScene.rows.find((row) => row.key === 'exact') ?? null);
   const featureSuggestions = $derived.by(() => suggestionResponse?.suggestions ?? []);
   const suggestionWarnings = $derived.by(() => suggestionResponse?.warnings ?? []);
   const showSuggestionPanel = $derived.by(
@@ -482,6 +521,7 @@
 
     activeStroke = {
       primitiveId: `primitive-${view}-${++primitiveSequence}`,
+      sketchId: resolvedWorkspaceSketchId(view),
       view,
       kind: 'polyline',
       points: [point],
@@ -525,6 +565,7 @@
     shapeDraft = {
       kind,
       primitiveId: `primitive-${view}-${++primitiveSequence}`,
+      sketchId: resolvedWorkspaceSketchId(view),
       view,
       pointerId: event.pointerId,
       start: pointResult.point,
@@ -577,6 +618,7 @@
     const maxY = Math.max(y0, y1);
     return {
       primitiveId: draft.primitiveId,
+      sketchId: draft.sketchId,
       view: draft.view,
       kind: 'polyline',
       points: [
@@ -595,6 +637,7 @@
     if (radius < 0.01) return null;
     return {
       primitiveId: draft.primitiveId,
+      sketchId: draft.sketchId,
       view: draft.view,
       kind: 'circle',
       points: [draft.start],
@@ -795,6 +838,7 @@
     clearPreviewResult();
     cleanupEvidenceText = '';
     errorText = '';
+    activeLens = 'sketch';
   }
 
   function selectPoint(stroke: SketchStroke, pointIndex: number) {
@@ -861,6 +905,7 @@
       } else {
         clearSelectedPoint();
       }
+      activeLens = 'sketch';
       errorText = '';
       clearPreviewResult();
       requestFeatureSuggestions(nextStrokes);
@@ -938,6 +983,7 @@
 
       strokes = nextStrokes;
       selectPoint(movedStroke, targetPoint.pointIndex);
+      activeLens = 'sketch';
       errorText = '';
       clearPreviewResult();
       requestFeatureSuggestions(nextStrokes);
@@ -986,6 +1032,7 @@
           syncSelectedPointInputs(updatedStroke, selectedPoint.pointIndex);
         }
       }
+      activeLens = 'sketch';
       errorText = '';
       clearPreviewResult();
       requestFeatureSuggestions(nextStrokes);
@@ -1034,6 +1081,7 @@
           syncSelectedPointInputs(updatedStroke, selectedPoint.pointIndex);
         }
       }
+      activeLens = 'sketch';
       errorText = '';
       clearPreviewResult();
       requestFeatureSuggestions(nextStrokes);
@@ -1076,6 +1124,7 @@
     cleanupEvidenceText = '';
     errorText = '';
     clearPreviewResult();
+    activeLens = 'sketch';
     requestFeatureSuggestions(nextStrokes);
     queueAutoPreview(updatedStroke);
   }
@@ -1107,6 +1156,7 @@
     strokes = result.strokes;
     activeStroke = null;
     clearSelectedPoint();
+    activeLens = 'sketch';
     errorText = '';
     cleanupEvidenceText = `CLEAN UP SOURCE BOUNDS RECTANGLE CLOSED / ${result.evidence.join(' ')}`;
     sourcePatchEntries = appendSketchSourcePatch(sourcePatchEntries, {
@@ -1131,6 +1181,15 @@
       ...(activeStroke?.view === view ? [activeStroke] : []),
       ...(shapeDraft?.view === view ? [shapeDraft.kind === 'rectangle' ? rectangleStrokeFromDraft(shapeDraft) : circleStrokeFromDraft(shapeDraft)].filter(Boolean) as SketchStroke[] : []),
     ];
+  }
+
+  function resolvedWorkspaceSketchId(view: SketchView): string {
+    if (activeStroke?.view === view && activeStroke.sketchId) return activeStroke.sketchId;
+    for (let index = strokes.length - 1; index >= 0; index -= 1) {
+      const stroke = strokes[index];
+      if (stroke.view === view && stroke.sketchId) return stroke.sketchId;
+    }
+    return `sketch-${view}`;
   }
 
   function closeOpenProfiles() {
@@ -1171,6 +1230,8 @@
     activeStroke = null;
     clearSelectedPoint();
     clearPreviewResult();
+    activeLens = 'sketch';
+    acceptedExactState = null;
     errorText = '';
     cleanupEvidenceText = '';
     autoPreviewPrimitiveId = null;
@@ -1206,6 +1267,7 @@
     clearSelectedPoint();
     primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
     sketchDocumentEditorDirty = false;
+    activeLens = 'sketch';
     errorText = '';
     cleanupEvidenceText = '';
     clearPreviewResult();
@@ -1248,6 +1310,8 @@
     sketchDocumentSnapshot = dimensionRepair.document;
     sketchDocumentImportText = formatSketchDocumentSource(dimensionRepair.document);
     sketchDocumentEditorDirty = false;
+    activeLens = 'sketch';
+    acceptedExactState = null;
     errorText = '';
     cleanupEvidenceText = autoRepairEvidence.length
       ? `AUTO SNAP IMPORT / ${autoRepairEvidence.map((entry) => entry.detail).join(' / ')}`
@@ -1299,6 +1363,8 @@
     sketchDocumentSnapshot = importRepairDocument;
     sketchDocumentImportText = formatSketchDocumentSource(importRepairDocument);
     sketchDocumentEditorDirty = false;
+    activeLens = 'sketch';
+    acceptedExactState = null;
     errorText = '';
     cleanupEvidenceText = '';
     if (repairedStroke) {
@@ -1380,6 +1446,7 @@
       artifactBundle = result.artifactBundle;
       previewProfile = previewProfileFor(request.sketch.view, draftStrokes);
       syncSketchDocumentEnvelope(result.draft.source);
+      draftSceneSignature = sceneSignatureFromStrokes(draftStrokes);
       autoQueued = false;
       publishPreviewResult(result);
       if (mode === 'manual') {
@@ -1474,6 +1541,12 @@
       hiddenLineErrorText = '';
       hiddenLineLoading = false;
       brepCandidateAcceptedSolutionId = response.acceptedSolution.solutionId;
+      acceptedExactState = {
+        solutionId: response.acceptedSolution.solutionId,
+        sceneSignature: currentSceneSignature,
+      };
+      draftSceneSignature = currentSceneSignature;
+      activeLens = 'exact';
       brepCandidateAcceptEvidence = response.evidence ?? [];
       publishPreviewResult({ draft: response.draftSource, artifactBundle: response.artifactBundle });
     } catch (error) {
@@ -1483,6 +1556,20 @@
       if (runId === autoPreviewRunId) {
         brepCandidateAcceptingSolutionId = null;
       }
+    }
+  }
+
+  function runWorkspaceSceneAction(rowKey: 'sketch' | 'draft' | 'exact') {
+    const row = workspaceScene.rows.find((candidate) => candidate.key === rowKey);
+    const action = row?.action;
+    if (!action) return;
+    if (action.kind === 'previewDraft') {
+      activeLens = 'draft';
+      void generateDraft('manual');
+      return;
+    }
+    if (action.kind === 'acceptExact' || action.kind === 'rebuildExact') {
+      void acceptBrepCandidateSolution(action.solutionId);
     }
   }
 
@@ -1513,10 +1600,17 @@
   }
 
   function acceptedBrepPorts(): ComponentPort[] {
+    const preferredTargetId =
+      artifactBundle?.faceTargets?.[0]?.durableTargetId ??
+      artifactBundle?.faceTargets?.[0]?.targetId ??
+      artifactBundle?.edgeTargets?.[0]?.durableTargetId ??
+      artifactBundle?.edgeTargets?.[0]?.targetId ??
+      null;
     return [
       {
         portId: ACCEPTED_BREP_PORT_ID,
         typeId: ACCEPTED_BREP_PORT_TYPE_ID,
+        targetIds: preferredTargetId ? [preferredTargetId] : [],
         frame: {
           origin: [0, 0, 0],
           xAxis: [1, 0, 0],
@@ -1665,6 +1759,8 @@
     primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
     sketchDocumentSnapshot = brepDerivedSketch.document;
     sketchDocumentImportText = formatSketchDocumentSource(brepDerivedSketch.document);
+    activeLens = 'sketch';
+    acceptedExactState = null;
     errorText = '';
     cleanupEvidenceText = brepDerivedSketch.evidence;
     sourcePatchEntries = appendSketchSourcePatch(sourcePatchEntries, {
@@ -1706,6 +1802,7 @@
     primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
     sketchDocumentSnapshot = repair.document;
     sketchDocumentImportText = formatSketchDocumentSource(repair.document);
+    activeLens = 'sketch';
     errorText = '';
     cleanupEvidenceText = repair.evidence.detail;
     sourcePatchEntries = appendSketchSourcePatch(sourcePatchEntries, {
@@ -1825,6 +1922,7 @@
       artifactBundle = result.artifactBundle;
       previewProfile = previewProfileForSuggestion(request, suggestion);
       syncSketchDocumentEnvelope(result.draft.source);
+      draftSceneSignature = sceneSignatureFromStrokes(strokes);
       acceptedSuggestionId = suggestion.suggestionId;
       acceptedSuggestionLabel = formatSuggestionLabel(suggestion);
       autoQueued = false;
@@ -1919,6 +2017,7 @@
 
   function clearPreviewResult() {
     draft = null;
+    draftSceneSignature = null;
     artifactBundle = null;
     previewProfile = null;
     clearBrepCandidateGraph();
@@ -1953,20 +2052,32 @@
     return `${view.view.toUpperCase()} ${view.visibleEdges?.length ?? 0} visible / ${view.hiddenEdges?.length ?? 0} hidden`;
   }
 
-  function hiddenLineProjectionStatus(view: SketchView): 'pass' | 'fail' {
-    return hiddenLineViewHasIssue(view) ? 'fail' : 'pass';
+  function hiddenLineProjectionStatus(view: SketchView): 'pass' | 'warn' | 'fail' {
+    if (hiddenLineViewHasIssue(view)) return 'fail';
+    if (brepHiddenLineViewHasWarning(hiddenLineResponse, view)) return 'warn';
+    return 'pass';
   }
 
   function hiddenLineViewHasIssue(view: SketchView): boolean {
-    const key = view.toLowerCase();
+    if (brepSketchRepairTargets.some((target) => target.view === view)) {
+      return true;
+    }
+    if (brepTopologyRepairProposals.some((proposal) => proposal.view === view)) {
+      return true;
+    }
     const issues = hiddenLineResponse?.validation?.issues ?? [];
-    if (issues.some((issue) => [issue.sketchId, issue.primitiveId ?? '', issue.message].some((text) => text.toLowerCase().includes(key)))) {
+    if (
+      issues.some((issue) => {
+        if (sketchDocumentSource) {
+          const match = findSketchIssueMatch(sketchDocumentSource, issue);
+          if (match) return match.sketch.view === view;
+        }
+        return false;
+      })
+    ) {
       return true;
     }
-    if (hiddenLineResponse?.validation && !hiddenLineResponse.validation.passed && issues.length === 0) {
-      return true;
-    }
-    return Boolean(hiddenLineResponse?.warnings?.some((warning) => warning.toLowerCase().includes(key)));
+    return false;
   }
 
   function hiddenLineEdgePoints(edge: BrepProjectedEdge2d): string {
@@ -1976,22 +2087,18 @@
   function brepSketchValidationLedgerRow(summary: ReturnType<typeof buildSketchBrepProjectionValidationSummary>): SketchValidationRow {
     const backendValidation = hiddenLineResponse?.validation;
     const backendEvidence = backendValidation?.evidence?.filter(Boolean).join('; ') ?? '';
-    const backendIssue = backendValidation?.issues
-      ?.map((issue) => issue.message)
-      .filter(Boolean)
-      .join('; ') ?? '';
+    const backendIssue = summarizeSketchValidationIssues(hiddenLineResponse?.validation?.issues);
     const failingRow = summary.rows.find((row) => row.status === 'fail');
-    const warning = hiddenLineResponse?.warnings?.find((item) => item.toLowerCase().includes('brep/sketch'));
     const viewEvidence = summary.viewSummaries
       .map((view) => `${view.view} ${view.visibleEdgeCount} visible / ${view.hiddenEdgeCount} hidden`)
       .join('; ');
     if (backendValidation) {
-      if (!backendValidation.passed || backendIssue || warning) {
+      if (!backendValidation.passed || (backendValidation.issues?.length ?? 0) > 0) {
         return {
           id: 'brepSketchValidation',
           label: 'BRep/sketch validation',
           status: 'fail',
-          detail: warning ?? backendIssue ?? backendEvidence ?? 'BRep/sketch validation failed.',
+          detail: backendIssue || backendEvidence || 'BRep/sketch validation failed.',
         };
       }
       return {
@@ -2001,12 +2108,12 @@
         detail: backendEvidence || viewEvidence || 'BRep/sketch validation passed.',
       };
     }
-    if (failingRow || warning) {
+    if (failingRow) {
       return {
         id: 'brepSketchValidation',
         label: 'BRep/sketch validation',
         status: 'fail',
-        detail: warning ?? failingRow?.evidence ?? 'BRep/sketch validation failed.',
+        detail: failingRow?.evidence ?? 'BRep/sketch validation failed.',
       };
     }
     const rowsPassed = summary.rows.length > 0 && summary.rows.every((row) => row.status === 'pass');
@@ -2235,6 +2342,8 @@
 
   <div class="sketch-workspace__body">
     <div class="sketch-workspace__panes">
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="sketch-pane sketch-pane--front"
         role="application"
@@ -2262,13 +2371,26 @@
                   (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
                 cx={point[0]}
                 cy={point[1]}
-                r="2.2"
+                r={POINT_HANDLE_RADIUS}
                 role="button"
                 tabindex="0"
                 aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
                 data-sketch-point-handle
                 data-point-handle
                 onclick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  suppressNextPaneClick = true;
+                  if (activeStroke?.primitiveId === stroke.primitiveId && !stroke.closed && pointIndex === 0) {
+                    closeActivePolyline();
+                  } else {
+                    selectPoint(stroke, pointIndex);
+                  }
+                }}
+                onkeydown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') {
+                    return;
+                  }
                   event.preventDefault();
                   event.stopPropagation();
                   suppressNextPaneClick = true;
@@ -2286,6 +2408,7 @@
             <g
               class="sketch-pane__brep-overlay"
               class:sketch-pane__brep-overlay--fail={hiddenLineViewHasIssue('front')}
+              class:sketch-pane__brep-overlay--warn={hiddenLineProjectionStatus('front') === 'warn'}
               data-brep-hidden-line-overlay="front"
               data-brep-projection-status={hiddenLineProjectionStatus('front')}
             >
@@ -2303,6 +2426,8 @@
           {/if}
         </svg>
       </div>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="sketch-pane"
         role="application"
@@ -2330,13 +2455,26 @@
                   (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
                 cx={point[0]}
                 cy={point[1]}
-                r="2.2"
+                r={POINT_HANDLE_RADIUS}
                 role="button"
                 tabindex="0"
                 aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
                 data-sketch-point-handle
                 data-point-handle
                 onclick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  suppressNextPaneClick = true;
+                  if (activeStroke?.primitiveId === stroke.primitiveId && !stroke.closed && pointIndex === 0) {
+                    closeActivePolyline();
+                  } else {
+                    selectPoint(stroke, pointIndex);
+                  }
+                }}
+                onkeydown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') {
+                    return;
+                  }
                   event.preventDefault();
                   event.stopPropagation();
                   suppressNextPaneClick = true;
@@ -2354,6 +2492,7 @@
             <g
               class="sketch-pane__brep-overlay"
               class:sketch-pane__brep-overlay--fail={hiddenLineViewHasIssue('top')}
+              class:sketch-pane__brep-overlay--warn={hiddenLineProjectionStatus('top') === 'warn'}
               data-brep-hidden-line-overlay="top"
               data-brep-projection-status={hiddenLineProjectionStatus('top')}
             >
@@ -2371,6 +2510,8 @@
           {/if}
         </svg>
       </div>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="sketch-pane"
         role="application"
@@ -2398,13 +2539,26 @@
                   (selectedPoint?.primitiveId === stroke.primitiveId && selectedPoint.pointIndex === pointIndex)}
                 cx={point[0]}
                 cy={point[1]}
-                r="2.2"
+                r={POINT_HANDLE_RADIUS}
                 role="button"
                 tabindex="0"
                 aria-label={`Edit ${stroke.primitiveId} point ${pointIndex}`}
                 data-sketch-point-handle
                 data-point-handle
                 onclick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  suppressNextPaneClick = true;
+                  if (activeStroke?.primitiveId === stroke.primitiveId && !stroke.closed && pointIndex === 0) {
+                    closeActivePolyline();
+                  } else {
+                    selectPoint(stroke, pointIndex);
+                  }
+                }}
+                onkeydown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') {
+                    return;
+                  }
                   event.preventDefault();
                   event.stopPropagation();
                   suppressNextPaneClick = true;
@@ -2422,6 +2576,7 @@
             <g
               class="sketch-pane__brep-overlay"
               class:sketch-pane__brep-overlay--fail={hiddenLineViewHasIssue('side')}
+              class:sketch-pane__brep-overlay--warn={hiddenLineProjectionStatus('side') === 'warn'}
               data-brep-hidden-line-overlay="side"
               data-brep-projection-status={hiddenLineProjectionStatus('side')}
             >
@@ -2459,9 +2614,26 @@
 
       <SketchInspectorSection title="DRAFT MODE" ariaLabel="Draft mode">
         {#snippet summaryExtra()}
-          <span>{draftModeSummary.label}</span>
+          <span>{draftSceneRow?.status?.toUpperCase() ?? draftModeSummary.label}</span>
         {/snippet}
         <div class="sketch-draft-mode">
+          {#if draftSceneRow}
+            <div class="sketch-token">MESH DRAFT {draftSceneRow.status.toUpperCase()}</div>
+            <div class="sketch-token">{draftSceneRow.detail}</div>
+            {#if draftSceneRow.action}
+              <button
+                class="btn btn-xs btn-primary"
+                type="button"
+                onclick={() => runWorkspaceSceneAction('draft')}
+                disabled={generating || brepCandidateLoading || brepCandidateAcceptingSolutionId !== null}
+              >
+                {workspaceSceneActionLabel(draftSceneRow.action, {
+                  generating,
+                  acceptingSolutionId: brepCandidateAcceptingSolutionId,
+                })}
+              </button>
+            {/if}
+          {/if}
           <div class="sketch-token">{draftModeSummary.detail}</div>
         </div>
       </SketchInspectorSection>
@@ -2908,6 +3080,25 @@
         {#if brepCandidateLoading || brepCandidateResponse || brepCandidateErrorText}
           <div class="sketch-brep-candidates" aria-label="BRep candidate graph">
             <div class="sketch-workspace__section-title">BREP CANDIDATE GRAPH</div>
+            {#if exactSceneRow}
+              <div class="sketch-token">EXACT MODEL {exactSceneRow.status.toUpperCase()}</div>
+              <div class="sketch-token">{exactSceneRow.detail}</div>
+              {#if exactSceneRow.action}
+                <div class="sketch-brep-candidates__actions">
+                  <button
+                    class="btn btn-xs btn-primary"
+                    type="button"
+                    onclick={() => runWorkspaceSceneAction('exact')}
+                    disabled={generating || brepCandidateLoading || brepCandidateAcceptingSolutionId !== null}
+                  >
+                    {workspaceSceneActionLabel(exactSceneRow.action, {
+                      generating,
+                      acceptingSolutionId: brepCandidateAcceptingSolutionId,
+                    })}
+                  </button>
+                </div>
+              {/if}
+            {/if}
             {#if brepCandidateLoading}
               <div class="sketch-token">ANALYZING...</div>
             {/if}
@@ -3019,7 +3210,7 @@
               {#if brepCandidateResponse.validation.issues?.length}
                 <div class="sketch-suggestion__warnings">
                   {#each brepCandidateResponse.validation.issues as issue}
-                    <div>{issue.message}</div>
+                    <div>{summarizeSketchValidationIssue(issue)}</div>
                   {/each}
                 </div>
               {/if}
@@ -3059,9 +3250,9 @@
               {:else if brepDerivedSketch && 'error' in brepDerivedSketch}
                 <div class="sketch-token">{brepDerivedSketch.error}</div>
               {/if}
-              {#if hiddenLineResponse.warnings?.length}
+              {#if brepHiddenLineWarningMessages(hiddenLineResponse).length}
                 <div class="sketch-suggestion__warnings">
-                  {#each hiddenLineResponse.warnings as warning}
+                  {#each brepHiddenLineWarningMessages(hiddenLineResponse) as warning}
                     <div>{warning}</div>
                   {/each}
                 </div>
@@ -3078,7 +3269,7 @@
                 {#if hiddenLineResponse.validation.issues?.length}
                   <div class="sketch-suggestion__warnings">
                     {#each hiddenLineResponse.validation.issues as issue}
-                      <div>{issue.message}</div>
+                      <div>{summarizeSketchValidationIssue(issue)}</div>
                     {/each}
                   </div>
                 {/if}
@@ -3087,7 +3278,7 @@
                     <div class="sketch-workspace__section-title">REPAIR TARGETS</div>
                     {#each brepSketchRepairTargets as target}
                       <div class="sketch-token" data-brep-repair-target={target.targetId}>
-                        {target.severity.toUpperCase()} {target.label} / {target.reason}
+                        {target.severity.toUpperCase()} {target.label}{target.edgeId ? ` / ${target.edgeId}` : ''} / {target.reason}
                       </div>
                     {/each}
                   </div>
@@ -3278,10 +3469,38 @@
     top: 8px;
     left: 8px;
     z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     color: var(--secondary);
     font-family: var(--font-mono);
     font-size: 0.64rem;
     letter-spacing: 0.12em;
+  }
+
+  .sketch-pane__label-action {
+    appearance: none;
+    border: 1px solid color-mix(in srgb, var(--secondary) 48%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 84%, black 16%);
+    color: color-mix(in srgb, var(--secondary) 82%, white 18%);
+    font-family: var(--font-mono);
+    font-size: 0.54rem;
+    line-height: 1;
+    letter-spacing: 0.12em;
+    padding: 3px 6px;
+    min-height: 18px;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .sketch-pane__label-action:hover {
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-100));
+  }
+
+  .sketch-pane__label-action:focus-visible {
+    outline: 1px solid color-mix(in srgb, var(--secondary) 72%, transparent);
+    outline-offset: 1px;
   }
 
   .sketch-pane__drawing {
@@ -3330,6 +3549,10 @@
     stroke: #ff6b5f;
   }
 
+  .sketch-pane__drawing .sketch-pane__brep-overlay--warn .sketch-pane__brep-edge {
+    stroke: color-mix(in srgb, var(--secondary) 82%, white 18%);
+  }
+
   .sketch-pane__drawing .sketch-point-handle {
     fill: color-mix(in srgb, var(--primary) 82%, white 18%);
     stroke: var(--bg);
@@ -3337,6 +3560,9 @@
     vector-effect: non-scaling-stroke;
     pointer-events: all;
     cursor: move;
+    transition:
+      fill 120ms ease,
+      stroke 120ms ease;
   }
 
   .sketch-pane__drawing .sketch-point-handle--active {

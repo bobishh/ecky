@@ -256,17 +256,17 @@
   {/if}
 
   {#if threadToDelete}
-    <Modal title="Confirm Deletion" onclose={() => threadToDelete = null}>
+    <Modal title="Trash Thread" onclose={() => threadToDelete = null}>
       <div class="confirm-delete-body">
-        <p>Are you sure you want to purge <strong>{threadToDelete.title}</strong>?</p>
+        <p>Move <strong>{threadToDelete.title}</strong> to trash?</p>
         <p class="warning">
           This will hide {threadToDelete.versionCount} {threadToDelete.versionCount === 1 ? 'model' : 'models'} from your history.
         </p>
-        <p class="minor">You can technically recover this from the database if you're desperate enough, but it won't be fun.</p>
+        <p class="minor">Recover later from trash.</p>
         
         <div class="confirm-actions">
-          <button class="btn btn-secondary" onclick={() => threadToDelete = null}>CANCEL</button>
-          <button class="btn btn-danger" onclick={executeDelete}>DELETE FOREVER*</button>
+          <button class="btn btn-ghost" onclick={() => threadToDelete = null}>CANCEL</button>
+          <button class="btn btn-danger" onclick={executeDelete}>MOVE TO TRASH</button>
         </div>
       </div>
     </Modal>
@@ -883,37 +883,4 @@
     font-style: italic;
   }
 
-  .confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 20px;
-  }
-
-  .btn {
-    padding: 6px 16px;
-    font-size: 0.75rem;
-    font-weight: bold;
-    cursor: pointer;
-    border: 1px solid transparent;
-  }
-
-  .btn-secondary {
-    background: var(--bg-300);
-    color: var(--text);
-    border-color: var(--bg-400);
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-400);
-  }
-
-  .btn-danger {
-    background: var(--red);
-    color: white;
-  }
-
-  .btn-danger:hover {
-    background: color-mix(in srgb, var(--red) 80%, black);
-  }
 </style>

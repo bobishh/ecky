@@ -8,6 +8,8 @@ import type {
   SketchValidationIssue,
   SketchView,
 } from './tauri/contracts';
+import { findSketchIssueMatch } from './sketchIssueLocator';
+import { summarizeSketchValidationIssue } from './sketchValidationIssueSummary';
 
 export type SketchBrepProjectionValidationStatus = 'pass' | 'pending' | 'fail';
 
@@ -61,6 +63,7 @@ export type SketchBrepProjectionRepairTarget = {
   sketchId: string;
   primitiveId: string | null;
   view: SketchView | null;
+  edgeId?: string | null;
   severity: SketchValidationIssue['severity'];
   label: string;
   reason: string;
@@ -150,31 +153,37 @@ export function buildSketchBrepProjectionRepairTargets(
 ): SketchBrepProjectionRepairTarget[] {
   const validation = projection?.validation;
   if (!validation || validation.passed) return [];
-
-  return (validation.issues ?? []).map((issue, index) => repairTargetFromIssue(document, issue, index));
+  return (validation.issues ?? []).flatMap((issue, index) => {
+    const target = repairTargetFromIssue(document, issue, index);
+    return target ? [target] : [];
+  });
 }
 
 function repairTargetFromIssue(
   document: SketchDocument,
   issue: SketchValidationIssue,
   index: number,
-): SketchBrepProjectionRepairTarget {
+): SketchBrepProjectionRepairTarget | null {
   const match = sketchIssueMatch(document, issue);
-  const sketchId = issue.sketchId || match?.sketch.sketchId || 'model';
-  const primitiveId = issue.primitiveId ?? match?.primitive?.primitiveId ?? null;
-  const view = match?.sketch.view ?? inferViewFromText(issue.message);
+  if (!match) return null;
+
+  const sketchId = match.sketch.sketchId;
+  const primitiveId = match.primitive?.primitiveId ?? null;
+  const view = match.sketch.view;
   const targetName = primitiveId ?? sketchId;
   const labelPrefix = view ? view.toUpperCase() : 'MODEL';
+  const summary = summarizeSketchValidationIssue(issue);
 
   return {
     targetId: `brep-repair-${slugPart(sketchId)}-${slugPart(primitiveId ?? 'sketch')}-${index}`,
     sketchId,
     primitiveId,
     view,
+    edgeId: issue.edgeId ?? null,
     severity: issue.severity,
     label: `${labelPrefix} / ${targetName}`,
-    reason: issue.message,
-    evidence: [sketchId, primitiveId, issue.message].filter(Boolean).join(' / '),
+    reason: summary,
+    evidence: [sketchId, primitiveId, issue.edgeId ?? null, summary].filter(Boolean).join(' / '),
   };
 }
 
@@ -182,24 +191,7 @@ function sketchIssueMatch(
   document: SketchDocument,
   issue: SketchValidationIssue,
 ): { sketch: SketchDefinition; primitive: SketchPrimitive | null } | null {
-  const sketches = document.sketches ?? [];
-  for (const sketch of sketches) {
-    const primitive = (sketch.primitives ?? []).find((item) => item.primitiveId === issue.primitiveId) ?? null;
-    if (primitive) return { sketch, primitive };
-  }
-  const sketch = sketches.find((item) => item.sketchId === issue.sketchId) ?? null;
-  if (sketch) return { sketch, primitive: null };
-  const view = inferViewFromText([issue.sketchId, issue.primitiveId ?? '', issue.message].join(' '));
-  const viewSketch = view ? sketches.find((item) => item.view === view) ?? null : null;
-  return viewSketch ? { sketch: viewSketch, primitive: null } : null;
-}
-
-function inferViewFromText(text: string): SketchView | null {
-  const lower = text.toLowerCase();
-  if (lower.includes('front')) return 'front';
-  if (lower.includes('top')) return 'top';
-  if (lower.includes('side')) return 'side';
-  return null;
+  return findSketchIssueMatch(document, issue);
 }
 
 function missingProjectionRows(

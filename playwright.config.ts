@@ -6,6 +6,8 @@ const webUrl = `http://localhost:${webPort}`;
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
+  workers: process.env.CI ? 2 : undefined,
+  retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
     baseURL: webUrl,

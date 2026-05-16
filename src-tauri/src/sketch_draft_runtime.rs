@@ -1,8 +1,9 @@
 use crate::models::SketchDocument;
 use crate::models::{
     validate_component_package, validate_design_params, validate_sketch_definition,
-    validate_ui_spec, AppError, AppResult, ArtifactBundle, ComponentDefinition, ComponentPackage,
-    DesignParams, ExportArtifact, GeometryBackend, MacroDialect, PackageVisibility, PathResolver,
+    validate_ui_spec, AppError, AppResult, ArtifactBundle, BrepProjectedLoopRole,
+    ComponentDefinition, ComponentPackage, ComponentPort, DesignParams, ExportArtifact,
+    GeometryBackend, MacroDialect, PackageVisibility, PathResolver,
     SketchAcceptedBrepCandidateSource, SketchAcceptedBrepComponentPackageRequest,
     SketchBrepCandidateAcceptRequest, SketchBrepCandidateCell, SketchBrepCandidateEdge,
     SketchBrepCandidateGraph, SketchBrepCandidateRequest, SketchBrepCandidateResponse,
@@ -10,8 +11,8 @@ use crate::models::{
     SketchBrepCandidateVertex, SketchBrepProjectionValidation, SketchDefinition,
     SketchDraftOperationKind, SketchDraftRequest, SketchDraftSource, SketchFeatureSuggestion,
     SketchPreviewHullRequest, SketchPrimitive, SketchPrimitiveKind, SketchSuggestionRequest,
-    SketchSuggestionResponse, SketchValidationIssue, SketchValidationSeverity, SketchView,
-    SourceLanguage, COMPONENT_PACKAGE_SCHEMA_VERSION,
+    SketchSuggestionResponse, SketchValidationIssue, SketchValidationIssueKind,
+    SketchValidationSeverity, SketchView, SourceLanguage, COMPONENT_PACKAGE_SCHEMA_VERSION,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json;
@@ -368,7 +369,8 @@ pub fn accepted_brep_candidate_to_component_package(
     let accepted_target_ids = request
         .artifact_bundle
         .as_ref()
-        .map(accepted_brep_target_ids);
+        .map(accepted_brep_target_ids)
+        .transpose()?;
     for port in &request.ports {
         if port.target_ids.is_empty() {
             continue;
@@ -400,6 +402,11 @@ pub fn accepted_brep_candidate_to_component_package(
     } else {
         request.params.clone()
     };
+    let ports = normalize_accepted_brep_ports(
+        &request.ports,
+        request.artifact_bundle.as_ref(),
+        request.source_ref.ends_with(".step") || request.source_ref.ends_with(".stp"),
+    )?;
 
     let package = ComponentPackage {
         schema_version: COMPONENT_PACKAGE_SCHEMA_VERSION,
@@ -424,7 +431,7 @@ pub fn accepted_brep_candidate_to_component_package(
             params,
             ui_spec: request.ui_spec,
             initial_params: request.initial_params,
-            ports: request.ports,
+            ports,
         }],
         assemblies: Vec::new(),
     };
@@ -474,18 +481,175 @@ pub fn write_accepted_brep_component_package_project(
     Ok(package)
 }
 
-fn accepted_brep_target_ids(bundle: &ArtifactBundle) -> HashSet<String> {
-    bundle
-        .edge_targets
+fn accepted_brep_target_ids(bundle: &ArtifactBundle) -> AppResult<HashSet<String>> {
+    let raw = fs::read_to_string(bundle.manifest_path.trim()).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read accepted BRep manifest '{}': {}",
+            bundle.manifest_path, err
+        ))
+    })?;
+    let manifest: crate::models::ModelManifest = serde_json::from_str(&raw).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse accepted BRep manifest '{}': {}",
+            bundle.manifest_path, err
+        ))
+    })?;
+
+    Ok(manifest
+        .selection_targets
         .iter()
-        .map(|target| target.target_id.clone())
-        .chain(
-            bundle
-                .face_targets
+        .flat_map(|target| {
+            target
+                .target_id
                 .iter()
-                .map(|target| target.target_id.clone()),
-        )
-        .collect()
+                .chain(target.durable_target_id.iter())
+                .cloned()
+                .chain(target.alias_ids.iter().cloned())
+        })
+        .chain(bundle.edge_targets.iter().flat_map(|target| {
+            std::iter::once(target.target_id.clone())
+                .chain(target.durable_target_id.iter().cloned())
+                .chain(target.alias_ids.iter().cloned())
+        }))
+        .chain(bundle.face_targets.iter().flat_map(|target| {
+            std::iter::once(target.target_id.clone())
+                .chain(target.durable_target_id.iter().cloned())
+                .chain(target.alias_ids.iter().cloned())
+        }))
+        .collect())
+}
+
+fn normalize_accepted_brep_ports(
+    ports: &[ComponentPort],
+    bundle: Option<&ArtifactBundle>,
+    prefer_stable_topology_ids: bool,
+) -> AppResult<Vec<ComponentPort>> {
+    if !prefer_stable_topology_ids {
+        return Ok(ports.to_vec());
+    }
+    let Some(bundle) = bundle else {
+        return Ok(ports.to_vec());
+    };
+
+    let raw = fs::read_to_string(bundle.manifest_path.trim()).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read accepted BRep manifest '{}': {}",
+            bundle.manifest_path, err
+        ))
+    })?;
+    let manifest: crate::models::ModelManifest = serde_json::from_str(&raw).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse accepted BRep manifest '{}': {}",
+            bundle.manifest_path, err
+        ))
+    })?;
+    let preferred_target_ids = manifest
+        .selection_targets
+        .iter()
+        .flat_map(|target| {
+            let Some(preferred) = preferred_accepted_brep_target_id(target) else {
+                return Vec::new();
+            };
+            target
+                .target_id
+                .iter()
+                .chain(target.durable_target_id.iter())
+                .chain(target.canonical_target_id.iter())
+                .chain(target.alias_ids.iter())
+                .map(|target_id| (target_id.clone(), preferred.clone()))
+                .collect::<Vec<_>>()
+        })
+        .chain(bundle.edge_targets.iter().flat_map(|target| {
+            target
+                .durable_target_id
+                .iter()
+                .map(|durable_target_id| (durable_target_id.clone(), target.target_id.clone()))
+                .chain(
+                    target
+                        .canonical_target_id
+                        .iter()
+                        .map(|canonical_target_id| {
+                            (canonical_target_id.clone(), target.target_id.clone())
+                        })
+                        .chain(
+                            target
+                                .alias_ids
+                                .iter()
+                                .map(|alias_id| (alias_id.clone(), target.target_id.clone())),
+                        ),
+                )
+                .collect::<Vec<_>>()
+        }))
+        .chain(bundle.face_targets.iter().flat_map(|target| {
+            target
+                .durable_target_id
+                .iter()
+                .map(|durable_target_id| (durable_target_id.clone(), target.target_id.clone()))
+                .chain(
+                    target
+                        .canonical_target_id
+                        .iter()
+                        .map(|canonical_target_id| {
+                            (canonical_target_id.clone(), target.target_id.clone())
+                        })
+                        .chain(
+                            target
+                                .alias_ids
+                                .iter()
+                                .map(|alias_id| (alias_id.clone(), target.target_id.clone())),
+                        ),
+                )
+                .collect::<Vec<_>>()
+        }))
+        .collect::<HashMap<_, _>>();
+
+    Ok(ports
+        .iter()
+        .cloned()
+        .map(|mut port| {
+            port.target_ids = port
+                .target_ids
+                .into_iter()
+                .map(|target_id| {
+                    preferred_target_ids
+                        .get(&target_id)
+                        .cloned()
+                        .unwrap_or(target_id)
+                })
+                .collect();
+            port
+        })
+        .collect())
+}
+
+fn preferred_accepted_brep_target_id(target: &crate::models::SelectionTarget) -> Option<String> {
+    target
+        .target_id
+        .clone()
+        .filter(|target_id| is_stable_topology_target_id(target_id))
+        .or_else(|| {
+            target
+                .alias_ids
+                .iter()
+                .filter(|alias_id| is_stable_topology_target_id(alias_id))
+                .min_by_key(|alias_id| alias_id.len())
+                .cloned()
+        })
+        .or_else(|| target.canonical_target_id.clone())
+        .or_else(|| target.durable_target_id.clone())
+        .or_else(|| target.target_id.clone())
+}
+
+fn is_stable_topology_target_id(target_id: &str) -> bool {
+    [":edge:", ":face:"].into_iter().any(|marker| {
+        let Some((_, payload)) = target_id.split_once(marker) else {
+            return false;
+        };
+        let Some(first) = payload.split(':').next() else {
+            return false;
+        };
+        !first.chars().all(|ch| ch.is_ascii_digit())
+    })
 }
 
 fn accepted_brep_package_source_ref(
@@ -658,6 +822,13 @@ pub fn sketch_suggestion_to_draft_request(
 }
 
 fn sketch_expr(sketch: &SketchDefinition) -> AppResult<String> {
+    if sketch.view == SketchView::Front {
+        let profiles = closed_profiles_for_sketch(sketch);
+        if !profiles.is_empty() {
+            return front_profile_expr(&profiles);
+        }
+    }
+
     let mut primitives = Vec::with_capacity(sketch.primitives.len());
     for primitive in &sketch.primitives {
         primitives.push(primitive_expr(primitive)?);
@@ -712,6 +883,7 @@ fn compact_primitive_for_source(
         points: compact_points,
         closed: primitive.closed,
         radius: primitive.radius,
+        topology: primitive.topology.clone(),
     }
 }
 
@@ -1030,6 +1202,7 @@ struct HullProfile {
     sketch_id: String,
     primitive: SketchPrimitive,
     bounds: ProfileBounds,
+    topology_role: Option<HullProfileRole>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1185,25 +1358,29 @@ fn find_closed_profile(document: &SketchDocument, view: SketchView) -> Option<Hu
     find_closed_profiles(document, view).into_iter().next()
 }
 
+fn closed_profiles_for_sketch(sketch: &SketchDefinition) -> Vec<HullProfile> {
+    sketch
+        .primitives
+        .iter()
+        .filter(|primitive| primitive.closed)
+        .filter_map(|primitive| {
+            primitive_bounds(primitive).map(|bounds| HullProfile {
+                sketch_id: sketch.sketch_id.clone(),
+                primitive: primitive.clone(),
+                bounds,
+                topology_role: hull_profile_role_from_primitive(primitive),
+            })
+        })
+        .collect()
+}
+
 fn find_closed_profiles(document: &SketchDocument, view: SketchView) -> Vec<HullProfile> {
     let mut profiles = Vec::new();
     for sketch in &document.sketches {
         if sketch.view != view {
             continue;
         }
-        for primitive in &sketch.primitives {
-            if !primitive.closed {
-                continue;
-            }
-            let Some(bounds) = primitive_bounds(primitive) else {
-                continue;
-            };
-            profiles.push(HullProfile {
-                sketch_id: sketch.sketch_id.clone(),
-                primitive: primitive.clone(),
-                bounds,
-            });
-        }
+        profiles.extend(closed_profiles_for_sketch(sketch));
     }
     profiles
 }
@@ -1212,6 +1389,9 @@ fn classify_hull_profiles(profiles: &[HullProfile]) -> Vec<ClassifiedHullProfile
     profiles
         .iter()
         .map(|profile| {
+            if let Some(role) = profile.topology_role {
+                return ClassifiedHullProfile { profile, role };
+            }
             let sample = primitive_representative_point(&profile.primitive)
                 .unwrap_or([profile.bounds.center_x(), profile.bounds.center_y()]);
             let area = primitive_area_abs(&profile.primitive);
@@ -1233,6 +1413,14 @@ fn classify_hull_profiles(profiles: &[HullProfile]) -> Vec<ClassifiedHullProfile
             }
         })
         .collect()
+}
+
+fn hull_profile_role_from_primitive(primitive: &SketchPrimitive) -> Option<HullProfileRole> {
+    match primitive.topology.as_ref()?.loop_role.as_ref()? {
+        BrepProjectedLoopRole::Outer => Some(HullProfileRole::Outer),
+        BrepProjectedLoopRole::Hole => Some(HullProfileRole::Hole),
+        BrepProjectedLoopRole::Unknown => None,
+    }
 }
 
 fn primitive_bounds(primitive: &SketchPrimitive) -> Option<ProfileBounds> {
@@ -2027,7 +2215,11 @@ fn validate_candidate_reprojection(
         if covered < total {
             issues.push(SketchValidationIssue {
                 sketch_id: view.sketch_id.clone(),
+                kind: SketchValidationIssueKind::ProjectionReplayCoverageGap,
+                view: view.view.clone(),
                 primitive_id: Some(view.primitive_id.clone()),
+                edge_id: None,
+                topology: None,
                 severity: SketchValidationSeverity::Error,
                 message: format!(
                     "{} projection replay covers {}/{} source edges.",
@@ -2042,7 +2234,11 @@ fn validate_candidate_reprojection(
     if internals.is_empty() {
         issues.push(SketchValidationIssue {
             sketch_id: "candidate-graph".to_string(),
+            kind: SketchValidationIssueKind::CandidateGraphNoVertices,
+            view: SketchView::Custom,
             primitive_id: None,
+            edge_id: None,
+            topology: None,
             severity: SketchValidationSeverity::Error,
             message: "BRep candidate graph has no vertices.".to_string(),
         });
@@ -2050,7 +2246,11 @@ fn validate_candidate_reprojection(
     if edges.is_empty() {
         issues.push(SketchValidationIssue {
             sketch_id: "candidate-graph".to_string(),
+            kind: SketchValidationIssueKind::CandidateGraphNoEdges,
+            view: SketchView::Custom,
             primitive_id: None,
+            edge_id: None,
+            topology: None,
             severity: SketchValidationSeverity::Error,
             message: "BRep candidate graph has no edges with two-view support.".to_string(),
         });
@@ -2252,7 +2452,10 @@ fn safe_part_id(sketch_id: &str, primitive_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     struct TestResolver {
         root: PathBuf,
@@ -2279,6 +2482,7 @@ mod tests {
             points,
             radius: None,
             closed: true,
+            topology: None,
         }
     }
 
@@ -2345,6 +2549,148 @@ mod tests {
         }
     }
 
+    #[test]
+    fn generate_sketch_draft_source_emits_profile_holes_for_front_multi_loop_sketch() {
+        let request = SketchDraftRequest {
+            part_id: "sketch-draft-part".to_string(),
+            sketch: SketchDefinition {
+                sketch_id: "sketch-front".to_string(),
+                view: SketchView::Front,
+                plane: None,
+                primitives: vec![
+                    polyline(
+                        "front-outer",
+                        vec![
+                            [0.0, 0.0],
+                            [80.0, 0.0],
+                            [80.0, 50.0],
+                            [0.0, 50.0],
+                            [0.0, 0.0],
+                        ],
+                    ),
+                    polyline(
+                        "front-hole",
+                        vec![
+                            [25.0, 18.0],
+                            [45.0, 18.0],
+                            [45.0, 34.0],
+                            [25.0, 34.0],
+                            [25.0, 18.0],
+                        ],
+                    ),
+                ],
+                constraints: Vec::new(),
+            },
+            operation: SketchDraftOperationKind::Extrude,
+            amount: 12.0,
+            symmetric: false,
+        };
+
+        let draft = generate_sketch_draft_source(request).expect("draft source should succeed");
+
+        assert!(draft.source.contains("(profile :outer"));
+        assert!(draft.source.contains(":holes"));
+        assert!(!draft.source.contains("(union (polygon"));
+    }
+
+    #[test]
+    fn generate_sketch_draft_source_uses_primitive_topology_roles_for_disjoint_front_loops() {
+        let mut outer = polyline(
+            "front-outer",
+            vec![
+                [0.0, 0.0],
+                [30.0, 0.0],
+                [30.0, 20.0],
+                [0.0, 20.0],
+                [0.0, 0.0],
+            ],
+        );
+        outer.topology = Some(crate::models::SketchPrimitiveTopology {
+            loop_id: Some("front-outer".to_string()),
+            edge_ids: vec!["outer-a".to_string()],
+            loop_role: Some(BrepProjectedLoopRole::Outer),
+            source_class: Some("derived".to_string()),
+        });
+        let mut hole = polyline(
+            "front-hole",
+            vec![
+                [40.0, 0.0],
+                [55.0, 0.0],
+                [55.0, 12.0],
+                [40.0, 12.0],
+                [40.0, 0.0],
+            ],
+        );
+        hole.topology = Some(crate::models::SketchPrimitiveTopology {
+            loop_id: Some("front-hole".to_string()),
+            edge_ids: vec!["inner-a".to_string()],
+            loop_role: Some(BrepProjectedLoopRole::Hole),
+            source_class: Some("derived".to_string()),
+        });
+        let request = SketchDraftRequest {
+            part_id: "sketch-draft-part".to_string(),
+            sketch: SketchDefinition {
+                sketch_id: "sketch-front".to_string(),
+                view: SketchView::Front,
+                plane: None,
+                primitives: vec![outer, hole],
+                constraints: Vec::new(),
+            },
+            operation: SketchDraftOperationKind::Extrude,
+            amount: 12.0,
+            symmetric: false,
+        };
+
+        let draft = generate_sketch_draft_source(request).expect("draft source should succeed");
+
+        assert!(draft.source.contains("(profile :outer"));
+        assert!(draft.source.contains(":holes"));
+        assert!(!draft.source.contains("(union (polygon"));
+    }
+
+    #[test]
+    fn generate_sketch_draft_source_keeps_disjoint_front_multi_loop_sketch_as_union() {
+        let request = SketchDraftRequest {
+            part_id: "sketch-draft-part".to_string(),
+            sketch: SketchDefinition {
+                sketch_id: "sketch-front".to_string(),
+                view: SketchView::Front,
+                plane: None,
+                primitives: vec![
+                    polyline(
+                        "front-left",
+                        vec![
+                            [0.0, 0.0],
+                            [20.0, 0.0],
+                            [20.0, 20.0],
+                            [0.0, 20.0],
+                            [0.0, 0.0],
+                        ],
+                    ),
+                    polyline(
+                        "front-right",
+                        vec![
+                            [40.0, 0.0],
+                            [60.0, 0.0],
+                            [60.0, 20.0],
+                            [40.0, 20.0],
+                            [40.0, 0.0],
+                        ],
+                    ),
+                ],
+                constraints: Vec::new(),
+            },
+            operation: SketchDraftOperationKind::Extrude,
+            amount: 12.0,
+            symmetric: false,
+        };
+
+        let draft = generate_sketch_draft_source(request).expect("draft source should succeed");
+
+        assert!(draft.source.contains("(union (polygon"));
+        assert!(!draft.source.contains("(profile :outer"));
+    }
+
     fn concave_front_document() -> SketchDocument {
         SketchDocument {
             document_id: "candidate-concave-doc".to_string(),
@@ -2400,6 +2746,119 @@ mod tests {
         }
     }
 
+    fn sample_manifest_value(alias_ids: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            "modelId": "generated-abc123",
+            "sourceKind": "generated",
+            "engineKind": "freecad",
+            "sourceLanguage": "legacyPython",
+            "geometryBackend": "freecad",
+            "document": {
+                "documentName": "Doc",
+                "documentLabel": "Doc",
+                "sourcePath": null,
+                "objectCount": 1,
+                "warnings": [],
+            },
+            "parts": [{
+                "partId": "part-shell",
+                "freecadObjectName": "Shell",
+                "label": "Shell",
+                "kind": "Part::Feature",
+                "semanticRole": "body",
+                "viewerAssetPath": "/tmp/node-shell.stl",
+                "viewerNodeIds": ["node-shell"],
+                "parameterKeys": ["radius"],
+                "editable": true,
+                "bounds": null,
+                "volume": null,
+                "area": null,
+            }],
+            "parameterGroups": [],
+            "controlPrimitives": [],
+            "controlRelations": [],
+            "controlViews": [],
+            "advisories": [],
+            "selectionTargets": [{
+                "targetId": "target-shell",
+                "aliasIds": alias_ids,
+                "partId": "part-shell",
+                "viewerNodeId": "node-shell",
+                "label": "Shell",
+                "kind": "object",
+                "editable": true,
+                "parameterKeys": [],
+                "primitiveIds": [],
+                "viewIds": [],
+            }],
+            "measurementAnnotations": [],
+            "warnings": [],
+            "enrichmentState": {
+                "status": "none",
+                "proposals": [],
+            },
+        })
+    }
+
+    fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
+        ArtifactBundle {
+            schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: "generated-abc123".to_string(),
+            source_kind: crate::models::ModelSourceKind::Generated,
+            engine_kind: crate::models::EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: manifest_path.to_string(),
+            macro_path: Some("/tmp/model.py".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: vec![crate::models::ViewerEdgeTarget {
+                target_id: "alias-edge".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: vec!["legacy-edge".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell edge".to_string(),
+                editable: true,
+                start: crate::models::ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: crate::models::ViewerEdgePoint {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            }],
+            face_targets: vec![crate::models::ViewerFaceTarget {
+                target_id: "alias-face".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: vec!["legacy-face".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell face".to_string(),
+                editable: true,
+                center: crate::models::ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                normal: Some([0.0, 0.0, 1.0]),
+                area: Some(1.0),
+            }],
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
+        }
+    }
+
     #[test]
     fn analyze_sketch_brep_candidates_searches_silhouette_cells() {
         let response = analyze_sketch_brep_candidates(SketchBrepCandidateRequest {
@@ -2431,6 +2890,171 @@ mod tests {
             SketchBrepCandidateSourceStrategy::FrontProfilePrism
         );
         assert!(response.search.evidence[1].contains("selected 3 silhouette-consistent cells"));
+    }
+
+    #[test]
+    fn accepted_brep_component_package_accepts_manifest_alias_target_ids() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-accepted-brep-alias-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("temp root");
+        let manifest_path = root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&sample_manifest_value(&["legacy-shell"]))
+                .expect("manifest json"),
+        )
+        .expect("manifest write");
+
+        let request = SketchAcceptedBrepComponentPackageRequest {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            display_name: "Pkg".to_string(),
+            tags: Vec::new(),
+            component_id: "accepted-shell".to_string(),
+            component_version: "1.0.0".to_string(),
+            component_display_name: "Accepted Shell".to_string(),
+            source_ref: "components/accepted-shell/source.step".to_string(),
+            artifact_bundle: Some(sample_artifact_bundle(&manifest_path.to_string_lossy())),
+            document: three_view_box_document(),
+            solution_id: "solution0".to_string(),
+            port_types: vec![crate::models::PortTypeDefinition {
+                type_id: "mechanical.anchor.v1".to_string(),
+                display_name: "Anchor".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            params: Vec::new(),
+            ui_spec: crate::models::UiSpec::default(),
+            initial_params: DesignParams::new(),
+            ports: vec![crate::models::ComponentPort {
+                port_id: "anchor".to_string(),
+                type_id: "mechanical.anchor.v1".to_string(),
+                target_ids: vec!["legacy-shell".to_string()],
+                frame: None,
+                params: Default::default(),
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+            }],
+        };
+
+        accepted_brep_candidate_to_component_package(request)
+            .expect("alias target id should resolve");
+    }
+
+    #[test]
+    fn accepted_brep_component_package_accepts_viewer_alias_target_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-accepted-brep-viewer-alias-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let manifest_path = root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&sample_manifest_value(&[])).expect("manifest json"),
+        )
+        .expect("manifest write");
+
+        let request = SketchAcceptedBrepComponentPackageRequest {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            display_name: "Pkg".to_string(),
+            tags: Vec::new(),
+            component_id: "accepted-shell".to_string(),
+            component_version: "1.0.0".to_string(),
+            component_display_name: "Accepted Shell".to_string(),
+            source_ref: "components/accepted-shell/source.step".to_string(),
+            artifact_bundle: Some(sample_artifact_bundle(&manifest_path.to_string_lossy())),
+            document: three_view_box_document(),
+            solution_id: "solution0".to_string(),
+            port_types: vec![crate::models::PortTypeDefinition {
+                type_id: "mechanical.anchor.v1".to_string(),
+                display_name: "Anchor".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            params: Vec::new(),
+            ui_spec: crate::models::UiSpec::default(),
+            initial_params: DesignParams::new(),
+            ports: vec![crate::models::ComponentPort {
+                port_id: "anchor".to_string(),
+                type_id: "mechanical.anchor.v1".to_string(),
+                target_ids: vec!["legacy-edge".to_string()],
+                frame: None,
+                params: Default::default(),
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+            }],
+        };
+
+        accepted_brep_candidate_to_component_package(request)
+            .expect("viewer alias target id should resolve");
+    }
+
+    #[test]
+    fn accepted_brep_component_package_normalizes_viewer_alias_target_ids_to_public_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-accepted-brep-viewer-alias-normalize-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let manifest_path = root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&sample_manifest_value(&[])).expect("manifest json"),
+        )
+        .expect("manifest write");
+
+        let request = SketchAcceptedBrepComponentPackageRequest {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            display_name: "Pkg".to_string(),
+            tags: Vec::new(),
+            component_id: "accepted-shell".to_string(),
+            component_version: "1.0.0".to_string(),
+            component_display_name: "Accepted Shell".to_string(),
+            source_ref: "components/accepted-shell/source.step".to_string(),
+            artifact_bundle: Some(sample_artifact_bundle(&manifest_path.to_string_lossy())),
+            document: three_view_box_document(),
+            solution_id: "solution0".to_string(),
+            port_types: vec![crate::models::PortTypeDefinition {
+                type_id: "mechanical.anchor.v1".to_string(),
+                display_name: "Anchor".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            params: Vec::new(),
+            ui_spec: crate::models::UiSpec::default(),
+            initial_params: DesignParams::new(),
+            ports: vec![crate::models::ComponentPort {
+                port_id: "anchor".to_string(),
+                type_id: "mechanical.anchor.v1".to_string(),
+                target_ids: vec!["legacy-edge".to_string()],
+                frame: None,
+                params: Default::default(),
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+            }],
+        };
+
+        let package = accepted_brep_candidate_to_component_package(request)
+            .expect("viewer alias target id should normalize");
+        assert_eq!(
+            package.components[0].ports[0].target_ids,
+            vec!["alias-edge".to_string()]
+        );
     }
 
     #[test]
@@ -2509,6 +3133,156 @@ mod tests {
             .expect("accepted exact prism STEP artifact");
         assert!(Path::new(&prism_bundle.preview_stl_path).is_file());
         assert!(Path::new(&prism_step_artifact.path).is_file());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_accepted_brep_component_package_project_round_trips_exact_target_ids_through_step() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout =
+            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ecky-accepted-brep-package-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let resolver = TestResolver { root: root.clone() };
+        let freecad_capability =
+            crate::runtime_capabilities::probe_freecad_runtime(None, &resolver);
+        if !freecad_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let accepted = generate_accepted_brep_candidate_source(SketchBrepCandidateAcceptRequest {
+            part_id: "accepted-body".to_string(),
+            document: three_view_box_document(),
+            solution_id: "solution0".to_string(),
+            tolerance: None,
+        })
+        .expect("accepted source");
+        let program = crate::ecky_scheme::compile_to_core_program(&accepted.draft_source.source)
+            .expect("accepted source compiles");
+        let (bundle, manifest) =
+            crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle(
+                &program,
+                &accepted.draft_source.source,
+                &DesignParams::new(),
+                &layout,
+                &resolver,
+            )
+            .expect("direct STEP bundle");
+        let edge_target_id = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .and_then(|target| target.target_id.clone())
+            .expect("edge target");
+        let face_target_id = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .and_then(|target| target.target_id.clone())
+            .expect("face target");
+        let expected_edge_target_id = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .and_then(|target| target.target_id.clone())
+            .expect("edge target");
+        let expected_face_target_id = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .and_then(|target| target.target_id.clone())
+            .expect("face target");
+
+        let project_dir = root.join("pkg");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let package = write_accepted_brep_component_package_project(
+            &project_dir,
+            SketchAcceptedBrepComponentPackageRequest {
+                package_id: "pkg.accepted".to_string(),
+                version: "1.0.0".to_string(),
+                display_name: "Accepted".to_string(),
+                tags: Vec::new(),
+                component_id: "accepted-body".to_string(),
+                component_version: "1.0.0".to_string(),
+                component_display_name: "Accepted Body".to_string(),
+                source_ref: "components/accepted-body/source.step".to_string(),
+                artifact_bundle: Some(bundle),
+                document: three_view_box_document(),
+                solution_id: "solution0".to_string(),
+                port_types: vec![crate::models::PortTypeDefinition {
+                    type_id: "mechanical.anchor.v1".to_string(),
+                    display_name: "Anchor".to_string(),
+                    base: None,
+                    interfaces: Vec::new(),
+                    compatible_with: Vec::new(),
+                    allowed_ops: Vec::new(),
+                    params: Vec::new(),
+                }],
+                params: Vec::new(),
+                ui_spec: crate::models::UiSpec::default(),
+                initial_params: DesignParams::new(),
+                ports: vec![crate::models::ComponentPort {
+                    port_id: "anchor".to_string(),
+                    type_id: "mechanical.anchor.v1".to_string(),
+                    target_ids: vec![edge_target_id, face_target_id],
+                    frame: None,
+                    params: Default::default(),
+                    interfaces: Vec::new(),
+                    compatible_with: Vec::new(),
+                    allowed_ops: Vec::new(),
+                }],
+            },
+        )
+        .expect("write accepted package");
+
+        assert_eq!(
+            package.components[0].ports[0].target_ids,
+            vec![expected_edge_target_id, expected_face_target_id]
+        );
+
+        let source_path = project_dir.join("components/accepted-body/source.step");
+        assert!(source_path.is_file());
+        let imported_bundle =
+            crate::freecad::import_step(source_path.to_string_lossy().as_ref(), None, &resolver)
+                .expect("import packaged step");
+        let imported_manifest_raw = fs::read_to_string(imported_bundle.manifest_path.trim())
+            .expect("read imported manifest");
+        let imported_manifest: crate::models::ModelManifest =
+            serde_json::from_str(&imported_manifest_raw).expect("parse imported manifest");
+        let installed_source = crate::models::InstalledComponentSource {
+            package_id: package.package_id.clone(),
+            version: package.version.clone(),
+            package_display_name: package.display_name.clone(),
+            package_dir: project_dir.to_string_lossy().to_string(),
+            component: package.components[0].clone(),
+            port_types: package.port_types.clone(),
+            mate_types: package.mate_types.clone(),
+            source_path: source_path.to_string_lossy().to_string(),
+        };
+        crate::commands::component_package::validate_rendered_component_port_targets(
+            &installed_source,
+            &imported_bundle,
+            &imported_manifest,
+        )
+        .expect("accepted round-trip target ids");
 
         let _ = std::fs::remove_dir_all(root);
     }

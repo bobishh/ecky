@@ -1144,6 +1144,9 @@ mod tests {
             }],
             selection_targets: vec![SelectionTarget {
                 target_id: Some("target-outer-shell".to_string()),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
                 part_id: "part-outer-shell".to_string(),
                 viewer_node_id: "OuterShell001".to_string(),
                 label: "Outer Shell".to_string(),

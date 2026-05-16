@@ -28,6 +28,7 @@ pub mod services;
 pub mod sketch_brep_validation;
 pub mod sketch_draft_runtime;
 pub mod source_flavor;
+pub mod topology_target_ids;
 
 #[cfg(test)]
 pub(crate) fn build123d_test_env_lock() -> &'static std::sync::Mutex<()> {

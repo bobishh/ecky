@@ -12,11 +12,14 @@ use crate::ecky_core_ir::{
     CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp,
     CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CoreParameter,
     CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart, CorePathOp,
-    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreShapeBinding, CoreSurfaceOp,
-    CoreSymbol, CoreTransformOp, CoreValueKind, NodeId, ParamId, PartId, ProgramId, SourceFileId,
-    SourceSpan,
+    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSelectorPayload, CoreShapeBinding,
+    CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind, NodeId, ParamId, PartId, ProgramId,
+    SourceFileId, SourceSpan,
 };
 use crate::ecky_deterministic;
+use crate::ecky_ir::edge_ops::{
+    parse_core_edge_selector_payload, parse_core_face_selector_payload,
+};
 
 use super::bootstrap;
 
@@ -24,6 +27,28 @@ const ECKY_COMPILE_STACK_SIZE: usize = 32 * 1024 * 1024;
 const ECKY_SOURCE_MAX_BYTES: usize = 512 * 1024;
 const ECKY_SOURCE_MAX_LIST_FORMS: usize = 20_000;
 const ECKY_SOURCE_MAX_PAREN_DEPTH: usize = 256;
+
+fn selector_payload_for_keyword(name: &str, value: &CoreNode) -> Option<CoreSelectorPayload> {
+    let selector = match &value.kind {
+        CoreNodeKind::Literal(CoreLiteral::Text(text)) => text.as_str(),
+        CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => match symbol {
+            CoreSymbol::Start => "start",
+            CoreSymbol::End => "end",
+            CoreSymbol::Xy => "xy",
+            CoreSymbol::Yz => "yz",
+            CoreSymbol::Xz => "xz",
+            CoreSymbol::Min => "min",
+            CoreSymbol::Center => "center",
+            CoreSymbol::Max => "max",
+        },
+        _ => return None,
+    };
+    match name {
+        "edges" => parse_core_edge_selector_payload(selector).ok(),
+        "faces" => parse_core_face_selector_payload(selector).ok(),
+        _ => None,
+    }
+}
 
 pub fn try_compile_to_legacy_source(source: &str) -> Option<AppResult<String>> {
     match compile_to_legacy_source(source) {
@@ -1723,18 +1748,33 @@ fn parse_expanded_node(
                                 if let TokenType::Keyword(name) = &atom.syn.ty {
                                     let normalized = normalize_keyword(&name.to_string());
                                     if normalized.starts_with(':') && index + 1 < items.len() {
-                                        keywords.push(CoreKeywordArg {
-                                            name: normalized.trim_start_matches(':').to_string(),
-                                            value: parse_expanded_node(
-                                                &items[index + 1],
-                                                next_node,
-                                                param_ids,
-                                                helpers,
-                                                node_refs,
-                                                &body_locals,
-                                                helper_stack,
-                                            )?,
-                                        });
+                                        let value = parse_expanded_node(
+                                            &items[index + 1],
+                                            next_node,
+                                            param_ids,
+                                            helpers,
+                                            node_refs,
+                                            &body_locals,
+                                            helper_stack,
+                                        )?;
+                                        let keyword_name =
+                                            normalized.trim_start_matches(':').to_string();
+                                        keywords.push(
+                                            selector_payload_for_keyword(&keyword_name, &value)
+                                                .map(|selector| {
+                                                    CoreKeywordArg::selector(
+                                                        keyword_name.clone(),
+                                                        value.clone(),
+                                                        selector,
+                                                    )
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    CoreKeywordArg::expr(
+                                                        keyword_name.clone(),
+                                                        value,
+                                                    )
+                                                }),
+                                        );
                                         index += 2;
                                         continue;
                                     }
@@ -4011,9 +4051,16 @@ fn clone_node_with_fresh_ids(node: &CoreNode, next_node: &mut u64) -> CoreNode {
                 .collect(),
             keywords: keywords
                 .iter()
-                .map(|keyword| CoreKeywordArg {
-                    name: keyword.name.clone(),
-                    value: clone_node_with_fresh_ids(&keyword.value, next_node),
+                .map(|keyword| match keyword.selector_payload() {
+                    Some(selector) => CoreKeywordArg::selector(
+                        keyword.name.clone(),
+                        clone_node_with_fresh_ids(keyword.source_node(), next_node),
+                        selector.clone(),
+                    ),
+                    None => CoreKeywordArg::expr(
+                        keyword.name.clone(),
+                        clone_node_with_fresh_ids(keyword.source_node(), next_node),
+                    ),
                 })
                 .collect(),
         },
@@ -5609,16 +5656,28 @@ fn parse_node(
                             if let Ok(name) = symbol_name(&items[index]) {
                                 let normalized = normalize_keyword(&name);
                                 if normalized.starts_with(':') && index + 1 < items.len() {
-                                    keywords.push(CoreKeywordArg {
-                                        name: normalized.trim_start_matches(':').to_string(),
-                                        value: parse_node(
-                                            &items[index + 1],
-                                            next_node,
-                                            param_ids,
-                                            node_refs,
-                                            &body_locals,
-                                        )?,
-                                    });
+                                    let value = parse_node(
+                                        &items[index + 1],
+                                        next_node,
+                                        param_ids,
+                                        node_refs,
+                                        &body_locals,
+                                    )?;
+                                    let keyword_name =
+                                        normalized.trim_start_matches(':').to_string();
+                                    keywords.push(
+                                        selector_payload_for_keyword(&keyword_name, &value)
+                                            .map(|selector| {
+                                                CoreKeywordArg::selector(
+                                                    keyword_name.clone(),
+                                                    value.clone(),
+                                                    selector,
+                                                )
+                                            })
+                                            .unwrap_or_else(|| {
+                                                CoreKeywordArg::expr(keyword_name.clone(), value)
+                                            }),
+                                    );
                                     index += 2;
                                     continue;
                                 }
@@ -5710,23 +5769,23 @@ fn typed_hole_call(
         CompilerError::new(CompilerErrorKind::Parse, "Typed hole requires `:type`.")
     })?;
     let value_kind = typed_hole_value_kind(&type_name)?;
-    let mut keywords = vec![CoreKeywordArg {
-        name: "type".to_string(),
-        value: CoreNode::new(
+    let mut keywords = vec![CoreKeywordArg::expr(
+        "type".to_string(),
+        CoreNode::new(
             alloc_node_id(next_node),
             CoreNodeKind::Literal(CoreLiteral::Text(type_name)),
             CoreValueKind::Text,
         ),
-    }];
+    )];
     if let Some(goal) = goal {
-        keywords.push(CoreKeywordArg {
-            name: "goal".to_string(),
-            value: CoreNode::new(
+        keywords.push(CoreKeywordArg::expr(
+            "goal".to_string(),
+            CoreNode::new(
                 alloc_node_id(next_node),
                 CoreNodeKind::Literal(CoreLiteral::Text(goal)),
                 CoreValueKind::Text,
             ),
-        });
+        ));
     }
     Ok((
         CoreNodeKind::Call {
@@ -6193,7 +6252,7 @@ fn emit_node(
             );
             for keyword in keywords {
                 items.push(format!(":{}", keyword.name));
-                items.push(emit_node(&keyword.value, param_names, node_names));
+                items.push(emit_node(keyword.source_node(), param_names, node_names));
             }
             format!("({})", items.join(" "))
         }
@@ -6784,7 +6843,7 @@ mod tests {
         ));
         assert_eq!(keywords.len(), 1);
         assert!(matches!(
-            keywords[0].value.kind,
+            keywords[0].source_node().kind,
             CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Symbol(CoreSymbol::End))
         ));
         assert!(matches!(
@@ -7264,7 +7323,7 @@ mod tests {
             .find(|keyword| keyword.name == "closed")
             .expect("closed keyword");
         assert!(matches!(
-            closed.value.kind,
+            closed.source_node().kind,
             CoreNodeKind::Literal(CoreLiteral::Boolean(true))
         ));
     }
@@ -7705,6 +7764,171 @@ mod tests {
     }
 
     #[test]
+    fn compiles_exact_edge_selector_keyword_payload() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:edge:0:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("compile");
+        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(keywords.len(), 1);
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::EdgeTargetIds(vec![
+                "body:edge:0:0-0-0_0-0-10".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn compiles_coarse_edge_selector_keyword_payload() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "left+vertical"
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("compile");
+        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::EdgeClauses(vec![
+                crate::ecky_core_ir::CoreEdgeSelectorClause::Boundary {
+                    axis: crate::ecky_core_ir::CoreEdgeAxis::X,
+                    bound: crate::ecky_core_ir::CoreEdgeBound::Min,
+                },
+                crate::ecky_core_ir::CoreEdgeSelectorClause::Axis(
+                    crate::ecky_core_ir::CoreEdgeAxis::Z,
+                ),
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn compiles_exact_face_selector_keyword_payload() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "target-id:body:face:0:0-0-10:400"
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("compile");
+        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(keywords.len(), 1);
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceTargetIds(vec![
+                "body:face:0:0-0-10:400".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn compiles_coarse_face_selector_keyword_payload() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "top"
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("compile");
+        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(keywords.len(), 1);
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceClauses(vec![
+                crate::ecky_core_ir::CoreFaceSelectorClause::Boundary {
+                    axis: crate::ecky_core_ir::CoreEdgeAxis::Z,
+                    bound: crate::ecky_core_ir::CoreEdgeBound::Max,
+                },
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn compiles_richer_face_selector_keyword_payload() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "planar+normal-z+area-max"
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("compile");
+        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(keywords.len(), 1);
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceClauses(vec![
+                crate::ecky_core_ir::CoreFaceSelectorClause::Planar,
+                crate::ecky_core_ir::CoreFaceSelectorClause::Normal(
+                    crate::ecky_core_ir::CoreEdgeAxis::Z,
+                ),
+                crate::ecky_core_ir::CoreFaceSelectorClause::Area(
+                    crate::ecky_core_ir::CoreFaceAreaRank::Max,
+                ),
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn clone_node_with_fresh_ids_preserves_selector_payload() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:edge:0:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("compile");
+        let mut next_node = 10_000;
+        let cloned = clone_node_with_fresh_ids(&program.parts[0].root, &mut next_node);
+        let CoreNodeKind::Call { keywords, .. } = &cloned.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::EdgeTargetIds(vec![
+                "body:edge:0:0-0-0_0-0-10".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
     fn typed_hole_type_mismatch_fails_typecheck() {
         let err = compile_to_core_program(
             r#"
@@ -7770,7 +7994,7 @@ mod tests {
             ],
             CoreNodeKind::Call { args, keywords, .. } => args
                 .iter()
-                .chain(keywords.iter().map(|keyword| &keyword.value))
+                .chain(keywords.iter().map(|keyword| keyword.source_node()))
                 .collect(),
             CoreNodeKind::Range { start, end } => vec![start.as_ref(), end.as_ref()],
             CoreNodeKind::Map { sources, body, .. } => sources

@@ -858,8 +858,10 @@ export type AutoAgent = { id: string; label: string; cmd: string; model?: string
  */
 startOnDemand?: boolean }
 export type BrepHiddenLineProjectionRequest = { artifactBundle: ArtifactBundle; views?: SketchView[]; tolerance?: number | null; sketchDocument?: SketchDocument | null }
-export type BrepHiddenLineProjectionResponse = { modelId: string; sourceArtifactPath: string; views?: BrepHiddenLineProjectionView[]; warnings?: string[]; validation?: SketchBrepProjectionValidation | null }
+export type BrepHiddenLineProjectionResponse = { modelId: string; sourceArtifactPath: string; views?: BrepHiddenLineProjectionView[]; warningEntries?: BrepHiddenLineWarning[]; validation?: SketchBrepProjectionValidation | null }
 export type BrepHiddenLineProjectionView = { view: SketchView; direction: [number, number, number]; visibleEdges?: BrepProjectedEdge2d[]; hiddenEdges?: BrepProjectedEdge2d[]; loops?: BrepProjectedLoop2d[] }
+export type BrepHiddenLineWarning = { kind: BrepHiddenLineWarningKind; view: SketchView; message: string }
+export type BrepHiddenLineWarningKind = "projectionNoEdges"
 export type BrepProjectedEdge2d = { edgeId: string; points?: ([number, number])[]; sourceClass: string }
 export type BrepProjectedLoop2d = { loopId: string; edgeIds?: string[]; points?: ([number, number])[]; role?: BrepProjectedLoopRole; sourceClass: string }
 export type BrepProjectedLoopRole = "outer" | "hole" | "unknown"
@@ -951,6 +953,10 @@ primaryAgentId?: string | null;
  */
 promptTimeoutSecs?: number; 
 /**
+ * Experimental: expose read-only Ecky Core AST tools for agent authoring.
+ */
+eckyAstAuthoring?: boolean;
+/**
  * External processes available to Ecky in active mode.
  */
 autoAgents?: AutoAgent[] }
@@ -994,7 +1000,7 @@ export type RuntimeBackendCapability = { available: boolean; detail: string; pat
 export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; directOcct: RuntimeBackendCapability; mesh: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
-export type SelectionTarget = { targetId?: string | null; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
+export type SelectionTarget = { targetId?: string | null; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds?: string[]; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
 export type SelectionTargetKind = "part" | "object" | "group" | "edge" | "face"
 export type SketchAcceptedBrepComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef: string; artifactBundle?: ArtifactBundle | null; document: SketchDocument; solutionId: string; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type SketchBrepCandidateAcceptRequest = { partId: string; document: SketchDocument; solutionId: string; tolerance?: number | null }
@@ -1018,11 +1024,13 @@ export type SketchDraftRequest = { partId: string; sketch: SketchDefinition; ope
 export type SketchDraftSource = { sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend; macroDialect: MacroDialect; source: string; warnings?: string[] }
 export type SketchFeatureSuggestion = { suggestionId: string; sketchId: string; primitiveId?: string | null; partId: string; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean; confidence: number; reason: string; warnings?: string[] }
 export type SketchPreviewHullRequest = { partId: string; document: SketchDocument; fallbackDepth: number }
-export type SketchPrimitive = { primitiveId: string; kind: SketchPrimitiveKind; points?: ([number, number])[]; closed?: boolean; radius?: number | null }
+export type SketchPrimitive = { primitiveId: string; kind: SketchPrimitiveKind; points?: ([number, number])[]; closed?: boolean; radius?: number | null; topology?: SketchPrimitiveTopology | null }
 export type SketchPrimitiveKind = "point" | "line" | "polyline" | "spline" | "arc" | "circle"
+export type SketchPrimitiveTopology = { loopId?: string | null; edgeIds?: string[]; loopRole?: BrepProjectedLoopRole | null; sourceClass?: string | null }
 export type SketchSuggestionRequest = { document: SketchDocument; limit?: number | null }
 export type SketchSuggestionResponse = { suggestions?: SketchFeatureSuggestion[]; warnings?: string[] }
-export type SketchValidationIssue = { sketchId: string; primitiveId?: string | null; severity: SketchValidationSeverity; message: string }
+export type SketchValidationIssue = { sketchId: string; kind: SketchValidationIssueKind; view: SketchView; primitiveId?: string | null; edgeId?: string | null; topology?: SketchPrimitiveTopology | null; severity: SketchValidationSeverity; message: string }
+export type SketchValidationIssueKind = "missingClosedProfile" | "missingProjectionEdges" | "boundsMismatch" | "containmentMismatch" | "topologyMismatch" | "concavityMismatch" | "projectionReplayCoverageGap" | "candidateGraphNoVertices" | "candidateGraphNoEdges"
 export type SketchValidationSeverity = "warning" | "error"
 export type SketchView = "front" | "side" | "top" | "custom"
 export type SourceLanguage = "legacyPython" | "ecky" | "build123d"
@@ -1053,8 +1061,8 @@ export type VerifierStatus = "ok" | "ok_rust_only" | "ok_with_backend" | "skippe
 export type ViewerAsset = { partId: string; nodeId: string; objectName: string; label: string; path: string; format: ViewerAssetFormat }
 export type ViewerAssetFormat = "stl" | "gltf" | "glb"
 export type ViewerEdgePoint = { x: number; y: number; z: number }
-export type ViewerEdgeTarget = { targetId: string; partId: string; viewerNodeId: string; label: string; editable: boolean; start: ViewerEdgePoint; end: ViewerEdgePoint }
-export type ViewerFaceTarget = { targetId: string; partId: string; viewerNodeId: string; label: string; editable: boolean; center: ViewerEdgePoint; normal?: [number, number, number] | null; area?: number | null }
+export type ViewerEdgeTarget = { targetId: string; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds: string[]; partId: string; viewerNodeId: string; label: string; editable: boolean; start: ViewerEdgePoint; end: ViewerEdgePoint }
+export type ViewerFaceTarget = { targetId: string; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds: string[]; partId: string; viewerNodeId: string; label: string; editable: boolean; center: ViewerEdgePoint; normal?: [number, number, number] | null; area?: number | null }
 export type ViewportCameraState = { position: [number, number, number]; target: [number, number, number]; zoom?: number | null; fov?: number | null }
 export type VisualIssue = { category: VisualIssueCategory; description: string; partLabel?: string | null }
 export type VisualIssueCategory = "missing_part" | "floating_part" | "connector_broken" | "reference_mismatch" | "topology_broken" | "other"

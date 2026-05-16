@@ -14,6 +14,7 @@ import {
   filterFieldsBySearch,
   pickContextAdvisories,
   pickContextControls,
+  resolveContextSelectionTarget,
   resolveMeasurementCallout,
   resolveActiveContextViewId,
   resolveContextSections,
@@ -26,6 +27,9 @@ import {
 function selectionTarget(target: Partial<SelectionTarget> & Pick<SelectionTarget, 'partId' | 'viewerNodeId' | 'label' | 'kind' | 'editable'>): SelectionTarget {
   return {
     targetId: null,
+    durableTargetId: null,
+    canonicalTargetId: null,
+    aliasIds: [],
     parameterKeys: [],
     primitiveIds: [],
     viewIds: [],
@@ -292,6 +296,125 @@ test('resolveViewerNodeTarget prefers exact object targets over broader part tar
   assert.equal(resolved?.targetId, 'target-body-object');
 });
 
+test('resolveContextSelectionTarget restores canonical target from alias id', () => {
+  const manifestValue = manifest({
+    selectionTargets: [
+      selectionTarget({
+        targetId: 'target-body-object',
+        aliasIds: ['legacy-body-object'],
+        partId: 'body',
+        viewerNodeId: 'Body001',
+        label: 'Body Object',
+        kind: 'object',
+        editable: true,
+      }),
+    ],
+  });
+  const targets = buildContextSelectionTargets(manifestValue);
+
+  const resolved = resolveContextSelectionTarget(
+    manifestValue,
+    targets,
+    'legacy-body-object',
+    null,
+  );
+
+  assert.equal(resolved?.targetId, 'target-body-object');
+});
+
+test('buildContextSelectionTargets prefers stable topology alias as primary edge id', () => {
+  const targets = buildContextSelectionTargets(
+    manifest({
+      selectionTargets: [
+        selectionTarget({
+          targetId: 'body:edge:0:0-0-0_10-0-0',
+          aliasIds: ['body:edge:0-0-0_10-0-0'],
+          partId: 'body',
+          viewerNodeId: 'Body001',
+          label: 'Body Edge',
+          kind: 'edge',
+          editable: true,
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(targets[0]?.targetId, 'body:edge:0-0-0_10-0-0');
+  assert.deepEqual(targets[0]?.aliasIds, ['body:edge:0:0-0-0_10-0-0']);
+});
+
+test('resolveContextSelectionTarget remaps canonical topology edge id onto stable public id', () => {
+  const manifestValue = manifest({
+    selectionTargets: [
+      selectionTarget({
+        targetId: 'body:edge:0:0-0-0_10-0-0',
+        aliasIds: ['body:edge:0-0-0_10-0-0'],
+        partId: 'body',
+        viewerNodeId: 'Body001',
+        label: 'Body Edge',
+        kind: 'edge',
+        editable: true,
+      }),
+    ],
+  });
+  const targets = buildContextSelectionTargets(manifestValue);
+
+  const resolved = resolveContextSelectionTarget(
+    manifestValue,
+    targets,
+    'body:edge:0:0-0-0_10-0-0',
+    null,
+  );
+
+  assert.equal(resolved?.targetId, 'body:edge:0-0-0_10-0-0');
+});
+
+test('buildContextSelectionTargets includes canonical target id as alias', () => {
+  const targets = buildContextSelectionTargets(
+    manifest({
+      selectionTargets: [
+        selectionTarget({
+          targetId: 'body:edge:0-0-0_10-0-0',
+          canonicalTargetId: 'body:edge:0:0-0-0_10-0-0',
+          partId: 'body',
+          viewerNodeId: 'Body001',
+          label: 'Body Edge',
+          kind: 'edge',
+          editable: true,
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(targets[0]?.targetId, 'body:edge:0-0-0_10-0-0');
+  assert.deepEqual(targets[0]?.aliasIds, ['body:edge:0:0-0-0_10-0-0']);
+});
+
+test('buildContextSelectionTargets prefers durable target id and keeps public + canonical aliases', () => {
+  const targets = buildContextSelectionTargets(
+    manifest({
+      selectionTargets: [
+        selectionTarget({
+          targetId: 'body:edge:0-0-0_10-0-0',
+          durableTargetId: 'body:node:42:edge:0-0-0_10-0-0',
+          canonicalTargetId: 'body:edge:0:0-0-0_10-0-0',
+          partId: 'body',
+          viewerNodeId: 'Body001',
+          label: 'Body Edge',
+          kind: 'edge',
+          editable: true,
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(targets[0]?.targetId, 'body:node:42:edge:0-0-0_10-0-0');
+  assert.deepEqual(targets[0]?.aliasIds, [
+    'body:edge:0-0-0_10-0-0',
+    'body:edge:0:0-0-0_10-0-0',
+  ]);
+});
+
 test('resolveMeasurementCallout prefers parameter-key matches over primitive and target matches', () => {
   const manifestValue = manifest({
     selectionTargets: [
@@ -431,6 +554,7 @@ test('resolveMeasurementCallout falls back to selected target matching when no f
     selectionTargets: [
       selectionTarget({
         targetId: 'target-body-edge',
+        aliasIds: ['legacy-body-edge'],
         partId: 'body',
         viewerNodeId: 'Body001',
         label: 'Body Edge',
@@ -449,7 +573,7 @@ test('resolveMeasurementCallout falls back to selected target matching when no f
         axis: 'path',
         parameterKeys: [],
         primitiveIds: [],
-        targetIds: ['target-body-edge'],
+        targetIds: ['legacy-body-edge'],
         guideId: null,
         explanation: null,
         formulaHint: null,
@@ -469,12 +593,13 @@ test('resolveMeasurementCallout falls back to selected target matching when no f
   );
 
   assert.equal(callout?.annotationId, 'edge-clearance');
-  assert.deepEqual(callout?.targetIds, ['target-body-edge']);
+  assert.deepEqual(callout?.targetIds, ['legacy-body-edge']);
 });
 
 test('pickContextControls orders exact target controls before part and global controls', () => {
   const target: ContextSelectionTarget = {
     targetId: 'target-edge',
+    aliasIds: [],
     kind: 'edge',
     partId: 'body',
     label: 'Body Edge',
@@ -509,6 +634,7 @@ test('pickContextControls orders exact target controls before part and global co
 test('resolveContextSections applies target scoping and shared search query together', () => {
   const target: ContextSelectionTarget = {
     targetId: 'target-body',
+    aliasIds: [],
     kind: 'object',
     partId: 'body',
     label: 'Body',
@@ -569,6 +695,7 @@ test('pickContextAdvisories follows currently visible contextual controls', () =
     ),
     {
       targetId: 'target-body',
+      aliasIds: [],
       kind: 'object',
       partId: 'body',
       label: 'Body',
@@ -588,6 +715,7 @@ test('resolveTargetParameterKeys prefers exact target keys before broader part k
     manifest(),
     {
       targetId: 'target-body',
+      aliasIds: [],
       kind: 'object',
       partId: 'body',
       label: 'Body',
@@ -632,6 +760,7 @@ test('resolveActiveContextViewId prefers target-scoped views before global defau
 
   const result = resolveActiveContextViewId(views, {
     targetId: 'target-body',
+    aliasIds: [],
     kind: 'object',
     partId: 'body',
     label: 'Body',
@@ -661,6 +790,7 @@ test('shouldDisplayViewportControlList hides the duplicated global control list'
   assert.equal(
     shouldDisplayViewportControlList({
       targetId: 'global',
+      aliasIds: [],
       kind: 'global',
       partId: null,
       label: 'Model',
@@ -676,6 +806,7 @@ test('shouldDisplayViewportControlList hides the duplicated global control list'
   assert.equal(
     shouldDisplayViewportControlList({
       targetId: 'target-body',
+      aliasIds: [],
       kind: 'object',
       partId: 'body',
       label: 'Body',

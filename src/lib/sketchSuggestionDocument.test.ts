@@ -72,6 +72,41 @@ test('buildSketchSuggestionRequest keeps drawn primitiveId instead of seed id', 
   assert.notEqual(primitive?.primitiveId, 'seed');
 });
 
+test('buildSketchSuggestionRequest preserves primitive topology provenance', () => {
+  const request = buildSketchSuggestionRequest([
+    {
+      ...frontRectangle,
+      topology: {
+        loopId: 'front-outer',
+        edgeIds: ['front-a', 'front-b', 'front-c', 'front-d'],
+        loopRole: 'outer',
+        sourceClass: 'derived',
+      },
+    },
+  ]);
+
+  assert.ok(!('error' in request));
+  assert.deepEqual(request.document.sketches?.[0]?.primitives?.[0]?.topology, {
+    loopId: 'front-outer',
+    edgeIds: ['front-a', 'front-b', 'front-c', 'front-d'],
+    loopRole: 'outer',
+    sourceClass: 'derived',
+  });
+});
+
+test('buildSketchSuggestionRequest preserves replayed sketchId instead of collapsing to view default', () => {
+  const request = buildSketchSuggestionRequest([
+    {
+      ...frontRectangle,
+      sketchId: 'sketch-alpha',
+    },
+  ]);
+
+  assert.ok(!('error' in request));
+  assert.equal(request.document.activeSketchId, 'sketch-alpha');
+  assert.equal(request.document.sketches?.[0]?.sketchId, 'sketch-alpha');
+});
+
 test('buildSketchSuggestionRequest adds width and height dimension constraints for locked profile dimensions', () => {
   const request = buildSketchSuggestionRequest([
     {

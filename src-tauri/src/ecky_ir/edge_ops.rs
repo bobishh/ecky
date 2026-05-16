@@ -4,6 +4,10 @@ use csgrs::float_types::parry3d::na::{Point3, Vector3};
 use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::vertex::Vertex as IrVertex;
 
+use crate::ecky_core_ir::{
+    CoreEdgeAxis, CoreEdgeBound, CoreEdgeSelectorClause, CoreFaceAreaRank, CoreFaceSelectorClause,
+    CoreSelectorPayload,
+};
 use crate::models::{AppResult, ParamValue};
 
 use super::eval_scalar::eval_stringish;
@@ -11,11 +15,115 @@ use super::model::{expr_keyword_name, IrExpr};
 use super::shared::{validation, IrMesh};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EdgeSelector {
+pub(crate) enum EdgeAxis {
+    X,
+    Y,
+    Z,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeBound {
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeSelectorClause {
+    Axis(EdgeAxis),
+    Boundary { axis: EdgeAxis, bound: EdgeBound },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EdgeSelector {
     All,
     Top,
     Bottom,
     Vertical,
+    Left,
+    Right,
+    Front,
+    Back,
+    PlaneMin(EdgeAxis),
+    PlaneMax(EdgeAxis),
+    Axis(EdgeAxis),
+    Compound(Vec<EdgeSelectorClause>),
+    TargetIds(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FaceSelector {
+    Clauses(Vec<FaceSelectorClause>),
+    TargetIds(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FaceAreaRank {
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FaceSelectorClause {
+    Boundary { axis: EdgeAxis, bound: EdgeBound },
+    Planar,
+    Normal(EdgeAxis),
+    Area(FaceAreaRank),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EdgeSelectorSpec {
+    canonical_string: String,
+    python_payload_literal: String,
+    target_ids: Option<Vec<String>>,
+}
+
+impl EdgeSelectorSpec {
+    #[cfg(test)]
+    pub(crate) fn canonical_string(&self) -> &str {
+        &self.canonical_string
+    }
+
+    pub(crate) fn target_ids(&self) -> Option<&[String]> {
+        self.target_ids.as_deref()
+    }
+
+    pub(crate) fn python_payload_literal(&self) -> &str {
+        &self.python_payload_literal
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FaceSelectorSpec {
+    canonical_string: String,
+    python_payload_literal: String,
+    target_ids: Vec<String>,
+}
+
+impl FaceSelectorSpec {
+    #[cfg(test)]
+    pub(crate) fn canonical_string(&self) -> &str {
+        &self.canonical_string
+    }
+
+    #[cfg(test)]
+    pub(crate) fn target_ids(&self) -> &[String] {
+        self.target_ids.as_slice()
+    }
+
+    pub(crate) fn python_payload_literal(&self) -> &str {
+        &self.python_payload_literal
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeExtrema {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+    min_z: f64,
+    max_z: f64,
+    tol: f64,
 }
 
 /// A feature edge between two triangles, identified by canonical vertex indices.
@@ -37,6 +145,765 @@ pub(super) struct FeatureEdge {
 }
 
 pub(super) const FEATURE_EDGE_DIHEDRAL_THRESHOLD: f64 = 0.35; // ~20 degrees
+
+const EDGE_SELECTOR_HELP: &str =
+    "`all`, `top`, `bottom`, `left`, `right`, `front`, `back`, `vertical`, `axis-x`, `axis-y`, `axis-z`, `x-min`, `x-max`, `y-min`, `y-max`, `z-min`, `z-max`, `target-id:<id>`, `target-ids:<id>|<id>`, or `+` intersections such as `x-min+axis-z`.";
+const FACE_SELECTOR_HELP: &str =
+    "`all`, `planar`, `normal-x`, `normal-y`, `normal-z`, `area-min`, `area-max`, `top`, `bottom`, `left`, `right`, `front`, `back`, `x-min`, `x-max`, `y-min`, `y-max`, `z-min`, `z-max`, `target-id:<id>`, `target-ids:<id>|<id>`, or `+` intersections such as `planar+normal-z+z-max`.";
+
+impl EdgeSelector {
+    pub(crate) fn clauses(&self) -> Option<Vec<EdgeSelectorClause>> {
+        match self {
+            EdgeSelector::All => None,
+            EdgeSelector::Top => Some(vec![EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Z,
+                bound: EdgeBound::Max,
+            }]),
+            EdgeSelector::Bottom => Some(vec![EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Z,
+                bound: EdgeBound::Min,
+            }]),
+            EdgeSelector::Vertical => Some(vec![EdgeSelectorClause::Axis(EdgeAxis::Z)]),
+            EdgeSelector::Left => Some(vec![EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::X,
+                bound: EdgeBound::Min,
+            }]),
+            EdgeSelector::Right => Some(vec![EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::X,
+                bound: EdgeBound::Max,
+            }]),
+            EdgeSelector::Front => Some(vec![EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Y,
+                bound: EdgeBound::Max,
+            }]),
+            EdgeSelector::Back => Some(vec![EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Y,
+                bound: EdgeBound::Min,
+            }]),
+            EdgeSelector::PlaneMin(axis) => Some(vec![EdgeSelectorClause::Boundary {
+                axis: *axis,
+                bound: EdgeBound::Min,
+            }]),
+            EdgeSelector::PlaneMax(axis) => Some(vec![EdgeSelectorClause::Boundary {
+                axis: *axis,
+                bound: EdgeBound::Max,
+            }]),
+            EdgeSelector::Axis(axis) => Some(vec![EdgeSelectorClause::Axis(*axis)]),
+            EdgeSelector::Compound(clauses) => Some(clauses.clone()),
+            EdgeSelector::TargetIds(_) => None,
+        }
+    }
+
+    pub(super) fn canonical_string(&self) -> String {
+        if let Some(target_ids) = self.target_ids() {
+            return format!("target-ids:{}", target_ids.join("|"));
+        }
+        let Some(clauses) = self.clauses() else {
+            return "all".to_string();
+        };
+        clauses
+            .iter()
+            .map(|clause| match clause {
+                EdgeSelectorClause::Axis(axis) => format!("axis-{}", edge_axis_name(*axis)),
+                EdgeSelectorClause::Boundary { axis, bound } => {
+                    format!("{}-{}", edge_axis_name(*axis), edge_bound_name(*bound))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    pub(super) fn target_ids(&self) -> Option<&[String]> {
+        match self {
+            EdgeSelector::TargetIds(target_ids) => Some(target_ids.as_slice()),
+            _ => None,
+        }
+    }
+}
+
+impl FaceSelector {
+    pub(crate) fn canonical_string(&self) -> String {
+        match self {
+            FaceSelector::Clauses(clauses) => {
+                if clauses.is_empty() {
+                    "all".to_string()
+                } else {
+                    clauses
+                        .iter()
+                        .map(|clause| match clause {
+                            FaceSelectorClause::Boundary { axis, bound } => {
+                                format!("{}-{}", edge_axis_name(*axis), edge_bound_name(*bound))
+                            }
+                            FaceSelectorClause::Planar => "planar".to_string(),
+                            FaceSelectorClause::Normal(axis) => {
+                                format!("normal-{}", edge_axis_name(*axis))
+                            }
+                            FaceSelectorClause::Area(rank) => match rank {
+                                FaceAreaRank::Min => "area-min".to_string(),
+                                FaceAreaRank::Max => "area-max".to_string(),
+                            },
+                        })
+                        .collect::<Vec<_>>()
+                        .join("+")
+                }
+            }
+            FaceSelector::TargetIds(target_ids) => format!("target-ids:{}", target_ids.join("|")),
+        }
+    }
+
+    pub(crate) fn target_ids(&self) -> &[String] {
+        match self {
+            FaceSelector::Clauses(_) => &[],
+            FaceSelector::TargetIds(target_ids) => target_ids.as_slice(),
+        }
+    }
+}
+
+pub(super) fn parse_edge_selector_value(selector_str: &str) -> AppResult<EdgeSelector> {
+    if let Some(target_ids) = exact_edge_target_ids_from_selector_str(selector_str)? {
+        return Ok(EdgeSelector::TargetIds(target_ids));
+    }
+    let normalized = selector_str.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(validation(format!(
+            "Unknown edge selector `{}`. Use {}",
+            selector_str, EDGE_SELECTOR_HELP
+        )));
+    }
+    match normalized.as_str() {
+        "all" => return Ok(EdgeSelector::All),
+        "top" => return Ok(EdgeSelector::Top),
+        "bottom" => return Ok(EdgeSelector::Bottom),
+        "vertical" => return Ok(EdgeSelector::Vertical),
+        "left" => return Ok(EdgeSelector::Left),
+        "right" => return Ok(EdgeSelector::Right),
+        "front" => return Ok(EdgeSelector::Front),
+        "back" => return Ok(EdgeSelector::Back),
+        _ => {}
+    }
+
+    let mut clauses = Vec::new();
+    for raw_token in normalized.split('+') {
+        let token = raw_token.trim();
+        if token.is_empty() {
+            return Err(validation(format!(
+                "Unknown edge selector `{}`. Use {}",
+                selector_str, EDGE_SELECTOR_HELP
+            )));
+        }
+        if token == "all" {
+            return Err(validation(format!(
+                "Edge selector `{}` cannot combine `all` with other clauses.",
+                selector_str
+            )));
+        }
+        clauses.push(parse_edge_selector_clause(token, selector_str)?);
+    }
+
+    if clauses.is_empty() {
+        Ok(EdgeSelector::All)
+    } else if clauses.len() == 1 {
+        match clauses[0] {
+            EdgeSelectorClause::Axis(axis) => Ok(EdgeSelector::Axis(axis)),
+            EdgeSelectorClause::Boundary {
+                axis,
+                bound: EdgeBound::Min,
+            } => Ok(EdgeSelector::PlaneMin(axis)),
+            EdgeSelectorClause::Boundary {
+                axis,
+                bound: EdgeBound::Max,
+            } => Ok(EdgeSelector::PlaneMax(axis)),
+        }
+    } else {
+        Ok(EdgeSelector::Compound(clauses))
+    }
+}
+
+pub(crate) fn parse_face_selector_value(selector_str: &str) -> AppResult<FaceSelector> {
+    if let Some(target_ids) = exact_face_target_ids_from_selector_str(selector_str)? {
+        return Ok(FaceSelector::TargetIds(target_ids));
+    }
+    let normalized = selector_str.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(validation(format!(
+            "Unknown face selector `{}`. Use {}",
+            selector_str, FACE_SELECTOR_HELP
+        )));
+    }
+    if normalized == "all" {
+        return Ok(FaceSelector::Clauses(Vec::new()));
+    }
+    let mut clauses = Vec::new();
+    for raw_token in normalized.split('+') {
+        let token = raw_token.trim();
+        if token.is_empty() {
+            return Err(validation(format!(
+                "Unknown face selector `{}`. Use {}",
+                selector_str, FACE_SELECTOR_HELP
+            )));
+        }
+        if token == "all" {
+            return Err(validation(format!(
+                "Face selector `{}` cannot combine `all` with other clauses.",
+                selector_str
+            )));
+        }
+        clauses.push(parse_face_selector_clause(token, selector_str)?);
+    }
+    Ok(FaceSelector::Clauses(clauses))
+}
+
+pub(crate) fn parse_edge_selector_spec(selector_str: &str) -> AppResult<EdgeSelectorSpec> {
+    let parsed = parse_edge_selector_value(selector_str)?;
+    Ok(EdgeSelectorSpec {
+        canonical_string: parsed.canonical_string(),
+        python_payload_literal: edge_selector_python_payload_literal(&parsed),
+        target_ids: parsed.target_ids().map(|ids| ids.to_vec()),
+    })
+}
+
+pub(crate) fn parse_core_edge_selector_payload(
+    selector_str: &str,
+) -> AppResult<CoreSelectorPayload> {
+    let parsed = parse_edge_selector_value(selector_str)?;
+    Ok(match parsed {
+        EdgeSelector::All => CoreSelectorPayload::EdgeAll,
+        EdgeSelector::TargetIds(target_ids) => CoreSelectorPayload::EdgeTargetIds(target_ids),
+        selector => {
+            let clauses = selector
+                .clauses()
+                .unwrap_or_default()
+                .into_iter()
+                .map(core_edge_selector_clause_from_edge_clause)
+                .collect();
+            CoreSelectorPayload::EdgeClauses(clauses)
+        }
+    })
+}
+
+pub(crate) fn parse_core_face_selector_payload(
+    selector_str: &str,
+) -> AppResult<CoreSelectorPayload> {
+    let parsed = parse_face_selector_value(selector_str)?;
+    Ok(match parsed {
+        FaceSelector::TargetIds(target_ids) => CoreSelectorPayload::FaceTargetIds(target_ids),
+        FaceSelector::Clauses(clauses) => CoreSelectorPayload::FaceClauses(
+            clauses
+                .into_iter()
+                .map(core_face_selector_clause_from_face_clause)
+                .collect(),
+        ),
+    })
+}
+
+pub(crate) fn edge_selector_spec_from_core_payload(
+    payload: &CoreSelectorPayload,
+) -> AppResult<EdgeSelectorSpec> {
+    match payload {
+        CoreSelectorPayload::EdgeAll => parse_edge_selector_spec("all"),
+        CoreSelectorPayload::EdgeClauses(clauses) => {
+            parse_edge_selector_spec(&core_edge_selector_clauses_string(clauses))
+        }
+        CoreSelectorPayload::EdgeTargetIds(target_ids) => {
+            parse_edge_selector_spec(&format!("target-ids:{}", target_ids.join("|")))
+        }
+        CoreSelectorPayload::FaceTargetIds(target_ids) => Err(validation(format!(
+            "Expected edge selector payload, got face target ids {:?}.",
+            target_ids
+        ))),
+        CoreSelectorPayload::FaceClauses(clauses) => Err(validation(format!(
+            "Expected edge selector payload, got face selector clauses {:?}.",
+            clauses
+        ))),
+    }
+}
+
+pub(crate) fn face_selector_spec_from_core_payload(
+    payload: &CoreSelectorPayload,
+) -> AppResult<FaceSelectorSpec> {
+    match payload {
+        CoreSelectorPayload::FaceClauses(clauses) => {
+            parse_face_selector_spec(&core_face_selector_clauses_string(clauses))
+        }
+        CoreSelectorPayload::FaceTargetIds(target_ids) => {
+            parse_face_selector_spec(&format!("target-ids:{}", target_ids.join("|")))
+        }
+        CoreSelectorPayload::EdgeAll => Err(validation(
+            "Expected face selector payload, got edge selector `all`.",
+        )),
+        CoreSelectorPayload::EdgeClauses(clauses) => Err(validation(format!(
+            "Expected face selector payload, got edge selector clauses {:?}.",
+            clauses
+        ))),
+        CoreSelectorPayload::EdgeTargetIds(target_ids) => Err(validation(format!(
+            "Expected face selector payload, got edge target ids {:?}.",
+            target_ids
+        ))),
+    }
+}
+
+pub(crate) fn parse_face_selector_spec(selector_str: &str) -> AppResult<FaceSelectorSpec> {
+    let parsed = parse_face_selector_value(selector_str)?;
+    Ok(FaceSelectorSpec {
+        canonical_string: parsed.canonical_string(),
+        python_payload_literal: face_selector_python_payload_literal(&parsed),
+        target_ids: parsed.target_ids().to_vec(),
+    })
+}
+
+pub(crate) fn exact_edge_target_ids_from_selector_str(
+    selector_str: &str,
+) -> AppResult<Option<Vec<String>>> {
+    exact_target_ids_from_prefixed_selector_str(selector_str, ":edge:", "Edge")
+}
+
+pub(crate) fn exact_face_target_ids_from_selector_str(
+    selector_str: &str,
+) -> AppResult<Option<Vec<String>>> {
+    exact_target_ids_from_prefixed_selector_str(selector_str, ":face:", "Face")
+}
+
+fn exact_target_ids_from_prefixed_selector_str(
+    selector_str: &str,
+    required_marker: &str,
+    selector_kind: &str,
+) -> AppResult<Option<Vec<String>>> {
+    let raw = selector_str.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    let payload = if let Some(rest) = raw.get(prefix_len_if_matches(&lower, "target-id:")..) {
+        Some(rest)
+    } else if let Some(rest) = raw.get(prefix_len_if_matches(&lower, "target-ids:")..) {
+        Some(rest)
+    } else {
+        None
+    };
+
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let target_ids = split_target_ids(payload);
+    if target_ids.is_empty() {
+        return Err(validation(format!(
+            "{selector_kind} selector `{}` did not include any target ids.",
+            selector_str
+        )));
+    }
+    if let Some(invalid_target_id) = target_ids
+        .iter()
+        .find(|target_id| !target_id.contains(required_marker))
+    {
+        return Err(validation(format!(
+            "{selector_kind} selector `{}` included non-{} target id `{}`.",
+            selector_str,
+            selector_kind.to_ascii_lowercase(),
+            invalid_target_id
+        )));
+    }
+    Ok(Some(target_ids))
+}
+
+fn prefix_len_if_matches(value: &str, prefix: &str) -> usize {
+    if value.starts_with(prefix) {
+        prefix.len()
+    } else {
+        usize::MAX
+    }
+}
+
+fn split_target_ids(payload: &str) -> Vec<String> {
+    let separator = if payload.contains('|') {
+        '|'
+    } else if payload.contains(',') {
+        ','
+    } else {
+        '\0'
+    };
+    let raw_items: Vec<&str> = if separator == '\0' {
+        vec![payload]
+    } else {
+        payload.split(separator).collect()
+    };
+
+    let mut target_ids = Vec::new();
+    for raw_item in raw_items {
+        let item = raw_item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if !target_ids.iter().any(|existing| existing == item) {
+            target_ids.push(item.to_string());
+        }
+    }
+    target_ids
+}
+
+fn edge_selector_python_payload_literal(selector: &EdgeSelector) -> String {
+    match selector {
+        EdgeSelector::All => "{'kind': 'all'}".to_string(),
+        EdgeSelector::TargetIds(target_ids) => format!(
+            "{{'kind': 'targetIds', 'targetIds': [{}]}}",
+            python_string_list_literal(target_ids)
+        ),
+        _ => {
+            let clauses = selector.clauses().unwrap_or_default();
+            let clause_literals = clauses
+                .iter()
+                .map(|clause| match clause {
+                    EdgeSelectorClause::Axis(axis) => {
+                        format!("{{'kind': 'axis', 'axis': '{}'}}", edge_axis_name(*axis))
+                    }
+                    EdgeSelectorClause::Boundary { axis, bound } => format!(
+                        "{{'kind': 'boundary', 'axis': '{}', 'bound': '{}'}}",
+                        edge_axis_name(*axis),
+                        edge_bound_name(*bound)
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{'kind': 'clauses', 'clauses': [{clause_literals}]}}")
+        }
+    }
+}
+
+fn face_selector_python_payload_literal(selector: &FaceSelector) -> String {
+    match selector {
+        FaceSelector::Clauses(clauses) => {
+            if clauses.is_empty() {
+                "{'kind': 'all'}".to_string()
+            } else {
+                let clause_literals = clauses
+                    .iter()
+                    .map(|clause| match clause {
+                        FaceSelectorClause::Boundary { axis, bound } => format!(
+                            "{{'kind': 'boundary', 'axis': '{}', 'bound': '{}'}}",
+                            edge_axis_name(*axis),
+                            edge_bound_name(*bound)
+                        ),
+                        FaceSelectorClause::Planar => "{'kind': 'planar'}".to_string(),
+                        FaceSelectorClause::Normal(axis) => {
+                            format!("{{'kind': 'normal', 'axis': '{}'}}", edge_axis_name(*axis))
+                        }
+                        FaceSelectorClause::Area(rank) => match rank {
+                            FaceAreaRank::Min => "{'kind': 'area', 'rank': 'min'}".to_string(),
+                            FaceAreaRank::Max => "{'kind': 'area', 'rank': 'max'}".to_string(),
+                        },
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{'kind': 'clauses', 'clauses': [{clause_literals}]}}")
+            }
+        }
+        FaceSelector::TargetIds(target_ids) => format!(
+            "{{'kind': 'targetIds', 'targetIds': [{}]}}",
+            python_string_list_literal(target_ids)
+        ),
+    }
+}
+
+fn parse_face_selector_clause(token: &str, full_selector: &str) -> AppResult<FaceSelectorClause> {
+    match token {
+        "top" => {
+            return Ok(FaceSelectorClause::Boundary {
+                axis: EdgeAxis::Z,
+                bound: EdgeBound::Max,
+            })
+        }
+        "bottom" => {
+            return Ok(FaceSelectorClause::Boundary {
+                axis: EdgeAxis::Z,
+                bound: EdgeBound::Min,
+            })
+        }
+        "left" => {
+            return Ok(FaceSelectorClause::Boundary {
+                axis: EdgeAxis::X,
+                bound: EdgeBound::Min,
+            })
+        }
+        "right" => {
+            return Ok(FaceSelectorClause::Boundary {
+                axis: EdgeAxis::X,
+                bound: EdgeBound::Max,
+            })
+        }
+        "front" => {
+            return Ok(FaceSelectorClause::Boundary {
+                axis: EdgeAxis::Y,
+                bound: EdgeBound::Max,
+            })
+        }
+        "back" => {
+            return Ok(FaceSelectorClause::Boundary {
+                axis: EdgeAxis::Y,
+                bound: EdgeBound::Min,
+            })
+        }
+        "planar" => return Ok(FaceSelectorClause::Planar),
+        _ => {}
+    }
+    if let Some(axis_name) = token.strip_prefix("normal-") {
+        return Ok(FaceSelectorClause::Normal(parse_edge_axis(
+            axis_name,
+            full_selector,
+        )?));
+    }
+    if let Some(rank_name) = token.strip_prefix("area-") {
+        let rank = match rank_name {
+            "min" => FaceAreaRank::Min,
+            "max" => FaceAreaRank::Max,
+            _ => {
+                return Err(validation(format!(
+                    "Unknown face selector `{}`. Use {}",
+                    full_selector, FACE_SELECTOR_HELP
+                )))
+            }
+        };
+        return Ok(FaceSelectorClause::Area(rank));
+    }
+    if let Some((axis_name, bound_name)) = token.split_once('-') {
+        let axis = parse_edge_axis(axis_name, full_selector)?;
+        let bound = match bound_name {
+            "min" => EdgeBound::Min,
+            "max" => EdgeBound::Max,
+            _ => {
+                return Err(validation(format!(
+                    "Unknown face selector `{}`. Use {}",
+                    full_selector, FACE_SELECTOR_HELP
+                )))
+            }
+        };
+        return Ok(FaceSelectorClause::Boundary { axis, bound });
+    }
+    Err(validation(format!(
+        "Unknown face selector `{}`. Use {}",
+        full_selector, FACE_SELECTOR_HELP
+    )))
+}
+
+fn core_edge_selector_clause_from_edge_clause(
+    clause: EdgeSelectorClause,
+) -> CoreEdgeSelectorClause {
+    match clause {
+        EdgeSelectorClause::Axis(axis) => {
+            CoreEdgeSelectorClause::Axis(core_edge_axis_from_edge_axis(axis))
+        }
+        EdgeSelectorClause::Boundary { axis, bound } => CoreEdgeSelectorClause::Boundary {
+            axis: core_edge_axis_from_edge_axis(axis),
+            bound: core_edge_bound_from_edge_bound(bound),
+        },
+    }
+}
+
+fn core_face_selector_clause_from_face_clause(
+    clause: FaceSelectorClause,
+) -> CoreFaceSelectorClause {
+    match clause {
+        FaceSelectorClause::Boundary { axis, bound } => CoreFaceSelectorClause::Boundary {
+            axis: core_edge_axis_from_edge_axis(axis),
+            bound: core_edge_bound_from_edge_bound(bound),
+        },
+        FaceSelectorClause::Planar => CoreFaceSelectorClause::Planar,
+        FaceSelectorClause::Normal(axis) => {
+            CoreFaceSelectorClause::Normal(core_edge_axis_from_edge_axis(axis))
+        }
+        FaceSelectorClause::Area(rank) => CoreFaceSelectorClause::Area(match rank {
+            FaceAreaRank::Min => CoreFaceAreaRank::Min,
+            FaceAreaRank::Max => CoreFaceAreaRank::Max,
+        }),
+    }
+}
+
+fn core_edge_axis_from_edge_axis(axis: EdgeAxis) -> CoreEdgeAxis {
+    match axis {
+        EdgeAxis::X => CoreEdgeAxis::X,
+        EdgeAxis::Y => CoreEdgeAxis::Y,
+        EdgeAxis::Z => CoreEdgeAxis::Z,
+    }
+}
+
+fn core_edge_bound_from_edge_bound(bound: EdgeBound) -> CoreEdgeBound {
+    match bound {
+        EdgeBound::Min => CoreEdgeBound::Min,
+        EdgeBound::Max => CoreEdgeBound::Max,
+    }
+}
+
+fn edge_axis_from_core_edge_axis(axis: CoreEdgeAxis) -> EdgeAxis {
+    match axis {
+        CoreEdgeAxis::X => EdgeAxis::X,
+        CoreEdgeAxis::Y => EdgeAxis::Y,
+        CoreEdgeAxis::Z => EdgeAxis::Z,
+    }
+}
+
+fn edge_bound_from_core_edge_bound(bound: CoreEdgeBound) -> EdgeBound {
+    match bound {
+        CoreEdgeBound::Min => EdgeBound::Min,
+        CoreEdgeBound::Max => EdgeBound::Max,
+    }
+}
+
+fn face_area_rank_from_core(rank: CoreFaceAreaRank) -> FaceAreaRank {
+    match rank {
+        CoreFaceAreaRank::Min => FaceAreaRank::Min,
+        CoreFaceAreaRank::Max => FaceAreaRank::Max,
+    }
+}
+
+fn core_edge_selector_clauses_string(clauses: &[CoreEdgeSelectorClause]) -> String {
+    if clauses.is_empty() {
+        return "all".to_string();
+    }
+    clauses
+        .iter()
+        .map(|clause| match clause {
+            CoreEdgeSelectorClause::Axis(axis) => {
+                format!(
+                    "axis-{}",
+                    edge_axis_name(edge_axis_from_core_edge_axis(*axis))
+                )
+            }
+            CoreEdgeSelectorClause::Boundary { axis, bound } => format!(
+                "{}-{}",
+                edge_axis_name(edge_axis_from_core_edge_axis(*axis)),
+                edge_bound_name(edge_bound_from_core_edge_bound(*bound))
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn core_face_selector_clauses_string(clauses: &[CoreFaceSelectorClause]) -> String {
+    if clauses.is_empty() {
+        return "all".to_string();
+    }
+    clauses
+        .iter()
+        .map(|clause| match clause {
+            CoreFaceSelectorClause::Boundary { axis, bound } => format!(
+                "{}-{}",
+                edge_axis_name(edge_axis_from_core_edge_axis(*axis)),
+                edge_bound_name(edge_bound_from_core_edge_bound(*bound))
+            ),
+            CoreFaceSelectorClause::Planar => "planar".to_string(),
+            CoreFaceSelectorClause::Normal(axis) => {
+                format!(
+                    "normal-{}",
+                    edge_axis_name(edge_axis_from_core_edge_axis(*axis))
+                )
+            }
+            CoreFaceSelectorClause::Area(rank) => match face_area_rank_from_core(*rank) {
+                FaceAreaRank::Min => "area-min".to_string(),
+                FaceAreaRank::Max => "area-max".to_string(),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn python_string_list_literal(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| format!("{item:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn parse_edge_selector_clause(token: &str, full_selector: &str) -> AppResult<EdgeSelectorClause> {
+    match token {
+        "top" => {
+            return Ok(EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Z,
+                bound: EdgeBound::Max,
+            })
+        }
+        "bottom" => {
+            return Ok(EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Z,
+                bound: EdgeBound::Min,
+            })
+        }
+        "left" => {
+            return Ok(EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::X,
+                bound: EdgeBound::Min,
+            })
+        }
+        "right" => {
+            return Ok(EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::X,
+                bound: EdgeBound::Max,
+            })
+        }
+        "front" => {
+            return Ok(EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Y,
+                bound: EdgeBound::Max,
+            })
+        }
+        "back" => {
+            return Ok(EdgeSelectorClause::Boundary {
+                axis: EdgeAxis::Y,
+                bound: EdgeBound::Min,
+            })
+        }
+        "vertical" => return Ok(EdgeSelectorClause::Axis(EdgeAxis::Z)),
+        _ => {}
+    }
+    if let Some(axis_name) = token.strip_prefix("axis-") {
+        let axis = parse_edge_axis(axis_name, full_selector)?;
+        return Ok(EdgeSelectorClause::Axis(axis));
+    }
+    if let Some((axis_name, bound_name)) = token.split_once('-') {
+        let axis = parse_edge_axis(axis_name, full_selector)?;
+        let bound = match bound_name {
+            "min" => EdgeBound::Min,
+            "max" => EdgeBound::Max,
+            _ => {
+                return Err(validation(format!(
+                    "Unknown edge selector `{}`. Use {}",
+                    full_selector, EDGE_SELECTOR_HELP
+                )))
+            }
+        };
+        return Ok(EdgeSelectorClause::Boundary { axis, bound });
+    }
+    Err(validation(format!(
+        "Unknown edge selector `{}`. Use {}",
+        full_selector, EDGE_SELECTOR_HELP
+    )))
+}
+
+fn parse_edge_axis(axis_name: &str, full_selector: &str) -> AppResult<EdgeAxis> {
+    match axis_name {
+        "x" => Ok(EdgeAxis::X),
+        "y" => Ok(EdgeAxis::Y),
+        "z" => Ok(EdgeAxis::Z),
+        _ => Err(validation(format!(
+            "Unknown edge selector `{}`. Use {}",
+            full_selector, EDGE_SELECTOR_HELP
+        ))),
+    }
+}
+
+fn edge_axis_name(axis: EdgeAxis) -> &'static str {
+    match axis {
+        EdgeAxis::X => "x",
+        EdgeAxis::Y => "y",
+        EdgeAxis::Z => "z",
+    }
+}
+
+fn edge_bound_name(bound: EdgeBound) -> &'static str {
+    match bound {
+        EdgeBound::Min => "min",
+        EdgeBound::Max => "max",
+    }
+}
 
 pub(super) fn detect_feature_edges(mesh: &IrMesh) -> Vec<FeatureEdge> {
     let tri_mesh = mesh.triangulate();
@@ -98,44 +965,101 @@ pub(super) fn detect_feature_edges(mesh: &IrMesh) -> Vec<FeatureEdge> {
 }
 
 pub(super) fn filter_edges(edges: &[FeatureEdge], selector: EdgeSelector) -> Vec<&FeatureEdge> {
-    match selector {
-        EdgeSelector::All => edges.iter().collect(),
-        EdgeSelector::Top => {
-            let max_z = edges
+    let Some(clauses) = selector.clauses() else {
+        return edges.iter().collect();
+    };
+    let extrema = edge_extrema(edges);
+    edges
+        .iter()
+        .filter(|edge| {
+            clauses
                 .iter()
-                .map(|e| e.pos_a.z.max(e.pos_b.z))
-                .fold(f64::NEG_INFINITY, f64::max);
-            let threshold = max_z - 1e-6;
-            edges
-                .iter()
-                .filter(|e| {
-                    let mid_z = (e.pos_a.z + e.pos_b.z) * 0.5;
-                    mid_z >= threshold
-                })
-                .collect()
-        }
-        EdgeSelector::Bottom => {
-            let min_z = edges
-                .iter()
-                .map(|e| e.pos_a.z.min(e.pos_b.z))
-                .fold(f64::INFINITY, f64::min);
-            let threshold = min_z + 1e-6;
-            edges
-                .iter()
-                .filter(|e| {
-                    let mid_z = (e.pos_a.z + e.pos_b.z) * 0.5;
-                    mid_z <= threshold
-                })
-                .collect()
-        }
-        EdgeSelector::Vertical => edges
-            .iter()
-            .filter(|e| {
-                let dir = (e.pos_b - e.pos_a).normalize();
-                dir.z.abs() > 0.95
-            })
-            .collect(),
+                .all(|clause| edge_matches_clause(edge, *clause, extrema))
+        })
+        .collect()
+}
+
+fn edge_extrema(edges: &[FeatureEdge]) -> EdgeExtrema {
+    let min_x = edges
+        .iter()
+        .map(|e| e.pos_a.x.min(e.pos_b.x))
+        .fold(f64::INFINITY, f64::min);
+    let max_x = edges
+        .iter()
+        .map(|e| e.pos_a.x.max(e.pos_b.x))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = edges
+        .iter()
+        .map(|e| e.pos_a.y.min(e.pos_b.y))
+        .fold(f64::INFINITY, f64::min);
+    let max_y = edges
+        .iter()
+        .map(|e| e.pos_a.y.max(e.pos_b.y))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_z = edges
+        .iter()
+        .map(|e| e.pos_a.z.min(e.pos_b.z))
+        .fold(f64::INFINITY, f64::min);
+    let max_z = edges
+        .iter()
+        .map(|e| e.pos_a.z.max(e.pos_b.z))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let span = (max_x - min_x)
+        .abs()
+        .max((max_y - min_y).abs())
+        .max((max_z - min_z).abs())
+        .max(1.0);
+    EdgeExtrema {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        min_z,
+        max_z,
+        tol: span * 1e-6,
     }
+}
+
+fn edge_matches_clause(
+    edge: &FeatureEdge,
+    clause: EdgeSelectorClause,
+    extrema: EdgeExtrema,
+) -> bool {
+    match clause {
+        EdgeSelectorClause::Axis(axis) => edge_matches_axis(edge, axis, extrema.tol),
+        EdgeSelectorClause::Boundary { axis, bound } => {
+            edge_matches_boundary(edge, axis, bound, extrema.tol, extrema)
+        }
+    }
+}
+
+fn edge_matches_axis(edge: &FeatureEdge, axis: EdgeAxis, tol: f64) -> bool {
+    let dx = (edge.pos_b.x - edge.pos_a.x).abs();
+    let dy = (edge.pos_b.y - edge.pos_a.y).abs();
+    let dz = (edge.pos_b.z - edge.pos_a.z).abs();
+    match axis {
+        EdgeAxis::X => dx > tol && dy <= tol && dz <= tol,
+        EdgeAxis::Y => dy > tol && dx <= tol && dz <= tol,
+        EdgeAxis::Z => dz > tol && dx <= tol && dy <= tol,
+    }
+}
+
+fn edge_matches_boundary(
+    edge: &FeatureEdge,
+    axis: EdgeAxis,
+    bound: EdgeBound,
+    tol: f64,
+    extrema: EdgeExtrema,
+) -> bool {
+    let (a, b, target) = match (axis, bound) {
+        (EdgeAxis::X, EdgeBound::Min) => (edge.pos_a.x, edge.pos_b.x, extrema.min_x),
+        (EdgeAxis::X, EdgeBound::Max) => (edge.pos_a.x, edge.pos_b.x, extrema.max_x),
+        (EdgeAxis::Y, EdgeBound::Min) => (edge.pos_a.y, edge.pos_b.y, extrema.min_y),
+        (EdgeAxis::Y, EdgeBound::Max) => (edge.pos_a.y, edge.pos_b.y, extrema.max_y),
+        (EdgeAxis::Z, EdgeBound::Min) => (edge.pos_a.z, edge.pos_b.z, extrema.min_z),
+        (EdgeAxis::Z, EdgeBound::Max) => (edge.pos_a.z, edge.pos_b.z, extrema.max_z),
+    };
+    (a - target).abs() <= tol && (b - target).abs() <= tol
 }
 
 pub(super) fn chamfer_mesh(
@@ -143,6 +1067,11 @@ pub(super) fn chamfer_mesh(
     distance: f64,
     selector: EdgeSelector,
 ) -> AppResult<IrMesh> {
+    if selector.target_ids().is_some() {
+        return Err(validation(
+            "Exact edge target-id selectors are not supported by the EckyRust mesh fallback. Use an exact backend.",
+        ));
+    }
     if distance.abs() < 1e-9 {
         return Ok(mesh.clone());
     }
@@ -450,6 +1379,11 @@ pub(super) fn fillet_arc_points(
 }
 
 pub(super) fn fillet_mesh(mesh: &IrMesh, radius: f64, selector: EdgeSelector) -> AppResult<IrMesh> {
+    if selector.target_ids().is_some() {
+        return Err(validation(
+            "Exact edge target-id selectors are not supported by the EckyRust mesh fallback. Use an exact backend.",
+        ));
+    }
     if radius.abs() < 1e-9 {
         return Ok(mesh.clone());
     }
@@ -620,20 +1554,89 @@ pub(super) fn parse_edge_selector(
             .unwrap_or(false)
     {
         let selector_str = eval_stringish(&args[2], env)?;
-        let selector = match selector_str.as_str() {
-            "all" => EdgeSelector::All,
-            "top" => EdgeSelector::Top,
-            "bottom" => EdgeSelector::Bottom,
-            "vertical" => EdgeSelector::Vertical,
-            other => {
-                return Err(validation(format!(
-                    "Unknown edge selector `{}`. Use `all`, `top`, `bottom`, or `vertical`.",
-                    other
-                )));
-            }
-        };
+        let selector = parse_edge_selector_value(&selector_str)?;
         Ok((selector, 3))
     } else {
         Ok((EdgeSelector::All, 1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        exact_edge_target_ids_from_selector_str, exact_face_target_ids_from_selector_str,
+        parse_edge_selector_spec, parse_face_selector_spec,
+    };
+
+    #[test]
+    fn exact_edge_selector_rejects_face_target_ids() {
+        let err = exact_edge_target_ids_from_selector_str("target-id:body:face:0:0-0-10:100")
+            .expect_err("face target id should fail edge selector");
+        assert!(
+            err.message
+                .contains("included non-edge target id `body:face:0:0-0-10:100`"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn exact_face_selector_rejects_edge_target_ids() {
+        let err = exact_face_target_ids_from_selector_str("target-id:body:edge:0:0-0-0_10-0-0")
+            .expect_err("edge target id should fail face selector");
+        assert!(
+            err.message
+                .contains("included non-face target id `body:edge:0:0-0-0_10-0-0`"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn exact_edge_selector_rejects_mixed_target_kinds() {
+        let err = exact_edge_target_ids_from_selector_str(
+            "target-ids:body:edge:0:0-0-0_10-0-0|body:face:0:0-0-10:100",
+        )
+        .expect_err("mixed selector should fail");
+        assert!(
+            err.message
+                .contains("included non-edge target id `body:face:0:0-0-10:100`"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn exact_face_selector_rejects_bare_raw_target_id() {
+        let parsed = exact_face_target_ids_from_selector_str("body:face:0:0-0-10:100")
+            .expect("bare raw selector should parse as non-exact");
+        assert!(parsed.is_none(), "{parsed:?}");
+    }
+
+    #[test]
+    fn selector_specs_canonicalize_and_expose_exact_ids() {
+        let edge = parse_edge_selector_spec("left+vertical").expect("edge spec");
+        assert_eq!(edge.canonical_string(), "x-min+axis-z");
+        assert_eq!(
+            edge.python_payload_literal(),
+            "{'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'x', 'bound': 'min'}, {'kind': 'axis', 'axis': 'z'}]}"
+        );
+        assert!(edge.target_ids().is_none(), "{edge:?}");
+
+        let face = parse_face_selector_spec("target-id:body:face:5:0-0-10:100").expect("face spec");
+        assert_eq!(face.canonical_string(), "target-ids:body:face:5:0-0-10:100");
+        assert_eq!(
+            face.python_payload_literal(),
+            "{'kind': 'targetIds', 'targetIds': [\"body:face:5:0-0-10:100\"]}"
+        );
+        assert_eq!(face.target_ids(), &["body:face:5:0-0-10:100".to_string()]);
+    }
+
+    #[test]
+    fn face_selector_specs_support_planar_normal_area_compounds() {
+        let face = parse_face_selector_spec("planar+normal-z+area-max").expect("face spec");
+        assert_eq!(face.canonical_string(), "planar+normal-z+area-max");
+        assert_eq!(
+            face.python_payload_literal(),
+            "{'kind': 'clauses', 'clauses': [{'kind': 'planar'}, {'kind': 'normal', 'axis': 'z'}, {'kind': 'area', 'rank': 'max'}]}"
+        );
+        assert!(face.target_ids().is_empty(), "{face:?}");
     }
 }

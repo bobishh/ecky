@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildOptimisticQueuedDialogueMessage,
   deriveOptimisticDialogueMessages,
   hasLiveApiEngineConnection,
+  mergeOptimisticQueuedDialogueMessages,
 } from './apiDialogue';
 import type { Message, Request } from '../types/domain';
 
@@ -82,6 +84,48 @@ test('deriveOptimisticDialogueMessages drops placeholders once persisted assista
   const messages = deriveOptimisticDialogueMessages(
     [persisted],
     [request({ result: { design: null, threadId: 'thread-1', messageId: 'msg-persisted', stlUrl: '', artifactBundle: null, modelManifest: null } })],
+  );
+
+  assert.deepEqual(messages, [persisted]);
+});
+
+test('mergeOptimisticQueuedDialogueMessages shows pending MCP user message before backend refresh', () => {
+  const optimistic = buildOptimisticQueuedDialogueMessage({
+    id: 'optimistic-queued-1',
+    prompt: 'Message should paint immediately',
+    attachments: [],
+    timestampMs: 1_710_000_000_000,
+  });
+
+  const messages = mergeOptimisticQueuedDialogueMessages(
+    [],
+    [{ threadId: 'thread-1', message: optimistic }],
+    'thread-1',
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]?.role, 'user');
+  assert.equal(messages[0]?.status, 'pending');
+  assert.equal(messages[0]?.content, 'Message should paint immediately');
+});
+
+test('mergeOptimisticQueuedDialogueMessages drops MCP optimistic message after persisted id arrives', () => {
+  const persisted = message({
+    id: 'queued-1',
+    role: 'user',
+    content: 'Message persisted.',
+    status: 'pending',
+  });
+  const optimistic = buildOptimisticQueuedDialogueMessage({
+    id: 'queued-1',
+    prompt: 'Message persisted.',
+    attachments: [],
+  });
+
+  const messages = mergeOptimisticQueuedDialogueMessages(
+    [persisted],
+    [{ threadId: 'thread-1', message: optimistic }],
+    'thread-1',
   );
 
   assert.deepEqual(messages, [persisted]);

@@ -2,6 +2,22 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Image Parameter Types', () => {
   test('renders image fields and allows interaction', async ({ page }) => {
+    await page.route(/\/mock\.stl(?:\?.*)?$/, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'model/stl',
+        body: `solid mock
+facet normal 0 0 0
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vertex 0 1 0
+endloop
+endfacet
+endsolid mock
+`,
+      });
+    });
     await page.addInitScript(() => {
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
@@ -48,6 +64,8 @@ test.describe('Image Parameter Types', () => {
               versionName: 'V1',
               interactionMode: 'design',
               macroCode: 'print("litho")',
+              sourceLanguage: 'legacyPython',
+              geometryBackend: 'freecad',
               uiSpec: {
                 fields: [
                   {
@@ -105,6 +123,22 @@ test.describe('Image Parameter Types', () => {
             enrichmentState: { status: 'none', proposals: [] },
           };
         }
+        if (cmd === 'verify_generated_model') {
+          return {
+            passed: true,
+            summary: 'Checks passed.',
+            issues: [],
+            metrics: {
+              partCount: 1,
+              previewStlSizeBytes: 1024,
+              totalVolume: 1000,
+              totalArea: 500,
+              bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },
+            },
+            verifierStatus: 'ok',
+            verifierSource: 'mock',
+          };
+        }
         if (cmd === 'get_thread') {
           return {
             id: args.id,
@@ -142,10 +176,12 @@ test.describe('Image Parameter Types', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a lithophane (mock)');
-    await page.getByRole('button', { name: 'PROCESS' }).click();
+    await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
     // 3. Wait for the generation to finish and UI to render
+    await page.getByRole('button', { name: 'PARAMS' }).click({ force: true });
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     
     // 4. Verify Image Field is rendered

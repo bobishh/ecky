@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import Dropdown from '../Dropdown.svelte';
   import type { ControlViewSource, ParamValue, ResolvedUiField, UiField } from '../types/domain';
 
@@ -16,6 +17,7 @@
     focused = false,
     highlighted = false,
     cadTone = 'neutral',
+    liveApply = false,
     semanticSource = undefined,
     showSemanticSource = false,
     canEdit = false,
@@ -37,6 +39,7 @@
     focused?: boolean;
     highlighted?: boolean;
     cadTone?: CadTone;
+    liveApply?: boolean;
     semanticSource?: ControlViewSource;
     showSemanticSource?: boolean;
     canEdit?: boolean;
@@ -48,6 +51,13 @@
     onFocusIn?: (event: FocusEvent) => void;
     onFocusOut?: (event: FocusEvent) => void;
   } = $props();
+
+  const NUMERIC_PARENT_UPDATE_DEBOUNCE_MS = 120;
+  let pendingNumericUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingNumericValue: number | null = null;
+  let releaseNumericDraftTimer: ReturnType<typeof setTimeout> | null = null;
+  let editingNumeric = $state(false);
+  let numericDraft = $state<string | null>(null);
 
   function getInputValue(event: Event): string {
     return (event.currentTarget as HTMLInputElement).value;
@@ -61,6 +71,59 @@
     const numeric = Number(rawValue);
     return Number.isFinite(numeric) ? numeric : fallback;
   }
+
+  function numericDisplayValue(fallback = 0): string {
+    if (editingNumeric && numericDraft !== null) return numericDraft;
+    return String(asNumber(value, fallback));
+  }
+
+  function beginNumericEdit(rawValue: string) {
+    if (releaseNumericDraftTimer) {
+      clearTimeout(releaseNumericDraftTimer);
+      releaseNumericDraftTimer = null;
+    }
+    editingNumeric = true;
+    numericDraft = rawValue;
+  }
+
+  function finishNumericEdit() {
+    flushPendingNumericUpdate();
+    if (releaseNumericDraftTimer) clearTimeout(releaseNumericDraftTimer);
+    releaseNumericDraftTimer = setTimeout(() => {
+      editingNumeric = false;
+      numericDraft = null;
+      releaseNumericDraftTimer = null;
+    }, 0);
+  }
+
+  function flushPendingNumericUpdate() {
+    if (pendingNumericUpdateTimer) {
+      clearTimeout(pendingNumericUpdateTimer);
+      pendingNumericUpdateTimer = null;
+    }
+    if (pendingNumericValue === null) return;
+    const nextValue = pendingNumericValue;
+    pendingNumericValue = null;
+    onUpdate?.(nextValue);
+  }
+
+  function scheduleNumericUpdate(rawValue: string) {
+    beginNumericEdit(rawValue);
+    const parsed = parseFloat(rawValue);
+    pendingNumericValue = Number.isFinite(parsed) ? parsed : null;
+    if (!liveApply) return;
+    if (pendingNumericUpdateTimer) clearTimeout(pendingNumericUpdateTimer);
+    pendingNumericUpdateTimer = setTimeout(
+      flushPendingNumericUpdate,
+      NUMERIC_PARENT_UPDATE_DEBOUNCE_MS,
+    );
+  }
+
+  onDestroy(() => {
+    flushPendingNumericUpdate();
+    if (pendingNumericUpdateTimer) clearTimeout(pendingNumericUpdateTimer);
+    if (releaseNumericDraftTimer) clearTimeout(releaseNumericDraftTimer);
+  });
 </script>
 
 <div
@@ -105,8 +168,10 @@
           min={range.min}
           max={range.max}
           step={range.step}
-          value={asNumber(value, range.min)}
-          oninput={(event) => onUpdate?.(parseFloat(getInputValue(event)))}
+          value={numericDisplayValue(range.min)}
+          oninput={(event) => scheduleNumericUpdate(getInputValue(event))}
+          onfocus={(event) => beginNumericEdit(getInputValue(event))}
+          onblur={finishNumericEdit}
           disabled={!editable}
         />
         <input
@@ -115,8 +180,10 @@
           min={range.min}
           max={range.max}
           step={range.step}
-          value={asNumber(value, range.min)}
-          oninput={(event) => onUpdate?.(parseFloat(getInputValue(event)))}
+          value={numericDisplayValue(range.min)}
+          oninput={(event) => scheduleNumericUpdate(getInputValue(event))}
+          onfocus={(event) => beginNumericEdit(getInputValue(event))}
+          onblur={finishNumericEdit}
           disabled={!editable}
         />
       </div>
@@ -125,8 +192,10 @@
         id={elementId}
         type="number"
         class="input-mono param-input"
-        value={asNumber(value, 0)}
-        oninput={(event) => onUpdate?.(parseFloat(getInputValue(event)))}
+        value={numericDisplayValue(0)}
+        oninput={(event) => scheduleNumericUpdate(getInputValue(event))}
+        onfocus={(event) => beginNumericEdit(getInputValue(event))}
+        onblur={finishNumericEdit}
         disabled={!editable}
       />
     {:else if field.type === 'select'}

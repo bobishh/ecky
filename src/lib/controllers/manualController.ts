@@ -12,7 +12,16 @@ import { buildImportedSyntheticDesign } from '../modelRuntime/importedRuntime';
 import { getRenderableRuntimeBundle, inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
 import { ensureSemanticManifest } from '../modelRuntime/semanticControls';
 import { confirmAction } from '../ui/confirmAction';
-import type { DesignOutput, DesignParams, ParamValue, UiField, UiSpec } from '../types/domain';
+import type {
+  ArtifactBundle,
+  DesignOutput,
+  DesignParams,
+  MacroDialect,
+  ParamValue,
+  PostProcessingSpec,
+  UiField,
+  UiSpec,
+} from '../types/domain';
 import {
   addManualVersion,
   applyImportedModel,
@@ -21,9 +30,6 @@ import {
   parseMacroParams,
   renderModel,
   saveModelManifest,
-  updateParameters,
-  updatePostProcessing,
-  updateVersionRuntime,
 } from '../tauri/client';
 
 let latestParamRenderSeq = 0;
@@ -32,6 +38,13 @@ type ManualCommitOptions = {
   targetThreadId?: string | null;
   activateTargetOnSuccess?: boolean;
   successStatus?: string;
+  versionName?: string | null;
+};
+
+export type ManualVersionCommitInput = {
+  code: string;
+  title?: string | null;
+  versionName?: string | null;
 };
 
 function toAssetUrl(path: string | null | undefined): string {
@@ -176,7 +189,7 @@ async function reconcileManualControls(
 export async function handleParamChange(
   newParams: DesignParams,
   forcedCode: string | null = null,
-  persist: boolean = true
+  persist: boolean = false
 ) {
   console.log('[ManualController] handleParamChange start', { newParams, persist });
   session.setError(null);
@@ -237,7 +250,7 @@ export async function handleParamChange(
           sourceBundle,
           sourceManifest,
           importedDesign.initialParams,
-          persist ? targetVersionId : null,
+          null,
         );
         const rawNextManifest = await getModelManifest(nextBundle.modelId);
         const nextManifest =
@@ -247,8 +260,9 @@ export async function handleParamChange(
             importedDesign.initialParams,
             sourceManifest,
           ) ?? rawNextManifest;
-        if (JSON.stringify(nextManifest) !== JSON.stringify(rawNextManifest)) {
-          await saveModelManifest(nextBundle.modelId, nextManifest, persist ? targetVersionId : null);
+        const manifestChanged = JSON.stringify(nextManifest) !== JSON.stringify(rawNextManifest);
+        if (manifestChanged) {
+          await saveModelManifest(nextBundle.modelId, nextManifest, null);
         }
 
         if (renderSeq !== latestParamRenderSeq) {
@@ -258,16 +272,66 @@ export async function handleParamChange(
         if (get(activeThreadId) === snapshotThreadId) {
           session.setStlUrl(toAssetUrl(nextBundle.previewStlPath));
           session.setModelRuntime(nextBundle, nextManifest);
+        }
+
+        if (persist && snapshotThreadId && get(activeThreadId) === snapshotThreadId) {
+          const committedTitle =
+            importedDesign.title ||
+            sourceManifest.document.documentLabel ||
+            sourceManifest.document.documentName ||
+            'Imported FreeCAD Model';
+          const committedVersionName = importedDesign.versionName || 'Imported';
+          const newMsgId = await addManualVersion({
+            threadId: snapshotThreadId,
+            title: committedTitle,
+            versionName: committedVersionName,
+            macroCode: importedDesign.macroCode,
+            sourceLanguage: importedDesign.sourceLanguage,
+            geometryBackend: importedDesign.geometryBackend,
+            parameters: importedDesign.initialParams,
+            uiSpec: importedDesign.uiSpec,
+            postProcessing: importedDesign.postProcessing ?? null,
+            artifactBundle: nextBundle,
+            modelManifest: nextManifest,
+          });
+          if (manifestChanged) {
+            await saveModelManifest(nextBundle.modelId, nextManifest, newMsgId);
+          }
+          rememberCommittedVersionMessage(snapshotThreadId, committedTitle, {
+            id: newMsgId,
+            role: 'assistant',
+            content: 'Imported model committed as new version.',
+            status: 'success',
+            output: importedDesign,
+            usage: null,
+            artifactBundle: nextBundle,
+            modelManifest: nextManifest,
+            agentOrigin: null,
+            imageData: null,
+            visualKind: null,
+            attachmentImages: [],
+            timestamp: Date.now() / 1000,
+          });
+          activeVersionId.set(newMsgId);
+          workingCopy.loadVersion(importedDesign, newMsgId);
+          paramPanelState.hydrateFromVersion(importedDesign, newMsgId);
+          await persistLastSessionSnapshot({
+            design: importedDesign,
+            threadId: snapshotThreadId,
+            messageId: newMsgId,
+            artifactBundle: nextBundle,
+            modelManifest: nextManifest,
+            selectedPartId: null,
+          });
+          await refreshHistory();
+          session.setStatus('Imported model committed as new version.');
+        } else if (get(activeThreadId) === snapshotThreadId) {
           await persistLastSessionSnapshot({
             design: importedDesign,
             artifactBundle: nextBundle,
             modelManifest: nextManifest,
           });
-          session.setStatus('Imported model updated.');
-        }
-
-        if (persist && targetVersionId && get(activeThreadId) === snapshotThreadId) {
-          await refreshHistory();
+          session.setStatus('Imported model updated. Commit version to save history.');
         }
       } catch (e) {
         console.error(
@@ -329,8 +393,9 @@ export async function handleParamChange(
     const manifest =
       ensureSemanticManifest(rawManifest, panel.uiSpec, currentParams, previousManifest) ??
       rawManifest;
-    if (JSON.stringify(manifest) !== JSON.stringify(rawManifest)) {
-      await saveModelManifest(bundle.modelId, manifest, persist ? targetVersionId : null);
+    const manifestChanged = JSON.stringify(manifest) !== JSON.stringify(rawManifest);
+    if (manifestChanged && !persist) {
+      await saveModelManifest(bundle.modelId, manifest, null);
     }
 
     if (renderSeq !== latestParamRenderSeq) {
@@ -354,25 +419,78 @@ export async function handleParamChange(
       });
     }
 
-    const sourceVersionId = targetVersionId;
-    if (persist && sourceVersionId) {
-      console.log('[ManualController] Persisting parameters to messageId:', sourceVersionId);
-      try {
-        await updateVersionRuntime(sourceVersionId, bundle, manifest);
-      } catch (e) {
-        console.error('[ManualController] Failed to update version runtime:', formatBackendError(e), e);
+    if (persist && snapshotThreadId) {
+      const committedTitle = wc.title || manifest.document?.documentLabel || manifest.document?.documentName || 'Parameter Apply';
+      const committedVersionName = wc.versionName || 'Param Apply';
+      const committedDesign = buildManualDesign({
+        title: committedTitle,
+        versionName: committedVersionName,
+        response: 'Parameter version committed.',
+        macroCode: codeToUse,
+        bundle: renderableBundle,
+        uiSpec: panel.uiSpec,
+        params: currentParams,
+        postProcessing: wc.postProcessing ?? null,
+        workingMacroDialect: wc.macroDialect,
+      });
+      const newMsgId = await addManualVersion({
+        threadId: snapshotThreadId,
+        title: committedTitle,
+        versionName: committedVersionName,
+        macroCode: codeToUse,
+        sourceLanguage: renderableBundle.sourceLanguage || wc.sourceLanguage || null,
+        geometryBackend: renderableBundle.geometryBackend || wc.geometryBackend || null,
+        parameters: currentParams,
+        uiSpec: panel.uiSpec,
+        postProcessing: wc.postProcessing ?? null,
+        artifactBundle: renderableBundle,
+        modelManifest: manifest,
+      });
+      if (manifestChanged) {
+        await saveModelManifest(bundle.modelId, manifest, newMsgId);
       }
-      try {
-        await updateParameters(sourceVersionId, currentParams);
-        console.log('[ManualController] update_parameters success');
-        await updatePostProcessing(sourceVersionId, wc.postProcessing ?? null);
-        console.log('[ManualController] update_post_processing success');
-        if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
-          await refreshHistory();
-        }
-      } catch (e) {
-        console.error('[ManualController] Failed to persist parameters:', formatBackendError(e), e);
+
+      rememberCommittedVersionMessage(snapshotThreadId, committedTitle, {
+        id: newMsgId,
+        role: 'assistant',
+        content: committedDesign.response,
+        status: 'success',
+        output: committedDesign,
+        usage: null,
+        artifactBundle: renderableBundle,
+        modelManifest: manifest,
+        agentOrigin: null,
+        imageData: null,
+        visualKind: null,
+        attachmentImages: [],
+        timestamp: Date.now() / 1000,
+      });
+
+      if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
+        activeVersionId.set(newMsgId);
+        workingCopy.loadVersion(committedDesign, newMsgId);
+        paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
+        await persistLastSessionSnapshot({
+          design: committedDesign,
+          threadId: snapshotThreadId,
+          messageId: newMsgId,
+          artifactBundle: renderableBundle,
+          modelManifest: manifest,
+          selectedPartId: null,
+        });
+        await refreshHistory();
+        session.setStatus(
+          runtime.skippedOversizedPreview
+            ? 'Parameter version committed. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
+            : 'Parameter version committed.',
+        );
       }
+    } else if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
+      session.setStatus(
+        runtime.skippedOversizedPreview
+          ? 'Parameters applied. Commit version to save history. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
+          : 'Parameters applied. Commit version to save history.',
+      );
     }
   } catch (e) {
     console.error('[ManualController] render_model error:', formatBackendError(e), e);
@@ -395,13 +513,163 @@ export function stageParamChange(newParams: DesignParams) {
   session.setStatus('Parameters staged. Apply to rerender.');
 }
 
+function buildManualDesign(input: {
+  title: string;
+  versionName: string;
+  response: string;
+  macroCode: string;
+  bundle: ArtifactBundle;
+  uiSpec: UiSpec;
+  params: DesignParams;
+  postProcessing: PostProcessingSpec | null;
+  workingMacroDialect: MacroDialect;
+}): DesignOutput {
+  return {
+    title: input.title,
+    versionName: input.versionName,
+    response: input.response,
+    interactionMode: "design",
+    macroCode: input.macroCode,
+    macroDialect:
+      input.bundle.sourceLanguage === 'build123d'
+        ? 'build123d'
+        : input.bundle.engineKind === 'ecky'
+          ? 'ecky'
+          : input.workingMacroDialect ?? 'legacy',
+    sourceLanguage: input.bundle.sourceLanguage || (input.bundle.engineKind === 'ecky' ? 'ecky' : 'legacyPython'),
+    geometryBackend: input.bundle.geometryBackend || (input.bundle.engineKind === 'ecky' ? 'mesh' : 'freecad'),
+    engineKind: input.bundle.engineKind,
+    uiSpec: input.uiSpec,
+    initialParams: input.params,
+    postProcessing: input.postProcessing ?? null,
+  };
+}
+
+export async function applyManualCodeDraft(editedCode: string) {
+  const wc = get(workingCopy);
+  const panel = get(paramPanelState);
+  const snapshotThreadId = get(activeThreadId);
+  const targetVersionId = panel.versionId || wc.sourceVersionId || get(activeVersionId);
+
+  session.setStatus('Applying code draft...');
+  session.setError(null);
+  try {
+    setManualRenderActive(true, {
+      threadId: snapshotThreadId,
+      messageId: targetVersionId,
+    });
+    const currentConfig = get(config);
+    startMicrowaveHum('__manual__', currentConfig, snapshotThreadId);
+
+    const reconciled = await reconcileManualControls(editedCode, panel.uiSpec, panel.params);
+    const nextUiSpec = reconciled.uiSpec;
+    const nextParams = reconciled.params;
+    const manualMacroDialect =
+      wc.sourceLanguage === 'build123d' || wc.macroDialect === 'build123d' ? wc.macroDialect ?? 'build123d' : null;
+    const manualGeometryBackend =
+      wc.sourceLanguage === 'build123d' || wc.geometryBackend === 'build123d' ? 'build123d' : null;
+    const bundle = await renderModel(
+      editedCode,
+      nextParams,
+      manualMacroDialect,
+      manualGeometryBackend,
+      wc.postProcessing ?? null,
+    );
+    const runtime = await inspectRuntimeBundle(
+      bundle,
+      undefined,
+      undefined,
+      wc.postProcessing ?? null,
+      nextParams,
+    );
+    const renderableBundle =
+      runtime.bundle ??
+      getRenderableRuntimeBundle(bundle, wc.postProcessing ?? null, nextParams) ??
+      bundle;
+    const rawManifest = await getModelManifest(bundle.modelId);
+    const previousManifest = get(session).modelManifest;
+    const manifest =
+      ensureSemanticManifest(rawManifest, nextUiSpec, nextParams, previousManifest) ??
+      rawManifest;
+    if (JSON.stringify(manifest) !== JSON.stringify(rawManifest)) {
+      await saveModelManifest(bundle.modelId, manifest, null);
+    }
+
+    const draftDesign = buildManualDesign({
+      title: wc.title || 'Manual Edit',
+      versionName: wc.versionName || 'Draft',
+      response: 'Code draft applied.',
+      macroCode: editedCode,
+      bundle,
+      uiSpec: nextUiSpec,
+      params: nextParams,
+      postProcessing: wc.postProcessing ?? null,
+      workingMacroDialect: wc.macroDialect,
+    });
+
+    if (get(activeThreadId) === snapshotThreadId) {
+      session.setStlUrl(toAssetUrl(renderableBundle.previewStlPath));
+      session.setModelRuntime(renderableBundle, manifest);
+      workingCopy.patch({
+        macroCode: editedCode,
+        macroDialect: draftDesign.macroDialect ?? wc.macroDialect,
+        engineKind: draftDesign.engineKind ?? wc.engineKind,
+        sourceLanguage: draftDesign.sourceLanguage,
+        geometryBackend: draftDesign.geometryBackend,
+        uiSpec: nextUiSpec,
+        params: nextParams,
+      });
+      paramPanelState.hydrate({
+        versionId: targetVersionId,
+        macroCode: editedCode,
+        uiSpec: nextUiSpec,
+        params: nextParams,
+      });
+      await persistLastSessionSnapshot({
+        design: draftDesign,
+        threadId: snapshotThreadId,
+        messageId: targetVersionId,
+        artifactBundle: renderableBundle,
+        modelManifest: manifest,
+        selectedPartId: null,
+      });
+      session.setStatus(
+        runtime.skippedOversizedPreview
+          ? 'Code applied. Commit version to save history. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
+          : 'Code applied. Commit version to save history.',
+      );
+    }
+
+    return {
+      design: draftDesign,
+      artifactBundle: renderableBundle,
+      modelManifest: manifest,
+      parserMatched: reconciled.parserMatched,
+    };
+  } catch (e) {
+    console.error('[ManualController] applyManualCodeDraft error:', formatBackendError(e), e);
+    if (get(activeThreadId) === snapshotThreadId) {
+      session.setError(`Apply Failed: ${formatBackendError(e)}`);
+    }
+    throw e;
+  } finally {
+    stopMicrowaveHum('__manual__');
+    setManualRenderActive(false);
+  }
+}
+
 export async function commitManualVersion(
-  editedCode: string,
+  editedCodeOrInput: string | ManualVersionCommitInput,
   titleOverride: string | null = null,
   options: ManualCommitOptions = {},
 ) {
   const wc = get(workingCopy);
   const panel = get(paramPanelState);
+  const editedCode = typeof editedCodeOrInput === 'string' ? editedCodeOrInput : editedCodeOrInput.code;
+  const inputTitle =
+    typeof editedCodeOrInput === 'string' ? titleOverride : editedCodeOrInput.title ?? titleOverride;
+  const inputVersionName =
+    typeof editedCodeOrInput === 'string' ? options.versionName : editedCodeOrInput.versionName ?? options.versionName;
   const previousThreadId = get(activeThreadId);
   const snapshotThreadId = options.targetThreadId || previousThreadId || crypto.randomUUID();
   const activateTargetOnSuccess =
@@ -446,11 +714,12 @@ export async function commitManualVersion(
       ensureSemanticManifest(rawManifest, nextUiSpec, nextParams, previousManifest) ??
       rawManifest;
 
-    const committedTitle = titleOverride || wc.title || "Manual Edit";
+    const committedTitle = inputTitle || wc.title || "Manual Edit";
+    const committedVersionName = inputVersionName?.trim() || wc.versionName || "V-manual";
     const newMsgId = await addManualVersion({
       threadId: snapshotThreadId,
       title: committedTitle,
-      versionName: "V-manual",
+      versionName: committedVersionName,
       macroCode: editedCode,
       sourceLanguage: bundle.sourceLanguage || wc.sourceLanguage || null,
       geometryBackend: bundle.geometryBackend || wc.geometryBackend || null,
@@ -466,7 +735,7 @@ export async function commitManualVersion(
 
     const committedDesign: DesignOutput = {
       title: committedTitle,
-      versionName: "V-manual",
+      versionName: committedVersionName,
       response: "Manual edit committed as new version.",
       interactionMode: "design",
       macroCode: editedCode,
@@ -545,15 +814,18 @@ export async function commitManualVersion(
 }
 
 export async function forkManualVersion(
-  editedCode: string,
+  editedCodeOrInput: string | ManualVersionCommitInput,
   titleOverride: string | null = null,
 ) {
   const wc = get(workingCopy);
-  const label = titleOverride || wc.title || 'Manual Edit';
+  const label =
+    typeof editedCodeOrInput === 'string'
+      ? titleOverride || wc.title || 'Manual Edit'
+      : editedCodeOrInput.title || titleOverride || wc.title || 'Manual Edit';
   const confirmed = await confirmAction(`Fork "${label}" into a new thread with this code?`);
   if (!confirmed) return;
 
-  await commitManualVersion(editedCode, titleOverride, {
+  await commitManualVersion(editedCodeOrInput, titleOverride, {
     targetThreadId: crypto.randomUUID(),
     activateTargetOnSuccess: true,
     successStatus: 'Forked into a new thread.',

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use super::{
     CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp,
     CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CorePathOp,
-    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSurfaceOp, CoreTransformOp,
-    CoreValueKind, NodeId, SourceSpan,
+    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSelectorPayload, CoreSurfaceOp,
+    CoreTransformOp, CoreValueKind, NodeId, SourceSpan,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -110,7 +110,7 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
                 verify_node(arg, env)?;
             }
             for keyword in keywords {
-                verify_node(&keyword.value, env)?;
+                verify_node(keyword.source_node(), env)?;
             }
             verify_call(op, args, keywords, node, env)
         }
@@ -248,12 +248,13 @@ fn verify_typed_hole(
         .iter()
         .find(|keyword| keyword.name == "type")
         .ok_or_else(|| type_error(name, "expected `:type`", "got no type", node.span))?;
-    let CoreNodeKind::Literal(CoreLiteral::Text(type_name)) = &type_keyword.value.kind else {
+    let CoreNodeKind::Literal(CoreLiteral::Text(type_name)) = &type_keyword.source_node().kind
+    else {
         return Err(type_error(
             name,
             "`:type` expected text",
-            &format!("got {}", kind_label(type_keyword.value.value_kind)),
-            type_keyword.value.span,
+            &format!("got {}", kind_label(type_keyword.source_node().value_kind)),
+            type_keyword.source_node().span,
         ));
     };
     let expected = typed_hole_kind(type_name).ok_or_else(|| {
@@ -261,18 +262,21 @@ fn verify_typed_hole(
             name,
             "`:type` expected solid, sketch, path, or shape",
             &format!("got `{}`", type_name),
-            type_keyword.value.span,
+            type_keyword.source_node().span,
         )
     })?;
     verify_result(name, expected, node, &KindEnv::default())?;
 
     if let Some(goal) = keywords.iter().find(|keyword| keyword.name == "goal") {
-        if !matches!(goal.value.kind, CoreNodeKind::Literal(CoreLiteral::Text(_))) {
+        if !matches!(
+            goal.source_node().kind,
+            CoreNodeKind::Literal(CoreLiteral::Text(_))
+        ) {
             return Err(type_error(
                 name,
                 "`:goal` expected text",
-                &format!("got {}", kind_label(goal.value.value_kind)),
-                goal.value.span,
+                &format!("got {}", kind_label(goal.source_node().value_kind)),
+                goal.source_node().span,
             ));
         }
     }
@@ -325,7 +329,9 @@ fn verify_primitive(
             verify_result(name, ExpectedKind::Solid, node, env)
         }
         CorePrimitive::Circle => {
-            verify_exact(name, args, &[num("radius")], env)?;
+            verify_between(name, args, 1, 2, "radius and optional segments")?;
+            verify_prefix(name, args, &[num("radius")], env)?;
+            verify_optional(name, args, 1, num("segments"), env)?;
             verify_result(name, ExpectedKind::Sketch, node, env)
         }
         CorePrimitive::Rectangle => {
@@ -663,17 +669,85 @@ fn verify_apply(
 
 fn verify_keywords(name: &str, keywords: &[CoreKeywordArg], env: &KindEnv) -> CoreResult<()> {
     for keyword in keywords {
+        match (keyword.name.as_str(), keyword.selector_payload()) {
+            (
+                "edges",
+                Some(CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_)),
+            ) => {
+                return Err(type_error(
+                    name,
+                    "`:edges` expected edge selector payload",
+                    "got face selector payload",
+                    keyword.source_node().span,
+                ))
+            }
+            ("edges", None) => {
+                return Err(type_error(
+                    name,
+                    "`:edges` expected selector payload",
+                    "got no selector payload",
+                    keyword.source_node().span,
+                ))
+            }
+            ("faces", Some(CoreSelectorPayload::EdgeAll))
+            | ("faces", Some(CoreSelectorPayload::EdgeClauses(_)))
+            | ("faces", Some(CoreSelectorPayload::EdgeTargetIds(_))) => {
+                return Err(type_error(
+                    name,
+                    "`:faces` expected face selector payload",
+                    "got edge selector payload",
+                    keyword.source_node().span,
+                ))
+            }
+            ("faces", None) => {
+                return Err(type_error(
+                    name,
+                    "`:faces` expected selector payload",
+                    "got no selector payload",
+                    keyword.source_node().span,
+                ))
+            }
+            _ => {}
+        }
+        if keyword.name == "openings" {
+            verify_openings_keyword(name, keyword, env)?;
+            continue;
+        }
         let expected = match (name, keyword.name.as_str()) {
             ("clip-box", "x" | "y" | "z") => Some(ExpectedKind::List),
             (_, "offset" | "rotate" | "origin" | "x" | "normal") => Some(ExpectedKind::Point3),
-            (_, "openings") => Some(ExpectedKind::Sketch),
             (_, _) => None,
         };
         if let Some(expected) = expected {
-            verify_expected_node(name, 0, &keyword.name, expected, &keyword.value, env)?;
+            verify_expected_node(name, 0, &keyword.name, expected, keyword.source_node(), env)?;
         }
     }
     Ok(())
+}
+
+fn verify_openings_keyword(name: &str, keyword: &CoreKeywordArg, env: &KindEnv) -> CoreResult<()> {
+    let node = keyword.source_node();
+    let actual = effective_kind(node, env);
+    if kind_matches(ExpectedKind::Sketch, actual) {
+        return Ok(());
+    }
+    if kind_matches(ExpectedKind::List, actual)
+        && matches!(
+            list_item_kind(node, env),
+            Some(CoreValueKind::Sketch | CoreValueKind::Any)
+        )
+    {
+        return Ok(());
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::TypeMismatch,
+        format!(
+            "op `{}` arg 0 `openings` expected sketch or sketch list, got {}.",
+            name,
+            kind_label(actual)
+        ),
+    )
+    .with_span(node.span.unwrap_or(SourceSpan::new(None, 0, 0))))
 }
 
 fn verify_exact(
@@ -1524,26 +1598,59 @@ mod tests {
                 op: CoreOperation::Custom("hole".into()),
                 args: vec![],
                 keywords: vec![
-                    CoreKeywordArg {
-                        name: "type".into(),
-                        value: CoreNode::new(
+                    CoreKeywordArg::expr(
+                        "type".into(),
+                        CoreNode::new(
                             NodeId::new(id + 1),
                             CoreNodeKind::Literal(CoreLiteral::Text(type_name.into())),
                             CoreValueKind::Text,
                         ),
-                    },
-                    CoreKeywordArg {
-                        name: "goal".into(),
-                        value: CoreNode::new(
+                    ),
+                    CoreKeywordArg::expr(
+                        "goal".into(),
+                        CoreNode::new(
                             NodeId::new(id + 2),
                             CoreNodeKind::Literal(CoreLiteral::Text("snap clip".into())),
                             CoreValueKind::Text,
                         ),
-                    },
+                    ),
                 ],
             },
             kind,
         )
+    }
+
+    fn selector_keyword_program(
+        keyword_name: &str,
+        selector: Option<CoreSelectorPayload>,
+    ) -> CoreProgram {
+        part(CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Call {
+                op: CoreOperation::Primitive(CorePrimitive::Box),
+                args: vec![num(20, 1.0), num(21, 1.0), num(22, 1.0)],
+                keywords: vec![match selector {
+                    Some(payload) => CoreKeywordArg::selector(
+                        keyword_name.into(),
+                        CoreNode::new(
+                            NodeId::new(23),
+                            CoreNodeKind::Literal(CoreLiteral::Text("left+vertical".into())),
+                            CoreValueKind::Text,
+                        ),
+                        payload,
+                    ),
+                    None => CoreKeywordArg::expr(
+                        keyword_name.into(),
+                        CoreNode::new(
+                            NodeId::new(23),
+                            CoreNodeKind::Literal(CoreLiteral::Text("left+vertical".into())),
+                            CoreValueKind::Text,
+                        ),
+                    ),
+                }],
+            },
+            CoreValueKind::Solid,
+        ))
     }
 
     fn verify_err(program: CoreProgram) -> String {
@@ -1580,6 +1687,24 @@ mod tests {
     }
 
     #[test]
+    fn offset_accepts_openings_sketch_list() {
+        let program = part(CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Call {
+                op: CoreOperation::Surface(CoreSurfaceOp::Offset),
+                args: vec![num(20, 2.0), circle_node(30)],
+                keywords: vec![CoreKeywordArg::expr(
+                    "openings".into(),
+                    list_node(40, vec![circle_node(50)]),
+                )],
+            },
+            CoreValueKind::Sketch,
+        ));
+
+        verify_core_program(&program).expect("offset openings should accept sketch lists");
+    }
+
+    #[test]
     fn difference_accepts_typed_solid_hole() {
         let program = part(call(
             10,
@@ -1592,6 +1717,38 @@ mod tests {
         ));
 
         verify_core_program(&program).expect("solid hole should typecheck as shape");
+    }
+
+    #[test]
+    fn verify_core_program_rejects_missing_edge_selector_payload() {
+        let message = verify_err(selector_keyword_program("edges", None));
+        assert!(
+            message.contains("`:edges` expected selector payload"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn verify_core_program_rejects_missing_face_selector_payload() {
+        let message = verify_err(selector_keyword_program("faces", None));
+        assert!(
+            message.contains("`:faces` expected selector payload"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn verify_core_program_rejects_wrong_kind_selector_payload() {
+        let message = verify_err(selector_keyword_program(
+            "edges",
+            Some(CoreSelectorPayload::FaceTargetIds(vec![
+                "body:face:0:0-0-1:1".into(),
+            ])),
+        ));
+        assert!(
+            message.contains("`:edges` expected edge selector payload"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -43,6 +43,9 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      - name: Prepare Runtime Resource Directories
+        run: mkdir -p .dist/build123d-runtime .dist/speech-runtime
+
       - name: Check Formatting
         run: cd src-tauri && cargo fmt --all -- --check
 
@@ -65,7 +68,7 @@ jobs:
           cache: 'npm'
 
       - name: Install Dependencies
-        run: npm install
+        run: npm ci
 
       - name: Typecheck Frontend
         run: npm run typecheck
@@ -76,9 +79,30 @@ jobs:
       - name: Build Frontend
         run: npm run build
 
+  test-e2e:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E
+        run: npm run test:e2e:ci
+
   build-tauri:
     name: Tauri Build Check
-    needs: [test-rust, test-frontend]
+    needs: [test-rust, test-frontend, test-e2e]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,7 +134,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Prepare Runtime Resource Directories
+        run: mkdir -p .dist/build123d-runtime .dist/speech-runtime
+
+      - name: Build Frontend
+        run: npm run build
 
       - name: Build Check
-        run: npm run tauri build -- --no-bundle
+        run: cd src-tauri && cargo build --verbose

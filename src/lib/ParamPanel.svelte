@@ -127,6 +127,7 @@
     onSemanticChange,
     onControlFocusChange,
     onchange,
+    oncommit,
     onspecchange,
     onpostprocessingchange,
     onShowCode = undefined,
@@ -154,6 +155,7 @@
     onSemanticChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
     onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
     onchange?: (params: DesignParams) => Promise<void> | void;
+    oncommit?: (params: DesignParams) => Promise<void> | void;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
     onpostprocessingchange?: (postProcessing: PostProcessingSpec | null) => void;
     onShowCode?: () => void;
@@ -612,6 +614,7 @@
 
   let reading = $state(false);
   let applying = $state(false);
+  let committing = $state(false);
 
   const filteredFields = $derived.by(() => {
     return filterFieldsBySearch(mergedFields, searchQuery);
@@ -1038,6 +1041,25 @@
     } else {
       console.warn('ParamPanel: onchange prop is missing!');
       session.setError('Apply Failed: parameter change handler is missing.');
+    }
+  }
+
+  async function commitChanges() {
+    if (committing) return;
+    if (oncommit) {
+      committing = true;
+      session.setError(null);
+      try {
+        await oncommit(localParams);
+      } catch (e: unknown) {
+        console.error('ParamPanel: oncommit failed', e);
+        session.setError(`Commit Failed: ${formatBackendError(e)}`);
+      } finally {
+        committing = false;
+      }
+    } else {
+      console.warn('ParamPanel: oncommit prop is missing!');
+      session.setError('Commit Failed: parameter commit handler is missing.');
     }
   }
 
@@ -2043,12 +2065,14 @@
     searchQuery={searchQuery}
     editing={editing}
     applying={applying}
+    committing={committing}
     reading={reading}
     saveValuesState={saveValuesState}
     liveApply={$liveApply}
     activeVersionId={activeVersionId}
     onSearchQueryChange={(value) => searchQuery = value}
     onApplyChanges={applyChanges}
+    onCommitChanges={commitChanges}
     onSaveValues={saveValues}
     onStartEditing={startEditing}
     onSaveFields={saveFields}
@@ -2767,6 +2791,7 @@
                     rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
                     editable={control.editable}
                     highlighted={highlightedParamKey === field.key}
+                    liveApply={$liveApply}
                     semanticSource={control.source}
                     showSemanticSource={shouldShowSemanticSource(control.source)}
                     canEdit={isManualPrimitive(control)}
@@ -2816,6 +2841,7 @@
                 focused={true}
                 highlighted={highlightedParamKey === field.key}
                 cadTone={getCadHint(field).tone}
+                liveApply={$liveApply}
                 onUpdate={(nextValue) => update(field.key, nextValue)}
                 onPickImage={async () => {
                   const file = await open({
@@ -2853,6 +2879,7 @@
             autoField={field._auto}
             highlighted={highlightedParamKey === field.key}
             cadTone={getCadHint(field).tone}
+            liveApply={$liveApply}
             onUpdate={(nextValue) => update(field.key, nextValue)}
             onPickImage={async () => {
               const file = await open({

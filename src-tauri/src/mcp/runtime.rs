@@ -240,34 +240,39 @@ fn format_spawn_failure(agent: &AutoAgent, err: &str) -> String {
     format!("spawn failed: {}", err)
 }
 
+fn append_terminal_tail_hint(message: String, output_tail: &str) -> String {
+    if output_tail.trim().is_empty() {
+        message
+    } else {
+        format!("{message} Open terminal for last agent output.")
+    }
+}
+
 fn format_agent_exit_error(
     agent: &AutoAgent,
     exit: &portable_pty::ExitStatus,
     elapsed_secs: u64,
     output_tail: &str,
 ) -> String {
-    let trimmed_tail = output_tail.trim();
-    if exit.exit_code() == 127 && trimmed_tail.contains("env: node: No such file or directory") {
-        let mut err = format!(
-            "{} could not start because `node` was not found in the auto-agent PATH. \
+    if exit.exit_code() == 127 && output_tail.contains("env: node: No such file or directory") {
+        return append_terminal_tail_hint(
+            format!(
+                "{} could not start because `node` was not found in the auto-agent PATH. \
              Release builds may start with a reduced environment.\n\
              Process exited with status {} after {}s.",
-            agent.label, exit, elapsed_secs
+                agent.label, exit, elapsed_secs
+            ),
+            output_tail,
         );
-        if !trimmed_tail.is_empty() {
-            err.push_str(&format!("\nLast agent output:\n{}", trimmed_tail));
-        }
-        return err;
     }
 
-    let mut err = format!(
-        "{} exited with status {} after {}s.",
-        agent.label, exit, elapsed_secs
-    );
-    if !trimmed_tail.is_empty() {
-        err.push_str(&format!("\nLast agent output:\n{}", trimmed_tail));
-    }
-    err
+    append_terminal_tail_hint(
+        format!(
+            "{} exited with status {} after {}s.",
+            agent.label, exit, elapsed_secs
+        ),
+        output_tail,
+    )
 }
 
 #[cfg(test)]
@@ -943,7 +948,7 @@ fn write_agent_instructions(
               means in the manifest.\n\
            i. If a step will take more than a few seconds, call `session_activity_set`, and call \
               `session_activity_clear` when that step finishes.\n\
-           j. Act on the request using `macro_buffer_replace_and_render`, `macro_replace_and_render`, or `params_patch_and_render`; prefer buffer replacement for non-trivial edits.\n\
+           j. Act on the request using `macro_buffer_replace_and_preview`, `macro_preview_render`, or `params_preview_render`; prefer buffer replacement for non-trivial edits.\n\
         5. When you finish a user-facing turn, call `session_reply_save` for the final reply \
            (or fatal error) if the user should see text in the thread history.\n\
         6. Immediately after the turn completes, call `request_user_prompt` again so Ecky can \
@@ -2397,7 +2402,7 @@ async fn spawn_agent_once(state: &AppState, agent: &AutoAgent) -> AppResult<()> 
         Some(if exit.success() {
             format!("{} terminal closed.", agent.label)
         } else {
-            format!("{} terminal closed with an error.", agent.label)
+            status_text.clone()
         }),
         false,
     );
@@ -3235,6 +3240,7 @@ mod tests {
                 mode: McpMode::Active,
                 primary_agent_id: primary_agent_id.map(str::to_string),
                 prompt_timeout_secs: 1800,
+                ecky_ast_authoring: false,
                 auto_agents: vec![],
             },
             has_seen_onboarding: false,
@@ -3547,19 +3553,21 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_127_mentions_missing_node_dependency_and_preserves_tail() {
+    fn exit_code_127_mentions_missing_node_dependency_without_leaking_terminal_tail() {
         let agent = build_agent_with_cmd("a3", "gemini", "gemini", vec![]);
+        let tail = "env: node: No such file or directory";
         let message = format_agent_exit_error(
             &agent,
             &portable_pty::ExitStatus::with_exit_code(127),
             0,
-            "env: node: No such file or directory",
+            tail,
         );
 
         assert!(message.contains("`node`"));
         assert!(message.contains("reduced environment"));
-        assert!(message.contains("env: node: No such file or directory"));
         assert!(message.contains("Exited with code 127"));
+        assert!(message.contains("Open terminal for last agent output."));
+        assert!(!message.contains(tail));
     }
 
     #[test]
@@ -3692,7 +3700,7 @@ mod tests {
         assert!(prompt.contains("Ecky authoring card"));
         assert!(prompt.contains("(extrude (polygon"));
         assert!(prompt.contains("let*"));
-        assert!(prompt.contains("macro_replace_and_render"));
+        assert!(prompt.contains("macro_preview_render"));
         assert!(prompt.contains("config/session defaults"));
 
         assert!(instructions.contains("call `target_meta_get`"));
@@ -3702,7 +3710,7 @@ mod tests {
         assert!(instructions.contains("agentBrief.geometryBackend"));
         assert!(instructions.contains("Ecky authoring card"));
         assert!(instructions.contains("ecky://guides/authoring-card"));
-        assert!(instructions.contains("macro_replace_and_render"));
+        assert!(instructions.contains("macro_preview_render"));
         assert!(instructions.contains("config/session defaults"));
     }
 
@@ -3806,7 +3814,16 @@ mod tests {
         let snapshot = primary_runtime_snapshot(&state).expect("primary runtime snapshot");
         assert_eq!(snapshot.phase, AutoAgentRuntimePhase::Waking);
 
-        sleep(Duration::from_millis(350)).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if fs::read_to_string(&touch_file).unwrap_or_default() == "primary" {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
         assert_eq!(
             fs::read_to_string(&touch_file).unwrap_or_default(),
             "primary"
@@ -3853,6 +3870,84 @@ mod tests {
             snapshot.screen_text.contains("hello from agent"),
             "expected degraded readable fallback output in snapshot, got: {:?}",
             snapshot.screen_text
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_exit_keeps_raw_terminal_tail_out_of_logs_and_status_text() {
+        let raw_tail = "RAW TERMINAL STACKTRACE 42";
+        let mut config = test_config(Some("primary"));
+        config.mcp.auto_agents = vec![build_agent(
+            "primary",
+            "Primary",
+            vec![
+                "-c".to_string(),
+                format!("printf '{}\\nsecond line\\n'; exit 7", raw_tail),
+            ],
+        )];
+        let state = test_state(config);
+        state.set_mcp_status(true, None);
+
+        initialize_auto_agent_supervisors(state.clone());
+        wake_primary_auto_agent(&state, Some("thread-1".to_string()), None, None)
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let Some(snapshot) = primary_runtime_snapshot(&state) else {
+                panic!("primary runtime snapshot missing");
+            };
+            if snapshot.phase == AutoAgentRuntimePhase::Error {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "runtime never reached error phase"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        let runtime = primary_runtime_snapshot(&state).expect("runtime snapshot");
+        let terminal = state
+            .agent_terminals
+            .lock()
+            .unwrap()
+            .get("primary")
+            .map(|runtime| runtime.snapshot.clone())
+            .expect("terminal snapshot");
+        let logs = state
+            .app_logs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect::<Vec<_>>();
+
+        assert!(
+            terminal.screen_text.contains(raw_tail) || terminal.vt_stream.contains(raw_tail),
+            "terminal snapshot missing raw tail: {terminal:?}"
+        );
+        assert_eq!(terminal.active, false);
+        assert!(terminal
+            .summary
+            .as_deref()
+            .is_some_and(|text| text.contains("Open terminal for last agent output.")));
+        assert!(terminal
+            .summary
+            .as_deref()
+            .is_some_and(|text| !text.contains(raw_tail)));
+        assert!(runtime
+            .status_text
+            .as_deref()
+            .is_some_and(|text| !text.contains(raw_tail)));
+        assert!(runtime
+            .last_error
+            .as_deref()
+            .is_some_and(|text| !text.contains(raw_tail)));
+        assert!(
+            logs.iter().all(|message| !message.contains(raw_tail)),
+            "app logs leaked terminal tail: {logs:?}"
         );
     }
 

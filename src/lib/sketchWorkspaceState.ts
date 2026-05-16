@@ -1,4 +1,11 @@
-import type { SketchConstraint, SketchDraftRequest, SketchPrimitive, SketchPrimitiveKind, SketchView } from './tauri/contracts';
+import type {
+  SketchConstraint,
+  SketchDraftRequest,
+  SketchPrimitive,
+  SketchPrimitiveKind,
+  SketchPrimitiveTopology,
+  SketchView,
+} from './tauri/contracts';
 
 export type SketchPoint = [number, number];
 
@@ -9,11 +16,13 @@ export type SketchDimensionLocks = {
 
 export type SketchStroke = {
   primitiveId: string;
+  sketchId?: string;
   view: SketchView;
   kind?: Extract<SketchPrimitiveKind, 'polyline' | 'circle'>;
   points: SketchPoint[];
   closed: boolean;
   radius?: number;
+  topology?: SketchPrimitiveTopology | null;
   dimensionLocks?: SketchDimensionLocks;
 };
 
@@ -143,21 +152,23 @@ export function buildSketchDraftRequest(strokes: SketchStroke[]): SketchDraftReq
   const depthResult = extrudeDepthForProfile(strokes, profile);
   if ('error' in depthResult) return depthResult;
 
-  const primitive: SketchPrimitive = {
-    primitiveId: profile.primitiveId,
-    kind: strokeKind(profile),
-    points: profile.points.map(copyPoint),
+  const draftProfiles = closedProfilesForDraft(strokes, profile);
+  const primitives: SketchPrimitive[] = draftProfiles.map((draftProfile) => ({
+    primitiveId: draftProfile.primitiveId,
+    kind: strokeKind(draftProfile),
+    points: draftProfile.points.map(copyPoint),
     closed: true,
-    radius: strokeKind(profile) === 'circle' ? profile.radius ?? null : null,
-  };
+    radius: strokeKind(draftProfile) === 'circle' ? draftProfile.radius ?? null : null,
+    ...(draftProfile.topology ? { topology: copyTopology(draftProfile.topology) } : {}),
+  }));
 
   return {
     partId: 'sketch-draft-part',
     sketch: {
-      sketchId: `sketch-${profile.view}`,
+      sketchId: profile.sketchId ?? `sketch-${profile.view}`,
       view: profile.view,
-      primitives: [primitive],
-      constraints: constraintsForStroke(profile),
+      primitives,
+      constraints: draftProfiles.flatMap((draftProfile) => constraintsForStroke(draftProfile)),
     },
     operation: 'extrude',
     amount: depthResult.amount,
@@ -258,8 +269,26 @@ function strokeBounds(stroke: SketchStroke): { minX: number; minY: number; maxX:
   };
 }
 
+function copyTopology(topology: SketchPrimitiveTopology | null | undefined): SketchPrimitiveTopology | null | undefined {
+  if (!topology) return topology;
+  return {
+    ...topology,
+    edgeIds: topology.edgeIds ? [...topology.edgeIds] : undefined,
+  };
+}
+
 function primaryClosedProfile(strokes: SketchStroke[]): SketchStroke | undefined {
   return strokes.find((stroke) => stroke.closed && stroke.view === 'front') ?? strokes.find((stroke) => stroke.closed);
+}
+
+function closedProfilesForDraft(strokes: SketchStroke[], profile: SketchStroke): SketchStroke[] {
+  const closedProfiles = strokes.filter(
+    (stroke) =>
+      stroke.closed &&
+      stroke.view === profile.view &&
+      (profile.sketchId ? stroke.sketchId === profile.sketchId : true),
+  );
+  return closedProfiles.length > 0 ? closedProfiles : [profile];
 }
 
 export function strokeKind(stroke: SketchStroke): Extract<SketchPrimitiveKind, 'polyline' | 'circle'> {

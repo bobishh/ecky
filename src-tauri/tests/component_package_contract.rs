@@ -19,9 +19,11 @@ use ecky_cad_lib::models::{
     ComponentParam, ComponentParamKind, ComponentPort, Config, EngineKind, GeometryBackend,
     KeepoutVolumeKind, MacroDialect, MatePortTypePair, MateTypeDefinition, McpConfig,
     ModelSourceKind, OperationKind, PackageVisibility, PathResolver, PortFrame, PortReference,
-    PortTypeDefinition, SketchConstraint, SketchConstraintKind, SketchDefinition, SketchPrimitive,
-    SketchPrimitiveKind, SketchView, SourceLanguage, VoiceConfig, COMPONENT_PACKAGE_SCHEMA_VERSION,
+    PortTypeDefinition, SketchAcceptedBrepComponentPackageRequest, SketchConstraint,
+    SketchConstraintKind, SketchDefinition, SketchDocument, SketchPrimitive, SketchPrimitiveKind,
+    SketchView, SourceLanguage, VoiceConfig, COMPONENT_PACKAGE_SCHEMA_VERSION,
 };
+use ecky_cad_lib::sketch_draft_runtime::write_accepted_brep_component_package_project;
 use zip::ZipArchive;
 
 const COMPONENT_PACKAGE_PAYLOAD_FILE_NAME: &str = "ecky-payload.b64";
@@ -127,6 +129,7 @@ fn sample_sketch(sketch_id: &str) -> SketchDefinition {
             points: vec![[0.0, 0.0], [20.0, 0.0], [20.0, 40.0], [0.0, 40.0]],
             closed: true,
             radius: None,
+            topology: None,
         }],
         constraints: vec![SketchConstraint {
             constraint_id: "outer_closed".to_string(),
@@ -241,6 +244,70 @@ fn sample_package() -> ComponentPackage {
                 mode: AssemblyOutputMode::SeparateParts,
             },
         }],
+    }
+}
+
+fn three_view_hull_document() -> SketchDocument {
+    let rectangle =
+        |sketch_id: &str, view: SketchView, primitive_id: &str, points: Vec<[f64; 2]>| {
+            SketchDefinition {
+                sketch_id: sketch_id.to_string(),
+                view,
+                plane: None,
+                primitives: vec![SketchPrimitive {
+                    primitive_id: primitive_id.to_string(),
+                    kind: SketchPrimitiveKind::Polyline,
+                    points,
+                    closed: true,
+                    radius: None,
+                    topology: None,
+                }],
+                constraints: vec![],
+            }
+        };
+    SketchDocument {
+        document_id: "doc-hull".to_string(),
+        active_sketch_id: Some("sketch-front".to_string()),
+        units: Some("mm".to_string()),
+        metadata: None,
+        sketches: vec![
+            rectangle(
+                "sketch-front",
+                SketchView::Front,
+                "front-box",
+                vec![
+                    [10.0, 20.0],
+                    [60.0, 20.0],
+                    [60.0, 50.0],
+                    [10.0, 50.0],
+                    [10.0, 20.0],
+                ],
+            ),
+            rectangle(
+                "sketch-top",
+                SketchView::Top,
+                "top-footprint",
+                vec![
+                    [10.0, 5.0],
+                    [60.0, 5.0],
+                    [60.0, 27.0],
+                    [10.0, 27.0],
+                    [10.0, 5.0],
+                ],
+            ),
+            rectangle(
+                "sketch-side",
+                SketchView::Side,
+                "side-footprint",
+                vec![
+                    [5.0, 20.0],
+                    [27.0, 20.0],
+                    [27.0, 50.0],
+                    [5.0, 50.0],
+                    [5.0, 20.0],
+                ],
+            ),
+        ],
     }
 }
 
@@ -1391,8 +1458,8 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
 
     let bundle = ecky_cad_lib::services::render::render_model(
         r#"(model
-            (part body
-              (sampled-radial-loft
+              (part body
+                (sampled-radial-loft
                 (theta z fz)
                 :height 40
                 :z-steps 6
@@ -1408,6 +1475,40 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
     )
     .await
     .expect("render exact source bundle");
+    let durable_target_id = bundle
+        .face_targets
+        .first()
+        .and_then(|target| target.durable_target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .and_then(|target| target.durable_target_id.clone())
+        })
+        .expect("build123d source-backed bundle durable topology target");
+    let chosen_target_id = bundle
+        .face_targets
+        .first()
+        .map(|target| target.target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .map(|target| target.target_id.clone())
+        })
+        .expect("runtime topology target");
+    let preferred_target_id = bundle
+        .face_targets
+        .first()
+        .and_then(|target| target.durable_target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .and_then(|target| target.durable_target_id.clone())
+        })
+        .unwrap_or_else(|| chosen_target_id.clone());
+    assert_eq!(preferred_target_id, durable_target_id);
 
     let project_dir = temp_root.join("project");
     let package = component_package_commands::write_artifact_bundle_component_package_project(
@@ -1437,7 +1538,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
             ports: vec![ComponentPort {
                 port_id: "mount".to_string(),
                 type_id: "mechanical.plane.mount.v1".to_string(),
-                target_ids: Vec::new(),
+                target_ids: vec![chosen_target_id.clone()],
                 frame: Some(PortFrame::identity()),
                 params: Default::default(),
                 interfaces: vec!["mechanical_mount".to_string()],
@@ -1465,6 +1566,10 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
     assert_eq!(
         package.components[0].macro_dialect,
         Some(MacroDialect::EckyIrV0)
+    );
+    assert_eq!(
+        package.components[0].ports[0].target_ids,
+        vec![preferred_target_id.clone()]
     );
     assert!(project_dir
         .join("components")
@@ -1515,6 +1620,182 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
     assert_eq!(
         rendered.artifact_bundle.geometry_backend,
         GeometryBackend::Build123d
+    );
+    assert_eq!(
+        rendered.installed_source.component.ports[0].target_ids,
+        vec![preferred_target_id]
+    );
+
+    fs::remove_dir_all(temp_root).ok();
+}
+
+#[tokio::test]
+async fn freecad_runtime_bundle_component_package_project_preserves_exact_source_and_rerenders() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "ecky-package-freecad-runtime-bundle-project-test-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let resolver = TempPathResolver {
+        root: temp_root.clone(),
+    };
+    let state = test_state(&temp_root);
+    if !ecky_cad_lib::services::render::is_freecad_available(&state) {
+        fs::remove_dir_all(temp_root).ok();
+        return;
+    }
+
+    let source = r#"(model
+        (part body
+          (box 10 10 10)))"#;
+    let bundle = ecky_cad_lib::services::render::render_model(
+        source,
+        &Default::default(),
+        Some(MacroDialect::EckyIrV0),
+        Some(GeometryBackend::Freecad),
+        None,
+        &state,
+        &resolver,
+    )
+    .await
+    .expect("render exact source bundle");
+    let durable_target_id = bundle
+        .face_targets
+        .first()
+        .and_then(|target| target.durable_target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .and_then(|target| target.durable_target_id.clone())
+        })
+        .expect("freecad source-backed bundle durable topology target");
+    let chosen_target_id = bundle
+        .face_targets
+        .first()
+        .map(|target| target.target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .map(|target| target.target_id.clone())
+        })
+        .expect("runtime topology target");
+    let preferred_target_id = bundle
+        .face_targets
+        .first()
+        .and_then(|target| target.durable_target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .and_then(|target| target.durable_target_id.clone())
+        })
+        .unwrap_or_else(|| chosen_target_id.clone());
+    assert_eq!(preferred_target_id, durable_target_id);
+
+    let project_dir = temp_root.join("project");
+    let package = component_package_commands::write_artifact_bundle_component_package_project(
+        project_dir.to_string_lossy().to_string(),
+        ArtifactBundleComponentPackageRequest {
+            package_id: "generated.freecad-shell-kit".to_string(),
+            version: "0.1.0".to_string(),
+            display_name: "Generated FreeCAD Shell Kit".to_string(),
+            tags: vec!["generated".to_string(), "freecad".to_string()],
+            component_id: "freecad-body".to_string(),
+            component_version: "1.0.0".to_string(),
+            component_display_name: "FreeCAD Body".to_string(),
+            source_ref: None,
+            artifact_bundle: bundle,
+            port_types: vec![sample_port_type(
+                "mechanical.plane.mount.v1",
+                vec!["mechanical.plane.mount.v1".to_string()],
+            )],
+            params: Vec::new(),
+            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            initial_params: Default::default(),
+            ports: vec![ComponentPort {
+                port_id: "mount".to_string(),
+                type_id: "mechanical.plane.mount.v1".to_string(),
+                target_ids: vec![chosen_target_id.clone()],
+                frame: Some(PortFrame::identity()),
+                params: Default::default(),
+                interfaces: vec!["mechanical_mount".to_string()],
+                compatible_with: vec!["mechanical.plane.mount.v1".to_string()],
+                allowed_ops: vec![OperationKind::Mate],
+            }],
+        },
+    )
+    .await
+    .expect("write runtime bundle component package project");
+
+    assert_eq!(
+        package.components[0].source_ref.as_deref(),
+        Some("components/freecad-body/source.ecky")
+    );
+    assert_eq!(
+        package.components[0].source_language,
+        Some(SourceLanguage::EckyIrV0)
+    );
+    assert_eq!(
+        package.components[0].geometry_backend,
+        Some(GeometryBackend::Freecad)
+    );
+    assert_eq!(
+        package.components[0].macro_dialect,
+        Some(MacroDialect::EckyIrV0)
+    );
+    assert_eq!(
+        package.components[0].ports[0].target_ids,
+        vec![preferred_target_id.clone()]
+    );
+
+    let archive_path = temp_root.join("generated-freecad.ecky");
+    write_component_package_archive(&project_dir, &archive_path).expect("write archive");
+    component_package_commands::install_component_package_archive_for_app(
+        &resolver,
+        archive_path.to_string_lossy().to_string(),
+    )
+    .await
+    .expect("install package");
+
+    let rendered = component_package_commands::render_installed_component_source_for_app(
+        &resolver,
+        &state,
+        "generated.freecad-shell-kit".to_string(),
+        "0.1.0".to_string(),
+        "freecad-body".to_string(),
+        Default::default(),
+    )
+    .await
+    .expect("render installed packaged runtime source");
+
+    assert_eq!(
+        rendered.installed_source.component.source_ref.as_deref(),
+        Some("components/freecad-body/source.ecky")
+    );
+    assert_eq!(
+        rendered.installed_source.component.source_language,
+        Some(SourceLanguage::EckyIrV0)
+    );
+    assert_eq!(
+        rendered.installed_source.component.geometry_backend,
+        Some(GeometryBackend::Freecad)
+    );
+    assert!(rendered
+        .installed_source
+        .source_path
+        .ends_with("components/freecad-body/source.ecky"));
+    assert_eq!(
+        rendered.artifact_bundle.source_language,
+        SourceLanguage::EckyIrV0
+    );
+    assert_eq!(
+        rendered.artifact_bundle.geometry_backend,
+        GeometryBackend::Freecad
+    );
+    assert_eq!(
+        rendered.installed_source.component.ports[0].target_ids,
+        vec![preferred_target_id]
     );
 
     fs::remove_dir_all(temp_root).ok();
@@ -2196,6 +2477,17 @@ async fn direct_runtime_bundle_component_package_project_preserves_topology_targ
                 .map(|target| target.target_id.clone())
         })
         .expect("direct runtime topology target");
+    let preferred_target_id = bundle
+        .face_targets
+        .first()
+        .and_then(|target| target.durable_target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .and_then(|target| target.durable_target_id.clone())
+        })
+        .unwrap_or_else(|| chosen_target_id.clone());
 
     let project_dir = temp_root.join("project");
     let package = component_package_commands::write_artifact_bundle_component_package_project(
@@ -2234,7 +2526,7 @@ async fn direct_runtime_bundle_component_package_project_preserves_topology_targ
 
     assert_eq!(
         package.components[0].ports[0].target_ids,
-        vec![chosen_target_id.clone()]
+        vec![preferred_target_id.clone()]
     );
 
     let archive_path = temp_root.join("generated-direct-targets.ecky");
@@ -2256,7 +2548,7 @@ async fn direct_runtime_bundle_component_package_project_preserves_topology_targ
     .expect("resolve installed component");
     assert_eq!(
         resolved.component.ports[0].target_ids,
-        vec![chosen_target_id.clone()]
+        vec![preferred_target_id.clone()]
     );
 
     let rendered = component_package_commands::render_installed_component_source_for_app(
@@ -2269,6 +2561,135 @@ async fn direct_runtime_bundle_component_package_project_preserves_topology_targ
     )
     .await
     .expect("render installed packaged direct source");
+
+    assert_eq!(
+        rendered.installed_source.component.ports[0].target_ids,
+        vec![preferred_target_id]
+    );
+    assert!(
+        !rendered.artifact_bundle.face_targets.is_empty()
+            || !rendered.artifact_bundle.edge_targets.is_empty()
+    );
+
+    fs::remove_dir_all(temp_root).ok();
+}
+
+#[tokio::test]
+async fn accepted_brep_step_component_package_project_preserves_exact_target_ids_through_install_and_render(
+) {
+    let temp_root = std::env::temp_dir().join(format!(
+        "ecky-accepted-package-render-targets-test-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let resolver = TempPathResolver {
+        root: temp_root.clone(),
+    };
+    let state = test_state(&temp_root);
+    if !ecky_cad_lib::services::render::is_freecad_available(&state) {
+        fs::remove_dir_all(temp_root).ok();
+        return;
+    }
+
+    let source = include_str!("fixtures/cad/surface/canonical_cup.ecky");
+    let bundle = ecky_cad_lib::freecad::render_model_with_sources(
+        &ecky_cad_lib::ecky_ir::lower_to_freecad(source).expect("lower"),
+        Some(source),
+        &Default::default(),
+        None,
+        &resolver,
+        SourceLanguage::EckyIrV0,
+    )
+    .expect("generate accepted step fixture");
+    let step_export = bundle
+        .export_artifacts
+        .iter()
+        .find(|artifact| artifact.format == "step")
+        .expect("step export");
+    let chosen_target_id = bundle
+        .face_targets
+        .first()
+        .map(|target| target.target_id.clone())
+        .or_else(|| {
+            bundle
+                .edge_targets
+                .first()
+                .map(|target| target.target_id.clone())
+        })
+        .expect("accepted topology target");
+
+    let project_dir = temp_root.join("project");
+    let package = write_accepted_brep_component_package_project(
+        &project_dir,
+        SketchAcceptedBrepComponentPackageRequest {
+            package_id: "accepted.target-kit".to_string(),
+            version: "0.1.0".to_string(),
+            display_name: "Accepted Target Kit".to_string(),
+            tags: vec!["accepted-brep".to_string()],
+            component_id: "accepted-body".to_string(),
+            component_version: "1.0.0".to_string(),
+            component_display_name: "Accepted Body".to_string(),
+            source_ref: step_export.path.clone(),
+            artifact_bundle: Some(bundle),
+            document: three_view_hull_document(),
+            solution_id: "solution0".to_string(),
+            port_types: vec![sample_port_type(
+                "mechanical.patch.mate.v1",
+                vec!["mechanical.patch.mate.v1".to_string()],
+            )],
+            params: Vec::new(),
+            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            initial_params: Default::default(),
+            ports: vec![ComponentPort {
+                port_id: "patch".to_string(),
+                type_id: "mechanical.patch.mate.v1".to_string(),
+                target_ids: vec![chosen_target_id.clone()],
+                frame: Some(PortFrame::identity()),
+                params: Default::default(),
+                interfaces: vec!["surface_patch".to_string()],
+                compatible_with: vec!["mechanical.patch.mate.v1".to_string()],
+                allowed_ops: vec![OperationKind::Mate],
+            }],
+        },
+    )
+    .expect("write accepted component package project");
+
+    assert_eq!(
+        package.components[0].ports[0].target_ids,
+        vec![chosen_target_id.clone()]
+    );
+
+    let archive_path = temp_root.join("accepted-targets.ecky");
+    write_component_package_archive(&project_dir, &archive_path).expect("write archive");
+    component_package_commands::install_component_package_archive_for_app(
+        &resolver,
+        archive_path.to_string_lossy().to_string(),
+    )
+    .await
+    .expect("install package");
+
+    let resolved = component_package_commands::resolve_installed_component_source_for_app(
+        &resolver,
+        "accepted.target-kit".to_string(),
+        "0.1.0".to_string(),
+        "accepted-body".to_string(),
+    )
+    .await
+    .expect("resolve installed accepted component");
+    assert_eq!(
+        resolved.component.ports[0].target_ids,
+        vec![chosen_target_id.clone()]
+    );
+
+    let rendered = component_package_commands::render_installed_component_source_for_app(
+        &resolver,
+        &state,
+        "accepted.target-kit".to_string(),
+        "0.1.0".to_string(),
+        "accepted-body".to_string(),
+        Default::default(),
+    )
+    .await
+    .expect("render installed accepted component");
 
     assert_eq!(
         rendered.installed_source.component.ports[0].target_ids,

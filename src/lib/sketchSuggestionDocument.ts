@@ -2,6 +2,7 @@ import type {
   SketchDefinition,
   SketchDocument,
   SketchPrimitive,
+  SketchPrimitiveTopology,
   SketchSuggestionRequest,
 } from './tauri/contracts';
 import { constraintsForStroke, strokeKind } from './sketchWorkspaceState';
@@ -26,7 +27,7 @@ export function buildSketchSuggestionDocument(strokes: SketchStroke[]): SketchDo
   for (const stroke of strokes) {
     if (!stroke.closed) continue;
 
-    const sketchId = `sketch-${stroke.view}`;
+    const sketchId = stroke.sketchId ?? `sketch-${stroke.view}`;
     if (!activeSketchId) activeSketchId = sketchId;
 
     let sketch = sketches.get(sketchId);
@@ -63,6 +64,7 @@ function strokeToPrimitive(stroke: SketchStroke): SketchPrimitive {
       points: stroke.points.map(copyPoint),
       closed: true,
       radius: stroke.radius ?? null,
+      ...(stroke.topology ? { topology: copyTopology(stroke.topology) } : {}),
     };
   }
   return {
@@ -70,9 +72,18 @@ function strokeToPrimitive(stroke: SketchStroke): SketchPrimitive {
     kind: 'polyline',
     points: stroke.points.map(copyPoint),
     closed: true,
+    ...(stroke.topology ? { topology: copyTopology(stroke.topology) } : {}),
   };
 }
 
 function copyPoint(point: SketchPoint): SketchPoint {
   return [point[0], point[1]];
+}
+
+function copyTopology(topology: SketchPrimitiveTopology | null | undefined): SketchPrimitiveTopology | null | undefined {
+  if (!topology) return topology;
+  return {
+    ...topology,
+    edgeIds: topology.edgeIds ? [...topology.edgeIds] : undefined,
+  };
 }

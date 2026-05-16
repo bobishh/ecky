@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test.describe('Drag and Drop', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    // Wait for the app to boot
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.waitForSelector('.prompt-container');
   });
 

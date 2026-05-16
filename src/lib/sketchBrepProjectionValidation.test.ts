@@ -78,7 +78,6 @@ const matchingProjection: BrepHiddenLineProjectionResponse = {
       ],
     },
   ],
-  warnings: [],
 };
 
 test('Given SketchDocument and matching BRep projection When summary builds Then rows pass with bounds seed', () => {
@@ -174,7 +173,9 @@ test('Given backend BRep validation issue When repair targets build Then target 
       issues: [
         {
           sketchId: 'front-sketch',
+          view: 'front',
           primitiveId: 'front-profile',
+          kind: 'boundsMismatch',
           severity: 'error',
           message: 'raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
         },
@@ -189,13 +190,387 @@ test('Given backend BRep validation issue When repair targets build Then target 
       sketchId: 'front-sketch',
       primitiveId: 'front-profile',
       view: 'front',
+      edgeId: null,
       severity: 'error',
       label: 'FRONT / front-profile',
-      reason: 'raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
+      reason:
+        'bounds mismatch / FRONT / front-profile / raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
       evidence:
-        'front-sketch / front-profile / raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
+        'front-sketch / front-profile / bounds mismatch / FRONT / front-profile / raw BREP/SKETCH bounds mismatch: front sketch bounds x=0..20 y=0..10; OCCT bounds x=0..20 y=0..8',
     },
   ]);
+});
+
+test('Given backend topology issue has locator but no primitive id When repair targets build Then target resolves exact primitive', () => {
+  const locatorDocument: SketchDocument = {
+    ...document,
+    sketches: [
+      {
+        sketchId: 'front-sketch',
+        view: 'front',
+        primitives: [
+          {
+            primitiveId: 'front-hole',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [3, 2],
+              [7, 2],
+              [7, 3],
+              [3, 3],
+              [3, 2],
+            ],
+            topology: {
+              loopId: 'front-hole',
+              edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+              loopRole: 'hole',
+              sourceClass: 'derived',
+            },
+          },
+          {
+            primitiveId: 'front-profile',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [0, 0],
+              [20, 0],
+              [20, 10],
+              [0, 10],
+              [0, 0],
+            ],
+            topology: {
+              loopId: 'front-outer',
+              edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+              loopRole: 'outer',
+              sourceClass: 'derived',
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const targets = buildSketchBrepProjectionRepairTargets(locatorDocument, {
+    ...matchingProjection,
+    validation: {
+      passed: false,
+      issues: [
+        {
+          sketchId: 'front-sketch',
+          view: 'front',
+          kind: 'topologyMismatch',
+          severity: 'error',
+          topology: {
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+          },
+          message: 'raw BREP/SKETCH topology mismatch: front face loop cannot be matched',
+        },
+      ],
+      evidence: [],
+    },
+  });
+
+  assert.equal(targets[0]?.primitiveId, 'front-hole');
+  assert.equal(targets[0]?.label, 'FRONT / front-hole');
+});
+
+test('Given backend containment issue carries explicit view and edge locator When repair targets build Then evidence keeps edge id and exact primitive', () => {
+  const locatorDocument: SketchDocument = {
+    documentId: 'doc-explicit-view',
+    units: 'mm',
+    sketches: [
+      {
+        sketchId: 'sketch-alpha',
+        view: 'front',
+        primitives: [
+          {
+            primitiveId: 'front-outer',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [0, 0],
+              [20, 0],
+              [20, 10],
+              [0, 10],
+              [0, 0],
+            ],
+            topology: {
+              loopId: 'front-outer',
+              edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+              loopRole: 'outer',
+              sourceClass: 'derived',
+            },
+          },
+          {
+            primitiveId: 'front-hole',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [3, 2],
+              [7, 2],
+              [7, 3],
+              [3, 3],
+              [3, 2],
+            ],
+            topology: {
+              loopId: 'front-hole',
+              edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+              loopRole: 'hole',
+              sourceClass: 'derived',
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const targets = buildSketchBrepProjectionRepairTargets(locatorDocument, {
+    ...matchingProjection,
+    validation: {
+      passed: false,
+      issues: [
+        {
+          sketchId: 'sketch-alpha',
+          view: 'front',
+          primitiveId: 'front-outer',
+          edgeId: 'front-v1',
+          kind: 'containmentMismatch',
+          severity: 'error',
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+          },
+          message: 'raw BREP/SKETCH containment mismatch: projection exits source profile, maxOutside=4.2mm',
+        },
+      ],
+      evidence: [],
+    },
+  });
+
+  assert.deepEqual(targets, [
+    {
+      targetId: 'brep-repair-sketch-alpha-front-hole-0',
+      sketchId: 'sketch-alpha',
+      primitiveId: 'front-hole',
+      view: 'front',
+      edgeId: 'front-v1',
+      severity: 'error',
+      label: 'FRONT / front-hole',
+      reason:
+        'containment mismatch / FRONT / HOLE / front-v1 / raw BREP/SKETCH containment mismatch: projection exits source profile, maxOutside=4.2mm',
+      evidence:
+        'sketch-alpha / front-hole / front-v1 / containment mismatch / FRONT / HOLE / front-v1 / raw BREP/SKETCH containment mismatch: projection exits source profile, maxOutside=4.2mm',
+    },
+  ]);
+});
+
+test('Given backend containment issue has structured front view and neutral message When repair targets build Then sketchId plus topology still resolve front hole', () => {
+  const locatorDocument: SketchDocument = {
+    documentId: 'doc-no-view',
+    units: 'mm',
+    sketches: [
+      {
+        sketchId: 'sketch-alpha',
+        view: 'front',
+        primitives: [
+          {
+            primitiveId: 'front-outer',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [0, 0],
+              [20, 0],
+              [20, 10],
+              [0, 10],
+              [0, 0],
+            ],
+            topology: {
+              loopId: 'front-outer',
+              edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+              loopRole: 'outer',
+              sourceClass: 'derived',
+            },
+          },
+          {
+            primitiveId: 'front-hole',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [3, 2],
+              [7, 2],
+              [7, 3],
+              [3, 3],
+              [3, 2],
+            ],
+            topology: {
+              loopId: 'front-hole',
+              edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+              loopRole: 'hole',
+              sourceClass: 'derived',
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const targets = buildSketchBrepProjectionRepairTargets(locatorDocument, {
+    ...matchingProjection,
+    validation: {
+      passed: false,
+      issues: [
+        {
+          sketchId: 'sketch-alpha',
+          kind: 'containmentMismatch',
+          view: 'front',
+          primitiveId: 'primitive-outer',
+          edgeId: 'front-v1',
+          severity: 'error',
+          message: 'projection exits source profile',
+          topology: {
+            loopId: 'hole-alpha',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+      evidence: [],
+    },
+  });
+
+  assert.equal(targets[0]?.sketchId, 'sketch-alpha');
+  assert.equal(targets[0]?.view, 'front');
+  assert.equal(targets[0]?.primitiveId, 'front-hole');
+  assert.equal(targets[0]?.label, 'FRONT / front-hole');
+});
+
+test('Given backend containment issue has generic sketch id with structured front view When repair targets build Then topology-only locator still resolves front hole', () => {
+  const locatorDocument: SketchDocument = {
+    documentId: 'doc-topology-only',
+    units: 'mm',
+    sketches: [
+      {
+        sketchId: 'sketch-alpha',
+        view: 'front',
+        primitives: [
+          {
+            primitiveId: 'front-outer',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [0, 0],
+              [20, 0],
+              [20, 10],
+              [0, 10],
+              [0, 0],
+            ],
+            topology: {
+              loopId: 'front-outer',
+              edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+              loopRole: 'outer',
+              sourceClass: 'derived',
+            },
+          },
+          {
+            primitiveId: 'front-hole',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [3, 2],
+              [7, 2],
+              [7, 3],
+              [3, 3],
+              [3, 2],
+            ],
+            topology: {
+              loopId: 'front-hole',
+              edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+              loopRole: 'hole',
+              sourceClass: 'derived',
+            },
+          },
+        ],
+      },
+      {
+        sketchId: 'sketch-top',
+        view: 'top',
+        primitives: [
+          {
+            primitiveId: 'top-outer',
+            kind: 'polyline',
+            closed: true,
+            points: [
+              [0, 0],
+              [20, 0],
+              [20, 10],
+              [0, 10],
+              [0, 0],
+            ],
+            topology: {
+              loopId: 'top-outer',
+              edgeIds: ['top-a', 'top-b', 'top-c', 'top-d'],
+              loopRole: 'outer',
+              sourceClass: 'derived',
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const targets = buildSketchBrepProjectionRepairTargets(locatorDocument, {
+    ...matchingProjection,
+    validation: {
+      passed: false,
+      issues: [
+        {
+          sketchId: 'model',
+          kind: 'containmentMismatch',
+          view: 'front',
+          primitiveId: 'primitive-outer',
+          edgeId: 'front-v1',
+          severity: 'error',
+          message: 'projection exits source profile',
+          topology: {
+            loopId: 'hole-alpha',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+      evidence: [],
+    },
+  });
+
+  assert.equal(targets[0]?.view, 'front');
+  assert.equal(targets[0]?.primitiveId, 'front-hole');
+  assert.equal(targets[0]?.label, 'FRONT / front-hole');
+});
+
+test('Given backend issue has stale sketch view and no locator When repair targets build Then no exact repair target is emitted', () => {
+  const targets = buildSketchBrepProjectionRepairTargets(document, {
+    ...matchingProjection,
+    validation: {
+      passed: false,
+      issues: [
+        {
+          sketchId: 'ghost-sketch',
+          view: 'top',
+          primitiveId: 'ghost-primitive',
+          kind: 'containmentMismatch',
+          severity: 'error',
+          message: 'projection exits source profile',
+        },
+      ],
+      evidence: [],
+    },
+  });
+
+  assert.deepEqual(targets, []);
 });
 
 test('Given passing backend BRep validation When repair targets build Then no targets are emitted', () => {

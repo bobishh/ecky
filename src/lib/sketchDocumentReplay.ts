@@ -1,4 +1,11 @@
-import type { SketchConstraint, SketchDocument, SketchPrimitive, SketchSuggestionRequest, SketchView } from './tauri/contracts';
+import type {
+  SketchConstraint,
+  SketchDocument,
+  SketchPrimitive,
+  SketchPrimitiveTopology,
+  SketchSuggestionRequest,
+  SketchView,
+} from './tauri/contracts';
 import type { SketchPoint, SketchStroke } from './sketchWorkspaceState';
 import { parseSketchDocumentEnvelope } from './sketchDocumentEnvelope';
 import { validateSketchDocumentConstraints } from './sketchConstraintValidation';
@@ -119,11 +126,13 @@ function primitiveToStroke(
     return {
       stroke: {
         primitiveId: primitive.primitiveId,
+        sketchId,
         view,
         kind: 'circle',
         points: [[center[0], center[1]]],
         closed: true,
         radius: primitive.radius,
+        ...(primitive.topology ? { topology: copyTopology(primitive.topology) } : {}),
       },
     };
   }
@@ -162,10 +171,12 @@ function primitiveToStroke(
   return {
     stroke: {
       primitiveId: primitive.primitiveId,
+      sketchId,
       view,
       kind: 'polyline',
       points: strokePoints,
       closed: true,
+      ...(primitive.topology ? { topology: copyTopology(primitive.topology) } : {}),
       ...dimensionLocksForPrimitive(primitive.primitiveId, constraints),
     },
   };
@@ -195,6 +206,14 @@ function primitiveSequenceFromPrimitiveId(primitiveId: string): number {
   const match = primitiveId.match(/(\d+)$/);
   if (!match) return 0;
   return Number(match[1]);
+}
+
+function copyTopology(topology: SketchPrimitiveTopology | null | undefined): SketchPrimitiveTopology | null | undefined {
+  if (!topology) return topology;
+  return {
+    ...topology,
+    edgeIds: topology.edgeIds ? [...topology.edgeIds] : undefined,
+  };
 }
 
 function parseSketchDocumentJsonValue(value: unknown): SketchDocumentParseResult {

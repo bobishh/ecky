@@ -1,8 +1,8 @@
 use crate::models::{
     BrepHiddenLineProjectionResponse, BrepProjectedEdge2d, BrepProjectedLoop2d,
     BrepProjectedLoopRole, SketchBrepProjectionValidation, SketchDefinition, SketchDocument,
-    SketchPrimitive, SketchPrimitiveKind, SketchValidationIssue, SketchValidationSeverity,
-    SketchView,
+    SketchPrimitive, SketchPrimitiveKind, SketchPrimitiveTopology, SketchValidationIssue,
+    SketchValidationIssueKind, SketchValidationSeverity, SketchView,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,6 +25,15 @@ struct BoundsDelta {
 struct ClosedProfile<'a> {
     sketch: &'a SketchDefinition,
     primitive: &'a SketchPrimitive,
+    bounds: Bounds2d,
+}
+
+#[derive(Debug, Clone)]
+struct SourceProfileTopology<'a> {
+    primitive: &'a SketchPrimitive,
+    role: BrepProjectedLoopRole,
+    area: f64,
+    sample: [f64; 2],
     bounds: Bounds2d,
 }
 
@@ -93,7 +102,11 @@ pub fn validate_sketch_brep_hidden_line_projection(
         let Some(profile) = find_closed_profile(document, &view) else {
             issues.push(SketchValidationIssue {
                 sketch_id: view_key(&view).to_string(),
+                kind: SketchValidationIssueKind::MissingClosedProfile,
+                view: view.clone(),
                 primitive_id: None,
+                edge_id: None,
+                topology: None,
                 severity: SketchValidationSeverity::Error,
                 message: format!("{label} sketch view has no active closed profile."),
             });
@@ -103,7 +116,11 @@ pub fn validate_sketch_brep_hidden_line_projection(
         let Some(brep_bounds) = projected_bounds(projection, &view) else {
             issues.push(SketchValidationIssue {
                 sketch_id: profile.sketch.sketch_id.clone(),
+                kind: SketchValidationIssueKind::MissingProjectionEdges,
+                view: view.clone(),
                 primitive_id: Some(profile.primitive.primitive_id.clone()),
+                edge_id: None,
+                topology: profile.primitive.topology.clone(),
                 severity: SketchValidationSeverity::Error,
                 message: format!("{label} BRep projection has no visible or hidden edge points."),
             });
@@ -115,7 +132,11 @@ pub fn validate_sketch_brep_hidden_line_projection(
         if max_delta > tolerance {
             issues.push(SketchValidationIssue {
                 sketch_id: profile.sketch.sketch_id.clone(),
+                kind: SketchValidationIssueKind::BoundsMismatch,
+                view: view.clone(),
                 primitive_id: Some(profile.primitive.primitive_id.clone()),
+                edge_id: None,
+                topology: profile.primitive.topology.clone(),
                 severity: SketchValidationSeverity::Error,
                 message: format!(
                     "{label} bounds mismatch: sketch {}, brep {}, maxDelta={:.6}, tolerance={:.6}.",
@@ -136,13 +157,24 @@ pub fn validate_sketch_brep_hidden_line_projection(
             ));
         }
 
+        let topology_counts = topology_counts(&profile, projection, &view);
         if let Some(mismatch) = containment_mismatch(&profile, projection, &view, tolerance) {
+            let mismatch_kind =
+                classify_containment_issue_kind(profile.primitive, topology_counts.as_ref());
+            let mismatch_label = match mismatch_kind {
+                SketchValidationIssueKind::ConcavityMismatch => "concavity mismatch",
+                _ => "containment mismatch",
+            };
             issues.push(SketchValidationIssue {
                 sketch_id: profile.sketch.sketch_id.clone(),
+                kind: mismatch_kind,
+                view: view.clone(),
                 primitive_id: Some(profile.primitive.primitive_id.clone()),
+                edge_id: Some(mismatch.edge_id.clone()),
+                topology: profile.primitive.topology.clone(),
                 severity: SketchValidationSeverity::Error,
                 message: format!(
-                    "{label} containment mismatch: edge {} has {} samples outside source profile, maxOutside={:.6}, tolerance={:.6}.",
+                    "{label} {mismatch_label}: edge {} has {} samples outside source profile, maxOutside={:.6}, tolerance={:.6}.",
                     mismatch.edge_id, mismatch.outside_count, mismatch.max_outside, tolerance
                 ),
             });
@@ -155,9 +187,19 @@ pub fn validate_sketch_brep_hidden_line_projection(
         }
 
         if let Some(mismatch) = topology_mismatch(&profile, projection, &view) {
+            let topology_target = topology_issue_target(profile.sketch, projection, &view);
             issues.push(SketchValidationIssue {
                 sketch_id: profile.sketch.sketch_id.clone(),
-                primitive_id: Some(profile.primitive.primitive_id.clone()),
+                kind: SketchValidationIssueKind::TopologyMismatch,
+                view: view.clone(),
+                primitive_id: topology_target
+                    .as_ref()
+                    .map(|target| target.primitive.primitive_id.clone())
+                    .or_else(|| Some(profile.primitive.primitive_id.clone())),
+                edge_id: None,
+                topology: topology_target
+                    .and_then(source_profile_issue_topology)
+                    .or_else(|| profile.primitive.topology.clone()),
                 severity: SketchValidationSeverity::Error,
                 message: format!(
                     "{label} topology mismatch: BRep projection has {} closed loops ({} holes) but source sketch has {}.",
@@ -166,7 +208,7 @@ pub fn validate_sketch_brep_hidden_line_projection(
                     source_topology_description(&mismatch),
                 ),
             });
-        } else if let Some(counts) = topology_counts(&profile, projection, &view) {
+        } else if let Some(counts) = topology_counts {
             evidence.push(format!(
                 "{label} topology pass: {} BRep loops, {} source {}, {} holes.",
                 counts.loop_count,
@@ -181,6 +223,22 @@ pub fn validate_sketch_brep_hidden_line_projection(
         passed: issues.is_empty(),
         issues,
         evidence,
+    }
+}
+
+fn classify_containment_issue_kind(
+    primitive: &SketchPrimitive,
+    topology_counts: Option<&TopologyCounts>,
+) -> SketchValidationIssueKind {
+    match topology_counts {
+        Some(counts)
+            if counts.loop_count == counts.source_profile_count
+                && counts.hole_count == counts.source_hole_count
+                && primitive_has_concavity(primitive) =>
+        {
+            SketchValidationIssueKind::ConcavityMismatch
+        }
+        _ => SketchValidationIssueKind::ContainmentMismatch,
     }
 }
 
@@ -362,24 +420,52 @@ fn topology_counts(
 }
 
 fn source_profile_roles(sketch: &SketchDefinition) -> Vec<BrepProjectedLoopRole> {
-    let profiles = sketch
+    source_profiles(sketch)
+        .into_iter()
+        .map(|profile| profile.role)
+        .collect()
+}
+
+fn source_profiles(sketch: &SketchDefinition) -> Vec<SourceProfileTopology<'_>> {
+    let seeds = sketch
         .primitives
         .iter()
         .filter(|primitive| primitive.closed)
         .filter_map(|primitive| {
             Some(SourceProfileTopology {
                 primitive,
+                role: BrepProjectedLoopRole::Unknown,
                 area: primitive_area_abs(primitive)?,
                 sample: primitive_representative_point(primitive)?,
+                bounds: primitive_bounds(primitive)?,
             })
         })
         .collect::<Vec<_>>();
 
-    profiles
+    if seeds.iter().all(|profile| {
+        profile
+            .primitive
+            .topology
+            .as_ref()
+            .and_then(|topology| topology.loop_role.clone())
+            .is_some()
+    }) {
+        return seeds
+            .into_iter()
+            .filter_map(|profile| {
+                Some(SourceProfileTopology {
+                    role: profile.primitive.topology.as_ref()?.loop_role.clone()?,
+                    ..profile
+                })
+            })
+            .collect();
+    }
+
+    seeds
         .iter()
         .enumerate()
         .map(|(index, profile)| {
-            let containing_larger_count = profiles
+            let containing_larger_count = seeds
                 .iter()
                 .enumerate()
                 .filter(|(other_index, other)| {
@@ -388,20 +474,16 @@ fn source_profile_roles(sketch: &SketchDefinition) -> Vec<BrepProjectedLoopRole>
                         && profile_contains_point(other.primitive, profile.sample, 0.0)
                 })
                 .count();
-            if containing_larger_count % 2 == 1 {
-                BrepProjectedLoopRole::Hole
-            } else {
-                BrepProjectedLoopRole::Outer
+            SourceProfileTopology {
+                role: if containing_larger_count % 2 == 1 {
+                    BrepProjectedLoopRole::Hole
+                } else {
+                    BrepProjectedLoopRole::Outer
+                },
+                ..profile.clone()
             }
         })
         .collect()
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SourceProfileTopology<'a> {
-    primitive: &'a SketchPrimitive,
-    area: f64,
-    sample: [f64; 2],
 }
 
 fn primitive_area_abs(primitive: &SketchPrimitive) -> Option<f64> {
@@ -455,6 +537,72 @@ fn source_topology_description(mismatch: &TopologyMismatch) -> String {
             profile_count_label(mismatch.source_profile_count)
         )
     }
+}
+
+fn topology_issue_target<'a>(
+    sketch: &'a SketchDefinition,
+    projection: &BrepHiddenLineProjectionResponse,
+    view: &SketchView,
+) -> Option<SourceProfileTopology<'a>> {
+    let projected_loops = projected_loops_for_view(projection, view);
+    if projected_loops.is_empty() {
+        return None;
+    }
+    source_profiles(sketch).into_iter().find(|profile| {
+        !projected_loops
+            .iter()
+            .any(|loop2d| source_profile_matches_loop(profile, loop2d))
+    })
+}
+
+fn source_profile_matches_loop(
+    profile: &SourceProfileTopology<'_>,
+    loop2d: &BrepProjectedLoop2d,
+) -> bool {
+    if let Some(topology) = profile.primitive.topology.as_ref() {
+        if !topology.edge_ids.is_empty() && same_edge_ids(&topology.edge_ids, &loop2d.edge_ids) {
+            return true;
+        }
+        if let Some(loop_id) = topology.loop_id.as_ref() {
+            if loop_id == &loop2d.loop_id {
+                return true;
+            }
+        }
+    }
+
+    if profile.role != loop2d.role {
+        return false;
+    }
+
+    Bounds2d::from_points(&loop2d.points)
+        .map(|loop_bounds| profile.bounds.delta(loop_bounds).max_component() <= 1e-6)
+        .unwrap_or(false)
+}
+
+fn source_profile_issue_topology(
+    profile: SourceProfileTopology<'_>,
+) -> Option<SketchPrimitiveTopology> {
+    if let Some(topology) = profile.primitive.topology.clone() {
+        return Some(topology);
+    }
+
+    Some(SketchPrimitiveTopology {
+        loop_id: None,
+        edge_ids: Vec::new(),
+        loop_role: Some(profile.role),
+        source_class: None,
+    })
+}
+
+fn same_edge_ids(left: &[String], right: &[String]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left_sorted = left.to_vec();
+    left_sorted.sort();
+    let mut right_sorted = right.to_vec();
+    right_sorted.sort();
+    left_sorted == right_sorted
 }
 
 fn projected_loops_for_view(
@@ -690,6 +838,49 @@ fn polygon_boundary_distance(points: &[[f64; 2]], point: [f64; 2]) -> f64 {
     min_distance
 }
 
+fn primitive_has_concavity(primitive: &SketchPrimitive) -> bool {
+    match primitive.kind {
+        SketchPrimitiveKind::Circle => false,
+        _ => polygon_is_concave(&primitive.points),
+    }
+}
+
+fn polygon_is_concave(points: &[[f64; 2]]) -> bool {
+    let mut vertices = points.to_vec();
+    if vertices.len() >= 2 && vertices.first() == vertices.last() {
+        vertices.pop();
+    }
+    if vertices.len() < 4
+        || vertices
+            .iter()
+            .any(|point| !point[0].is_finite() || !point[1].is_finite())
+    {
+        return false;
+    }
+
+    let mut turn_sign = 0.0f64;
+    for index in 0..vertices.len() {
+        let previous = vertices[(index + vertices.len() - 1) % vertices.len()];
+        let current = vertices[index];
+        let next = vertices[(index + 1) % vertices.len()];
+        let ab = [current[0] - previous[0], current[1] - previous[1]];
+        let bc = [next[0] - current[0], next[1] - current[1]];
+        let cross = ab[0] * bc[1] - ab[1] * bc[0];
+        if cross.abs() <= 1e-9 {
+            continue;
+        }
+        let sign = cross.signum();
+        if turn_sign == 0.0 {
+            turn_sign = sign;
+            continue;
+        }
+        if (turn_sign - sign).abs() > f64::EPSILON {
+            return true;
+        }
+    }
+    false
+}
+
 fn point_segment_distance(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let ab = [b[0] - a[0], b[1] - a[1]];
     let ap = [point[0] - a[0], point[1] - a[1]];
@@ -790,6 +981,7 @@ mod tests {
             points,
             closed: true,
             radius: None,
+            topology: None,
         }
     }
 
@@ -888,7 +1080,7 @@ mod tests {
                 base_rect_view(SketchView::Top, "top"),
                 base_rect_view(SketchView::Side, "side"),
             ],
-            warnings: Vec::new(),
+            warning_entries: Vec::new(),
             validation: None,
         }
     }
@@ -949,11 +1141,58 @@ mod tests {
         let issue = validation
             .issues
             .iter()
-            .find(|item| item.message.contains("Front containment mismatch"))
+            .find(|item| item.kind == SketchValidationIssueKind::ConcavityMismatch)
+            .expect("front concavity issue");
+        assert_eq!(issue.sketch_id, "front-sketch");
+        assert_eq!(issue.kind, SketchValidationIssueKind::ConcavityMismatch);
+        assert_eq!(issue.view, SketchView::Front);
+        assert_eq!(issue.primitive_id.as_deref(), Some("front-profile"));
+        assert!(matches!(
+            issue.edge_id.as_deref(),
+            Some("front-right") | Some("front-top")
+        ));
+        assert!(issue.message.contains("Front concavity mismatch"));
+        assert!(issue.message.contains("front-right") || issue.message.contains("front-top"));
+    }
+
+    #[test]
+    fn same_bounds_projection_points_outside_convex_profile_stays_containment_fail() {
+        let document = document_with_front(polyline(
+            "front-profile",
+            vec![
+                [0.0, 0.0],
+                [100.0, 0.0],
+                [80.0, 100.0],
+                [20.0, 100.0],
+                [0.0, 0.0],
+            ],
+        ));
+        let validation = validate_sketch_brep_hidden_line_projection(
+            &document,
+            &projection(vec![
+                edge("front-bottom", vec![[0.0, 0.0], [100.0, 0.0]]),
+                edge("front-right", vec![[100.0, 0.0], [100.0, 100.0]]),
+                edge("front-top", vec![[100.0, 100.0], [0.0, 100.0]]),
+                edge("front-left", vec![[0.0, 100.0], [0.0, 0.0]]),
+            ]),
+            0.1,
+        );
+
+        assert!(!validation.passed);
+        let issue = validation
+            .issues
+            .iter()
+            .find(|item| item.kind == SketchValidationIssueKind::ContainmentMismatch)
             .expect("front containment issue");
         assert_eq!(issue.sketch_id, "front-sketch");
+        assert_eq!(issue.kind, SketchValidationIssueKind::ContainmentMismatch);
+        assert_eq!(issue.view, SketchView::Front);
         assert_eq!(issue.primitive_id.as_deref(), Some("front-profile"));
-        assert!(issue.message.contains("front-right") || issue.message.contains("front-top"));
+        assert!(issue
+            .edge_id
+            .as_deref()
+            .is_some_and(|edge_id| edge_id.starts_with("front-")));
+        assert!(issue.message.contains("Front containment mismatch"));
     }
 
     #[test]
@@ -1061,6 +1300,57 @@ mod tests {
                 .expect("island loop")
                 .role,
             crate::models::BrepProjectedLoopRole::Outer
+        );
+    }
+
+    #[test]
+    fn source_profile_roles_prefer_primitive_topology_metadata() {
+        let mut outer = polyline(
+            "front-outer",
+            vec![
+                [0.0, 0.0],
+                [30.0, 0.0],
+                [30.0, 20.0],
+                [0.0, 20.0],
+                [0.0, 0.0],
+            ],
+        );
+        outer.topology = Some(crate::models::SketchPrimitiveTopology {
+            loop_id: Some("front-outer".to_string()),
+            edge_ids: vec!["outer-a".to_string()],
+            loop_role: Some(crate::models::BrepProjectedLoopRole::Outer),
+            source_class: Some("derived".to_string()),
+        });
+        let mut hole = polyline(
+            "front-hole",
+            vec![
+                [40.0, 0.0],
+                [55.0, 0.0],
+                [55.0, 12.0],
+                [40.0, 12.0],
+                [40.0, 0.0],
+            ],
+        );
+        hole.topology = Some(crate::models::SketchPrimitiveTopology {
+            loop_id: Some("front-hole".to_string()),
+            edge_ids: vec!["inner-a".to_string()],
+            loop_role: Some(crate::models::BrepProjectedLoopRole::Hole),
+            source_class: Some("derived".to_string()),
+        });
+        let sketch = SketchDefinition {
+            sketch_id: "sketch-front".to_string(),
+            view: SketchView::Front,
+            plane: None,
+            primitives: vec![outer, hole],
+            constraints: Vec::new(),
+        };
+
+        assert_eq!(
+            source_profile_roles(&sketch),
+            vec![
+                crate::models::BrepProjectedLoopRole::Outer,
+                crate::models::BrepProjectedLoopRole::Hole
+            ]
         );
     }
 }

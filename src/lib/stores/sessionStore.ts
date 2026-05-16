@@ -18,6 +18,7 @@ function createSessionStore() {
     status: 'System ready.',
     error: null as string | null,
     stlUrl: null as string | null,
+    runtimeRevision: 0,
     artifactBundle: null as ArtifactBundle | null,
     modelManifest: null as ModelManifest | null,
     selectedPartId: null as string | null,
@@ -39,6 +40,7 @@ function createSessionStore() {
       update(s => ({
         ...s,
         stlUrl: url,
+        runtimeRevision: s.runtimeRevision + 1,
         artifactBundle: url ? s.artifactBundle : null,
         modelManifest: url ? s.modelManifest : null,
         selectedPartId: url ? s.selectedPartId : null,

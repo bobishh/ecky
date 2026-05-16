@@ -41,6 +41,25 @@ export function viewportTargetKey(threadId: string, messageId: string): string {
   return `${threadId}:${messageId}`;
 }
 
+export function viewportCameraKey(
+  threadId: string,
+  messageId: string,
+  modelId: string | null | undefined,
+  artifactVersion: number | null | undefined,
+  contentHash: string | null | undefined,
+): string {
+  const base = viewportTargetKey(threadId, messageId);
+  if (!modelId && artifactVersion == null && !contentHash) {
+    return base;
+  }
+  return [
+    base,
+    modelId ?? '',
+    artifactVersion ?? '',
+    contentHash ?? '',
+  ].join(':');
+}
+
 export function chooseViewportCaptureMode(
   input: ChooseViewportCaptureModeInput,
 ): ViewportCaptureMode {
@@ -54,6 +73,10 @@ export function chooseViewportCaptureMode(
 
   if (matchesVisibleTarget) {
     return input.cameraOverride ? 'hidden-target' : 'visible-live';
+  }
+
+  if (input.requestedThreadId && input.requestedMessageId) {
+    return 'hidden-target';
   }
 
   return 'needs-user-choice';

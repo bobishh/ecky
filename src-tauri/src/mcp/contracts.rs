@@ -1,7 +1,7 @@
 use crate::models::{
-    AgentOrigin, ArtifactBundle, ControlPrimitive, ControlView, DesignOutput, DesignParams,
-    MeasurementAnnotation, ModelManifest, StructuralVerificationResult, TargetLeaseInfo, Thread,
-    ThreadStatus, UiSpec,
+    AgentOrigin, AgentScenePacket, ArtifactBundle, ControlPrimitive, ControlView, DesignOutput,
+    DesignParams, MeasurementAnnotation, ModelManifest, StructuralVerificationResult,
+    TargetLeaseInfo, Thread, ThreadStatus, UiSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,10 +40,10 @@ pub struct UserPromptResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConceptPreviewGenerateRequest {
-    pub prompt: String,
+pub struct ConceptPreviewSaveRequest {
+    pub image_data: String,
     #[serde(default)]
-    pub attachments: Vec<crate::contracts::Attachment>,
+    pub caption: String,
     #[serde(default)]
     pub thread_id: Option<String>,
     #[serde(default)]
@@ -54,7 +54,7 @@ pub struct ConceptPreviewGenerateRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConceptPreviewGenerateResponse {
+pub struct ConceptPreviewSaveResponse {
     pub thread_id: String,
     pub message_id: String,
     pub image_data: String,
@@ -224,6 +224,18 @@ pub struct ThreadListRequest {}
 pub struct ThreadListEntry {
     pub thread_id: String,
     pub title: String,
+    pub updated_at: u64,
+    pub version_count: usize,
+    pub pending_count: usize,
+    pub queued_count: usize,
+    pub error_count: usize,
+    pub status: ThreadStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalized_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_confirm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_pending_message_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,6 +300,10 @@ pub struct ThreadMetaResponse {
     pub status: ThreadStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_confirm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_pending_message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim_owner: Option<crate::models::AgentSession>,
 }
@@ -480,6 +496,7 @@ pub struct TargetMetaResponse {
     pub control_primitive_count: usize,
     pub control_relation_count: usize,
     pub control_view_count: usize,
+    pub scene_packet: AgentScenePacket,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -500,6 +517,8 @@ pub struct TargetMacroRequest {
     pub identity: AgentIdentityOverride,
     pub thread_id: Option<String>,
     pub message_id: Option<String>,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -510,7 +529,12 @@ pub struct TargetMacroResponse {
     pub title: String,
     pub version_name: String,
     pub resolved_from: TargetResolvedFrom,
-    pub macro_code: String,
+    pub digest: String,
+    pub line_count: usize,
+    pub window_start_line: usize,
+    pub window_end_line: usize,
+    pub truncated: bool,
+    pub lines: Vec<MacroBufferLine>,
     pub macro_dialect: crate::models::MacroDialect,
     pub post_processing: Option<crate::models::PostProcessingSpec>,
     pub authoring_context: TargetAuthoringContext,
@@ -531,6 +555,8 @@ pub struct MacroBufferGetRequest {
     pub identity: AgentIdentityOverride,
     pub thread_id: Option<String>,
     pub message_id: Option<String>,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -543,7 +569,9 @@ pub struct MacroBufferGetResponse {
     pub resolved_from: TargetResolvedFrom,
     pub digest: String,
     pub line_count: usize,
-    pub macro_code: String,
+    pub window_start_line: usize,
+    pub window_end_line: usize,
+    pub truncated: bool,
     pub lines: Vec<MacroBufferLine>,
     pub source_language: String,
     pub macro_dialect: crate::models::MacroDialect,
@@ -551,6 +579,98 @@ pub struct MacroBufferGetResponse {
     pub post_processing: Option<crate::models::PostProcessingSpec>,
     pub authoring_context: TargetAuthoringContext,
     pub artifact_digest: Option<ArtifactBundleDigest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstGetRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub path: Option<String>,
+    pub depth: Option<usize>,
+    pub max_nodes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstNode {
+    pub path: String,
+    pub digest: String,
+    pub node_id: u64,
+    pub kind: String,
+    pub value_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<EckyAstSpan>,
+    pub child_paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstGetResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub resolved_from: TargetResolvedFrom,
+    pub source_digest: String,
+    pub core_digest: String,
+    pub root_paths: Vec<String>,
+    pub requested_path: Option<String>,
+    pub depth: usize,
+    pub max_nodes: usize,
+    pub truncated: bool,
+    pub nodes: Vec<EckyAstNode>,
+    pub authoring_context: TargetAuthoringContext,
+    pub artifact_digest: Option<ArtifactBundleDigest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EckyAstEditOperation {
+    Replace,
+    InsertBefore,
+    InsertAfter,
+    Delete,
+    Rename,
+}
+
+impl Default for EckyAstEditOperation {
+    fn default() -> Self {
+        Self::Replace
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstReplaceAndRenderRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub operation: EckyAstEditOperation,
+    pub source_digest: String,
+    pub path: String,
+    pub expected_node_digest: String,
+    pub replacement_source: Option<String>,
+    pub new_name: Option<String>,
+    pub parameters: Option<DesignParams>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub geometry_backend: Option<crate::models::GeometryBackend>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -587,7 +707,9 @@ pub struct MacroBufferRenderRequest {
 pub struct MacroBufferEditResponse {
     pub digest: String,
     pub line_count: usize,
-    pub macro_code: String,
+    pub window_start_line: usize,
+    pub window_end_line: usize,
+    pub truncated: bool,
     pub lines: Vec<MacroBufferLine>,
 }
 
@@ -708,7 +830,7 @@ pub struct TargetDetailResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_artifacts: Option<Vec<crate::models::ExportArtifact>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_draft: Option<Option<()>>,
+    pub latest_draft: Option<Option<crate::models::AgentDraft>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -724,7 +846,7 @@ pub struct TargetGetResponse {
     pub artifact_bundle: Option<ArtifactBundle>,
     pub artifact_digest: Option<ArtifactBundleDigest>,
     pub model_manifest: Option<ModelManifest>,
-    pub latest_draft: Option<()>,
+    pub latest_draft: Option<crate::models::AgentDraft>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1149,8 +1271,13 @@ pub struct SemanticManifestMutationResponse {
     pub model_id: String,
     pub title: String,
     pub version_name: String,
-    pub artifact_bundle: ArtifactBundle,
-    pub model_manifest: ModelManifest,
+    pub artifact_digest: ArtifactBundleDigest,
+    pub control_primitive_count: usize,
+    pub relation_count: usize,
+    pub view_count: usize,
+    pub advisory_count: usize,
+    pub measurement_annotation_count: usize,
+    pub part_count: usize,
     pub agent_origin: AgentOrigin,
 }
 

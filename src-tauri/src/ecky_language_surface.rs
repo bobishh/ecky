@@ -1051,11 +1051,11 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "revolve" => ref_entry(name, "cadOp", "(revolve sketch angle)", "solid", "Revolves a sketch profile around an axis.", true, support, "(revolve profile 360)", &[]),
         "loft" => ref_entry(name, "cadOp", "(loft sketch...)", "solid", "Creates a solid through multiple sketch sections.", true, support, "(loft bottom top)", &[]),
         "sweep" => ref_entry(name, "cadOp", "(sweep profile path)", "solid", "Sweeps a profile along a path.", true, support, "(sweep (circle 2 16) rail)", &[]),
-        "shell" => ref_entry(name, "cadOp", "(shell thickness solid)", "solid", "Hollows or thickens a solid by wall thickness.", true, support, "(shell 2 (cylinder 20 80))", &[]),
+        "shell" => ref_entry(name, "cadOp", "(shell thickness [:faces selector] solid)", "solid", "Hollows or thickens a solid by wall thickness. Exact backends also accept `:faces` with `target-id:<id>` or `target-ids:<id>|<id>` to choose shell opening faces.", true, support, "(shell 2 :faces \"target-id:body:face:0-0-20:1256.637\" (cylinder 20 80))", &[]),
         "offset" => ref_entry(name, "cadOp", "(offset distance sketch)", "sketch", "Offsets a sketch/profile by distance.", true, support, "(offset 2 profile)", &[]),
         "offset-rounded" => ref_entry(name, "cadOp", "(offset-rounded distance sketch)", "sketch", "Offsets a sketch with rounded joins where supported.", true, support, "(offset-rounded 2 profile)", &[]),
-        "fillet" => ref_entry(name, "cadOp", "(fillet radius solid)", "solid", "Rounds edges of a solid where backend can infer applicable edges.", true, support, "(fillet 2 body)", &[]),
-        "chamfer" => ref_entry(name, "cadOp", "(chamfer distance solid)", "solid", "Bevels edges of a solid where backend can infer applicable edges.", true, support, "(chamfer 1 body)", &[]),
+        "fillet" => ref_entry(name, "cadOp", "(fillet radius [:edges selector] solid)", "solid", "Rounds edges of a solid. `:edges` accepts coarse selectors like `top`, `left`, `axis-z`, `x-min`, or `x-min+z-max`; exact backends also accept `target-id:<id>` and `target-ids:<id>|<id>`.", true, support, "(fillet 2 :edges \"x-min+z-max\" body)", &["Topology-sensitive post-op: if the selector matches no edges after one smaller-radius retry and one selector retry, stop retrying fillet. Rebuild with rounded source geometry such as `rounded-rect`, `rounded-polygon`, `offset-rounded`, `loft`, `taper`, `cone`, or explicit profiles."]),
+        "chamfer" => ref_entry(name, "cadOp", "(chamfer distance [:edges selector] solid)", "solid", "Bevels edges of a solid. `:edges` accepts coarse selectors like `bottom`, `front`, `axis-z`, `y-max`, or `x-min+z-max`; exact backends also accept `target-id:<id>` and `target-ids:<id>|<id>`.", true, support, "(chamfer 1 :edges \"bottom\" body)", &["Topology-sensitive post-op: if the selector matches no edges after one smaller-distance retry and one selector retry, stop retrying chamfer. Rebuild with source bevel/rounding geometry such as explicit profiles, `loft`, `taper`, `cone`, `rounded-polygon`, or `offset-rounded`."]),
         "taper" => ref_entry(name, "cadOp", "(taper height scale sketch) or (taper height scale-x scale-y sketch)", "solid", "Extrudes a sketch while scaling the top section.", true, support, "(taper 30 0.7 0.7 (circle 12 32))", &[]),
         "twist" => ref_entry(name, "cadOp", "(twist height angle sketch)", "solid", "Extrudes a sketch while rotating sections along height.", true, support, "(twist 40 90 profile)", &[]),
         "sampled-radial-loft" => ref_entry(name, "cadOp", "(sampled-radial-loft (theta z fz) :height h :z-steps n :theta-steps n :radius expr :z-map expr?)", "solid", "Samples radial sections across height, then lofts exact backend wires/faces into a solid.", true, support, "(sampled-radial-loft (theta z fz) :height 40 :z-steps 24 :theta-steps 72 :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))", &["Binders expose per-sample `theta`, absolute `z`, and normalized `fz` in `[0,1]`.", "Use on FreeCAD/build123d for formula-driven dome/pot families."]),
@@ -1292,7 +1292,8 @@ mod tests {
 
     #[test]
     fn surface_reference_covers_all_manifest_names() {
-        let reference = supported_surface_reference(GeometryBackend::EckyRust);
+        let backend = GeometryBackend::EckyRust;
+        let reference = supported_surface_reference(backend);
 
         for name in MODEL_CLAUSES
             .iter()
@@ -1301,10 +1302,8 @@ mod tests {
             .chain(NUMERIC_HELPERS.iter())
             .chain(POINT_LIST_HELPERS.iter())
             .chain(BOOLEAN_HELPERS.iter())
-            .chain(CAD_OPS_PORTABLE.iter())
-            .chain(EXACT_BACKEND_ONLY_CAD_OPS.iter())
-            .chain(ECKY_RUST_ONLY_CAD_OPS.iter())
-            .chain(WALL_PATTERN_MODES.iter())
+            .chain(cad_ops_for_backend(backend).iter())
+            .chain(wall_pattern_modes_for_backend(backend).iter())
         {
             let entry = reference
                 .entries
@@ -1377,6 +1376,32 @@ mod tests {
         );
         assert!(radial.description.contains("Samples radial sections"));
         assert!(radial.notes.iter().any(|note| note.contains("theta")));
+    }
+
+    #[test]
+    fn surface_reference_warns_against_blind_edge_modifier_retries() {
+        let reference = supported_surface_reference(GeometryBackend::Build123d);
+        let lookup = |name: &str| {
+            reference
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing reference entry: {name}"))
+        };
+
+        let fillet = lookup("fillet");
+        assert!(fillet.notes.iter().any(|note| {
+            note.contains("selector matches no edges")
+                && note.contains("stop retrying fillet")
+                && note.contains("rounded source geometry")
+        }));
+
+        let chamfer = lookup("chamfer");
+        assert!(chamfer.notes.iter().any(|note| {
+            note.contains("selector matches no edges")
+                && note.contains("stop retrying chamfer")
+                && note.contains("explicit profiles")
+        }));
     }
 
     #[test]

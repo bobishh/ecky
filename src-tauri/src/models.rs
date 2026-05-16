@@ -257,6 +257,16 @@ impl AppState {
         }
     }
 
+    pub fn emit_agent_draft_preview_updated(
+        &self,
+        event: &crate::contracts::AgentDraftPreviewUpdatedEvent,
+    ) {
+        let handle = self.app_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            let _ = handle.emit("agent-draft-preview-updated", event);
+        }
+    }
+
     pub fn emit_history_updated(&self) {
         let handle = self.app_handle.lock().unwrap().clone();
         if let Some(handle) = handle {

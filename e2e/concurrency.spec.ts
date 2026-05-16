@@ -2,6 +2,22 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Concurrency Isolation', () => {
   test('switching threads during generation does not mutate the new thread', async ({ page }) => {
+    await page.route(/\/mock\.stl(?:\?.*)?$/, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'model/stl',
+        body: `solid mock
+facet normal 0 0 0
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vertex 0 1 0
+endloop
+endfacet
+endsolid mock
+`,
+      });
+    });
     // Mock the Tauri invoke to simulate a slow generation and basic boot
     await page.addInitScript(() => {
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
@@ -52,6 +68,11 @@ test.describe('Concurrency Isolation', () => {
             messages: [],
           };
         }
+        if (cmd === 'get_thread_latest_version') return null;
+        if (cmd === 'get_thread_message_version') return null;
+        if (cmd === 'get_thread_messages_page') {
+          return { messages: [], nextBefore: null, hasMore: false };
+        }
         if (cmd === 'generate_design') {
           // Artificial delay
           await new Promise(resolve => setTimeout(resolve, 1000));
@@ -59,15 +80,73 @@ test.describe('Concurrency Isolation', () => {
             threadId: args.threadId || 'mock-thread-1',
             messageId: 'mock-msg-1',
             design: {
+              title: 'Mock Box',
+              versionName: 'V1',
               interactionMode: 'design',
               macroCode: 'print("mock")',
+              sourceLanguage: 'legacyPython',
+              geometryBackend: 'freecad',
               initialParams: {},
               uiSpec: { fields: [] }
             }
           };
         }
-        if (cmd === 'render_stl') {
-          return '/mock/path/to.stl';
+        if (cmd === 'render_model') {
+          return {
+            modelId: 'mock-model-1',
+            sourceKind: 'generated',
+            engineKind: 'freecad',
+            sourceLanguage: 'legacyPython',
+            geometryBackend: 'freecad',
+            contentHash: 'mock-hash-1',
+            fcstdPath: '/mock.FCStd',
+            manifestPath: '/mock/manifest.json',
+            previewStlPath: '/mock.stl',
+            viewerAssets: [],
+            calloutAnchors: [],
+            measurementGuides: [],
+            edgeTargets: [],
+          };
+        }
+        if (cmd === 'get_model_manifest') {
+          return {
+            modelId: 'mock-model-1',
+            sourceKind: 'generated',
+            sourceLanguage: 'legacyPython',
+            geometryBackend: 'freecad',
+            document: {
+              documentName: 'Mock Box',
+              documentLabel: 'Mock Box',
+              objectCount: 0,
+              warnings: [],
+            },
+            parts: [],
+            parameterGroups: [],
+            controlPrimitives: [],
+            controlRelations: [],
+            controlViews: [],
+            selectionTargets: [],
+            advisories: [],
+            measurementAnnotations: [],
+            warnings: [],
+            enrichmentState: { status: 'none', proposals: [] },
+          };
+        }
+        if (cmd === 'verify_generated_model') {
+          return {
+            passed: true,
+            summary: 'Checks passed.',
+            issues: [],
+            metrics: {
+              partCount: 1,
+              previewStlSizeBytes: 1024,
+              totalVolume: 1000,
+              totalArea: 500,
+              bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },
+            },
+            verifierStatus: 'ok',
+            verifierSource: 'mock',
+          };
         }
         if (cmd === 'save_config') return null;
         if (cmd === 'init_generation_attempt') return 'mock-msg-1';
@@ -100,27 +179,29 @@ test.describe('Concurrency Isolation', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.waitForSelector('.workbench');
-    await expect(page.locator('.history-card')).toContainText('Existing Thread');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await expect(page.locator('.project-card')).toContainText('Existing Thread');
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
 
     // Type a prompt
     const textarea = page.locator('.prompt-input');
     await textarea.fill('Build a box');
     const sendBtn = page.locator('button:has-text("PROCESS")');
     await expect(sendBtn).toBeEnabled();
-    await sendBtn.click();
+    await textarea.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
     // Immediately click the existing thread in history
-    const historyCard = page.locator('.history-card').first();
-    if (await historyCard.isVisible()) {
-      await historyCard.click();
-    }
+    await page.getByRole('button', { name: 'PROJECTS' }).click({ force: true });
+    const projectCard = page.locator('.project-card', { hasText: 'Existing Thread' }).first();
+    await expect(projectCard).toBeVisible();
+    await projectCard.getByRole('button', { name: 'OPEN' }).click({ force: true });
 
     // Wait for the mock generation delay
     await page.waitForTimeout(1500);
 
     // Assert that the generated output did not bleed into the newly selected thread view
     // i.e., the active thread should be mock-thread-2 and not mock-thread-1
-    const activeCard = page.locator('.history-card.active');
-    await expect(activeCard).toContainText('Existing Thread');
+    await page.getByRole('button', { name: 'PROJECTS' }).click({ force: true });
+    await expect(page.locator('.project-card.active')).toContainText('Existing Thread');
   });
 });

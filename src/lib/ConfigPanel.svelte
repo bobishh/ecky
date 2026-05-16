@@ -51,8 +51,9 @@
   let activeSection = $state<ActiveSection>('agents');
 
   // Eagerly initialize mcp config so derived below is always non-null
-  if (!config.mcp) config.mcp = { port: null, maxSessions: null, mode: 'passive', primaryAgentId: null, promptTimeoutSecs: 1800, autoAgents: [] };
+  if (!config.mcp) config.mcp = { port: null, maxSessions: null, mode: 'passive', primaryAgentId: null, promptTimeoutSecs: 1800, eckyAstAuthoring: false, autoAgents: [] };
   if (!Array.isArray(config.mcp.autoAgents)) config.mcp.autoAgents = [];
+  if (typeof config.mcp.eckyAstAuthoring !== 'boolean') config.mcp.eckyAstAuthoring = false;
   if (!config.mcp.mode) config.mcp.mode = normalizeMcpMode(config.mcp.mode, config.mcp.autoAgents);
   if (config.mcp.primaryAgentId === undefined) {
     config.mcp.primaryAgentId = derivePrimaryAgentId(config.mcp.autoAgents, config.mcp.primaryAgentId);
@@ -155,13 +156,13 @@
     'macro_buffer_get',
     'macro_buffer_replace_range',
     'macro_buffer_apply_patch',
-    'macro_buffer_render',
+    'macro_buffer_preview_render',
     'target_detail_get',
     'target_get',
     'get_model_screenshot',
-    'params_patch_and_render',
-    'macro_replace_and_render',
-    'macro_buffer_replace_and_render',
+    'params_preview_render',
+    'macro_preview_render',
+    'macro_buffer_replace_and_preview',
     'semantic_manifest_get',
     'control_primitive_save',
     'control_primitive_delete',
@@ -169,7 +170,7 @@
     'control_view_delete',
     'measurement_annotation_save',
     'measurement_annotation_delete',
-    'version_save',
+    'commit_preview_version',
     'thread_fork_from_target',
     'version_restore',
     'user_confirm_request',
@@ -1087,6 +1088,21 @@
             </div>
           </div>
 
+          <div class="field mcp-ast-authoring-field">
+            <label class="mcp-ast-authoring-toggle" title="Expose experimental Ecky AST authoring MCP tools">
+              <input
+                aria-label="ECKY AST AUTHORING"
+                type="checkbox"
+                bind:checked={mcpConfig.eckyAstAuthoring}
+              />
+              <span class="tgl-track"></span>
+              <span class="toggle-label">ECKY AST AUTHORING</span>
+            </label>
+            <div class="field-help">
+              Enables AST MCP tools for Ecky source and disables macro buffer edits while active.
+            </div>
+          </div>
+
           {#if mcpMode === 'passive'}
             <div class="field">
               <div class="field-row">
@@ -1951,6 +1967,7 @@
   }
 
   .aac-toggle,
+  .mcp-ast-authoring-toggle,
   .engine-enabled-toggle {
     position: relative;
     display: flex;
@@ -1962,6 +1979,7 @@
   }
 
   .aac-toggle input[type="checkbox"],
+  .mcp-ast-authoring-toggle input[type="checkbox"],
   .engine-enabled-toggle input[type="checkbox"] {
     position: absolute;
     opacity: 0;
@@ -1994,12 +2012,14 @@
   }
 
   .aac-toggle:has(input:checked) .tgl-track,
+  .mcp-ast-authoring-toggle:has(input:checked) .tgl-track,
   .engine-enabled-toggle:has(input:checked) .tgl-track {
     background: var(--primary);
     border-color: var(--primary);
   }
 
   .aac-toggle:has(input:checked) .tgl-track::after,
+  .mcp-ast-authoring-toggle:has(input:checked) .tgl-track::after,
   .engine-enabled-toggle:has(input:checked) .tgl-track::after {
     transform: translateX(14px);
     background: #fff;
@@ -2013,7 +2033,8 @@
     white-space: nowrap;
   }
 
-  .aac-toggle:has(input:checked) .tgl-label {
+  .aac-toggle:has(input:checked) .tgl-label,
+  .mcp-ast-authoring-toggle:has(input:checked) .toggle-label {
     color: var(--primary);
   }
 

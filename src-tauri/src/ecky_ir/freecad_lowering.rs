@@ -4,15 +4,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contracts::AppResult;
 use crate::ecky_core_ir::{
-    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode,
-    CoreNodeKind, CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference,
+    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
+    CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload,
     CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
 };
 use crate::models::ParamValue;
 
+use super::edge_ops::{
+    edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
+    parse_edge_selector_spec,
+};
 use super::model::{
     allocate_legacy_local_name, core_program_param_defaults, expr_head_symbol, expr_keyword_name,
-    expr_list_items, expr_parse_stringish, parse_value_kind_tag, IrExpr, IrModel,
+    expr_list_items, expr_parse_edge_selector_spec, expr_parse_face_selector_spec,
+    expr_parse_stringish, materialize_selector_nodes, parse_value_kind_tag, IrExpr, IrModel,
 };
 use super::shared::{unsupported, validation};
 
@@ -72,6 +77,7 @@ fn lower_parts_to_freecad(
     let mut lowered_parts = Vec::new();
 
     for (part_id, expr) in parts {
+        lowerer.current_part_id = Some(part_id.clone());
         let node = lowerer.lower_geom_expr(expr, &scope)?;
         let part_var = lowerer.stabilize_part(node);
         lowered_parts.push((part_id.clone(), part_var));
@@ -165,6 +171,23 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
         CoreOperation::Meta(CoreMetaOp::Comment) => "meta".to_string(),
         CoreOperation::Meta(CoreMetaOp::Annotate) => "build".to_string(),
         CoreOperation::Custom(name) => name.clone(),
+    }
+}
+
+fn core_selector_payload_to_ir_expr_local(payload: &CoreSelectorPayload) -> AppResult<IrExpr> {
+    match payload {
+        CoreSelectorPayload::EdgeAll
+        | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTargetIds(_) => Ok(IrExpr::Selector(
+            crate::ecky_ir::model::IrSelectorExpr::Edge(edge_selector_spec_from_core_payload(
+                payload,
+            )?),
+        )),
+        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => Ok(
+            IrExpr::Selector(crate::ecky_ir::model::IrSelectorExpr::Face(
+                face_selector_spec_from_core_payload(payload)?,
+            )),
+        ),
     }
 }
 
@@ -317,17 +340,53 @@ fn core_node_to_ir_expr_local(
                     used_local_names,
                 )?);
             }
-            for CoreKeywordArg { name, value } in keywords {
-                items.push(IrExpr::keyword(name.clone()));
-                items.push(core_node_to_ir_expr_local(
-                    value,
-                    param_names,
-                    refs,
-                    locals,
-                    used_local_names,
-                )?);
+            for keyword in keywords {
+                items.push(IrExpr::keyword(keyword.name.clone()));
+                items.push(match (keyword.name.as_str(), keyword.selector_payload()) {
+                    ("edges", None) => {
+                        return Err(validation(
+                            "CoreProgram `:edges` keyword requires selector payload.",
+                        ))
+                    }
+                    ("faces", None) => {
+                        return Err(validation(
+                            "CoreProgram `:faces` keyword requires selector payload.",
+                        ))
+                    }
+                    (
+                        "edges",
+                        Some(
+                            CoreSelectorPayload::FaceClauses(_)
+                            | CoreSelectorPayload::FaceTargetIds(_),
+                        ),
+                    ) => {
+                        return Err(validation(
+                            "CoreProgram `:edges` keyword requires edge selector payload.",
+                        ))
+                    }
+                    (
+                        "faces",
+                        Some(
+                            CoreSelectorPayload::EdgeAll
+                            | CoreSelectorPayload::EdgeClauses(_)
+                            | CoreSelectorPayload::EdgeTargetIds(_),
+                        ),
+                    ) => {
+                        return Err(validation(
+                            "CoreProgram `:faces` keyword requires face selector payload.",
+                        ))
+                    }
+                    (_, Some(selector)) => core_selector_payload_to_ir_expr_local(selector)?,
+                    (_, None) => core_node_to_ir_expr_local(
+                        keyword.source_node(),
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                    )?,
+                });
             }
-            Ok(IrExpr::list(items))
+            materialize_selector_nodes(IrExpr::list(items))
         }
         CoreNodeKind::Range { start, end } => Ok(IrExpr::list(vec![
             IrExpr::symbol("range"),
@@ -659,6 +718,7 @@ fn typed_hole_error(args: &[IrExpr]) -> String {
 struct FreecadLowerer {
     lines: Vec<String>,
     counter: usize,
+    current_part_id: Option<String>,
 }
 
 impl FreecadLowerer {
@@ -666,6 +726,7 @@ impl FreecadLowerer {
         Self {
             lines: Vec::new(),
             counter: 0,
+            current_part_id: None,
         }
     }
 
@@ -707,6 +768,7 @@ impl FreecadLowerer {
         let mut nested = FreecadLowerer {
             lines: Vec::new(),
             counter: self.counter,
+            current_part_id: self.current_part_id.clone(),
         };
         let node = nested.lower_geom_expr(value, scope)?;
         Ok((nested.lines, node.expr, node.kind, nested.counter))
@@ -1369,17 +1431,19 @@ impl FreecadLowerer {
     }
 
     fn lower_edge_selector(&self, value: Option<&IrExpr>) -> AppResult<String> {
-        let selector = match value {
-            Some(value) => expr_parse_stringish(value, "edge selection")?,
-            None => "all".to_string(),
+        let parsed = match value {
+            Some(value) => expr_parse_edge_selector_spec(value, "edge selection")?,
+            None => parse_edge_selector_spec("all")?,
         };
-        match selector.as_str() {
-            "all" | "top" | "bottom" | "vertical" => Ok(format!("{:?}", selector)),
-            other => Err(validation(format!(
-                "Unknown edge selector `{}`. Use `all`, `top`, `bottom`, or `vertical`.",
-                other
-            ))),
-        }
+        Ok(parsed.python_payload_literal().to_string())
+    }
+
+    fn lower_face_selector(&self, value: Option<&IrExpr>) -> AppResult<Option<String>> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let parsed = expr_parse_face_selector_spec(value, "face selection")?;
+        Ok(Some(parsed.python_payload_literal().to_string()))
     }
 
     fn lower_range_pair(
@@ -2776,15 +2840,26 @@ impl FreecadLowerer {
                 });
             }
             "shell" => {
-                if args.len() != 2 {
+                let parsed = ParsedCallArgs::parse(op, args, &["faces"])?;
+                if parsed.positional.len() != 2 {
                     return Err(validation(
                         "`shell` expects wall thickness and a geometry node.",
                     ));
                 }
-                let wall = self.lower_num_expr(&args[0], scope)?;
-                let solid = self.lower_geom_expr(&args[1], scope)?;
+                let wall = self.lower_num_expr(&parsed.positional[0], scope)?;
+                let solid = self.lower_geom_expr(&parsed.positional[1], scope)?;
+                let selector = self.lower_face_selector(parsed.keywords.get("faces"))?;
+                let object_name = self.current_part_id.clone().ok_or_else(|| {
+                    validation("FreeCAD lowerer lost current part id for shell face selector.")
+                })?;
                 let result = self.next_var();
-                self.emit(format!("{result} = _ecky_shell({}, {})", solid.expr, wall));
+                self.emit(format!(
+                    "{result} = _ecky_shell({}, {}, {}, {:?})",
+                    solid.expr,
+                    wall,
+                    selector.as_deref().unwrap_or("None"),
+                    object_name
+                ));
                 return Ok(LoweredNode {
                     expr: result,
                     kind: GeomKind::Solid3d,
@@ -2894,9 +2969,12 @@ impl FreecadLowerer {
                 } else {
                     "_ecky_chamfer"
                 };
+                let object_name = self.current_part_id.clone().ok_or_else(|| {
+                    validation("FreeCAD lowerer lost current part id for edge selector.")
+                })?;
                 self.emit(format!(
-                    "{result} = {}({}, {}, {})",
-                    helper, solid.expr, radius, selector
+                    "{result} = {}({}, {}, {}, {:?})",
+                    helper, solid.expr, radius, selector, object_name
                 ));
                 return Ok(LoweredNode {
                     expr: result,
@@ -3427,21 +3505,63 @@ fn freecad_preamble() -> Vec<String> {
         String::new(),
         "def _ecky_planar_faces(shape):\n    faces = []\n    top = None\n    for face in list(getattr(shape, 'Faces', []) or []):\n        surface = getattr(face, 'Surface', None)\n        name = surface.__class__.__name__.lower() if surface is not None else ''\n        if 'plane' not in name:\n            continue\n        box = getattr(face, 'BoundBox', None)\n        zmax = float(box.ZMax) if box is not None else 0.0\n        if top is None or zmax > top + 1e-6:\n            faces = [face]\n            top = zmax\n        elif abs(zmax - top) <= 1e-6:\n            faces.append(face)\n    return faces".into(),
         String::new(),
-        "def _ecky_shell(shape, wall):\n    amount = -abs(float(wall))\n    if amount >= 0.0:\n        raise ValueError('shell expects positive wall thickness')\n    planar = _ecky_planar_faces(shape)\n    failures = []\n    if planar:\n        for tol in (0.05, 0.1):\n            try:\n                return shape.makeThickness(planar, amount, tol)\n            except Exception as exc:\n                failures.append(f'makeThickness({tol}) -> {exc}')\n    for tol in (0.05, 0.1):\n        try:\n            inner = shape.makeOffsetShape(amount, tol, join=2, fill=True)\n            return shape.cut(inner)\n        except Exception as exc:\n            failures.append(f'makeOffsetShape({tol}) -> {exc}')\n    raise ValueError('shell failed: ' + '; '.join(failures))".into(),
+        "def _ecky_face_target_id(face, face_index, object_name):\n    try:\n        center = getattr(face, 'CenterOfMass', None)\n        area = getattr(face, 'Area', None)\n        if center is not None and area is not None:\n            return f'{object_name}:face:{face_index}:{_ecky_point_signature((float(center.x), float(center.y), float(center.z)))}:{_ecky_number_signature(area)}'\n    except Exception:\n        pass\n    return f'{object_name}:face:{face_index}'".into(),
+        String::new(),
+        "def _ecky_stable_edge_target_id(target_id):\n    raw = str(target_id or '').strip()\n    marker = ':edge:'\n    if marker not in raw:\n        return raw\n    prefix, payload = raw.split(marker, 1)\n    parts = payload.split(':')\n    if len(parts) >= 2 and parts[0].isdigit():\n        return f'{prefix}{marker}{\":\".join(parts[1:])}'\n    return raw".into(),
+        String::new(),
+        "def _ecky_stable_face_target_id(target_id):\n    raw = str(target_id or '').strip()\n    marker = ':face:'\n    if marker not in raw:\n        return raw\n    prefix, payload = raw.split(marker, 1)\n    parts = payload.split(':')\n    if len(parts) >= 3 and parts[0].isdigit():\n        return f'{prefix}{marker}{\":\".join(parts[1:])}'\n    return raw".into(),
+        String::new(),
+        "_ECKY_FACE_SELECTOR_HELP = '`all`, `planar`, `normal-x`, `normal-y`, `normal-z`, `area-min`, `area-max`, `top`, `bottom`, `left`, `right`, `front`, `back`, `x-min`, `x-max`, `y-min`, `y-max`, `z-min`, `z-max`, `target-id:<id>`, `target-ids:<id>|<id>`, or `+` intersections such as `planar+normal-z+z-max`.'".into(),
+        String::new(),
+        "def _ecky_face_selector_error(selector):\n    raise ValueError(f'Unknown face selector `{selector}`. Use {_ECKY_FACE_SELECTOR_HELP}')".into(),
+        String::new(),
+        "def _ecky_face_selector_target_ids(selector):\n    if selector is None:\n        return None\n    if not isinstance(selector, dict):\n        raise ValueError(f'Face selector `{selector}` requires typed selector payload.')\n    if _ecky_selector_kind(selector) != 'targetIds':\n        return None\n    target_ids = []\n    for item in selector.get('targetIds') or []:\n        target_id = str(item).strip()\n        if target_id and ':face:' in target_id and target_id not in target_ids:\n            target_ids.append(target_id)\n    if not target_ids:\n        raise ValueError(f'Face selector `{selector}` did not include any face target ids.')\n    return target_ids".into(),
+        String::new(),
+        "def _ecky_face_selector_clauses(selector):\n    if selector is None:\n        return []\n    if not isinstance(selector, dict):\n        raise ValueError(f'Face selector `{selector}` requires typed selector payload.')\n    kind = _ecky_selector_kind(selector)\n    if kind == 'all':\n        return []\n    if kind != 'clauses':\n        _ecky_face_selector_error(selector)\n    clauses = []\n    for clause in selector.get('clauses') or []:\n        if not isinstance(clause, dict):\n            _ecky_face_selector_error(selector)\n        clause_kind = str(clause.get('kind') or '').strip().lower()\n        if clause_kind == 'boundary':\n            axis = str(clause.get('axis') or '').strip().lower()\n            bound = str(clause.get('bound') or '').strip().lower()\n            if axis not in ('x', 'y', 'z') or bound not in ('min', 'max'):\n                _ecky_face_selector_error(selector)\n            clauses.append(('boundary', axis, bound))\n            continue\n        if clause_kind == 'planar':\n            clauses.append(('planar',))\n            continue\n        if clause_kind == 'normal':\n            axis = str(clause.get('axis') or '').strip().lower()\n            if axis not in ('x', 'y', 'z'):\n                _ecky_face_selector_error(selector)\n            clauses.append(('normal', axis))\n            continue\n        if clause_kind == 'area':\n            rank = str(clause.get('rank') or '').strip().lower()\n            if rank not in ('min', 'max'):\n                _ecky_face_selector_error(selector)\n            clauses.append(('area', rank))\n            continue\n        _ecky_face_selector_error(selector)\n    return clauses".into(),
+        String::new(),
+        "def _ecky_face_matches_clause(face, box, clause, tol):\n    face_box = getattr(face, 'BoundBox', None)\n    if face_box is None:\n        return False\n    if clause[0] == 'planar':\n        surface = getattr(face, 'Surface', None)\n        name = surface.__class__.__name__.lower() if surface is not None else ''\n        return 'plane' in name\n    if clause[0] == 'normal':\n        surface = getattr(face, 'Surface', None)\n        name = surface.__class__.__name__.lower() if surface is not None else ''\n        if 'plane' not in name:\n            return False\n        axis = clause[1]\n        span = {'x': float(face_box.XLength), 'y': float(face_box.YLength), 'z': float(face_box.ZLength)}[axis]\n        return span <= tol\n    _, axis, bound = clause\n    target = {\n        ('x', 'min'): float(box.XMin),\n        ('x', 'max'): float(box.XMax),\n        ('y', 'min'): float(box.YMin),\n        ('y', 'max'): float(box.YMax),\n        ('z', 'min'): float(box.ZMin),\n        ('z', 'max'): float(box.ZMax),\n    }[(axis, bound)]\n    face_min = {\n        'x': float(face_box.XMin),\n        'y': float(face_box.YMin),\n        'z': float(face_box.ZMin),\n    }[axis]\n    face_max = {\n        'x': float(face_box.XMax),\n        'y': float(face_box.YMax),\n        'z': float(face_box.ZMax),\n    }[axis]\n    return abs(face_min - target) <= tol and abs(face_max - target) <= tol".into(),
+        String::new(),
+        "def _ecky_filter_faces_by_area(faces, rank):\n    if not faces:\n        return []\n    areas = [float(getattr(face, 'Area', 0.0)) for face in faces]\n    target = min(areas) if rank == 'min' else max(areas)\n    tol = max(abs(float(target)), 1.0) * 1e-6\n    return [face for face, area in zip(faces, areas) if abs(float(area) - target) <= tol]".into(),
+        String::new(),
+        "def _ecky_select_shell_faces(shape, selector, object_name=None):\n    faces = list(getattr(shape, 'Faces', []) or [])\n    if not faces:\n        raise ValueError('Shape has no faces for shell opening selection.')\n    target_ids = _ecky_face_selector_target_ids(selector)\n    if target_ids is not None:\n        if not object_name:\n            raise ValueError(f'Face selector `{selector}` requires an object name for exact target-id matching.')\n        face_records = []\n        stable_counts = {}\n        for face_index, face in enumerate(faces):\n            target_id = _ecky_face_target_id(face, face_index, object_name)\n            stable_id = _ecky_stable_face_target_id(target_id)\n            face_records.append((face, target_id, stable_id))\n            stable_counts[stable_id] = stable_counts.get(stable_id, 0) + 1\n        selected = []\n        matched = set()\n        for requested_target_id in target_ids:\n            exact = next((record for record in face_records if record[1] == requested_target_id), None)\n            if exact is not None:\n                if exact[1] not in matched:\n                    selected.append(exact[0])\n                    matched.add(exact[1])\n                continue\n            stable_requested = _ecky_stable_face_target_id(requested_target_id)\n            candidates = [record for record in face_records if record[2] == stable_requested]\n            if not candidates:\n                raise ValueError(f'Face selector `{selector}` did not match target ids: {[requested_target_id]}')\n            if len(candidates) > 1 or stable_counts.get(stable_requested, 0) > 1:\n                raise ValueError(f'Face selector `{selector}` ambiguously matched stable face target `{requested_target_id}`.')\n            candidate = candidates[0]\n            if candidate[1] not in matched:\n                selected.append(candidate[0])\n                matched.add(candidate[1])\n        return selected\n    clauses = _ecky_face_selector_clauses(selector)\n    if selector is None:\n        return None\n    if not clauses:\n        return faces\n    box = getattr(shape, 'BoundBox', None)\n    if box is None:\n        raise ValueError('Shape has no BoundBox for shell face selection.')\n    span = max(float(box.XLength), float(box.YLength), float(box.ZLength), 1.0)\n    tol = span * 1e-6\n    selected = list(faces)\n    for clause in clauses:\n        if clause[0] == 'area':\n            selected = _ecky_filter_faces_by_area(selected, clause[1])\n            continue\n        selected = [face for face in selected if _ecky_face_matches_clause(face, box, clause, tol)]\n    if not selected:\n        raise ValueError(f'Face selector `{selector}` matched no shell opening faces.')\n    return selected".into(),
+        String::new(),
+        "def _ecky_shell(shape, wall, face_selector=None, object_name=None):\n    amount = -abs(float(wall))\n    if amount >= 0.0:\n        raise ValueError('shell expects positive wall thickness')\n    selected_faces = _ecky_select_shell_faces(shape, face_selector, object_name)\n    planar = selected_faces if selected_faces is not None else _ecky_planar_faces(shape)\n    failures = []\n    if planar:\n        for tol in (0.05, 0.1):\n            try:\n                return shape.makeThickness(planar, amount, tol)\n            except Exception as exc:\n                failures.append(f'makeThickness({tol}) -> {exc}')\n        if selected_faces is not None:\n            raise ValueError('shell failed: ' + '; '.join(failures))\n    if selected_faces is not None:\n        raise ValueError(f'Face selector `{face_selector}` matched no shell opening faces.')\n    for tol in (0.05, 0.1):\n        try:\n            inner = shape.makeOffsetShape(amount, tol, join=2, fill=True)\n            return shape.cut(inner)\n        except Exception as exc:\n            failures.append(f'makeOffsetShape({tol}) -> {exc}')\n    raise ValueError('shell failed: ' + '; '.join(failures))".into(),
         String::new(),
         "def _ecky_edge_axis_span(edge):\n    box = getattr(edge, 'BoundBox', None)\n    if box is None:\n        raise ValueError('Edge has no BoundBox.')\n    return float(box.XLength), float(box.YLength), float(box.ZLength)".into(),
         String::new(),
-        "def _ecky_select_edges(shape, selector):\n    edges = list(getattr(shape, 'Edges', []) or [])\n    if not edges:\n        raise ValueError('Shape has no edges for fillet/chamfer.')\n    if selector == 'all':\n        return edges\n    box = getattr(shape, 'BoundBox', None)\n    if box is None:\n        raise ValueError('Shape has no BoundBox for edge selection.')\n    span = max(float(box.XLength), float(box.YLength), float(box.ZLength), 1.0)\n    tol = span * 1e-6\n    selected = []\n    for edge in edges:\n        edge_box = getattr(edge, 'BoundBox', None)\n        if edge_box is None:\n            continue\n        if selector == 'top':\n            if abs(float(edge_box.ZMin) - float(box.ZMax)) <= tol and abs(float(edge_box.ZMax) - float(box.ZMax)) <= tol:\n                selected.append(edge)\n        elif selector == 'bottom':\n            if abs(float(edge_box.ZMin) - float(box.ZMin)) <= tol and abs(float(edge_box.ZMax) - float(box.ZMin)) <= tol:\n                selected.append(edge)\n        elif selector == 'vertical':\n            x_span, y_span, z_span = _ecky_edge_axis_span(edge)\n            if x_span <= tol and y_span <= tol and z_span > tol:\n                selected.append(edge)\n        else:\n            raise ValueError(f'Unknown edge selector `{selector}`. Use `all`, `top`, `bottom`, or `vertical`.')\n    if not selected:\n        raise ValueError(f'Edge selector `{selector}` matched no edges.')\n    return selected".into(),
+        "_ECKY_EDGE_SELECTOR_HELP = '`all`, `top`, `bottom`, `left`, `right`, `front`, `back`, `vertical`, `axis-x`, `axis-y`, `axis-z`, `x-min`, `x-max`, `y-min`, `y-max`, `z-min`, `z-max`, `target-id:<id>`, `target-ids:<id>|<id>`, or `+` intersections such as `x-min+axis-z`.'".into(),
+        String::new(),
+        "def _ecky_edge_selector_error(selector):\n    raise ValueError(f'Unknown edge selector `{selector}`. Use {_ECKY_EDGE_SELECTOR_HELP}')".into(),
+        String::new(),
+        "def _ecky_selector_kind(selector):\n    if isinstance(selector, dict):\n        return str(selector.get('kind') or '').strip()\n    return ''".into(),
+        String::new(),
+        "def _ecky_selector_target_ids(selector):\n    if selector is None:\n        return None\n    if not isinstance(selector, dict):\n        raise ValueError(f'Edge selector `{selector}` requires typed selector payload.')\n    if _ecky_selector_kind(selector) != 'targetIds':\n        return None\n    target_ids = []\n    for item in selector.get('targetIds') or []:\n        text = str(item).strip()\n        if text and text not in target_ids:\n            target_ids.append(text)\n    if not target_ids:\n        raise ValueError(f'Edge selector `{selector}` did not include any target ids.')\n    return target_ids".into(),
+        String::new(),
+        "def _ecky_selector_clauses(selector):\n    if selector is None:\n        return []\n    if not isinstance(selector, dict):\n        raise ValueError(f'Edge selector `{selector}` requires typed selector payload.')\n    kind = _ecky_selector_kind(selector)\n    if kind == 'all':\n        return []\n    if kind != 'clauses':\n        _ecky_edge_selector_error(selector)\n    clauses = []\n    for clause in selector.get('clauses') or []:\n        if not isinstance(clause, dict):\n            _ecky_edge_selector_error(selector)\n        clause_kind = str(clause.get('kind') or '').strip()\n        if clause_kind == 'axis':\n            axis = str(clause.get('axis') or '').strip().lower()\n            if axis not in ('x', 'y', 'z'):\n                _ecky_edge_selector_error(selector)\n            clauses.append(('axis', axis))\n            continue\n        if clause_kind == 'boundary':\n            axis = str(clause.get('axis') or '').strip().lower()\n            bound = str(clause.get('bound') or '').strip().lower()\n            if axis not in ('x', 'y', 'z') or bound not in ('min', 'max'):\n                _ecky_edge_selector_error(selector)\n            clauses.append(('boundary', axis, bound))\n            continue\n        _ecky_edge_selector_error(selector)\n    return clauses".into(),
+        String::new(),
+        "def _ecky_number_signature(value):\n    text = format(float(value), '.3f').rstrip('0').rstrip('.')\n    if text in ('', '-0'):\n        return '0'\n    return text".into(),
+        String::new(),
+        "def _ecky_point_signature(point):\n    return '-'.join(_ecky_number_signature(coord) for coord in point)".into(),
+        String::new(),
+        "def _ecky_edge_endpoints(edge):\n    try:\n        vertexes = list(getattr(edge, 'Vertexes', []) or [])\n        if len(vertexes) >= 2:\n            start = vertexes[0].Point\n            end = vertexes[-1].Point\n            return (float(start.x), float(start.y), float(start.z)), (float(end.x), float(end.y), float(end.z))\n    except Exception:\n        pass\n    try:\n        start = edge.valueAt(edge.FirstParameter)\n        end = edge.valueAt(edge.LastParameter)\n        return (float(start.x), float(start.y), float(start.z)), (float(end.x), float(end.y), float(end.z))\n    except Exception:\n        return None".into(),
+        String::new(),
+        "def _ecky_edge_target_id(edge, edge_index, object_name):\n    endpoints = _ecky_edge_endpoints(edge)\n    if endpoints is None:\n        return f'{object_name}:edge:{edge_index}'\n    first, second = sorted((_ecky_point_signature(endpoints[0]), _ecky_point_signature(endpoints[1])))\n    return f'{object_name}:edge:{edge_index}:{first}_{second}'".into(),
+        String::new(),
+        "def _ecky_axis_value(vec, axis):\n    if axis == 'x':\n        return float(vec.x)\n    if axis == 'y':\n        return float(vec.y)\n    return float(vec.z)".into(),
+        String::new(),
+        "def _ecky_edge_matches_clause(edge, box, clause, tol):\n    edge_box = getattr(edge, 'BoundBox', None)\n    if edge_box is None:\n        return False\n    if clause[0] == 'axis':\n        x_span, y_span, z_span = _ecky_edge_axis_span(edge)\n        if clause[1] == 'x':\n            return x_span > tol and y_span <= tol and z_span <= tol\n        if clause[1] == 'y':\n            return y_span > tol and x_span <= tol and z_span <= tol\n        return z_span > tol and x_span <= tol and y_span <= tol\n    _, axis, bound = clause\n    target_box = box if bound == 'min' else box\n    target = {\n        ('x', 'min'): float(box.XMin),\n        ('x', 'max'): float(box.XMax),\n        ('y', 'min'): float(box.YMin),\n        ('y', 'max'): float(box.YMax),\n        ('z', 'min'): float(box.ZMin),\n        ('z', 'max'): float(box.ZMax),\n    }[(axis, bound)]\n    edge_min = {\n        'x': float(edge_box.XMin),\n        'y': float(edge_box.YMin),\n        'z': float(edge_box.ZMin),\n    }[axis]\n    edge_max = {\n        'x': float(edge_box.XMax),\n        'y': float(edge_box.YMax),\n        'z': float(edge_box.ZMax),\n    }[axis]\n    return abs(edge_min - target) <= tol and abs(edge_max - target) <= tol".into(),
+        String::new(),
+        "def _ecky_select_edges(shape, selector, object_name=None):\n    edges = list(getattr(shape, 'Edges', []) or [])\n    if not edges:\n        raise ValueError('Shape has no edges for fillet/chamfer.')\n    target_ids = _ecky_selector_target_ids(selector)\n    if target_ids is not None:\n        if not object_name:\n            raise ValueError(f'Edge selector `{selector}` requires an object name for exact target-id matching.')\n        edge_records = []\n        stable_counts = {}\n        for edge_index, edge in enumerate(edges):\n            target_id = _ecky_edge_target_id(edge, edge_index, object_name)\n            stable_id = _ecky_stable_edge_target_id(target_id)\n            edge_records.append((edge, target_id, stable_id))\n            stable_counts[stable_id] = stable_counts.get(stable_id, 0) + 1\n        selected = []\n        matched = set()\n        for requested_target_id in target_ids:\n            exact = next((record for record in edge_records if record[1] == requested_target_id), None)\n            if exact is not None:\n                if exact[1] not in matched:\n                    selected.append(exact[0])\n                    matched.add(exact[1])\n                continue\n            stable_requested = _ecky_stable_edge_target_id(requested_target_id)\n            candidates = [record for record in edge_records if record[2] == stable_requested]\n            if not candidates:\n                raise ValueError(f'Edge selector `{selector}` did not match target ids: {[requested_target_id]}')\n            if len(candidates) > 1 or stable_counts.get(stable_requested, 0) > 1:\n                raise ValueError(f'Edge selector `{selector}` ambiguously matched stable edge target `{requested_target_id}`.')\n            candidate = candidates[0]\n            if candidate[1] not in matched:\n                selected.append(candidate[0])\n                matched.add(candidate[1])\n        return selected\n    clauses = _ecky_selector_clauses(selector)\n    if not clauses:\n        return edges\n    box = getattr(shape, 'BoundBox', None)\n    if box is None:\n        raise ValueError('Shape has no BoundBox for edge selection.')\n    span = max(float(box.XLength), float(box.YLength), float(box.ZLength), 1.0)\n    tol = span * 1e-6\n    selected = [edge for edge in edges if all(_ecky_edge_matches_clause(edge, box, clause, tol) for clause in clauses)]\n    if not selected:\n        raise ValueError(f'Edge selector `{selector}` matched no edges.')\n    return selected".into(),
         String::new(),
         "def _ecky_edge_signature(edge):\n    box = getattr(edge, 'BoundBox', None)\n    if box is None:\n        return None\n    try:\n        curve = edge.Curve\n        u0, u1 = edge.ParameterRange\n        mid = curve.value((float(u0) + float(u1)) / 2.0)\n        point = (float(mid.x), float(mid.y), float(mid.z))\n    except Exception:\n        point = (\n            (float(box.XMin) + float(box.XMax)) / 2.0,\n            (float(box.YMin) + float(box.YMax)) / 2.0,\n            (float(box.ZMin) + float(box.ZMax)) / 2.0,\n        )\n    return {\n        'point': point,\n        'span': (float(box.XLength), float(box.YLength), float(box.ZLength)),\n    }".into(),
         String::new(),
         "def _ecky_match_edge(shape, signature):\n    best = None\n    best_score = None\n    for edge in list(getattr(shape, 'Edges', []) or []):\n        candidate = _ecky_edge_signature(edge)\n        if candidate is None:\n            continue\n        score = 0.0\n        for a, b in zip(candidate['point'], signature['point']):\n            score += abs(float(a) - float(b))\n        for a, b in zip(candidate['span'], signature['span']):\n            score += abs(float(a) - float(b))\n        if best_score is None or score < best_score:\n            best = edge\n            best_score = score\n    return best".into(),
         String::new(),
-        "def _ecky_apply_edge_op(shape, amount, selector, op_name):\n    selected = _ecky_select_edges(shape, selector)\n    direct = shape.makeFillet if op_name == 'fillet' else shape.makeChamfer\n    try:\n        return direct(amount, selected)\n    except Exception as exc:\n        failure = exc\n    result = shape.copy()\n    applied = 0\n    for signature in [_ecky_edge_signature(edge) for edge in selected]:\n        if signature is None:\n            continue\n        edge = _ecky_match_edge(result, signature)\n        if edge is None:\n            continue\n        try:\n            direct = result.makeFillet if op_name == 'fillet' else result.makeChamfer\n            result = direct(amount, [edge])\n            applied += 1\n        except Exception:\n            continue\n    if applied > 0:\n        return result\n    raise ValueError(f'{op_name} failed for selector `{selector}`: {failure}')".into(),
+        "def _ecky_apply_edge_op(shape, amount, selector, op_name, object_name=None):\n    selected = _ecky_select_edges(shape, selector, object_name)\n    direct = shape.makeFillet if op_name == 'fillet' else shape.makeChamfer\n    try:\n        return direct(amount, selected)\n    except Exception as exc:\n        failure = exc\n    result = shape.copy()\n    applied = 0\n    for signature in [_ecky_edge_signature(edge) for edge in selected]:\n        if signature is None:\n            continue\n        edge = _ecky_match_edge(result, signature)\n        if edge is None:\n            continue\n        try:\n            direct = result.makeFillet if op_name == 'fillet' else result.makeChamfer\n            result = direct(amount, [edge])\n            applied += 1\n        except Exception:\n            continue\n    if applied > 0:\n        return result\n    raise ValueError(f'{op_name} failed for selector `{selector}`: {failure}')".into(),
         String::new(),
-        "def _ecky_fillet(shape, radius, selector='all'):\n    amount = abs(float(radius))\n    if amount <= 1e-12:\n        return shape.copy()\n    return _ecky_apply_edge_op(shape, amount, selector, 'fillet')".into(),
+        "def _ecky_fillet(shape, radius, selector=None, object_name=None):\n    amount = abs(float(radius))\n    if amount <= 1e-12:\n        return shape.copy()\n    return _ecky_apply_edge_op(shape, amount, selector, 'fillet', object_name)".into(),
         String::new(),
-        "def _ecky_chamfer(shape, distance, selector='all'):\n    amount = abs(float(distance))\n    if amount <= 1e-12:\n        return shape.copy()\n    return _ecky_apply_edge_op(shape, amount, selector, 'chamfer')".into(),
+        "def _ecky_chamfer(shape, distance, selector=None, object_name=None):\n    amount = abs(float(distance))\n    if amount <= 1e-12:\n        return shape.copy()\n    return _ecky_apply_edge_op(shape, amount, selector, 'chamfer', object_name)".into(),
         String::new(),
         "def _ecky_clip_box(shape, xmin, xmax, ymin, ymax, zmin, zmax):\n    x0, x1 = sorted((float(xmin), float(xmax)))\n    y0, y1 = sorted((float(ymin), float(ymax)))\n    z0, z1 = sorted((float(zmin), float(zmax)))\n    box = Part.makeBox(x1 - x0, y1 - y0, z1 - z0)\n    box.translate(App.Vector(x0, y0, z0))\n    return shape.common(box)".into(),
         String::new(),
@@ -4138,7 +4258,7 @@ mod tests {
             lower_to_freecad(r#"(model (part body (fillet 1.5 :edges top (box 20 20 10))))"#)
                 .expect("fillet lower");
         assert!(
-            fillet.contains("_ecky_fillet(_f0, 1.5, \"top\")"),
+            fillet.contains("_ecky_fillet(_f0, 1.5, {'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'z', 'bound': 'max'}]}, \"body\")"),
             "fillet selector call: {}",
             fillet
         );
@@ -4164,7 +4284,7 @@ mod tests {
             lower_to_freecad(r#"(model (part body (chamfer 2 :edges "bottom" (box 20 20 10))))"#)
                 .expect("chamfer lower");
         assert!(
-            chamfer.contains("_ecky_chamfer(_f0, 2.0, \"bottom\")"),
+            chamfer.contains("_ecky_chamfer(_f0, 2.0, {'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'z', 'bound': 'min'}]}, \"body\")"),
             "chamfer selector call: {}",
             chamfer
         );
@@ -4175,6 +4295,196 @@ mod tests {
             "chamfer helper should dispatch through FreeCAD edge op helper: {}",
             chamfer
         );
+
+        let compound = lower_to_freecad(
+            r#"(model (part body (fillet 1 :edges "left+vertical" (box 20 20 10))))"#,
+        )
+        .expect("compound selector lower");
+        assert!(
+            compound.contains("_ecky_fillet(_f0, 1.0, {'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'x', 'bound': 'min'}, {'kind': 'axis', 'axis': 'z'}]}, \"body\")"),
+            "compound selector call: {}",
+            compound
+        );
+
+        let exact = lower_to_freecad(
+            r#"(model (part body (fillet 1 :edges "target-id:body:edge:0:0-0-0_10-0-0" (box 20 20 10))))"#,
+        )
+        .expect("exact selector lower");
+        assert!(
+            exact.contains("_ecky_fillet(_f0, 1.0, {'kind': 'targetIds', 'targetIds': [\"body:edge:0:0-0-0_10-0-0\"]}, \"body\")"),
+            "exact selector call: {}",
+            exact
+        );
+        assert!(
+            exact.contains("def _ecky_edge_target_id(edge, edge_index, object_name):"),
+            "exact selector helper missing: {}",
+            exact
+        );
+
+        let exact_shell = lower_to_freecad(
+            r#"(model (part body (shell 1.5 :faces "target-id:body:face:0:0-0-10:400" (box 20 20 10))))"#,
+        )
+        .expect("exact shell selector lower");
+        assert!(
+            exact_shell.contains("_ecky_shell(_f0, 1.5, {'kind': 'targetIds', 'targetIds': [\"body:face:0:0-0-10:400\"]}, \"body\")"),
+            "exact shell selector call: {}",
+            exact_shell
+        );
+        assert!(
+            exact_shell.contains("def _ecky_face_target_id(face, face_index, object_name):"),
+            "exact shell selector helper missing face target id helper: {}",
+            exact_shell
+        );
+        assert!(
+            exact_shell
+                .contains("def _ecky_select_shell_faces(shape, selector, object_name=None):"),
+            "exact shell selector helper missing shell face selector helper: {}",
+            exact_shell
+        );
+
+        let coarse_shell =
+            lower_to_freecad(r#"(model (part body (shell 1.5 :faces "top" (box 20 20 10))))"#)
+                .expect("coarse shell selector lower");
+        assert!(
+            coarse_shell.contains(
+                "_ecky_shell(_f0, 1.5, {'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'z', 'bound': 'max'}]}, \"body\")"
+            ),
+            "coarse shell selector call: {}",
+            coarse_shell
+        );
+
+        let richer_shell = lower_to_freecad(
+            r#"(model (part body (shell 1.5 :faces "planar+normal-z+area-max" (box 20 20 10))))"#,
+        )
+        .expect("richer shell selector lower");
+        assert!(
+            richer_shell.contains(
+                "_ecky_shell(_f0, 1.5, {'kind': 'clauses', 'clauses': [{'kind': 'planar'}, {'kind': 'normal', 'axis': 'z'}, {'kind': 'area', 'rank': 'max'}]}, \"body\")"
+            ),
+            "richer shell selector call: {}",
+            richer_shell
+        );
+    }
+
+    #[test]
+    fn lower_core_program_to_freecad_supports_typed_selector_nodes() {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model (part body (fillet 1 :edges "target-id:body:edge:0:0-0-0_10-0-0" (box 20 20 10))))"#,
+        )
+        .expect("program");
+        let code = lower_core_program_to_freecad(&program).expect("lower");
+        assert!(
+            code.contains("_ecky_fillet(_f0, 1.0, {'kind': 'targetIds', 'targetIds': [\"body:edge:0:0-0-0_10-0-0\"]}, \"body\")"),
+            "typed selector core lower: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn lower_core_program_to_freecad_supports_coarse_selector_payload_when_value_is_bad() {
+        let mut program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model (part body (fillet 1 :edges "left+vertical" (box 20 20 10))))"#,
+        )
+        .expect("program");
+        let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } =
+            &mut program.parts[0].root.kind
+        else {
+            panic!("expected call");
+        };
+        *keywords[0].source_node_mut() = crate::ecky_core_ir::CoreNode::new(
+            crate::ecky_core_ir::NodeId::new(99_002),
+            crate::ecky_core_ir::CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(
+                7.0,
+            )),
+            crate::ecky_core_ir::CoreValueKind::Number,
+        );
+        let code = lower_core_program_to_freecad(&program).expect("lower");
+        assert!(
+            code.contains("_ecky_fillet(_f0, 1.0, {'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'x', 'bound': 'min'}, {'kind': 'axis', 'axis': 'z'}]}, \"body\")"),
+            "typed coarse selector core lower: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_dict_only_selector_helpers() {
+        let code = lower_to_freecad(
+            r#"(model (part body (union
+                (fillet 1 :edges "left+vertical" (box 20 20 10))
+                (translate 40 0 0 (shell 1.5 :faces "target-id:body:face:0:0-0-10:400" (box 20 20 10))))))"#,
+        )
+        .expect("lower");
+        assert!(
+            !code.contains("def _ecky_parse_target_ids("),
+            "legacy target-id string parser leaked: {}",
+            code
+        );
+        assert!(
+            !code.contains("def _ecky_edge_selector_clauses("),
+            "legacy coarse string parser leaked: {}",
+            code
+        );
+        assert!(
+            code.contains("requires typed selector payload"),
+            "typed selector helper guard missing: {}",
+            code
+        );
+        assert!(
+            code.contains("def _ecky_fillet(shape, radius, selector=None, object_name=None):")
+                && code.contains(
+                    "def _ecky_chamfer(shape, distance, selector=None, object_name=None):"
+                ),
+            "selector defaults not normalized: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn lower_core_program_to_freecad_rejects_missing_selector_payload_on_edges_keyword() {
+        let mut program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model (part body (fillet 1 :edges "left+vertical" (box 20 20 10))))"#,
+        )
+        .expect("program");
+        let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } =
+            &mut program.parts[0].root.kind
+        else {
+            panic!("expected call");
+        };
+        keywords[0].set_selector_payload(None);
+
+        let err = lower_core_program_to_freecad(&program)
+            .expect_err("missing selector payload should fail");
+        assert!(
+            err.to_string()
+                .contains("CoreProgram `:edges` keyword requires selector payload"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn lower_core_program_to_freecad_rejects_wrong_kind_selector_payload_on_edges_keyword() {
+        let mut program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model (part body (fillet 1 :edges "left+vertical" (box 20 20 10))))"#,
+        )
+        .expect("program");
+        let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } =
+            &mut program.parts[0].root.kind
+        else {
+            panic!("expected call");
+        };
+        keywords[0].set_selector_payload(Some(
+            crate::ecky_core_ir::CoreSelectorPayload::FaceTargetIds(vec![
+                "body:face:0:0-0-1:1".into()
+            ]),
+        ));
+
+        let err = lower_core_program_to_freecad(&program)
+            .expect_err("wrong-kind selector payload should fail");
+        assert!(
+            err.to_string()
+                .contains("CoreProgram `:edges` keyword requires edge selector payload"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -4182,11 +4492,35 @@ mod tests {
         let err = lower_to_freecad(r#"(model (part body (fillet 1 :edges side (box 10 10 10))))"#)
             .expect_err("unknown selector should fail");
         assert!(
-            err.message.contains(
-                "Unknown edge selector `side`. Use `all`, `top`, `bottom`, or `vertical`."
-            ),
+            err.message
+                .contains("Unknown edge selector `side`. Use `all`, `top`, `bottom`"),
             "unexpected error: {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_rejects_wrong_kind_exact_selectors() {
+        let edge_err = lower_to_freecad(
+            r#"(model (part body (fillet 1 :edges "target-id:body:face:0:0-0-10:400" (box 20 20 10))))"#,
+        )
+        .expect_err("face target id should fail edge selector");
+        assert!(
+            edge_err
+                .message
+                .contains("included non-edge target id `body:face:0:0-0-10:400`"),
+            "{edge_err:?}"
+        );
+
+        let face_err = lower_to_freecad(
+            r#"(model (part body (shell 1.5 :faces "target-id:body:edge:0:0-0-0_10-0-0" (box 20 20 10))))"#,
+        )
+        .expect_err("edge target id should fail face selector");
+        assert!(
+            face_err
+                .message
+                .contains("included non-face target id `body:edge:0:0-0-0_10-0-0`"),
+            "{face_err:?}"
         );
     }
 }

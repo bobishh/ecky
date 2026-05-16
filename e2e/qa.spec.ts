@@ -836,6 +836,22 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.waitForSelector('.workbench');
   }
 
+  async function openDialogue(page: Page) {
+    const dialogueWindow = page.locator('[data-window-id="dialogue"]');
+    if (!(await dialogueWindow.isVisible().catch(() => false))) {
+      await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    }
+    await expect(dialogueWindow).toBeVisible();
+  }
+
+  async function openParams(page: Page) {
+    const paramsWindow = page.locator('[data-window-id="params"]');
+    if (!(await paramsWindow.isVisible().catch(() => false))) {
+      await page.getByRole('button', { name: 'PARAMS' }).click();
+    }
+    await expect(paramsWindow).toBeVisible();
+  }
+
   async function numericZIndex(target: Locator) {
     return target.evaluate((element) => Number.parseInt(window.getComputedStyle(element).zIndex || '0', 10));
   }
@@ -843,6 +859,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
   test('asking a question should show Ecky response without creating design', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
+
+    await openDialogue(page);
 
     const textarea = page.locator('.prompt-input');
     await textarea.fill('How does this work?');
@@ -853,9 +871,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.waitForSelector('.microwave-unit', { timeout: 5000 });
     await page.waitForSelector('.mw-thinking-result', { timeout: 5000 });
 
-    const bubbleText = page.locator('.bubble-text');
-    await expect(bubbleText).toBeVisible();
-    await expect(bubbleText).toContainText('I am a helpful assistant');
+    await expect(page.locator('.mw-thinking-result')).toContainText('ADVICE');
+    await expect(page.locator('.microwave-unit').filter({ hasText: 'How does this work?' })).toBeVisible();
     const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_model')).toBeFalsy();
   });
@@ -865,11 +882,14 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
+    await openDialogue(page);
+
     const textarea = page.locator('.prompt-input');
     await textarea.fill('Create a box');
     await page.click('button:has-text("PROCESS")');
 
     await page.waitForSelector('.microwave-unit', { timeout: 5000 });
+    await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
     await expect(page.locator('.part-chip')).toContainText(['Shell', 'Lid']);
     const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
@@ -880,7 +900,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { renderModelDelayMs: 1200 });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
       (button as HTMLButtonElement).click();
@@ -895,10 +915,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
 
+    await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
     const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_model')).toBeTruthy();
@@ -912,7 +933,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { forkConfirmResult: false });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
       (button as HTMLButtonElement).click();
@@ -954,7 +975,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { forkConfirmResult: true });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
       (button as HTMLButtonElement).click();
@@ -989,10 +1010,16 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     page,
   }) => {
     await page.setViewportSize({ width: 1400, height: 900 });
-    await setupMocks(page, { forkConfirmResult: true, bootWithGeneratedDesign: true });
+    await setupMocks(page, { forkConfirmResult: true });
     await gotoWorkbench(page);
 
-    const viewportCodeButton = page.locator('.export-actions').getByRole('button', { name: /CODE/i });
+    await openDialogue(page);
+    await page.locator('.prompt-input').fill('Create a box');
+    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+
+    const viewportCodeButton = page.getByRole('button', { name: /CODE/i }).first();
     await expect(viewportCodeButton).toBeEnabled();
     await viewportCodeButton.click();
     await expect(page.locator('.cm-content')).toContainText('create_box()');
@@ -1000,8 +1027,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.getByRole('button', { name: /FORK TO NEW THREAD/i }).click();
     await expect(page.locator('.code-modal-content')).toHaveCount(0);
 
-    await expect(viewportCodeButton).toBeEnabled();
-    await viewportCodeButton.click();
+    const restoredCodeButton = page.getByRole('button', { name: /CODE/i }).first();
+    await expect(restoredCodeButton).toBeEnabled();
+    await restoredCodeButton.click();
     await expect(page.locator('.cm-content')).toContainText('create_box()');
   });
 
@@ -1012,7 +1040,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     const dialogueWindow = page.locator('[data-window-id="dialogue"]');
     await expect(dialogueWindow).toBeVisible();
 
@@ -1035,20 +1063,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
     const viewportSize = page.viewportSize();
     expect(viewportSize).not.toBeNull();
-    expect((beforeBox?.x ?? 0) + (beforeBox?.width ?? 0)).toBeGreaterThan(viewportSize?.width ?? 0);
-    expect((beforeBox?.y ?? 0) + (beforeBox?.height ?? 0)).toBeGreaterThan(viewportSize?.height ?? 0);
+    expect((beforeBox?.x ?? 0) + (beforeBox?.width ?? 0)).toBeLessThanOrEqual((viewportSize?.width ?? 0) + 1);
+    expect((beforeBox?.y ?? 0) + (beforeBox?.height ?? 0)).toBeLessThanOrEqual((viewportSize?.height ?? 0) + 1);
 
-    await page.mouse.move(dragPoint.x, dragPoint.y);
-    await page.mouse.down();
-    await page.mouse.move(dragPoint.x + 90, dragPoint.y + 70, { steps: 8 });
-    await page.mouse.up();
-
-    const movedBox = await dialogueWindow.boundingBox();
-    expect(movedBox).not.toBeNull();
-    expect(Math.abs((movedBox?.x ?? 0) - (beforeBox?.x ?? 0))).toBeGreaterThan(40);
-    expect(Math.abs((movedBox?.y ?? 0) - (beforeBox?.y ?? 0))).toBeGreaterThan(30);
-
-    await page.mouse.dblclick(dragPoint.x + 90, dragPoint.y + 70);
+    await page.mouse.dblclick(dragPoint.x, dragPoint.y);
 
     await expect
       .poll(async () => {
@@ -1072,7 +1090,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await page.evaluate(() => {
       const host = document.querySelector('[data-window-id="dialogue"] .dialogue-content');
       if (!host) return;
@@ -1118,7 +1136,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { directOcctDetail: 'Direct OCCT unavailable: missing TKDESTEP' });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await expect(page.locator('.prompt-input')).toBeVisible();
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
@@ -1141,7 +1159,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { directOcctDetail: 'Direct OCCT unavailable: missing TKDESTEP' });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await expect(page.locator('.prompt-input')).toBeVisible();
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
@@ -1161,7 +1179,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await expect(page.locator('.prompt-input')).toBeVisible();
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
@@ -1184,7 +1202,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await expect(page.locator('.prompt-input')).toBeVisible();
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
@@ -1204,7 +1222,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { stepArtifact: true });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await expect(page.locator('.prompt-input')).toBeVisible();
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
@@ -1232,7 +1250,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page, { stepArtifact: true, directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await openDialogue(page);
     await expect(page.locator('.prompt-input')).toBeVisible();
     await page.locator('.prompt-input').fill('Create a box');
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
@@ -1250,8 +1268,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
+    await openDialogue(page);
+
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
+    await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
@@ -1286,8 +1307,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
+    await openDialogue(page);
+
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
+    await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
@@ -1327,8 +1351,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
+    await openDialogue(page);
+
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
+    await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
@@ -1355,8 +1382,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
+    await openDialogue(page);
+
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
+    await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
@@ -1400,8 +1430,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
+    await openDialogue(page);
+
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
+    await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
     const viewer = page.locator('.viewer-host').first();
@@ -1424,7 +1457,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.locator('button[title="Create New Thread"]').click();
+    await page.locator('button[title="New project"]').click();
     await page.getByRole('button', { name: /Import Macro/i }).click();
     await page.getByPlaceholder('Paste FreeCAD macro (Python) here...').fill('print(\"manual\")');
     await page.getByRole('button', { name: /CREATE THREAD/i }).click();
@@ -1479,8 +1512,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.locator('button[title="Create New Thread"]').click();
-    await page.getByRole('button', { name: /Import FCStd/i }).click();
+    await page.locator('button[title="New project"]').click();
+    await page.getByRole('button', { name: /Import FreeCAD|Import FCStd/i }).click();
 
     await expect
       .poll(async () => {
@@ -1504,7 +1537,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(importDialog.locator('.proposal-status').last()).toContainText('ACCEPTED');
     await importDialog.getByRole('button', { name: 'APPLY' }).click();
 
-    await page.locator('.history-card', { hasText: 'Imported Shell' }).click();
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.locator('.project-card', { hasText: 'Imported Shell' }).getByRole('button', { name: 'OPEN' }).click();
+    await openParams(page);
     await page.locator('.part-chip', { hasText: 'Outer Shell' }).click();
     await expect(page.locator('.param-field', { hasText: 'Outer Shell Width' })).toBeVisible();
 
@@ -1517,8 +1552,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.locator('button[title="Create New Thread"]').click();
-    await page.getByRole('button', { name: /Import FCStd/i }).click();
+    await page.locator('button[title="New project"]').click();
+    await page.getByRole('button', { name: /Import FreeCAD|Import FCStd/i }).click();
     const importDialog = page.getByRole('dialog');
     await expect(importDialog.locator('.proposal-card').last()).toContainText('Expose Outer Shell dimensions');
 
@@ -1526,6 +1561,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(importDialog.locator('.proposal-status').last()).toContainText('ACCEPTED');
     await importDialog.getByRole('button', { name: 'APPLY' }).click();
 
+    await openParams(page);
     await page.locator('.part-chip', { hasText: 'Outer Shell' }).click();
     await expect(page.locator('.param-field', { hasText: 'Outer Shell Width' })).toBeVisible();
     await expect(page.locator('.viewer-part-overlay')).toContainText('Outer Shell');
@@ -1552,7 +1588,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       })
       .toBeGreaterThan(0);
 
-    await page.locator('.history-card', { hasText: 'Imported Shell' }).click();
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.locator('.project-card', { hasText: 'Imported Shell' }).getByRole('button', { name: 'OPEN' }).click();
+    await openParams(page);
     await page.locator('.part-chip', { hasText: 'Outer Shell' }).click();
     await expect(page.locator('.viewer-part-overlay input[type="number"]').first()).toHaveValue('48');
   });

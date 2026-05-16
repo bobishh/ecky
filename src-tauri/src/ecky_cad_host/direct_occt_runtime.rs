@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -15,6 +16,10 @@ use crate::models::{
     ModelSourceKind, ParameterGroup, PartBinding, PathResolver, SelectionTarget,
     SelectionTargetKind, SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
     MODEL_RUNTIME_SCHEMA_VERSION,
+};
+use crate::topology_target_ids::{
+    preferred_public_topology_target_id, stable_edge_target_id, stable_face_target_id,
+    topology_target_aliases, viewer_target_alias_ids,
 };
 
 const SOURCE_FILE_NAME: &str = "source.ecky";
@@ -131,12 +136,18 @@ pub(crate) fn render_core_program_runtime_bundle(
                 .iter()
                 .map(|part| (part.key.clone(), part.label.clone()))
                 .collect::<Vec<_>>();
+            let part_root_node_ids = program
+                .parts
+                .iter()
+                .map(|part| (part.key.clone(), part.root.id.raw()))
+                .collect::<HashMap<_, _>>();
             let manifest = build_direct_occt_manifest(
                 &model_id,
                 &source_path,
                 &part_specs,
                 &parameter_keys,
                 topology_report.as_ref(),
+                &part_root_node_ids,
             )?;
             let bundle = build_direct_occt_bundle(
                 &model_id,
@@ -169,13 +180,15 @@ pub(crate) fn build_direct_occt_manifest(
     parts: &[(String, String)],
     parameter_keys: &[String],
     topology_report: Option<&DirectOcctTopologyReport>,
+    part_root_node_ids: &HashMap<String, u64>,
 ) -> AppResult<ModelManifest> {
     let part_bindings = direct_occt_part_bindings(parts, parameter_keys);
     let part_ids = part_bindings
         .iter()
         .map(|part| part.part_id.clone())
         .collect::<Vec<_>>();
-    let selection_targets = direct_occt_selection_targets(&part_bindings, topology_report)?;
+    let selection_targets =
+        direct_occt_selection_targets(&part_bindings, topology_report, part_root_node_ids)?;
 
     Ok(ModelManifest {
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
@@ -336,11 +349,15 @@ fn read_direct_occt_topology_report(path: &Path) -> AppResult<Option<DirectOcctT
 fn direct_occt_selection_targets(
     part_bindings: &[PartBinding],
     topology_report: Option<&DirectOcctTopologyReport>,
+    part_root_node_ids: &HashMap<String, u64>,
 ) -> AppResult<Vec<SelectionTarget>> {
     let Some(topology_report) = topology_report else {
         return Ok(Vec::new());
     };
     let mut selection_targets = Vec::new();
+    let mut seen_canonical_target_ids = std::collections::HashSet::new();
+    let mut seen_public_target_ids = std::collections::HashSet::new();
+    let mut seen_manifest_ids = std::collections::HashSet::new();
 
     for topology_part in &topology_report.parts {
         let part_id = topology_part.part_id.trim();
@@ -361,8 +378,54 @@ fn direct_occt_selection_targets(
             .iter()
             .filter(|edge| edge.start.is_some() && edge.end.is_some())
         {
+            let canonical_target_id = direct_occt_edge_target_id(part_id, edge);
+            if !seen_canonical_target_ids.insert(canonical_target_id.clone()) {
+                continue;
+            }
+            let stable_target_id = direct_occt_stable_edge_target_id(&canonical_target_id);
+            let preferred_public_target_id = if stable_target_id.is_empty() {
+                canonical_target_id.clone()
+            } else {
+                stable_target_id
+            };
+            let mut public_target_id =
+                if seen_public_target_ids.insert(preferred_public_target_id.clone()) {
+                    preferred_public_target_id
+                } else {
+                    canonical_target_id.clone()
+                };
+            if !seen_manifest_ids.insert(public_target_id.clone()) {
+                if public_target_id != canonical_target_id
+                    && seen_manifest_ids.insert(canonical_target_id.clone())
+                {
+                    public_target_id = canonical_target_id.clone();
+                } else {
+                    continue;
+                }
+            }
+            let durable_target_id = part_root_node_ids
+                .get(part_id)
+                .and_then(|root_node_id| {
+                    direct_occt_durable_edge_target_id(part_id, *root_node_id, &public_target_id)
+                })
+                .filter(|durable_target_id| seen_manifest_ids.insert(durable_target_id.clone()));
+            let canonical_target_id_value = if canonical_target_id != public_target_id
+                && seen_manifest_ids.insert(canonical_target_id.clone())
+            {
+                Some(canonical_target_id.clone())
+            } else {
+                None
+            };
             selection_targets.push(SelectionTarget {
-                target_id: Some(direct_occt_edge_target_id(part_id, edge)),
+                target_id: Some(public_target_id.clone()),
+                durable_target_id,
+                canonical_target_id: canonical_target_id_value.clone(),
+                alias_ids: canonical_target_id_value
+                    .clone()
+                    .map(|canonical_target_id| {
+                        topology_target_aliases(&public_target_id, canonical_target_id)
+                    })
+                    .unwrap_or_default(),
                 part_id: part_binding.part_id.clone(),
                 viewer_node_id: viewer_node_id.clone(),
                 label: direct_occt_edge_label(topology_part, edge),
@@ -379,8 +442,54 @@ fn direct_occt_selection_targets(
             .iter()
             .filter(|face| face.center.is_some())
         {
+            let canonical_target_id = direct_occt_face_target_id(part_id, face);
+            if !seen_canonical_target_ids.insert(canonical_target_id.clone()) {
+                continue;
+            }
+            let stable_target_id = direct_occt_stable_face_target_id(&canonical_target_id);
+            let preferred_public_target_id = if stable_target_id.is_empty() {
+                canonical_target_id.clone()
+            } else {
+                stable_target_id
+            };
+            let mut public_target_id =
+                if seen_public_target_ids.insert(preferred_public_target_id.clone()) {
+                    preferred_public_target_id
+                } else {
+                    canonical_target_id.clone()
+                };
+            if !seen_manifest_ids.insert(public_target_id.clone()) {
+                if public_target_id != canonical_target_id
+                    && seen_manifest_ids.insert(canonical_target_id.clone())
+                {
+                    public_target_id = canonical_target_id.clone();
+                } else {
+                    continue;
+                }
+            }
+            let durable_target_id = part_root_node_ids
+                .get(part_id)
+                .and_then(|root_node_id| {
+                    direct_occt_durable_face_target_id(part_id, *root_node_id, &public_target_id)
+                })
+                .filter(|durable_target_id| seen_manifest_ids.insert(durable_target_id.clone()));
+            let canonical_target_id_value = if canonical_target_id != public_target_id
+                && seen_manifest_ids.insert(canonical_target_id.clone())
+            {
+                Some(canonical_target_id.clone())
+            } else {
+                None
+            };
             selection_targets.push(SelectionTarget {
-                target_id: Some(direct_occt_face_target_id(part_id, face)),
+                target_id: Some(public_target_id.clone()),
+                durable_target_id,
+                canonical_target_id: canonical_target_id_value.clone(),
+                alias_ids: canonical_target_id_value
+                    .clone()
+                    .map(|canonical_target_id| {
+                        topology_target_aliases(&public_target_id, canonical_target_id)
+                    })
+                    .unwrap_or_default(),
                 part_id: part_binding.part_id.clone(),
                 viewer_node_id: viewer_node_id.clone(),
                 label: direct_occt_face_label(topology_part, face),
@@ -407,11 +516,15 @@ fn direct_occt_edge_targets(
         .selection_targets
         .iter()
         .filter(|target| target.kind == SelectionTargetKind::Edge)
-        .filter_map(|target| {
+        .flat_map(|target| {
             target
                 .target_id
-                .as_deref()
-                .map(|target_id| (target_id, target))
+                .iter()
+                .map(String::as_str)
+                .chain(target.durable_target_id.iter().map(String::as_str))
+                .chain(target.canonical_target_id.iter().map(String::as_str))
+                .chain(target.alias_ids.iter().map(String::as_str))
+                .map(move |target_id| (target_id, target))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut edge_targets = Vec::new();
@@ -435,7 +548,10 @@ fn direct_occt_edge_targets(
             };
 
             edge_targets.push(ViewerEdgeTarget {
-                target_id,
+                target_id: preferred_public_topology_target_id(selection_target, &target_id),
+                durable_target_id: selection_target.durable_target_id.clone(),
+                canonical_target_id: Some(target_id.clone()),
+                alias_ids: viewer_target_alias_ids(selection_target, &target_id),
                 part_id: selection_target.part_id.clone(),
                 viewer_node_id: selection_target.viewer_node_id.clone(),
                 label: direct_occt_edge_label(topology_part, edge),
@@ -460,11 +576,15 @@ fn direct_occt_face_targets(
         .selection_targets
         .iter()
         .filter(|target| target.kind == SelectionTargetKind::Face)
-        .filter_map(|target| {
+        .flat_map(|target| {
             target
                 .target_id
-                .as_deref()
-                .map(|target_id| (target_id, target))
+                .iter()
+                .map(String::as_str)
+                .chain(target.durable_target_id.iter().map(String::as_str))
+                .chain(target.canonical_target_id.iter().map(String::as_str))
+                .chain(target.alias_ids.iter().map(String::as_str))
+                .map(move |target_id| (target_id, target))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut face_targets = Vec::new();
@@ -485,7 +605,10 @@ fn direct_occt_face_targets(
             };
 
             face_targets.push(ViewerFaceTarget {
-                target_id,
+                target_id: preferred_public_topology_target_id(selection_target, &target_id),
+                durable_target_id: selection_target.durable_target_id.clone(),
+                canonical_target_id: Some(target_id.clone()),
+                alias_ids: viewer_target_alias_ids(selection_target, &target_id),
                 part_id: selection_target.part_id.clone(),
                 viewer_node_id: selection_target.viewer_node_id.clone(),
                 label: direct_occt_face_label(topology_part, face),
@@ -519,6 +642,18 @@ fn direct_occt_edge_target_id(part_id: &str, edge: &DirectOcctTopologyEdge) -> S
         Some(signature) => format!("{part_id}:edge:{edge_index}:{signature}"),
         None => format!("{part_id}:edge:{edge_index}"),
     }
+}
+
+fn direct_occt_stable_edge_target_id(target_id: &str) -> String {
+    stable_edge_target_id(target_id)
+}
+
+fn direct_occt_durable_edge_target_id(
+    part_id: &str,
+    root_node_id: u64,
+    target_id: &str,
+) -> Option<String> {
+    direct_occt_durable_topology_target_id(part_id, root_node_id, target_id, ":edge:")
 }
 
 fn direct_occt_edge_label(
@@ -565,6 +700,28 @@ fn direct_occt_face_target_id(part_id: &str, face: &DirectOcctTopologyFace) -> S
         Some(signature) => format!("{part_id}:face:{face_index}:{signature}"),
         None => format!("{part_id}:face:{face_index}"),
     }
+}
+
+fn direct_occt_stable_face_target_id(target_id: &str) -> String {
+    stable_face_target_id(target_id)
+}
+
+fn direct_occt_durable_face_target_id(
+    part_id: &str,
+    root_node_id: u64,
+    target_id: &str,
+) -> Option<String> {
+    direct_occt_durable_topology_target_id(part_id, root_node_id, target_id, ":face:")
+}
+
+fn direct_occt_durable_topology_target_id(
+    part_id: &str,
+    root_node_id: u64,
+    target_id: &str,
+    marker: &str,
+) -> Option<String> {
+    let (_, payload) = target_id.trim().split_once(marker)?;
+    Some(format!("{part_id}:node:{root_node_id}{marker}{payload}"))
 }
 
 fn direct_occt_face_label(
@@ -709,6 +866,7 @@ mod tests {
             &[("body".to_string(), "Body".to_string())],
             &Vec::<String>::new(),
             None,
+            &HashMap::new(),
         )
         .expect("manifest");
         let bundle = build_direct_occt_bundle(
@@ -756,6 +914,7 @@ mod tests {
             ],
             &["width".to_string()],
             None,
+            &HashMap::new(),
         )
         .expect("manifest");
 
@@ -816,6 +975,7 @@ mod tests {
             &[("body".to_string(), "Body".to_string())],
             &Vec::<String>::new(),
             Some(&topology),
+            &HashMap::from([(String::from("body"), 42_u64)]),
         )
         .expect("manifest");
         let bundle = build_direct_occt_bundle(
@@ -830,13 +990,30 @@ mod tests {
         .expect("bundle");
 
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
-        let face_target_id = "body:face:0:5-10-15:200";
+        let face_target_id = "body:face:5-10-15:200";
+        let face_durable_id = "body:node:42:face:5-10-15:200";
+        let face_alias_id = "body:face:0:5-10-15:200";
         assert!(manifest.selection_targets.iter().any(|target| {
             target.kind == SelectionTargetKind::Face
                 && target.target_id.as_deref() == Some(face_target_id)
+                && target.durable_target_id.as_deref() == Some(face_durable_id)
+                && target.canonical_target_id.as_deref() == Some(face_alias_id)
+                && target.alias_ids.is_empty()
         }));
         assert_eq!(bundle.face_targets.len(), 1);
-        assert_eq!(bundle.face_targets[0].target_id, face_target_id);
+        assert_eq!(bundle.face_targets[0].target_id, "body:face:5-10-15:200");
+        assert_eq!(
+            bundle.face_targets[0].durable_target_id.as_deref(),
+            Some(face_durable_id)
+        );
+        assert_eq!(
+            bundle.face_targets[0].canonical_target_id.as_deref(),
+            Some(face_alias_id)
+        );
+        assert_eq!(
+            bundle.face_targets[0].alias_ids,
+            vec![face_alias_id.to_string(), face_durable_id.to_string()]
+        );
         assert_eq!(bundle.face_targets[0].part_id, "body");
         assert_eq!(bundle.face_targets[0].viewer_node_id, "body");
         assert_eq!(bundle.face_targets[0].label, "Body.Face1");
@@ -873,6 +1050,7 @@ mod tests {
             &[("body".to_string(), "Body".to_string())],
             &Vec::<String>::new(),
             Some(&topology),
+            &HashMap::from([(String::from("body"), 42_u64)]),
         )
         .expect("manifest");
         let bundle = build_direct_occt_bundle(
@@ -887,13 +1065,30 @@ mod tests {
         .expect("bundle");
 
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
-        let edge_target_id = "body:edge:0:0-0-0_10-0-0";
+        let edge_target_id = "body:edge:0-0-0_10-0-0";
+        let edge_durable_id = "body:node:42:edge:0-0-0_10-0-0";
+        let edge_alias_id = "body:edge:0:0-0-0_10-0-0";
         assert!(manifest.selection_targets.iter().any(|target| {
             target.kind == SelectionTargetKind::Edge
                 && target.target_id.as_deref() == Some(edge_target_id)
+                && target.durable_target_id.as_deref() == Some(edge_durable_id)
+                && target.canonical_target_id.as_deref() == Some(edge_alias_id)
+                && target.alias_ids.is_empty()
         }));
         assert_eq!(bundle.edge_targets.len(), 1);
-        assert_eq!(bundle.edge_targets[0].target_id, edge_target_id);
+        assert_eq!(bundle.edge_targets[0].target_id, "body:edge:0-0-0_10-0-0");
+        assert_eq!(
+            bundle.edge_targets[0].durable_target_id.as_deref(),
+            Some(edge_durable_id)
+        );
+        assert_eq!(
+            bundle.edge_targets[0].canonical_target_id.as_deref(),
+            Some(edge_alias_id)
+        );
+        assert_eq!(
+            bundle.edge_targets[0].alias_ids,
+            vec![edge_alias_id.to_string(), edge_durable_id.to_string()]
+        );
         assert_eq!(bundle.edge_targets[0].part_id, "body");
         assert_eq!(bundle.edge_targets[0].viewer_node_id, "body");
         assert_eq!(bundle.edge_targets[0].label, "Body.Edge1");
@@ -931,6 +1126,10 @@ mod tests {
         assert_eq!(
             direct_occt_edge_target_id("body", &forward),
             "body:edge:0:0-0-0_10-0-0"
+        );
+        assert_eq!(
+            direct_occt_stable_edge_target_id("body:edge:0:0-0-0_10-0-0"),
+            "body:edge:0-0-0_10-0-0"
         );
         assert_eq!(
             direct_occt_edge_target_id("body", &forward),
@@ -1068,6 +1267,256 @@ mod tests {
             .selection_targets
             .iter()
             .any(|target| target.kind == SelectionTargetKind::Face));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_exact_edge_target_id_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-exact-edge-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (base_bundle, _) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let edge_target_id = base_bundle
+            .edge_targets
+            .first()
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box edge target");
+        let drifted_edge_target_id = edge_target_id.replacen(":edge:0:", ":edge:999:", 1);
+        assert_ne!(drifted_edge_target_id, edge_target_id);
+
+        let exact_source = format!(
+            r#"(model (part body (fillet 1.5 :edges "target-id:{drifted_edge_target_id}" (box 20 20 10))))"#
+        );
+        let exact_program = compile(&exact_source);
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &exact_program,
+            &exact_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT exact-target fillet bundle");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(
+            std::fs::metadata(&bundle.preview_stl_path)
+                .expect("stl")
+                .len()
+                > 512
+        );
+        assert!(
+            std::fs::metadata(&bundle.export_artifacts[0].path)
+                .expect("step")
+                .len()
+                > 1024
+        );
+        assert_eq!(manifest.parts[0].part_id, "body");
+        assert!(
+            edge_target_id.starts_with("body:edge:"),
+            "unexpected edge target id: {edge_target_id}"
+        );
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_exact_edge_alias_target_id_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-exact-edge-alias-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (_base_bundle, base_manifest) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let edge_alias_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box edge alias target");
+
+        let exact_source = format!(
+            r#"(model (part body (fillet 1.5 :edges "target-id:{edge_alias_target_id}" (box 20 20 10))))"#
+        );
+        let exact_program = compile(&exact_source);
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &exact_program,
+            &exact_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT exact-alias fillet bundle");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_exact_face_target_id_for_shell_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-exact-face-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (base_bundle, _) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let face_target_id = base_bundle
+            .face_targets
+            .first()
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box face target");
+        let drifted_face_target_id = face_target_id.replacen(":face:0:", ":face:999:", 1);
+        assert_ne!(drifted_face_target_id, face_target_id);
+
+        let exact_source = format!(
+            r#"(model (part body (shell 1.5 :faces "target-id:{drifted_face_target_id}" (box 20 20 10))))"#
+        );
+        let exact_program = compile(&exact_source);
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &exact_program,
+            &exact_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT exact-target shell bundle");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(
+            std::fs::metadata(&bundle.preview_stl_path)
+                .expect("stl")
+                .len()
+                > 512
+        );
+        assert!(
+            std::fs::metadata(&bundle.export_artifacts[0].path)
+                .expect("step")
+                .len()
+                > 1024
+        );
+        assert_eq!(manifest.parts[0].part_id, "body");
+        assert!(
+            face_target_id.starts_with("body:face:"),
+            "unexpected face target id: {face_target_id}"
+        );
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_exact_face_alias_target_id_for_shell_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-exact-face-alias-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (_base_bundle, base_manifest) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let face_alias_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box face alias target");
+
+        let exact_source = format!(
+            r#"(model (part body (shell 1.5 :faces "target-id:{face_alias_target_id}" (box 20 20 10))))"#
+        );
+        let exact_program = compile(&exact_source);
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &exact_program,
+            &exact_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT exact-alias shell bundle");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
 
         let _ = fs::remove_dir_all(root);
     }

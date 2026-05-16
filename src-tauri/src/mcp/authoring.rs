@@ -6,14 +6,15 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- First read current target settings from `workspace_overview`, `target_macro_get`, or `target_detail_get`: `sourceLanguage`, `macroDialect`, `geometryBackend`.\n",
     "- Preserve model-version settings. For empty threads, use session config/defaults; threads do not own language/backend.\n",
     "- If `sourceLanguage=ecky`, write valid `.ecky` only; source starts with `(model ...)`.\n",
-    "- For non-trivial source edits, use `macro_buffer_get` first, edit against line numbers/digest, then render with `macro_buffer_replace_and_render`; use full `macro_replace_and_render` only for small complete rewrites or first versions.\n",
+    "- For non-trivial source edits, use `macro_buffer_get` first, edit against line numbers/digest, then render with `macro_buffer_replace_and_preview`; use full `macro_preview_render` only for small complete rewrites or first versions.\n",
     "- Do not reuse parameter keys with different meanings. Keep macroCode, uiSpec, and initialParams aligned; remove stale params.\n",
     "- Valid basics: `(box 40 20 10 :align '(min center min))`, `(extrude (polygon ((0 0) (100 0) (100 20) (0 20))) 8)`, `(place (location (plane :origin '(80 0 6)) :rotate '(0 90 0)) (cylinder 4 18))`.\n",
     "- `let` is parallel; use `let*` when later bindings depend on earlier bindings.\n",
     "- Read `ecky://guides/ecky-source`, the backend guide, the matching surface manifest, and the matching surface reference before inventing helpers or CAD ops.\n",
+    "- Fillet/chamfer are topology-sensitive. If a selector matches no edges after one smaller-radius retry and one selector retry, stop retrying fillet/chamfer; rebuild the shape with rounded source geometry (`rounded-rect`, `rounded-polygon`, `offset-rounded`, `loft`, `taper`, `cone`, or explicit profiles).\n",
     "- Do not promise STEP unless current artifact truth says `hasStepExport=true` or exportArtifacts contains `format=step`; direct OCCT is internal, not a selectable user backend.\n",
-    "- For an existing design target, call `thread_borrow`; for a brand-new design, call `thread_create`, then render the first version with `macro_replace_and_render`.\n",
-    "- Render with `macro_replace_and_render`. If validation fails, surface exact raw error, fix source properly, and render again.\n",
+    "- For an existing design target, call `thread_borrow`; for a brand-new design, call `thread_create`, then render the first version with `macro_preview_render`.\n",
+    "- Render with `macro_preview_render`. If validation fails, surface exact raw error, fix source properly, and render again.\n",
     "- Verify geometry with `get_model_screenshot` after successful render.\n"
 );
 
@@ -109,5 +110,15 @@ mod tests {
         assert!(card.contains("hasStepExport=true"));
         assert!(card.contains("exportArtifacts contains `format=step`"));
         assert!(card.contains("direct OCCT is internal"));
+    }
+
+    #[test]
+    fn authoring_card_stops_blind_fillet_retries() {
+        let card = authoring_card_text();
+
+        assert!(card.contains("Fillet/chamfer are topology-sensitive"));
+        assert!(card.contains("selector matches no edges"));
+        assert!(card.contains("stop retrying fillet/chamfer"));
+        assert!(card.contains("rounded source geometry"));
     }
 }

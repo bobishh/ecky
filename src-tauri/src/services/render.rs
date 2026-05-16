@@ -1124,6 +1124,20 @@ mod tests {
         );
         assert!(bundle.model_id.starts_with("generated-b123d-"));
         assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(!bundle.edge_targets.is_empty());
+        assert!(!bundle.face_targets.is_empty());
+
+        let manifest = load_manifest_for_bundle(&bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        assert!(manifest
+            .selection_targets
+            .iter()
+            .any(|target| target.kind == crate::models::SelectionTargetKind::Edge));
+        assert!(manifest
+            .selection_targets
+            .iter()
+            .any(|target| target.kind == crate::models::SelectionTargetKind::Face));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1236,6 +1250,20 @@ mod tests {
         );
         assert!(bundle.model_id.starts_with("generated-b123d-"));
         assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(!bundle.edge_targets.is_empty());
+        assert!(!bundle.face_targets.is_empty());
+
+        let manifest = load_manifest_for_bundle(&bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        assert!(manifest
+            .selection_targets
+            .iter()
+            .any(|target| target.kind == crate::models::SelectionTargetKind::Edge));
+        assert!(manifest
+            .selection_targets
+            .iter()
+            .any(|target| target.kind == crate::models::SelectionTargetKind::Face));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1244,6 +1272,11 @@ mod tests {
     async fn ecky_rust_request_renders_dome_style_exact_stack_via_build123d() {
         let root = temp_root("eckyrust-dome-style-radial-loft");
         let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if direct_capability.available {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
         let capability = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
         if !capability.available {
             let _ = std::fs::remove_dir_all(&root);
@@ -1282,6 +1315,20 @@ mod tests {
         );
         assert!(bundle.model_id.starts_with("generated-b123d-"));
         assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(!bundle.edge_targets.is_empty());
+        assert!(!bundle.face_targets.is_empty());
+
+        let manifest = load_manifest_for_bundle(&bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        assert!(manifest
+            .selection_targets
+            .iter()
+            .any(|target| target.kind == crate::models::SelectionTargetKind::Edge));
+        assert!(manifest
+            .selection_targets
+            .iter()
+            .any(|target| target.kind == crate::models::SelectionTargetKind::Face));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1398,6 +1445,294 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["body"]
         );
+        assert!(!manifest.selection_targets.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_dispatch_applies_exact_edge_target_id_when_sdk_ready() {
+        let root = temp_root("direct-exact-edge-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let state = test_state(&root);
+        let base_bundle = render_model(
+            r#"(model
+                (part body (box 20 20 10)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("base direct OCCT render");
+        let edge_target_id = base_bundle
+            .edge_targets
+            .first()
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box edge target");
+        let drifted_edge_target_id = edge_target_id.replacen(":edge:0:", ":edge:999:", 1);
+        assert_ne!(drifted_edge_target_id, edge_target_id);
+
+        let exact_source = format!(
+            r#"(model
+                (part body
+                  (fillet 1.5 :edges "target-id:{drifted_edge_target_id}" (box 20 20 10))))"#
+        );
+        let bundle = render_model(
+            &exact_source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("exact edge target-id direct OCCT render");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
+        assert!(
+            edge_target_id.starts_with("body:edge:"),
+            "unexpected edge target id: {edge_target_id}"
+        );
+
+        let manifest = load_manifest_for_bundle(&bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        assert_eq!(
+            manifest
+                .parts
+                .iter()
+                .map(|part| part.part_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["body"]
+        );
+        assert!(!manifest.selection_targets.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_dispatch_applies_exact_edge_alias_target_id_when_sdk_ready() {
+        let root = temp_root("direct-exact-edge-alias-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let state = test_state(&root);
+        let base_bundle = render_model(
+            r#"(model
+                (part body (box 20 20 10)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("base direct OCCT render");
+        let base_manifest = load_manifest_for_bundle(&base_bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        let edge_alias_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box edge alias target");
+
+        let exact_source = format!(
+            r#"(model
+                (part body
+                  (fillet 1.5 :edges "target-id:{edge_alias_target_id}" (box 20 20 10))))"#
+        );
+        let bundle = render_model(
+            &exact_source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("exact edge alias direct OCCT render");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
+
+        let manifest = load_manifest_for_bundle(&bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        assert!(!manifest.selection_targets.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_dispatch_applies_exact_face_target_id_for_shell_when_sdk_ready() {
+        let root = temp_root("direct-exact-face-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let state = test_state(&root);
+        let base_bundle = render_model(
+            r#"(model
+                (part body (box 20 20 10)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("base direct OCCT render");
+        let face_target_id = base_bundle
+            .face_targets
+            .first()
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box face target");
+        let drifted_face_target_id = face_target_id.replacen(":face:0:", ":face:999:", 1);
+        assert_ne!(drifted_face_target_id, face_target_id);
+
+        let exact_source = format!(
+            r#"(model
+                (part body
+                  (shell 1.5 :faces "target-id:{drifted_face_target_id}" (box 20 20 10))))"#
+        );
+        let bundle = render_model(
+            &exact_source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("exact face target-id direct OCCT shell render");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
+        assert!(
+            face_target_id.starts_with("body:face:"),
+            "unexpected face target id: {face_target_id}"
+        );
+
+        let manifest = load_manifest_for_bundle(&bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        assert_eq!(
+            manifest
+                .parts
+                .iter()
+                .map(|part| part.part_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["body"]
+        );
+        assert!(!manifest.selection_targets.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_dispatch_applies_exact_face_alias_target_id_for_shell_when_sdk_ready() {
+        let root = temp_root("direct-exact-face-alias-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let state = test_state(&root);
+        let base_bundle = render_model(
+            r#"(model
+                (part body (box 20 20 10)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("base direct OCCT render");
+        let base_manifest = load_manifest_for_bundle(&base_bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
+        let face_alias_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box face alias target");
+
+        let exact_source = format!(
+            r#"(model
+                (part body
+                  (shell 1.5 :faces "target-id:{face_alias_target_id}" (box 20 20 10))))"#
+        );
+        let bundle = render_model(
+            &exact_source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("exact face alias direct OCCT shell render");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
+
+        let manifest = load_manifest_for_bundle(&bundle)
+            .expect("load manifest")
+            .expect("runtime manifest");
         assert!(!manifest.selection_targets.is_empty());
 
         std::fs::remove_dir_all(root).unwrap();

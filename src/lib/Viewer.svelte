@@ -26,6 +26,7 @@
   import type { MaterializedSemanticControl } from './modelRuntime/semanticControls';
   import { cycleTopologyMode, topologyModeLabel, type TopologyMode } from './viewerDisplayMode';
   import { resolveViewerTone, type ViewerTone } from './viewerLook';
+  import { resolveViewerAssetUrl } from './viewerAssetUrl';
 
   type ViewportBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
 
@@ -60,6 +61,7 @@
     onControlFocusChange,
     onCameraStateChange,
     onModelLoaded,
+    onModelLoadError,
   }: {
     modelKey?: string | null;
     stlUrl?: string | null;
@@ -91,6 +93,7 @@
     onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
     onCameraStateChange?: (camera: ViewportCameraState) => void;
     onModelLoaded?: () => void;
+    onModelLoadError?: (message: string) => void;
   } = $props();
 
   type RuntimeMesh = {
@@ -104,6 +107,9 @@
 
   type RuntimeEdge = {
     targetId: string;
+    durableTargetId?: string | null;
+    canonicalTargetId?: string | null;
+    aliasIds: string[];
     partId: string;
     line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   };
@@ -185,6 +191,29 @@
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     if (token !== loadToken) return;
     onModelLoaded?.();
+  }
+
+  function notifyModelLoadError(token: number, context: string, error: unknown) {
+    if (token !== loadToken) return;
+    const message = error instanceof Error ? error.message : String(error);
+    onModelLoadError?.(`${context}: ${message}`);
+  }
+
+  function loadStlGeometry(loader: STLLoader, url: string): Promise<THREE.BufferGeometry> {
+    const resolvedUrl = resolveViewerAssetUrl(url, modelKey);
+    const timeoutMs = 30000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([
+      loader.loadAsync(resolvedUrl),
+      new Promise<THREE.BufferGeometry>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`STL load timed out after ${timeoutMs}ms: ${resolvedUrl}`)),
+          timeoutMs,
+        );
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   }
 
   export function getCameraState(): ViewportCameraState | null {
@@ -393,12 +422,15 @@
 
   onMount(() => {
     setupViewer();
-    void loadCurrentModel();
 
     resizeObserver = new ResizeObserver(() => {
       onResize();
     });
     resizeObserver.observe(viewerHost);
+    requestAnimationFrame(() => {
+      onResize();
+      void loadCurrentModel();
+    });
   });
 
   onDestroy(() => {
@@ -475,7 +507,8 @@
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0b0f1a);
 
-    camera = new THREE.PerspectiveCamera(45, viewerHost.clientWidth / viewerHost.clientHeight, 0.1, 2000);
+    const { width, height } = hostSize();
+    camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 2000);
     camera.position.set(140, 120, 140);
 
     renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -483,7 +516,7 @@
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.08;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setSize(viewerHost.clientWidth, viewerHost.clientHeight);
+    renderer.setSize(width, height);
     viewerHost.appendChild(renderer.domElement);
     renderer.domElement.addEventListener('pointerdown', handlePointerDown);
     renderer.domElement.addEventListener('pointermove', handlePointerMove);
@@ -531,13 +564,19 @@
     renderer.render(scene, camera);
   }
 
+  function hostSize() {
+    return {
+      width: Math.max(1, viewerHost?.clientWidth ?? 1),
+      height: Math.max(1, viewerHost?.clientHeight ?? 1),
+    };
+  }
+
   function onResize() {
     if (!viewerHost || !camera || !renderer) return;
-    const w = viewerHost.clientWidth;
-    const h = viewerHost.clientHeight;
-    camera.aspect = w / h;
+    const { width, height } = hostSize();
+    camera.aspect = width / height;
     camera.updateProjectionMatrix();
-    renderer.setSize(w, h);
+    renderer.setSize(width, height);
     updateOverlayAnchor();
   }
 
@@ -567,7 +606,7 @@
 
     try {
       for (const asset of assets) {
-        const geometry = await loader.loadAsync(cacheBust(asset.path));
+        const geometry = await loadStlGeometry(loader, asset.path);
         if (token !== loadToken) {
           geometry.dispose();
           return;
@@ -622,6 +661,7 @@
         await loadSingleStl(token, stlUrl);
         return;
       }
+      notifyModelLoadError(token, 'Failed to load multipart STL assets', error);
     }
   }
 
@@ -632,7 +672,7 @@
     nextRoot.rotation.x = -Math.PI / 2;
 
     try {
-      const geometry = await loader.loadAsync(cacheBust(url));
+      const geometry = await loadStlGeometry(loader, url);
       if (token !== loadToken) {
         geometry.dispose();
         return;
@@ -666,6 +706,7 @@
     } catch (error) {
       console.error('Failed to load STL:', error);
       disposeDetachedGroup(nextRoot);
+      notifyModelLoadError(token, 'Failed to load STL', error);
     }
   }
 
@@ -783,9 +824,18 @@
       line.userData.partId = target.partId;
       line.userData.viewerNodeId = target.viewerNodeId;
       line.userData.selectionTargetId = target.targetId;
+      line.userData.selectionTargetIds = [
+        target.targetId,
+        ...(target.durableTargetId ? [target.durableTargetId] : []),
+        ...(target.canonicalTargetId ? [target.canonicalTargetId] : []),
+        ...(target.aliasIds || []),
+      ];
       root.add(line);
       return {
         targetId: target.targetId,
+        durableTargetId: target.durableTargetId,
+        canonicalTargetId: target.canonicalTargetId,
+        aliasIds: target.aliasIds || [],
         partId: target.partId,
         line,
       };
@@ -832,9 +882,14 @@
     }
 
     for (const entry of runtimeEdges) {
-      const isSelected = selectedTarget?.kind === 'edge' && selectedTarget.targetId === entry.targetId;
-      const isHovered = !isSelected && hoveredTargetId === entry.targetId;
-      const isMeasured = !isSelected && !isHovered && measurementTargetIds.has(entry.targetId);
+      const isSelected =
+        selectedTarget?.kind === 'edge' &&
+        runtimeEdgeMatchesTargetId(entry.targetId, selectedTarget.targetId);
+      const isHovered = !isSelected && runtimeEdgeMatchesTargetId(entry.targetId, hoveredTargetId);
+      const isMeasured =
+        !isSelected &&
+        !isHovered &&
+        [...measurementTargetIds].some((targetId) => runtimeEdgeMatchesTargetId(entry.targetId, targetId));
       entry.line.material.color.setHex(
         isSelected ? 0xe5ca88 : isHovered ? 0x78c0a8 : isMeasured ? 0x9ad8c5 : 0x405371,
       );
@@ -968,8 +1023,43 @@
     };
   }
 
+  function selectionTargetMatchesId(
+    target: ContextSelectionTarget | null | undefined,
+    requestedTargetId: string | null | undefined,
+  ) {
+    return Boolean(
+      target &&
+        requestedTargetId &&
+        (target.targetId === requestedTargetId || target.aliasIds.includes(requestedTargetId)),
+    );
+  }
+
+  function resolveSelectionTargetByAnyId(targetId: string | null | undefined) {
+    if (!targetId) return null;
+    return selectionTargets.find((target) => selectionTargetMatchesId(target, targetId)) ?? null;
+  }
+
+  function runtimeEdgeMatchesTargetId(
+    runtimeTargetId: string | null | undefined,
+    requestedTargetId: string | null | undefined,
+  ) {
+    if (!runtimeTargetId || !requestedTargetId) return false;
+    const selectionTarget = resolveSelectionTargetByAnyId(runtimeTargetId);
+    if (!selectionTarget) {
+      const runtimeEdge = runtimeEdges.find((entry) => entry.targetId === runtimeTargetId);
+      if (!runtimeEdge) return runtimeTargetId === requestedTargetId;
+      return (
+        runtimeTargetId === requestedTargetId ||
+        runtimeEdge.durableTargetId === requestedTargetId ||
+        runtimeEdge.canonicalTargetId === requestedTargetId ||
+        runtimeEdge.aliasIds.includes(requestedTargetId)
+      );
+    }
+    return selectionTargetMatchesId(selectionTarget, requestedTargetId);
+  }
+
   function projectEdgeMidpoint(targetId: string) {
-    const edge = runtimeEdges.find((entry) => entry.targetId === targetId)?.line;
+    const edge = runtimeEdges.find((entry) => runtimeEdgeMatchesTargetId(entry.targetId, targetId))?.line;
     if (!edge) return null;
     const position = edge.geometry.getAttribute('position');
     if (!position || position.count < 2) return null;
@@ -1150,10 +1240,6 @@
     });
   }
 
-  function cacheBust(url: string) {
-    return `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
-  }
-
   function handlePointerDown(event: PointerEvent) {
     if (hideModelWhileBusy) return;
     pointerDownAt = { x: event.clientX, y: event.clientY };
@@ -1164,6 +1250,7 @@
     return (
       resolveViewerNodeTarget(selectionTargets, viewerNodeId, partId) ?? {
         targetId: `part:${partId}`,
+        aliasIds: [],
         kind: 'part',
         partId,
         label: partId,
@@ -1189,11 +1276,17 @@
       .find((entry) => typeof entry.object.userData.selectionTargetId === 'string');
     if (edgeHit?.object.userData.selectionTargetId) {
       const targetId = edgeHit.object.userData.selectionTargetId as string;
+      const aliasIds = Array.isArray(edgeHit.object.userData.selectionTargetIds)
+        ? (edgeHit.object.userData.selectionTargetIds as string[]).filter(
+            (candidate) => typeof candidate === 'string' && candidate !== targetId,
+          )
+        : [];
       const partId = (edgeHit.object.userData.partId as string | undefined) ?? null;
       const viewerNodeId = (edgeHit.object.userData.viewerNodeId as string | undefined) ?? null;
       return (
-        selectionTargets.find((target) => target.targetId === targetId) ?? {
+        resolveSelectionTargetByAnyId(targetId) ?? {
           targetId,
+          aliasIds,
           kind: 'edge',
           partId,
           label: partId ? `${partId} Edge` : 'Edge',

@@ -132,6 +132,45 @@ pub enum CoreValueKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreEdgeAxis {
+    X,
+    Y,
+    Z,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreEdgeBound {
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreEdgeSelectorClause {
+    Axis(CoreEdgeAxis),
+    Boundary {
+        axis: CoreEdgeAxis,
+        bound: CoreEdgeBound,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreFaceAreaRank {
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreFaceSelectorClause {
+    Boundary {
+        axis: CoreEdgeAxis,
+        bound: CoreEdgeBound,
+    },
+    Planar,
+    Normal(CoreEdgeAxis),
+    Area(CoreFaceAreaRank),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CoreSymbol {
     Start,
     End,
@@ -235,9 +274,72 @@ pub struct CoreShapeBinding {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum CoreSelectorPayload {
+    EdgeAll,
+    EdgeClauses(Vec<CoreEdgeSelectorClause>),
+    EdgeTargetIds(Vec<String>),
+    FaceClauses(Vec<CoreFaceSelectorClause>),
+    FaceTargetIds(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreKeywordValue {
+    Expr(CoreNode),
+    Selector {
+        source: CoreNode,
+        payload: CoreSelectorPayload,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoreKeywordArg {
     pub name: String,
-    pub value: CoreNode,
+    pub value: CoreKeywordValue,
+}
+
+impl CoreKeywordArg {
+    pub fn expr(name: String, value: CoreNode) -> Self {
+        Self {
+            name,
+            value: CoreKeywordValue::Expr(value),
+        }
+    }
+
+    pub fn selector(name: String, source: CoreNode, payload: CoreSelectorPayload) -> Self {
+        Self {
+            name,
+            value: CoreKeywordValue::Selector { source, payload },
+        }
+    }
+
+    pub fn source_node(&self) -> &CoreNode {
+        match &self.value {
+            CoreKeywordValue::Expr(value) => value,
+            CoreKeywordValue::Selector { source, .. } => source,
+        }
+    }
+
+    pub fn source_node_mut(&mut self) -> &mut CoreNode {
+        match &mut self.value {
+            CoreKeywordValue::Expr(value) => value,
+            CoreKeywordValue::Selector { source, .. } => source,
+        }
+    }
+
+    pub fn selector_payload(&self) -> Option<&CoreSelectorPayload> {
+        match &self.value {
+            CoreKeywordValue::Expr(_) => None,
+            CoreKeywordValue::Selector { payload, .. } => Some(payload),
+        }
+    }
+
+    pub fn set_selector_payload(&mut self, selector: Option<CoreSelectorPayload>) {
+        let source = self.source_node().clone();
+        self.value = match selector {
+            Some(payload) => CoreKeywordValue::Selector { source, payload },
+            None => CoreKeywordValue::Expr(source),
+        };
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

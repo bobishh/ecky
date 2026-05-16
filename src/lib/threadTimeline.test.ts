@@ -69,6 +69,39 @@ test('threadTimelineMessages preserves source order when timestamps collide', ()
   );
 });
 
+test('threadTimelineMessages hides agent tool error noise but keeps user-facing errors', () => {
+  const timeline = threadTimelineMessages([
+    sampleMessage({
+      id: 'agent-tool-error',
+      role: 'assistant',
+      status: 'error',
+      content: 'Expected a symbolic head for runtime list expression.',
+      agentOrigin: {
+        hostLabel: 'Codex MCP Client',
+        clientKind: 'mcp-http',
+        agentLabel: 'Ecky',
+        llmModelId: null,
+        llmModelLabel: null,
+        sessionId: 'session-1',
+        createdAt: 1,
+      },
+      timestamp: 2,
+    }),
+    sampleMessage({
+      id: 'generation-error',
+      role: 'assistant',
+      status: 'error',
+      content: 'Generation failed.',
+      timestamp: 3,
+    }),
+  ]);
+
+  assert.deepEqual(
+    timeline.map((message) => message.id),
+    ['generation-error'],
+  );
+});
+
 test('timelineVisuals converts attachment image paths through the provided asset helper', () => {
   const visuals = timelineVisuals(
     sampleMessage({

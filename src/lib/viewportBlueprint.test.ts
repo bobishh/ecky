@@ -3,12 +3,9 @@ import test from 'node:test';
 
 import type { Message } from './types/domain';
 import {
-  buildGenerateFromConceptPrompt,
-  cycleConceptPreviewMessageId,
   isConceptPreviewMessage,
   listConceptPreviewMessages,
-  reconcileConceptPreviewUiState,
-  resolveEffectiveConceptPreviewMessage,
+  resolveLatestConceptPreviewMessage,
 } from './viewportBlueprint';
 
 function sampleMessage(overrides: Partial<Message> = {}): Message {
@@ -55,7 +52,7 @@ test('concept preview selector keeps only assistant concept-preview images', () 
   ]);
 });
 
-test('reconcileConceptPreviewUiState auto-pins the latest preview and keeps manual pin until a newer preview arrives', () => {
+test('latest preview resolver returns the newest concept image', () => {
   const first = sampleMessage({
     id: 'first',
     imageData: 'data:image/png;base64,first',
@@ -69,94 +66,5 @@ test('reconcileConceptPreviewUiState auto-pins the latest preview and keeps manu
     timestamp: 2,
   });
 
-  const initial = reconcileConceptPreviewUiState({
-    messages: [first, second],
-    previous: { pinnedMessageId: null, lastAutoPinnedMessageId: null, mode: 'model' },
-    hasModel: true,
-  });
-  assert.equal(initial.nextState.pinnedMessageId, 'second');
-
-  const manual = reconcileConceptPreviewUiState({
-    messages: [first, second],
-    previous: {
-      pinnedMessageId: 'first',
-      lastAutoPinnedMessageId: 'second',
-      mode: 'blueprint',
-    },
-    hasModel: true,
-  });
-  assert.equal(manual.nextState.pinnedMessageId, 'first');
-  assert.equal(manual.effectiveMessage?.id, 'first');
-
-  const third = sampleMessage({
-    id: 'third',
-    imageData: 'data:image/png;base64,third',
-    visualKind: 'conceptPreview',
-    timestamp: 3,
-  });
-  const updated = reconcileConceptPreviewUiState({
-    messages: [first, second, third],
-    previous: manual.nextState,
-    hasModel: true,
-  });
-  assert.equal(updated.nextState.pinnedMessageId, 'third');
-  assert.equal(updated.nextState.lastAutoPinnedMessageId, 'third');
-});
-
-test('reconcileConceptPreviewUiState forces blueprint when no model is available and preserves the current mode when a model exists', () => {
-  const concept = sampleMessage({
-    id: 'concept',
-    imageData: 'data:image/png;base64,concept',
-    visualKind: 'conceptPreview',
-  });
-
-  const noModel = reconcileConceptPreviewUiState({
-    messages: [concept],
-    previous: { pinnedMessageId: null, lastAutoPinnedMessageId: null, mode: 'model' },
-    hasModel: false,
-  });
-  assert.equal(noModel.nextState.mode, 'blueprint');
-
-  const withModel = reconcileConceptPreviewUiState({
-    messages: [concept, sampleMessage({
-      id: 'concept-2',
-      imageData: 'data:image/png;base64,concept-2',
-      visualKind: 'conceptPreview',
-      timestamp: 2,
-    })],
-    previous: {
-      pinnedMessageId: 'concept',
-      lastAutoPinnedMessageId: 'concept',
-      mode: 'model',
-    },
-    hasModel: true,
-  });
-  assert.equal(withModel.nextState.mode, 'model');
-});
-
-test('effective preview falls back to the latest preview and cycling wraps around', () => {
-  const first = sampleMessage({
-    id: 'first',
-    imageData: 'data:image/png;base64,first',
-    visualKind: 'conceptPreview',
-    timestamp: 1,
-  });
-  const second = sampleMessage({
-    id: 'second',
-    imageData: 'data:image/png;base64,second',
-    visualKind: 'conceptPreview',
-    timestamp: 2,
-  });
-
-  assert.equal(resolveEffectiveConceptPreviewMessage([first, second], 'missing')?.id, 'second');
-  assert.equal(cycleConceptPreviewMessageId([first, second], 'first'), 'second');
-  assert.equal(cycleConceptPreviewMessageId([first, second], 'second'), 'first');
-});
-
-test('generate-from-concept prompt includes the concept note when available', () => {
-  assert.match(
-    buildGenerateFromConceptPrompt(sampleMessage({ content: 'Brutalist crab shrine vase' })),
-    /Brutalist crab shrine vase/,
-  );
-  assert.match(buildGenerateFromConceptPrompt(null), /concept preview/i);
+  assert.equal(resolveLatestConceptPreviewMessage([first, second])?.id, 'second');
 });

@@ -807,6 +807,9 @@ mod tests {
             mock_artifact_bundle("cad-step", vec![step_export("/tmp/cad-step/model.step")]);
         bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
             target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
             part_id: "body".to_string(),
             viewer_node_id: "body".to_string(),
             label: "Body.Edge1".to_string(),
@@ -824,6 +827,9 @@ mod tests {
         });
         bundle.face_targets.push(crate::models::ViewerFaceTarget {
             target_id: "body:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
             part_id: "body".to_string(),
             viewer_node_id: "body".to_string(),
             label: "Body.Face1".to_string(),

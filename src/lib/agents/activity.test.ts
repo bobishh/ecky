@@ -6,6 +6,7 @@ import {
   formatAgentActivityElapsed,
   isThreadAgentBusy,
   resolveActiveMcpBubble,
+  resolveGenieBubblePresentation,
   resolveTerminalActivityMeta,
 } from './activity';
 
@@ -232,4 +233,65 @@ test('compactThreadActivitySummary keeps only the first paragraph and truncates 
   );
   assert.equal(compact.endsWith('…'), true);
   assert.equal(compact.includes('dialogue pane'), false);
+});
+
+test('resolveGenieBubblePresentation compacts preview validation feedback and keeps preview context visible', () => {
+  const bubble = resolveGenieBubblePresentation({
+    threadAgentState: {
+      connectionState: 'active',
+      agentLabel: 'Codex',
+      llmModelLabel: 'gpt-5',
+      providerKind: 'openai',
+      sessionId: 'session-1',
+      phase: 'patching_macro',
+      statusText: 'Preview validation found a containment mismatch on front profile. Repairing source bounds and rerunning exact hidden-line validation.',
+      busy: true,
+      activityLabel: 'Preview validation found a containment mismatch on front profile. Repairing source bounds and rerunning exact hidden-line validation.',
+      activityStartedAt: 100,
+      attentionKind: null,
+      waitingOnPrompt: false,
+      updatedAt: 1,
+    },
+    activeMcpBubbleSummary: 'Preview validation found a containment mismatch on front profile. Repairing source bounds and rerunning exact hidden-line validation.',
+    hasPreviewArtifact: true,
+    previewArtifactName: 'preview-feedback.stl',
+  });
+
+  assert.equal(bubble.compact, true);
+  assert.equal(bubble.badge, 'PREVIEW CHECK');
+  assert.equal(bubble.contextLabel, 'preview-feedback.stl');
+  assert.match(bubble.text, /Preview validation found a containment mismatch/);
+});
+
+test('resolveGenieBubblePresentation keeps prompt priority over preview repair status', () => {
+  const bubble = resolveGenieBubblePresentation({
+    pendingAgentPrompt: {
+      message: 'Need tolerance target before I rerun the preview.',
+      agentLabel: 'Codex',
+    },
+    threadAgentState: {
+      connectionState: 'active',
+      agentLabel: 'Codex',
+      llmModelLabel: 'gpt-5',
+      providerKind: 'openai',
+      sessionId: 'session-1',
+      phase: 'patching_macro',
+      statusText: 'Repairing source bounds.',
+      busy: true,
+      activityLabel: 'Repairing source bounds.',
+      activityStartedAt: 100,
+      attentionKind: null,
+      waitingOnPrompt: false,
+      updatedAt: 1,
+    },
+    activeMcpBubbleSummary: 'Repairing source bounds.',
+    repairMessage: 'Repairing source bounds.',
+    hasPreviewArtifact: true,
+    previewArtifactName: 'preview-feedback.stl',
+  });
+
+  assert.equal(bubble.source, 'pendingPrompt');
+  assert.equal(bubble.compact, false);
+  assert.equal(bubble.badge, null);
+  assert.equal(bubble.text, 'Need tolerance target before I rerun the preview.');
 });

@@ -60,8 +60,8 @@ Add tools:
   - output: thread ids, model ids, parameter diff, macro diff summary, optional unified macro diff, preview asset paths
 
 Extend existing mutation tools:
-- `params_patch_and_render`
-- `macro_replace_and_render`
+- `params_preview_render`
+- `macro_preview_render`
 
 New optional inputs on both:
 - `sessionId`
@@ -102,7 +102,7 @@ Rules:
 Validation upgrades:
 - unknown patch keys must fail with a validation error that includes the offending key and up to 3 close matches from `uiSpec`
 - invalid select values must report the field key and the allowed option values
-- `macro_replace_and_render` must keep accepting explicit `uiSpec` for legacy macros and must validate `initialParams` against the effective `uiSpec` before render
+- `macro_preview_render` must keep accepting explicit `uiSpec` for legacy macros and must validate `initialParams` against the effective `uiSpec` before render
 
 ### 4. Desktop integration
 Expose durable run state in the app and make auto-saved runs readable rather than noisy.
@@ -139,8 +139,8 @@ This is not a general resources/prompts expansion; it is only the minimum needed
 ## Test Plan
 Rust/backend:
 - `agent_session_start` resolves explicit `messageId`, explicit `threadId`, and current snapshot correctly
-- session-mode `params_patch_and_render` auto-saves a new version and advances `current_message_id`
-- session-mode `macro_replace_and_render` auto-saves and preserves explicit legacy `uiSpec`
+- session-mode `params_preview_render` auto-saves a new version and advances `current_message_id`
+- session-mode `macro_preview_render` auto-saves and preserves explicit legacy `uiSpec`
 - failed session mutation creates no saved version and records `waiting`/`error` correctly
 - step budget is enforced exactly
 - `version_compare` returns correct param and macro diffs
@@ -159,7 +159,7 @@ Verification:
 - relevant Rust tests for run lifecycle and auto-save behavior
 - `npm run typecheck`
 - frontend tests for run grouping, compare, and hydration guards
-- one manual smoke test from an MCP host: `session_start -> macro_replace_and_render -> params_patch_and_render -> version_compare -> session_finish`
+- one manual smoke test from an MCP host: `session_start -> macro_preview_render -> params_preview_render -> version_compare -> session_finish`
 
 ## Assumptions
 - `freecad-mcp` still does not embed its own LLM; “autopilot” is a bounded workflow contract consumed by Gemini/Claude/Codex

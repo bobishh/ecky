@@ -5,12 +5,15 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
+  import Viewer from './Viewer.svelte';
   import { appendTranscriptToPrompt, createPromptAudioRecorder, type PromptAudioRecorder } from './audio/pushToTalk';
   import { formatBackendError, transcribePromptAudio } from './tauri/client';
+  import { resolveVersionLoupeRuntime } from './versionLoupeRuntime';
   import type {
     Attachment,
     Message,
     UsageSummary,
+    ViewerAsset,
   } from './types/domain';
   import {
     activeVersionTimelineIndex,
@@ -20,8 +23,8 @@
     timelineVisuals,
     versionTimelineMessages,
     versionTimelineTitle,
+    type TimelineVisual,
   } from './threadTimeline';
-  import { isConceptPreviewMessage } from './viewportBlueprint';
   import { modelEngineLabel } from './modelEngineLabel';
   import type { DialogueState } from './composables/dialogueState';
 
@@ -40,6 +43,21 @@
     artifactBundle?: Message['artifactBundle'];
   };
 
+  type VisualLoupeState = {
+    title: string;
+    src: string;
+    alt: string;
+    caption: string;
+  };
+
+  type VersionLoupeState = {
+    message: VersionMessage;
+    loadError: string | null;
+    loading: boolean;
+    previewUrl: string | null;
+    viewerAssets: ViewerAsset[];
+  };
+
   let {
     onGenerate,
     isGenerating = false,
@@ -52,9 +70,6 @@
     messagesPageLoading = false,
     onLoadOlderMessages,
     onShowCode,
-    onOpenConceptPreview,
-    onPinConceptPreview,
-    pinnedConceptPreviewMessageId = null,
     activeThreadId = null,
     sendWorkspaceCapture = false,
     workspaceCaptureHint = null,
@@ -76,9 +91,6 @@
     messagesPageLoading?: boolean;
     onLoadOlderMessages?: () => Promise<void> | void;
     onShowCode: (message: CodeVersionMessage) => void;
-    onOpenConceptPreview?: (message: Message) => void;
-    onPinConceptPreview?: (message: Message) => void;
-    pinnedConceptPreviewMessageId?: string | null;
     activeThreadId?: string | null;
     sendWorkspaceCapture?: boolean;
     workspaceCaptureHint?: string | null;
@@ -99,6 +111,9 @@
   let attachments = $state<Attachment[]>([]);
   let isDragging = $state(false);
   let versionToDelete = $state<VersionMessage | null>(null);
+  let visualLoupe = $state<VisualLoupeState | null>(null);
+  let versionLoupe = $state<VersionLoupeState | null>(null);
+  let versionLoupeLoadSeq = 0;
   let draftScopeKey = $state<string | null>(null);
   let draftPersistTimer: number | null = null;
   let pendingDraftWrite = $state<{ scopeKey: string; prompt: string } | null>(null);
@@ -473,6 +488,52 @@
     if (message.output) onShowCode(message as CodeVersionMessage);
   }
 
+  async function openVersionLoupe(message: VersionMessage) {
+    const loadSeq = ++versionLoupeLoadSeq;
+    versionLoupe = {
+      message,
+      loadError: null,
+      loading: true,
+      previewUrl: null,
+      viewerAssets: [],
+    };
+    try {
+      const runtime = await resolveVersionLoupeRuntime(message, activeThreadId, toAssetUrl);
+      if (!versionLoupe || loadSeq !== versionLoupeLoadSeq || versionLoupe.message.id !== message.id) {
+        return;
+      }
+      versionLoupe = {
+        ...versionLoupe,
+        loading: false,
+        previewUrl: runtime.previewUrl,
+        viewerAssets: runtime.viewerAssets,
+      };
+    } catch (error) {
+      if (!versionLoupe || loadSeq !== versionLoupeLoadSeq || versionLoupe.message.id !== message.id) {
+        return;
+      }
+      versionLoupe = {
+        ...versionLoupe,
+        loading: false,
+        loadError: formatBackendError(error),
+      };
+    }
+  }
+
+  function setVersionLoupeLoadError(message: string) {
+    if (!versionLoupe) return;
+    versionLoupe = { ...versionLoupe, loading: false, loadError: message };
+  }
+
+  function openVisualLoupe(message: Message, visual: TimelineVisual) {
+    visualLoupe = {
+      title: visual.label,
+      src: visual.src,
+      alt: visual.alt,
+      caption: message.content.trim(),
+    };
+  }
+
   const timelineMessages = $derived(threadTimelineMessages(messages));
   const versionMessages = $derived(versionTimelineMessages(messages));
   const activeVersionIndex = $derived(
@@ -519,6 +580,10 @@
     } catch (error) {
       console.error('Failed to copy dialogue preview text:', error);
     }
+  }
+
+  function isCopiedTrailMessage(msg: Message) {
+    return copiedTrailMessageId === msg.id;
   }
 
   function formatTokenCount(count: number | null | undefined) {
@@ -672,9 +737,56 @@
         <p>Remove <strong>{versionTimelineTitle(versionToDelete)}</strong> from the version carousel?</p>
         <p class="warning">It stays in thread history and can be returned to the carousel later.</p>
         <div class="confirm-actions">
-          <button class="btn btn-secondary" onclick={() => (versionToDelete = null)}>CANCEL</button>
+          <button class="btn btn-ghost" onclick={() => (versionToDelete = null)}>CANCEL</button>
           <button class="btn btn-danger" onclick={executeDelete}>REMOVE</button>
         </div>
+      </div>
+    </Modal>
+  {/if}
+
+  {#if visualLoupe}
+    <Modal title={`${visualLoupe.title} Loupe`} onclose={() => (visualLoupe = null)}>
+      <div class="visual-loupe">
+        <div class="visual-loupe__image-frame">
+          <img class="visual-loupe__image" src={visualLoupe.src} alt={visualLoupe.alt} />
+        </div>
+        {#if visualLoupe.caption}
+          <div class="visual-loupe__caption">{visualLoupe.caption}</div>
+        {/if}
+      </div>
+    </Modal>
+  {/if}
+
+  {#if versionLoupe}
+    <Modal title="Version Preview" onclose={() => (versionLoupe = null)}>
+      <div class="version-loupe">
+        <div class="version-loupe__meta">
+          <div class="version-loupe__title">{versionTimelineTitle(versionLoupe.message)}</div>
+          {#if versionLoupe.message.output?.versionName}
+            <div class="version-loupe__subtitle">{versionLoupe.message.output.versionName}</div>
+          {/if}
+        </div>
+        {#if versionLoupe.loading}
+          <div class="version-loupe__empty">LOADING PREVIEW...</div>
+        {:else if versionLoupe.previewUrl}
+          <div class="version-loupe__viewer">
+            <Viewer
+              modelKey={versionLoupe.message.artifactBundle?.modelId ?? versionLoupe.message.id}
+              stlUrl={versionLoupe.previewUrl}
+              viewerAssets={versionLoupe.viewerAssets}
+              manifestParts={versionLoupe.message.modelManifest?.parts ?? []}
+              showContextOverlay={false}
+              onModelLoadError={setVersionLoupeLoadError}
+            />
+          </div>
+          {#if versionLoupe.loadError}
+            <div class="version-loupe__error" role="alert">{versionLoupe.loadError}</div>
+          {/if}
+        {:else if versionLoupe.loadError}
+          <div class="version-loupe__error" role="alert">{versionLoupe.loadError}</div>
+        {:else}
+          <div class="version-loupe__empty">NO RUNTIME ARTIFACT</div>
+        {/if}
       </div>
     </Modal>
   {/if}
@@ -723,7 +835,7 @@
       {#if activeVersion}
         <div class="version-nav__actions">
           <button class="trail-copy-btn delete-btn" type="button" title="Remove from carousel" onclick={() => (versionToDelete = activeVersion)}>
-            🗑️
+            DELETE
           </button>
         </div>
       {/if}
@@ -784,10 +896,12 @@
                   <button
                     class="trail-copy-btn"
                     type="button"
-                    disabled={isActiveVersion}
                     onclick={() => onVersionChange?.(msg)}
                   >
-                    {isActiveVersion ? 'VIEWING' : 'OPEN'}
+                    {isActiveVersion ? 'CURRENT' : 'SET CURRENT'}
+                  </button>
+                  <button class="trail-copy-btn" type="button" onclick={() => openVersionLoupe(msg)}>
+                    VIEW
                   </button>
                 {/if}
               {/if}
@@ -798,13 +912,14 @@
               {/if}
               {#if !isDiscardedVersion}
                 <button class="trail-copy-btn delete-btn" type="button" title="Remove from carousel" onclick={() => (versionToDelete = msg)}>
-                  🗑️
+                  DELETE
                 </button>
               {/if}
+            {:else}
+              <button class="trail-copy-btn" type="button" onclick={() => copyTrailMessage(msg)}>
+                {isCopiedTrailMessage(msg) ? 'COPIED' : 'COPY'}
+              </button>
             {/if}
-            <button class="trail-copy-btn" type="button" onclick={() => copyTrailMessage(msg)}>
-              {copiedTrailMessageId === msg.id ? 'COPIED' : 'COPY'}
-            </button>
           </div>
         </div>
         <div class="trail-content">
@@ -813,24 +928,16 @@
               {#each visuals as visual, visualIndex (`${msg.id}-${visual.label}-${visualIndex}`)}
                 <div class="trail-image-wrapper">
                   <div class="trail-image-kicker">{visual.label}</div>
-                  <img src={visual.src} alt={visual.alt} class="trail-image" />
+                  <button
+                    class="trail-image-button"
+                    type="button"
+                    aria-label={`Open ${visual.label.toLowerCase()} preview`}
+                    onclick={() => openVisualLoupe(msg, visual)}
+                  >
+                    <img src={visual.src} alt={visual.alt} class="trail-image" />
+                  </button>
                 </div>
               {/each}
-            </div>
-          {/if}
-          {#if isConceptPreviewMessage(msg)}
-            <div class="trail-visual-actions">
-              <button class="trail-action-btn" type="button" onclick={() => onOpenConceptPreview?.(msg)}>
-                OPEN IN VIEWPORT
-              </button>
-              <button
-                class="trail-action-btn"
-                type="button"
-                disabled={pinnedConceptPreviewMessageId === msg.id}
-                onclick={() => onPinConceptPreview?.(msg)}
-              >
-                {pinnedConceptPreviewMessageId === msg.id ? 'PINNED' : 'PIN AS CURRENT PREVIEW'}
-              </button>
             </div>
           {/if}
           {#if isVersion && msg.output}
@@ -1543,6 +1650,9 @@
     font-family: var(--font-mono);
     font-size: 0.56rem;
     letter-spacing: 0.08em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .trail-image {
@@ -1551,6 +1661,117 @@
     height: auto;
     max-height: 200px;
     object-fit: contain;
+  }
+
+  .trail-image-button {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: zoom-in;
+  }
+
+  .visual-loupe {
+    min-width: min(900px, 86vw);
+    max-width: 86vw;
+    max-height: 78vh;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    overflow: hidden;
+  }
+
+  .visual-loupe__image-frame {
+    flex: 1;
+    min-height: 0;
+    border: 1px solid var(--bg-400);
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .visual-loupe__image {
+    display: block;
+    max-width: 100%;
+    max-height: 70vh;
+    object-fit: contain;
+  }
+
+  .visual-loupe__caption {
+    flex: 0 0 auto;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    max-height: 5rem;
+    overflow: auto;
+    border: 1px solid var(--bg-400);
+    background: var(--bg-100);
+    padding: 8px;
+  }
+
+  .version-loupe {
+    width: min(980px, 86vw);
+    height: min(720px, 78vh);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 10px;
+    overflow: hidden;
+  }
+
+  .version-loupe__meta {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    overflow: hidden;
+  }
+
+  .version-loupe__title {
+    min-width: 0;
+    color: var(--secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .version-loupe__subtitle {
+    flex: 0 0 auto;
+    color: var(--text-dim);
+    font-size: 0.62rem;
+  }
+
+  .version-loupe__viewer {
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--bg-400);
+    background: #05070d;
+    overflow: hidden;
+  }
+
+  .version-loupe__empty,
+  .version-loupe__error {
+    border: 1px solid var(--bg-400);
+    background: var(--bg-100);
+    color: var(--text-dim);
+    padding: 8px;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    overflow: auto;
+  }
+
+  .version-loupe__error {
+    border-color: var(--danger);
+    color: var(--danger);
   }
 
   .input-area {
@@ -1721,37 +1942,4 @@
     font-weight: bold;
   }
 
-  .confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 20px;
-  }
-
-  .btn {
-    padding: 6px 16px;
-    font-size: 0.75rem;
-    font-weight: bold;
-    cursor: pointer;
-    border: 1px solid transparent;
-  }
-
-  .btn-secondary {
-    background: var(--bg-300);
-    color: var(--text);
-    border-color: var(--bg-400);
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-400);
-  }
-
-  .btn-danger {
-    background: var(--red);
-    color: white;
-  }
-
-  .btn-danger:hover {
-    background: color-mix(in srgb, var(--red) 80%, black);
-  }
 </style>
