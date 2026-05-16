@@ -297,8 +297,10 @@ def export_report(doc, exportable, parts_dir):
         Mesh.export([obj], export_path)
         shape = getattr(obj, "Shape", None)
         object_name = getattr(obj, "Name", f"Object{index}")
+        part_id = normalize_part_text(getattr(obj, "EckyPartId", None)) or object_name
         objects.append(
             {
+                "part_id": part_id,
                 "object_name": object_name,
                 "label": getattr(obj, "Label", getattr(obj, "Name", f"Object{index}")),
                 "type_id": getattr(obj, "TypeId", ""),
@@ -306,8 +308,8 @@ def export_report(doc, exportable, parts_dir):
                 "bounds": shape_bounds(shape) if shape is not None else None,
                 "volume": float(getattr(shape, "Volume", 0.0)) if shape is not None else None,
                 "area": float(getattr(shape, "Area", 0.0)) if shape is not None else None,
-                "edges": shape_edges(shape, object_name) if shape is not None else [],
-                "faces": shape_faces(shape, object_name) if shape is not None else [],
+                "edges": shape_edges(shape, part_id) if shape is not None else [],
+                "faces": shape_faces(shape, part_id) if shape is not None else [],
             }
         )
 
@@ -445,6 +447,14 @@ def execute_macro(macro_path, params_dict):
                 freecad_object_name(normalized["object_name"], index),
             )
             obj.Label = str(normalized["label"])
+            try:
+                obj.addProperty("App::PropertyString", "EckyPartId", "Ecky")
+            except Exception:
+                pass
+            try:
+                obj.EckyPartId = str(normalized["part_id"])
+            except Exception:
+                pass
             obj.Shape = shape
 
     if App.ActiveDocument is None:
@@ -860,7 +870,7 @@ def run_hidden_line_projection(artifact_path, report_path, views, tolerance, art
 
     shapes = [obj.Shape.copy() for obj in exportable]
     compound = shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)
-    warnings = []
+    warning_entries = []
     projection_views = []
     for spec in hidden_line_view_specs(views):
         visible_edges, hidden_edges = project_shape_hidden_lines(
@@ -869,7 +879,13 @@ def run_hidden_line_projection(artifact_path, report_path, views, tolerance, art
             spec["direction"],
         )
         if not visible_edges and not hidden_edges:
-            warnings.append(f"{spec['view']} projection produced no edges.")
+            warning_entries.append(
+                {
+                    "kind": "projectionNoEdges",
+                    "view": spec["view"],
+                    "message": "projection produced no edges.",
+                }
+            )
         projection_views.append(
             {
                 "view": spec["view"],
@@ -882,7 +898,7 @@ def run_hidden_line_projection(artifact_path, report_path, views, tolerance, art
     report = {
         "sourceArtifactPath": os.path.abspath(artifact_path),
         "views": projection_views,
-        "warnings": warnings,
+        "warningEntries": warning_entries,
         "tolerance": tolerance,
     }
     with open(report_path, "w", encoding="utf-8") as handle:

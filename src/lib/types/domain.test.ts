@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   hasActiveLithophaneAttachments,
+  normalizeArtifactBundle,
   normalizeConfig,
   normalizeDesignOutput,
   normalizeRuntimeCapabilities,
@@ -87,6 +88,93 @@ test('normalizeMessage heals ecky ir output backend from build123d runtime bundl
 
   assert.equal(message.output?.geometryBackend, 'build123d');
   assert.equal(message.output?.sourceLanguage, 'ecky');
+});
+
+test('normalizeArtifactBundle preserves topology target alias ids', () => {
+  const bundle = normalizeArtifactBundle({
+    modelId: 'model',
+    sourceKind: 'generated',
+    contentHash: 'x',
+    fcstdPath: '',
+    manifestPath: '',
+    previewStlPath: '',
+    edgeTargets: [{
+      targetId: 'body:edge:0-0-0_10-0-0',
+      durableTargetId: 'body:node:42:edge:0-0-0_10-0-0',
+      canonicalTargetId: 'body:edge:0:0-0-0_10-0-0',
+      aliasIds: ['body:edge:0:0-0-0_10-0-0'],
+    }],
+    faceTargets: [{
+      targetId: 'body:face:0-0-10:100',
+      durableTargetId: 'body:node:42:face:0-0-10:100',
+      canonicalTargetId: 'body:face:5:0-0-10:100',
+      aliasIds: ['body:face:5:0-0-10:100'],
+    }],
+  } as any);
+
+  assert.ok(bundle.edgeTargets?.[0]);
+  assert.ok(bundle.faceTargets?.[0]);
+  assert.equal(bundle.edgeTargets[0].durableTargetId, 'body:node:42:edge:0-0-0_10-0-0');
+  assert.equal(bundle.faceTargets[0].durableTargetId, 'body:node:42:face:0-0-10:100');
+  assert.equal(bundle.edgeTargets[0].canonicalTargetId, 'body:edge:0:0-0-0_10-0-0');
+  assert.equal(bundle.faceTargets[0].canonicalTargetId, 'body:face:5:0-0-10:100');
+  assert.deepEqual(bundle.edgeTargets[0].aliasIds, ['body:edge:0:0-0-0_10-0-0']);
+  assert.deepEqual(bundle.faceTargets[0].aliasIds, ['body:face:5:0-0-10:100']);
+});
+
+test('normalizeMessage preserves durable topology target ids on manifest', () => {
+  const message = normalizeMessage({
+    id: 'm1',
+    role: 'assistant',
+    content: '',
+    status: 'success',
+    timestamp: 0,
+    output: null,
+    artifactBundle: null,
+    modelManifest: {
+      modelId: 'model',
+      sourceKind: 'generated',
+      contentHash: 'x',
+      fcstdPath: '',
+      manifestPath: '',
+      previewStlPath: '',
+      document: {
+        documentName: 'Doc',
+        documentLabel: 'Doc',
+        sourcePath: null,
+        objectCount: 1,
+        warnings: [],
+      },
+      parts: [],
+      parameterGroups: [],
+      controlPrimitives: [],
+      controlRelations: [],
+      controlViews: [],
+      advisories: [],
+      selectionTargets: [{
+        targetId: 'body:edge:0-0-0_10-0-0',
+        durableTargetId: 'body:node:42:edge:0-0-0_10-0-0',
+        canonicalTargetId: 'body:edge:0:0-0-0_10-0-0',
+        aliasIds: ['legacy-edge'],
+        partId: 'body',
+        viewerNodeId: 'Body001',
+        label: 'Body Edge',
+        kind: 'edge',
+        editable: true,
+        parameterKeys: [],
+        primitiveIds: [],
+        viewIds: [],
+      }],
+      measurementAnnotations: [],
+      warnings: [],
+      enrichmentState: { status: 'none', proposals: [] },
+    } as any,
+  } as any);
+
+  assert.equal(
+    message.modelManifest?.selectionTargets?.[0]?.durableTargetId,
+    'body:node:42:edge:0-0-0_10-0-0',
+  );
 });
 
 test('normalizeLastDesignSnapshot heals ecky ir output backend from build123d runtime bundle', () => {

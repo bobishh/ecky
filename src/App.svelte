@@ -10,7 +10,7 @@
   import { writeTextFile } from '@tauri-apps/plugin-fs';
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
-  import { buildAgentGenieTraits } from './lib/genie/traits';
+  import { buildModelGenieTraits } from './lib/genie/traits';
 
   import CodeModal from './lib/CodeModal.svelte';
   import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
@@ -46,7 +46,7 @@
   import { session } from './lib/stores/sessionStore';
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
   import { handleGenerate, initOrchestrator, isQuestionIntent } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange } from './lib/controllers/manualController';
+  import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange, applyManualCodeDraft } from './lib/controllers/manualController';
   import {
     loadFromHistory,
     createNewThread,
@@ -77,6 +77,7 @@
   import { inferModelCapabilities } from './lib/modelRuntime/modelCapabilities';
   import { persistLastSessionSnapshot } from './lib/modelRuntime/sessionSnapshot';
   import { getRenderableRuntimeBundle, inspectRuntimeBundle } from './lib/modelRuntime/runtimeBundle';
+  import { shouldPersistVersionPreview } from './lib/versionPreviewPersistence';
   import {
     deriveThreadAttentionIds,
     deriveMascotStateForThreadAgent,
@@ -104,6 +105,11 @@
     buildAgentTerminalLineInput,
   } from './lib/agents/terminal';
   import {
+    isVisibleAgentDraftFeedback,
+    summarizeAgentDraftFeedback,
+    type AgentDraftFeedback,
+  } from './lib/agents/draftFeedback';
+  import {
     isWorkspaceCaptureEnabled,
     readWorkspaceCapturePrefs,
     setWorkspaceCaptureEnabled,
@@ -122,6 +128,7 @@
   import {
     isThreadAgentBusy,
     resolveActiveMcpBubble,
+    resolveGenieBubblePresentation,
     resolveTerminalActivityMeta,
   } from './lib/agents/activity';
   import {
@@ -129,6 +136,7 @@
     rememberTargetCameraState,
     rememberTargetScreenshot,
     resolveFallbackScreenshotSource,
+    viewportCameraKey,
     viewportTargetKey,
     type ViewportScreenshotCapture,
   } from './lib/agents/screenshot';
@@ -155,15 +163,6 @@
     type MeasurementControlFocus,
     type ContextSelectionTarget,
   } from './lib/modelRuntime/contextualEditing';
-  import {
-    buildGenerateFromConceptPrompt,
-    cycleConceptPreviewMessageId,
-    listConceptPreviewMessages,
-    reconcileConceptPreviewUiState,
-    resolveEffectiveConceptPreviewMessage,
-    type ConceptPreviewUiState,
-    type ViewportPresentationMode,
-  } from './lib/viewportBlueprint';
   import {
     getStepExportPath,
     type ExportMode,
@@ -204,6 +203,7 @@
     saveConfig as persistBackendConfig,
     sendAgentTerminalInput,
     stopPrimaryAutoAgent,
+    updateVersionRuntime,
     updateVersionPreview,
     wakePrimaryAutoAgent,
     saveModelManifest,
@@ -218,9 +218,11 @@
     AgentTerminalSnapshot,
     Attachment,
     ArtifactBundle,
+    DesignOutput,
     DesignParams,
     GenieTraits,
     Message,
+    ModelManifest,
     ParamValue,
     Request,
     RuntimeBackendCapability,
@@ -242,6 +244,23 @@
     } | null;
     getCameraState: () => ViewportCameraState | null;
     setCameraState: (camera: ViewportCameraState | null) => void;
+  };
+
+  type AgentDraftPreviewUpdatedEvent = {
+    sessionId: string;
+    threadId: string;
+    previewId: string;
+    baseMessageId?: string | null;
+    modelId?: string | null;
+    design: DesignOutput;
+    artifactBundle: ArtifactBundle;
+    modelManifest: ModelManifest;
+    feedback?: {
+      status: 'checking' | 'passed' | 'failed' | 'warning';
+      summary: string;
+      items: Array<string | { code: string; message: string }>;
+      source: 'structuralVerification' | 'renderError' | 'toolError' | 'visualRepair';
+    } | null;
   };
 
   type DrawingOverlayHandle = {
@@ -291,25 +310,6 @@
     artifactName: string;
   };
 
-  function defaultConceptPreviewUiState(): ConceptPreviewUiState {
-    return {
-      pinnedMessageId: null,
-      lastAutoPinnedMessageId: null,
-      mode: 'model',
-    };
-  }
-
-  function sameConceptPreviewUiState(
-    left: ConceptPreviewUiState,
-    right: ConceptPreviewUiState,
-  ): boolean {
-    return (
-      left.pinnedMessageId === right.pinnedMessageId &&
-      left.lastAutoPinnedMessageId === right.lastAutoPinnedMessageId &&
-      left.mode === right.mode
-    );
-  }
-
   function formatAgentPhase(phase: string): string {
     return phase.replace(/_/g, ' ').toUpperCase();
   }
@@ -350,6 +350,7 @@
   let errorCopied = $state(false);
   let errorCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
   const stlUrl = $derived($session.stlUrl);
+  const runtimeRevision = $derived($session.runtimeRevision);
   const activeArtifactBundle = $derived($session.artifactBundle);
   const sessionModelManifest = $derived($session.modelManifest);
   let selectedContextTargetId = $state<string | null>(null);
@@ -363,6 +364,10 @@
   let showNewProjectImport = $state(false);
   let sketchPreview = $state<SketchPreviewState | null>(null);
   let codeModalMode = $state<'version' | 'sketch-preview'>('version');
+  let activeDraftFeedback = $state<AgentDraftFeedback | null>(null);
+  const LIVE_APPLY_DEBOUNCE_MS = 250;
+  let liveApplyTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingLiveApplyParams: DesignParams = {};
 
   const isBooting = $derived(phase === 'booting');
   const isQuestionFlow = $derived(phase === 'answering');
@@ -399,7 +404,6 @@
     );
   });
   let cameraStateByTarget = $state<Record<string, ViewportCameraState>>({});
-  let conceptPreviewUiByThread = $state<Record<string, ConceptPreviewUiState>>({});
   type PendingAgentPrompt = {
     requestId: string;
     message: string | null;
@@ -498,7 +502,7 @@
       activeVersionId: $activeVersionId ?? null,
       activeVersionMessage,
       cameraStateByTarget,
-      conceptPreviewUiByThread,
+      runtimeRevision,
       stlUrl,
       toAssetUrl,
     }),
@@ -537,18 +541,6 @@
     sketchPreview?.artifactBundle ? sketchPreviewViewerAssets : viewerAssets,
   );
   const hasRenderableModel = $derived.by(() => viewportState.hasRenderableModel);
-  const activeThreadConceptPreviewState = $derived.by<ConceptPreviewUiState>(
-    () => viewportState.activeThreadConceptPreviewState,
-  );
-  const conceptPreviewMessages = $derived.by<Message[]>(() => viewportState.conceptPreviewMessages);
-  const effectiveConceptPreviewMessage = $derived.by<Message | null>(
-    () => viewportState.effectiveConceptPreviewMessage,
-  );
-  const viewportPresentationMode = $derived.by<ViewportPresentationMode>(
-    () => viewportState.viewportPresentationMode,
-  );
-  const showBlueprintViewport = $derived.by(() => viewportState.showBlueprintViewport);
-  const blueprintAttentionVisible = $derived.by(() => viewportState.blueprintAttentionVisible);
   const currentViewportTargetKey = $derived.by<string | null>(
     () => viewportState.currentViewportTargetKey,
   );
@@ -598,8 +590,13 @@
   const activeMcpRenderBusy = $derived.by(() => agentOpsState.activeMcpRenderBusy);
   const activeMcpBubbleSummary = $derived.by(() => agentOpsState.activeMcpBubbleSummary);
   const activeAgentTerminalMetaSummary = $derived.by(() => agentOpsState.activeAgentTerminalMetaSummary);
+  const activeDraftFeedbackSummary = $derived.by(() => {
+    if (!isVisibleAgentDraftFeedback(activeDraftFeedback, $activeThreadId, $activeVersionId)) {
+      return '';
+    }
+    return summarizeAgentDraftFeedback(activeDraftFeedback);
+  });
   const hasLiveMcpSession = $derived.by(() => agentOpsState.hasLiveMcpSession);
-  const activeMascotAgentIdentity = $derived.by(() => agentOpsState.activeMascotAgentIdentity);
   const isAudioMuted = $derived(Boolean($config?.microwave?.muted));
   const audioMuteLabel = $derived(isAudioMuted ? 'Unmute Ecky audio' : 'Mute Ecky audio');
   const dialogueState = $derived.by<DialogueState>(() => {
@@ -623,16 +620,21 @@
   const directOcctStepStatus = $derived.by(() =>
     buildDirectOcctStepStatus(activeArtifactBundle, $runtimeCapabilities),
   );
+  const canOpenViewportCode = $derived.by(
+    () => Boolean(activeVersionMessage?.output?.macroCode || $workingCopy.macroCode),
+  );
 
   let viewerComponent = $state<ViewerHandle | null>(null);
   let hiddenViewerComponent = $state<ViewerHandle | null>(null);
   let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
+  let overlayActionsEl = $state<HTMLElement | null>(null);
+  let genieSafeRightInset = $state(360);
   let drawingOverlayDirty = $state(false);
   let viewportAreaEl = $state<HTMLElement | null>(null);
-  let blueprintImageEl = $state<HTMLImageElement | null>(null);
   let hiddenViewerSpec = $state<HiddenViewerSpec | null>(null);
   let visibleViewerLoadNonce = $state(0);
   let hiddenViewerLoadNonce = $state(0);
+  let visibleViewerRecoveryKey = $state<string | null>(null);
   let versionPreviewCaptureSeq = 0;
   let lastSavedVersionPreviewKey = '';
   let lastLiveScreenshotByTarget = $state<Record<string, ViewportScreenshotCapture>>({});
@@ -644,6 +646,27 @@
   let lastAdvisorQuestion = $state('');
   let dismissedBubbleText = $state('');
   let agentControlBusy = $state(false);
+
+  $effect(() => {
+    if (!overlayActionsEl || typeof ResizeObserver === 'undefined' || typeof window === 'undefined') {
+      genieSafeRightInset = 360;
+      return;
+    }
+
+    const measure = () => {
+      const width = overlayActionsEl?.getBoundingClientRect().width ?? 0;
+      genieSafeRightInset = Math.max(220, Math.ceil(width) + 28);
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(overlayActionsEl);
+    window.addEventListener('resize', measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  });
 
   let genieWakeUpCount = $state(0);
   let lastAgentPresenceConnected = false;
@@ -899,6 +922,17 @@
     return pending;
   }
 
+  function rejectViewerLoadWaiters(
+    waiters: ViewerLoadWaiter[],
+    error: Error,
+  ): ViewerLoadWaiter[] {
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    return [];
+  }
+
   function waitForViewerLoad(
     kind: 'visible' | 'hidden',
     previousNonce: number,
@@ -933,7 +967,10 @@
   function handleVisibleViewerLoaded() {
     visibleViewerLoadNonce += 1;
     visibleViewerWaiters = settleViewerLoadWaiters(visibleViewerWaiters, visibleViewerLoadNonce);
-    if (!hasSketchPreview) {
+    if (
+      !hasSketchPreview &&
+      shouldPersistVersionPreview(activeVersionMessage, get(session).artifactBundle, get(session).stlUrl)
+    ) {
       void persistVisibleVersionPreview(visibleViewerLoadNonce);
     }
   }
@@ -941,6 +978,81 @@
   function handleHiddenViewerLoaded() {
     hiddenViewerLoadNonce += 1;
     hiddenViewerWaiters = settleViewerLoadWaiters(hiddenViewerWaiters, hiddenViewerLoadNonce);
+  }
+
+  function handleVisibleViewerLoadError(message: string) {
+    void recoverVisibleViewerRuntime(message);
+  }
+
+  function handleHiddenViewerLoadError(message: string) {
+    hiddenViewerWaiters = rejectViewerLoadWaiters(
+      hiddenViewerWaiters,
+      new Error(`Hidden viewer failed to load model. ${message}`),
+    );
+  }
+
+  function isMissingViewerArtifactError(message: string): boolean {
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes('responded with 404') ||
+      normalized.includes('not found') ||
+      normalized.includes('status 404')
+    );
+  }
+
+  async function recoverVisibleViewerRuntime(message: string) {
+    visibleViewerWaiters = rejectViewerLoadWaiters(
+      visibleViewerWaiters,
+      new Error(`Visible viewer failed to load model. ${message}`),
+    );
+
+    const threadId = get(activeThreadId);
+    const messageId = get(activeVersionId);
+    const currentSession = get(session);
+    const panel = get(paramPanelState);
+    const wc = get(workingCopy);
+    const bundle = currentSession.artifactBundle;
+    const recoveryKey =
+      threadId && messageId && bundle
+        ? `${threadId}:${messageId}:${bundle.modelId}:${bundle.previewStlPath}`
+        : null;
+
+    if (
+      recoveryKey &&
+      isMissingViewerArtifactError(message) &&
+      visibleViewerRecoveryKey !== recoveryKey
+    ) {
+      visibleViewerRecoveryKey = recoveryKey;
+      session.setError(null);
+      session.setStatus('Runtime artifact missing. Re-rendering cached model...');
+      try {
+        await handleParamChange(panel.params, wc.macroCode || null, false);
+        const repairedSession = get(session);
+        const repairedBundle = repairedSession.artifactBundle;
+        const repairedManifest = repairedSession.modelManifest;
+        if (
+          get(activeThreadId) === threadId &&
+          get(activeVersionId) === messageId &&
+          repairedBundle &&
+          repairedManifest &&
+          repairedBundle.modelId === repairedManifest.modelId
+        ) {
+          await updateVersionRuntime(messageId!, repairedBundle, repairedManifest);
+          session.setStatus('Missing runtime rebuilt.');
+          await refreshHistory();
+          return;
+        }
+      } catch (error) {
+        session.setError(`Runtime Rebuild Error: ${formatBackendError(error)}`);
+        return;
+      } finally {
+        if (visibleViewerRecoveryKey === recoveryKey) {
+          visibleViewerRecoveryKey = null;
+        }
+      }
+    }
+
+    session.setError(`Viewer Load Error: ${message}`);
   }
 
   function patchThreadMessagePreview(threadId: string, messageId: string, imageData: string) {
@@ -1064,13 +1176,6 @@
   }
 
   async function capturePromptWorkspaceImageData(): Promise<string | null> {
-    if (showBlueprintViewport) {
-      return (
-        (await resolveBlueprintPromptImageOverride()) ??
-        effectiveConceptPreviewMessage?.imageData ??
-        null
-      );
-    }
     if (!viewerComponent) return null;
     return viewerComponent.captureScreenshot(liveOverlayCanvas(true));
   }
@@ -1122,11 +1227,31 @@
 
   function rememberVisibleViewportCapture(capture: ViewportScreenshotCapture) {
     if (!capture.threadId || !capture.messageId) return;
-    const key = viewportTargetKey(capture.threadId, capture.messageId);
-    lastLiveScreenshotByTarget = rememberTargetScreenshot(lastLiveScreenshotByTarget, key, capture);
+    const screenshotKey = viewportTargetKey(capture.threadId, capture.messageId);
+    lastLiveScreenshotByTarget = rememberTargetScreenshot(
+      lastLiveScreenshotByTarget,
+      screenshotKey,
+      capture,
+    );
+    const runtimeBundle =
+      capture.threadId === get(activeThreadId) && capture.messageId === get(activeVersionId)
+        ? get(session).artifactBundle
+        : null;
+    const cameraKey =
+      capture.threadId === get(activeThreadId) &&
+      capture.messageId === get(activeVersionId) &&
+      currentViewportTargetKey
+        ? currentViewportTargetKey
+        : viewportCameraKey(
+            capture.threadId,
+            capture.messageId,
+            runtimeBundle?.modelId ?? capture.modelId ?? null,
+            runtimeBundle?.artifactVersion ?? null,
+            runtimeBundle?.contentHash ?? null,
+          );
     cameraStateByTarget = rememberTargetCameraState(
       cameraStateByTarget,
-      key,
+      cameraKey,
       capture.camera,
       true,
     );
@@ -1197,9 +1322,9 @@
       requestId: request.requestId,
       targetKey,
       stlUrl: toAssetUrl(request.previewStlPath),
-      viewerAssets: viewerAssetsToUrls(request.viewerAssets ?? []),
+      viewerAssets: [],
     };
-    await waitForViewerLoad('hidden', previousNonce);
+    await waitForViewerLoad('hidden', previousNonce, 60000);
     if (!hiddenViewerComponent) {
       throw new Error('Hidden viewer is unavailable.');
     }
@@ -1640,168 +1765,6 @@
     }
   }
 
-  function updateActiveThreadConceptPreviewState(
-    updater: (state: ConceptPreviewUiState) => ConceptPreviewUiState,
-  ) {
-    const threadId = $activeThreadId;
-    if (!threadId) return;
-    const previous = conceptPreviewUiByThread[threadId] ?? defaultConceptPreviewUiState();
-    const next = updater(previous);
-    if (sameConceptPreviewUiState(previous, next)) return;
-    conceptPreviewUiByThread = {
-      ...conceptPreviewUiByThread,
-      [threadId]: next,
-    };
-  }
-
-  function setViewportPresentationMode(mode: ViewportPresentationMode) {
-    updateActiveThreadConceptPreviewState((state) => ({ ...state, mode }));
-  }
-
-  function pinConceptPreviewMessageId(
-    messageId: string | null,
-    mode: ViewportPresentationMode | null = null,
-  ) {
-    updateActiveThreadConceptPreviewState((state) => ({
-      ...state,
-      pinnedMessageId: messageId,
-      mode: mode ?? state.mode,
-    }));
-  }
-
-  function openConceptPreviewInViewport(message: Message) {
-    pinConceptPreviewMessageId(message.id, 'blueprint');
-  }
-
-  function pinConceptPreviewFromMessage(message: Message) {
-    pinConceptPreviewMessageId(message.id);
-  }
-
-  function pickOtherConceptPreview() {
-    const nextMessageId = cycleConceptPreviewMessageId(
-      activeThreadDialogueMessages,
-      effectiveConceptPreviewMessage?.id ?? activeThreadConceptPreviewState.pinnedMessageId,
-    );
-    if (!nextMessageId) return;
-    pinConceptPreviewMessageId(nextMessageId, 'blueprint');
-  }
-
-  async function waitForBlueprintImageReady(): Promise<HTMLImageElement | null> {
-    await tick();
-    const image = blueprintImageEl;
-    if (!image) return null;
-    if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
-      return image;
-    }
-    await new Promise<void>((resolve) => {
-      const cleanup = () => {
-        image.removeEventListener('load', handleLoad);
-        image.removeEventListener('error', handleLoad);
-      };
-      const handleLoad = () => {
-        cleanup();
-        resolve();
-      };
-      image.addEventListener('load', handleLoad, { once: true });
-      image.addEventListener('error', handleLoad, { once: true });
-      window.setTimeout(() => {
-        cleanup();
-        resolve();
-      }, 500);
-    });
-    return blueprintImageEl;
-  }
-
-  async function captureConceptPreviewCompositeDataUrl(): Promise<string | null> {
-    const conceptMessage = effectiveConceptPreviewMessage;
-    if (!conceptMessage?.imageData) return null;
-
-    const image = await waitForBlueprintImageReady();
-    const overlayCanvas = drawingOverlay?.hasDrawing() ? drawingOverlay.getCanvas() : null;
-    if (!image || !overlayCanvas || !viewportAreaEl) {
-      return conceptMessage.imageData;
-    }
-
-    const viewportRect = viewportAreaEl.getBoundingClientRect();
-    const imageRect = image.getBoundingClientRect();
-    if (
-      viewportRect.width <= 0 ||
-      viewportRect.height <= 0 ||
-      imageRect.width <= 0 ||
-      imageRect.height <= 0
-    ) {
-      return conceptMessage.imageData;
-    }
-
-    const naturalWidth = image.naturalWidth || Math.round(imageRect.width);
-    const naturalHeight = image.naturalHeight || Math.round(imageRect.height);
-    if (naturalWidth <= 0 || naturalHeight <= 0) {
-      return conceptMessage.imageData;
-    }
-
-    const overlayScaleX = overlayCanvas.width / viewportRect.width;
-    const overlayScaleY = overlayCanvas.height / viewportRect.height;
-    const sourceX = Math.max(0, (imageRect.left - viewportRect.left) * overlayScaleX);
-    const sourceY = Math.max(0, (imageRect.top - viewportRect.top) * overlayScaleY);
-    const sourceWidth = Math.min(
-      overlayCanvas.width - sourceX,
-      imageRect.width * overlayScaleX,
-    );
-    const sourceHeight = Math.min(
-      overlayCanvas.height - sourceY,
-      imageRect.height * overlayScaleY,
-    );
-
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
-      return conceptMessage.imageData;
-    }
-
-    const composed = document.createElement('canvas');
-    composed.width = Math.max(1, Math.round(naturalWidth));
-    composed.height = Math.max(1, Math.round(naturalHeight));
-    const context = composed.getContext('2d');
-    if (!context) return conceptMessage.imageData;
-
-    context.drawImage(image, 0, 0, composed.width, composed.height);
-    context.drawImage(
-      overlayCanvas,
-      sourceX,
-      sourceY,
-      sourceWidth,
-      sourceHeight,
-      0,
-      0,
-      composed.width,
-      composed.height,
-    );
-    return composed.toDataURL('image/png');
-  }
-
-  async function resolveBlueprintPromptImageOverride(): Promise<string | null> {
-    if (imageInputUnavailableReason) return null;
-    if (!showBlueprintViewport || !effectiveConceptPreviewMessage) return null;
-    return captureConceptPreviewCompositeDataUrl();
-  }
-
-  async function generateFromConceptPreview() {
-    if (!effectiveConceptPreviewMessage) return;
-    if (generationUnavailableReason) {
-      session.setError(`Render Error: ${generationUnavailableReason}`);
-      return;
-    }
-    if (imageInputUnavailableReason) {
-      session.setError(`Render Error: ${imageInputUnavailableReason}`);
-      return;
-    }
-    const imageDataOverride =
-      (await resolveBlueprintPromptImageOverride()) ?? effectiveConceptPreviewMessage.imageData ?? null;
-    await handleGenerate(
-      buildGenerateFromConceptPrompt(effectiveConceptPreviewMessage),
-      [],
-      { imageDataOverride },
-    );
-  }
-
   async function handlePromptPanelSubmit(prompt: string, attachments: Attachment[]) {
     if (dialogueState.mode !== 'generate') {
       await handleDialogueSubmit(prompt, attachments);
@@ -1811,8 +1774,7 @@
       session.setError(`Render Error: ${generationUnavailableReason}`);
       return;
     }
-    const imageDataOverride = await resolveBlueprintPromptImageOverride();
-    await handleGenerate(prompt, attachments, { imageDataOverride });
+    await handleGenerate(prompt, attachments);
   }
 
   function startBlankProject() {
@@ -1900,6 +1862,40 @@
       }
       void refreshThreadAgentState();
     });
+    const unlistenDraftPreview = listen<AgentDraftPreviewUpdatedEvent>(
+      'agent-draft-preview-updated',
+      (event) => {
+        const preview = event.payload;
+        activeThreadId.set(preview.threadId);
+        activeVersionId.set(preview.previewId);
+        activeDraftFeedback = preview.feedback
+          ? {
+              ...preview.feedback,
+              items: preview.feedback.items.map((item, index) =>
+                typeof item === 'string'
+                  ? { code: `feedback-${index + 1}`, message: item }
+                  : item,
+              ),
+              threadId: preview.threadId,
+              previewId: preview.previewId,
+              sessionId: preview.sessionId,
+            }
+          : null;
+        workingCopy.loadVersion(preview.design, preview.previewId);
+        paramPanelState.hydrateFromVersion(preview.design, preview.previewId);
+        session.setStlUrl(toAssetUrl(preview.artifactBundle.previewStlPath));
+        session.setModelRuntime(preview.artifactBundle, preview.modelManifest);
+        session.setStatus(preview.feedback?.summary || 'Preview rendered.');
+        void persistLastSessionSnapshot({
+          design: preview.design,
+          threadId: preview.threadId,
+          messageId: preview.previewId,
+          artifactBundle: preview.artifactBundle,
+          modelManifest: preview.modelManifest,
+          selectedPartId: null,
+        });
+      },
+    );
     const unlistenSessions = listen<AgentSession[]>('agent-sessions-changed', (event) => {
       activeAgentSessions = event.payload;
       void refreshThreadAgentState();
@@ -1924,6 +1920,7 @@
       void unlistenPromptClosed.then(fn => fn());
       void unlistenViewportScreenshot.then(fn => fn());
       void unlistenHistory.then(fn => fn());
+      void unlistenDraftPreview.then(fn => fn());
       void unlistenSessions.then(fn => fn());
       void unlistenTerminal.then(fn => fn());
       void unlistenWorkingVersion.then(fn => fn());
@@ -1968,7 +1965,13 @@
     return $runtimeCapabilities.freecad.available ? null : $runtimeCapabilities.freecad.detail;
   });
   const eckyTraits = $derived<Partial<GenieTraits>>(
-    buildAgentGenieTraits(activeMascotAgentIdentity),
+    buildModelGenieTraits({
+      artifactBundle: activeArtifactBundle,
+      modelManifest: sessionModelManifest,
+      messageId: activeVersionMessage?.id ?? null,
+      versionName: activeVersionMessage?.output?.versionName ?? null,
+      authoringContext: activeAuthoringContext,
+    }),
   );
   const eckyIntensity = $derived(1.0 + Math.max(0, ($activeRequestCount - 1) * 0.25));
 
@@ -2027,6 +2030,14 @@
     if (!latestAssistantMessage?.timestamp) return false;
     return $nowSeconds - latestAssistantMessage.timestamp <= 300;
   });
+  const hasPreviewArtifact = $derived.by(() =>
+    Boolean(sketchPreview?.artifactBundle?.previewStlPath || activeArtifactBundle?.previewStlPath),
+  );
+  const previewArtifactName = $derived.by<string | null>(() =>
+    sketchPreviewStatus?.artifactName ||
+    fileBasename(sketchPreview?.artifactBundle?.previewStlPath ?? activeArtifactBundle?.previewStlPath) ||
+    null,
+  );
 
   $effect(() => {
     const msgId = latestAssistantMessage?.id;
@@ -2098,39 +2109,41 @@
     return 'idle';
   });
 
-  const genieBubble = $derived.by(() => {
-    if ($onboarding.isActive) return $onboarding.text;
-    if (activeViewportScreenshotChoice) return activeViewportScreenshotChoice.message;
-    if (activeConfirm) return activeConfirm.message;
-    if (isActiveMcpMode && activeAgentTerminalAttention) {
-      return (
-        activeAgentTerminalAttention.summary ||
-        `${activeAgentTerminalAttention.agentLabel} needs terminal input.`
-      );
-    }
-
-    let raw = '';
-    if (activePendingAgentPrompt) {
-      raw =
-        activePendingAgentPrompt.message ||
-        `${activePendingAgentPrompt.agentLabel} is waiting for your input`;
-    } else if (hasQueuedAgentMessageWithoutPrompt) {
-      raw = 'Your message is queued. The agent has not requested the next prompt yet.';
-    } else if (threadAgentState?.connectionState === 'active') {
-      raw = activeMcpBubbleSummary;
-    } else if (threadAgentMascot.bubble) {
-      raw = threadAgentMascot.bubble;
-    } else {
-      const atPhase = activeThreadHighestPhase;
-      const threadError =
-        atPhase === 'error' ? activeThreadErrorText : null;
-      raw = threadError ||
-            (atPhase === 'repairing' ? $session.repairMessage : null) ||
-            (['classifying', 'generating', 'answering'].includes(atPhase) ? $session.cookingPhrase : null) ||
-            lastAdvisorBubble || '';
-    }
-    return (dismissedBubbleText === raw) ? '' : raw;
-  });
+  const genieBubbleState = $derived.by(() =>
+    resolveGenieBubblePresentation({
+      onboardingText: $onboarding.isActive ? $onboarding.text : null,
+      viewportScreenshotMessage: activeViewportScreenshotChoice?.message ?? null,
+      confirmMessage: activeConfirm?.message ?? null,
+      terminalAttentionSummary:
+        isActiveMcpMode && activeAgentTerminalAttention
+          ? (
+              activeAgentTerminalAttention.summary ||
+              `${activeAgentTerminalAttention.agentLabel} needs terminal input.`
+            )
+          : null,
+      pendingAgentPrompt: activePendingAgentPrompt
+        ? {
+            message: activePendingAgentPrompt.message ?? null,
+            agentLabel: activePendingAgentPrompt.agentLabel,
+          }
+        : null,
+      draftFeedbackSummary: activeDraftFeedbackSummary,
+      hasQueuedAgentMessageWithoutPrompt,
+      threadAgentState,
+      activeMcpBubbleSummary,
+      threadAgentMascotBubble: threadAgentMascot.bubble,
+      threadError: activeThreadHighestPhase === 'error' ? activeThreadErrorText : null,
+      repairMessage: activeThreadHighestPhase === 'repairing' ? $session.repairMessage : null,
+      cookingPhrase: ['classifying', 'generating', 'answering'].includes(activeThreadHighestPhase)
+        ? $session.cookingPhrase
+        : null,
+      assistantBubble: lastAdvisorBubble,
+      dismissedBubbleText,
+      hasPreviewArtifact,
+      previewArtifactName,
+    }),
+  );
+  const genieBubble = $derived(genieBubbleState.text);
 
   $effect(() => {
     const speechCue = resolveGenieSpeechCue({
@@ -2491,6 +2504,7 @@
 
   onDestroy(() => {
     if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer);
+    if (liveApplyTimer) clearTimeout(liveApplyTimer);
   });
 
   $effect(() => {
@@ -2551,11 +2565,34 @@
     handleTargetSelect(nextTarget);
   }
 
+  function scheduleLiveParamChange(nextParams: DesignParams) {
+    pendingLiveApplyParams = { ...pendingLiveApplyParams, ...nextParams };
+    if (liveApplyTimer) clearTimeout(liveApplyTimer);
+    liveApplyTimer = setTimeout(() => {
+      const params = pendingLiveApplyParams;
+      pendingLiveApplyParams = {};
+      liveApplyTimer = null;
+      void handleParamChange(params, null, false);
+    }, LIVE_APPLY_DEBOUNCE_MS);
+  }
+
+  function handleParamPanelChange(nextParams: DesignParams) {
+    if ($liveApply) {
+      scheduleLiveParamChange(nextParams);
+      return;
+    }
+    return handleParamChange(nextParams, null, false);
+  }
+
+  function handleParamPanelCommit(nextParams: DesignParams) {
+    return handleParamChange(nextParams, null, true);
+  }
+
   function handleSemanticControlChange(primitiveId: string, value: ParamValue) {
     const nextParams = buildSemanticPatch(activeModelManifest, primitiveId, value, effectiveUiSpec);
     if (Object.keys(nextParams).length === 0) return;
     if ($liveApply) {
-      void handleParamChange(nextParams);
+      scheduleLiveParamChange(nextParams);
       return;
     }
     stageParamChange(nextParams);
@@ -2624,7 +2661,7 @@
   {#if $onboarding.isActive}
     <div class="onboarding-backdrop"></div>
   {/if}
-  <div class="app-overlay-actions">
+  <div class="app-overlay-actions" bind:this={overlayActionsEl}>
     {#if $currentView === 'workbench'}
       <div class="dock-group dock-group--primary">
         <button
@@ -2737,7 +2774,7 @@
             class:onboarding-highlight={$onboarding.highlightTarget === 'viewport'}
             data-onboarding-target="viewport"
           >
-            <div class="viewer-shell" class:viewer-shell--occluded={showBlueprintViewport}>
+            <div class="viewer-shell">
               <Viewer
                 bind:this={viewerComponent}
                 modelKey={effectiveViewerModelKey}
@@ -2765,6 +2802,7 @@
                 onSelectTarget={handleTargetSelect}
                 onCameraStateChange={handleVisibleViewerCameraChange}
                 onModelLoaded={handleVisibleViewerLoaded}
+                onModelLoadError={handleVisibleViewerLoadError}
                 isGenerating={viewerBusyPhase === 'generating' || viewerBusyPhase === 'repairing'}
                 hideModelWhileBusy={showViewerBusyMask}
                 busyPhase={viewerBusyPhase}
@@ -2786,60 +2824,6 @@
                 </section>
               {/if}
             </div>
-            {#if showBlueprintViewport && effectiveConceptPreviewMessage?.imageData}
-              <section class="viewport-blueprint" aria-label="Concept preview">
-                <div class="viewport-blueprint__frame">
-                  <div class="viewport-blueprint__header">
-                    <div class="viewport-blueprint__eyebrow">CONCEPT PREVIEW</div>
-                    <div class="viewport-blueprint__warning">NOT A 3D MODEL</div>
-                  </div>
-                  <div class="viewport-blueprint__body">
-                    <div class="viewport-blueprint__image-wrap">
-                      <img
-                        bind:this={blueprintImageEl}
-                        src={effectiveConceptPreviewMessage.imageData || ''}
-                        alt="Assistant concept preview"
-                        class="viewport-blueprint__image"
-                      />
-                    </div>
-                    {#if effectiveConceptPreviewMessage.content.trim()}
-                      <div class="viewport-blueprint__note">
-                        {effectiveConceptPreviewMessage.content}
-                      </div>
-                    {/if}
-                    {#if imageInputUnavailableReason}
-                      <div class="viewport-blueprint__status">
-                        {imageInputUnavailableReason}
-                      </div>
-                    {/if}
-                  </div>
-                  <div class="viewport-blueprint__actions">
-                    <button
-                      class="btn btn-xs btn-secondary"
-                      onclick={() => setViewportPresentationMode('model')}
-                      disabled={!hasRenderableModel}
-                    >
-                      OPEN MODEL
-                    </button>
-                    <button
-                      class="btn btn-xs btn-primary"
-                      onclick={() => void generateFromConceptPreview()}
-                      disabled={$activeThreadBusy || Boolean(generationUnavailableReason) || Boolean(imageInputUnavailableReason)}
-                      title={generationUnavailableReason ?? imageInputUnavailableReason ?? undefined}
-                    >
-                      GENERATE 3D FROM THIS
-                    </button>
-                    <button
-                      class="btn btn-xs btn-secondary"
-                      onclick={pickOtherConceptPreview}
-                      disabled={conceptPreviewMessages.length < 2}
-                    >
-                      PICK OTHER PREVIEW
-                    </button>
-                  </div>
-                </div>
-              </section>
-            {/if}
             <DrawingOverlay
               bind:this={drawingOverlay}
               active={drawMode}
@@ -2871,6 +2855,7 @@
                 onSelectTarget={() => {}}
                 onCameraStateChange={() => {}}
                 onModelLoaded={handleHiddenViewerLoaded}
+                onModelLoadError={handleHiddenViewerLoadError}
                 isGenerating={false}
                 hideModelWhileBusy={false}
                 busyPhase={null}
@@ -2880,7 +2865,11 @@
             <div class="genie-layer" class:onboarding-active={$onboarding.isActive}>
               <VertexGenie 
                 mode={genieMode} 
-                bubble={genieBubble} 
+                bubble={genieBubble}
+                compact={genieBubbleState.compact}
+                badge={genieBubbleState.badge}
+                contextLabel={genieBubbleState.contextLabel}
+                safeRightInset={genieSafeRightInset}
                 onDismiss={dismissGenie} 
                 actions={genieActions} 
                 traits={eckyTraits} 
@@ -2987,36 +2976,8 @@
             {/if}
             
 
-            {#if $activeThreadId && ($workingCopy.macroCode || stlUrl || effectiveConceptPreviewMessage)}
+            {#if $activeThreadId && ($workingCopy.macroCode || stlUrl)}
               <div class="viewport-overlay">
-                {#if effectiveConceptPreviewMessage}
-                  <div class="viewport-mode-panel">
-                    <div class="viewport-mode-label">VIEWPORT MODE</div>
-                    <div
-                      class="viewport-mode-toggle"
-                      class:viewport-mode-toggle--attention={blueprintAttentionVisible}
-                    >
-                      <button
-                        class="viewport-mode-btn"
-                        class:viewport-mode-btn--active={viewportPresentationMode === 'model'}
-                        onclick={() => setViewportPresentationMode('model')}
-                        disabled={!hasRenderableModel}
-                      >
-                        MODEL
-                      </button>
-                      <button
-                        class="viewport-mode-btn"
-                        class:viewport-mode-btn--active={viewportPresentationMode === 'blueprint'}
-                        onclick={() => setViewportPresentationMode('blueprint')}
-                      >
-                        BLUEPRINT
-                      </button>
-                    </div>
-                    {#if blueprintAttentionVisible}
-                      <div class="viewport-mode-hint">CONCEPT PREVIEW READY</div>
-                    {/if}
-                  </div>
-                {/if}
                 {#if directOcctStepStatus && !hasSketchPreview}
                   <div
                     class="direct-occt-step-status"
@@ -3033,23 +2994,26 @@
                 {/if}
                 <div class="export-actions">
                   <button class="btn btn-xs btn-secondary" onclick={() => {
-                    if (activeVersionMessage?.output) {
+                    const sourceCode =
+                      activeVersionMessage?.output?.macroCode ??
+                      $workingCopy.macroCode;
+                    if (sourceCode) {
                       codeModalMode = 'version';
-                      selectedCode.set($workingCopy.macroCode);
+                      selectedCode.set(sourceCode);
                       selectedTitle.set(
                         codeInspectorTitle(
-                          activeVersionMessage.output.title || $workingCopy.title || 'design',
-                          activeVersionMessage.artifactBundle?.sourceLanguage ??
-                            activeVersionMessage.modelManifest?.sourceLanguage ??
-                            activeVersionMessage.output.sourceLanguage,
-                          activeVersionMessage.artifactBundle?.geometryBackend ??
-                            activeVersionMessage.modelManifest?.geometryBackend ??
-                            activeVersionMessage.output.geometryBackend,
+                          activeVersionMessage?.output?.title || $workingCopy.title || 'design',
+                          activeVersionMessage?.artifactBundle?.sourceLanguage ??
+                            activeVersionMessage?.modelManifest?.sourceLanguage ??
+                            activeVersionMessage?.output?.sourceLanguage,
+                          activeVersionMessage?.artifactBundle?.geometryBackend ??
+                            activeVersionMessage?.modelManifest?.geometryBackend ??
+                            activeVersionMessage?.output?.geometryBackend,
                         ),
                       );
                       showCodeModal.set(true);
                     }
-                  }} disabled={!activeVersionMessage?.output || showViewerBusyMask} title="View source code">
+                  }} disabled={!canOpenViewportCode || showViewerBusyMask} title="View source code">
                     📄 CODE
                   </button>
                   <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
@@ -3162,7 +3126,8 @@
             workingCopy.patch({ postProcessing: nextPostProcessing });
           }}
           onSemanticChange={handleSemanticControlChange}
-          onchange={handleParamChange}
+          onchange={handleParamPanelChange}
+          oncommit={handleParamPanelCommit}
           onspecchange={(spec, params) => {
             paramPanelState.setUiSpec(spec);
             workingCopy.patch({ uiSpec: spec });
@@ -3173,6 +3138,7 @@
           }}
           activeVersionId={$paramPanelState.versionId}
           messageId={$activeVersionId}
+          macroCode={$workingCopy.macroCode}
           outlineEnabled={viewerOutlineEnabled}
           topologyMode={viewerTopologyMode}
           onViewerDisplayChange={(display) => {
@@ -3269,9 +3235,6 @@
             workspaceCaptureHint={workspaceCaptureHint}
             sttLanguageCode={$config.voice?.sttLanguageCode ?? 'en-US'}
             onToggleWorkspaceCapture={setWorkspaceCaptureForActiveThread}
-            onOpenConceptPreview={openConceptPreviewInViewport}
-            onPinConceptPreview={pinConceptPreviewFromMessage}
-            pinnedConceptPreviewMessageId={activeThreadConceptPreviewState.pinnedMessageId}
             onShowCode={(m) => {
               codeModalMode = 'version';
               selectedCode.set(m.output.macroCode);
@@ -3424,6 +3387,9 @@
     <CodeModal
       bind:code={$selectedCode}
       title={$selectedTitle}
+      defaultTitle={$workingCopy.title}
+      defaultVersionName={$workingCopy.versionName || 'V-manual'}
+      onApply={codeModalMode === 'sketch-preview' ? undefined : applyManualCodeDraft}
       onCommit={codeModalMode === 'sketch-preview' ? undefined : commitManualVersion}
       onFork={codeModalMode === 'sketch-preview' ? undefined : forkManualVersion}
       onclose={() => showCodeModal.set(false)}
@@ -3466,11 +3432,6 @@
     z-index: 5;
     transition: opacity 180ms ease, filter 180ms ease;
     overflow: hidden;
-  }
-  .viewer-shell--occluded {
-    opacity: 0.08;
-    filter: saturate(0.45);
-    pointer-events: none;
   }
   .sketch-preview-status {
     position: absolute;
@@ -3525,115 +3486,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .viewport-blueprint {
-    position: absolute;
-    inset: 0;
-    z-index: 20;
-    padding: 56px 28px 96px;
-    display: flex;
-    align-items: stretch;
-    justify-content: stretch;
-    background:
-      radial-gradient(circle at 20% 18%, rgba(198, 154, 52, 0.12), transparent 28%),
-      linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
-      linear-gradient(180deg, rgba(7, 11, 19, 0.28), rgba(7, 11, 19, 0.68));
-    background-size: auto, 28px 28px, 28px 28px, auto;
-    pointer-events: none;
-    overflow: hidden;
-  }
-  .viewport-blueprint__frame {
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    gap: 14px;
-    padding: 18px;
-    border: 1px solid color-mix(in srgb, var(--primary) 48%, var(--bg-300));
-    outline: 1px solid color-mix(in srgb, var(--secondary) 18%, transparent);
-    outline-offset: -6px;
-    background:
-      linear-gradient(180deg, color-mix(in srgb, var(--bg-100) 92%, black 8%), color-mix(in srgb, var(--bg-200) 88%, black 12%));
-    box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.03),
-      0 18px 42px rgba(0, 0, 0, 0.28);
-    pointer-events: auto;
-    overflow: hidden;
-  }
-  .viewport-blueprint__header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    font-family: var(--font-mono);
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-  }
-  .viewport-blueprint__eyebrow {
-    color: var(--primary);
-    font-size: 0.68rem;
-    font-weight: 700;
-  }
-  .viewport-blueprint__warning {
-    color: var(--secondary);
-    font-size: 0.64rem;
-    font-weight: 700;
-  }
-  .viewport-blueprint__body {
-    min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
-    gap: 16px;
-    overflow: hidden;
-  }
-  .viewport-blueprint__image-wrap {
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid color-mix(in srgb, var(--secondary) 26%, var(--bg-300));
-    background:
-      linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-      color-mix(in srgb, var(--bg-100) 84%, black 16%);
-    background-size: 20px 20px, 20px 20px, auto;
-    overflow: hidden;
-  }
-  .viewport-blueprint__image {
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
-    object-fit: contain;
-    filter: contrast(1.02) saturate(0.92);
-    image-rendering: auto;
-  }
-  .viewport-blueprint__note {
-    padding: 12px;
-    border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    overflow: auto;
-  }
-  .viewport-blueprint__status {
-    color: var(--secondary);
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    line-height: 1.5;
-  }
-  .viewport-blueprint__actions {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    flex-wrap: wrap;
   }
   .dialogue-content { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   .dialogue-toolbar {
@@ -3701,7 +3553,7 @@
   }
   .terminal-overlay-btn { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; }
   .terminal-overlay-btn-attention { border-color: var(--secondary); color: var(--secondary); box-shadow: 0 0 10px color-mix(in srgb, var(--secondary) 50%, transparent); }
-  .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 220; pointer-events: auto; max-width: min(80vw, 420px); }
+  .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 120; pointer-events: auto; max-width: min(56vw, 380px); }
   .error-banner {
     position: absolute;
     top: 12px;
@@ -3823,65 +3675,6 @@
     overflow: hidden;
   }
   .viewport-overlay { position: absolute; bottom: 12px; right: 12px; max-width: min(420px, calc(100vw - 24px)); background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; overflow: hidden; }
-  .viewport-mode-panel {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
-    min-width: 210px;
-  }
-  .viewport-mode-label {
-    color: var(--secondary);
-    font-size: 0.58rem;
-    font-weight: 700;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-  }
-  .viewport-mode-toggle {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 4px;
-    padding: 4px;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 92%, transparent);
-  }
-  .viewport-mode-toggle--attention {
-    border-color: var(--secondary);
-    box-shadow: 0 0 12px color-mix(in srgb, var(--secondary) 26%, transparent);
-  }
-  .viewport-mode-btn {
-    min-width: 0;
-    padding: 6px 8px;
-    border: 1px solid var(--bg-400);
-    background: var(--bg-200);
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-    font-size: 0.66rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    cursor: pointer;
-  }
-  .viewport-mode-btn:hover:not(:disabled) {
-    border-color: var(--primary);
-    color: var(--primary);
-  }
-  .viewport-mode-btn--active {
-    border-color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 18%, var(--bg-200));
-    color: var(--primary);
-  }
-  .viewport-mode-btn:disabled {
-    cursor: default;
-    opacity: 0.5;
-  }
-  .viewport-mode-hint {
-    color: var(--secondary);
-    font-size: 0.62rem;
-    font-family: var(--font-mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    text-align: right;
-  }
   .direct-occt-step-status {
     width: 100%;
     min-width: min(330px, 100%);
@@ -3993,26 +3786,11 @@
     line-height: 1.45;
   }
   @media (max-width: 960px) {
-    .viewport-blueprint {
-      padding: 48px 16px 96px;
-    }
-    .viewport-blueprint__body {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .viewport-blueprint__note {
-      max-height: 180px;
-    }
     .viewport-overlay {
       left: 12px;
       right: 12px;
       bottom: 12px;
       align-items: stretch;
-    }
-    .viewport-mode-panel {
-      min-width: 0;
-    }
-    .viewport-mode-hint {
-      text-align: left;
     }
     .export-chooser {
       min-width: min(92vw, 520px);

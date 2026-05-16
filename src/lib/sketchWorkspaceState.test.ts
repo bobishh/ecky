@@ -137,6 +137,99 @@ test('buildSketchDraftRequest can preview first closed profile while later sketc
   assert.equal(request.sketch.primitives?.[0]?.primitiveId, 'primitive-front-1');
 });
 
+test('buildSketchDraftRequest keeps multiple closed front primitives for hole-aware replay', () => {
+  const request = buildSketchDraftRequest([
+    {
+      primitiveId: 'primitive-front-outer',
+      view: 'front',
+      points: [
+        [0, 0],
+        [80, 0],
+        [80, 50],
+        [0, 50],
+        [0, 0],
+      ],
+      closed: true,
+      topology: {
+        loopId: 'front-outer',
+        edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+        loopRole: 'outer',
+        sourceClass: 'derived',
+      },
+    },
+    {
+      primitiveId: 'primitive-front-hole',
+      view: 'front',
+      points: [
+        [25, 18],
+        [45, 18],
+        [45, 34],
+        [25, 34],
+        [25, 18],
+      ],
+      closed: true,
+      topology: {
+        loopId: 'front-hole',
+        edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+        loopRole: 'hole',
+        sourceClass: 'derived',
+      },
+    },
+  ]);
+
+  assert.ok(!('error' in request));
+  assert.deepEqual(
+    request.sketch.primitives?.map((primitive) => primitive.primitiveId),
+    ['primitive-front-outer', 'primitive-front-hole'],
+  );
+  assert.deepEqual(
+    request.sketch.primitives?.map((primitive) => primitive.topology?.loopId),
+    ['front-outer', 'front-hole'],
+  );
+  assert.deepEqual(
+    request.sketch.primitives?.map((primitive) => primitive.topology?.loopRole),
+    ['outer', 'hole'],
+  );
+});
+
+test('buildSketchDraftRequest preserves replayed sketchId for imported sketch profiles', () => {
+  const request = buildSketchDraftRequest([
+    {
+      primitiveId: 'primitive-front-outer',
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      points: [
+        [0, 0],
+        [80, 0],
+        [80, 50],
+        [0, 50],
+        [0, 0],
+      ],
+      closed: true,
+    },
+    {
+      primitiveId: 'primitive-front-hole',
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      points: [
+        [25, 18],
+        [45, 18],
+        [45, 34],
+        [25, 34],
+        [25, 18],
+      ],
+      closed: true,
+    },
+  ]);
+
+  assert.ok(!('error' in request));
+  assert.equal(request.sketch.sketchId, 'sketch-alpha');
+  assert.deepEqual(
+    request.sketch.primitives?.map((primitive) => primitive.primitiveId),
+    ['primitive-front-outer', 'primitive-front-hole'],
+  );
+});
+
 test('buildSketchDraftRequest uses top view depth when front and top profiles match width', () => {
   const request = buildSketchDraftRequest([
     {

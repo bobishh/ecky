@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
+  import { buildCornerGlyph } from './genie/angularGeometry';
   import {
     DEFAULT_GENIE_TRAITS,
     resolveModeTraits,
-    seededSigned,
-    seededUnit,
     type GenieMode,
     type ResolvedGenieProfile,
   } from './genie/traits';
@@ -14,17 +13,17 @@
     edge: string;
     node: string;
     glow: string;
+    body: string;
+    face: string;
+    selected: string;
   };
-  type Point = {
-    x: number;
-    y: number;
-  };
-
-  const TAU = Math.PI * 2;
 
   let {
     mode = 'idle',
     bubble = '',
+    compact = false,
+    badge = null,
+    contextLabel = null,
     question = '',
     onDismiss = null,
     actions = null,
@@ -32,9 +31,13 @@
     intensity = 1.0,
     wakeUp = 0,
     agentConnected = true,
+    safeRightInset = 360,
   }: {
     mode?: GenieMode;
     bubble?: string;
+    compact?: boolean;
+    badge?: string | null;
+    contextLabel?: string | null;
     question?: string;
     onDismiss?: (() => void) | null;
     actions?: Array<{ label: string; onclick: () => void }> | null;
@@ -42,29 +45,24 @@
     intensity?: number;
     wakeUp?: number;
     agentConnected?: boolean;
+    safeRightInset?: number;
   } = $props();
 
-  const WAKE_DUR = 650;
-  let wakeUpStartTime: number | null = null;
-
-  $effect(() => {
-    if (wakeUp > 0) wakeUpStartTime = performance.now();
-  });
-
-  const profile = $derived.by(() => {
-    const effectiveMode = agentConnected ? mode : 'sleeping';
-    return resolveModeTraits(traits ?? DEFAULT_GENIE_TRAITS, effectiveMode);
-  });
-
-  let canvas: HTMLCanvasElement;
-  let frameId = 0;
-  let dpr = 1;
-  let ctx: CanvasRenderingContext2D | null = null;
   let copyFeedback = $state('');
   let copyFeedbackTimer: number | null = null;
+  let wakePulse = $state(0);
 
-  const SIZE = 150;
   const MAX_BUBBLE_LEN = 1200;
+  const effectiveMode = $derived(agentConnected ? mode : 'sleeping');
+  const profile = $derived.by(() =>
+    resolveModeTraits(traits ?? DEFAULT_GENIE_TRAITS, effectiveMode),
+  );
+  const glyph = $derived.by(() => buildCornerGlyph(profile));
+  const motionScale = $derived(Math.min(2.6, Math.max(0.6, intensity)));
+
+  $effect(() => {
+    wakePulse = wakeUp;
+  });
 
   const cleanBubble = $derived.by(() => {
     const text = `${bubble ?? ''}`.replace(/\s+/g, ' ').trim();
@@ -89,6 +87,88 @@
     return hue;
   }
 
+  function pickPalette(currentProfile: ResolvedGenieProfile): Palette {
+    const primary = 'var(--primary, #4a8c5c)';
+    const secondary = 'var(--secondary, #c8a620)';
+    const red = 'var(--red, #ff6b6b)';
+    const blendHue = (base: string, hue: number, lightness: number, amount: number): string => {
+      const baseAmount = clamp(100 - amount, 0, 100);
+      return `color-mix(in hsl, ${base} ${baseAmount}%, hsl(${normalizeHue(hue)} 70% ${lightness}%))`;
+    };
+    const colorHue =
+      currentProfile.palettePreset === 'error'
+        ? normalizeHue(currentProfile.colorHue)
+        : normalizeOperationalHue(currentProfile.colorHue);
+    const glowHue = normalizeHue(colorHue + currentProfile.glowHueShift);
+    const baseEdge = blendHue(primary, colorHue - 4, 60, 14);
+
+    switch (currentProfile.palettePreset) {
+      case 'sleeping':
+        return {
+          edge: blendHue('#444', colorHue, 40, 10),
+          node: blendHue('#666', colorHue, 50, 5),
+          glow: `hsla(${normalizeHue(glowHue)}, 10%, 20%, 0.1)`,
+          body: 'color-mix(in srgb, var(--bg-200) 82%, #555)',
+          face: 'color-mix(in srgb, var(--bg-100) 76%, #666)',
+          selected: 'color-mix(in srgb, var(--secondary) 28%, #666)',
+        };
+      case 'waking':
+        return {
+          edge: blendHue('#555', colorHue, 46, 18),
+          node: blendHue('#898', colorHue, 60, 14),
+          glow: `hsla(${normalizeHue(glowHue + 8)}, 18%, 28%, 0.16)`,
+          body: 'color-mix(in srgb, var(--bg-200) 78%, #506055)',
+          face: 'color-mix(in srgb, var(--bg-100) 76%, #70806e)',
+          selected: 'color-mix(in srgb, var(--secondary) 34%, #6f7560)',
+        };
+      case 'repairing':
+        return {
+          edge: blendHue(secondary, colorHue + 6, 60, 16),
+          node: blendHue('#f8f1df', colorHue + 2, 88, 10),
+          glow: `hsl(${normalizeHue(glowHue - 4)} 54% 46% / 0.24)`,
+          body: 'color-mix(in srgb, var(--bg-200) 70%, var(--secondary))',
+          face: 'color-mix(in srgb, var(--bg-100) 78%, var(--secondary))',
+          selected: 'var(--secondary)',
+        };
+      case 'rendering':
+        return {
+          edge: blendHue('#8be7ff', colorHue + 52, 70, 24),
+          node: blendHue('#effcff', colorHue + 40, 92, 16),
+          glow: `hsl(${normalizeHue(glowHue + 34)} 90% 68% / 0.36)`,
+          body: 'color-mix(in srgb, var(--bg-200) 66%, #2aaec0)',
+          face: 'color-mix(in srgb, var(--bg-100) 75%, #8be7ff)',
+          selected: '#8be7ff',
+        };
+      case 'error':
+        return {
+          edge: blendHue(red, 6, 66, 10),
+          node: blendHue('#ffe0e0', 8, 90, 8),
+          glow: 'hsl(4 88% 66% / 0.42)',
+          body: 'color-mix(in srgb, var(--bg-200) 72%, var(--red))',
+          face: 'color-mix(in srgb, var(--bg-100) 74%, var(--red))',
+          selected: 'var(--red)',
+        };
+      case 'thinking':
+      case 'speaking':
+      case 'light':
+      case 'base':
+      default:
+        return {
+          edge: baseEdge,
+          node: blendHue('#e7f2eb', colorHue, 88, 10),
+          glow: `hsl(${normalizeHue(glowHue - 8)} 56% 42% / 0.22)`,
+          body: 'color-mix(in srgb, var(--bg-200) 70%, var(--primary))',
+          face: 'color-mix(in srgb, var(--bg-100) 78%, var(--primary))',
+          selected: 'var(--secondary)',
+        };
+    }
+  }
+
+  const palette = $derived.by(() => pickPalette(profile));
+  const svgStyle = $derived(
+    `--corner-edge: ${palette.edge}; --corner-node: ${palette.node}; --corner-glow: ${palette.glow}; --corner-body: ${palette.body}; --corner-face: ${palette.face}; --corner-selected: ${palette.selected}; --corner-motion: ${motionScale};`,
+  );
+
   async function copyBubbleText() {
     if (!cleanBubble) return;
     try {
@@ -103,394 +183,78 @@
     }, 1400);
   }
 
-  function resizeCanvas() {
-    if (!canvas) return;
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(SIZE * dpr);
-    canvas.height = Math.round(SIZE * dpr);
-    canvas.style.width = `${SIZE}px`;
-    canvas.style.height = `${SIZE}px`;
-    ctx = canvas.getContext('2d');
-  }
-
-  function pickPalette(currentProfile: ResolvedGenieProfile): Palette {
-    const css = getComputedStyle(document.documentElement);
-    const primary = css.getPropertyValue('--primary').trim() || '#4a8c5c';
-    const secondary = css.getPropertyValue('--secondary').trim() || '#c8a620';
-    const red = css.getPropertyValue('--red').trim() || '#ff6b6b';
-    const blendHue = (base: string, hue: number, lightness: number, amount: number): string => {
-      const baseAmount = clamp(100 - amount, 0, 100);
-      return `color-mix(in hsl, ${base} ${baseAmount}%, hsl(${normalizeHue(hue)} 70% ${lightness}%))`;
-    };
-    const colorHue =
-      currentProfile.palettePreset === 'error'
-        ? normalizeHue(currentProfile.colorHue)
-        : normalizeOperationalHue(currentProfile.colorHue);
-    const glowHue = normalizeHue(colorHue + currentProfile.glowHueShift);
-
-    switch (currentProfile.palettePreset) {
-      case 'sleeping':
-        return {
-          edge: blendHue('#444', colorHue, 40, 10),
-          node: blendHue('#666', colorHue, 50, 5),
-          glow: `hsla(${normalizeHue(glowHue)}, 10%, 20%, 0.1)`,
-        };
-      case 'waking':
-        return {
-          edge: blendHue('#555', colorHue, 46, 18),
-          node: blendHue('#898', colorHue, 60, 14),
-          glow: `hsla(${normalizeHue(glowHue + 8)}, 18%, 28%, 0.16)`,
-        };
-      case 'thinking':
-        return {
-          edge: blendHue(primary, colorHue - 8, 62, 18),
-          node: blendHue('#eef7f1', colorHue - 6, 90, 12),
-          glow: `hsl(${normalizeHue(glowHue - 10)} 58% 44% / 0.26)`,
-        };
-      case 'light':
-        return {
-          edge: blendHue(primary, colorHue - 24, 72, 38),
-          node: blendHue('#effbf3', colorHue - 14, 90, 22),
-          glow: `hsl(${glowHue} 78% 68% / 0.24)`,
-        };
-      case 'repairing':
-        return {
-          edge: blendHue(secondary, colorHue + 6, 60, 16),
-          node: blendHue('#f8f1df', colorHue + 2, 88, 10),
-          glow: `hsl(${normalizeHue(glowHue - 4)} 54% 46% / 0.24)`,
-        };
-      case 'rendering':
-        return {
-          edge: blendHue('#8be7ff', colorHue + 52, 70, 24),
-          node: blendHue('#effcff', colorHue + 40, 92, 16),
-          glow: `hsl(${normalizeHue(glowHue + 34)} 90% 68% / 0.36)`,
-        };
-      case 'speaking':
-        return {
-          edge: blendHue(primary, colorHue + 4, 62, 18),
-          node: blendHue('#f2fff6', colorHue + 2, 92, 12),
-          glow: `hsl(${normalizeHue(glowHue - 6)} 60% 46% / 0.24)`,
-        };
-      case 'error':
-        return {
-          edge: blendHue(red, 6, 66, 10),
-          node: blendHue('#ffe0e0', 8, 90, 8),
-          glow: 'hsl(4 88% 66% / 0.42)',
-        };
-      case 'base':
-      default:
-        return {
-          edge: blendHue(primary, colorHue - 4, 60, 14),
-          node: blendHue('#e7f2eb', colorHue, 88, 10),
-          glow: `hsl(${normalizeHue(glowHue - 8)} 56% 42% / 0.22)`,
-        };
-    }
-  }
-
-  function drawEyeDots(
-    context: CanvasRenderingContext2D,
-    currentProfile: ResolvedGenieProfile,
-    centerX: number,
-    centerY: number,
-    eyeBlink: number,
-  ) {
-    const eyeY = centerY - 5 + currentProfile.seedOffsets.eyeY * 1.5;
-    const eyeSpacing = currentProfile.eyeSpacing;
-    const leftX = centerX - eyeSpacing * 0.5 + currentProfile.seedOffsets.eyeX * 1.4;
-    const rightX = centerX + eyeSpacing * 0.5 + currentProfile.seedOffsets.eyeX * 0.7;
-
-    for (const eyeX of [leftX, rightX]) {
-      context.save();
-      context.translate(eyeX, eyeY);
-      context.scale(1, eyeBlink);
-      context.beginPath();
-      context.ellipse(0, 0, currentProfile.eyeSize, currentProfile.eyeSize * 0.92, 0, 0, TAU);
-      context.fill();
-      context.restore();
-    }
-  }
-
-  function drawEyeLines(
-    context: CanvasRenderingContext2D,
-    currentProfile: ResolvedGenieProfile,
-    centerX: number,
-    centerY: number,
-    slant: number,
-  ) {
-    const eyeY = centerY - 5 + currentProfile.seedOffsets.eyeY * 1.5;
-    const eyeSpacing = currentProfile.eyeSpacing;
-    const leftX = centerX - eyeSpacing * 0.5 + currentProfile.seedOffsets.eyeX * 1.4;
-    const rightX = centerX + eyeSpacing * 0.5 + currentProfile.seedOffsets.eyeX * 0.7;
-    const width = currentProfile.eyeSize * 2.8;
-
-    context.beginPath();
-    context.moveTo(leftX - width * 0.5, eyeY + slant);
-    context.lineTo(leftX + width * 0.5, eyeY - slant);
-    context.stroke();
-
-    context.beginPath();
-    context.moveTo(rightX - width * 0.5, eyeY - slant);
-    context.lineTo(rightX + width * 0.5, eyeY + slant);
-    context.stroke();
-  }
-
-  function drawFace(
-    context: CanvasRenderingContext2D,
-    currentProfile: ResolvedGenieProfile,
-    centerX: number,
-    centerY: number,
-    time: number,
-    currentMode: GenieMode,
-    palette: Palette,
-  ) {
-    const now = performance.now();
-    const eyeOpenProgress =
-      wakeUpStartTime !== null
-        ? Math.min(1, (now - wakeUpStartTime) / WAKE_DUR)
-        : 1;
-    const blinkPulse = Math.sin(
-      time * (3.4 + currentProfile.pulseScale * 0.9) + currentProfile.seedOffsets.blink,
-    );
-    const eyeBlinkBase =
-      currentMode === 'speaking'
-        ? 0.72 + Math.abs(Math.sin(time * 9.5 + currentProfile.seedOffsets.blink)) * 0.35
-        : blinkPulse > 0.965
-          ? 0.18
-          : 1;
-    const eyeBlink = eyeOpenProgress < 1 ? eyeOpenProgress * eyeBlinkBase : eyeBlinkBase;
-
-    context.fillStyle = palette.node;
-    context.strokeStyle = palette.node;
-    context.lineCap = 'round';
-
-    if (currentMode === 'waking') {
-      // Asymmetric waking eyes: left stays closed (bar), right opens with eyeOpenProgress
-      const eyeY = centerY - 5 + currentProfile.seedOffsets.eyeY * 1.5;
-      const eyeSpacing = currentProfile.eyeSpacing;
-      const leftX = centerX - eyeSpacing * 0.5 + currentProfile.seedOffsets.eyeX * 1.4;
-      const rightX = centerX + eyeSpacing * 0.5 + currentProfile.seedOffsets.eyeX * 0.7;
-      const barWidth = currentProfile.eyeSize * 2.8;
-      context.lineWidth = 2.2;
-      // Left eye: horizontal bar (still sleeping)
-      context.beginPath();
-      context.moveTo(leftX - barWidth * 0.5, eyeY);
-      context.lineTo(leftX + barWidth * 0.5, eyeY);
-      context.stroke();
-      // Right eye: opening dot (0.08 at minimum so it's just cracking open)
-      const rightBlink = Math.max(0.08, eyeOpenProgress * eyeBlinkBase);
-      context.save();
-      context.translate(rightX, eyeY);
-      context.scale(1, rightBlink);
-      context.beginPath();
-      context.ellipse(0, 0, currentProfile.eyeSize, currentProfile.eyeSize * 0.92, 0, 0, TAU);
-      context.fill();
-      context.restore();
-    } else {
-      switch (currentProfile.eyeStyle) {
-        case 'bar':
-          context.lineWidth = 2.2;
-          drawEyeLines(context, currentProfile, centerX, centerY, 0);
-          break;
-        case 'slant':
-          context.lineWidth = 2.2;
-          drawEyeLines(
-            context,
-            currentProfile,
-            centerX,
-            centerY,
-            1.2 + currentProfile.seedOffsets.eyeX * 0.8,
-          );
-          break;
-        case 'dot':
-        default:
-          drawEyeDots(context, currentProfile, centerX, centerY, eyeBlink);
-          break;
-      }
-    }
-
-    const mouthMotion =
-      currentMode === 'speaking'
-        ? Math.abs(Math.sin(time * 12.8 + currentProfile.seedOffsets.mouth))
-        : 0.25 + (Math.sin(time * 2.3 + currentProfile.seedOffsets.mouth) + 1) * 0.25;
-    const mouthOpen =
-      currentProfile.mouthOpenBase + mouthMotion * currentProfile.mouthOpenAmplitude;
-    const mouthWidth = 9.5 + Math.abs(currentProfile.mouthCurve) * 1.6;
-    const mouthY = centerY + 10 + currentProfile.seedOffsets.eyeY * 0.5;
-
-    context.lineWidth = 2.1;
-    context.beginPath();
-    if (currentProfile.mouthStyle === 'line') {
-      const slant = currentProfile.mouthCurve * 0.35;
-      context.moveTo(centerX - mouthWidth, mouthY + slant);
-      context.lineTo(centerX + mouthWidth, mouthY - slant + mouthOpen * 0.1);
-    } else {
-      context.moveTo(centerX - mouthWidth, mouthY);
-      context.quadraticCurveTo(
-        centerX,
-        mouthY + currentProfile.mouthCurve * 1.8 + mouthOpen,
-        centerX + mouthWidth,
-        mouthY,
-      );
-    }
-    context.stroke();
-  }
-
-  function draw(timestamp: number) {
-    if (!ctx) return;
-
-    const time = timestamp * 0.001;
-    const currentProfile = profile;
-    const currentIntensity = clamp(intensity, 0.6, 2.6);
-    const palette = pickPalette(currentProfile);
-    const points: Point[] = [];
-    const centerX =
-      SIZE * 0.48 +
-      Math.sin(
-        time * currentProfile.centerOrbitFrequency + currentProfile.seedOffsets.orbit,
-      ) *
-        currentProfile.centerOrbitAmplitude *
-        currentIntensity +
-      Math.cos(time * 0.92 + currentProfile.seedOffsets.hover) *
-        currentProfile.seedOffsets.eyeX *
-        0.8;
-    const centerY =
-      SIZE * 0.58 +
-      Math.sin(time * 2.15 + currentProfile.seedOffsets.hover) *
-        currentProfile.hoverScale *
-        currentIntensity;
-    const radius =
-      currentProfile.radiusBase *
-      (1 +
-        Math.sin(time * 4.9 + currentProfile.seedOffsets.pulse) *
-          0.022 *
-          currentProfile.pulseScale *
-          currentIntensity);
-    const tilt =
-      Math.sin(time * 1.08 + currentProfile.seedOffsets.orbit) *
-      currentProfile.tiltScale *
-      5.5;
-
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, SIZE, SIZE);
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, radius + 24, 0, Math.PI * 2);
-    ctx.fillStyle = palette.glow;
-    ctx.fill();
-    ctx.restore();
-
-    for (let i = 0; i < currentProfile.vertexCount; i++) {
-      const baseAngle = (i / currentProfile.vertexCount) * TAU + tilt;
-      const vertexJitter = 0.55 + seededUnit(currentProfile.seed, 100 + i) * 0.95;
-      const warpWeight = 0.45 + seededUnit(currentProfile.seed, 200 + i) * 0.95;
-      const angleJitter = seededSigned(currentProfile.seed, 300 + i) * 0.06;
-      const drift =
-        Math.sin(
-          time * (2.2 + currentProfile.jitterScale * 0.45) +
-            i * 0.8 +
-            currentProfile.seedOffsets.jitter,
-        ) *
-        0.7 *
-        currentIntensity *
-        currentProfile.jitterScale *
-        vertexJitter;
-      const warp =
-        Math.sin(
-          time * (1.8 + currentProfile.warpScale * 1.5) +
-            i * (0.74 + warpWeight * 0.18) +
-            currentProfile.seedOffsets.warp,
-        ) *
-        currentProfile.warpScale *
-        currentIntensity *
-        0.9 *
-        warpWeight;
-      const asymmetryWave =
-        1 +
-        (currentProfile.asymmetry - 1) *
-          Math.sin(baseAngle * 2 + currentProfile.seedOffsets.asym * 2 + time * 0.22);
-      const radial = radius + drift + warp;
-      const x = centerX + Math.cos(baseAngle + angleJitter) * radial * asymmetryWave;
-      const y =
-        centerY +
-        Math.sin(baseAngle + angleJitter) *
-          radial *
-          currentProfile.stretchY *
-          (1 + seededSigned(currentProfile.seed, 400 + i) * 0.03);
-      points.push({ x, y });
-    }
-
-    ctx.strokeStyle = palette.edge;
-    ctx.lineWidth = currentProfile.lineWidth;
-    ctx.globalAlpha = 0.85;
-
-    for (let i = 0; i < currentProfile.vertexCount; i++) {
-      const next = (i + 1) % currentProfile.vertexCount;
-      const chord = (i + currentProfile.chordSkip) % currentProfile.vertexCount;
-
-      ctx.beginPath();
-      ctx.moveTo(points[i].x, points[i].y);
-      ctx.lineTo(points[next].x, points[next].y);
-      ctx.stroke();
-
-      ctx.globalAlpha = currentProfile.chordAlpha;
-      ctx.beginPath();
-      ctx.moveTo(points[i].x, points[i].y);
-      ctx.lineTo(points[chord].x, points[chord].y);
-      ctx.stroke();
-      ctx.globalAlpha = 0.85;
-    }
-
-    if (currentProfile.spokeStride) {
-      ctx.globalAlpha = Math.min(0.24, currentProfile.chordAlpha + 0.04);
-      for (let i = 0; i < currentProfile.vertexCount; i += currentProfile.spokeStride) {
-        ctx.beginPath();
-        ctx.moveTo(points[i].x, points[i].y);
-        ctx.lineTo(centerX, centerY);
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 0.85;
-    }
-
-    ctx.fillStyle = palette.node;
-    for (const point of points) {
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, currentProfile.nodeRadius, 0, TAU);
-      ctx.fill();
-    }
-
-    // Keep all visual elements attached to the core head mesh (no detached satellites).
-    ctx.globalAlpha = 0.85;
-    drawFace(ctx, currentProfile, centerX, centerY, time, mode, palette);
-
-    ctx.globalAlpha = 1;
-
-    frameId = requestAnimationFrame(draw);
-  }
-
-  onMount(() => {
-    resizeCanvas();
-    frameId = requestAnimationFrame(draw);
-    window.addEventListener('resize', resizeCanvas);
-  });
-
   onDestroy(() => {
-    if (frameId) cancelAnimationFrame(frameId);
-    window.removeEventListener('resize', resizeCanvas);
     if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
   });
 </script>
 
-<div class="genie-shell" data-agent-connected={agentConnected ? 'true' : 'false'}>
-  <canvas bind:this={canvas} class="genie-canvas"></canvas>
+<div
+  class="genie-shell"
+  data-agent-connected={agentConnected ? 'true' : 'false'}
+  style={`--genie-safe-right: ${Math.max(0, safeRightInset)}px;`}
+>
+  <svg
+    class="genie-corner-svg"
+    data-mode={effectiveMode}
+    data-wake-pulse={wakePulse}
+    viewBox="0 0 150 150"
+    aria-hidden="true"
+    style={svgStyle}
+  >
+    <defs>
+      <filter id="genie-corner-soft-glow" x="-35%" y="-35%" width="170%" height="170%">
+        <feGaussianBlur stdDeviation="3.2" result="blur" />
+        <feMerge>
+          <feMergeNode in="blur" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+    </defs>
+    <ellipse class="genie-corner-glow" cx="75" cy="80" rx="46" ry="52" />
+    <g class="genie-corner-glyph">
+      <polygon class="genie-corner-body" points={glyph.bodyPoints} />
+      <polygon class="genie-corner-face" points={glyph.facePoints} />
+      {#each glyph.edges as edge}
+        <line class="genie-corner-edge" x1={edge.x1} y1={edge.y1} x2={edge.x2} y2={edge.y2} />
+      {/each}
+      <line
+        class="genie-corner-selected-edge"
+        x1={glyph.selectedEdge.x1}
+        y1={glyph.selectedEdge.y1}
+        x2={glyph.selectedEdge.x2}
+        y2={glyph.selectedEdge.y2}
+      />
+      {#each glyph.nodes as node}
+        <circle class="genie-corner-node" cx={node.x} cy={node.y} r="3.1" />
+      {/each}
+      <g class="genie-corner-face-lines">
+        <line x1="58" y1={glyph.eyeY + glyph.eyeSlant} x2="69" y2={glyph.eyeY - glyph.eyeSlant} />
+        <line x1="82" y1={glyph.eyeY - glyph.eyeSlant} x2="94" y2={glyph.eyeY + glyph.eyeSlant} />
+        <path d={`M 63 ${glyph.mouthY} Q 75 ${glyph.mouthY + glyph.mouthCurve * 1.8} 88 ${glyph.mouthY}`} />
+      </g>
+    </g>
+  </svg>
   {#if cleanBubble}
-    <div class="genie-bubble">
+    <div class="genie-bubble" class:genie-bubble--compact={compact} data-bubble-layout={compact ? 'compact' : 'full'}>
       <button class="bubble-copy" type="button" onclick={copyBubbleText} aria-label="Copy advisor response">
         {copyFeedback || 'COPY'}
       </button>
       <button class="bubble-close" type="button" onclick={() => onDismiss?.()} aria-label="Dismiss advisor bubble"></button>
-      <div class="bubble-speaker"><strong>ECKY EINACS:</strong></div>
-      {#if cleanQuestion}
+      <div class="bubble-header">
+        {#if compact}
+          <div class="bubble-meta">
+            {#if badge}
+              <span class="bubble-badge">{badge}</span>
+            {/if}
+            {#if contextLabel}
+              <span class="bubble-context">{contextLabel}</span>
+            {/if}
+          </div>
+        {:else}
+          <div class="bubble-speaker"><strong>ECKY EINACS:</strong></div>
+        {/if}
+      </div>
+      {#if !compact && cleanQuestion}
         <div class="bubble-question-block">
           <div class="bubble-question-label">YOU ASKED</div>
           <div class="bubble-question">"{cleanQuestion}"</div>
@@ -516,27 +280,143 @@
     pointer-events: none;
   }
 
-  .genie-canvas {
+  .genie-corner-svg {
     width: 150px;
     height: 150px;
     display: block;
+    overflow: hidden;
+  }
+
+  .genie-corner-glyph {
+    transform-origin: 75px 80px;
+    animation: genieCornerHover calc(2.2s / var(--corner-motion, 1)) ease-in-out infinite;
+  }
+
+  .genie-corner-glow {
+    fill: var(--corner-glow);
+    filter: url('#genie-corner-soft-glow');
+    opacity: 0.9;
+  }
+
+  .genie-corner-body {
+    fill: var(--corner-body);
+    stroke: color-mix(in srgb, var(--corner-edge) 56%, var(--bg-400));
+    stroke-width: 2.4;
+    stroke-linejoin: miter;
+  }
+
+  .genie-corner-face {
+    fill: var(--corner-face);
+    opacity: 0.74;
+    stroke: color-mix(in srgb, var(--corner-edge) 42%, transparent);
+    stroke-width: 1.2;
+    stroke-linejoin: miter;
+  }
+
+  .genie-corner-edge,
+  .genie-corner-selected-edge,
+  .genie-corner-face-lines line,
+  .genie-corner-face-lines path {
+    vector-effect: non-scaling-stroke;
+    stroke-linecap: square;
+  }
+
+  .genie-corner-edge {
+    stroke: var(--corner-edge);
+    stroke-width: 1.25;
+    opacity: 0.54;
+  }
+
+  .genie-corner-selected-edge {
+    stroke: var(--corner-selected);
+    stroke-width: 2.9;
+    opacity: 0.95;
+  }
+
+  .genie-corner-node {
+    fill: var(--corner-node);
+    stroke: color-mix(in srgb, var(--corner-edge) 45%, var(--bg-400));
+    stroke-width: 1.2;
+  }
+
+  .genie-corner-face-lines line,
+  .genie-corner-face-lines path {
+    fill: none;
+    stroke: color-mix(in srgb, var(--corner-node) 86%, var(--text));
+    stroke-width: 2.3;
+  }
+
+  .genie-corner-svg[data-mode='thinking'] .genie-corner-edge,
+  .genie-corner-svg[data-mode='repairing'] .genie-corner-edge,
+  .genie-corner-svg[data-mode='rendering'] .genie-corner-edge {
+    animation: genieCornerSolve calc(1.1s / var(--corner-motion, 1)) steps(2, end) infinite;
+  }
+
+  .genie-corner-svg[data-mode='speaking'] .genie-corner-face-lines path {
+    animation: genieCornerSpeak 0.42s steps(2, end) infinite;
+  }
+
+  .genie-corner-svg[data-mode='error'] .genie-corner-glyph {
+    animation:
+      genieCornerHover 1.9s ease-in-out infinite,
+      genieCornerError 0.34s steps(2, end) infinite;
+  }
+
+  @keyframes genieCornerHover {
+    0%,
+    100% {
+      transform: translateY(-1px) rotate(-1deg);
+    }
+    50% {
+      transform: translateY(3px) rotate(1deg);
+    }
+  }
+
+  @keyframes genieCornerSolve {
+    0%,
+    100% {
+      opacity: 0.42;
+    }
+    50% {
+      opacity: 0.82;
+    }
+  }
+
+  @keyframes genieCornerSpeak {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(1.6px);
+    }
+  }
+
+  @keyframes genieCornerError {
+    0%,
+    100% {
+      translate: -1px 0;
+    }
+    50% {
+      translate: 1px 0;
+    }
   }
 
   .genie-bubble {
     position: absolute;
-    left: 138px;
-    top: 8px;
-    width: clamp(420px, 54vw, 760px);
-    max-width: min(78vw, 760px);
-    min-height: 130px;
-    max-height: min(52vh, 480px);
-    padding: 16px 78px 16px 18px;
+    left: 126px;
+    top: 6px;
+    width: min(380px, max(248px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
+    max-width: min(380px, max(248px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
+    min-height: 74px;
+    max-height: min(34vh, 240px);
+    padding: 12px 72px 12px 14px;
     border: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
     background: color-mix(in srgb, var(--bg-100) 90%, transparent);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.82rem;
-    line-height: 1.56;
+    font-size: 0.74rem;
+    line-height: 1.42;
     text-transform: none;
     letter-spacing: 0.01em;
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg-300) 85%, transparent), var(--shadow);
@@ -545,6 +425,16 @@
     -webkit-user-select: text !important;
     user-select: text !important;
     overflow-y: auto;
+  }
+
+  .genie-bubble--compact {
+    width: min(340px, max(236px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
+    max-width: min(340px, max(236px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
+    min-height: 66px;
+    max-height: min(24vh, 176px);
+    padding: 10px 64px 10px 12px;
+    font-size: 0.72rem;
+    line-height: 1.38;
   }
 
   .genie-bubble::before {
@@ -646,6 +536,48 @@
     text-wrap: pretty;
     -webkit-user-select: text !important;
     user-select: text !important;
+    max-width: 100%;
+  }
+
+  .bubble-header {
+    display: flex;
+    align-items: flex-start;
+    min-height: 16px;
+    margin-bottom: 6px;
+    min-width: 0;
+  }
+
+  .bubble-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .bubble-badge,
+  .bubble-context {
+    min-width: 0;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg) 72%, transparent);
+    padding: 2px 6px;
+    font-size: 0.56rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .bubble-badge {
+    color: var(--secondary);
+    border-color: color-mix(in srgb, var(--secondary) 54%, var(--bg-300));
+  }
+
+  .bubble-context {
+    color: var(--text-dim);
+    max-width: 132px;
   }
 
   .bubble-question-block {
@@ -673,10 +605,9 @@
   }
 
   .bubble-speaker {
-    margin-bottom: 6px;
     color: var(--secondary);
     letter-spacing: 0.06em;
-    font-size: 0.72rem;
+    font-size: 0.64rem;
   }
 
   .bubble-actions {
@@ -708,12 +639,19 @@
 
   @media (max-width: 960px) {
     .genie-bubble {
-      width: min(86vw, 620px);
-      max-width: min(86vw, 620px);
-      min-height: 110px;
-      max-height: min(46vh, 420px);
-      font-size: 0.76rem;
-      line-height: 1.5;
+      left: 14px;
+      top: 126px;
+      width: min(calc(100vw - 28px), 320px);
+      max-width: min(calc(100vw - 28px), 320px);
+      min-height: 72px;
+      max-height: min(32vh, 220px);
+      font-size: 0.72rem;
+      line-height: 1.4;
+    }
+
+    .genie-bubble--compact {
+      min-height: 64px;
+      max-height: min(24vh, 160px);
     }
   }
 </style>

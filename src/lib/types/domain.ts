@@ -237,6 +237,7 @@ export interface McpConfig {
   mode: McpMode;
   primaryAgentId: string | null;
   promptTimeoutSecs: number;
+  eckyAstAuthoring: boolean;
   autoAgents: AutoAgent[];
 }
 
@@ -1071,6 +1072,7 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
             1800,
             Math.max(10, Number((config.mcp as any).promptTimeoutSecs ?? 1800) || 1800),
           ),
+          eckyAstAuthoring: Boolean((config.mcp as any).eckyAstAuthoring),
           autoAgents: Array.isArray((config.mcp as any).autoAgents) ? [...(config.mcp as any).autoAgents] : [],
         }
       : {
@@ -1079,6 +1081,7 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
           mode: 'passive',
           primaryAgentId: null,
           promptTimeoutSecs: 1800,
+          eckyAstAuthoring: false,
           autoAgents: [],
         },
     hasSeenOnboarding: Boolean(config.hasSeenOnboarding ?? legacy.has_seen_onboarding),
@@ -1190,7 +1193,34 @@ export function normalizeArtifactBundle(
   return {
     ...bundle,
     viewerAssets: Array.isArray(bundle.viewerAssets) ? [...bundle.viewerAssets] : [],
-    edgeTargets: Array.isArray(bundle.edgeTargets) ? [...bundle.edgeTargets] : [],
+    edgeTargets: Array.isArray(bundle.edgeTargets)
+      ? bundle.edgeTargets.map((target) => ({
+          ...target,
+          durableTargetId:
+            typeof target.durableTargetId === 'string' && target.durableTargetId.trim()
+              ? target.durableTargetId
+              : null,
+          canonicalTargetId:
+            typeof target.canonicalTargetId === 'string' && target.canonicalTargetId.trim()
+              ? target.canonicalTargetId
+              : null,
+          aliasIds: Array.isArray(target.aliasIds) ? [...target.aliasIds] : [],
+        }))
+      : [],
+    faceTargets: Array.isArray(bundle.faceTargets)
+      ? bundle.faceTargets.map((target) => ({
+          ...target,
+          durableTargetId:
+            typeof target.durableTargetId === 'string' && target.durableTargetId.trim()
+              ? target.durableTargetId
+              : null,
+          canonicalTargetId:
+            typeof target.canonicalTargetId === 'string' && target.canonicalTargetId.trim()
+              ? target.canonicalTargetId
+              : null,
+          aliasIds: Array.isArray(target.aliasIds) ? [...target.aliasIds] : [],
+        }))
+      : [],
     exportArtifacts: Array.isArray(bundle.exportArtifacts) ? [...bundle.exportArtifacts] : [],
   };
 }
@@ -1225,6 +1255,15 @@ export function normalizeModelManifest(
     selectionTargets: Array.isArray(manifest.selectionTargets)
       ? manifest.selectionTargets.map((target) => ({
           ...target,
+          durableTargetId:
+            typeof target.durableTargetId === 'string' && target.durableTargetId.trim()
+              ? target.durableTargetId
+              : null,
+          canonicalTargetId:
+            typeof target.canonicalTargetId === 'string' && target.canonicalTargetId.trim()
+              ? target.canonicalTargetId
+              : null,
+          aliasIds: Array.isArray(target.aliasIds) ? [...target.aliasIds] : [],
           parameterKeys: Array.isArray(target.parameterKeys) ? [...target.parameterKeys] : [],
           primitiveIds: Array.isArray(target.primitiveIds) ? [...target.primitiveIds] : [],
           viewIds: Array.isArray(target.viewIds) ? [...target.viewIds] : [],

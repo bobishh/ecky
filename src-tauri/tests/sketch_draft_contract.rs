@@ -51,6 +51,7 @@ fn rectangle_sketch(closed: bool) -> SketchDefinition {
             points: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 12.0], [0.0, 12.0]],
             closed,
             radius: None,
+            topology: None,
         }],
         constraints: vec![],
     }
@@ -72,6 +73,7 @@ fn rectangle_view_sketch(
             points,
             closed: true,
             radius: None,
+            topology: None,
         }],
         constraints: vec![],
     }
@@ -197,6 +199,7 @@ fn holed_front_hull_document() -> SketchDocument {
                         ],
                         closed: true,
                         radius: None,
+                        topology: None,
                     },
                     SketchPrimitive {
                         primitive_id: "front-hole".to_string(),
@@ -210,6 +213,7 @@ fn holed_front_hull_document() -> SketchDocument {
                         ],
                         closed: true,
                         radius: None,
+                        topology: None,
                     },
                 ],
                 constraints: vec![],
@@ -253,6 +257,7 @@ fn circle_sketch(sketch_id: &str, primitive_id: &str, radius: f64) -> SketchDefi
             points: vec![[0.0, 0.0]],
             closed: true,
             radius: Some(radius),
+            topology: None,
         }],
         constraints: vec![],
     }
@@ -476,6 +481,7 @@ fn sketch_draft_compacts_dense_profile_before_steel_lowering() {
                 points,
                 closed: true,
                 radius: None,
+                topology: None,
             }],
             constraints: vec![],
         },
@@ -879,6 +885,9 @@ fn accepted_brep_step_gate_rejects_mesh_only_bundle() {
 }
 
 fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
+    let public_target_id = stable_test_topology_target_id(target_id);
+    let alias_ids = topology_alias_ids(&public_target_id, target_id);
+    let manifest_path = write_accepted_test_manifest("edge", &public_target_id, &alias_ids);
     ArtifactBundle {
         schema_version: 1,
         model_id: "accepted-step".to_string(),
@@ -889,12 +898,15 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
         content_hash: "hash".to_string(),
         artifact_version: 1,
         fcstd_path: String::new(),
-        manifest_path: "/tmp/manifest.json".to_string(),
+        manifest_path,
         macro_path: None,
         preview_stl_path: "/tmp/preview.stl".to_string(),
         viewer_assets: vec![],
         edge_targets: vec![ViewerEdgeTarget {
-            target_id: target_id.to_string(),
+            target_id: public_target_id,
+            canonical_target_id: Some(target_id.to_string()),
+            durable_target_id: None,
+            alias_ids,
             part_id: "accepted-body".to_string(),
             viewer_node_id: "accepted-body".to_string(),
             label: "Mounting edge".to_string(),
@@ -923,6 +935,9 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
 }
 
 fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
+    let public_target_id = stable_test_topology_target_id(target_id);
+    let alias_ids = topology_alias_ids(&public_target_id, target_id);
+    let manifest_path = write_accepted_test_manifest("face", &public_target_id, &alias_ids);
     ArtifactBundle {
         schema_version: 1,
         model_id: "accepted-step".to_string(),
@@ -933,13 +948,16 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
         content_hash: "hash".to_string(),
         artifact_version: 1,
         fcstd_path: String::new(),
-        manifest_path: "/tmp/manifest.json".to_string(),
+        manifest_path,
         macro_path: None,
         preview_stl_path: "/tmp/preview.stl".to_string(),
         viewer_assets: vec![],
         edge_targets: vec![],
         face_targets: vec![ViewerFaceTarget {
-            target_id: target_id.to_string(),
+            target_id: public_target_id,
+            canonical_target_id: Some(target_id.to_string()),
+            durable_target_id: None,
+            alias_ids,
             part_id: "accepted-body".to_string(),
             viewer_node_id: "accepted-body".to_string(),
             label: "Mounting face".to_string(),
@@ -961,6 +979,104 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
             role: "primary".to_string(),
         }],
     }
+}
+
+fn stable_test_topology_target_id(target_id: &str) -> String {
+    for marker in [":edge:", ":face:"] {
+        let Some((prefix, payload)) = target_id.split_once(marker) else {
+            continue;
+        };
+        let parts = payload.split(':').collect::<Vec<_>>();
+        let minimum_parts = if marker == ":edge:" { 2 } else { 3 };
+        if parts.len() >= minimum_parts && parts[0].chars().all(|ch| ch.is_ascii_digit()) {
+            return format!("{prefix}{marker}{}", parts[1..].join(":"));
+        }
+    }
+    target_id.to_string()
+}
+
+fn topology_alias_ids(public_target_id: &str, canonical_target_id: &str) -> Vec<String> {
+    if public_target_id == canonical_target_id {
+        Vec::new()
+    } else {
+        vec![canonical_target_id.to_string()]
+    }
+}
+
+fn write_accepted_test_manifest(
+    kind: &str,
+    public_target_id: &str,
+    alias_ids: &[String],
+) -> String {
+    let root = std::env::temp_dir().join(format!(
+        "ecky-accepted-step-manifest-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&root).expect("accepted manifest dir");
+    let path = root.join("manifest.json");
+    let selection_kind = match kind {
+        "edge" => "edge",
+        "face" => "face",
+        _ => "object",
+    };
+    let manifest = serde_json::json!({
+        "schemaVersion": ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
+        "modelId": "accepted-step",
+        "sourceKind": "generated",
+        "engineKind": "eckyIrV0",
+        "sourceLanguage": "eckyIrV0",
+        "geometryBackend": "eckyRust",
+        "document": {
+            "documentName": "Accepted",
+            "documentLabel": "Accepted",
+            "sourcePath": null,
+            "objectCount": 1,
+            "warnings": [],
+        },
+        "parts": [{
+            "partId": "accepted-body",
+            "freecadObjectName": "accepted-body",
+            "label": "Accepted Body",
+            "kind": "solid",
+            "semanticRole": "body",
+            "viewerAssetPath": null,
+            "viewerNodeIds": ["accepted-body"],
+            "parameterKeys": [],
+            "editable": true,
+            "bounds": null,
+            "volume": null,
+            "area": null,
+        }],
+        "parameterGroups": [],
+        "controlPrimitives": [],
+        "controlRelations": [],
+        "controlViews": [],
+        "advisories": [],
+        "selectionTargets": [{
+            "targetId": public_target_id,
+            "aliasIds": alias_ids,
+            "partId": "accepted-body",
+            "viewerNodeId": "accepted-body",
+            "label": "Accepted target",
+            "kind": selection_kind,
+            "editable": true,
+            "parameterKeys": [],
+            "primitiveIds": [],
+            "viewIds": [],
+        }],
+        "measurementAnnotations": [],
+        "warnings": [],
+        "enrichmentState": {
+            "status": "none",
+            "proposals": [],
+        },
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+    )
+    .expect("manifest write");
+    path.to_string_lossy().to_string()
 }
 
 #[test]
@@ -1018,6 +1134,8 @@ fn accepted_brep_component_package_requires_explicit_ports_and_exposes_header_po
 
 #[test]
 fn accepted_brep_component_package_preserves_port_edge_target_refs() {
+    let edge_target_id = "OuterShell:edge:0:0-0-0_10-0-0";
+    let expected_edge_target_id = "OuterShell:edge:0-0-0_10-0-0";
     let package =
         accepted_brep_candidate_to_component_package(SketchAcceptedBrepComponentPackageRequest {
             package_id: "sketch.accepted.body".to_string(),
@@ -1028,9 +1146,7 @@ fn accepted_brep_component_package_preserves_port_edge_target_refs() {
             component_version: "0.1.0".to_string(),
             component_display_name: "Accepted Body".to_string(),
             source_ref: "artifacts/accepted-body/model.step".to_string(),
-            artifact_bundle: Some(accepted_step_bundle_with_edge_target(
-                "OuterShell:edge:0:0-0-0_10-0-0",
-            )),
+            artifact_bundle: Some(accepted_step_bundle_with_edge_target(edge_target_id)),
             document: three_view_hull_document(),
             solution_id: "solution0".to_string(),
             port_types: vec![PortTypeDefinition {
@@ -1048,7 +1164,7 @@ fn accepted_brep_component_package_preserves_port_edge_target_refs() {
             ports: vec![ComponentPort {
                 port_id: "mounting_edge".to_string(),
                 type_id: "mechanical.edge.mount.v1".to_string(),
-                target_ids: vec!["OuterShell:edge:0:0-0-0_10-0-0".to_string()],
+                target_ids: vec![edge_target_id.to_string()],
                 frame: Some(PortFrame::identity()),
                 params: Default::default(),
                 interfaces: vec!["mechanical_mount".to_string()],
@@ -1061,13 +1177,14 @@ fn accepted_brep_component_package_preserves_port_edge_target_refs() {
     validate_component_package(&package).expect("package contract");
     assert_eq!(
         package.components[0].ports[0].target_ids,
-        vec!["OuterShell:edge:0:0-0-0_10-0-0".to_string()]
+        vec![expected_edge_target_id.to_string()]
     );
 }
 
 #[test]
 fn accepted_brep_component_package_preserves_port_face_target_refs() {
     let face_target_id = "OuterShell:face:0:5-5-0:100";
+    let expected_face_target_id = "OuterShell:face:5-5-0:100";
     let package =
         accepted_brep_candidate_to_component_package(SketchAcceptedBrepComponentPackageRequest {
             package_id: "sketch.accepted.body".to_string(),
@@ -1109,7 +1226,7 @@ fn accepted_brep_component_package_preserves_port_face_target_refs() {
     validate_component_package(&package).expect("package contract");
     assert_eq!(
         package.components[0].ports[0].target_ids,
-        vec![face_target_id.to_string()]
+        vec![expected_face_target_id.to_string()]
     );
 }
 
@@ -1267,6 +1384,7 @@ fn accepted_brep_component_package_project_copies_step_and_rewrites_absolute_sou
     std::fs::write(&step_path, "STEP-DATA").expect("step file");
 
     let edge_target_id = "OuterShell:edge:0:0-0-0_10-0-0";
+    let expected_edge_target_id = "OuterShell:edge:0-0-0_10-0-0";
     let mut bundle = accepted_step_bundle_with_edge_target(edge_target_id);
     bundle.export_artifacts[0].path = step_path.to_string_lossy().to_string();
     let ui_spec = ecky_cad_lib::models::UiSpec {
@@ -1346,7 +1464,7 @@ fn accepted_brep_component_package_project_copies_step_and_rewrites_absolute_sou
     );
     assert_eq!(
         manifest.components[0].ports[0].target_ids,
-        vec![edge_target_id.to_string()]
+        vec![expected_edge_target_id.to_string()]
     );
     assert_eq!(manifest.components[0].ui_spec, ui_spec);
     assert_eq!(manifest.components[0].initial_params, initial_params);
@@ -1374,6 +1492,7 @@ fn accepted_brep_component_package_project_installs_and_resolves_step_source() {
     std::fs::write(&step_path, "STEP-DATA").expect("step file");
 
     let edge_target_id = "OuterShell:edge:0:0-0-0_10-0-0";
+    let expected_edge_target_id = "OuterShell:edge:0-0-0_10-0-0";
     let mut bundle = accepted_step_bundle_with_edge_target(edge_target_id);
     bundle.export_artifacts[0].path = step_path.to_string_lossy().to_string();
 
@@ -1438,7 +1557,7 @@ fn accepted_brep_component_package_project_installs_and_resolves_step_source() {
     );
     assert_eq!(
         resolved.component.ports[0].target_ids,
-        vec![edge_target_id.to_string()]
+        vec![expected_edge_target_id.to_string()]
     );
 
     std::fs::remove_dir_all(temp_root).ok();

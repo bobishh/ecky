@@ -1,16 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ecky_core_ir::{
-    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode,
-    CoreNodeKind, CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference,
+    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
+    CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload,
     CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
 };
 use crate::models::{AppResult, ParamValue};
 
+use super::edge_ops::{
+    edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
+    parse_edge_selector_spec,
+};
 use super::model::{
     allocate_legacy_local_name, core_program_param_defaults, expr_head_symbol as head_symbol,
     expr_keyword_name as keyword_name, expr_list_items as list_items,
-    expr_parse_stringish as parse_stringish, parse_model,
+    expr_parse_edge_selector_spec, expr_parse_face_selector_spec,
+    expr_parse_stringish as parse_stringish, materialize_selector_nodes, parse_model,
     parse_typed_build_expr as parse_build_expr, parse_value_kind_tag, IrExpr as Value, IrModel,
 };
 use super::shared::{unsupported, validation};
@@ -23,6 +28,23 @@ impl IrExprVecExt for Value {
     fn to_vec(&self) -> Option<Vec<Value>> {
         self.as_list()
             .map(|items| items.iter().map(Value::dup).collect())
+    }
+}
+
+fn core_selector_payload_to_ir_value(payload: &CoreSelectorPayload) -> AppResult<Value> {
+    match payload {
+        CoreSelectorPayload::EdgeAll
+        | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTargetIds(_) => Ok(Value::Selector(
+            crate::ecky_ir::model::IrSelectorExpr::Edge(edge_selector_spec_from_core_payload(
+                payload,
+            )?),
+        )),
+        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => Ok(
+            Value::Selector(crate::ecky_ir::model::IrSelectorExpr::Face(
+                face_selector_spec_from_core_payload(payload)?,
+            )),
+        ),
     }
 }
 
@@ -237,6 +259,7 @@ enum LoweredBinding {
 struct LoweringScope<'a> {
     params: &'a BTreeMap<String, ParamValue>,
     locals: Vec<BTreeMap<String, LoweredBinding>>,
+    current_part_id: Option<String>,
 }
 
 impl<'a> LoweringScope<'a> {
@@ -244,6 +267,7 @@ impl<'a> LoweringScope<'a> {
         Self {
             params,
             locals: Vec::new(),
+            current_part_id: None,
         }
     }
 
@@ -253,6 +277,15 @@ impl<'a> LoweringScope<'a> {
         Self {
             params: self.params,
             locals,
+            current_part_id: self.current_part_id.clone(),
+        }
+    }
+
+    fn with_part_id(&self, part_id: &str) -> Self {
+        Self {
+            params: self.params,
+            locals: self.locals.clone(),
+            current_part_id: Some(part_id.to_string()),
         }
     }
 
@@ -1604,7 +1637,8 @@ impl<'a> ExprLowerer<'a> {
         let scope = LoweringScope::new(self.param_defaults);
         let mut part_entries: Vec<String> = Vec::new();
         for (part_id, expr, value_kind) in parts {
-            let node = self.lower_geom_expr_hinted(expr, &scope, *value_kind)?;
+            let part_scope = scope.with_part_id(part_id);
+            let node = self.lower_geom_expr_hinted(expr, &part_scope, *value_kind)?;
             let var = self.lin.linearize(&node.expr);
             part_entries.push(format!("({:?}, {})", part_id, var));
         }
@@ -1623,6 +1657,7 @@ impl<'a> ExprLowerer<'a> {
         let scope = LoweringScope::new(self.param_defaults);
         let mut part_entries: Vec<String> = Vec::new();
         for part in parts {
+            let part_scope = scope.with_part_id(&part.key);
             let mut refs = BTreeMap::new();
             let mut locals = BTreeMap::new();
             let mut used_local_names = BTreeMap::new();
@@ -1632,7 +1667,7 @@ impl<'a> ExprLowerer<'a> {
                 &mut refs,
                 &mut locals,
                 &mut used_local_names,
-                &scope,
+                &part_scope,
             )?;
             let var = self.lin.linearize(&node.expr);
             part_entries.push(format!("({:?}, {})", part.key, var));
@@ -2202,17 +2237,53 @@ impl<'a> ExprLowerer<'a> {
                         used_local_names,
                     )?);
                 }
-                for CoreKeywordArg { name, value } in keywords {
-                    items.push(Value::keyword(name.clone()));
-                    items.push(self.lower_core_node_to_value(
-                        value,
-                        param_names,
-                        refs,
-                        locals,
-                        used_local_names,
-                    )?);
+                for keyword in keywords {
+                    items.push(Value::keyword(keyword.name.clone()));
+                    items.push(match (keyword.name.as_str(), keyword.selector_payload()) {
+                        ("edges", None) => {
+                            return Err(validation(
+                                "CoreProgram `:edges` keyword requires selector payload.",
+                            ))
+                        }
+                        ("faces", None) => {
+                            return Err(validation(
+                                "CoreProgram `:faces` keyword requires selector payload.",
+                            ))
+                        }
+                        (
+                            "edges",
+                            Some(
+                                CoreSelectorPayload::FaceClauses(_)
+                                | CoreSelectorPayload::FaceTargetIds(_),
+                            ),
+                        ) => {
+                            return Err(validation(
+                                "CoreProgram `:edges` keyword requires edge selector payload.",
+                            ))
+                        }
+                        (
+                            "faces",
+                            Some(
+                                CoreSelectorPayload::EdgeAll
+                                | CoreSelectorPayload::EdgeClauses(_)
+                                | CoreSelectorPayload::EdgeTargetIds(_),
+                            ),
+                        ) => {
+                            return Err(validation(
+                                "CoreProgram `:faces` keyword requires face selector payload.",
+                            ))
+                        }
+                        (_, Some(selector)) => core_selector_payload_to_ir_value(selector)?,
+                        (_, None) => self.lower_core_node_to_value(
+                            keyword.source_node(),
+                            param_names,
+                            refs,
+                            locals,
+                            used_local_names,
+                        )?,
+                    });
                 }
-                Ok(Value::list(items))
+                materialize_selector_nodes(Value::list(items))
             }
             CoreNodeKind::Range { start, end } => Ok(Value::list(vec![
                 Value::symbol("range"),
@@ -3715,6 +3786,21 @@ impl<'a> ExprLowerer<'a> {
                     B123dGeomKind::Sketch2d,
                 )
             }
+            "rectangle" => {
+                if args.len() != 2 {
+                    return Err(validation("`rectangle` expects width and height."));
+                }
+                let w = lower_num_expr(&args[0], scope)?;
+                let h = lower_num_expr(&args[1], scope)?;
+                (
+                    PyExpr::Call {
+                        func: "Rectangle".into(),
+                        args: vec![PyExpr::Inline(w), PyExpr::Inline(h)],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
             "rounded_rect" | "rounded-rect" => {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(validation(
@@ -4124,7 +4210,7 @@ impl<'a> ExprLowerer<'a> {
                     positioned.iter().map(|e| self.lin.linearize(e)).collect();
                 (
                     PyExpr::Call {
-                        func: "loft".into(),
+                        func: "_ecky_loft".into(),
                         args: vec![PyExpr::Inline(format!("[{}]", sketch_vars.join(", ")))],
                         kwargs: vec![],
                     },
@@ -4159,8 +4245,10 @@ impl<'a> ExprLowerer<'a> {
                     format!(
                         "if abs(_tsx - _tsy) < 1e-9: {scaled} = Pos(0, 0, {height}) * {sketch_var}.scale(_tsx)"
                     ),
-                    "else: raise ValueError('build123d lowerer: non-uniform taper scale not supported')".into(),
-                    format!("{result} = loft([{bottom}, {scaled}])"),
+                    format!(
+                        "else: {scaled} = Pos(0, 0, {height}) * _ecky_non_uniform_scale({sketch_var}, _tsx, _tsy, 1.0)"
+                    ),
+                    format!("{result} = _ecky_loft([{bottom}, {scaled}])"),
                 ];
                 (
                     PyExpr::Imperative {
@@ -4191,7 +4279,7 @@ impl<'a> ExprLowerer<'a> {
                     format!(
                         "{sections} = [Pos(0, 0, {height} * _ti / {segments}) * Rot(0, 0, {angle} * _ti / {segments}) * {sketch_var} for _ti in range({segments} + 1)]"
                     ),
-                    format!("{result} = loft({sections})"),
+                    format!("{result} = _ecky_loft({sections})"),
                 ];
                 (
                     PyExpr::Imperative {
@@ -4268,7 +4356,7 @@ impl<'a> ExprLowerer<'a> {
                             format!(
                                 "    {sections}.append(Pos(0, 0, {section_z_var}) * _ecky_face(Polygon({points_var})))"
                             ),
-                            format!("{result} = loft({sections})"),
+                            format!("{result} = _ecky_loft({sections})"),
                         ],
                         result_var: result,
                     },
@@ -4502,24 +4590,29 @@ impl<'a> ExprLowerer<'a> {
                     )));
                 }
                 let radius = lower_num_expr(&pos_args[0], scope)?;
-                let edge_select = if let Some(value) = properties.get("edges") {
-                    parse_stringish(value, "edge selection")?
+                let selector = if let Some(value) = properties.get("edges") {
+                    expr_parse_edge_selector_spec(value, "edge selection")?
                 } else {
-                    "all".to_string()
+                    parse_edge_selector_spec("all")?
                 };
                 let body = self.lower_solid_expr(&pos_args[1], scope)?;
                 let body_var = self.lin.linearize(&body.expr);
-                let edges_expr = match edge_select.as_str() {
-                    "all" => format!("{body_var}.edges()"),
-                    "top" => format!("{body_var}.edges().group_by(Axis.Z)[-1]"),
-                    "bottom" => format!("{body_var}.edges().group_by(Axis.Z)[0]"),
-                    "vertical" => format!("{body_var}.edges().filter_by(Axis.Z)"),
-                    other => {
-                        return Err(validation(format!(
-                            "Unknown edge selector `{}`. Use `all`, `top`, `bottom`, or `vertical`.",
-                            other
-                        )));
-                    }
+                let edges_expr = if selector.target_ids().is_some() {
+                    let Some(part_id) = scope.current_part_id.as_deref() else {
+                        return Err(validation(
+                            "Exact edge target-id selectors require a part context in build123d lowering.",
+                        ));
+                    };
+                    format!(
+                        "_ecky_select_edges({body_var}, {}, {:?})",
+                        selector.python_payload_literal(),
+                        part_id
+                    )
+                } else {
+                    format!(
+                        "_ecky_select_edges({body_var}, {})",
+                        selector.python_payload_literal()
+                    )
                 };
                 (
                     PyExpr::Call {
@@ -4933,37 +5026,62 @@ impl<'a> ExprLowerer<'a> {
             }
             // -- Shell (Step 9) --
             "shell" => {
-                if args.len() != 2 {
+                let (pos_args, properties) = self.parse_properties(args)?;
+                if pos_args.len() != 2 {
                     return Err(validation(
                         "`shell` expects wall thickness and a geometry node.",
                     ));
                 }
-                let wall = lower_num_expr(&args[0], scope)?;
-                let outer = self.lower_solid_expr(&args[1], scope)?;
-                match self.plan_shell_target(&args[1], &args[0])? {
-                    ShellLoweringPlan::BooleanInner(inner_target) => {
-                        let inner = self.lower_solid_expr(&inner_target, scope)?;
-                        (
-                            PyExpr::BinOp {
-                                op: "-",
-                                operands: vec![outer.expr, inner.expr],
-                            },
-                            B123dGeomKind::Solid3d,
-                        )
-                    }
-                    ShellLoweringPlan::SolidOffsetPlanarFaces => {
-                        let outer_var = self.lin.linearize(&outer.expr);
-                        let result = self.next_imp_var();
-                        let lines = vec![format!(
-                            "{result} = offset({outer_var}, amount=-({wall}), openings={outer_var}.faces().filter_by(GeomType.PLANE))"
-                        )];
-                        (
-                            PyExpr::Imperative {
-                                lines,
-                                result_var: result,
-                            },
-                            B123dGeomKind::Solid3d,
-                        )
+                let wall = lower_num_expr(&pos_args[0], scope)?;
+                let outer = self.lower_solid_expr(&pos_args[1], scope)?;
+                if let Some(face_select) = properties.get("faces") {
+                    let parsed =
+                        expr_parse_face_selector_spec(face_select, "shell face selection")?;
+                    let Some(part_id) = scope.current_part_id.as_deref() else {
+                        return Err(validation(
+                            "Build123d `shell :faces` exact selectors require a part context.",
+                        ));
+                    };
+                    let outer_var = self.lin.linearize(&outer.expr);
+                    let result = self.next_imp_var();
+                    let lines = vec![format!(
+                        "{result} = offset({outer_var}, amount=-({wall}), openings=_ecky_select_shell_faces({outer_var}, {}, {:?}))",
+                        parsed.python_payload_literal(),
+                        part_id
+                    )];
+                    (
+                        PyExpr::Imperative {
+                            lines,
+                            result_var: result,
+                        },
+                        B123dGeomKind::Solid3d,
+                    )
+                } else {
+                    match self.plan_shell_target(&pos_args[1], &pos_args[0])? {
+                        ShellLoweringPlan::BooleanInner(inner_target) => {
+                            let inner = self.lower_solid_expr(&inner_target, scope)?;
+                            (
+                                PyExpr::BinOp {
+                                    op: "-",
+                                    operands: vec![outer.expr, inner.expr],
+                                },
+                                B123dGeomKind::Solid3d,
+                            )
+                        }
+                        ShellLoweringPlan::SolidOffsetPlanarFaces => {
+                            let outer_var = self.lin.linearize(&outer.expr);
+                            let result = self.next_imp_var();
+                            let lines = vec![format!(
+                                "{result} = offset({outer_var}, amount=-({wall}), openings={outer_var}.faces().filter_by(GeomType.PLANE))"
+                            )];
+                            (
+                                PyExpr::Imperative {
+                                    lines,
+                                    result_var: result,
+                                },
+                                B123dGeomKind::Solid3d,
+                            )
+                        }
                     }
                 }
             }

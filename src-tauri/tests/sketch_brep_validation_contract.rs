@@ -1,7 +1,7 @@
 use ecky_cad_lib::models::{
     BrepHiddenLineProjectionResponse, BrepHiddenLineProjectionView, BrepProjectedEdge2d,
     BrepProjectedLoop2d, BrepProjectedLoopRole, SketchDefinition, SketchDocument, SketchPrimitive,
-    SketchPrimitiveKind, SketchValidationSeverity, SketchView,
+    SketchPrimitiveKind, SketchPrimitiveTopology, SketchValidationSeverity, SketchView,
 };
 use ecky_cad_lib::sketch_brep_validation::validate_sketch_brep_hidden_line_projection;
 
@@ -16,6 +16,7 @@ fn rectangle_sketch(sketch_id: &str, view: SketchView, points: Vec<[f64; 2]>) ->
             points,
             closed: true,
             radius: None,
+            topology: None,
         }],
         constraints: vec![],
     }
@@ -28,6 +29,7 @@ fn polyline(primitive_id: &str, points: Vec<[f64; 2]>) -> SketchPrimitive {
         points,
         closed: true,
         radius: None,
+        topology: None,
     }
 }
 
@@ -129,7 +131,7 @@ fn projection() -> BrepHiddenLineProjectionResponse {
                 vec![edge("side-hidden", vec![[2.0, 0.0], [8.0, 5.0]], "hidden")],
             ),
         ],
-        warnings: vec![],
+        warning_entries: vec![],
         validation: None,
     }
 }
@@ -343,4 +345,92 @@ fn reports_topology_mismatch_from_derived_edge_loops_when_report_has_no_loop_lis
         issue.message
             == "Front topology mismatch: BRep projection has 2 closed loops (1 holes) but source sketch has 1 closed profile."
     }));
+}
+
+#[test]
+fn topology_mismatch_locator_targets_missing_hole_from_edge_only_projection() {
+    let mut outer = polyline(
+        "outer-profile",
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0], [0.0, 0.0]],
+    );
+    outer.topology = Some(SketchPrimitiveTopology {
+        loop_id: Some("front-outer".to_string()),
+        edge_ids: vec![
+            "outer-bottom".to_string(),
+            "outer-right".to_string(),
+            "outer-top".to_string(),
+            "outer-left".to_string(),
+        ],
+        loop_role: Some(BrepProjectedLoopRole::Outer),
+        source_class: Some("derived".to_string()),
+    });
+    let mut hole = polyline(
+        "hole-profile",
+        vec![[3.0, 2.0], [7.0, 2.0], [7.0, 3.0], [3.0, 3.0], [3.0, 2.0]],
+    );
+    hole.topology = Some(SketchPrimitiveTopology {
+        loop_id: Some("front-hole".to_string()),
+        edge_ids: vec![
+            "hole-bottom".to_string(),
+            "hole-right".to_string(),
+            "hole-top".to_string(),
+            "hole-left".to_string(),
+        ],
+        loop_role: Some(BrepProjectedLoopRole::Hole),
+        source_class: Some("derived".to_string()),
+    });
+    let document = multi_profile_front_document(vec![outer, hole]);
+    let mut projection = projection();
+    projection.views[0].visible_edges = vec![
+        edge("outer-bottom", vec![[0.0, 0.0], [10.0, 0.0]], "visible"),
+        edge("outer-right", vec![[10.0, 0.0], [10.0, 5.0]], "visible"),
+        edge("outer-top", vec![[10.0, 5.0], [0.0, 5.0]], "visible"),
+        edge("outer-left", vec![[0.0, 5.0], [0.0, 0.0]], "visible"),
+    ];
+    projection.views[0].loops.clear();
+
+    let validation = validate_sketch_brep_hidden_line_projection(&document, &projection, 0.01);
+
+    assert!(!validation.passed);
+    let issue = validation
+        .issues
+        .iter()
+        .find(|issue| issue.message.contains("Front topology mismatch"))
+        .expect("front topology mismatch");
+    assert_eq!(issue.primitive_id.as_deref(), Some("hole-profile"));
+    assert_eq!(
+        issue
+            .topology
+            .as_ref()
+            .and_then(|topology| topology.loop_role.clone()),
+        Some(BrepProjectedLoopRole::Hole)
+    );
+    assert_eq!(
+        issue
+            .topology
+            .as_ref()
+            .map(|topology| topology.edge_ids.clone()),
+        Some(vec![
+            "hole-bottom".to_string(),
+            "hole-right".to_string(),
+            "hole-top".to_string(),
+            "hole-left".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn hidden_line_validation_issues_always_emit_structured_kind_and_view() {
+    let validation = validate_sketch_brep_hidden_line_projection(
+        &document(),
+        &outer_hole_front_projection(),
+        0.01,
+    );
+
+    assert!(!validation.passed);
+    assert!(!validation.issues.is_empty());
+    assert!(validation.issues.iter().all(|issue| matches!(
+        issue.view,
+        SketchView::Front | SketchView::Top | SketchView::Side | SketchView::Custom
+    )));
 }

@@ -1,5 +1,6 @@
 use super::super::edge_ops::{
-    chamfer_mesh, detect_feature_edges, fillet_mesh, filter_edges, EdgeSelector,
+    chamfer_mesh, detect_feature_edges, fillet_mesh, filter_edges, parse_edge_selector_value,
+    EdgeAxis, EdgeSelector,
 };
 use super::super::shared::IrMesh;
 use super::{lower_core_program_to_build123d, lower_to_build123d};
@@ -508,6 +509,13 @@ fn lower_to_build123d_revolve() {
 }
 
 #[test]
+fn lower_to_build123d_rectangle() {
+    let src = r#"(model (part body (extrude (rectangle 24 12) 4)))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(code.contains("Rectangle(24.0, 12.0)"), "rectangle: {code}");
+}
+
+#[test]
 fn lower_to_build123d_loft() {
     let src = r#"(model (part body (loft 30 (circle 20) (circle 10))))"#;
     let code = lower_to_build123d(src).expect("lower");
@@ -518,7 +526,18 @@ fn lower_to_build123d_loft() {
         "height positioning: {}",
         code
     );
-    assert!(code.contains("loft("), "loft call");
+    assert!(code.contains("_ecky_loft("), "loft helper");
+}
+
+#[test]
+fn lower_to_build123d_taper_accepts_non_uniform_scale() {
+    let src = r#"(model (part body (taper 20 0.5 0.75 (rectangle 20 10))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("_ecky_non_uniform_scale("),
+        "non-uniform taper scale: {code}"
+    );
+    assert!(code.contains("_ecky_loft("), "loft helper: {code}");
 }
 
 #[test]
@@ -812,6 +831,43 @@ fn lower_to_build123d_profile_with_holes() {
 }
 
 #[test]
+fn lower_to_build123d_profile_accepts_keyword_holes_and_circle_segments() {
+    let src = r#"(model
+        (part body
+          (extrude
+            (profile :outer (circle 20 96) :holes (circle 10 96))
+            10)))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(code.contains("Circle(20.0)"), "outer circle: {}", code);
+    assert!(code.contains("Circle(10.0)"), "hole circle: {}", code);
+    assert!(
+        code.contains("_ecky_face_with_holes("),
+        "profile holes: {}",
+        code
+    );
+    assert!(code.contains("extrude("), "extrude: {}", code);
+}
+
+#[test]
+fn lower_core_program_to_build123d_accepts_profile_keywords() {
+    let src = r#"(model
+        (part body
+          (extrude
+            (profile :outer (circle 20 96) :holes (circle 10 96))
+            10)))"#;
+    let program = crate::ecky_scheme::compile_to_core_program(src).expect("compile core program");
+    let code = lower_core_program_to_build123d(&program).expect("lower core program");
+    assert!(code.contains("Circle(20.0)"), "outer circle: {}", code);
+    assert!(code.contains("Circle(10.0)"), "hole circle: {}", code);
+    assert!(
+        code.contains("_ecky_face_with_holes("),
+        "profile holes: {}",
+        code
+    );
+    assert!(code.contains("extrude("), "extrude: {}", code);
+}
+
+#[test]
 fn lower_to_build123d_profile_accepts_bspline_outer_loop() {
     let src = r#"(model (part body (extrude (profile (:outer (union (bspline ((0 0) (5 5) (10 0)) #f :tangents ((1 0) (1 0)) :tangent-scalars (1 1)) (path (0 0 0) (10 0 0))))) 5)))"#;
     let code = lower_to_build123d(src).expect("lower");
@@ -964,7 +1020,11 @@ fn lower_to_build123d_fillet_all_edges() {
     let src = r#"(model (part body (fillet 2 (box 20 20 10))))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("Box(20.0, 20.0, 10.0,"), "box");
-    assert!(code.contains(".edges()"), "edge selection");
+    assert!(
+        code.contains("_ecky_select_edges("),
+        "edge selection helper"
+    );
+    assert!(code.contains(r#"{'kind': 'all'}"#), "all selector");
     assert!(code.contains("fillet("), "fillet call");
     assert!(code.contains(", 2.0)"), "radius");
 }
@@ -974,7 +1034,8 @@ fn lower_to_build123d_fillet_top_edges() {
     let src = r#"(model (part body (fillet 1.5 :edges top (box 20 20 10))))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(
-        code.contains(".edges().group_by(Axis.Z)[-1]"),
+        code.contains(r#"_ecky_select_edges("#)
+            && code.contains(r#"{'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'z', 'bound': 'max'}]}"#),
         "top edge selection: {}",
         code
     );
@@ -986,7 +1047,8 @@ fn lower_to_build123d_chamfer_bottom_edges() {
     let src = r#"(model (part body (chamfer 1 :edges bottom (cylinder 10 20))))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(
-        code.contains(".edges().group_by(Axis.Z)[0]"),
+        code.contains(r#"_ecky_select_edges("#)
+            && code.contains(r#"{'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'z', 'bound': 'min'}]}"#),
         "bottom edge selection: {}",
         code
     );
@@ -998,8 +1060,21 @@ fn lower_to_build123d_fillet_vertical_edges() {
     let src = r#"(model (part body (fillet 3 :edges vertical (box 30 30 20))))"#;
     let code = lower_to_build123d(src).expect("lower");
     assert!(
-        code.contains(".edges().filter_by(Axis.Z)"),
+        code.contains(r#"_ecky_select_edges("#) && code.contains(r#"'kind': 'axis', 'axis': 'z'"#),
         "vertical edge selection: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_fillet_compound_selector_edges() {
+    let src = r#"(model (part body (fillet 1 :edges "x-min+z-max" (box 30 30 20))))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains(r#"_ecky_select_edges("#)
+            && code.contains(r#"'kind': 'boundary', 'axis': 'x', 'bound': 'min'"#)
+            && code.contains(r#"'kind': 'boundary', 'axis': 'z', 'bound': 'max'"#),
+        "compound edge selection: {}",
         code
     );
 }
@@ -1044,6 +1119,229 @@ fn edge_selector_vertical_box() {
     let edges = detect_feature_edges(&mesh);
     let vertical = filter_edges(&edges, EdgeSelector::Vertical);
     assert_eq!(vertical.len(), 4, "box has 4 vertical edges");
+}
+
+#[test]
+fn edge_selector_left_box() {
+    let mesh = IrMesh::cuboid(10.0, 10.0, 10.0, None);
+    let edges = detect_feature_edges(&mesh);
+    let left = filter_edges(&edges, EdgeSelector::Left);
+    assert_eq!(left.len(), 4, "box left plane has 4 edges");
+}
+
+#[test]
+fn edge_selector_front_box() {
+    let mesh = IrMesh::cuboid(10.0, 10.0, 10.0, None);
+    let edges = detect_feature_edges(&mesh);
+    let front = filter_edges(&edges, EdgeSelector::Front);
+    assert_eq!(front.len(), 4, "box front plane has 4 edges");
+}
+
+#[test]
+fn edge_selector_compound_box() {
+    let mesh = IrMesh::cuboid(10.0, 10.0, 10.0, None);
+    let edges = detect_feature_edges(&mesh);
+    let selector = EdgeSelector::Compound(vec![
+        super::super::edge_ops::EdgeSelectorClause::Boundary {
+            axis: EdgeAxis::X,
+            bound: super::super::edge_ops::EdgeBound::Min,
+        },
+        super::super::edge_ops::EdgeSelectorClause::Boundary {
+            axis: EdgeAxis::Z,
+            bound: super::super::edge_ops::EdgeBound::Max,
+        },
+    ]);
+    let compound = filter_edges(&edges, selector);
+    assert_eq!(
+        compound.len(),
+        1,
+        "x-min + z-max should isolate one box edge"
+    );
+}
+
+#[test]
+fn edge_selector_aliases_canonicalize() {
+    let selector = parse_edge_selector_value("left+vertical").expect("parse selector");
+    assert_eq!(selector.canonical_string(), "x-min+axis-z");
+}
+
+#[test]
+fn edge_selector_target_ids_canonicalize() {
+    let selector =
+        parse_edge_selector_value("target-ids:Body:edge:0-0-0_10-0-0|Body:edge:0-0-0_0-10-0")
+            .expect("parse selector");
+    assert_eq!(
+        selector.canonical_string(),
+        "target-ids:Body:edge:0-0-0_10-0-0|Body:edge:0-0-0_0-10-0"
+    );
+}
+
+#[test]
+fn lower_to_build123d_supports_exact_target_id_selectors() {
+    let code = lower_to_build123d(
+        r#"(model (part body (fillet 1 :edges "target-id:body:edge:0:0-0-0_10-0-0" (box 10 10 10))))"#,
+    )
+    .expect("exact target ids should lower");
+    assert!(
+        code.contains(r#"_ecky_select_edges("#)
+            && code.contains(r#"{'kind': 'targetIds', 'targetIds': ["body:edge:0:0-0-0_10-0-0"]}"#)
+            && code.contains(r#""body""#),
+        "unexpected exact selector lowering: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_supports_exact_face_target_id_shell_selectors() {
+    let code = lower_to_build123d(
+        r#"(model (part body (shell 1 :faces "target-id:body:face:5:0-0-10:100" (box 10 10 10))))"#,
+    )
+    .expect("exact face target ids should lower");
+    assert!(
+        code.contains(r#"_ecky_select_shell_faces("#)
+            && code.contains(r#"{'kind': 'targetIds', 'targetIds': ["body:face:5:0-0-10:100"]}"#)
+            && code.contains(r#""body""#),
+        "unexpected exact shell selector lowering: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_supports_coarse_face_shell_selectors() {
+    let code = lower_to_build123d(r#"(model (part body (shell 1 :faces "top" (box 10 10 10))))"#)
+        .expect("coarse face selectors should lower");
+    assert!(
+        code.contains(r#"_ecky_select_shell_faces("#)
+            && code.contains(
+                r#"{'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'z', 'bound': 'max'}]}"#
+            ),
+        "unexpected coarse shell selector lowering: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_supports_richer_face_shell_selectors() {
+    let code = lower_to_build123d(
+        r#"(model (part body (shell 1 :faces "planar+normal-z+area-max" (box 10 10 10))))"#,
+    )
+    .expect("richer face selectors should lower");
+    assert!(
+        code.contains(r#"_ecky_select_shell_faces("#)
+            && code.contains(
+                r#"{'kind': 'clauses', 'clauses': [{'kind': 'planar'}, {'kind': 'normal', 'axis': 'z'}, {'kind': 'area', 'rank': 'max'}]}"#
+            ),
+        "unexpected richer shell selector lowering: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_supports_typed_selector_nodes() {
+    let program = crate::ecky_scheme::compile_to_core_program(
+        r#"(model (part body (fillet 1 :edges "target-id:body:edge:0:0-0-0_10-0-0" (box 10 10 10))))"#,
+    )
+    .expect("program");
+    let code = lower_core_program_to_build123d(&program).expect("typed selector lower");
+    assert!(
+        code.contains(r#"{'kind': 'targetIds', 'targetIds': ["body:edge:0:0-0-0_10-0-0"]}"#),
+        "unexpected core selector lowering: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_supports_coarse_selector_payload_when_value_is_bad() {
+    let mut program = crate::ecky_scheme::compile_to_core_program(
+        r#"(model (part body (fillet 1 :edges "left+vertical" (box 10 10 10))))"#,
+    )
+    .expect("program");
+    let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } = &mut program.parts[0].root.kind
+    else {
+        panic!("expected call");
+    };
+    *keywords[0].source_node_mut() = crate::ecky_core_ir::CoreNode::new(
+        crate::ecky_core_ir::NodeId::new(99_001),
+        crate::ecky_core_ir::CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(7.0)),
+        crate::ecky_core_ir::CoreValueKind::Number,
+    );
+    let code = lower_core_program_to_build123d(&program).expect("typed selector lower");
+    assert!(
+        code.contains(
+            r#"{'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'x', 'bound': 'min'}, {'kind': 'axis', 'axis': 'z'}]}"#
+        ),
+        "unexpected core selector lowering: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_rejects_missing_selector_payload_on_edges_keyword() {
+    let mut program = crate::ecky_scheme::compile_to_core_program(
+        r#"(model (part body (fillet 1 :edges "left+vertical" (box 10 10 10))))"#,
+    )
+    .expect("program");
+    let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } = &mut program.parts[0].root.kind
+    else {
+        panic!("expected call");
+    };
+    keywords[0].set_selector_payload(None);
+
+    let err = lower_core_program_to_build123d(&program)
+        .expect_err("missing selector payload should fail");
+    assert!(
+        err.to_string()
+            .contains("CoreProgram `:edges` keyword requires selector payload"),
+        "{err}"
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_rejects_wrong_kind_selector_payload_on_edges_keyword() {
+    let mut program = crate::ecky_scheme::compile_to_core_program(
+        r#"(model (part body (fillet 1 :edges "left+vertical" (box 10 10 10))))"#,
+    )
+    .expect("program");
+    let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } = &mut program.parts[0].root.kind
+    else {
+        panic!("expected call");
+    };
+    keywords[0].set_selector_payload(Some(
+        crate::ecky_core_ir::CoreSelectorPayload::FaceTargetIds(vec!["body:face:0:0-0-1:1".into()]),
+    ));
+
+    let err = lower_core_program_to_build123d(&program)
+        .expect_err("wrong-kind selector payload should fail");
+    assert!(
+        err.to_string()
+            .contains("CoreProgram `:edges` keyword requires edge selector payload"),
+        "{err}"
+    );
+}
+
+#[test]
+fn lower_to_build123d_rejects_wrong_kind_exact_selectors() {
+    let edge_err = lower_to_build123d(
+        r#"(model (part body (fillet 1 :edges "target-id:body:face:5:0-0-10:100" (box 10 10 10))))"#,
+    )
+    .expect_err("face target id should fail edge selector");
+    assert!(
+        edge_err
+            .message
+            .contains("included non-edge target id `body:face:5:0-0-10:100`"),
+        "{edge_err:?}"
+    );
+
+    let face_err = lower_to_build123d(
+        r#"(model (part body (shell 1 :faces "target-id:body:edge:0:0-0-0_10-0-0" (box 10 10 10))))"#,
+    )
+    .expect_err("edge target id should fail face selector");
+    assert!(
+        face_err
+            .message
+            .contains("included non-face target id `body:edge:0:0-0-0_10-0-0`"),
+        "{face_err:?}"
+    );
 }
 
 #[test]

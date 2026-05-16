@@ -2,28 +2,53 @@
   import Window from './Window.svelte';
   import CodePanel from './CodePanel.svelte';
 
+  type CodeModalCommitPayload = {
+    code: string;
+    title: string;
+    versionName: string;
+  };
+
   let {
     code = $bindable(''),
     title,
+    defaultTitle = '',
+    defaultVersionName = '',
     onclose,
+    onApply,
     onCommit,
     onFork,
   }: {
     code?: string;
     title: string;
+    defaultTitle?: string;
+    defaultVersionName?: string;
     onclose: () => void;
-    onCommit?: (code: string) => Promise<void> | void;
-    onFork?: (code: string) => Promise<void> | void;
+    onApply?: (code: string) => Promise<unknown> | unknown;
+    onCommit?: (payload: CodeModalCommitPayload) => Promise<void> | void;
+    onFork?: (payload: CodeModalCommitPayload) => Promise<void> | void;
   } = $props();
 
-  let x = $state(100);
-  let y = $state(100);
-  let width = $state(1000);
-  let height = $state(700);
+  let x = $state(60);
+  let y = $state(40);
+  let width = $state(960);
+  let height = $state(620);
 
   let copyState = $state<'idle' | 'copied'>('idle');
-  let commitState = $state<'idle' | 'committing' | 'forking'>('idle');
+  let commitState = $state<'idle' | 'applying' | 'committing' | 'forking'>('idle');
   let commitError = $state('');
+  let draftTitle = $state('');
+  let draftVersionName = $state('');
+  let initializedDraftFields = $state(false);
+
+  $effect(() => {
+    if (commitState !== 'idle') return;
+    if (!initializedDraftFields) {
+      draftTitle = defaultTitle || title;
+      draftVersionName = defaultVersionName || 'V-manual';
+      initializedDraftFields = true;
+      return;
+    }
+  });
 
   function formatCommitError(error: unknown): string {
     if (error instanceof Error) return error.message;
@@ -45,12 +70,34 @@
     }
   }
 
+  async function handleApply() {
+    if (!onApply || commitState !== 'idle') return;
+    commitState = 'applying';
+    commitError = '';
+    try {
+      await onApply(code);
+    } catch (e: unknown) {
+      console.error('Failed to apply code:', e);
+      commitError = formatCommitError(e);
+    } finally {
+      commitState = 'idle';
+    }
+  }
+
+  function commitPayload(): CodeModalCommitPayload {
+    return {
+      code,
+      title: draftTitle.trim() || defaultTitle || title || 'Manual Edit',
+      versionName: draftVersionName.trim() || defaultVersionName || 'V-manual',
+    };
+  }
+
   async function handleCommit() {
     if (!onCommit || commitState !== 'idle') return;
     commitState = 'committing';
     commitError = '';
     try {
-      await onCommit(code);
+      await onCommit(commitPayload());
     } catch (e: unknown) {
       console.error('Failed to commit code:', e);
       commitError = formatCommitError(e);
@@ -64,7 +111,7 @@
     commitState = 'forking';
     commitError = '';
     try {
-      await onFork(code);
+      await onFork(commitPayload());
     } catch (e: unknown) {
       console.error('Failed to fork code:', e);
       commitError = formatCommitError(e);
@@ -100,6 +147,34 @@
         {/if}
       </div>
       <div class="footer-actions">
+        <div class="commit-fields">
+          <input
+            class="commit-input"
+            aria-label="Version title"
+            bind:value={draftTitle}
+            placeholder="Title"
+            disabled={commitState !== 'idle'}
+          />
+          <input
+            class="commit-input commit-input-version"
+            aria-label="Version name"
+            bind:value={draftVersionName}
+            placeholder="Version"
+            disabled={commitState !== 'idle'}
+          />
+        </div>
+        <button
+          class="btn btn-secondary"
+          onclick={handleApply}
+          disabled={!onApply || commitState !== 'idle'}
+          title="Render code changes without creating a history version"
+        >
+          {#if commitState === 'applying'}
+            APPLYING...
+          {:else}
+            APPLY
+          {/if}
+        </button>
         <button
           class="btn btn-secondary"
           onclick={handleFork}
@@ -121,7 +196,7 @@
           {#if commitState === 'committing'}
             COMMITTING...
           {:else}
-            COMMIT AS NEW VERSION
+            COMMIT VERSION
           {/if}
         </button>
       </div>
@@ -178,5 +253,29 @@
     gap: 8px;
     align-items: center;
     justify-content: flex-end;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .commit-fields {
+    display: flex;
+    gap: 8px;
+    min-width: 260px;
+  }
+
+  .commit-input {
+    min-width: 0;
+    width: 170px;
+    height: 34px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg);
+    color: var(--text);
+    padding: 0 10px;
+    font-size: 0.72rem;
+    font-family: inherit;
+  }
+
+  .commit-input-version {
+    width: 110px;
   }
 </style>

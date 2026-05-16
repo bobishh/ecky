@@ -3,19 +3,18 @@ use crate::freecad::resolve_resource_path;
 use crate::mcp::contracts::*;
 use crate::mcp::runtime;
 use crate::models::{
-    AgentSession, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, ControlPrimitive,
-    ControlView, ControlViewSource, DesignOutput, Engine, InteractionMode, MacroDialect,
+    AgentDraft, AgentSession, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle,
+    ControlPrimitive, ControlView, ControlViewSource, DesignOutput, InteractionMode, MacroDialect,
     MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest, ModelSourceKind,
-    PathResolver, UiSpec,
+    PathResolver, SourceLanguage, UiSpec, WorkspaceSceneLens, WorkspaceSceneRepresentation,
+    WorkspaceSceneRepresentationKind, WorkspaceSceneRepresentationStatus, WorkspaceSceneTopology,
 };
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
 };
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::{agent_dialogue, history, render};
-use base64::Engine as _;
 use std::collections::HashMap;
-use std::fs;
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -332,31 +331,6 @@ fn try_record_agent_error(
             details: err.details.clone(),
         },
     );
-    if let Some(thread_id) = thread_id {
-        let timestamp = now_secs();
-        let _ = db::add_message(
-            conn,
-            &thread_id,
-            &crate::models::Message {
-                id: Uuid::new_v4().to_string(),
-                role: crate::models::MessageRole::Assistant,
-                content: err.message.clone(),
-                status: crate::models::MessageStatus::Error,
-                output: None,
-                usage: None,
-                artifact_bundle: None,
-                model_manifest: None,
-                agent_origin: Some(agent_dialogue::build_agent_origin(
-                    &dialogue_identity(ctx),
-                    timestamp,
-                )),
-                image_data: None,
-                visual_kind: None,
-                attachment_images: Vec::new(),
-                timestamp,
-            },
-        );
-    }
 }
 
 fn dialogue_identity(ctx: &AgentContext) -> agent_dialogue::AgentDialogueIdentity {
@@ -368,63 +342,6 @@ fn dialogue_identity(ctx: &AgentContext) -> agent_dialogue::AgentDialogueIdentit
         llm_model_id: ctx.llm_model_id.clone(),
         llm_model_label: ctx.llm_model_label.clone(),
     }
-}
-
-fn selected_generation_engine(state: &AppState) -> AppResult<Engine> {
-    let config = state.config.lock().unwrap();
-    let engine = config
-        .engines
-        .iter()
-        .find(|candidate| candidate.id == config.selected_engine_id)
-        .cloned()
-        .ok_or_else(|| AppError::validation("No active engine selected."))?;
-    if engine.provider != "ollama" && engine.api_key.trim().is_empty() {
-        return Err(AppError::validation(format!(
-            "Selected engine '{}' has no API key configured.",
-            engine.name
-        )));
-    }
-    Ok(engine)
-}
-
-fn attachment_image_data_url(attachment: &crate::contracts::Attachment) -> Option<String> {
-    if attachment.kind != crate::contracts::AttachmentKind::Image {
-        return None;
-    }
-    if let Some(data_url) = attachment
-        .data_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| value.starts_with("data:image/"))
-    {
-        return Some(data_url.to_string());
-    }
-    if attachment.path.trim().is_empty() {
-        return None;
-    }
-    let bytes = fs::read(&attachment.path).ok()?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let ext = attachment
-        .name
-        .split('.')
-        .next_back()
-        .unwrap_or("png")
-        .to_ascii_lowercase();
-    let mime = if ext == "jpg" || ext == "jpeg" {
-        "image/jpeg"
-    } else if ext == "webp" {
-        "image/webp"
-    } else {
-        "image/png"
-    };
-    Some(format!("data:{};base64,{}", mime, b64))
-}
-
-fn attachment_image_data_urls(attachments: &[crate::contracts::Attachment]) -> Vec<String> {
-    attachments
-        .iter()
-        .filter_map(attachment_image_data_url)
-        .collect()
 }
 
 struct TraceEvent<'a> {
@@ -1619,18 +1536,24 @@ pub async fn handle_session_reply_save(
     })
 }
 
-pub async fn handle_concept_preview_generate(
+pub async fn handle_concept_preview_save(
     state: &AppState,
-    req: ConceptPreviewGenerateRequest,
+    req: ConceptPreviewSaveRequest,
     ctx: &AgentContext,
-) -> AppResult<ConceptPreviewGenerateResponse> {
+) -> AppResult<ConceptPreviewSaveResponse> {
     let ctx = ctx.with_override(&req.identity);
-    let prompt = req.prompt.trim();
-    if prompt.is_empty() {
+    let image_data = req.image_data.trim();
+    if image_data.is_empty() {
         return Err(AppError::validation(
-            "concept_preview_generate requires a non-empty prompt.",
+            "concept_preview_save requires non-empty imageData.",
         ));
     }
+    if !image_data.starts_with("data:image/") {
+        return Err(AppError::validation(
+            "concept_preview_save imageData must be a data:image URL produced by the MCP agent.",
+        ));
+    }
+    let caption = req.caption.trim().to_string();
 
     let target = if let Some(explicit_target) =
         resolve_explicit_session_target(state, req.thread_id.clone(), req.message_id.clone(), None)
@@ -1642,19 +1565,12 @@ pub async fn handle_concept_preview_generate(
             .await?
             .ok_or_else(|| {
                 AppError::validation(
-                    "No active session target is available for concept_preview_generate.",
+                    "No active session target is available for concept_preview_save.",
                 )
             })?
     };
 
     ensure_thread_claim(state, &ctx, &target.thread_id, false).await?;
-
-    let engine = selected_generation_engine(state)?;
-    let images = attachment_image_data_urls(&req.attachments);
-    let preview = crate::llm::generate_concept_preview(&engine, prompt, images)
-        .await
-        .map_err(AppError::provider)?;
-    let image_data = crate::llm::svg_to_data_url(&preview.data.svg).map_err(AppError::provider)?;
 
     let timestamp = now_secs();
     let message_id = Uuid::new_v4().to_string();
@@ -1664,17 +1580,17 @@ pub async fn handle_concept_preview_generate(
         &crate::models::Message {
             id: message_id.clone(),
             role: crate::models::MessageRole::Assistant,
-            content: preview.data.caption.clone(),
+            content: caption.clone(),
             status: crate::models::MessageStatus::Success,
             output: None,
-            usage: preview.usage,
+            usage: None,
             artifact_bundle: None,
             model_manifest: None,
             agent_origin: Some(agent_dialogue::build_agent_origin(
                 &dialogue_identity(&ctx),
                 timestamp,
             )),
-            image_data: Some(image_data.clone()),
+            image_data: Some(image_data.to_string()),
             visual_kind: Some(crate::models::MessageVisualKind::ConceptPreview),
             attachment_images: Vec::new(),
             timestamp,
@@ -1683,11 +1599,11 @@ pub async fn handle_concept_preview_generate(
     .await?;
     state.emit_history_updated();
 
-    Ok(ConceptPreviewGenerateResponse {
+    Ok(ConceptPreviewSaveResponse {
         thread_id: target.thread_id,
         message_id,
-        image_data,
-        caption: preview.data.caption,
+        image_data: image_data.to_string(),
+        caption,
     })
 }
 
@@ -1956,17 +1872,35 @@ pub async fn handle_ui_dispatch(
     Ok(UiDispatchResponse { success: true })
 }
 
+fn build_thread_list_entry(
+    conn: &rusqlite::Connection,
+    thread: crate::models::Thread,
+) -> AppResult<ThreadListEntry> {
+    let latest_pending_message_id = db::get_latest_pending_user_message_id(conn, &thread.id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    Ok(ThreadListEntry {
+        thread_id: thread.id,
+        title: thread.title,
+        updated_at: thread.updated_at,
+        version_count: thread.version_count,
+        pending_count: thread.pending_count,
+        queued_count: thread.queued_count,
+        error_count: thread.error_count,
+        status: thread.status,
+        finalized_at: thread.finalized_at,
+        pending_confirm: thread.pending_confirm,
+        latest_pending_message_id,
+    })
+}
+
 pub async fn handle_thread_list(state: &AppState) -> AppResult<ThreadListResponse> {
     let conn = state.db.lock().await;
     let threads = history::get_history(&conn)?;
-    drop(conn);
     let entries = threads
         .into_iter()
-        .map(|t| ThreadListEntry {
-            thread_id: t.id,
-            title: t.title,
-        })
-        .collect();
+        .map(|thread| build_thread_list_entry(&conn, thread))
+        .collect::<AppResult<Vec<_>>>()?;
+    drop(conn);
 
     Ok(ThreadListResponse { threads: entries })
 }
@@ -2121,6 +2055,8 @@ pub async fn handle_thread_meta_get(
 ) -> AppResult<ThreadMetaResponse> {
     let conn = state.db.lock().await;
     let t = history::get_thread(&conn, &req.thread_id)?;
+    let latest_pending_message_id = db::get_latest_pending_user_message_id(&conn, &req.thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
     drop(conn);
     let claim_owner = claim_owner_for_thread(state, &req.thread_id).await;
     Ok(ThreadMetaResponse {
@@ -2133,6 +2069,8 @@ pub async fn handle_thread_meta_get(
         error_count: t.error_count,
         status: t.status,
         finalized_at: t.finalized_at,
+        pending_confirm: t.pending_confirm,
+        latest_pending_message_id,
         claim_owner,
     })
 }
@@ -2594,6 +2532,96 @@ fn map_target_resolved_from(
     }
 }
 
+fn build_agent_scene_packet(
+    design_output: &DesignOutput,
+    artifact_bundle: Option<&ArtifactBundle>,
+    model_manifest: Option<&ModelManifest>,
+    has_draft: bool,
+) -> crate::models::AgentScenePacket {
+    let has_source = !design_output.macro_code.trim().is_empty();
+    let exact_committed = artifact_bundle.is_some() && model_manifest.is_some();
+    let sketch_status = if has_source {
+        WorkspaceSceneRepresentationStatus::Rebuildable
+    } else {
+        WorkspaceSceneRepresentationStatus::Pending
+    };
+    let draft_status = if has_draft {
+        WorkspaceSceneRepresentationStatus::Fresh
+    } else if has_source {
+        WorkspaceSceneRepresentationStatus::Stale
+    } else {
+        WorkspaceSceneRepresentationStatus::Pending
+    };
+    let exact_status = if exact_committed {
+        WorkspaceSceneRepresentationStatus::Committed
+    } else if has_source {
+        WorkspaceSceneRepresentationStatus::Rebuildable
+    } else {
+        WorkspaceSceneRepresentationStatus::Pending
+    };
+    let active_lens = if exact_status == WorkspaceSceneRepresentationStatus::Committed {
+        WorkspaceSceneLens::Exact
+    } else if draft_status == WorkspaceSceneRepresentationStatus::Fresh {
+        WorkspaceSceneLens::Draft
+    } else {
+        WorkspaceSceneLens::Sketch
+    };
+    let mut allowed_patch_targets = Vec::new();
+    if has_source {
+        allowed_patch_targets.push("macroBufferReplaceAndPreview".to_string());
+    }
+    if design_output.source_language == SourceLanguage::EckyIrV0 {
+        allowed_patch_targets.push("eckyAstReplaceAndRender".to_string());
+    }
+    if model_manifest.is_some() {
+        allowed_patch_targets.push("semanticManifestPatch".to_string());
+    }
+    if has_draft {
+        allowed_patch_targets.push("commitPreviewVersion".to_string());
+    }
+
+    crate::models::AgentScenePacket {
+        schema_version: 1,
+        active_lens,
+        representations: vec![
+            WorkspaceSceneRepresentation {
+                kind: WorkspaceSceneRepresentationKind::SketchIntent,
+                status: sketch_status,
+            },
+            WorkspaceSceneRepresentation {
+                kind: WorkspaceSceneRepresentationKind::MeshDraft,
+                status: draft_status,
+            },
+            WorkspaceSceneRepresentation {
+                kind: WorkspaceSceneRepresentationKind::ExactModel,
+                status: exact_status,
+            },
+        ],
+        topology: WorkspaceSceneTopology {
+            edge_target_count: artifact_bundle
+                .map(|bundle| bundle.edge_targets.len())
+                .unwrap_or(0),
+            face_target_count: artifact_bundle
+                .map(|bundle| bundle.face_targets.len())
+                .unwrap_or(0),
+            selection_target_count: model_manifest
+                .map(|manifest| manifest.selection_targets.len())
+                .unwrap_or(0),
+            control_primitive_count: model_manifest
+                .map(|manifest| manifest.control_primitives.len())
+                .unwrap_or(0),
+            control_relation_count: model_manifest
+                .map(|manifest| manifest.control_relations.len())
+                .unwrap_or(0),
+            control_view_count: model_manifest
+                .map(|manifest| manifest.control_views.len())
+                .unwrap_or(0),
+        },
+        allowed_patch_targets,
+    }
+}
+
+#[allow(dead_code)]
 fn build_target_meta_response(
     target: &crate::services::target::EditableTarget,
 ) -> TargetMetaResponse {
@@ -2685,6 +2713,12 @@ fn build_target_meta_response(
             .as_ref()
             .map(|manifest| manifest.control_views.len())
             .unwrap_or(0),
+        scene_packet: build_agent_scene_packet(
+            &target.design_output,
+            target.artifact_bundle.as_ref(),
+            target.model_manifest.as_ref(),
+            false,
+        ),
     }
 }
 
@@ -2713,16 +2747,42 @@ pub async fn handle_target_meta_get(
             "Reading target metadata.",
         )?;
 
-        let target = crate::services::target::resolve_editable_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let preview = session_render_preview_for_request(
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        );
+        let has_draft = preview.is_some();
+        let (target_thread_id, target_message_id, design_output, artifact_bundle, model_manifest) =
+            if let Some(preview) = preview {
+                (
+                    preview.thread_id,
+                    preview.preview_id,
+                    preview.design_output,
+                    Some(preview.artifact_bundle),
+                    Some(preview.model_manifest),
+                )
+            } else {
+                let target = crate::services::target::resolve_editable_target(
+                    &conn,
+                    app,
+                    req.thread_id.clone(),
+                    req.message_id.clone(),
+                )?;
+                (
+                    target.thread_id,
+                    target.message_id,
+                    target.design_output,
+                    target.artifact_bundle,
+                    target.model_manifest,
+                )
+            };
 
-        tracked_thread_id = Some(target.thread_id.clone());
-        tracked_message_id = Some(target.message_id.clone());
-        tracked_model_id = target.model_id();
+        tracked_thread_id = Some(target_thread_id.clone());
+        tracked_message_id = Some(target_message_id.clone());
+        tracked_model_id = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.model_id.clone());
 
         persist_agent_session(
             &conn,
@@ -2734,7 +2794,94 @@ pub async fn handle_target_meta_get(
             "",
         )?;
 
-        Ok(build_target_meta_response(&target))
+        let (range_count, number_count, select_count, checkbox_count) = design_output
+            .ui_spec
+            .fields
+            .iter()
+            .fold((0, 0, 0, 0), |acc, field| match field {
+                crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
+                crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
+                crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
+                crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
+                crate::models::UiField::Image { .. } => acc,
+            });
+        let export_formats = artifact_bundle
+            .as_ref()
+            .map(|bundle| {
+                bundle
+                    .export_artifacts
+                    .iter()
+                    .map(|artifact| artifact.format.as_str().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let has_step_export = export_formats
+            .iter()
+            .any(|format| format.eq_ignore_ascii_case("step"));
+        let step_export_path = artifact_bundle.as_ref().and_then(|bundle| {
+            bundle
+                .export_artifacts
+                .iter()
+                .find(|artifact| artifact.format.eq_ignore_ascii_case("step"))
+                .map(|artifact| artifact.path.clone())
+        });
+        let edge_target_count = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.edge_targets.len())
+            .unwrap_or(0);
+        let face_target_count = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.face_targets.len())
+            .unwrap_or(0);
+        let scene_packet = build_agent_scene_packet(
+            &design_output,
+            artifact_bundle.as_ref(),
+            model_manifest.as_ref(),
+            has_draft,
+        );
+
+        Ok(TargetMetaResponse {
+            thread_id: target_thread_id,
+            message_id: target_message_id,
+            title: design_output.title,
+            version_name: design_output.version_name,
+            model_id: artifact_bundle
+                .as_ref()
+                .map(|bundle| bundle.model_id.clone()),
+            source_language: design_output.source_language.as_str().to_string(),
+            macro_dialect: crate::mcp::authoring::macro_dialect_label(&design_output.macro_dialect)
+                .to_string(),
+            geometry_backend: design_output.geometry_backend.as_str().to_string(),
+            has_draft,
+            resolved_from: TargetResolvedFrom::Base,
+            has_artifact_bundle: artifact_bundle.is_some(),
+            has_runtime_manifest: artifact_bundle.is_some() && model_manifest.is_some(),
+            export_formats,
+            has_step_export,
+            step_export_path,
+            edge_target_count,
+            face_target_count,
+            ui_field_count: design_output.ui_spec.fields.len(),
+            range_count,
+            number_count,
+            select_count,
+            checkbox_count,
+            parameter_count: design_output.initial_params.len(),
+            has_semantic_manifest: model_manifest.is_some(),
+            control_primitive_count: model_manifest
+                .as_ref()
+                .map(|manifest| manifest.control_primitives.len())
+                .unwrap_or(0),
+            control_relation_count: model_manifest
+                .as_ref()
+                .map(|manifest| manifest.control_relations.len())
+                .unwrap_or(0),
+            control_view_count: model_manifest
+                .as_ref()
+                .map(|manifest| manifest.control_views.len())
+                .unwrap_or(0),
+            scene_packet,
+        })
     })();
 
     if let Err(err) = &result {
@@ -2777,16 +2924,39 @@ pub async fn handle_target_macro_get(
             "Reading target macro.",
         )?;
 
-        let target = crate::services::target::resolve_editable_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let preview = session_render_preview_for_request(
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        );
+        let (target_thread_id, target_message_id, design_output, artifact_bundle) =
+            if let Some(preview) = preview {
+                (
+                    preview.thread_id,
+                    preview.preview_id,
+                    preview.design_output,
+                    Some(preview.artifact_bundle),
+                )
+            } else {
+                let target = crate::services::target::resolve_editable_target(
+                    &conn,
+                    app,
+                    req.thread_id.clone(),
+                    req.message_id.clone(),
+                )?;
+                (
+                    target.thread_id,
+                    target.message_id,
+                    target.design_output,
+                    target.artifact_bundle,
+                )
+            };
 
-        tracked_thread_id = Some(target.thread_id.clone());
-        tracked_message_id = Some(target.message_id.clone());
-        tracked_model_id = target.model_id();
+        tracked_thread_id = Some(target_thread_id.clone());
+        tracked_message_id = Some(target_message_id.clone());
+        tracked_model_id = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.model_id.clone());
 
         persist_agent_session(
             &conn,
@@ -2798,19 +2968,29 @@ pub async fn handle_target_macro_get(
             "",
         )?;
 
-        let authoring_context =
-            crate::mcp::authoring::target_authoring_context(&target.design_output);
-        let artifact_digest = target.artifact_bundle.as_ref().map(artifact_bundle_digest);
+        let authoring_context = crate::mcp::authoring::target_authoring_context(&design_output);
+        let artifact_digest = artifact_bundle.as_ref().map(artifact_bundle_digest);
+        let macro_code = design_output.macro_code;
+        let lines = macro_buffer_lines(&macro_code);
+        let line_count = lines.len();
+        let digest = macro_buffer_digest(&macro_code);
+        let (window_start_line, window_end_line, truncated, window_lines) =
+            macro_buffer_line_window(&lines, req.start_line, req.end_line)?;
 
         Ok(TargetMacroResponse {
-            thread_id: target.thread_id,
-            message_id: target.message_id,
-            title: target.design_output.title,
-            version_name: target.design_output.version_name,
-            resolved_from: map_target_resolved_from(target.resolved_from),
-            macro_code: target.design_output.macro_code,
-            macro_dialect: target.design_output.macro_dialect,
-            post_processing: target.design_output.post_processing,
+            thread_id: target_thread_id,
+            message_id: target_message_id,
+            title: design_output.title,
+            version_name: design_output.version_name,
+            resolved_from: TargetResolvedFrom::Base,
+            digest,
+            line_count,
+            window_start_line,
+            window_end_line,
+            truncated,
+            lines: window_lines,
+            macro_dialect: design_output.macro_dialect,
+            post_processing: design_output.post_processing,
             authoring_context,
             artifact_digest,
         })
@@ -2847,9 +3027,303 @@ fn macro_buffers() -> &'static StdMutex<HashMap<String, SessionMacroBuffer>> {
     MACRO_BUFFERS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+#[derive(Debug, Clone)]
+pub struct StoreSessionRenderPreviewRequest {
+    pub thread_id: String,
+    pub base_message_id: Option<String>,
+    pub design_output: DesignOutput,
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+    pub draft_feedback: Option<DraftFeedbackSeed>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRenderPreview {
+    pub session_id: String,
+    pub preview_id: String,
+    pub thread_id: String,
+    pub base_message_id: Option<String>,
+    pub design_output: DesignOutput,
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+    pub draft_feedback: Option<crate::models::AgentDraftFeedback>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftFeedbackSeed {
+    pub status: crate::models::AgentDraftFeedbackStatus,
+    pub summary: String,
+    pub items: Vec<crate::models::AgentDraftFeedbackItem>,
+    pub source: crate::models::AgentDraftFeedbackSource,
+}
+
+static SESSION_RENDER_PREVIEWS: OnceLock<StdMutex<HashMap<String, SessionRenderPreview>>> =
+    OnceLock::new();
+
+fn session_render_previews() -> &'static StdMutex<HashMap<String, SessionRenderPreview>> {
+    SESSION_RENDER_PREVIEWS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn preview_matches_request(
+    preview: &SessionRenderPreview,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+) -> bool {
+    if let Some(thread_id) = thread_id {
+        if preview.thread_id != thread_id {
+            return false;
+        }
+    }
+    if let Some(message_id) = message_id {
+        message_id == preview.preview_id || preview.base_message_id.as_deref() == Some(message_id)
+    } else {
+        true
+    }
+}
+
+pub fn session_render_preview_for_request(
+    ctx: &AgentContext,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+) -> Option<SessionRenderPreview> {
+    session_render_previews()
+        .lock()
+        .unwrap()
+        .get(&ctx.session_id)
+        .filter(|preview| preview_matches_request(preview, thread_id, message_id))
+        .cloned()
+}
+
+fn session_render_preview_from_draft(draft: AgentDraft) -> SessionRenderPreview {
+    SessionRenderPreview {
+        session_id: draft.session_id,
+        preview_id: draft.preview_id,
+        thread_id: draft.thread_id,
+        base_message_id: draft.base_message_id,
+        design_output: draft.design_output,
+        artifact_bundle: draft.artifact_bundle,
+        model_manifest: draft.model_manifest,
+        draft_feedback: draft.draft_feedback,
+        updated_at: draft.updated_at,
+    }
+}
+
+fn agent_draft_from_session_render_preview(preview: SessionRenderPreview) -> AgentDraft {
+    AgentDraft {
+        preview_id: preview.preview_id,
+        session_id: preview.session_id,
+        thread_id: preview.thread_id,
+        base_message_id: preview.base_message_id,
+        design_output: preview.design_output,
+        artifact_bundle: preview.artifact_bundle,
+        model_manifest: preview.model_manifest,
+        draft_feedback: preview.draft_feedback,
+        updated_at: preview.updated_at,
+    }
+}
+
+fn draft_feedback_from_structural_verification(
+    result: &crate::contracts::StructuralVerificationResult,
+) -> DraftFeedbackSeed {
+    let status = if result.passed {
+        crate::models::AgentDraftFeedbackStatus::Passed
+    } else if matches!(
+        result.verifier_status,
+        crate::contracts::VerifierStatus::SkippedUnavailable
+            | crate::contracts::VerifierStatus::SkippedBackendUnavailable
+    ) {
+        crate::models::AgentDraftFeedbackStatus::Warning
+    } else {
+        crate::models::AgentDraftFeedbackStatus::Failed
+    };
+    let summary = if result.passed {
+        result.summary.trim().to_string()
+    } else if let Some(first_issue) = result.issues.first() {
+        if result.issues.len() > 1 {
+            format!(
+                "{} (+{} more)",
+                first_issue.message,
+                result.issues.len() - 1
+            )
+        } else {
+            first_issue.message.clone()
+        }
+    } else {
+        result.summary.trim().to_string()
+    };
+    let items = result
+        .issues
+        .iter()
+        .take(3)
+        .map(|issue| crate::models::AgentDraftFeedbackItem {
+            code: issue.code.clone(),
+            message: issue.message.clone(),
+        })
+        .collect();
+    DraftFeedbackSeed {
+        status,
+        summary,
+        items,
+        source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+    }
+}
+
+fn hydrate_draft_feedback(
+    preview: &SessionRenderPreview,
+    seed: Option<DraftFeedbackSeed>,
+) -> Option<crate::models::AgentDraftFeedback> {
+    seed.map(|seed| crate::models::AgentDraftFeedback {
+        session_id: preview.session_id.clone(),
+        thread_id: preview.thread_id.clone(),
+        preview_id: preview.preview_id.clone(),
+        status: seed.status,
+        summary: seed.summary,
+        items: seed.items,
+        source: seed.source,
+    })
+}
+
+pub async fn resolve_session_render_preview_for_request(
+    state: &AppState,
+    ctx: &AgentContext,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+) -> AppResult<Option<SessionRenderPreview>> {
+    if let Some(preview) = session_render_preview_for_request(ctx, thread_id, message_id) {
+        return Ok(Some(preview));
+    }
+
+    let draft = {
+        let conn = state.db.lock().await;
+        db::get_agent_draft_for_session(&conn, &ctx.session_id)
+            .map_err(|e| AppError::persistence(e.to_string()))?
+    };
+    let Some(draft) = draft else {
+        return Ok(None);
+    };
+    let preview = session_render_preview_from_draft(draft);
+    if !preview_matches_request(&preview, thread_id, message_id) {
+        return Ok(None);
+    }
+    session_render_previews()
+        .lock()
+        .unwrap()
+        .insert(ctx.session_id.clone(), preview.clone());
+    Ok(Some(preview))
+}
+
+fn clear_session_render_preview(session_id: &str) {
+    session_render_previews().lock().unwrap().remove(session_id);
+}
+
+async fn clear_session_render_preview_durable(state: &AppState, session_id: &str) -> AppResult<()> {
+    clear_session_render_preview(session_id);
+    let conn = state.db.lock().await;
+    db::delete_agent_draft_for_session(&conn, session_id)
+        .map_err(|e| AppError::persistence(e.to_string()))?;
+    Ok(())
+}
+
+pub async fn store_session_render_preview(
+    state: &AppState,
+    app: &dyn PathResolver,
+    ctx: &AgentContext,
+    req: StoreSessionRenderPreviewRequest,
+) -> AppResult<SessionRenderPreview> {
+    crate::models::validate_design_output(&req.design_output)?;
+    crate::models::validate_model_runtime_bundle(&req.model_manifest, &req.artifact_bundle)?;
+    let draft_feedback = req.draft_feedback.clone().or_else(|| {
+        Some(draft_feedback_from_structural_verification(
+            &crate::services::structural_verification::verify_structure(
+                &req.artifact_bundle,
+                &req.model_manifest,
+            ),
+        ))
+    });
+
+    let preview = SessionRenderPreview {
+        session_id: ctx.session_id.clone(),
+        preview_id: Uuid::new_v4().to_string(),
+        thread_id: req.thread_id,
+        base_message_id: req.base_message_id,
+        design_output: req.design_output,
+        artifact_bundle: req.artifact_bundle,
+        model_manifest: req.model_manifest,
+        draft_feedback: None,
+        updated_at: now_secs(),
+    };
+    let preview = SessionRenderPreview {
+        draft_feedback: hydrate_draft_feedback(&preview, draft_feedback),
+        ..preview
+    };
+
+    session_render_previews()
+        .lock()
+        .unwrap()
+        .insert(ctx.session_id.clone(), preview.clone());
+
+    {
+        let conn = state.db.lock().await;
+        db::upsert_agent_draft(
+            &conn,
+            &AgentDraft {
+                preview_id: preview.preview_id.clone(),
+                session_id: preview.session_id.clone(),
+                thread_id: preview.thread_id.clone(),
+                base_message_id: preview.base_message_id.clone(),
+                design_output: preview.design_output.clone(),
+                artifact_bundle: preview.artifact_bundle.clone(),
+                model_manifest: preview.model_manifest.clone(),
+                draft_feedback: preview.draft_feedback.clone(),
+                updated_at: preview.updated_at,
+            },
+        )
+        .map_err(|e| AppError::persistence(e.to_string()))?;
+    }
+
+    let snapshot = crate::services::session::build_runtime_snapshot(
+        Some(preview.design_output.clone()),
+        Some(preview.thread_id.clone()),
+        Some(preview.preview_id.clone()),
+        Some(preview.artifact_bundle.clone()),
+        Some(preview.model_manifest.clone()),
+        None,
+    );
+    {
+        let mut last = state.last_snapshot.lock().unwrap();
+        *last = Some(snapshot.clone());
+    }
+    crate::services::session::write_last_snapshot(app, Some(&snapshot));
+
+    state.emit_agent_draft_preview_updated(&crate::contracts::AgentDraftPreviewUpdatedEvent {
+        session_id: preview.session_id.clone(),
+        thread_id: preview.thread_id.clone(),
+        preview_id: preview.preview_id.clone(),
+        base_message_id: preview.base_message_id.clone(),
+        model_id: Some(preview.artifact_bundle.model_id.clone()),
+        design: preview.design_output.clone(),
+        artifact_bundle: preview.artifact_bundle.clone(),
+        model_manifest: preview.model_manifest.clone(),
+        feedback: preview.draft_feedback.clone(),
+    });
+
+    Ok(preview)
+}
+
 fn macro_buffer_digest(macro_code: &str) -> String {
     crate::mcp::macro_buffer::source_digest(macro_code)
 }
+
+fn ecky_ast_authoring_enabled(state: &AppState) -> bool {
+    state.config.lock().unwrap().mcp.ecky_ast_authoring
+}
+
+const DEFAULT_ECKY_AST_DEPTH: usize = 3;
+const DEFAULT_ECKY_AST_MAX_NODES: usize = 120;
+const MAX_ECKY_AST_DEPTH: usize = 12;
+const MAX_ECKY_AST_NODES: usize = 500;
+const DEFAULT_MACRO_BUFFER_WINDOW_LINES: usize = 200;
 
 fn macro_buffer_lines(macro_code: &str) -> Vec<MacroBufferLine> {
     macro_code
@@ -2860,6 +3334,1308 @@ fn macro_buffer_lines(macro_code: &str) -> Vec<MacroBufferLine> {
             text: text.to_string(),
         })
         .collect()
+}
+
+fn macro_buffer_line_window(
+    lines: &[MacroBufferLine],
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> AppResult<(usize, usize, bool, Vec<MacroBufferLine>)> {
+    let line_count = lines.len();
+    if line_count == 0 {
+        return Ok((0, 0, false, Vec::new()));
+    }
+
+    let start = start_line.unwrap_or(1);
+    if start == 0 || start > line_count {
+        return Err(AppError::validation(format!(
+            "Macro buffer startLine {} is outside buffer line count {}.",
+            start, line_count
+        )));
+    }
+
+    let requested_end = end_line.unwrap_or_else(|| {
+        std::cmp::min(
+            line_count,
+            start.saturating_add(DEFAULT_MACRO_BUFFER_WINDOW_LINES - 1),
+        )
+    });
+    if requested_end < start {
+        return Err(AppError::validation(format!(
+            "Macro buffer endLine {} is before startLine {}.",
+            requested_end, start
+        )));
+    }
+
+    let end = std::cmp::min(requested_end, line_count);
+    let window = lines[(start - 1)..end].to_vec();
+    Ok((start, end, start > 1 || end < line_count, window))
+}
+
+fn path_segment(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn core_node_kind_label(kind: &crate::ecky_core_ir::CoreNodeKind) -> &'static str {
+    match kind {
+        crate::ecky_core_ir::CoreNodeKind::Literal(_) => "Literal",
+        crate::ecky_core_ir::CoreNodeKind::Reference(_) => "Reference",
+        crate::ecky_core_ir::CoreNodeKind::Build { .. } => "Build",
+        crate::ecky_core_ir::CoreNodeKind::Let { .. } => "Let",
+        crate::ecky_core_ir::CoreNodeKind::If { .. } => "If",
+        crate::ecky_core_ir::CoreNodeKind::Call { .. } => "Call",
+        crate::ecky_core_ir::CoreNodeKind::Range { .. } => "Range",
+        crate::ecky_core_ir::CoreNodeKind::Map { .. } => "Map",
+        crate::ecky_core_ir::CoreNodeKind::Apply { .. } => "Apply",
+        crate::ecky_core_ir::CoreNodeKind::List(_) => "List",
+        crate::ecky_core_ir::CoreNodeKind::Group(_) => "Group",
+    }
+}
+
+fn core_node_child_paths<'a>(
+    node: &'a crate::ecky_core_ir::CoreNode,
+    path: &str,
+) -> Vec<(String, &'a crate::ecky_core_ir::CoreNode)> {
+    match &node.kind {
+        crate::ecky_core_ir::CoreNodeKind::Literal(_)
+        | crate::ecky_core_ir::CoreNodeKind::Reference(_) => Vec::new(),
+        crate::ecky_core_ir::CoreNodeKind::Build { bindings, result } => bindings
+            .iter()
+            .map(|binding| {
+                (
+                    format!("{}/build/bindings/{}", path, path_segment(&binding.name)),
+                    &binding.value,
+                )
+            })
+            .chain(std::iter::once((
+                format!("{path}/build/result"),
+                result.as_ref(),
+            )))
+            .collect(),
+        crate::ecky_core_ir::CoreNodeKind::Let { bindings, body } => bindings
+            .iter()
+            .map(|binding| {
+                (
+                    format!("{}/let/bindings/{}", path, path_segment(&binding.name)),
+                    &binding.value,
+                )
+            })
+            .chain(std::iter::once((format!("{path}/let/body"), body.as_ref())))
+            .collect(),
+        crate::ecky_core_ir::CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => vec![
+            (format!("{path}/if/condition"), condition.as_ref()),
+            (format!("{path}/if/then"), then_branch.as_ref()),
+            (format!("{path}/if/else"), else_branch.as_ref()),
+        ],
+        crate::ecky_core_ir::CoreNodeKind::Call { args, keywords, .. } => args
+            .iter()
+            .enumerate()
+            .map(|(idx, arg)| (format!("{path}/call/args/{idx}"), arg))
+            .chain(keywords.iter().map(|keyword| {
+                (
+                    format!("{}/call/keywords/{}", path, path_segment(&keyword.name)),
+                    keyword.source_node(),
+                )
+            }))
+            .collect(),
+        crate::ecky_core_ir::CoreNodeKind::Range { start, end } => vec![
+            (format!("{path}/range/start"), start.as_ref()),
+            (format!("{path}/range/end"), end.as_ref()),
+        ],
+        crate::ecky_core_ir::CoreNodeKind::Map { sources, body, .. } => sources
+            .iter()
+            .enumerate()
+            .map(|(idx, source)| (format!("{path}/map/sources/{idx}"), source))
+            .chain(std::iter::once((format!("{path}/map/body"), body.as_ref())))
+            .collect(),
+        crate::ecky_core_ir::CoreNodeKind::Apply { args, list, .. } => args
+            .iter()
+            .enumerate()
+            .map(|(idx, arg)| (format!("{path}/apply/args/{idx}"), arg))
+            .chain(std::iter::once((
+                format!("{path}/apply/list"),
+                list.as_ref(),
+            )))
+            .collect(),
+        crate::ecky_core_ir::CoreNodeKind::List(items) => items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| (format!("{path}/list/{idx}"), item))
+            .collect(),
+        crate::ecky_core_ir::CoreNodeKind::Group(items) => items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| (format!("{path}/group/{idx}"), item))
+            .collect(),
+    }
+}
+
+fn core_node_op_label(node: &crate::ecky_core_ir::CoreNode) -> Option<String> {
+    match &node.kind {
+        crate::ecky_core_ir::CoreNodeKind::Call { op, .. }
+        | crate::ecky_core_ir::CoreNodeKind::Apply { op, .. } => Some(format!("{op:?}")),
+        _ => None,
+    }
+}
+
+fn core_node_digest(node: &crate::ecky_core_ir::CoreNode) -> String {
+    let mut parts = vec![
+        core_node_kind_label(&node.kind).to_string(),
+        format!("{:?}", node.value_kind),
+    ];
+    match &node.kind {
+        crate::ecky_core_ir::CoreNodeKind::Literal(value) => parts.push(format!("{value:?}")),
+        crate::ecky_core_ir::CoreNodeKind::Reference(value) => parts.push(format!("{value:?}")),
+        crate::ecky_core_ir::CoreNodeKind::Call { op, .. }
+        | crate::ecky_core_ir::CoreNodeKind::Apply { op, .. } => parts.push(format!("{op:?}")),
+        crate::ecky_core_ir::CoreNodeKind::Map { params, .. } => parts.push(format!("{params:?}")),
+        crate::ecky_core_ir::CoreNodeKind::Build { bindings, .. } => parts.push(format!(
+            "bindings:{:?}",
+            bindings
+                .iter()
+                .map(|binding| &binding.name)
+                .collect::<Vec<_>>()
+        )),
+        crate::ecky_core_ir::CoreNodeKind::Let { bindings, .. } => parts.push(format!(
+            "bindings:{:?}",
+            bindings
+                .iter()
+                .map(|binding| &binding.name)
+                .collect::<Vec<_>>()
+        )),
+        crate::ecky_core_ir::CoreNodeKind::If { .. }
+        | crate::ecky_core_ir::CoreNodeKind::Range { .. }
+        | crate::ecky_core_ir::CoreNodeKind::List(_)
+        | crate::ecky_core_ir::CoreNodeKind::Group(_) => {}
+    }
+    if let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } = &node.kind {
+        parts.push(format!(
+            "keywords:{:?}",
+            keywords
+                .iter()
+                .map(|keyword| (&keyword.name, keyword.selector_payload()))
+                .collect::<Vec<_>>()
+        ));
+    }
+    for (_, child) in core_node_child_paths(node, "") {
+        parts.push(core_node_digest(child));
+    }
+    crate::mcp::macro_buffer::source_digest(&parts.join("|"))
+}
+
+fn core_param_digest(param: &crate::ecky_core_ir::CoreParameter) -> String {
+    crate::mcp::macro_buffer::source_digest(&format!(
+        "param|{}|{}|{:?}|{:?}|{}|{:?}",
+        param.key, param.label, param.kind, param.default_value, param.frozen, param.constraints
+    ))
+}
+
+fn core_part_digest(part: &crate::ecky_core_ir::CorePart) -> String {
+    crate::mcp::macro_buffer::source_digest(&format!(
+        "part|{}|{}|{}",
+        part.key,
+        part.label,
+        core_node_digest(&part.root)
+    ))
+}
+
+fn collect_core_part_clause_ast_nodes(
+    program: &crate::ecky_core_ir::CoreProgram,
+    source: &str,
+    requested_path: Option<&str>,
+    max_nodes: usize,
+    nodes: &mut Vec<EckyAstNode>,
+) -> AppResult<bool> {
+    let mut truncated = false;
+    for part in &program.parts {
+        if nodes.len() >= max_nodes {
+            return Ok(true);
+        }
+        let path = format!("/parts/{}", path_segment(&part.key));
+        if let Some(requested_path) = requested_path {
+            if requested_path != "/" && requested_path != path {
+                continue;
+            }
+        }
+        let span = source_span_for_ecky_path(source, &path)
+            .ok()
+            .map(|(start, end)| EckyAstSpan {
+                start: start as u32,
+                end: end as u32,
+            });
+        nodes.push(EckyAstNode {
+            path,
+            digest: core_part_digest(part),
+            node_id: 0,
+            kind: "Part".to_string(),
+            value_kind: "Part".to_string(),
+            op: None,
+            part_key: Some(part.key.clone()),
+            span,
+            child_paths: vec![format!("/parts/{}/root", path_segment(&part.key))],
+        });
+    }
+    if nodes.len() >= max_nodes {
+        truncated = true;
+    }
+    Ok(truncated)
+}
+
+fn collect_core_param_ast_nodes(
+    program: &crate::ecky_core_ir::CoreProgram,
+    source: &str,
+    requested_path: Option<&str>,
+    max_nodes: usize,
+    nodes: &mut Vec<EckyAstNode>,
+) -> AppResult<bool> {
+    let mut truncated = false;
+    for param in &program.parameters {
+        if nodes.len() >= max_nodes {
+            return Ok(true);
+        }
+        let path = format!("/params/{}", path_segment(&param.key));
+        if let Some(requested_path) = requested_path {
+            if requested_path != "/" && requested_path != path {
+                continue;
+            }
+        }
+        let span = source_span_for_ecky_path(source, &path)
+            .ok()
+            .map(|(start, end)| EckyAstSpan {
+                start: start as u32,
+                end: end as u32,
+            });
+        nodes.push(EckyAstNode {
+            path,
+            digest: core_param_digest(param),
+            node_id: 0,
+            kind: "Param".to_string(),
+            value_kind: format!("{:?}", param.kind),
+            op: None,
+            part_key: None,
+            span,
+            child_paths: Vec::new(),
+        });
+    }
+    if nodes.len() >= max_nodes {
+        truncated = true;
+    }
+    Ok(truncated)
+}
+
+fn collect_core_ast_nodes(
+    node: &crate::ecky_core_ir::CoreNode,
+    path: &str,
+    part_key: Option<&str>,
+    depth: usize,
+    max_nodes: usize,
+    nodes: &mut Vec<EckyAstNode>,
+) -> bool {
+    if nodes.len() >= max_nodes {
+        return true;
+    }
+    let children = core_node_child_paths(node, path);
+    let child_paths = children
+        .iter()
+        .map(|(child_path, _)| child_path.clone())
+        .collect::<Vec<_>>();
+    nodes.push(EckyAstNode {
+        path: path.to_string(),
+        digest: core_node_digest(node),
+        node_id: node.id.raw(),
+        kind: core_node_kind_label(&node.kind).to_string(),
+        value_kind: format!("{:?}", node.value_kind),
+        op: core_node_op_label(node),
+        part_key: part_key.map(str::to_string),
+        span: node.span.map(|span| EckyAstSpan {
+            start: span.start,
+            end: span.end,
+        }),
+        child_paths,
+    });
+    if depth == 0 {
+        return false;
+    }
+    for (child_path, child) in children {
+        if collect_core_ast_nodes(child, &child_path, part_key, depth - 1, max_nodes, nodes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_matching_core_ast_nodes(
+    node: &crate::ecky_core_ir::CoreNode,
+    path: &str,
+    part_key: Option<&str>,
+    requested_path: &str,
+    depth: usize,
+    max_nodes: usize,
+    nodes: &mut Vec<EckyAstNode>,
+) -> bool {
+    if path == requested_path {
+        return collect_core_ast_nodes(node, path, part_key, depth, max_nodes, nodes);
+    }
+    for (child_path, child) in core_node_child_paths(node, path) {
+        if requested_path.starts_with(&child_path)
+            && collect_matching_core_ast_nodes(
+                child,
+                &child_path,
+                part_key,
+                requested_path,
+                depth,
+                max_nodes,
+                nodes,
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_core_ast_node<'a>(
+    node: &'a crate::ecky_core_ir::CoreNode,
+    path: &str,
+    requested_path: &str,
+) -> Option<&'a crate::ecky_core_ir::CoreNode> {
+    if path == requested_path {
+        return Some(node);
+    }
+    for (child_path, child) in core_node_child_paths(node, path) {
+        if requested_path.starts_with(&child_path) {
+            if let Some(found) = find_core_ast_node(child, &child_path, requested_path) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn find_core_ast_node_in_program<'a>(
+    program: &'a crate::ecky_core_ir::CoreProgram,
+    requested_path: &str,
+) -> Option<&'a crate::ecky_core_ir::CoreNode> {
+    for part in &program.parts {
+        let root_path = format!("/parts/{}/root", path_segment(&part.key));
+        if requested_path.starts_with(&root_path) {
+            if let Some(found) = find_core_ast_node(&part.root, &root_path, requested_path) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn source_addressable_digest_for_path(
+    program: &crate::ecky_core_ir::CoreProgram,
+    requested_path: &str,
+) -> Option<String> {
+    let segments = requested_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(path_segment_decode)
+        .collect::<Vec<_>>();
+    if segments.len() == 2 && segments[0] == "params" {
+        return program
+            .parameters
+            .iter()
+            .find(|param| param.key == segments[1])
+            .map(core_param_digest);
+    }
+    if segments.len() == 2 && segments[0] == "parts" {
+        return program
+            .parts
+            .iter()
+            .find(|part| part.key == segments[1])
+            .map(core_part_digest);
+    }
+    find_core_ast_node_in_program(program, requested_path).map(core_node_digest)
+}
+
+fn raw_source_target_digest_for_path(source: &str, requested_path: &str) -> AppResult<String> {
+    let exprs = SourceExprParser::new(source).parse_all()?;
+    let target = source_target_for_ecky_path(&exprs, source, requested_path)?;
+    Ok(crate::mcp::macro_buffer::source_digest(&format!(
+        "{:?}|{}",
+        target.kind,
+        &source[target.expr.start..target.expr.end]
+    )))
+}
+
+fn edit_digest_for_ecky_path(
+    program: &crate::ecky_core_ir::CoreProgram,
+    source: &str,
+    requested_path: &str,
+) -> AppResult<String> {
+    Ok(source_addressable_digest_for_path(program, requested_path)
+        .unwrap_or(raw_source_target_digest_for_path(source, requested_path)?))
+}
+
+#[derive(Debug, Clone)]
+struct SourceExprSpan {
+    start: usize,
+    end: usize,
+    children: Vec<SourceExprSpan>,
+}
+
+impl SourceExprSpan {
+    fn atom_text<'a>(&self, source: &'a str) -> Option<&'a str> {
+        if self.children.is_empty() {
+            Some(&source[self.start..self.end])
+        } else {
+            None
+        }
+    }
+}
+
+struct SourceExprParser<'a> {
+    source: &'a str,
+    cursor: usize,
+}
+
+impl<'a> SourceExprParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self { source, cursor: 0 }
+    }
+
+    fn parse_all(mut self) -> AppResult<Vec<SourceExprSpan>> {
+        let mut exprs = Vec::new();
+        while self.skip_ws_and_comments() < self.source.len() {
+            exprs.push(self.parse_expr()?);
+        }
+        Ok(exprs)
+    }
+
+    fn skip_ws_and_comments(&mut self) -> usize {
+        while self.cursor < self.source.len() {
+            let rest = &self.source[self.cursor..];
+            if rest.starts_with(';') {
+                while self.cursor < self.source.len()
+                    && !self.source[self.cursor..].starts_with('\n')
+                {
+                    self.cursor += 1;
+                }
+            } else if let Some(ch) = rest.chars().next() {
+                if ch.is_whitespace() {
+                    self.cursor += ch.len_utf8();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        self.cursor
+    }
+
+    fn parse_expr(&mut self) -> AppResult<SourceExprSpan> {
+        self.skip_ws_and_comments();
+        if self.cursor >= self.source.len() {
+            return Err(AppError::validation("Unexpected end of Ecky source."));
+        }
+        if self.source[self.cursor..].starts_with('(') {
+            return self.parse_list();
+        }
+        if self.source[self.cursor..].starts_with('"') {
+            return self.parse_string();
+        }
+        Ok(self.parse_atom())
+    }
+
+    fn parse_list(&mut self) -> AppResult<SourceExprSpan> {
+        let start = self.cursor;
+        self.cursor += 1;
+        let mut children = Vec::new();
+        loop {
+            self.skip_ws_and_comments();
+            if self.cursor >= self.source.len() {
+                return Err(AppError::validation("Unclosed list in Ecky source."));
+            }
+            if self.source[self.cursor..].starts_with(')') {
+                self.cursor += 1;
+                return Ok(SourceExprSpan {
+                    start,
+                    end: self.cursor,
+                    children,
+                });
+            }
+            children.push(self.parse_expr()?);
+        }
+    }
+
+    fn parse_string(&mut self) -> AppResult<SourceExprSpan> {
+        let start = self.cursor;
+        self.cursor += 1;
+        let mut escaped = false;
+        while self.cursor < self.source.len() {
+            let ch = self.source[self.cursor..]
+                .chars()
+                .next()
+                .ok_or_else(|| AppError::validation("Unclosed string in Ecky source."))?;
+            self.cursor += ch.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                return Ok(SourceExprSpan {
+                    start,
+                    end: self.cursor,
+                    children: Vec::new(),
+                });
+            }
+        }
+        Err(AppError::validation("Unclosed string in Ecky source."))
+    }
+
+    fn parse_atom(&mut self) -> SourceExprSpan {
+        let start = self.cursor;
+        while self.cursor < self.source.len() {
+            let ch = self.source[self.cursor..].chars().next().unwrap();
+            if ch.is_whitespace() || ch == '(' || ch == ')' || ch == ';' {
+                break;
+            }
+            self.cursor += ch.len_utf8();
+        }
+        SourceExprSpan {
+            start,
+            end: self.cursor,
+            children: Vec::new(),
+        }
+    }
+}
+
+fn path_segment_decode(value: &str) -> String {
+    value.replace("~1", "/").replace("~0", "~")
+}
+
+fn list_head<'a>(expr: &'a SourceExprSpan, source: &'a str) -> Option<&'a str> {
+    expr.children
+        .first()
+        .and_then(|head| head.atom_text(source))
+}
+
+fn source_positional_arg<'a>(
+    expr: &'a SourceExprSpan,
+    source: &str,
+    index: usize,
+) -> Option<&'a SourceExprSpan> {
+    let mut positional = 0usize;
+    let mut idx = 1usize;
+    while idx < expr.children.len() {
+        let child = &expr.children[idx];
+        if child
+            .atom_text(source)
+            .is_some_and(|text| text.starts_with(':'))
+        {
+            idx += 2;
+            continue;
+        }
+        if positional == index {
+            return Some(child);
+        }
+        positional += 1;
+        idx += 1;
+    }
+    None
+}
+
+fn source_keyword_value<'a>(
+    expr: &'a SourceExprSpan,
+    source: &str,
+    name: &str,
+) -> Option<&'a SourceExprSpan> {
+    let expected = format!(":{name}");
+    expr.children.windows(2).find_map(|pair| {
+        if pair[0].atom_text(source) == Some(expected.as_str()) {
+            Some(&pair[1])
+        } else {
+            None
+        }
+    })
+}
+
+fn source_keyword_pair_span(
+    expr: &SourceExprSpan,
+    source: &str,
+    name: &str,
+) -> Option<(usize, usize)> {
+    let expected = format!(":{name}");
+    expr.children.windows(2).find_map(|pair| {
+        if pair[0].atom_text(source) == Some(expected.as_str()) {
+            Some((pair[0].start, pair[1].end))
+        } else {
+            None
+        }
+    })
+}
+
+fn model_form<'a>(exprs: &'a [SourceExprSpan], source: &str) -> AppResult<&'a SourceExprSpan> {
+    exprs
+        .iter()
+        .find(|expr| list_head(expr, source) == Some("model"))
+        .ok_or_else(|| AppError::validation("Ecky source has no model form."))
+}
+
+fn model_part_clause<'a>(
+    model: &'a SourceExprSpan,
+    source: &str,
+    part_key: &str,
+) -> Option<&'a SourceExprSpan> {
+    model.children.iter().find(|expr| {
+        list_head(expr, source) == Some("part")
+            && expr.children.get(1).and_then(|item| item.atom_text(source)) == Some(part_key)
+    })
+}
+
+fn model_params_form<'a>(model: &'a SourceExprSpan, source: &str) -> Option<&'a SourceExprSpan> {
+    model
+        .children
+        .iter()
+        .find(|expr| list_head(expr, source) == Some("params"))
+}
+
+fn model_param_decl<'a>(
+    params: &'a SourceExprSpan,
+    source: &str,
+    key: &str,
+) -> Option<&'a SourceExprSpan> {
+    params
+        .children
+        .iter()
+        .skip(1)
+        .find(|expr| expr.children.get(1).and_then(|item| item.atom_text(source)) == Some(key))
+}
+
+fn build_shape_clause<'a>(
+    build: &'a SourceExprSpan,
+    source: &str,
+    name: &str,
+) -> Option<&'a SourceExprSpan> {
+    build.children.iter().skip(1).find(|expr| {
+        list_head(expr, source) == Some("shape")
+            && expr.children.get(1).and_then(|item| item.atom_text(source)) == Some(name)
+    })
+}
+
+fn build_result_clause<'a>(build: &'a SourceExprSpan, source: &str) -> Option<&'a SourceExprSpan> {
+    build
+        .children
+        .iter()
+        .skip(1)
+        .find(|expr| list_head(expr, source) == Some("result"))
+}
+
+fn let_binding_pair<'a>(
+    let_expr: &'a SourceExprSpan,
+    source: &str,
+    name: &str,
+) -> Option<&'a SourceExprSpan> {
+    let_expr.children.get(1).and_then(|bindings| {
+        bindings.children.iter().find(|pair| {
+            let Some(raw_name) = pair
+                .children
+                .first()
+                .and_then(|item| item.atom_text(source))
+            else {
+                return false;
+            };
+            raw_name == name || name.contains(raw_name)
+        })
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourcePathTargetKind {
+    Root,
+    PositionalArg,
+    KeywordValue { name: String },
+    PartClause { name: String },
+    ParamDecl { name: String },
+    BuildBinding { name: String },
+    BuildResult,
+    LetBinding { name: String },
+    LetBody,
+}
+
+struct SourcePathTarget<'a> {
+    expr: &'a SourceExprSpan,
+    parent: Option<&'a SourceExprSpan>,
+    scope: Option<&'a SourceExprSpan>,
+    kind: SourcePathTargetKind,
+}
+
+fn source_target_for_ecky_path<'a>(
+    exprs: &'a [SourceExprSpan],
+    source: &str,
+    path: &str,
+) -> AppResult<SourcePathTarget<'a>> {
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(path_segment_decode)
+        .collect::<Vec<_>>();
+    let model = model_form(exprs, source)?;
+    if segments.len() == 2 && segments[0] == "params" {
+        let params = model_params_form(model, source)
+            .ok_or_else(|| AppError::validation("Ecky source has no params form."))?;
+        let param = model_param_decl(params, source, &segments[1]).ok_or_else(|| {
+            AppError::validation(format!("Ecky source has no param {}.", segments[1]))
+        })?;
+        return Ok(SourcePathTarget {
+            expr: param,
+            parent: Some(params),
+            scope: Some(model),
+            kind: SourcePathTargetKind::ParamDecl {
+                name: segments[1].clone(),
+            },
+        });
+    }
+    if segments.len() == 2 && segments[0] == "parts" {
+        let part = model_part_clause(model, source, &segments[1]).ok_or_else(|| {
+            AppError::validation(format!("Ecky source has no part {}.", segments[1]))
+        })?;
+        return Ok(SourcePathTarget {
+            expr: part,
+            parent: Some(model),
+            scope: Some(model),
+            kind: SourcePathTargetKind::PartClause {
+                name: segments[1].clone(),
+            },
+        });
+    }
+    if segments.len() < 3 || segments[0] != "parts" || segments[2] != "root" {
+        return Err(AppError::validation(format!(
+            "Ecky AST path is not source-span addressable in v1: {path}."
+        )));
+    }
+    let part_key = &segments[1];
+    let part = model_part_clause(model, source, part_key)
+        .ok_or_else(|| AppError::validation(format!("Ecky source has no part {part_key}.")))?;
+    let mut current = part
+        .children
+        .get(2)
+        .ok_or_else(|| AppError::validation(format!("Ecky part {part_key} has no root node.")))?;
+    let mut parent = None;
+    let mut scope = Some(part);
+    let mut kind = SourcePathTargetKind::Root;
+    let mut idx = 3usize;
+    while idx < segments.len() {
+        match segments.get(idx).map(String::as_str) {
+            Some("build") if list_head(current, source) == Some("build") => {
+                match segments.get(idx + 1).map(String::as_str) {
+                    Some("bindings") => {
+                        let name = segments.get(idx + 2).ok_or_else(|| {
+                            AppError::validation(format!("Invalid Ecky AST path: {path}."))
+                        })?;
+                        let shape = build_shape_clause(current, source, name).ok_or_else(|| {
+                            AppError::validation(format!(
+                                "Ecky AST source build binding not found: {path}."
+                            ))
+                        })?;
+                        parent = Some(shape);
+                        scope = Some(current);
+                        current = shape.children.get(2).ok_or_else(|| {
+                            AppError::validation(format!("Ecky build binding {name} has no value."))
+                        })?;
+                        kind = SourcePathTargetKind::BuildBinding {
+                            name: name.to_string(),
+                        };
+                        idx += 3;
+                    }
+                    Some("result") => {
+                        let result = build_result_clause(current, source).ok_or_else(|| {
+                            AppError::validation(format!(
+                                "Ecky AST source build result not found: {path}."
+                            ))
+                        })?;
+                        parent = Some(result);
+                        scope = Some(current);
+                        current = result.children.get(1).ok_or_else(|| {
+                            AppError::validation("Ecky build result has no value.")
+                        })?;
+                        kind = SourcePathTargetKind::BuildResult;
+                        idx += 2;
+                    }
+                    _ => {
+                        return Err(AppError::validation(format!(
+                            "Ecky AST path is not source-span addressable in v1: {path}."
+                        )));
+                    }
+                }
+            }
+            Some("let")
+                if list_head(current, source) == Some("let")
+                    || list_head(current, source) == Some("let*") =>
+            {
+                match segments.get(idx + 1).map(String::as_str) {
+                    Some("bindings") => {
+                        let name = segments.get(idx + 2).ok_or_else(|| {
+                            AppError::validation(format!("Invalid Ecky AST path: {path}."))
+                        })?;
+                        let binding = let_binding_pair(current, source, name).ok_or_else(|| {
+                            AppError::validation(format!(
+                                "Ecky AST source let binding not found: {path}."
+                            ))
+                        })?;
+                        parent = Some(binding);
+                        scope = Some(current);
+                        current = binding.children.get(1).ok_or_else(|| {
+                            AppError::validation(format!("Ecky let binding {name} has no value."))
+                        })?;
+                        let raw_name = binding
+                            .children
+                            .first()
+                            .and_then(|item| item.atom_text(source))
+                            .unwrap_or(name);
+                        kind = SourcePathTargetKind::LetBinding {
+                            name: raw_name.to_string(),
+                        };
+                        idx += 3;
+                    }
+                    Some("body") => {
+                        parent = Some(current);
+                        scope = Some(current);
+                        current = current
+                            .children
+                            .get(2)
+                            .ok_or_else(|| AppError::validation("Ecky let form has no body."))?;
+                        kind = SourcePathTargetKind::LetBody;
+                        idx += 2;
+                    }
+                    _ => {
+                        return Err(AppError::validation(format!(
+                            "Ecky AST path is not source-span addressable in v1: {path}."
+                        )));
+                    }
+                }
+            }
+            Some("call") if segments.get(idx + 1).map(String::as_str) == Some("args") => {
+                let arg_index = segments
+                    .get(idx + 2)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or_else(|| {
+                        AppError::validation(format!("Invalid Ecky AST path: {path}."))
+                    })?;
+                parent = Some(current);
+                scope = Some(current);
+                current = source_positional_arg(current, source, arg_index).ok_or_else(|| {
+                    AppError::validation(format!("Ecky AST source arg path not found: {path}."))
+                })?;
+                kind = SourcePathTargetKind::PositionalArg;
+                idx += 3;
+            }
+            Some("call") if segments.get(idx + 1).map(String::as_str) == Some("keywords") => {
+                let keyword = segments.get(idx + 2).ok_or_else(|| {
+                    AppError::validation(format!("Invalid Ecky AST path: {path}."))
+                })?;
+                parent = Some(current);
+                scope = Some(current);
+                current = source_keyword_value(current, source, keyword).ok_or_else(|| {
+                    AppError::validation(format!("Ecky AST source keyword path not found: {path}."))
+                })?;
+                kind = SourcePathTargetKind::KeywordValue {
+                    name: keyword.to_string(),
+                };
+                idx += 3;
+            }
+            _ => {
+                return Err(AppError::validation(format!(
+                    "Ecky AST path is not source-span addressable in v1: {path}."
+                )));
+            }
+        }
+    }
+    Ok(SourcePathTarget {
+        expr: current,
+        parent,
+        scope,
+        kind,
+    })
+}
+
+fn source_span_for_ecky_path(source: &str, path: &str) -> AppResult<(usize, usize)> {
+    let exprs = SourceExprParser::new(source).parse_all()?;
+    let target = source_target_for_ecky_path(&exprs, source, path)?;
+    Ok((target.expr.start, target.expr.end))
+}
+
+fn source_anchor_span_for_edit(source: &str, path: &str) -> AppResult<(usize, usize)> {
+    let exprs = SourceExprParser::new(source).parse_all()?;
+    let target = source_target_for_ecky_path(&exprs, source, path)?;
+    match (&target.kind, target.parent) {
+        (SourcePathTargetKind::KeywordValue { name }, Some(parent)) => {
+            source_keyword_pair_span(parent, source, name).ok_or_else(|| {
+                AppError::validation(format!("Ecky AST source keyword pair not found: {path}."))
+            })
+        }
+        (
+            SourcePathTargetKind::BuildBinding { .. }
+            | SourcePathTargetKind::BuildResult
+            | SourcePathTargetKind::LetBinding { .. },
+            Some(parent),
+        ) => Ok((parent.start, parent.end)),
+        _ => Ok((target.expr.start, target.expr.end)),
+    }
+}
+
+fn expand_delete_span(source: &str, start: usize, end: usize) -> (usize, usize) {
+    if end < source.len() {
+        if let Some(ch) = source[end..].chars().next() {
+            if ch.is_whitespace() {
+                return (start, end + ch.len_utf8());
+            }
+        }
+    }
+    if start > 0 {
+        if let Some((prev_start, ch)) = source[..start].char_indices().last() {
+            if ch.is_whitespace() {
+                return (prev_start, end);
+            }
+        }
+    }
+    (start, end)
+}
+
+fn validate_ecky_identifier(name: &str) -> AppResult<&str> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with(':')
+        || trimmed
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch == '(' || ch == ')' || ch == '"' || ch == ';')
+    {
+        return Err(AppError::validation(format!(
+            "Invalid Ecky identifier for rename: {name}."
+        )));
+    }
+    Ok(trimmed)
+}
+
+fn collect_identifier_spans(
+    expr: &SourceExprSpan,
+    source: &str,
+    name: &str,
+    spans: &mut Vec<(usize, usize)>,
+) {
+    if let Some(text) = expr.atom_text(source) {
+        if text == name {
+            spans.push((expr.start, expr.end));
+        }
+        return;
+    }
+    for child in &expr.children {
+        collect_identifier_spans(child, source, name, spans);
+    }
+}
+
+fn rewrite_ranges(source: &str, ranges: &[(usize, usize)], replacement: &str) -> AppResult<String> {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_by_key(|(start, _)| *start);
+    for pair in sorted.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            return Err(AppError::validation("Overlapping Ecky AST rename ranges."));
+        }
+    }
+    let mut next = source.to_string();
+    for (start, end) in sorted.into_iter().rev() {
+        if start >= end
+            || end > next.len()
+            || !next.is_char_boundary(start)
+            || !next.is_char_boundary(end)
+        {
+            return Err(AppError::validation(format!(
+                "Invalid Ecky AST rename range {start}..{end}."
+            )));
+        }
+        next.replace_range(start..end, replacement);
+    }
+    Ok(next)
+}
+
+fn collect_identifier_spans_excluding_shadowed_lets(
+    expr: &SourceExprSpan,
+    source: &str,
+    name: &str,
+    spans: &mut Vec<(usize, usize)>,
+) {
+    if let Some(text) = expr.atom_text(source) {
+        if text == name {
+            spans.push((expr.start, expr.end));
+        }
+        return;
+    }
+
+    let head = list_head(expr, source);
+    if matches!(head, Some("let") | Some("let*")) {
+        let mut shadows_name = false;
+        if let Some(bindings) = expr.children.get(1) {
+            for binding in &bindings.children {
+                if binding
+                    .children
+                    .first()
+                    .and_then(|item| item.atom_text(source))
+                    == Some(name)
+                {
+                    shadows_name = true;
+                }
+                for child in binding.children.iter().skip(1) {
+                    collect_identifier_spans_excluding_shadowed_lets(child, source, name, spans);
+                }
+            }
+        }
+        if !shadows_name {
+            for child in expr.children.iter().skip(2) {
+                collect_identifier_spans_excluding_shadowed_lets(child, source, name, spans);
+            }
+        }
+        return;
+    }
+
+    for child in &expr.children {
+        collect_identifier_spans_excluding_shadowed_lets(child, source, name, spans);
+    }
+}
+
+fn rename_ecky_source_target(source: &str, path: &str, new_name: &str) -> AppResult<String> {
+    let new_name = validate_ecky_identifier(new_name)?;
+    let exprs = SourceExprParser::new(source).parse_all()?;
+    let target = source_target_for_ecky_path(&exprs, source, path)?;
+    let mut ranges = Vec::new();
+    match (&target.kind, target.parent, target.scope) {
+        (SourcePathTargetKind::BuildBinding { name }, Some(shape), Some(build)) => {
+            if build_shape_clause(build, source, new_name).is_some() {
+                return Err(AppError::validation(format!(
+                    "Ecky build binding {new_name} already exists."
+                )));
+            }
+            let name_atom = shape.children.get(1).ok_or_else(|| {
+                AppError::validation(format!("Ecky build binding {name} has no name atom."))
+            })?;
+            ranges.push((name_atom.start, name_atom.end));
+            let shape_index = build
+                .children
+                .iter()
+                .position(|child| child.start == shape.start && child.end == shape.end)
+                .ok_or_else(|| AppError::validation("Ecky build binding parent not found."))?;
+            for child in build.children.iter().skip(shape_index + 1) {
+                collect_identifier_spans(child, source, name, &mut ranges);
+            }
+        }
+        (SourcePathTargetKind::LetBinding { name }, Some(binding), Some(let_expr)) => {
+            let duplicate = let_expr
+                .children
+                .get(1)
+                .map(|bindings| {
+                    bindings.children.iter().any(|pair| {
+                        pair.children
+                            .first()
+                            .and_then(|item| item.atom_text(source))
+                            == Some(new_name)
+                    })
+                })
+                .unwrap_or(false);
+            if duplicate {
+                return Err(AppError::validation(format!(
+                    "Ecky let binding {new_name} already exists."
+                )));
+            }
+            let name_atom = binding.children.first().ok_or_else(|| {
+                AppError::validation(format!("Ecky let binding {name} has no name atom."))
+            })?;
+            ranges.push((name_atom.start, name_atom.end));
+            let body = let_expr
+                .children
+                .get(2)
+                .ok_or_else(|| AppError::validation("Ecky let form has no body."))?;
+            collect_identifier_spans(body, source, name, &mut ranges);
+        }
+        (SourcePathTargetKind::PartClause { name }, Some(_), Some(model)) => {
+            if model_part_clause(model, source, new_name).is_some() {
+                return Err(AppError::validation(format!(
+                    "Ecky part {new_name} already exists."
+                )));
+            }
+            let part = target.expr;
+            let name_atom = part.children.get(1).ok_or_else(|| {
+                AppError::validation(format!("Ecky part {name} has no name atom."))
+            })?;
+            ranges.push((name_atom.start, name_atom.end));
+        }
+        (SourcePathTargetKind::ParamDecl { name }, Some(_), Some(model)) => {
+            let params = model_params_form(model, source)
+                .ok_or_else(|| AppError::validation("Ecky source has no params form."))?;
+            if model_param_decl(params, source, new_name).is_some() {
+                return Err(AppError::validation(format!(
+                    "Ecky param {new_name} already exists."
+                )));
+            }
+            let param = target.expr;
+            let name_atom = param.children.get(1).ok_or_else(|| {
+                AppError::validation(format!("Ecky param {name} has no name atom."))
+            })?;
+            ranges.push((name_atom.start, name_atom.end));
+            for child in &model.children {
+                if child.start == params.start && child.end == params.end {
+                    continue;
+                }
+                collect_identifier_spans_excluding_shadowed_lets(child, source, name, &mut ranges);
+            }
+        }
+        _ => {
+            return Err(AppError::validation(format!(
+                "Ecky AST rename is not supported for path: {path}."
+            )));
+        }
+    }
+    let next_source = rewrite_ranges(source, &ranges, new_name)?;
+    crate::ecky_scheme::compile_to_core_program(&next_source).map_err(|err| {
+        AppError::validation(format!(
+            "Rename produced invalid Ecky source at {path}: {err}"
+        ))
+    })?;
+    Ok(next_source)
+}
+
+fn replace_ecky_ast_source(
+    source: &str,
+    expected_source_digest: &str,
+    path: &str,
+    expected_node_digest: &str,
+    operation: &EckyAstEditOperation,
+    replacement_source: Option<&str>,
+    new_name: Option<&str>,
+) -> AppResult<String> {
+    crate::mcp::macro_buffer::assert_expected_digest(source, expected_source_digest)?;
+    let program = crate::ecky_scheme::compile_to_core_program(source)
+        .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+    let exprs = SourceExprParser::new(source).parse_all()?;
+    let target = source_target_for_ecky_path(&exprs, source, path)?;
+    let target_kind = target.kind.clone();
+    let node = find_core_ast_node_in_program(&program, path);
+    let actual_node_digest = edit_digest_for_ecky_path(&program, source, path)?;
+    if actual_node_digest != expected_node_digest {
+        return Err(AppError::validation(format!(
+            "Ecky AST node digest mismatch at {path}: expected {expected_node_digest}, actual {actual_node_digest}."
+        )));
+    }
+    if matches!(operation, EckyAstEditOperation::Rename) {
+        let new_name = new_name
+            .or(replacement_source)
+            .ok_or_else(|| AppError::validation("newName is required for Ecky AST rename."))?;
+        return rename_ecky_source_target(source, path, new_name);
+    }
+
+    let replacement = match operation {
+        EckyAstEditOperation::Replace
+        | EckyAstEditOperation::InsertBefore
+        | EckyAstEditOperation::InsertAfter => replacement_source
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::validation("replacementSource is required for Ecky AST replace/insert.")
+            })?,
+        EckyAstEditOperation::Delete => "",
+        EckyAstEditOperation::Rename => unreachable!("rename returned above"),
+    };
+
+    let (start, end) = match operation {
+        EckyAstEditOperation::Replace => {
+            let core_span = if matches!(
+                target_kind,
+                SourcePathTargetKind::Root
+                    | SourcePathTargetKind::PositionalArg
+                    | SourcePathTargetKind::KeywordValue { .. }
+            ) {
+                node.and_then(|node| node.span)
+                    .map(|span| (span.start as usize, span.end as usize))
+            } else {
+                None
+            };
+            match core_span {
+                Some((start, end))
+                    if start < end
+                        && end <= source.len()
+                        && source.is_char_boundary(start)
+                        && source.is_char_boundary(end) =>
+                {
+                    (start, end)
+                }
+                _ => source_span_for_ecky_path(source, path)?,
+            }
+        }
+        EckyAstEditOperation::InsertBefore
+        | EckyAstEditOperation::InsertAfter
+        | EckyAstEditOperation::Delete => source_anchor_span_for_edit(source, path)?,
+        EckyAstEditOperation::Rename => unreachable!("rename returned above"),
+    };
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return Err(AppError::validation(format!(
+            "Ecky AST node at {path} has invalid source span {start}..{end}."
+        )));
+    }
+
+    let next_source = match operation {
+        EckyAstEditOperation::Replace => {
+            let mut next_source = String::with_capacity(
+                source
+                    .len()
+                    .saturating_sub(end - start)
+                    .saturating_add(replacement.len()),
+            );
+            next_source.push_str(&source[..start]);
+            next_source.push_str(replacement);
+            next_source.push_str(&source[end..]);
+            next_source
+        }
+        EckyAstEditOperation::InsertBefore => {
+            let inserted = format!("{replacement} ");
+            let mut next_source = String::with_capacity(source.len() + inserted.len());
+            next_source.push_str(&source[..start]);
+            next_source.push_str(&inserted);
+            next_source.push_str(&source[start..]);
+            next_source
+        }
+        EckyAstEditOperation::InsertAfter => {
+            let inserted = format!(" {replacement}");
+            let mut next_source = String::with_capacity(source.len() + inserted.len());
+            next_source.push_str(&source[..end]);
+            next_source.push_str(&inserted);
+            next_source.push_str(&source[end..]);
+            next_source
+        }
+        EckyAstEditOperation::Delete => {
+            let exprs = SourceExprParser::new(source).parse_all()?;
+            let target = source_target_for_ecky_path(&exprs, source, path)?;
+            if matches!(target.kind, SourcePathTargetKind::Root) {
+                return Err(AppError::validation(
+                    "Deleting a part root is not supported by Ecky AST v1.",
+                ));
+            }
+            let (delete_start, delete_end) = expand_delete_span(source, start, end);
+            let mut next_source =
+                String::with_capacity(source.len().saturating_sub(delete_end - delete_start));
+            next_source.push_str(&source[..delete_start]);
+            next_source.push_str(&source[delete_end..]);
+            next_source
+        }
+        EckyAstEditOperation::Rename => unreachable!("rename returned above"),
+    };
+    crate::ecky_scheme::compile_to_core_program(&next_source).map_err(|err| {
+        AppError::validation(format!(
+            "Replacement produced invalid Ecky source at {path}: {err}"
+        ))
+    })?;
+    Ok(next_source)
 }
 
 fn apply_macro_buffer_replacements(
@@ -2878,7 +4654,7 @@ fn apply_macro_buffer_replacements(
 
     if replacements.is_empty() {
         return Err(AppError::validation(
-            "macro_buffer_replace_and_render requires at least one replacement.",
+            "macro_buffer_replace_and_preview requires at least one replacement.",
         ));
     }
 
@@ -2975,16 +4751,39 @@ pub async fn handle_macro_buffer_get(
             "Reading macro buffer.",
         )?;
 
-        let target = crate::services::target::resolve_editable_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let preview = session_render_preview_for_request(
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        );
+        let (target_thread_id, target_message_id, design_output, artifact_bundle) =
+            if let Some(preview) = preview {
+                (
+                    preview.thread_id,
+                    preview.preview_id,
+                    preview.design_output,
+                    Some(preview.artifact_bundle),
+                )
+            } else {
+                let target = crate::services::target::resolve_editable_target(
+                    &conn,
+                    app,
+                    req.thread_id.clone(),
+                    req.message_id.clone(),
+                )?;
+                (
+                    target.thread_id,
+                    target.message_id,
+                    target.design_output,
+                    target.artifact_bundle,
+                )
+            };
 
-        tracked_thread_id = Some(target.thread_id.clone());
-        tracked_message_id = Some(target.message_id.clone());
-        tracked_model_id = target.model_id();
+        tracked_thread_id = Some(target_thread_id.clone());
+        tracked_message_id = Some(target_message_id.clone());
+        tracked_model_id = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.model_id.clone());
 
         persist_agent_session(
             &conn,
@@ -2996,39 +4795,42 @@ pub async fn handle_macro_buffer_get(
             "",
         )?;
 
-        let authoring_context =
-            crate::mcp::authoring::target_authoring_context(&target.design_output);
-        let artifact_digest = target.artifact_bundle.as_ref().map(artifact_bundle_digest);
-        let macro_code = target.design_output.macro_code;
+        let authoring_context = crate::mcp::authoring::target_authoring_context(&design_output);
+        let artifact_digest = artifact_bundle.as_ref().map(artifact_bundle_digest);
+        let macro_code = design_output.macro_code.clone();
         let lines = macro_buffer_lines(&macro_code);
         let line_count = lines.len();
         let digest = macro_buffer_digest(&macro_code);
+        let (window_start_line, window_end_line, truncated, window_lines) =
+            macro_buffer_line_window(&lines, req.start_line, req.end_line)?;
         set_session_macro_buffer(
             ctx,
             SessionMacroBuffer {
-                thread_id: target.thread_id.clone(),
-                message_id: target.message_id.clone(),
+                thread_id: target_thread_id.clone(),
+                message_id: target_message_id.clone(),
                 macro_code: macro_code.clone(),
-                macro_dialect: target.design_output.macro_dialect.clone(),
-                post_processing: target.design_output.post_processing.clone(),
-                geometry_backend: target.design_output.geometry_backend,
+                macro_dialect: design_output.macro_dialect.clone(),
+                post_processing: design_output.post_processing.clone(),
+                geometry_backend: design_output.geometry_backend,
             },
         );
 
         Ok(MacroBufferGetResponse {
-            thread_id: target.thread_id,
-            message_id: target.message_id,
-            title: target.design_output.title,
-            version_name: target.design_output.version_name,
-            resolved_from: map_target_resolved_from(target.resolved_from),
+            thread_id: target_thread_id,
+            message_id: target_message_id,
+            title: design_output.title,
+            version_name: design_output.version_name,
+            resolved_from: TargetResolvedFrom::Base,
             digest,
             line_count,
-            macro_code,
-            lines,
-            source_language: target.design_output.source_language.as_str().to_string(),
-            macro_dialect: target.design_output.macro_dialect,
-            geometry_backend: target.design_output.geometry_backend.as_str().to_string(),
-            post_processing: target.design_output.post_processing,
+            window_start_line,
+            window_end_line,
+            truncated,
+            lines: window_lines,
+            source_language: design_output.source_language.as_str().to_string(),
+            macro_dialect: design_output.macro_dialect,
+            geometry_backend: design_output.geometry_backend.as_str().to_string(),
+            post_processing: design_output.post_processing,
             authoring_context,
             artifact_digest,
         })
@@ -3047,6 +4849,296 @@ pub async fn handle_macro_buffer_get(
     }
 
     result
+}
+
+pub async fn handle_ecky_ast_get(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: EckyAstGetRequest,
+    ctx: &AgentContext,
+) -> AppResult<EckyAstGetResponse> {
+    if !ecky_ast_authoring_enabled(state) {
+        return Err(AppError::validation(
+            "Ecky AST authoring is disabled. Set mcp.eckyAstAuthoring=true to expose ecky_ast_get.",
+        ));
+    }
+
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = None;
+
+    let result = (|| -> AppResult<EckyAstGetResponse> {
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            None,
+            "reading",
+            "Reading Ecky AST.",
+        )?;
+
+        let preview = session_render_preview_for_request(
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        );
+        let (target_thread_id, target_message_id, design_output, artifact_bundle) =
+            if let Some(preview) = preview {
+                (
+                    preview.thread_id,
+                    preview.preview_id,
+                    preview.design_output,
+                    Some(preview.artifact_bundle),
+                )
+            } else {
+                let target = crate::services::target::resolve_editable_target(
+                    &conn,
+                    app,
+                    req.thread_id.clone(),
+                    req.message_id.clone(),
+                )?;
+                (
+                    target.thread_id,
+                    target.message_id,
+                    target.design_output,
+                    target.artifact_bundle,
+                )
+            };
+
+        tracked_thread_id = Some(target_thread_id.clone());
+        tracked_message_id = Some(target_message_id.clone());
+        tracked_model_id = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.model_id.clone());
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            tracked_model_id.clone(),
+            "reading",
+            "",
+        )?;
+
+        if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+            return Err(AppError::validation(format!(
+                "ecky_ast_get only supports sourceLanguage=ecky. Target sourceLanguage={}.",
+                design_output.source_language.as_str()
+            )));
+        }
+
+        let source = design_output.macro_code.clone();
+        let program = crate::ecky_scheme::compile_to_core_program(&source)
+            .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+        let depth = req
+            .depth
+            .unwrap_or(DEFAULT_ECKY_AST_DEPTH)
+            .min(MAX_ECKY_AST_DEPTH);
+        let max_nodes = req
+            .max_nodes
+            .unwrap_or(DEFAULT_ECKY_AST_MAX_NODES)
+            .clamp(1, MAX_ECKY_AST_NODES);
+        let requested_path = req.path.filter(|path| !path.trim().is_empty());
+        let root_paths = program
+            .parameters
+            .iter()
+            .map(|param| format!("/params/{}", path_segment(&param.key)))
+            .chain(
+                program
+                    .parts
+                    .iter()
+                    .map(|part| format!("/parts/{}/root", path_segment(&part.key))),
+            )
+            .chain(
+                program
+                    .parts
+                    .iter()
+                    .map(|part| format!("/parts/{}", path_segment(&part.key))),
+            )
+            .collect::<Vec<_>>();
+        let mut nodes = Vec::new();
+        let mut truncated = false;
+        truncated |= collect_core_param_ast_nodes(
+            &program,
+            &source,
+            requested_path.as_deref(),
+            max_nodes,
+            &mut nodes,
+        )?;
+        truncated |= collect_core_part_clause_ast_nodes(
+            &program,
+            &source,
+            requested_path.as_deref(),
+            max_nodes,
+            &mut nodes,
+        )?;
+
+        for part in &program.parts {
+            if nodes.len() >= max_nodes {
+                truncated = true;
+                break;
+            }
+            let root_path = format!("/parts/{}/root", path_segment(&part.key));
+            if let Some(requested_path) = requested_path.as_deref() {
+                if requested_path == "/" {
+                    truncated |= collect_core_ast_nodes(
+                        &part.root,
+                        &root_path,
+                        Some(&part.key),
+                        depth,
+                        max_nodes,
+                        &mut nodes,
+                    );
+                } else if requested_path.starts_with(&root_path) {
+                    truncated |= collect_matching_core_ast_nodes(
+                        &part.root,
+                        &root_path,
+                        Some(&part.key),
+                        requested_path,
+                        depth,
+                        max_nodes,
+                        &mut nodes,
+                    );
+                }
+            } else {
+                truncated |= collect_core_ast_nodes(
+                    &part.root,
+                    &root_path,
+                    Some(&part.key),
+                    depth,
+                    max_nodes,
+                    &mut nodes,
+                );
+            }
+            if nodes.len() >= max_nodes {
+                truncated = true;
+                break;
+            }
+        }
+
+        if requested_path.as_deref().is_some_and(|path| path != "/") && nodes.is_empty() {
+            return Err(AppError::validation(format!(
+                "Ecky AST path not found: {}.",
+                requested_path.as_deref().unwrap_or_default()
+            )));
+        }
+
+        let core_digest = crate::mcp::macro_buffer::source_digest(
+            &nodes
+                .iter()
+                .map(|node| format!("{}={}", node.path, node.digest))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let authoring_context = crate::mcp::authoring::target_authoring_context(&design_output);
+        let artifact_digest = artifact_bundle.as_ref().map(artifact_bundle_digest);
+
+        Ok(EckyAstGetResponse {
+            thread_id: target_thread_id,
+            message_id: target_message_id,
+            title: design_output.title,
+            version_name: design_output.version_name,
+            resolved_from: TargetResolvedFrom::Base,
+            source_digest: crate::mcp::macro_buffer::source_digest(&source),
+            core_digest,
+            root_paths,
+            requested_path,
+            depth,
+            max_nodes,
+            truncated,
+            nodes,
+            authoring_context,
+            artifact_digest,
+        })
+    })();
+
+    if let Err(err) = &result {
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+pub async fn handle_ecky_ast_replace_and_render(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: EckyAstReplaceAndRenderRequest,
+    ctx: &AgentContext,
+) -> AppResult<MacroReplaceResponse> {
+    if !ecky_ast_authoring_enabled(state) {
+        return Err(AppError::validation(
+            "Ecky AST authoring is disabled. Set mcp.eckyAstAuthoring=true to expose ecky_ast_replace_and_render.",
+        ));
+    }
+
+    let ctx = ctx.with_override(&req.identity);
+    let preview = session_render_preview_for_request(
+        &ctx,
+        req.thread_id.as_deref(),
+        req.message_id.as_deref(),
+    );
+    let (thread_id, message_id, design_output) = if let Some(preview) = preview {
+        (preview.thread_id, preview.preview_id, preview.design_output)
+    } else {
+        let conn = state.db.lock().await;
+        let target = crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            req.thread_id.clone(),
+            req.message_id.clone(),
+        )?;
+        drop(conn);
+        (target.thread_id, target.message_id, target.design_output)
+    };
+
+    if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+        return Err(AppError::validation(format!(
+            "ecky_ast_replace_and_render only supports sourceLanguage=ecky. Target sourceLanguage={}.",
+            design_output.source_language.as_str()
+        )));
+    }
+
+    let next_source = replace_ecky_ast_source(
+        &design_output.macro_code,
+        &req.source_digest,
+        &req.path,
+        &req.expected_node_digest,
+        &req.operation,
+        req.replacement_source.as_deref(),
+        req.new_name.as_deref(),
+    )?;
+
+    handle_macro_preview_render(
+        state,
+        app,
+        MacroReplaceRequest {
+            identity: req.identity,
+            thread_id: Some(thread_id),
+            message_id: Some(message_id),
+            macro_code: next_source,
+            macro_dialect: Some(MacroDialect::EckyIrV0),
+            ui_spec: None,
+            parameters: req.parameters,
+            post_processing: req.post_processing,
+            geometry_backend: req.geometry_backend,
+        },
+        &ctx,
+    )
+    .await
 }
 
 pub async fn handle_target_detail_get(
@@ -3163,7 +5255,26 @@ pub async fn handle_target_detail_get(
                     .map(|b| b.export_artifacts.clone()),
                 None,
             ),
-            TargetDetailSection::LatestDraft => (None, None, None, None, None, None, Some(None)),
+            TargetDetailSection::LatestDraft => {
+                let latest_draft = if let Some(preview) = session_render_preview_for_request(
+                    ctx,
+                    Some(target.thread_id.as_str()),
+                    Some(target.message_id.as_str()),
+                ) {
+                    Some(Some(agent_draft_from_session_render_preview(preview)))
+                } else {
+                    let draft = db::get_agent_draft_for_session(&conn, &ctx.session_id)
+                        .map_err(|e| AppError::persistence(e.to_string()))?
+                        .filter(|draft| {
+                            draft.thread_id == target.thread_id
+                                && (draft.preview_id == target.message_id
+                                    || draft.base_message_id.as_deref()
+                                        == Some(target.message_id.as_str()))
+                        });
+                    Some(draft)
+                };
+                (None, None, None, None, None, None, latest_draft)
+            }
         };
 
         let authoring_context =
@@ -3293,7 +5404,7 @@ pub async fn handle_artifact_manifest_get(
     })
 }
 
-pub async fn handle_params_patch_and_render(
+pub async fn handle_params_preview_render(
     state: &AppState,
     app: &dyn PathResolver,
     req: ParamsPatchRequest,
@@ -3307,19 +5418,43 @@ pub async fn handle_params_patch_and_render(
 
     let result = async {
         let conn = state.db.lock().await;
-        let target = crate::services::target::resolve_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let preview = session_render_preview_for_request(
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        );
+        let (target_thread_id, target_message_id, base_design) =
+            if let Some(preview) = preview.clone() {
+                (
+                    preview.thread_id.clone(),
+                    preview
+                        .base_message_id
+                        .clone()
+                        .unwrap_or_else(|| preview.preview_id.clone()),
+                    preview.design_output.clone(),
+                )
+            } else {
+                let target = crate::services::target::resolve_target(
+                    &conn,
+                    app,
+                    req.thread_id.clone(),
+                    req.message_id.clone(),
+                )?;
+                let base_design = target
+                    .design
+                    .ok_or_else(|| AppError::validation("Target has no design output."))?;
+                tracked_model_id = target
+                    .artifact_bundle
+                    .as_ref()
+                    .map(|bundle| bundle.model_id.clone());
+                (target.thread_id, target.message_id, base_design)
+            };
 
-        tracked_thread_id = Some(target.thread_id.clone());
-        tracked_message_id = Some(target.message_id.clone());
-        tracked_model_id = target
-            .artifact_bundle
-            .as_ref()
-            .map(|bundle| bundle.model_id.clone());
+        if let Some(preview) = preview.as_ref() {
+            tracked_model_id = Some(preview.artifact_bundle.model_id.clone());
+        }
+        tracked_thread_id = Some(target_thread_id.clone());
+        tracked_message_id = Some(target_message_id.clone());
 
         persist_agent_session(
             &conn,
@@ -3334,8 +5469,8 @@ pub async fn handle_params_patch_and_render(
             state,
             ctx,
             Some(session_target_ref(
-                target.thread_id.clone(),
-                target.message_id.clone(),
+                target_thread_id.clone(),
+                target_message_id.clone(),
                 tracked_model_id.clone(),
             )),
             "patching_params",
@@ -3358,10 +5493,6 @@ pub async fn handle_params_patch_and_render(
                 details: None,
             },
         );
-
-        let base_design = target
-            .design
-            .ok_or_else(|| AppError::validation("Target has no design output."))?;
 
         let mut merged_params = base_design.initial_params.clone();
         for (key, value) in req.parameter_patch.clone() {
@@ -3426,8 +5557,8 @@ pub async fn handle_params_patch_and_render(
             state,
             ctx,
             Some(session_target_ref(
-                target.thread_id.clone(),
-                target.message_id.clone(),
+                target_thread_id.clone(),
+                target_message_id.clone(),
                 tracked_model_id.clone(),
             )),
             "rendering",
@@ -3474,36 +5605,28 @@ pub async fn handle_params_patch_and_render(
         design_output.version_name.clear();
         design_output.interaction_mode = InteractionMode::Tune;
 
-        let save_result = save_or_update_agent_version_for_session(
-            state,
-            app,
-            SaveOrUpdateAgentVersionRequest {
-                session_id: ctx.session_id.clone(),
-                thread_id: target.thread_id.clone(),
-                base_message_id: target.message_id.clone(),
-                model_id: Some(artifact_bundle.model_id.clone()),
-                design_output: design_output.clone(),
-                artifact_bundle: Some(artifact_bundle.clone()),
-                model_manifest: Some(model_manifest.clone()),
-                updated_at: now_secs(),
-                response_text_created: String::new(),
-                response_text_updated: String::new(),
-                preserve_existing_title: true,
-                preserve_existing_version_name: true,
-                force_create_new_message: true,
-                announce_created_working_version: false,
-            },
-        )
-        .await?;
-        tracked_message_id = Some(save_result.message_id.clone());
-
         let sv = crate::services::structural_verification::verify_structure(
             &artifact_bundle,
             &model_manifest,
         );
+        let preview = store_session_render_preview(
+            state,
+            app,
+            ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: target_thread_id.clone(),
+                base_message_id: Some(target_message_id.clone()),
+                design_output: design_output.clone(),
+                artifact_bundle: artifact_bundle.clone(),
+                model_manifest: model_manifest.clone(),
+                draft_feedback: Some(draft_feedback_from_structural_verification(&sv)),
+            },
+        )
+        .await?;
+        tracked_message_id = Some(preview.preview_id.clone());
         Ok(ParamsPatchResponse {
-            thread_id: target.thread_id,
-            message_id: save_result.message_id,
+            thread_id: target_thread_id,
+            message_id: preview.preview_id,
             merged_params: healed_params,
             artifact_digest: artifact_bundle_digest(&artifact_bundle),
             artifact_bundle,
@@ -3540,7 +5663,7 @@ pub async fn handle_params_patch_and_render(
     result
 }
 
-pub async fn handle_macro_buffer_replace_and_render(
+pub async fn handle_macro_buffer_replace_and_preview(
     state: &AppState,
     app: &dyn PathResolver,
     req: MacroBufferReplaceAndRenderRequest,
@@ -3552,14 +5675,14 @@ pub async fn handle_macro_buffer_replace_and_render(
     if let Some(thread_id) = &req.thread_id {
         if thread_id != &buffer.thread_id {
             return Err(AppError::validation(
-                "macro_buffer_replace_and_render threadId does not match session buffer.",
+                "macro_buffer_replace_and_preview threadId does not match session buffer.",
             ));
         }
     }
     if let Some(message_id) = &req.message_id {
         if message_id != &buffer.message_id {
             return Err(AppError::validation(
-                "macro_buffer_replace_and_render messageId does not match session buffer.",
+                "macro_buffer_replace_and_preview messageId does not match session buffer.",
             ));
         }
     }
@@ -3571,7 +5694,7 @@ pub async fn handle_macro_buffer_replace_and_render(
     buffer.macro_code = patched_macro_code.clone();
     set_session_macro_buffer(ctx, buffer.clone());
 
-    let render_response = handle_macro_replace_and_render(
+    let render_response = handle_macro_preview_render(
         state,
         app,
         MacroReplaceRequest {
@@ -3616,17 +5739,26 @@ pub async fn handle_macro_buffer_replace_range(
 ) -> AppResult<MacroBufferEditResponse> {
     let ctx = ctx.with_override(&req.identity);
     let mut buffer = get_session_macro_buffer(&ctx)?;
+    let window_start = req
+        .replacements
+        .iter()
+        .map(|replacement| replacement.start_line)
+        .min();
     buffer.macro_code = apply_macro_buffer_replacements(
         &buffer.macro_code,
         &req.expected_digest,
         &req.replacements,
     )?;
     let lines = macro_buffer_lines(&buffer.macro_code);
+    let (window_start_line, window_end_line, truncated, window_lines) =
+        macro_buffer_line_window(&lines, window_start, None)?;
     let response = MacroBufferEditResponse {
         digest: macro_buffer_digest(&buffer.macro_code),
         line_count: lines.len(),
-        macro_code: buffer.macro_code.clone(),
-        lines,
+        window_start_line,
+        window_end_line,
+        truncated,
+        lines: window_lines,
     };
     set_session_macro_buffer(&ctx, buffer);
     Ok(response)
@@ -3642,17 +5774,21 @@ pub async fn handle_macro_buffer_apply_patch(
     buffer.macro_code =
         crate::mcp::macro_buffer::apply_unified_patch(&buffer.macro_code, &req.patch)?;
     let lines = macro_buffer_lines(&buffer.macro_code);
+    let (window_start_line, window_end_line, truncated, window_lines) =
+        macro_buffer_line_window(&lines, None, None)?;
     let response = MacroBufferEditResponse {
         digest: macro_buffer_digest(&buffer.macro_code),
         line_count: lines.len(),
-        macro_code: buffer.macro_code.clone(),
-        lines,
+        window_start_line,
+        window_end_line,
+        truncated,
+        lines: window_lines,
     };
     set_session_macro_buffer(&ctx, buffer);
     Ok(response)
 }
 
-pub async fn handle_macro_buffer_render(
+pub async fn handle_macro_buffer_preview_render(
     state: &AppState,
     app: &dyn PathResolver,
     req: MacroBufferRenderRequest,
@@ -3662,7 +5798,7 @@ pub async fn handle_macro_buffer_render(
     let ctx = &ctx;
     let mut buffer = get_session_macro_buffer(ctx)?;
     crate::mcp::macro_buffer::assert_expected_digest(&buffer.macro_code, &req.expected_digest)?;
-    let response = handle_macro_replace_and_render(
+    let response = handle_macro_preview_render(
         state,
         app,
         MacroReplaceRequest {
@@ -3774,7 +5910,7 @@ fn first_version_authoring_context(
     }
 }
 
-pub async fn handle_macro_replace_and_render(
+pub async fn handle_macro_preview_render(
     state: &AppState,
     app: &dyn PathResolver,
     req: MacroReplaceRequest,
@@ -3787,8 +5923,21 @@ pub async fn handle_macro_replace_and_render(
     let mut tracked_model_id = None;
 
     let result = async {
-        // Resolve an existing working target, or bootstrap from scratch for virgin threads.
-        let (working_thread_id, base_design) = if req.message_id.is_some() {
+        let (working_thread_id, base_design) = if let Some(preview) =
+            session_render_preview_for_request(
+                ctx,
+                req.thread_id.as_deref(),
+                req.message_id.as_deref(),
+            )
+        {
+            tracked_thread_id = Some(preview.thread_id.clone());
+            tracked_message_id = preview
+                .base_message_id
+                .clone()
+                .or_else(|| Some(preview.preview_id.clone()));
+            tracked_model_id = Some(preview.artifact_bundle.model_id.clone());
+            (preview.thread_id, preview.design_output)
+        } else if req.message_id.is_some() {
             let conn = state.db.lock().await;
             let target = crate::services::target::resolve_target(
                 &conn,
@@ -3796,15 +5945,6 @@ pub async fn handle_macro_replace_and_render(
                 req.thread_id.clone(),
                 req.message_id.clone(),
             )?;
-            drop(conn);
-            let target = resolve_turn_working_target(
-                state,
-                app,
-                ctx,
-                target,
-                format!("{} created a working version for this turn.", ctx.agent_label),
-            )
-            .await?;
 
             tracked_thread_id = Some(target.thread_id.clone());
             tracked_message_id = Some(target.message_id.clone());
@@ -4104,38 +6244,28 @@ pub async fn handle_macro_replace_and_render(
             post_processing: next_post_processing,
         };
 
-        let save_result = save_or_update_agent_version_for_session(
-            state,
-            app,
-            SaveOrUpdateAgentVersionRequest {
-                session_id: ctx.session_id.clone(),
-                thread_id: working_thread_id.clone(),
-                base_message_id: tracked_message_id.clone().unwrap_or_default(),
-                model_id: Some(artifact_bundle.model_id.clone()),
-                design_output: design_output.clone(),
-                artifact_bundle: Some(artifact_bundle.clone()),
-                model_manifest: Some(model_manifest.clone()),
-                updated_at: now_secs(),
-                response_text_created: String::new(),
-                response_text_updated: String::new(),
-                preserve_existing_title: true,
-                preserve_existing_version_name: true,
-                force_create_new_message: true,
-                // Announce the rendered version so the frontend immediately loads it.
-                announce_created_working_version: true,
-            },
-        )
-        .await?;
-        tracked_message_id = Some(save_result.message_id.clone());
-        state.emit_history_updated();
-
         let sv = crate::services::structural_verification::verify_structure(
             &artifact_bundle,
             &model_manifest,
         );
+        let preview = store_session_render_preview(
+            state,
+            app,
+            ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: working_thread_id.clone(),
+                base_message_id: tracked_message_id.clone(),
+                design_output: design_output.clone(),
+                artifact_bundle: artifact_bundle.clone(),
+                model_manifest: model_manifest.clone(),
+                draft_feedback: Some(draft_feedback_from_structural_verification(&sv)),
+            },
+        )
+        .await?;
+        tracked_message_id = Some(preview.preview_id.clone());
         Ok(MacroReplaceResponse {
             thread_id: working_thread_id,
-            message_id: save_result.message_id,
+            message_id: preview.preview_id,
             macro_code: req.macro_code.clone(),
             ui_spec,
             initial_params,
@@ -4173,7 +6303,110 @@ pub async fn handle_macro_replace_and_render(
     result
 }
 
-pub async fn handle_version_save(
+pub async fn handle_commit_preview_version(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: VersionSaveRequest,
+    ctx: &AgentContext,
+) -> AppResult<VersionSaveResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = None;
+
+    let result = async {
+        let preview = resolve_session_render_preview_for_request(
+            state,
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::validation(
+                "No preview draft is available for this MCP session. Render a preview before commit_preview_version.",
+            )
+        })?;
+
+        tracked_thread_id = Some(preview.thread_id.clone());
+        tracked_message_id = Some(preview.preview_id.clone());
+        tracked_model_id = Some(preview.artifact_bundle.model_id.clone());
+
+        {
+            let conn = state.db.lock().await;
+            persist_agent_session(
+                &conn,
+                ctx,
+                tracked_thread_id.clone(),
+                tracked_message_id.clone(),
+                tracked_model_id.clone(),
+                "saving_version",
+                "Committing preview draft.",
+            )?;
+        }
+
+        let mut design_output = preview.design_output.clone();
+        if let Some(title) = req.title.clone() {
+            design_output.title = title;
+        }
+        if let Some(version_name) = req.version_name.clone() {
+            design_output.version_name = version_name;
+        } else if design_output.version_name.trim().is_empty() {
+            design_output.version_name.clear();
+        }
+
+        let save_result = save_or_update_agent_version_for_session(
+            state,
+            app,
+            SaveOrUpdateAgentVersionRequest {
+                session_id: ctx.session_id.clone(),
+                thread_id: preview.thread_id.clone(),
+                base_message_id: preview.base_message_id.clone().unwrap_or_default(),
+                model_id: Some(preview.artifact_bundle.model_id.clone()),
+                design_output,
+                artifact_bundle: Some(preview.artifact_bundle.clone()),
+                model_manifest: Some(preview.model_manifest.clone()),
+                updated_at: now_secs(),
+                response_text_created: format!("{} committed the MCP preview.", ctx.agent_label),
+                response_text_updated: format!("{} updated the MCP preview commit.", ctx.agent_label),
+                preserve_existing_title: req.title.is_none(),
+                preserve_existing_version_name: req.version_name.is_none(),
+                force_create_new_message: true,
+                announce_created_working_version: false,
+            },
+        )
+        .await?;
+
+        clear_session_render_preview_durable(state, &ctx.session_id).await?;
+        tracked_message_id = Some(save_result.message_id.clone());
+        tracked_model_id = save_result.model_id.clone();
+
+        Ok(VersionSaveResponse {
+            thread_id: preview.thread_id,
+            message_id: save_result.message_id,
+            model_id: save_result.model_id.unwrap_or_default(),
+        })
+    }
+    .await;
+
+    if let Err(err) = &result {
+        let conn = state.db.lock().await;
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+pub async fn handle_saved_target_version(
     state: &AppState,
     app: &dyn PathResolver,
     req: VersionSaveRequest,
@@ -4551,16 +6784,21 @@ async fn save_semantic_manifest_version(
     )
     .await?;
     let agent_origin = save_result.agent_origin.clone();
-    let artifact_bundle = target.artifact_bundle.clone();
+    let artifact_digest = artifact_bundle_digest(&target.artifact_bundle);
 
     Ok(SemanticManifestMutationResponse {
         thread_id: target.thread_id,
         message_id: save_result.message_id,
-        model_id: artifact_bundle.model_id.clone(),
+        model_id: target.artifact_bundle.model_id.clone(),
         title: design_output.title,
         version_name: save_result.version_name,
-        artifact_bundle,
-        model_manifest: next_manifest,
+        artifact_digest,
+        control_primitive_count: next_manifest.control_primitives.len(),
+        relation_count: next_manifest.control_relations.len(),
+        view_count: next_manifest.control_views.len(),
+        advisory_count: next_manifest.advisories.len(),
+        measurement_annotation_count: next_manifest.measurement_annotations.len(),
+        part_count: next_manifest.parts.len(),
         agent_origin,
     })
 }
@@ -5566,7 +7804,7 @@ mod tests {
         AppErrorCode, Config, ControlPrimitiveKind, ControlRelationMode, ControlViewScope,
         DesignParams, DocumentMetadata, EnrichmentStatus, McpConfig, MeasurementAnnotation,
         MeasurementAnnotationSource, MeasurementAxis, MeasurementBasis, Message, MessageRole,
-        MessageStatus, ParamValue, UiField,
+        MessageStatus, MessageVisualKind, ParamValue, UiField,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -5606,6 +7844,30 @@ mod tests {
             perms.set_mode(0o755);
             fs::set_permissions(path, perms).unwrap();
         }
+    }
+
+    fn write_closed_tetra_binary_stl(path: &std::path::Path) {
+        let triangles = [
+            [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0f32, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+            [[0.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0f32, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
+        ];
+
+        let mut bytes = vec![0u8; 80];
+        bytes.extend_from_slice(&(triangles.len() as u32).to_le_bytes());
+        for triangle in triangles {
+            for normal_component in [0.0f32, 0.0, 0.0] {
+                bytes.extend_from_slice(&normal_component.to_le_bytes());
+            }
+            for vertex in triangle {
+                for component in vertex {
+                    bytes.extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+        }
+        fs::write(path, bytes).unwrap();
     }
 
     fn test_config() -> Config {
@@ -5814,7 +8076,20 @@ mod tests {
                 object_count: 1,
                 warnings: Vec::new(),
             },
-            parts: Vec::new(),
+            parts: vec![crate::models::PartBinding {
+                part_id: "body".to_string(),
+                freecad_object_name: "Body".to_string(),
+                label: "Body".to_string(),
+                kind: "solid".to_string(),
+                semantic_role: None,
+                viewer_asset_path: None,
+                viewer_node_ids: vec!["body".to_string()],
+                parameter_keys: Vec::new(),
+                editable: true,
+                bounds: None,
+                volume: None,
+                area: None,
+            }],
             parameter_groups: Vec::new(),
             control_primitives: vec![
                 ControlPrimitive {
@@ -5872,7 +8147,36 @@ mod tests {
                 order: 1,
             }],
             advisories: Vec::new(),
-            selection_targets: Vec::new(),
+            selection_targets: vec![
+                crate::models::SelectionTarget {
+                    target_id: Some("body:edge:0:0-0-0_10-0-0".to_string()),
+                    durable_target_id: None,
+                    canonical_target_id: None,
+                    alias_ids: Vec::new(),
+                    part_id: "body".to_string(),
+                    viewer_node_id: "body".to_string(),
+                    label: "Body.Edge1".to_string(),
+                    kind: crate::models::SelectionTargetKind::Edge,
+                    editable: true,
+                    parameter_keys: Vec::new(),
+                    primitive_ids: Vec::new(),
+                    view_ids: Vec::new(),
+                },
+                crate::models::SelectionTarget {
+                    target_id: Some("body:face:0:5-5-5:100".to_string()),
+                    durable_target_id: None,
+                    canonical_target_id: None,
+                    alias_ids: Vec::new(),
+                    part_id: "body".to_string(),
+                    viewer_node_id: "body".to_string(),
+                    label: "Body.Face1".to_string(),
+                    kind: crate::models::SelectionTargetKind::Face,
+                    editable: true,
+                    parameter_keys: Vec::new(),
+                    primitive_ids: Vec::new(),
+                    view_ids: Vec::new(),
+                },
+            ],
             measurement_annotations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: crate::contracts::ManifestEnrichmentState {
@@ -5883,6 +8187,14 @@ mod tests {
     }
 
     async fn seed_target() -> (AppState, TestPathResolver) {
+        seed_target_with_macro("Base Pot", "V-base", "base_macro()").await
+    }
+
+    async fn seed_target_with_macro(
+        title: &str,
+        version_name: &str,
+        macro_code: &str,
+    ) -> (AppState, TestPathResolver) {
         let root = std::env::temp_dir().join(format!("ecky-mcp-root-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let conn = crate::db::init_db(&test_db_path("target-read")).expect("db");
@@ -5903,6 +8215,9 @@ mod tests {
             .edge_targets
             .push(crate::models::ViewerEdgeTarget {
                 target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
                 part_id: "body".to_string(),
                 viewer_node_id: "body".to_string(),
                 label: "Body.Edge1".to_string(),
@@ -5922,6 +8237,9 @@ mod tests {
             .face_targets
             .push(crate::models::ViewerFaceTarget {
                 target_id: "body:face:0:5-5-5:100".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
                 part_id: "body".to_string(),
                 viewer_node_id: "body".to_string(),
                 label: "Body.Face1".to_string(),
@@ -5935,7 +8253,13 @@ mod tests {
                 area: Some(100.0),
             });
         let base_manifest = sample_manifest("model-base");
-        let base_design = sample_design("Base Pot", "V-base", "base_macro()");
+        let mut base_design = sample_design(title, version_name, macro_code);
+        if macro_code.trim_start().starts_with("(model") {
+            base_design.macro_dialect = MacroDialect::EckyIrV0;
+            base_design.engine_kind = crate::models::EngineKind::EckyIrV0;
+            base_design.geometry_backend = crate::models::GeometryBackend::EckyRust;
+            base_design.source_language = crate::models::SourceLanguage::EckyIrV0;
+        }
 
         {
             let conn = state.db.lock().await;
@@ -6303,13 +8627,60 @@ mod tests {
         assert_eq!(response.control_primitive_count, 2);
         assert_eq!(response.control_relation_count, 1);
         assert_eq!(response.control_view_count, 1);
+        assert_eq!(response.scene_packet.schema_version, 1);
+        assert_eq!(response.scene_packet.active_lens.as_str(), "exact");
+        assert_eq!(
+            response
+                .scene_packet
+                .representations
+                .iter()
+                .map(|entry| (entry.kind.as_str(), entry.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sketchIntent", "rebuildable"),
+                ("meshDraft", "stale"),
+                ("exactModel", "committed")
+            ]
+        );
+        assert!(response
+            .scene_packet
+            .allowed_patch_targets
+            .contains(&"macroBufferReplaceAndPreview".to_string()));
+        assert_eq!(response.scene_packet.topology.edge_target_count, 1);
+        assert_eq!(response.scene_packet.topology.face_target_count, 1);
 
         let value = serde_json::to_value(&response).unwrap();
+        assert!(value.get("scenePacket").is_some());
         assert!(value.get("macroCode").is_none());
         assert!(value.get("artifactBundle").is_none());
         assert!(value.get("modelManifest").is_none());
         assert!(value.get("latestDraft").is_none());
         assert!(value.get("cadSdkSnippet").is_none());
+    }
+
+    #[tokio::test]
+    async fn target_meta_get_marks_ecky_source_as_ast_patchable() {
+        let (state, resolver) =
+            seed_target_with_macro("Ecky block", "V-ecky", "(model\n  (box :size 10))").await;
+        let response = handle_target_meta_get(
+            &state,
+            &resolver,
+            TargetMetaRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("target meta");
+
+        assert_eq!(response.source_language, "ecky");
+        assert!(response
+            .scene_packet
+            .allowed_patch_targets
+            .contains(&"eckyAstReplaceAndRender".to_string()));
+        assert_eq!(response.scene_packet.active_lens.as_str(), "exact");
     }
 
     #[tokio::test]
@@ -6685,6 +9056,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concept_preview_save_stores_agent_image_without_selected_engine() {
+        let conn = crate::db::init_db(&test_db_path("concept-preview-save")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        seed_live_session(&state).await;
+        {
+            let conn = state.db.lock().await;
+            db::create_or_update_thread(&conn, "thread-1", "Thread", now_secs(), None).unwrap();
+        }
+
+        let response = handle_concept_preview_save(
+            &state,
+            ConceptPreviewSaveRequest {
+                image_data: "data:image/svg+xml;base64,PHN2Zy8+".to_string(),
+                caption: "Agent sketch.".to_string(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: None,
+                identity: AgentIdentityOverride::default(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("concept preview save");
+
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.caption, "Agent sketch.");
+        let messages = {
+            let conn = state.db.lock().await;
+            db::get_thread_messages(&conn, "thread-1").expect("messages")
+        };
+        let saved = messages
+            .iter()
+            .find(|message| message.id == response.message_id)
+            .expect("saved concept preview");
+        assert_eq!(saved.content, "Agent sketch.");
+        assert_eq!(saved.role, MessageRole::Assistant);
+        assert_eq!(
+            saved.image_data.as_deref(),
+            Some(response.image_data.as_str())
+        );
+        assert_eq!(saved.visual_kind, Some(MessageVisualKind::ConceptPreview));
+        assert_eq!(saved.usage, None);
+    }
+
+    #[tokio::test]
+    async fn thread_list_and_meta_surface_pending_inbox_anchor() {
+        let (state, _resolver) = seed_target().await;
+        let now = now_secs();
+
+        {
+            let conn = state.db.lock().await;
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "assistant-pending-1".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Working on it".to_string(),
+                    status: MessageStatus::Pending,
+                    output: None,
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now,
+                },
+            )
+            .unwrap();
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "user-pending-1".to_string(),
+                    role: MessageRole::User,
+                    content: "first".to_string(),
+                    status: MessageStatus::Pending,
+                    output: None,
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now,
+                },
+            )
+            .unwrap();
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "user-pending-2".to_string(),
+                    role: MessageRole::User,
+                    content: "second".to_string(),
+                    status: MessageStatus::Pending,
+                    output: None,
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now,
+                },
+            )
+            .unwrap();
+            db::set_thread_pending_confirm(&conn, "thread-1", Some("needs-review")).unwrap();
+        }
+
+        let list = handle_thread_list(&state).await.expect("thread list");
+        assert_eq!(list.threads.len(), 1);
+        let entry = &list.threads[0];
+        assert_eq!(entry.pending_count, 1);
+        assert_eq!(entry.queued_count, 2);
+        assert_eq!(entry.pending_confirm.as_deref(), Some("needs-review"));
+        assert_eq!(
+            entry.latest_pending_message_id.as_deref(),
+            Some("user-pending-2")
+        );
+
+        let meta = handle_thread_meta_get(
+            &state,
+            ThreadMetaRequest {
+                thread_id: "thread-1".to_string(),
+            },
+        )
+        .await
+        .expect("thread meta");
+        assert_eq!(meta.pending_count, 1);
+        assert_eq!(meta.queued_count, 2);
+        assert_eq!(meta.pending_confirm.as_deref(), Some("needs-review"));
+        assert_eq!(
+            meta.latest_pending_message_id.as_deref(),
+            Some("user-pending-2")
+        );
+    }
+
+    #[tokio::test]
     async fn thread_get_rejects_deleted_thread_as_normal_mcp_thread() {
         let (state, _resolver) = seed_target().await;
         {
@@ -6790,6 +9303,8 @@ mod tests {
                 identity: AgentIdentityOverride::default(),
                 thread_id: Some("thread-1".to_string()),
                 message_id: Some("msg-1".to_string()),
+                start_line: None,
+                end_line: None,
             },
             &test_ctx(),
         )
@@ -6801,9 +9316,15 @@ mod tests {
         assert_eq!(response.title, "Base Pot");
         assert_eq!(response.version_name, "V-base");
         assert_eq!(response.resolved_from, TargetResolvedFrom::Base);
-        assert_eq!(response.macro_code, "base_macro()");
+        assert_eq!(response.line_count, 1);
+        assert_eq!(response.window_start_line, 1);
+        assert_eq!(response.window_end_line, 1);
+        assert!(!response.truncated);
+        assert_eq!(response.lines[0].text, "base_macro()");
         assert_eq!(response.macro_dialect, MacroDialect::Legacy);
-        let artifact_digest = response.artifact_digest.expect("artifact digest");
+        let value = serde_json::to_value(&response).expect("target macro json");
+        assert!(value.get("macroCode").is_none());
+        let artifact_digest = response.artifact_digest.as_ref().expect("artifact digest");
         assert_eq!(artifact_digest.model_id, "model-base");
         assert!(artifact_digest.has_step_export);
         assert_eq!(
@@ -6856,6 +9377,9 @@ mod tests {
         let mut bundle = sample_bundle("model-topology", "topology.stl");
         bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
             target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
             part_id: "body".to_string(),
             viewer_node_id: "body".to_string(),
             label: "Body.Edge1".to_string(),
@@ -6873,6 +9397,9 @@ mod tests {
         });
         bundle.face_targets.push(crate::models::ViewerFaceTarget {
             target_id: "body:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
             part_id: "body".to_string(),
             viewer_node_id: "body".to_string(),
             label: "Body.Face1".to_string(),
@@ -6965,19 +9492,637 @@ mod tests {
                 identity: AgentIdentityOverride::default(),
                 thread_id: Some("thread-1".to_string()),
                 message_id: Some("msg-1".to_string()),
+                start_line: None,
+                end_line: None,
             },
             &test_ctx(),
         )
         .await
         .expect("macro buffer");
 
-        let artifact_digest = response.artifact_digest.expect("artifact digest");
+        let artifact_digest = response.artifact_digest.as_ref().expect("artifact digest");
         assert_eq!(artifact_digest.model_id, "model-base");
         assert!(artifact_digest.has_step_export);
         assert_eq!(
             artifact_digest.step_export_path.as_deref(),
             Some("/tmp/model-base.step")
         );
+
+        let value = serde_json::to_value(&response).expect("macro buffer json");
+        assert!(value.get("macroCode").is_none());
+        assert_eq!(value["lineCount"], 1);
+        assert_eq!(value["windowStartLine"], 1);
+        assert_eq!(value["windowEndLine"], 1);
+        assert_eq!(value["truncated"], false);
+        assert_eq!(value["lines"][0]["text"], "base_macro()");
+    }
+
+    #[tokio::test]
+    async fn macro_buffer_get_returns_requested_window_without_full_source() {
+        let (state, resolver) = seed_target_with_macro(
+            "window",
+            "V-window",
+            &(1..=205)
+                .map(|line| format!("line_{line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .await;
+
+        let response = handle_macro_buffer_get(
+            &state,
+            &resolver,
+            MacroBufferGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                start_line: Some(201),
+                end_line: Some(205),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("macro buffer");
+
+        let value = serde_json::to_value(&response).expect("macro buffer json");
+        assert!(value.get("macroCode").is_none());
+        assert_eq!(value["lineCount"], 205);
+        assert_eq!(value["windowStartLine"], 201);
+        assert_eq!(value["windowEndLine"], 205);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["lines"].as_array().expect("lines").len(), 5);
+        assert_eq!(value["lines"][0]["text"], "line_201");
+    }
+
+    #[tokio::test]
+    async fn ecky_ast_get_requires_feature_toggle() {
+        let (state, resolver) =
+            seed_target_with_macro("Box", "V-ast", "(model (part body (box 1 2 3)))").await;
+
+        let err = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: None,
+                depth: None,
+                max_nodes: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("feature toggle should gate AST tool");
+
+        assert!(err.message.contains("mcp.eckyAstAuthoring=true"));
+    }
+
+    #[tokio::test]
+    async fn ecky_ast_get_returns_bounded_core_nodes_when_enabled() {
+        let (state, resolver) =
+            seed_target_with_macro("Box", "V-ast", "(model (part body (box 1 2 3)))").await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let response = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: None,
+                depth: Some(1),
+                max_nodes: Some(4),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+
+        let value = serde_json::to_value(&response).expect("ast json");
+        assert_eq!(
+            value["sourceDigest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:"),
+            true
+        );
+        assert_eq!(value["rootPaths"][0], "/parts/body/root");
+        assert!(value["nodes"].as_array().expect("nodes").len() >= 1);
+        assert_eq!(value["nodes"][0]["path"], "/parts/body/root");
+        assert!(value["nodes"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(value.get("macroCode").is_none());
+    }
+
+    #[tokio::test]
+    async fn given_ecky_params_when_ast_get_then_param_paths_are_visible() {
+        let (state, resolver) = seed_target_with_macro(
+            "Params",
+            "V-ast-params",
+            "(model (params (number width 12)) (part body (box width 2 3)))",
+        )
+        .await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let response = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: Some("/params/width".to_string()),
+                depth: Some(0),
+                max_nodes: Some(4),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+
+        let value = serde_json::to_value(&response).expect("ast json");
+        assert_eq!(value["rootPaths"][0], "/params/width");
+        assert_eq!(value["nodes"][0]["path"], "/params/width");
+        assert_eq!(value["nodes"][0]["kind"], "Param");
+        assert!(value["nodes"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+    }
+
+    #[test]
+    fn ecky_ast_replace_source_rewrites_spanned_node_with_digest_guards() {
+        let source = "(model (part body (box 1 2 3)))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = "/parts/body/root";
+        let node = find_core_ast_node_in_program(&program, &path).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Replace,
+            Some("(box 4 5 6)"),
+            None,
+        )
+        .expect("replace");
+
+        assert_eq!(next, "(model (part body (box 4 5 6)))");
+    }
+
+    fn source_edit_digest(source: &str, path: &str) -> String {
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        edit_digest_for_ecky_path(&program, source, path).expect("path digest")
+    }
+
+    #[test]
+    fn given_param_path_when_replace_then_source_rewrites_param_decl() {
+        let source = "(model (params (number width 12)) (part body (box width 2 3)))";
+        let path = "/params/width";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Replace,
+            Some("(number width 24)"),
+            None,
+        )
+        .expect("replace param");
+
+        assert_eq!(
+            next,
+            "(model (params (number width 24)) (part body (box width 2 3)))"
+        );
+    }
+
+    #[test]
+    fn given_param_path_when_rename_then_decl_and_refs_update() {
+        let source = "(model (params (number width 12)) (part body (box width 2 3)))";
+        let path = "/params/width";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Rename,
+            None,
+            Some("height"),
+        )
+        .expect("rename param");
+
+        assert_eq!(
+            next,
+            "(model (params (number height 12)) (part body (box height 2 3)))"
+        );
+    }
+
+    #[test]
+    fn given_part_path_when_rename_then_part_name_updates() {
+        let source = "(model (part body (box 1 2 3)) (part cap (sphere 2)))";
+        let path = "/parts/cap";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Rename,
+            None,
+            Some("panel"),
+        )
+        .expect("rename part");
+
+        assert_eq!(
+            next,
+            "(model (part body (box 1 2 3)) (part panel (sphere 2)))"
+        );
+    }
+
+    #[test]
+    fn given_ast_arg_path_when_insert_after_then_source_adds_sibling() {
+        let source = "(model (part body (union (box 1 2 3) (sphere 4))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = "/parts/body/root/call/args/1";
+        let node = find_core_ast_node_in_program(&program, &path).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::InsertAfter,
+            Some("(cylinder 2 8)"),
+            None,
+        )
+        .expect("insert");
+
+        assert_eq!(
+            next,
+            "(model (part body (union (box 1 2 3) (sphere 4) (cylinder 2 8))))"
+        );
+    }
+
+    #[test]
+    fn given_ast_arg_path_when_delete_then_source_removes_sibling() {
+        let source = "(model (part body (union (box 1 2 3) (sphere 4))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = "/parts/body/root/call/args/1";
+        let node = find_core_ast_node_in_program(&program, &path).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Delete,
+            None,
+            None,
+        )
+        .expect("delete");
+
+        assert_eq!(next, "(model (part body (union (box 1 2 3))))");
+    }
+
+    #[test]
+    fn given_ast_keyword_path_when_delete_then_source_removes_keyword_pair() {
+        let source = "(model (part body (fillet 2 :edges \"top\" (box 1 2 3))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = "/parts/body/root/call/keywords/edges";
+        let node = find_core_ast_node_in_program(&program, &path).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Delete,
+            None,
+            None,
+        )
+        .expect("delete keyword");
+
+        assert_eq!(next, "(model (part body (fillet 2 (box 1 2 3))))");
+    }
+
+    #[test]
+    fn given_param_path_when_insert_after_then_source_adds_param_sibling() {
+        let source = "(model (params (number width 12)) (part body (box width height 3)))";
+        let path = "/params/width";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::InsertAfter,
+            Some("(number height 6)"),
+            None,
+        )
+        .expect("insert param");
+
+        assert_eq!(
+            next,
+            "(model (params (number width 12) (number height 6)) (part body (box width height 3)))"
+        );
+    }
+
+    #[test]
+    fn given_part_path_when_insert_after_then_source_adds_part_sibling() {
+        let source = "(model (part body (box 1 2 3)))";
+        let path = "/parts/body";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::InsertAfter,
+            Some("(part lid (sphere 2))"),
+            None,
+        )
+        .expect("insert part");
+
+        assert_eq!(
+            next,
+            "(model (part body (box 1 2 3)) (part lid (sphere 2)))"
+        );
+    }
+
+    #[test]
+    fn given_part_path_when_delete_then_source_removes_part_clause() {
+        let source = "(model (part body (box 1 2 3)) (part lid (sphere 2)))";
+        let path = "/parts/lid";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Delete,
+            None,
+            None,
+        )
+        .expect("delete part");
+
+        assert_eq!(next, "(model (part body (box 1 2 3)))");
+    }
+
+    #[test]
+    fn given_build_binding_path_when_replace_then_source_rewrites_shape_value() {
+        let source = "(model (part body (build (shape rail (box 1 2 3)) (result rail))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = "/parts/body/root/build/bindings/rail";
+        let node = find_core_ast_node_in_program(&program, path).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Replace,
+            Some("(cylinder 2 8)"),
+            None,
+        )
+        .expect("replace build binding");
+
+        assert_eq!(
+            next,
+            "(model (part body (build (shape rail (cylinder 2 8)) (result rail))))"
+        );
+    }
+
+    #[test]
+    fn given_build_binding_path_when_insert_after_then_source_adds_shape_sibling() {
+        let source = "(model (part body (build (shape rail (box 1 2 3)) (result rail))))";
+        let path = "/parts/body/root/build/bindings/rail";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::InsertAfter,
+            Some("(shape cap (translate 0 0 1 rail))"),
+            None,
+        )
+        .expect("insert build shape");
+
+        assert_eq!(
+            next,
+            "(model (part body (build (shape rail (box 1 2 3)) (shape cap (translate 0 0 1 rail)) (result rail))))"
+        );
+    }
+
+    #[test]
+    fn given_build_binding_path_when_delete_then_source_removes_shape_clause() {
+        let source = "(model (part body (build (shape rail (box 1 2 3)) (shape cap (sphere 2)) (result cap))))";
+        let path = "/parts/body/root/build/bindings/rail";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Delete,
+            None,
+            None,
+        )
+        .expect("delete build shape");
+
+        assert_eq!(
+            next,
+            "(model (part body (build (shape cap (sphere 2)) (result cap))))"
+        );
+    }
+
+    #[test]
+    fn given_let_binding_path_when_replace_then_source_rewrites_binding_value() {
+        let source = "(model (part body (let ((lift 3)) (translate 0 0 lift (box 1 2 3)))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = core_node_child_paths(&program.parts[0].root, "/parts/body/root")
+            .into_iter()
+            .find_map(|(path, _)| path.contains("/let/bindings/").then_some(path))
+            .expect("let binding path");
+        let node = find_core_ast_node_in_program(&program, path.as_str()).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            &path,
+            &node_digest,
+            &EckyAstEditOperation::Replace,
+            Some("6"),
+            None,
+        )
+        .expect("replace let binding");
+
+        assert_eq!(
+            next,
+            "(model (part body (let ((lift 6)) (translate 0 0 lift (box 1 2 3)))))"
+        );
+    }
+
+    #[test]
+    fn given_let_binding_path_when_insert_after_then_source_adds_binding_sibling() {
+        let source = "(model (part body (let ((lift 3)) (translate 0 0 lift (box 1 2 3)))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = core_node_child_paths(&program.parts[0].root, "/parts/body/root")
+            .into_iter()
+            .find_map(|(path, _)| path.contains("/let/bindings/").then_some(path))
+            .expect("let binding path");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, &path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            &path,
+            &node_digest,
+            &EckyAstEditOperation::InsertAfter,
+            Some("(drop 4)"),
+            None,
+        )
+        .expect("insert let binding");
+
+        assert_eq!(
+            next,
+            "(model (part body (let ((lift 3) (drop 4)) (translate 0 0 lift (box 1 2 3)))))"
+        );
+    }
+
+    #[test]
+    fn given_let_binding_path_when_delete_then_source_removes_binding_pair() {
+        let source =
+            "(model (part body (let ((lift 3) (drop 4)) (translate 0 0 drop (box 1 2 3)))))";
+        let path = "/parts/body/root/let/bindings/lift";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Delete,
+            None,
+            None,
+        )
+        .expect("delete let binding");
+
+        assert_eq!(
+            next,
+            "(model (part body (let ((drop 4)) (translate 0 0 drop (box 1 2 3)))))"
+        );
+    }
+
+    #[test]
+    fn given_build_binding_path_when_rename_then_refs_update_in_scope() {
+        let source = "(model (part body (build (shape rail (box 1 2 3)) (shape cap (translate 0 0 1 rail)) (result cap))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = "/parts/body/root/build/bindings/rail";
+        let node = find_core_ast_node_in_program(&program, path).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            path,
+            &node_digest,
+            &EckyAstEditOperation::Rename,
+            None,
+            Some("spine"),
+        )
+        .expect("rename build binding");
+
+        assert_eq!(
+            next,
+            "(model (part body (build (shape spine (box 1 2 3)) (shape cap (translate 0 0 1 spine)) (result cap))))"
+        );
+    }
+
+    #[test]
+    fn given_let_binding_path_when_rename_then_body_refs_update_not_binding_value() {
+        let source = "(model (part body (let ((lift height)) (translate 0 0 lift (box 1 2 3)))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let path = core_node_child_paths(&program.parts[0].root, "/parts/body/root")
+            .into_iter()
+            .find_map(|(path, _)| path.contains("/let/bindings/").then_some(path))
+            .expect("let binding path");
+        let node = find_core_ast_node_in_program(&program, path.as_str()).expect("node");
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = core_node_digest(node);
+
+        let next = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            &path,
+            &node_digest,
+            &EckyAstEditOperation::Rename,
+            None,
+            Some("zlift"),
+        )
+        .expect("rename let binding");
+
+        assert_eq!(
+            next,
+            "(model (part body (let ((zlift height)) (translate 0 0 zlift (box 1 2 3)))))"
+        );
+    }
+
+    #[test]
+    fn ecky_ast_replace_source_rejects_stale_node_digest() {
+        let source = "(model (part body (box 1 2 3)))";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+
+        let err = replace_ecky_ast_source(
+            source,
+            &source_digest,
+            "/parts/body/root",
+            "sha256:not-current",
+            &EckyAstEditOperation::Replace,
+            Some("(box 4 5 6)"),
+            None,
+        )
+        .expect_err("stale node digest should fail");
+
+        assert!(err.message.contains("node digest mismatch"));
     }
 
     #[tokio::test]
@@ -7228,8 +10373,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_detail_get_returns_latest_draft_null_for_compatibility() {
+    async fn given_durable_preview_feedback_when_latest_draft_requested_then_response_restores_feedback(
+    ) {
         let (state, resolver) = seed_target().await;
+        let ctx = test_ctx();
+        let preview_stl_path = resolver.root.join("preview-pass.stl");
+        write_closed_tetra_binary_stl(&preview_stl_path);
+
+        let mut preview_bundle = sample_bundle("model-preview-pass", "preview-pass.stl");
+        preview_bundle.preview_stl_path = preview_stl_path.display().to_string();
+        let preview = store_session_render_preview(
+            &state,
+            &resolver,
+            &ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: "thread-1".to_string(),
+                base_message_id: Some("msg-1".to_string()),
+                design_output: sample_design("Preview Pass", "", "preview_pass_macro()"),
+                artifact_bundle: preview_bundle,
+                model_manifest: sample_manifest("model-preview-pass"),
+                draft_feedback: None,
+            },
+        )
+        .await
+        .expect("store preview");
+        assert_eq!(
+            preview
+                .draft_feedback
+                .as_ref()
+                .expect("preview feedback")
+                .status,
+            crate::models::AgentDraftFeedbackStatus::Passed
+        );
+
+        clear_session_render_preview(&ctx.session_id);
+
         let response = handle_target_detail_get(
             &state,
             &resolver,
@@ -7247,7 +10425,12 @@ mod tests {
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["section"], "latestDraft");
         assert!(value.get("latestDraft").is_some());
-        assert!(value["latestDraft"].is_null());
+        assert_eq!(value["latestDraft"]["previewId"], preview.preview_id);
+        assert_eq!(value["latestDraft"]["draftFeedback"]["status"], "passed");
+        assert_eq!(
+            value["latestDraft"]["draftFeedback"]["source"],
+            "structuralVerification"
+        );
         assert!(value.get("uiSpec").is_none());
         assert!(value.get("initialParams").is_none());
         assert!(value.get("artifactBundle").is_none());
@@ -7274,6 +10457,189 @@ mod tests {
         assert_eq!(value["section"], "latestDraft");
         assert!(value.get("latestDraft").is_some());
         assert!(value["latestDraft"].is_null());
+    }
+
+    #[tokio::test]
+    async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
+        let (state, resolver) = seed_target().await;
+        let ctx = test_ctx();
+        let initial_count = {
+            let conn = state.db.lock().await;
+            db::get_thread_messages(&conn, "thread-1").unwrap().len()
+        };
+        let preview_design = sample_design("Preview Pot", "", "preview_macro()");
+        let preview_bundle = sample_bundle("model-preview", "preview.stl");
+        let preview_manifest = sample_manifest("model-preview");
+
+        let preview = store_session_render_preview(
+            &state,
+            &resolver,
+            &ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: "thread-1".to_string(),
+                base_message_id: Some("msg-1".to_string()),
+                design_output: preview_design.clone(),
+                artifact_bundle: preview_bundle.clone(),
+                model_manifest: preview_manifest.clone(),
+                draft_feedback: None,
+            },
+        )
+        .await
+        .expect("store preview");
+
+        {
+            let conn = state.db.lock().await;
+            assert_eq!(
+                db::get_thread_messages(&conn, "thread-1").unwrap().len(),
+                initial_count
+            );
+        }
+        assert_eq!(
+            session_render_preview_for_request(
+                &ctx,
+                Some("thread-1"),
+                Some(preview.preview_id.as_str())
+            )
+            .expect("session preview")
+            .design_output
+            .macro_code,
+            "preview_macro()"
+        );
+
+        let response = handle_commit_preview_version(
+            &state,
+            &resolver,
+            VersionSaveRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some(preview.preview_id.clone()),
+                title: Some("Committed Pot".to_string()),
+                version_name: Some("V-preview".to_string()),
+            },
+            &ctx,
+        )
+        .await
+        .expect("commit preview");
+
+        {
+            let conn = state.db.lock().await;
+            let messages = db::get_thread_messages(&conn, "thread-1").unwrap();
+            assert_eq!(messages.len(), initial_count + 1);
+            let committed = messages
+                .iter()
+                .find(|message| message.id == response.message_id)
+                .expect("committed message");
+            assert_eq!(
+                committed.output.as_ref().unwrap().macro_code,
+                "preview_macro()"
+            );
+            assert_eq!(committed.output.as_ref().unwrap().version_name, "V-preview");
+        }
+        assert!(session_render_preview_for_request(
+            &ctx,
+            Some("thread-1"),
+            Some(preview.preview_id.as_str())
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn given_preview_render_when_session_memory_clears_then_commit_by_preview_id_uses_durable_draft(
+    ) {
+        let (state, resolver) = seed_target().await;
+        let ctx = test_ctx();
+        let initial_count = {
+            let conn = state.db.lock().await;
+            db::get_thread_messages(&conn, "thread-1").unwrap().len()
+        };
+
+        let preview = store_session_render_preview(
+            &state,
+            &resolver,
+            &ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: "thread-1".to_string(),
+                base_message_id: Some("msg-1".to_string()),
+                design_output: sample_design("Durable Pot", "", "durable_preview_macro()"),
+                artifact_bundle: sample_bundle("model-durable-preview", "durable-preview.stl"),
+                model_manifest: sample_manifest("model-durable-preview"),
+                draft_feedback: Some(DraftFeedbackSeed {
+                    status: crate::models::AgentDraftFeedbackStatus::Failed,
+                    summary: "Draft failed structural verification.".to_string(),
+                    items: vec![crate::models::AgentDraftFeedbackItem {
+                        code: "non_manifold".to_string(),
+                        message: "Mesh contains a non-manifold edge.".to_string(),
+                    }],
+                    source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+                }),
+            },
+        )
+        .await
+        .expect("store preview");
+        assert_eq!(
+            preview
+                .draft_feedback
+                .as_ref()
+                .expect("draft feedback")
+                .summary,
+            "Draft failed structural verification."
+        );
+
+        clear_session_render_preview(&ctx.session_id);
+        assert!(session_render_preview_for_request(
+            &ctx,
+            Some("thread-1"),
+            Some(preview.preview_id.as_str())
+        )
+        .is_none());
+        let restored = resolve_session_render_preview_for_request(
+            &state,
+            &ctx,
+            Some("thread-1"),
+            Some(preview.preview_id.as_str()),
+        )
+        .await
+        .expect("resolve durable preview")
+        .expect("durable preview restored");
+        assert_eq!(
+            restored
+                .draft_feedback
+                .as_ref()
+                .expect("restored draft feedback")
+                .summary,
+            "Draft failed structural verification."
+        );
+
+        let response = handle_commit_preview_version(
+            &state,
+            &resolver,
+            VersionSaveRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some(preview.preview_id.clone()),
+                title: None,
+                version_name: Some("V-durable".to_string()),
+            },
+            &ctx,
+        )
+        .await
+        .expect("commit durable preview");
+
+        let conn = state.db.lock().await;
+        let messages = db::get_thread_messages(&conn, "thread-1").unwrap();
+        assert_eq!(messages.len(), initial_count + 1);
+        let committed = messages
+            .iter()
+            .find(|message| message.id == response.message_id)
+            .expect("committed message");
+        assert_eq!(
+            committed.output.as_ref().unwrap().macro_code,
+            "durable_preview_macro()"
+        );
+        assert_eq!(committed.output.as_ref().unwrap().version_name, "V-durable");
+        assert!(db::get_agent_draft_for_session(&conn, &ctx.session_id)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -7308,15 +10674,30 @@ mod tests {
         .expect("measurement annotation save");
 
         assert_eq!(response.version_name, "V-mcp-measurement");
-        assert_eq!(response.model_manifest.measurement_annotations.len(), 1);
-        assert_eq!(
-            response.model_manifest.measurement_annotations[0].source,
-            MeasurementAnnotationSource::Llm
-        );
-        assert_eq!(
-            response.model_manifest.measurement_annotations[0].annotation_id,
-            "measurement-outer-diameter"
-        );
+        assert_eq!(response.measurement_annotation_count, 1);
+        assert_eq!(response.artifact_digest.model_id, "model-base");
+        let value = serde_json::to_value(&response).expect("semantic mutation json");
+        assert!(value.get("artifactBundle").is_none());
+        assert!(value.get("modelManifest").is_none());
+        let detail = handle_semantic_manifest_detail_get(
+            &state,
+            &resolver,
+            SemanticManifestDetailRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some(response.thread_id.clone()),
+                message_id: Some(response.message_id.clone()),
+                section: SemanticManifestSection::MeasurementAnnotations,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("measurement detail");
+        let annotations = detail
+            .measurement_annotations
+            .expect("measurement annotations");
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].source, MeasurementAnnotationSource::Llm);
+        assert_eq!(annotations[0].annotation_id, "measurement-outer-diameter");
     }
 
     #[tokio::test]
@@ -7415,7 +10796,24 @@ mod tests {
         .await
         .expect("delete annotation");
 
-        assert!(deleted.model_manifest.measurement_annotations.is_empty());
+        assert_eq!(deleted.measurement_annotation_count, 0);
+        let detail = handle_semantic_manifest_detail_get(
+            &state,
+            &resolver,
+            SemanticManifestDetailRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some(deleted.thread_id.clone()),
+                message_id: Some(deleted.message_id.clone()),
+                section: SemanticManifestSection::MeasurementAnnotations,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("measurement detail after delete");
+        assert!(detail
+            .measurement_annotations
+            .expect("measurement annotations")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -7757,6 +11155,34 @@ mod tests {
         .expect("patched macro");
 
         assert_eq!(patched, "(model\n  (part body (box 2 2 2))\n)\n");
+    }
+
+    #[test]
+    fn macro_buffer_edit_response_omits_full_macro_code() {
+        let response = MacroBufferEditResponse {
+            digest: "digest".to_string(),
+            line_count: 2,
+            window_start_line: 1,
+            window_end_line: 2,
+            truncated: false,
+            lines: vec![
+                MacroBufferLine {
+                    line_number: 1,
+                    text: "(model".to_string(),
+                },
+                MacroBufferLine {
+                    line_number: 2,
+                    text: ")".to_string(),
+                },
+            ],
+        };
+
+        let value = serde_json::to_value(response).expect("edit response json");
+        assert!(value.get("macroCode").is_none());
+        assert_eq!(value["windowStartLine"], 1);
+        assert_eq!(value["windowEndLine"], 2);
+        assert_eq!(value["truncated"], false);
+        assert_eq!(value["lines"].as_array().expect("lines").len(), 2);
     }
 
     #[test]

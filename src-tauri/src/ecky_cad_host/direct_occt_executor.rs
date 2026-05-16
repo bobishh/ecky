@@ -1,15 +1,26 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::direct_occt::{OcctArg, OcctCommand, OcctOp, OcctParameterKind, OcctPlan, OcctSlot};
+use super::direct_occt::{
+    OcctArg, OcctCommand, OcctKeyword, OcctOp, OcctParameterKind, OcctPlan, OcctSlot,
+};
 use super::direct_occt_sdk::{run_native_export_source, DirectOcctSdkLayout, NativeExportOutcome};
-use crate::ecky_core_ir::{CoreParameterValue, CoreProgram};
+use crate::ecky_core_ir::{
+    CoreEdgeAxis, CoreEdgeBound, CoreFaceAreaRank, CoreFaceSelectorClause, CoreParameterValue,
+    CoreProgram, CoreSelectorPayload,
+};
 use crate::models::{AppError, AppResult, DesignParams, ParamValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectOcctExport {
     pub step_path: PathBuf,
     pub stl_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellFaceSelector {
+    TargetIds(Vec<String>),
+    Clauses(Vec<CoreFaceSelectorClause>),
 }
 
 pub fn export_core_program_step_stl(
@@ -87,7 +98,7 @@ pub fn emit_plan_export_source_with_params(
     let mut part_topology_roots = Vec::with_capacity(plan.parts.len());
     for part in &plan.parts {
         for command in &part.commands {
-            emit_command(&mut body, &mut vars, command)?;
+            emit_command(&mut body, &mut vars, &part.key, command)?;
         }
 
         let root_var = vars.get(&part.root).cloned().ok_or_else(|| {
@@ -155,6 +166,7 @@ pub fn emit_plan_export_source_with_params(
 #include <StlAPI_Writer.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -163,6 +175,7 @@ pub fn emit_plan_export_source_with_params(
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
@@ -175,6 +188,7 @@ pub fn emit_plan_export_source_with_params(
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -268,6 +282,115 @@ void write_json_number(std::ofstream& out, double value) {
     }
 }
 
+std::string direct_occt_format_coordinate(double value) {
+    if (!std::isfinite(value) || std::abs(value) < 0.0005) {
+        return "0";
+    }
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3) << value;
+    std::string text = out.str();
+    while (!text.empty() && text.back() == '0') {
+        text.pop_back();
+    }
+    if (!text.empty() && text.back() == '.') {
+        text.pop_back();
+    }
+    if (text.empty() || text == "-0") {
+        return "0";
+    }
+    return text;
+}
+
+std::string direct_occt_point_signature(const gp_Pnt& point) {
+    return direct_occt_format_coordinate(point.X()) + "-" +
+           direct_occt_format_coordinate(point.Y()) + "-" +
+           direct_occt_format_coordinate(point.Z());
+}
+
+std::string direct_occt_edge_signature(const gp_Pnt& start, const gp_Pnt& end) {
+    std::string first = direct_occt_point_signature(start);
+    std::string second = direct_occt_point_signature(end);
+    if (second < first) {
+        std::swap(first, second);
+    }
+    return first + "_" + second;
+}
+
+std::string direct_occt_edge_target_id(
+    const std::string& part_id,
+    int edge_index,
+    const TopoDS_Edge& edge
+) {
+    try {
+        BRepAdaptor_Curve curve(edge);
+        double first_param = curve.FirstParameter();
+        double last_param = curve.LastParameter();
+        if (std::isfinite(first_param) && std::isfinite(last_param)) {
+            gp_Pnt start = curve.Value(first_param);
+            gp_Pnt end = curve.Value(last_param);
+            return part_id + ":edge:" + std::to_string(edge_index) + ":" +
+                   direct_occt_edge_signature(start, end);
+        }
+    } catch (...) {
+    }
+    return part_id + ":edge:" + std::to_string(edge_index);
+}
+
+std::string direct_occt_face_target_id(
+    const std::string& part_id,
+    int face_index,
+    const TopoDS_Face& face
+) {
+    try {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        gp_Pnt center = props.CentreOfMass();
+        double area = props.Mass();
+        return part_id + ":face:" + std::to_string(face_index) + ":" +
+               direct_occt_point_signature(center) + ":" +
+               direct_occt_format_coordinate(area);
+    } catch (...) {
+    }
+    return part_id + ":face:" + std::to_string(face_index);
+}
+
+std::string direct_occt_stable_target_suffix(const std::string& payload) {
+    std::size_t first_colon = payload.find(':');
+    if (first_colon == std::string::npos) {
+        return payload;
+    }
+    bool numeric_prefix = first_colon > 0 &&
+        std::all_of(payload.begin(), payload.begin() + static_cast<long>(first_colon), [](char ch) {
+            return ch >= '0' && ch <= '9';
+        });
+    if (!numeric_prefix) {
+        return payload;
+    }
+    return payload.substr(first_colon + 1);
+}
+
+std::string direct_occt_stable_edge_target_id(const std::string& target_id) {
+    const std::string marker = ":edge:";
+    std::size_t marker_pos = target_id.find(marker);
+    if (marker_pos == std::string::npos) {
+        return target_id;
+    }
+    std::string prefix = target_id.substr(0, marker_pos + marker.size());
+    std::string payload = target_id.substr(marker_pos + marker.size());
+    return prefix + direct_occt_stable_target_suffix(payload);
+}
+
+std::string direct_occt_stable_face_target_id(const std::string& target_id) {
+    const std::string marker = ":face:";
+    std::size_t marker_pos = target_id.find(marker);
+    if (marker_pos == std::string::npos) {
+        return target_id;
+    }
+    std::string prefix = target_id.substr(0, marker_pos + marker.size());
+    std::string payload = target_id.substr(marker_pos + marker.size());
+    return prefix + direct_occt_stable_target_suffix(payload);
+}
+
 void write_part_faces(
     std::ofstream& out,
     const std::string& part_id,
@@ -286,10 +409,12 @@ void write_part_faces(
     out << ",\"edges\":[";
 
     bool first_edge = true;
-    int edge_index = 0;
-    for (TopExp_Explorer explorer(part_shape, TopAbs_EDGE); explorer.More(); explorer.Next(), ++edge_index) {
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(part_shape, TopAbs_EDGE, edge_map);
+    for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
         try {
-            TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+            int edge_index = edge_ordinal - 1;
+            TopoDS_Edge edge = TopoDS::Edge(edge_map.FindKey(edge_ordinal));
             BRepAdaptor_Curve curve(edge);
             double first_param = curve.FirstParameter();
             double last_param = curve.LastParameter();
@@ -399,6 +524,7 @@ void write_part_faces(
 fn emit_command(
     body: &mut String,
     vars: &mut BTreeMap<OcctSlot, String>,
+    part_key: &str,
     command: &OcctCommand,
 ) -> AppResult<()> {
     let var = slot_var(command.output);
@@ -411,6 +537,9 @@ fn emit_command(
                 | OcctOp::PathFrame
                 | OcctOp::Place
                 | OcctOp::ClipBox
+                | OcctOp::Fillet
+                | OcctOp::Chamfer
+                | OcctOp::Shell
         )
     {
         return Err(AppError::validation(format!(
@@ -614,6 +743,7 @@ fn emit_command(
         OcctOp::Fillet => {
             let radius = positive_radius_arg(&command.args, 0, "fillet")?;
             let input = ref_arg(&command.args, 1)?;
+            let target_ids = exact_edge_target_selector(&command.keywords, "fillet")?;
             emit_edge_radius_operation(
                 body,
                 &var,
@@ -621,11 +751,14 @@ fn emit_command(
                 "BRepFilletAPI_MakeFillet",
                 slot_var(input),
                 radius,
+                part_key,
+                target_ids.as_deref(),
             );
         }
         OcctOp::Chamfer => {
             let distance = positive_radius_arg(&command.args, 0, "chamfer")?;
             let input = ref_arg(&command.args, 1)?;
+            let target_ids = exact_edge_target_selector(&command.keywords, "chamfer")?;
             emit_edge_radius_operation(
                 body,
                 &var,
@@ -633,12 +766,22 @@ fn emit_command(
                 "BRepFilletAPI_MakeChamfer",
                 slot_var(input),
                 distance,
+                part_key,
+                target_ids.as_deref(),
             );
         }
         OcctOp::Shell => {
             let thickness = positive_radius_arg(&command.args, 0, "shell")?;
             let input = ref_arg(&command.args, 1)?;
-            emit_shell_operation(body, &var, slot_var(input), thickness);
+            let selector = shell_face_selector(&command.keywords, "shell")?;
+            emit_shell_operation(
+                body,
+                &var,
+                slot_var(input),
+                thickness,
+                part_key,
+                selector.as_ref(),
+            );
         }
         OcctOp::Translate => {
             let [x, y, z] = numeric_prefix_args::<3>(&command.args)?;
@@ -774,6 +917,94 @@ fn stringish_arg(args: &[OcctArg], index: usize, label: &str) -> AppResult<Strin
     }
 }
 
+fn exact_edge_target_selector(
+    keywords: &[OcctKeyword],
+    op_name: &str,
+) -> AppResult<Option<Vec<String>>> {
+    let Some(keyword) = selector_keyword(keywords, op_name, "edges")? else {
+        return Ok(None);
+    };
+    if let Some(CoreSelectorPayload::EdgeAll | CoreSelectorPayload::EdgeClauses(_)) =
+        keyword.selector_payload()
+    {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name}` supports exact `target-id:` / `target-ids:` selectors only for `:edges` right now.",
+        )));
+    }
+    if let Some(CoreSelectorPayload::EdgeTargetIds(target_ids)) = keyword.selector_payload() {
+        return Ok(Some(target_ids.clone()));
+    }
+    if let Some(CoreSelectorPayload::FaceTargetIds(target_ids)) = keyword.selector_payload() {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :edges` got face selector payload {:?}.",
+            target_ids
+        )));
+    }
+    if let Some(CoreSelectorPayload::FaceClauses(clauses)) = keyword.selector_payload() {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :edges` got face selector clauses {:?}.",
+            clauses
+        )));
+    }
+    Err(AppError::validation(format!(
+        "Direct OCCT executor `{op_name} :edges` requires typed selector payload.",
+    )))
+}
+
+fn shell_face_selector(
+    keywords: &[OcctKeyword],
+    op_name: &str,
+) -> AppResult<Option<ShellFaceSelector>> {
+    let Some(keyword) = selector_keyword(keywords, op_name, "faces")? else {
+        return Ok(None);
+    };
+    match keyword.selector_payload() {
+        Some(CoreSelectorPayload::FaceTargetIds(target_ids)) => {
+            Ok(Some(ShellFaceSelector::TargetIds(target_ids.clone())))
+        }
+        Some(CoreSelectorPayload::FaceClauses(clauses)) => {
+            Ok(Some(ShellFaceSelector::Clauses(clauses.clone())))
+        }
+        Some(CoreSelectorPayload::EdgeAll | CoreSelectorPayload::EdgeClauses(_)) => {
+            Err(AppError::validation(format!(
+                "Direct OCCT executor `{op_name} :faces` got edge selector payload.",
+            )))
+        }
+        Some(CoreSelectorPayload::EdgeTargetIds(target_ids)) => Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :faces` got edge selector payload {:?}.",
+            target_ids
+        ))),
+        None => Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :faces` requires typed selector payload.",
+        ))),
+    }
+}
+
+fn selector_keyword<'a>(
+    keywords: &'a [OcctKeyword],
+    op_name: &str,
+    keyword_name: &str,
+) -> AppResult<Option<&'a OcctKeyword>> {
+    let mut selector = None;
+    for keyword in keywords {
+        match keyword.name.as_str() {
+            name if name == keyword_name => {
+                if selector.replace(keyword).is_some() {
+                    return Err(AppError::validation(format!(
+                        "Direct OCCT executor `{op_name}` got duplicate `:{keyword_name}` keywords.",
+                    )));
+                }
+            }
+            other => {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT executor `{op_name}` does not support keyword `:{other}`.",
+                )));
+            }
+        }
+    }
+    Ok(selector)
+}
+
 fn positive_radius_arg(args: &[OcctArg], index: usize, op_name: &str) -> AppResult<f64> {
     let radius = numeric_arg(args, index)?;
     if radius <= 0.0 {
@@ -838,7 +1069,7 @@ fn resolve_plan_parameters(plan: &OcctPlan, parameters: &DesignParams) -> AppRes
                 *arg = resolve_occt_arg(arg, &env)?;
             }
             for keyword in &mut command.keywords {
-                keyword.value = resolve_occt_arg(&keyword.value, &env)?;
+                *keyword.source_arg_mut() = resolve_occt_arg(keyword.source_arg(), &env)?;
             }
         }
     }
@@ -985,8 +1216,12 @@ fn profile_refs(
         }
         for keyword in keywords {
             match keyword.name.as_str() {
-                "outer" => outer.extend(ref_collection_arg(&keyword.value, "profile :outer")?),
-                "holes" => holes.extend(ref_collection_arg(&keyword.value, "profile :holes")?),
+                "outer" => {
+                    outer.extend(ref_collection_arg(keyword.source_arg(), "profile :outer")?)
+                }
+                "holes" => {
+                    holes.extend(ref_collection_arg(keyword.source_arg(), "profile :holes")?)
+                }
                 other => {
                     return Err(AppError::validation(format!(
                         "Direct OCCT executor `profile` does not recognize `:{other}`."
@@ -1047,9 +1282,9 @@ fn plane_args(
     let mut normal = [0.0, 0.0, 1.0];
     for keyword in keywords {
         match keyword.name.as_str() {
-            "origin" => origin = point3_like_arg(&keyword.value, "plane :origin")?,
-            "x" => x_axis = point3_like_arg(&keyword.value, "plane :x")?,
-            "normal" => normal = point3_like_arg(&keyword.value, "plane :normal")?,
+            "origin" => origin = point3_like_arg(keyword.source_arg(), "plane :origin")?,
+            "x" => x_axis = point3_like_arg(keyword.source_arg(), "plane :x")?,
+            "normal" => normal = point3_like_arg(keyword.source_arg(), "plane :normal")?,
             other => {
                 return Err(AppError::validation(format!(
                     "Direct OCCT executor `plane` does not recognize `:{other}`."
@@ -1090,8 +1325,8 @@ fn location_args(
     let mut rotate = [0.0, 0.0, 0.0];
     for keyword in keywords {
         match keyword.name.as_str() {
-            "offset" => offset = point3_like_arg(&keyword.value, "location :offset")?,
-            "rotate" => rotate = point3_like_arg(&keyword.value, "location :rotate")?,
+            "offset" => offset = point3_like_arg(keyword.source_arg(), "location :offset")?,
+            "rotate" => rotate = point3_like_arg(keyword.source_arg(), "location :rotate")?,
             other => {
                 return Err(AppError::validation(format!(
                     "Direct OCCT executor `location` does not recognize `:{other}`."
@@ -1128,8 +1363,8 @@ fn path_frame_args(
     let mut up = [0.0, 0.0, 1.0];
     for keyword in keywords {
         match keyword.name.as_str() {
-            "at" => at = path_frame_anchor_arg(&keyword.value)?,
-            "up" => up = point3_like_arg(&keyword.value, "path-frame :up")?,
+            "at" => at = path_frame_anchor_arg(keyword.source_arg())?,
+            "up" => up = point3_like_arg(keyword.source_arg(), "path-frame :up")?,
             other => {
                 return Err(AppError::validation(format!(
                     "Direct OCCT executor `path-frame` does not recognize `:{other}`."
@@ -1176,8 +1411,8 @@ fn place_args(
     let mut rotate = [0.0, 0.0, 0.0];
     for keyword in keywords {
         match keyword.name.as_str() {
-            "offset" => offset = point3_like_arg(&keyword.value, "place :offset")?,
-            "rotate" => rotate = point3_like_arg(&keyword.value, "place :rotate")?,
+            "offset" => offset = point3_like_arg(keyword.source_arg(), "place :offset")?,
+            "rotate" => rotate = point3_like_arg(keyword.source_arg(), "place :rotate")?,
             other => {
                 return Err(AppError::validation(format!(
                     "Direct OCCT executor `place` does not recognize `:{other}`."
@@ -1228,9 +1463,9 @@ fn clip_box_args(
     let mut z = None;
     for keyword in keywords {
         match keyword.name.as_str() {
-            "x" => x = Some(axis_range_arg(&keyword.value, "clip-box :x")?),
-            "y" => y = Some(axis_range_arg(&keyword.value, "clip-box :y")?),
-            "z" => z = Some(axis_range_arg(&keyword.value, "clip-box :z")?),
+            "x" => x = Some(axis_range_arg(keyword.source_arg(), "clip-box :x")?),
+            "y" => y = Some(axis_range_arg(keyword.source_arg(), "clip-box :y")?),
+            "z" => z = Some(axis_range_arg(keyword.source_arg(), "clip-box :z")?),
             other => {
                 return Err(AppError::validation(format!(
                     "Direct OCCT executor `clip-box` does not recognize `:{other}`."
@@ -1385,14 +1620,123 @@ fn emit_edge_radius_operation(
     builder_type: &str,
     input_var: String,
     radius: f64,
+    part_key: &str,
+    target_ids: Option<&[String]>,
 ) {
-    body.push_str(&format!(
-        "    {builder_type} {var}_{label}({input_var});\n    int {var}_edge_count = 0;\n    for (TopExp_Explorer {var}_edge_explorer({input_var}, TopAbs_EDGE); {var}_edge_explorer.More(); {var}_edge_explorer.Next()) {{\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_explorer.Current()));\n        ++{var}_edge_count;\n    }}\n    if ({var}_edge_count == 0) {{ return 4; }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
-    ));
+    if let Some(target_ids) = target_ids {
+        let target_id_vector = if target_ids.is_empty() {
+            "{}".to_string()
+        } else {
+            format!(
+                "{{{}}}",
+                target_ids
+                    .iter()
+                    .map(|target_id| cpp_string_literal(target_id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        body.push_str(&format!(
+            "    {builder_type} {var}_{label}({input_var});\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<std::string> {var}_edge_target_ids;\n    std::vector<std::string> {var}_edge_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n        std::string {var}_target_id = direct_occt_edge_target_id({part_id}, {var}_edge_index, {var}_edge);\n        std::string {var}_stable_id = direct_occt_stable_edge_target_id({var}_target_id);\n        {var}_edge_target_ids.push_back({var}_target_id);\n        {var}_edge_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_edge_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_edge_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ return 7; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ return 4; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ return 7; }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n",
+            part_id = cpp_string_literal(part_key)
+        ));
+    } else {
+        body.push_str(&format!(
+            "    {builder_type} {var}_{label}({input_var});\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    int {var}_edge_count = 0;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n        ++{var}_edge_count;\n    }}\n    if ({var}_edge_count == 0) {{ return 4; }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
+        ));
+    }
 }
 
-fn emit_shell_operation(body: &mut String, var: &str, input_var: String, thickness: f64) {
+fn emit_shell_operation(
+    body: &mut String,
+    var: &str,
+    input_var: String,
+    thickness: f64,
+    part_key: &str,
+    selector: Option<&ShellFaceSelector>,
+) {
     let offset = -thickness.abs();
+    if let Some(ShellFaceSelector::TargetIds(target_ids)) = selector {
+        let target_id_vector = if target_ids.is_empty() {
+            "std::vector<std::string>{}".to_string()
+        } else {
+            format!(
+                "std::vector<std::string>{{{}}}",
+                target_ids
+                    .iter()
+                    .map(|target_id| format!("{:?}", target_id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        body.push_str(&format!(
+            "    TopTools_ListOfShape {var}_closing_faces;\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<TopoDS_Face> {var}_faces;\n    std::vector<std::string> {var}_face_target_ids;\n    std::vector<std::string> {var}_face_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    int {var}_face_index = 0;\n    for (TopExp_Explorer {var}_face_explorer({input_var}, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next(), ++{var}_face_index) {{\n        TopoDS_Face {var}_face = TopoDS::Face({var}_face_explorer.Current());\n        std::string {var}_target_id = direct_occt_face_target_id({:?}, {var}_face_index, {var}_face);\n        std::string {var}_stable_id = direct_occt_stable_face_target_id({var}_target_id);\n        {var}_faces.push_back({var}_face);\n        {var}_face_target_ids.push_back({var}_target_id);\n        {var}_face_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_face_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_face_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_face_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_face_indexes.begin(), {var}_matched_face_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_face_indexes.end()) {{\n                {var}_closing_faces.Append({var}_faces[{var}_candidate_index]);\n                {var}_matched_face_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_face_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ return 11; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_face_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_face_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_face_indexes.begin(), {var}_matched_face_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_face_indexes.end()) {{\n                {var}_closing_faces.Append({var}_faces[{var}_candidate_index]);\n                {var}_matched_face_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ return 10; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ return 11; }}\n    if ({var}_matched_face_indexes.empty()) {{ return 10; }}\n    BRepOffsetAPI_MakeThickSolid {var}_thick;\n    {var}_thick.MakeThickSolidByJoin({input_var}, {var}_closing_faces, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n    TopoDS_Shape {var} = {var}_thick.Shape();\n",
+            part_key
+        ));
+        return;
+    }
+    if let Some(ShellFaceSelector::Clauses(clauses)) = selector {
+        let clause_checks = clauses
+            .iter()
+            .map(|clause| {
+                match clause {
+                    CoreFaceSelectorClause::Boundary { axis, bound } => {
+                        let axis_name = match axis {
+                            CoreEdgeAxis::X => "x",
+                            CoreEdgeAxis::Y => "y",
+                            CoreEdgeAxis::Z => "z",
+                        };
+                        let bound_name = match bound {
+                            CoreEdgeBound::Min => "min",
+                            CoreEdgeBound::Max => "max",
+                        };
+                        format!(
+                            "        {var}_matches = {var}_matches && std::abs({var}_face_{axis_name}min - {var}_{axis_name}{bound_name}) <= {var}_tol && std::abs({var}_face_{axis_name}max - {var}_{axis_name}{bound_name}) <= {var}_tol;\n"
+                        )
+                    }
+                    CoreFaceSelectorClause::Planar => format!(
+                        "        {var}_matches = {var}_matches && {var}_is_planar;\n"
+                    ),
+                    CoreFaceSelectorClause::Normal(axis) => {
+                        let axis_name = match axis {
+                            CoreEdgeAxis::X => "x",
+                            CoreEdgeAxis::Y => "y",
+                            CoreEdgeAxis::Z => "z",
+                        };
+                        format!(
+                            "        {var}_matches = {var}_matches && {var}_is_planar && ({var}_face_{axis_name}max - {var}_face_{axis_name}min) <= {var}_tol;\n"
+                        )
+                    }
+                    CoreFaceSelectorClause::Area(rank) => {
+                        let _ = rank;
+                        String::new()
+                    }
+                }
+            })
+            .collect::<String>();
+        let area_filters = clauses
+            .iter()
+            .filter_map(|clause| match clause {
+                CoreFaceSelectorClause::Area(rank) => Some(match rank {
+                    CoreFaceAreaRank::Min => {
+                        format!(
+                            "    Standard_Real {var}_target_area = 1.0e100;\n    for (int {var}_index : {var}_candidate_indexes) {{\n        {var}_target_area = std::min({var}_target_area, {var}_face_areas[static_cast<std::size_t>({var}_index)]);\n    }}\n    std::vector<int> {var}_area_filtered;\n    for (int {var}_index : {var}_candidate_indexes) {{\n        if (std::abs({var}_face_areas[static_cast<std::size_t>({var}_index)] - {var}_target_area) <= {var}_area_tol) {{\n            {var}_area_filtered.push_back({var}_index);\n        }}\n    }}\n    {var}_candidate_indexes = {var}_area_filtered;\n"
+                        )
+                    }
+                    CoreFaceAreaRank::Max => {
+                        format!(
+                            "    Standard_Real {var}_target_area = -1.0e100;\n    for (int {var}_index : {var}_candidate_indexes) {{\n        {var}_target_area = std::max({var}_target_area, {var}_face_areas[static_cast<std::size_t>({var}_index)]);\n    }}\n    std::vector<int> {var}_area_filtered;\n    for (int {var}_index : {var}_candidate_indexes) {{\n        if (std::abs({var}_face_areas[static_cast<std::size_t>({var}_index)] - {var}_target_area) <= {var}_area_tol) {{\n            {var}_area_filtered.push_back({var}_index);\n        }}\n    }}\n    {var}_candidate_indexes = {var}_area_filtered;\n"
+                        )
+                    }
+                }),
+                _ => None,
+            })
+            .collect::<String>();
+        body.push_str(&format!(
+            "    TopTools_ListOfShape {var}_closing_faces;\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax;\n    {var}_shape_box.Get({var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax);\n    Standard_Real {var}_tol = std::max({var}_xmax - {var}_xmin, std::max({var}_ymax - {var}_ymin, std::max({var}_zmax - {var}_zmin, 1.0))) * 1.0e-6;\n    Standard_Real {var}_area_tol = 1.0e-6;\n    std::vector<TopoDS_Face> {var}_faces;\n    std::vector<Standard_Real> {var}_face_areas;\n    std::vector<int> {var}_candidate_indexes;\n    for (TopExp_Explorer {var}_face_explorer({input_var}, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next()) {{\n        TopoDS_Face {var}_face = TopoDS::Face({var}_face_explorer.Current());\n        BRepAdaptor_Surface {var}_surface({var}_face);\n        bool {var}_is_planar = {var}_surface.GetType() == GeomAbs_Plane;\n        Bnd_Box {var}_face_box;\n        BRepBndLib::Add({var}_face, {var}_face_box);\n        Standard_Real {var}_face_xmin, {var}_face_ymin, {var}_face_zmin, {var}_face_xmax, {var}_face_ymax, {var}_face_zmax;\n        {var}_face_box.Get({var}_face_xmin, {var}_face_ymin, {var}_face_zmin, {var}_face_xmax, {var}_face_ymax, {var}_face_zmax);\n        GProp_GProps {var}_props;\n        BRepGProp::SurfaceProperties({var}_face, {var}_props);\n        Standard_Real {var}_area = {var}_props.Mass();\n        bool {var}_matches = true;\n{clause_checks}        if ({var}_matches) {{\n            {var}_faces.push_back({var}_face);\n            {var}_face_areas.push_back({var}_area);\n            {var}_candidate_indexes.push_back(static_cast<int>({var}_faces.size()) - 1);\n        }}\n    }}\n    if ({var}_candidate_indexes.empty()) {{ return 10; }}\n{area_filters}    if ({var}_candidate_indexes.empty()) {{ return 10; }}\n    for (int {var}_index : {var}_candidate_indexes) {{\n        {var}_closing_faces.Append({var}_faces[static_cast<std::size_t>({var}_index)]);\n    }}\n    BRepOffsetAPI_MakeThickSolid {var}_thick;\n    {var}_thick.MakeThickSolidByJoin({input_var}, {var}_closing_faces, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n    TopoDS_Shape {var} = {var}_thick.Shape();\n"
+        ));
+        return;
+    }
     body.push_str(&format!(
         "    TopTools_ListOfShape {var}_closing_faces;\n    Standard_Real {var}_top_z = -1.0e100;\n    for (TopExp_Explorer {var}_face_explorer({input_var}, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next()) {{\n        TopoDS_Face {var}_face = TopoDS::Face({var}_face_explorer.Current());\n        BRepAdaptor_Surface {var}_surface({var}_face);\n        if ({var}_surface.GetType() != GeomAbs_Plane) {{ continue; }}\n        Bnd_Box {var}_face_box;\n        BRepBndLib::Add({var}_face, {var}_face_box);\n        Standard_Real {var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax;\n        {var}_face_box.Get({var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax);\n        if ({var}_zmax > {var}_top_z + 1.0e-7) {{\n            {var}_closing_faces.Clear();\n            {var}_top_z = {var}_zmax;\n        }}\n        if (std::abs({var}_zmax - {var}_top_z) <= 1.0e-7) {{\n            {var}_closing_faces.Append({var}_face);\n        }}\n    }}\n    TopoDS_Shape {var};\n    if ({var}_closing_faces.IsEmpty()) {{\n        BRepOffsetAPI_MakeOffsetShape {var}_offset;\n        {var}_offset.PerformByJoin({input_var}, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n        TopoDS_Shape {var}_inner = {var}_offset.Shape();\n        {var} = BRepAlgoAPI_Cut({input_var}, {var}_inner).Shape();\n    }} else {{\n        BRepOffsetAPI_MakeThickSolid {var}_thick;\n        {var}_thick.MakeThickSolidByJoin({input_var}, {var}_closing_faces, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n        {var} = {var}_thick.Shape();\n    }}\n"
     ));
@@ -2727,6 +3071,399 @@ mod tests {
         assert!(source.contains("TopoDS::Edge"), "{source}");
         assert!(source.contains(".Add(0.5"), "{source}");
         assert!(source.contains(".Add(0.75"), "{source}");
+    }
+
+    #[test]
+    fn emits_exact_target_id_selector_for_native_occt_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:edge:0:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(
+            source.contains("std::vector<std::string>") && source.contains("_target_ids"),
+            "{source}"
+        );
+        assert!(source.contains("\"body:edge:0:0-0-0_0-0-10\""), "{source}");
+        assert!(
+            source.contains("direct_occt_edge_target_id(\"body\""),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn emits_exact_target_id_selector_for_native_occt_source_from_payload_when_value_is_bad() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:edge:0:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        );
+        let mut plan =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let fillet = plan.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        *fillet.keywords[0].source_arg_mut() = OcctArg::Number(7.0);
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("\"body:edge:0:0-0-0_0-0-10\""), "{source}");
+    }
+
+    #[test]
+    fn rejects_exact_edge_selector_without_payload_even_if_text_present() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:edge:0:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        );
+        let mut plan =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let fillet = plan.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        fillet.keywords[0].set_selector_payload(None);
+
+        let err = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect_err("missing payload should fail");
+
+        assert!(
+            err.message.contains("requires typed selector payload"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn emits_exact_face_target_id_selector_for_native_occt_shell_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "target-id:body:face:0:0-0-10:400"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(
+            source.contains("std::vector<std::string>") && source.contains("_target_ids"),
+            "{source}"
+        );
+        assert!(source.contains("\"body:face:0:0-0-10:400\""), "{source}");
+        assert!(
+            source.contains("direct_occt_face_target_id(\"body\""),
+            "{source}"
+        );
+        assert!(source.contains("BRepOffsetAPI_MakeThickSolid"), "{source}");
+    }
+
+    #[test]
+    fn emits_exact_face_target_id_selector_for_native_occt_shell_source_from_payload_when_value_is_bad(
+    ) {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "target-id:body:face:0:0-0-10:400"
+                  (box 10 10 10))))
+            "#,
+        );
+        let mut plan =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let shell = plan.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Shell)
+            .expect("shell");
+        *shell.keywords[0].source_arg_mut() = OcctArg::Number(7.0);
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("\"body:face:0:0-0-10:400\""), "{source}");
+    }
+
+    #[test]
+    fn rejects_exact_face_selector_without_payload_even_if_text_present() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "target-id:body:face:0:0-0-10:400"
+                  (box 10 10 10))))
+            "#,
+        );
+        let mut plan =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let shell = plan.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Shell)
+            .expect("shell");
+        shell.keywords[0].set_selector_payload(None);
+
+        let err = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect_err("missing payload should fail");
+
+        assert!(
+            err.message.contains("requires typed selector payload"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_coarse_edge_selector_for_native_occt_exact_path() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5 :edges "top" (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let err = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect_err("coarse selector should fail");
+
+        assert!(
+            err.message
+                .contains("supports exact `target-id:` / `target-ids:` selectors only"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_coarse_edge_selector_payload_for_native_occt_exact_path_when_value_is_bad() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5 :edges "top" (box 10 10 10))))
+            "#,
+        );
+        let mut plan =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let fillet = plan.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        *fillet.keywords[0].source_arg_mut() = OcctArg::Number(7.0);
+
+        let err = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect_err("coarse selector should fail");
+
+        assert!(
+            err.message
+                .contains("supports exact `target-id:` / `target-ids:` selectors only"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_edge_selector_with_shared_selector_help() {
+        let err = crate::ecky_scheme::compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (fillet 0.5 :edges "side" (box 10 10 10))))
+            "#,
+        )
+        .expect_err("unknown selector should fail");
+
+        assert!(
+            err.message.contains("expected selector payload"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_face_target_id_in_native_occt_edge_selector() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5 :edges "target-id:body:edge:0:0-0-0_10-0-0" (box 10 10 10))))
+            "#,
+        );
+        let mut plan =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let fillet = plan.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        fillet.keywords[0].set_selector_payload(Some(CoreSelectorPayload::FaceTargetIds(vec![
+            "body:face:0:0-0-10:100".to_string(),
+        ])));
+
+        let err = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect_err("wrong target kind should fail");
+
+        assert!(
+            err.message
+                .contains("got face selector payload [\"body:face:0:0-0-10:100\"]"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn emits_coarse_face_selector_for_native_occt_shell_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8 :faces "top" (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("coarse face selector should emit");
+        assert!(
+            source.contains("Bnd_Box")
+                && source.contains("TopTools_ListOfShape")
+                && source.contains("BRepBndLib::Add")
+                && source.contains("std::abs"),
+            "unexpected source: {}",
+            source
+        );
+    }
+
+    #[test]
+    fn emits_richer_face_selector_for_native_occt_shell_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8 :faces "planar+normal-z+area-max" (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("richer face selector should emit");
+        assert!(
+            source.contains("BRepGProp::SurfaceProperties")
+                && source.contains("GeomAbs_Plane")
+                && source.contains("std::max")
+                && source.contains("std::abs"),
+            "unexpected source: {}",
+            source
+        );
+    }
+
+    #[test]
+    fn rejects_edge_target_id_in_native_occt_face_selector() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8 :faces "target-id:body:face:0:0-0-10:100" (box 10 10 10))))
+            "#,
+        );
+        let mut plan =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let shell = plan.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Shell)
+            .expect("shell");
+        shell.keywords[0].set_selector_payload(Some(CoreSelectorPayload::EdgeTargetIds(vec![
+            "body:edge:0:0-0-0_10-0-0".to_string(),
+        ])));
+
+        let err = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect_err("wrong target kind should fail");
+
+        assert!(
+            err.message
+                .contains("got edge selector payload [\"body:edge:0:0-0-0_10-0-0\"]"),
+            "unexpected error: {:?}",
+            err
+        );
     }
 
     #[test]

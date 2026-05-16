@@ -80,6 +80,13 @@ Add new tables in `history.sqlite`:
 
 Use SQLite WAL as already configured. Do not add a second state file for activity in Phase 1; keep external agent state queryable with the rest of app history/runtime state.
 
+Current implementation gap:
+- `agent_sessions` exists.
+- `agent_drafts` does not exist; `init_db` currently drops legacy `agent_drafts`.
+- MCP preview drafts live in process memory under `SESSION_RENDER_PREVIEWS` and are mirrored to `last_design.json` for UI hydration.
+- `commit_preview_version` can receive a preview id that is not a saved `messages.id`; after process/session drift this returns `notFound` such as `Message b93ae906-ae19-4a77-88f8-282ac69422b5 not found.`
+- Fix direction: persist successful drafts durably outside history, keyed by `(session_id, thread_id, base_message_id)` plus preview id. History gets a new `messages` row only when `commit_preview_version` succeeds.
+
 ## Data Model
 ### `agent_sessions`
 Purpose: live external activity state for UI markers and target ownership display.
@@ -127,7 +134,15 @@ Rules:
 - one effective latest draft per `(thread_id, base_message_id)` target
 - when a new successful draft is written for the same target, it supersedes the previous draft
 - failed rerenders do not write draft state
-- `version_save` consumes the latest successful draft for the target and then clears it
+- `commit_preview_version` consumes the latest successful draft for the target and then clears it
+- draft ids are not history message ids until commit succeeds
+
+Acceptance:
+- Given `params_preview_render` succeeds, when the MCP session restarts, then `commit_preview_version` with base `threadId`/`messageId` saves the latest durable draft.
+- Given a durable draft exists, when thread history loads, then the draft is absent from `messages`.
+- Given a failed rerender follows a successful draft, then the previous successful durable draft remains commit-able.
+- Given `commit_preview_version` succeeds, then the durable draft for that target is cleared.
+- Given a stale preview id is passed after restart, then the error says the preview draft expired or was not found and tells the agent to use the base message id or rerender. It must not leak `Message <preview_id> not found.`
 
 ## Target Resolution
 Target resolution must be centralized in one service and used identically by Tauri and MCP.
@@ -242,7 +257,7 @@ Behavior:
 - the client decides whether to continue from draft or from saved base
 - update `agent_sessions.phase = reading`
 
-### `params_patch_and_render`
+### `params_preview_render`
 Purpose:
 - patch a subset of parameters and rerender a draft
 
@@ -278,7 +293,7 @@ Rules:
 - patch semantics are partial merge, not full replacement
 - no saved history version is created here
 
-### `macro_replace_and_render`
+### `macro_preview_render`
 Purpose:
 - replace macro code and rerender a draft
 
@@ -314,7 +329,7 @@ Output:
 Rules:
 - no saved history version is created here
 
-### `version_save`
+### `commit_preview_version`
 Purpose:
 - persist the latest successful draft as a new saved version
 
@@ -426,7 +441,7 @@ The implementer should avoid duplicating logic between Tauri and MCP. Shared ser
 - Return raw backend/provider/render error bodies where available.
 - Do not replace errors with generic “check API key” or “retry later” strings.
 - Validation errors for bad parameter patches must identify the offending key and mismatch reason.
-- `version_save` without a successful draft must return a clear validation error.
+- `commit_preview_version` without a successful draft must return a clear validation error.
 - Target resolution failures must distinguish:
   - unknown message
   - thread has no successful version
@@ -439,14 +454,14 @@ Add tests for:
 - target resolution by `threadId`
 - target resolution by last snapshot
 - no target available
-- `params_patch_and_render` partial merge behavior
+- `params_preview_render` partial merge behavior
 - invalid parameter patch rejection
-- `macro_replace_and_render` on legacy macro
-- `macro_replace_and_render` on framework macro
+- `macro_preview_render` on legacy macro
+- `macro_preview_render` on framework macro
 - successful draft superseding previous draft
 - failed render preserving previous successful draft
-- `version_save` creating new history message from draft
-- `version_save` clearing draft after success
+- `commit_preview_version` creating new history message from draft
+- `commit_preview_version` clearing draft after success
 - stale session filtering
 
 ### Frontend tests

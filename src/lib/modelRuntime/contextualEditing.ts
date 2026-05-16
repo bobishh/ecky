@@ -19,6 +19,7 @@ export type ContextSelectionKind = SelectionTargetKind | 'global';
 
 export type ContextSelectionTarget = {
   targetId: string;
+  aliasIds: string[];
   kind: ContextSelectionKind;
   partId: string | null;
   label: string;
@@ -68,15 +69,45 @@ function normalizeList(values: string[] | null | undefined): string[] {
   return Array.isArray(values) ? values.filter((value) => typeof value === 'string' && value.trim().length > 0) : [];
 }
 
+function stableTopologyAliasId(target: SelectionTarget): string | null {
+  if (target.kind !== 'edge' && target.kind !== 'face') return null;
+  const marker = `:${target.kind}:`;
+  return normalizeList(target.aliasIds).find((aliasId) => {
+    const parts = aliasId.split(marker);
+    if (parts.length !== 2) return false;
+    const [_, payload] = parts;
+    const head = payload.split(':')[0] ?? '';
+    return head.length > 0 && !/^\d+$/.test(head);
+  }) ?? null;
+}
+
 function defaultTargetId(target: SelectionTarget): string {
+  const durable = target.durableTargetId?.trim();
+  if (durable) return durable;
+  const stableAlias = stableTopologyAliasId(target);
+  if (stableAlias) return stableAlias;
   const explicit = target.targetId?.trim();
   if (explicit) return explicit;
   return `${target.kind}:${target.partId}:${target.viewerNodeId}`;
 }
 
 function normalizeSelectionTarget(target: SelectionTarget): ContextSelectionTarget {
+  const explicit = target.targetId?.trim() || null;
+  const durable = target.durableTargetId?.trim() || null;
+  const canonical = target.canonicalTargetId?.trim() || null;
+  const targetId = defaultTargetId(target);
+  const aliasIds = normalizeList(target.aliasIds);
+  const allAliasIds = [
+    ...new Set([
+      ...(durable && durable !== targetId ? [durable] : []),
+      ...(explicit && explicit !== targetId ? [explicit] : []),
+      ...(canonical && canonical !== targetId ? [canonical] : []),
+      ...aliasIds,
+    ]),
+  ].filter((aliasId) => aliasId !== targetId);
   return {
-    targetId: defaultTargetId(target),
+    targetId,
+    aliasIds: allAliasIds,
     kind: target.kind,
     partId: target.partId,
     label: target.label,
@@ -93,6 +124,7 @@ function syntheticPartTarget(manifest: ModelManifest, partId: string): ContextSe
   if (!part) return null;
   return {
     targetId: `part:${part.partId}`,
+    aliasIds: [],
     kind: 'part',
     partId: part.partId,
     label: part.label,
@@ -108,7 +140,7 @@ export function buildContextSelectionTargets(manifest: ModelManifest | null): Co
   if (!manifest) return [];
 
   const targets = (manifest.selectionTargets || []).map(normalizeSelectionTarget);
-  const seenIds = new Set(targets.map((target) => target.targetId));
+  const seenIds = new Set(targets.flatMap((target) => [target.targetId, ...target.aliasIds]));
 
   for (const part of manifest.parts || []) {
     const hasPartTarget = targets.some(
@@ -141,6 +173,7 @@ export function createGlobalContextTarget(manifest: ModelManifest | null): Conte
     (manifest.controlPrimitives || []).some((primitive) => primitive.editable);
   return {
     targetId: 'global',
+    aliasIds: [],
     kind: 'global',
     partId: null,
     label,
@@ -169,7 +202,11 @@ export function resolveContextSelectionTarget(
   if (!manifest) return null;
 
   if (requestedTargetId) {
-    const exact = targets.find((target) => target.targetId === requestedTargetId) ?? null;
+    const exact =
+      targets.find(
+        (target) =>
+          target.targetId === requestedTargetId || target.aliasIds.includes(requestedTargetId),
+      ) ?? null;
     if (exact) return exact;
   }
 
@@ -219,6 +256,15 @@ function sourcePriority(source: MaterializedSemanticView['source']): number {
     default:
       return 4;
   }
+}
+
+function buildTargetsById(targets: ContextSelectionTarget[]): Map<string, ContextSelectionTarget> {
+  const out = new Map<string, ContextSelectionTarget>();
+  for (const target of targets) {
+    out.set(target.targetId, target);
+    for (const aliasId of target.aliasIds) out.set(aliasId, target);
+  }
+  return out;
 }
 
 function viewPriority(view: MaterializedSemanticView, target: ContextSelectionTarget | null): number {
@@ -484,6 +530,7 @@ function annotationTargetMatchesSelection(
   const targetIds = normalizeList(annotation.targetIds);
   if (!target || target.kind === 'global' || targetIds.length === 0) return false;
   if (targetIds.includes(target.targetId)) return true;
+  if (targetIds.some((targetId) => target.aliasIds.includes(targetId))) return true;
   if (!target.partId) return false;
   return targetIds.some(
     (targetId) => targetsById.get(targetId)?.partId === target.partId,
@@ -539,7 +586,7 @@ export function resolveMeasurementCallout(
   const annotations = manifest?.measurementAnnotations || [];
   if (!manifest || annotations.length === 0) return null;
 
-  const targetsById = new Map(targets.map((target) => [target.targetId, target] as const));
+  const targetsById = buildTargetsById(targets);
   type RankedAnnotation = {
     annotation: MeasurementAnnotation;
     rank: number;

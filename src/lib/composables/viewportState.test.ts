@@ -3,7 +3,6 @@ import test from 'node:test';
 
 import { deriveViewportState } from './viewportState';
 import type { AgentOrigin, ArtifactBundle, Message, ViewportCameraState } from '../types/domain';
-import type { ConceptPreviewUiState } from '../viewportBlueprint';
 
 function bundle(): ArtifactBundle {
   return {
@@ -73,28 +72,97 @@ test('deriveViewportState resolves preview mode, URLs, and active viewport keys'
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
     stlUrl: 'file:///tmp/model.stl',
-    conceptPreviewUiByThread: {
-      'thread-1': {
-        pinnedMessageId: 'msg-1',
-        lastAutoPinnedMessageId: 'msg-1',
-        mode: 'blueprint',
-      } satisfies ConceptPreviewUiState,
-    },
     cameraStateByTarget: {
-      'thread-1:msg-1': cameraState,
+      'thread-1:msg-1:model-1:3:hash-1': cameraState,
     },
     toAssetUrl: (path) => `asset:${path ?? ''}`,
   });
 
   assert.equal(state.viewerAssets[0]?.path, 'asset:/tmp/body.stl');
   assert.equal(state.hasRenderableModel, true);
-  assert.equal(state.activeThreadConceptPreviewState.mode, 'blueprint');
   assert.equal(state.effectiveConceptPreviewMessage?.id, 'msg-1');
-  assert.equal(state.viewportPresentationMode, 'blueprint');
-  assert.equal(state.showBlueprintViewport, true);
-  assert.equal(state.blueprintAttentionVisible, false);
-  assert.equal(state.currentViewportTargetKey, 'thread-1:msg-1');
-  assert.equal(state.currentViewerModelKey, 'thread-1:msg-1:model-1:3:hash-1');
+  assert.equal(state.currentViewportTargetKey, 'thread-1:msg-1:model-1:3:hash-1');
+  assert.equal(state.currentViewerModelKey, 'model-1:3:hash-1:file:///tmp/model.stl');
   assert.deepEqual(state.persistedViewportCameraState, cameraState);
   assert.equal(state.activeVersionAgentLabel, 'Ecky · Gemini');
+});
+
+test('deriveViewportState drops persisted camera when same version points at a new artifact', () => {
+  const state = deriveViewportState({
+    activeThreadId: 'thread-1',
+    activeVersionId: 'msg-1',
+    activeArtifactBundle: {
+      ...bundle(),
+      contentHash: 'hash-2',
+      artifactVersion: 4,
+    },
+    activeVersionMessage: conceptMessage('msg-1'),
+    activeThreadMessages: [conceptMessage('msg-1')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {
+      'thread-1:msg-1:model-1:3:hash-1': {
+        position: [1, 2, 3],
+        target: [0, 0, 0],
+        zoom: 1,
+        fov: 35,
+      },
+    },
+    toAssetUrl: (path) => `asset:${path ?? ''}`,
+  });
+
+  assert.equal(state.currentViewportTargetKey, 'thread-1:msg-1:model-1:4:hash-2');
+  assert.equal(state.persistedViewportCameraState, null);
+});
+
+test('deriveViewportState keeps viewer model key stable across version ids for same artifact', () => {
+  const first = deriveViewportState({
+    activeThreadId: 'thread-1',
+    activeVersionId: 'msg-1',
+    activeArtifactBundle: bundle(),
+    activeVersionMessage: conceptMessage('msg-1'),
+    activeThreadMessages: [conceptMessage('msg-1')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {},
+    toAssetUrl: (path) => `asset:${path ?? ''}`,
+  });
+  const second = deriveViewportState({
+    activeThreadId: 'thread-1',
+    activeVersionId: 'msg-2',
+    activeArtifactBundle: bundle(),
+    activeVersionMessage: conceptMessage('msg-2'),
+    activeThreadMessages: [conceptMessage('msg-2')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {},
+    toAssetUrl: (path) => `asset:${path ?? ''}`,
+  });
+
+  assert.equal(first.currentViewerModelKey, second.currentViewerModelKey);
+  assert.notEqual(first.currentViewportTargetKey, second.currentViewportTargetKey);
+});
+
+test('deriveViewportState changes viewer model key when same artifact is regenerated', () => {
+  const first = deriveViewportState({
+    activeThreadId: 'thread-1',
+    activeVersionId: 'msg-1',
+    activeArtifactBundle: bundle(),
+    activeVersionMessage: conceptMessage('msg-1'),
+    activeThreadMessages: [conceptMessage('msg-1')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {},
+    runtimeRevision: 1,
+    toAssetUrl: (path) => `asset:${path ?? ''}`,
+  });
+  const second = deriveViewportState({
+    activeThreadId: 'thread-1',
+    activeVersionId: 'msg-1',
+    activeArtifactBundle: bundle(),
+    activeVersionMessage: conceptMessage('msg-1'),
+    activeThreadMessages: [conceptMessage('msg-1')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {},
+    runtimeRevision: 2,
+    toAssetUrl: (path) => `asset:${path ?? ''}`,
+  });
+
+  assert.notEqual(first.currentViewerModelKey, second.currentViewerModelKey);
 });

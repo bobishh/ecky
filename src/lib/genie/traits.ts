@@ -1,4 +1,10 @@
-import type { GenieEyeStyle, GenieTraits } from '../types/domain';
+import type {
+  ArtifactBundle,
+  GenieEyeStyle,
+  GenieTraits,
+  ModelManifest,
+  RuntimeAuthoringContext,
+} from '../types/domain';
 
 export type GenieMode =
   | 'idle'
@@ -207,6 +213,42 @@ export function buildGenieTraitsFromSeed(seed: number): GenieTraits {
 export function buildAgentGenieTraits(agentIdentity: string | null | undefined): GenieTraits {
   const identity = agentIdentity?.trim().toLowerCase() || 'ecky';
   return buildGenieTraitsFromSeed(deriveGenieSeed(`agent:${identity}`));
+}
+
+export function buildModelGenieTraits(input: {
+  artifactBundle?: ArtifactBundle | null;
+  modelManifest?: ModelManifest | null;
+  messageId?: string | null;
+  versionName?: string | null;
+  authoringContext?: RuntimeAuthoringContext | null;
+}): GenieTraits {
+  const bundle = input.artifactBundle ?? null;
+  const manifest = input.modelManifest ?? null;
+  const authoring = input.authoringContext ?? null;
+  const modelId = bundle?.modelId ?? manifest?.modelId ?? '';
+  const contentHash = bundle?.contentHash ?? '';
+  const artifactVersion = bundle?.artifactVersion ?? '';
+  const engineKind = authoring?.engineKind ?? bundle?.engineKind ?? manifest?.engineKind ?? '';
+  const sourceLanguage =
+    authoring?.sourceLanguage ?? bundle?.sourceLanguage ?? manifest?.sourceLanguage ?? '';
+  const geometryBackend =
+    authoring?.geometryBackend ?? bundle?.geometryBackend ?? manifest?.geometryBackend ?? '';
+  const version = input.messageId ?? input.versionName ?? '';
+  const digest = [
+    'model',
+    modelId,
+    contentHash,
+    `${artifactVersion}`,
+    version,
+    engineKind,
+    sourceLanguage,
+    geometryBackend,
+  ]
+    .map((part) => `${part}`.trim().toLowerCase())
+    .filter(Boolean)
+    .join('|');
+
+  return buildGenieTraitsFromSeed(deriveGenieSeed(digest || 'model:ecky:boot'));
 }
 
 export function normalizeGenieTraits(

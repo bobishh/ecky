@@ -15,15 +15,18 @@ use crate::models::{
 
 use super::mesh_ops::eval_geometry_expr;
 use super::model::{
-    build_param_env, core_program_param_defaults, parse_model, parsed_params_from_core_program,
-    parsed_params_from_model, IrExpr, IrModel,
+    build_param_env, core_program_param_defaults, materialize_selector_nodes, parse_model,
+    parsed_params_from_core_program, parsed_params_from_model, IrExpr, IrModel,
 };
 use super::shared::{unsupported, validation, IrMesh};
 use super::syntax::canonicalize;
 use crate::ecky_core_ir::{
-    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode,
-    CoreNodeKind, CoreOperation, CorePart, CorePathOp, CorePrimitive, CoreProgram, CoreReference,
-    CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
+    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
+    CoreOperation, CorePart, CorePathOp, CorePrimitive, CoreProgram, CoreReference,
+    CoreSelectorPayload, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
+};
+use crate::ecky_ir::edge_ops::{
+    edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
 };
 
 pub(super) const MODEL_RUNTIME_ROOT: &str = "model-runtime";
@@ -242,14 +245,31 @@ fn runtime_core_part_to_runtime_part(
     Ok(RuntimePart {
         part_id: part.key.clone(),
         label: part.label.clone(),
-        expr: runtime_core_node_to_ir_expr(
+        expr: materialize_selector_nodes(runtime_core_node_to_ir_expr(
             &part.root,
             param_names,
             &BTreeMap::new(),
             &BTreeMap::new(),
             &mut used_local_names,
-        )?,
+        )?)?,
     })
+}
+
+fn runtime_ir_expr_from_core_selector_payload(payload: &CoreSelectorPayload) -> AppResult<IrExpr> {
+    match payload {
+        CoreSelectorPayload::EdgeAll
+        | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTargetIds(_) => Ok(IrExpr::Selector(
+            crate::ecky_ir::model::IrSelectorExpr::Edge(edge_selector_spec_from_core_payload(
+                payload,
+            )?),
+        )),
+        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => Ok(
+            IrExpr::Selector(crate::ecky_ir::model::IrSelectorExpr::Face(
+                face_selector_spec_from_core_payload(payload)?,
+            )),
+        ),
+    }
 }
 
 fn runtime_core_node_to_ir_expr(
@@ -401,15 +421,51 @@ fn runtime_core_node_to_ir_expr(
                     used_local_names,
                 )?);
             }
-            for CoreKeywordArg { name, value } in keywords {
-                items.push(IrExpr::keyword(name.clone()));
-                items.push(runtime_core_node_to_ir_expr(
-                    value,
-                    param_names,
-                    refs,
-                    locals,
-                    used_local_names,
-                )?);
+            for keyword in keywords {
+                items.push(IrExpr::keyword(keyword.name.clone()));
+                items.push(match (keyword.name.as_str(), keyword.selector_payload()) {
+                    ("edges", None) => {
+                        return Err(validation(
+                            "CoreProgram `:edges` keyword requires selector payload.",
+                        ))
+                    }
+                    ("faces", None) => {
+                        return Err(validation(
+                            "CoreProgram `:faces` keyword requires selector payload.",
+                        ))
+                    }
+                    (
+                        "edges",
+                        Some(
+                            crate::ecky_core_ir::CoreSelectorPayload::FaceClauses(_)
+                            | crate::ecky_core_ir::CoreSelectorPayload::FaceTargetIds(_),
+                        ),
+                    ) => {
+                        return Err(validation(
+                            "CoreProgram `:edges` keyword requires edge selector payload.",
+                        ))
+                    }
+                    (
+                        "faces",
+                        Some(
+                            crate::ecky_core_ir::CoreSelectorPayload::EdgeAll
+                            | crate::ecky_core_ir::CoreSelectorPayload::EdgeClauses(_)
+                            | crate::ecky_core_ir::CoreSelectorPayload::EdgeTargetIds(_),
+                        ),
+                    ) => {
+                        return Err(validation(
+                            "CoreProgram `:faces` keyword requires face selector payload.",
+                        ))
+                    }
+                    (_, Some(selector)) => runtime_ir_expr_from_core_selector_payload(selector)?,
+                    (_, None) => runtime_core_node_to_ir_expr(
+                        keyword.source_node(),
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                    )?,
+                });
             }
             Ok(IrExpr::list(items))
         }
@@ -875,6 +931,22 @@ mod tests {
         .expect("parse manifest")
     }
 
+    fn contains_edge_selector(expr: &IrExpr) -> bool {
+        match expr {
+            IrExpr::Selector(crate::ecky_ir::model::IrSelectorExpr::Edge(_)) => true,
+            IrExpr::List(items) => items.iter().any(contains_edge_selector),
+            _ => false,
+        }
+    }
+
+    fn contains_face_selector(expr: &IrExpr) -> bool {
+        match expr {
+            IrExpr::Selector(crate::ecky_ir::model::IrSelectorExpr::Face(_)) => true,
+            IrExpr::List(items) => items.iter().any(contains_face_selector),
+            _ => false,
+        }
+    }
+
     #[test]
     fn render_model_from_model_renders_typed_build_expr() {
         let root = render_root();
@@ -1085,5 +1157,103 @@ mod tests {
         assert_eq!(runtime.part_id, legacy.part_id);
         assert_eq!(runtime.label, legacy.label);
         assert_eq!(runtime.expr, legacy.expr);
+    }
+
+    #[test]
+    fn runtime_core_part_conversion_materializes_selector_nodes() {
+        let source =
+            "(model (part body (fillet 1 :edges \"target-id:body:edge:0:0-0-0_1-0-0\" (box 1 1 1))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let param_names = program
+            .parameters
+            .iter()
+            .map(|param| (param.id.raw(), param.key.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let runtime =
+            runtime_core_part_to_runtime_part(&program.parts[0], &param_names).expect("runtime");
+        assert!(
+            contains_edge_selector(&runtime.expr),
+            "expected typed selector in {:?}",
+            runtime.expr
+        );
+    }
+
+    #[test]
+    fn runtime_core_part_conversion_materializes_face_selector_nodes() {
+        let source =
+            "(model (part body (shell 1 :faces \"target-id:body:face:0:0-0-1:1\" (box 1 1 1))))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let param_names = program
+            .parameters
+            .iter()
+            .map(|param| (param.id.raw(), param.key.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let runtime =
+            runtime_core_part_to_runtime_part(&program.parts[0], &param_names).expect("runtime");
+        assert!(
+            contains_face_selector(&runtime.expr),
+            "expected typed face selector in {:?}",
+            runtime.expr
+        );
+    }
+
+    #[test]
+    fn runtime_core_part_conversion_rejects_missing_selector_payload_on_edges_keyword() {
+        let source = "(model (part body (fillet 1 :edges \"left+vertical\" (box 1 1 1))))";
+        let mut program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } =
+            &mut program.parts[0].root.kind
+        else {
+            panic!("expected call");
+        };
+        keywords[0].set_selector_payload(None);
+        let param_names = program
+            .parameters
+            .iter()
+            .map(|param| (param.id.raw(), param.key.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let err = match runtime_core_part_to_runtime_part(&program.parts[0], &param_names) {
+            Ok(_) => panic!("missing selector payload should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("CoreProgram `:edges` keyword requires selector payload"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn runtime_core_part_conversion_rejects_wrong_kind_selector_payload_on_edges_keyword() {
+        let source = "(model (part body (fillet 1 :edges \"left+vertical\" (box 1 1 1))))";
+        let mut program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } =
+            &mut program.parts[0].root.kind
+        else {
+            panic!("expected call");
+        };
+        keywords[0].set_selector_payload(Some(
+            crate::ecky_core_ir::CoreSelectorPayload::FaceTargetIds(vec![
+                "body:face:0:0-0-1:1".into()
+            ]),
+        ));
+        let param_names = program
+            .parameters
+            .iter()
+            .map(|param| (param.id.raw(), param.key.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let err = match runtime_core_part_to_runtime_part(&program.parts[0], &param_names) {
+            Ok(_) => panic!("wrong-kind selector payload should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("CoreProgram `:edges` keyword requires edge selector payload"),
+            "{err}"
+        );
     }
 }

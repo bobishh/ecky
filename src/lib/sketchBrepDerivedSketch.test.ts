@@ -31,7 +31,6 @@ const projection: BrepHiddenLineProjectionResponse = {
       hiddenEdges: [],
     },
   ],
-  warnings: [],
   validation: { passed: true, issues: [], evidence: [] },
 };
 
@@ -120,6 +119,86 @@ test('buildSketchDocumentFromBrepProjection preserves multiple closed projection
   assert.equal(derived.document.sketches?.[0]?.primitives?.length, 2);
   assert.equal(derived.document.sketches?.[0]?.primitives?.[0]?.primitiveId, 'derived-brep-front');
   assert.equal(derived.document.sketches?.[0]?.primitives?.[1]?.primitiveId, 'derived-brep-front-2');
+  assert.deepEqual(derived.document.sketches?.[0]?.primitives?.map((primitive) => primitive.topology?.edgeIds), [
+    ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+    ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+  ]);
+  assert.deepEqual(derived.document.sketches?.[0]?.primitives?.map((primitive) => primitive.topology?.loopRole), [
+    'outer',
+    'hole',
+  ]);
+  assert.deepEqual(derived.document.sketches?.[0]?.primitives?.[1]?.points, [
+    [25, 18],
+    [45, 18],
+    [45, 34],
+    [25, 34],
+    [25, 18],
+  ]);
+});
+
+test('buildSketchDocumentFromBrepProjection prefers backend projected loops and preserves loop ids', () => {
+  const result = buildSketchDocumentFromBrepProjection({
+    ...projection,
+    views: [
+      {
+        view: 'front',
+        direction: [0, -1, 0],
+        visibleEdges: [
+          { edgeId: 'outer-a', points: [[999, 999], [1000, 999]], sourceClass: 'V' },
+        ],
+        hiddenEdges: [],
+        loops: [
+          {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            points: [
+              [0, 0],
+              [80, 0],
+              [80, 50],
+              [0, 50],
+              [0, 0],
+            ],
+            role: 'outer',
+            sourceClass: 'V',
+          },
+          {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            points: [
+              [25, 18],
+              [45, 18],
+              [45, 34],
+              [25, 34],
+              [25, 18],
+            ],
+            role: 'hole',
+            sourceClass: 'V',
+          },
+        ],
+      },
+    ],
+  });
+  const derived = assertDerivedResult(result);
+
+  assert.deepEqual(derived.document.sketches?.[0]?.primitives?.map((primitive) => primitive.primitiveId), [
+    'derived-brep-front-front-outer',
+    'derived-brep-front-front-hole',
+  ]);
+  assert.deepEqual(derived.document.sketches?.[0]?.primitives?.map((primitive) => primitive.topology?.loopId), [
+    'front-outer',
+    'front-hole',
+  ]);
+  assert.deepEqual(derived.document.sketches?.[0]?.primitives?.map((primitive) => primitive.topology?.loopRole), [
+    'outer',
+    'hole',
+  ]);
+  assert.deepEqual(derived.document.sketches?.[0]?.primitives?.[0]?.points, [
+    [0, 0],
+    [80, 0],
+    [80, 50],
+    [0, 50],
+    [0, 0],
+  ]);
   assert.deepEqual(derived.document.sketches?.[0]?.primitives?.[1]?.points, [
     [25, 18],
     [45, 18],

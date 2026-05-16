@@ -4,9 +4,9 @@ use lexpr::Value;
 
 #[cfg(test)]
 use crate::ecky_core_ir::{
-    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode,
-    CoreNodeKind, CoreOperation, CorePart, CorePathOp, CorePrimitive, CoreReference, CoreSurfaceOp,
-    CoreSymbol, CoreTransformOp,
+    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
+    CoreOperation, CorePart, CorePathOp, CorePrimitive, CoreReference, CoreSelectorPayload,
+    CoreSurfaceOp, CoreSymbol, CoreTransformOp,
 };
 use crate::ecky_core_ir::{
     CoreParameter, CoreParameterKind, CoreParameterValue, CoreProgram, CoreValueKind,
@@ -15,6 +15,15 @@ use crate::models::{
     AppResult, DesignParams, ParamValue, ParsedParamsResult, SelectOption, SelectValue, UiField,
 };
 
+#[cfg(test)]
+use super::edge_ops::{
+    edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
+    parse_edge_selector_spec, parse_face_selector_spec, EdgeSelectorSpec, FaceSelectorSpec,
+};
+#[cfg(not(test))]
+use super::edge_ops::{
+    parse_edge_selector_spec, parse_face_selector_spec, EdgeSelectorSpec, FaceSelectorSpec,
+};
 use super::shared::{unsupported, validation};
 use super::syntax::{
     head_symbol, ir_parse, keyword_name, list_items, parse_number_value, parse_stringish,
@@ -26,12 +35,19 @@ pub(crate) struct IrModel {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) enum IrSelectorExpr {
+    Edge(EdgeSelectorSpec),
+    Face(FaceSelectorSpec),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IrExpr {
     Number(f64),
     Boolean(bool),
     String(String),
     Symbol(String),
     Keyword(String),
+    Selector(IrSelectorExpr),
     List(Vec<IrExpr>),
 }
 
@@ -174,6 +190,117 @@ pub(super) fn expr_parse_stringish(value: &IrExpr, context: &str) -> AppResult<S
         return Ok(symbol.to_string());
     }
     Err(validation(format!("Expected text for {}.", context)))
+}
+
+pub(crate) fn expr_parse_edge_selector_spec(
+    value: &IrExpr,
+    context: &str,
+) -> AppResult<EdgeSelectorSpec> {
+    match value {
+        IrExpr::Selector(IrSelectorExpr::Edge(selector)) => Ok(selector.clone()),
+        IrExpr::Selector(IrSelectorExpr::Face(_)) => Err(validation(format!(
+            "Expected edge selector for {}.",
+            context
+        ))),
+        _ => Err(validation(format!(
+            "Expected typed edge selector for {}.",
+            context
+        ))),
+    }
+}
+
+pub(crate) fn expr_parse_face_selector_spec(
+    value: &IrExpr,
+    context: &str,
+) -> AppResult<FaceSelectorSpec> {
+    match value {
+        IrExpr::Selector(IrSelectorExpr::Face(selector)) => Ok(selector.clone()),
+        IrExpr::Selector(IrSelectorExpr::Edge(_)) => Err(validation(format!(
+            "Expected face selector for {}.",
+            context
+        ))),
+        _ => Err(validation(format!(
+            "Expected typed face selector for {}.",
+            context
+        ))),
+    }
+}
+
+fn materialize_edge_selector_expr(value: IrExpr) -> AppResult<IrExpr> {
+    match value {
+        IrExpr::Selector(IrSelectorExpr::Edge(selector)) => {
+            Ok(IrExpr::Selector(IrSelectorExpr::Edge(selector)))
+        }
+        IrExpr::Selector(IrSelectorExpr::Face(_)) => {
+            Err(validation("Expected edge selector for edge selection."))
+        }
+        other => Ok(IrExpr::Selector(IrSelectorExpr::Edge(
+            parse_edge_selector_spec(&expr_parse_stringish(&other, "edge selection")?)?,
+        ))),
+    }
+}
+
+fn materialize_face_selector_expr(value: IrExpr) -> AppResult<IrExpr> {
+    match value {
+        IrExpr::Selector(IrSelectorExpr::Face(selector)) => {
+            Ok(IrExpr::Selector(IrSelectorExpr::Face(selector)))
+        }
+        IrExpr::Selector(IrSelectorExpr::Edge(_)) => {
+            Err(validation("Expected face selector for face selection."))
+        }
+        other => Ok(IrExpr::Selector(IrSelectorExpr::Face(
+            parse_face_selector_spec(&expr_parse_stringish(&other, "face selection")?)?,
+        ))),
+    }
+}
+
+fn materialize_keyword_selector(name: &str, value: IrExpr) -> AppResult<IrExpr> {
+    match name {
+        "edges" => materialize_edge_selector_expr(value),
+        "faces" => materialize_face_selector_expr(value),
+        _ => Ok(value),
+    }
+}
+
+pub(crate) fn materialize_selector_nodes(value: IrExpr) -> AppResult<IrExpr> {
+    match value {
+        IrExpr::List(items) => {
+            let mut rewritten = items
+                .into_iter()
+                .map(materialize_selector_nodes)
+                .collect::<AppResult<Vec<_>>>()?;
+            if rewritten.first().and_then(IrExpr::as_symbol).is_some() {
+                let mut index = 1usize;
+                while index + 1 < rewritten.len() {
+                    if let Some(keyword) = expr_keyword_name(&rewritten[index]) {
+                        rewritten[index + 1] =
+                            materialize_keyword_selector(keyword, rewritten[index + 1].dup())?;
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                }
+            }
+            Ok(IrExpr::List(rewritten))
+        }
+        other => Ok(other),
+    }
+}
+
+#[cfg(test)]
+fn ir_expr_from_core_selector_payload(payload: &CoreSelectorPayload) -> AppResult<IrExpr> {
+    match payload {
+        CoreSelectorPayload::EdgeAll
+        | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTargetIds(_) => Ok(IrExpr::Selector(IrSelectorExpr::Edge(
+            edge_selector_spec_from_core_payload(payload)?,
+        ))),
+        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => {
+            Ok(IrExpr::Selector(IrSelectorExpr::Face(
+                face_selector_spec_from_core_payload(payload)?,
+            )))
+        }
+    }
 }
 
 pub(super) fn inline_let_expr(value: &IrExpr) -> AppResult<IrExpr> {
@@ -501,7 +628,7 @@ pub(super) fn parse_part_decl(items: &[Value]) -> AppResult<IrPart> {
     Ok(IrPart {
         part_id,
         label,
-        expr: IrExpr::from_value(&expr)?,
+        expr: materialize_selector_nodes(IrExpr::from_value(&expr)?)?,
         value_kind: None,
     })
 }
@@ -782,13 +909,13 @@ pub(crate) fn core_part_to_ir_part(
     Ok(IrPart {
         part_id: part.key.clone(),
         label: part.label.clone(),
-        expr: core_node_to_ir_expr(
+        expr: materialize_selector_nodes(core_node_to_ir_expr(
             &part.root,
             param_names,
             &BTreeMap::new(),
             &BTreeMap::new(),
             &mut used_local_names,
-        )?,
+        )?)?,
         value_kind: Some(part.root.value_kind),
     })
 }
@@ -951,15 +1078,51 @@ pub(crate) fn core_node_to_ir_expr(
                     used_local_names,
                 )?);
             }
-            for CoreKeywordArg { name, value } in keywords {
-                items.push(IrExpr::keyword(name.clone()));
-                items.push(core_node_to_ir_expr(
-                    value,
-                    param_names,
-                    refs,
-                    locals,
-                    used_local_names,
-                )?);
+            for keyword in keywords {
+                items.push(IrExpr::keyword(keyword.name.clone()));
+                items.push(match (keyword.name.as_str(), keyword.selector_payload()) {
+                    ("edges", None) => {
+                        return Err(validation(
+                            "CoreProgram `:edges` keyword requires selector payload.",
+                        ))
+                    }
+                    ("faces", None) => {
+                        return Err(validation(
+                            "CoreProgram `:faces` keyword requires selector payload.",
+                        ))
+                    }
+                    (
+                        "edges",
+                        Some(
+                            CoreSelectorPayload::FaceClauses(_)
+                            | CoreSelectorPayload::FaceTargetIds(_),
+                        ),
+                    ) => {
+                        return Err(validation(
+                            "CoreProgram `:edges` keyword requires edge selector payload.",
+                        ))
+                    }
+                    (
+                        "faces",
+                        Some(
+                            CoreSelectorPayload::EdgeAll
+                            | CoreSelectorPayload::EdgeClauses(_)
+                            | CoreSelectorPayload::EdgeTargetIds(_),
+                        ),
+                    ) => {
+                        return Err(validation(
+                            "CoreProgram `:faces` keyword requires face selector payload.",
+                        ))
+                    }
+                    (_, Some(selector)) => ir_expr_from_core_selector_payload(selector)?,
+                    (_, None) => core_node_to_ir_expr(
+                        keyword.source_node(),
+                        param_names,
+                        refs,
+                        locals,
+                        used_local_names,
+                    )?,
+                });
             }
             Ok(IrExpr::list(items))
         }
@@ -1178,12 +1341,29 @@ mod tests {
     fn collect_symbols(expr: &IrExpr, out: &mut Vec<String>) {
         match expr {
             IrExpr::Symbol(symbol) => out.push(symbol.clone()),
+            IrExpr::Selector(_) => {}
             IrExpr::List(items) => {
                 for item in items {
                     collect_symbols(item, out);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn contains_edge_selector(expr: &IrExpr) -> bool {
+        match expr {
+            IrExpr::Selector(IrSelectorExpr::Edge(_)) => true,
+            IrExpr::List(items) => items.iter().any(contains_edge_selector),
+            _ => false,
+        }
+    }
+
+    fn contains_face_selector(expr: &IrExpr) -> bool {
+        match expr {
+            IrExpr::Selector(IrSelectorExpr::Face(_)) => true,
+            IrExpr::List(items) => items.iter().any(contains_face_selector),
+            _ => false,
         }
     }
 
@@ -1284,6 +1464,130 @@ mod tests {
             symbols.iter().any(|symbol| symbol.contains("total-l2")),
             "expected readable local symbol in {:?}",
             symbols
+        );
+    }
+
+    #[test]
+    fn parse_model_materializes_edge_selector_node() {
+        let model = parse_model(
+            "(model (part body (fillet 1 :edges \"target-id:body:edge:0:0-0-0_1-0-0\" (box 1 1 1))))",
+        )
+        .expect("model");
+        let items = model.parts[0].expr.as_list().expect("call");
+        match &items[3] {
+            IrExpr::Selector(IrSelectorExpr::Edge(selector)) => {
+                assert_eq!(
+                    selector.target_ids(),
+                    Some(&["body:edge:0:0-0-0_1-0-0".to_string()][..])
+                );
+            }
+            other => panic!("expected edge selector node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_model_materializes_face_selector_node() {
+        let model = parse_model(
+            "(model (part body (shell 1 :faces \"target-id:body:face:0:0-0-1:1\" (box 1 1 1))))",
+        )
+        .expect("model");
+        let items = model.parts[0].expr.as_list().expect("call");
+        match &items[3] {
+            IrExpr::Selector(IrSelectorExpr::Face(selector)) => {
+                assert_eq!(selector.target_ids(), &["body:face:0:0-0-1:1".to_string()]);
+            }
+            other => panic!("expected face selector node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_parse_edge_selector_spec_rejects_raw_string_expr() {
+        let err = expr_parse_edge_selector_spec(&IrExpr::string("left+vertical"), "edge selection")
+            .expect_err("raw string should fail");
+        assert!(err.to_string().contains("Expected typed edge selector"));
+    }
+
+    #[test]
+    fn expr_parse_face_selector_spec_rejects_raw_string_expr() {
+        let err = expr_parse_face_selector_spec(
+            &IrExpr::string("target-id:body:face:0:0-0-1:1"),
+            "face selection",
+        )
+        .expect_err("raw string should fail");
+        assert!(err.to_string().contains("Expected typed face selector"));
+    }
+
+    #[test]
+    fn core_program_to_model_materializes_selector_nodes() {
+        let program = compile_to_core_program(
+            "(model (part body (fillet 1 :edges \"target-id:body:edge:0:0-0-0_1-0-0\" (box 1 1 1))))",
+        )
+        .expect("program");
+        let model = core_program_to_model(&program).expect("model");
+        assert!(
+            contains_edge_selector(&model.parts[0].expr),
+            "expected selector in {:?}",
+            model.parts[0].expr
+        );
+    }
+
+    #[test]
+    fn core_program_to_model_materializes_face_selector_nodes() {
+        let program = compile_to_core_program(
+            "(model (part body (shell 1 :faces \"target-id:body:face:0:0-0-1:1\" (box 1 1 1))))",
+        )
+        .expect("program");
+        let model = core_program_to_model(&program).expect("model");
+        assert!(
+            contains_face_selector(&model.parts[0].expr),
+            "expected face selector in {:?}",
+            model.parts[0].expr
+        );
+    }
+
+    #[test]
+    fn core_program_to_model_rejects_missing_selector_payload_on_edges_keyword() {
+        let mut program = compile_to_core_program(
+            "(model (part body (fillet 1 :edges \"left+vertical\" (box 1 1 1))))",
+        )
+        .expect("program");
+        let CoreNodeKind::Call { keywords, .. } = &mut program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        keywords[0].set_selector_payload(None);
+
+        let err = match core_program_to_model(&program) {
+            Ok(_) => panic!("missing selector payload should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("CoreProgram `:edges` keyword requires selector payload"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn core_program_to_model_rejects_wrong_kind_selector_payload_on_edges_keyword() {
+        let mut program = compile_to_core_program(
+            "(model (part body (fillet 1 :edges \"left+vertical\" (box 1 1 1))))",
+        )
+        .expect("program");
+        let CoreNodeKind::Call { keywords, .. } = &mut program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        keywords[0].set_selector_payload(Some(CoreSelectorPayload::FaceTargetIds(vec![
+            "body:face:0:0-0-1:1".into(),
+        ])));
+
+        let err = match core_program_to_model(&program) {
+            Ok(_) => panic!("wrong-kind selector payload should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("CoreProgram `:edges` keyword requires edge selector payload"),
+            "{err}"
         );
     }
 }

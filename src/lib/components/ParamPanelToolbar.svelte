@@ -5,12 +5,14 @@
     searchQuery = '',
     editing = false,
     applying = false,
+    committing = false,
     reading = false,
     saveValuesState = 'idle',
     liveApply = false,
     activeVersionId = null,
     onSearchQueryChange,
     onApplyChanges,
+    onCommitChanges,
     onSaveValues,
     onStartEditing,
     onSaveFields,
@@ -21,12 +23,14 @@
     searchQuery?: string;
     editing?: boolean;
     applying?: boolean;
+    committing?: boolean;
     reading?: boolean;
     saveValuesState?: SaveValuesState;
     liveApply?: boolean;
     activeVersionId?: string | null;
     onSearchQueryChange?: (value: string) => void;
     onApplyChanges?: () => void;
+    onCommitChanges?: () => void;
     onSaveValues?: () => void;
     onStartEditing?: () => void;
     onSaveFields?: () => void;
@@ -64,7 +68,7 @@
         <span>LIVE</span>
       </label>
       <button
-        class="btn btn-xs btn-primary apply-btn"
+        class="btn btn-xs btn-secondary apply-btn"
         onclick={onApplyChanges}
         disabled={liveApply || applying}
       >
@@ -72,6 +76,18 @@
           APPLYING...
         {:else}
           APPLY
+        {/if}
+      </button>
+      <button
+        class="btn btn-xs btn-primary"
+        onclick={onCommitChanges}
+        disabled={!activeVersionId || committing}
+        title={activeVersionId ? 'Save current draft as immutable history version' : 'Generate first to commit a version'}
+      >
+        {#if committing}
+          COMMITTING...
+        {:else}
+          COMMIT
         {/if}
       </button>
       <button

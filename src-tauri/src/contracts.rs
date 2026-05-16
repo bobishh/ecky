@@ -40,6 +40,59 @@ pub struct AgentSession {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraft {
+    pub preview_id: String,
+    pub session_id: String,
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_message_id: Option<String>,
+    pub design_output: DesignOutput,
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_feedback: Option<AgentDraftFeedback>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentDraftFeedbackStatus {
+    Checking,
+    Passed,
+    Failed,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentDraftFeedbackSource {
+    StructuralVerification,
+    RenderError,
+    ToolError,
+    VisualRepair,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraftFeedback {
+    pub session_id: String,
+    pub thread_id: String,
+    pub preview_id: String,
+    pub status: AgentDraftFeedbackStatus,
+    pub summary: String,
+    pub items: Vec<AgentDraftFeedbackItem>,
+    pub source: AgentDraftFeedbackSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraftFeedbackItem {
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetLeaseInfo {
@@ -88,6 +141,23 @@ pub struct AgentWorkingVersionEvent {
     pub message_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraftPreviewUpdatedEvent {
+    pub session_id: String,
+    pub thread_id: String,
+    pub preview_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub design: DesignOutput,
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<AgentDraftFeedback>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -449,6 +519,9 @@ pub struct McpConfig {
     /// Default request_user_prompt timeout used when the agent does not pass timeoutSecs.
     #[serde(default = "default_mcp_prompt_timeout_secs")]
     pub prompt_timeout_secs: u64,
+    /// Experimental: expose read-only Ecky Core AST tools for agent authoring.
+    #[serde(default)]
+    pub ecky_ast_authoring: bool,
     /// External processes available to Ecky in active mode.
     #[serde(default)]
     pub auto_agents: Vec<AutoAgent>,
@@ -462,6 +535,7 @@ impl Default for McpConfig {
             mode: McpMode::Passive,
             primary_agent_id: None,
             prompt_timeout_secs: default_mcp_prompt_timeout_secs(),
+            ecky_ast_authoring: false,
             auto_agents: vec![],
         }
     }
@@ -2388,6 +2462,12 @@ pub struct ViewerEdgePoint {
 #[serde(rename_all = "camelCase")]
 pub struct ViewerEdgeTarget {
     pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alias_ids: Vec<String>,
     pub part_id: String,
     pub viewer_node_id: String,
     pub label: String,
@@ -2400,6 +2480,12 @@ pub struct ViewerEdgeTarget {
 #[serde(rename_all = "camelCase")]
 pub struct ViewerFaceTarget {
     pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alias_ids: Vec<String>,
     pub part_id: String,
     pub viewer_node_id: String,
     pub label: String,
@@ -2561,6 +2647,12 @@ pub struct ParameterGroup {
 pub struct SelectionTarget {
     #[serde(default)]
     pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_target_id: Option<String>,
+    #[serde(default)]
+    pub alias_ids: Vec<String>,
     pub part_id: String,
     pub viewer_node_id: String,
     pub label: String,
@@ -2915,6 +3007,19 @@ pub enum SketchConstraintKind {
     Dimension,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchPrimitiveTopology {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_id: Option<String>,
+    #[serde(default)]
+    pub edge_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_role: Option<BrepProjectedLoopRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_class: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SketchPrimitive {
@@ -2926,6 +3031,8 @@ pub struct SketchPrimitive {
     pub closed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<SketchPrimitiveTopology>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -2964,6 +3071,94 @@ pub struct SketchDocument {
     pub units: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceSceneLens {
+    Sketch,
+    Draft,
+    Exact,
+}
+
+impl WorkspaceSceneLens {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sketch => "sketch",
+            Self::Draft => "draft",
+            Self::Exact => "exact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceSceneRepresentationKind {
+    SketchIntent,
+    MeshDraft,
+    ExactModel,
+}
+
+impl WorkspaceSceneRepresentationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SketchIntent => "sketchIntent",
+            Self::MeshDraft => "meshDraft",
+            Self::ExactModel => "exactModel",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceSceneRepresentationStatus {
+    Pending,
+    Fresh,
+    Stale,
+    Rebuildable,
+    Failed,
+    Committed,
+}
+
+impl WorkspaceSceneRepresentationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Rebuildable => "rebuildable",
+            Self::Failed => "failed",
+            Self::Committed => "committed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSceneRepresentation {
+    pub kind: WorkspaceSceneRepresentationKind,
+    pub status: WorkspaceSceneRepresentationStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSceneTopology {
+    pub edge_target_count: usize,
+    pub face_target_count: usize,
+    pub selection_target_count: usize,
+    pub control_primitive_count: usize,
+    pub control_relation_count: usize,
+    pub control_view_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentScenePacket {
+    pub schema_version: u32,
+    pub active_lens: WorkspaceSceneLens,
+    pub representations: Vec<WorkspaceSceneRepresentation>,
+    pub topology: WorkspaceSceneTopology,
+    pub allowed_patch_targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -3237,13 +3432,27 @@ pub struct BrepHiddenLineProjectionView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub enum BrepHiddenLineWarningKind {
+    ProjectionNoEdges,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrepHiddenLineWarning {
+    pub kind: BrepHiddenLineWarningKind,
+    pub view: SketchView,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct BrepHiddenLineProjectionResponse {
     pub model_id: String,
     pub source_artifact_path: String,
     #[serde(default)]
     pub views: Vec<BrepHiddenLineProjectionView>,
     #[serde(default)]
-    pub warnings: Vec<String>,
+    pub warning_entries: Vec<BrepHiddenLineWarning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<SketchBrepProjectionValidation>,
 }
@@ -3303,10 +3512,30 @@ pub enum SketchValidationSeverity {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum SketchValidationIssueKind {
+    MissingClosedProfile,
+    MissingProjectionEdges,
+    BoundsMismatch,
+    ContainmentMismatch,
+    TopologyMismatch,
+    ConcavityMismatch,
+    ProjectionReplayCoverageGap,
+    CandidateGraphNoVertices,
+    CandidateGraphNoEdges,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SketchValidationIssue {
     pub sketch_id: String,
+    pub kind: SketchValidationIssueKind,
+    pub view: SketchView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primitive_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<SketchPrimitiveTopology>,
     pub severity: SketchValidationSeverity,
     pub message: String,
 }
@@ -4332,6 +4561,45 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
                 )));
             }
         }
+        if let Some(durable_target_id) = target.durable_target_id.as_deref() {
+            if durable_target_id.trim().is_empty() {
+                return Err(AppError::validation(
+                    "selection targets with durableTargetId must use a non-empty value.",
+                ));
+            }
+            if !selection_target_ids.insert(durable_target_id) {
+                return Err(AppError::validation(format!(
+                    "selection target durable id '{}' is duplicated.",
+                    durable_target_id
+                )));
+            }
+        }
+        if let Some(canonical_target_id) = target.canonical_target_id.as_deref() {
+            if canonical_target_id.trim().is_empty() {
+                return Err(AppError::validation(
+                    "selection targets with canonicalTargetId must use a non-empty value.",
+                ));
+            }
+            if !selection_target_ids.insert(canonical_target_id) {
+                return Err(AppError::validation(format!(
+                    "selection target canonical id '{}' is duplicated.",
+                    canonical_target_id
+                )));
+            }
+        }
+        for alias_id in &target.alias_ids {
+            if alias_id.trim().is_empty() {
+                return Err(AppError::validation(
+                    "selection targets with aliasIds must use non-empty values.",
+                ));
+            }
+            if !selection_target_ids.insert(alias_id) {
+                return Err(AppError::validation(format!(
+                    "selection target alias '{}' is duplicated.",
+                    alias_id
+                )));
+            }
+        }
         if !part_ids.contains(target.part_id.as_str()) {
             return Err(AppError::validation(format!(
                 "selection target '{}' references unknown partId '{}'.",
@@ -4504,11 +4772,21 @@ pub fn validate_model_runtime_bundle(
         ));
     }
 
-    let selection_target_ids = manifest
-        .selection_targets
-        .iter()
-        .filter_map(|target| target.target_id.as_deref())
-        .collect::<HashSet<_>>();
+    let mut selection_target_ids = HashSet::new();
+    for target in &manifest.selection_targets {
+        if let Some(target_id) = target.target_id.as_deref() {
+            selection_target_ids.insert(target_id);
+        }
+        if let Some(durable_target_id) = target.durable_target_id.as_deref() {
+            selection_target_ids.insert(durable_target_id);
+        }
+        if let Some(canonical_target_id) = target.canonical_target_id.as_deref() {
+            selection_target_ids.insert(canonical_target_id);
+        }
+        for alias_id in &target.alias_ids {
+            selection_target_ids.insert(alias_id.as_str());
+        }
+    }
     let guide_ids = bundle
         .measurement_guides
         .iter()
@@ -4533,6 +4811,30 @@ pub fn validate_model_runtime_bundle(
                 edge_target.label, edge_target.target_id
             )));
         }
+        if let Some(durable_target_id) = edge_target.durable_target_id.as_deref() {
+            if !selection_target_ids.contains(durable_target_id) {
+                return Err(AppError::validation(format!(
+                    "edge target '{}' references unknown durable targetId '{}'.",
+                    edge_target.label, durable_target_id
+                )));
+            }
+        }
+        if let Some(canonical_target_id) = edge_target.canonical_target_id.as_deref() {
+            if !selection_target_ids.contains(canonical_target_id) {
+                return Err(AppError::validation(format!(
+                    "edge target '{}' references unknown canonical targetId '{}'.",
+                    edge_target.label, canonical_target_id
+                )));
+            }
+        }
+        for alias_id in &edge_target.alias_ids {
+            if !selection_target_ids.contains(alias_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "edge target '{}' references unknown alias targetId '{}'.",
+                    edge_target.label, alias_id
+                )));
+            }
+        }
     }
 
     for face_target in &bundle.face_targets {
@@ -4541,6 +4843,30 @@ pub fn validate_model_runtime_bundle(
                 "face target '{}' references unknown targetId '{}'.",
                 face_target.label, face_target.target_id
             )));
+        }
+        if let Some(durable_target_id) = face_target.durable_target_id.as_deref() {
+            if !selection_target_ids.contains(durable_target_id) {
+                return Err(AppError::validation(format!(
+                    "face target '{}' references unknown durable targetId '{}'.",
+                    face_target.label, durable_target_id
+                )));
+            }
+        }
+        if let Some(canonical_target_id) = face_target.canonical_target_id.as_deref() {
+            if !selection_target_ids.contains(canonical_target_id) {
+                return Err(AppError::validation(format!(
+                    "face target '{}' references unknown canonical targetId '{}'.",
+                    face_target.label, canonical_target_id
+                )));
+            }
+        }
+        for alias_id in &face_target.alias_ids {
+            if !selection_target_ids.contains(alias_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "face target '{}' references unknown alias targetId '{}'.",
+                    face_target.label, alias_id
+                )));
+            }
         }
     }
 
@@ -5857,6 +6183,9 @@ mod tests {
             }],
             selection_targets: vec![SelectionTarget {
                 target_id: Some("target-shell".to_string()),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
                 part_id: "part-shell".to_string(),
                 viewer_node_id: "node-shell".to_string(),
                 label: "Shell".to_string(),
@@ -5872,6 +6201,46 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+        }
+    }
+
+    fn sample_design_output() -> DesignOutput {
+        DesignOutput {
+            title: "Sample".to_string(),
+            version_name: "V1".to_string(),
+            response: "Rendered preview".to_string(),
+            interaction_mode: InteractionMode::Design,
+            macro_code: "print('hello')".to_string(),
+            macro_dialect: MacroDialect::Legacy,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            ui_spec: UiSpec::default(),
+            initial_params: DesignParams::default(),
+            post_processing: None,
+        }
+    }
+
+    fn sample_artifact_bundle() -> ArtifactBundle {
+        ArtifactBundle {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: "generated-abc123".to_string(),
+            source_kind: ModelSourceKind::Generated,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            content_hash: "hash-123".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/sample.fcstd".to_string(),
+            manifest_path: "/tmp/sample.manifest.json".to_string(),
+            macro_path: None,
+            preview_stl_path: "/tmp/sample.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: Vec::new(),
+            face_targets: Vec::new(),
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
         }
     }
 
@@ -5913,6 +6282,9 @@ mod tests {
                     .iter()
                     .map(|node_id| SelectionTarget {
                         target_id: Some(format!("target-{}", node_id)),
+                        durable_target_id: None,
+                        canonical_target_id: None,
+                        alias_ids: Vec::new(),
                         part_id: part.part_id.clone(),
                         viewer_node_id: node_id.clone(),
                         label: part.label.clone(),
@@ -6003,6 +6375,39 @@ mod tests {
     }
 
     #[test]
+    fn agent_draft_preview_updated_event_serializes_feedback_in_camel_case() {
+        let event = AgentDraftPreviewUpdatedEvent {
+            session_id: "session-1".to_string(),
+            thread_id: "thread-1".to_string(),
+            preview_id: "preview-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            design: sample_design_output(),
+            artifact_bundle: sample_artifact_bundle(),
+            model_manifest: sample_manifest(),
+            feedback: Some(AgentDraftFeedback {
+                session_id: "session-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                preview_id: "preview-1".to_string(),
+                status: AgentDraftFeedbackStatus::Failed,
+                summary: "Preview STL file not found. (+1 more)".to_string(),
+                items: vec![AgentDraftFeedbackItem {
+                    code: "PREVIEW_STL_MISSING".to_string(),
+                    message: "Preview STL file not found.".to_string(),
+                }],
+                source: AgentDraftFeedbackSource::StructuralVerification,
+            }),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize preview event");
+
+        assert_eq!(value["feedback"]["status"], "failed");
+        assert_eq!(value["feedback"]["source"], "structuralVerification");
+        assert_eq!(value["feedback"]["previewId"], "preview-1");
+        assert_eq!(value["feedback"]["items"][0]["code"], "PREVIEW_STL_MISSING");
+    }
+
+    #[test]
     fn validate_model_manifest_accepts_measurement_annotations() {
         let mut manifest = sample_manifest();
         manifest.measurement_annotations = vec![MeasurementAnnotation {
@@ -6042,6 +6447,72 @@ mod tests {
         let err =
             validate_model_manifest(&manifest).expect_err("manifest should reject bad targetId");
         assert!(err.message.contains("unknown targetId"));
+    }
+
+    #[test]
+    fn validate_model_manifest_accepts_measurement_target_alias_ids() {
+        let mut manifest = sample_manifest();
+        manifest.selection_targets[0].alias_ids = vec!["legacy-target-shell".to_string()];
+        manifest.measurement_annotations = vec![MeasurementAnnotation {
+            annotation_id: "measurement-shell-outer-radius".to_string(),
+            label: "Outer Radius".to_string(),
+            basis: MeasurementBasis::Outer,
+            axis: MeasurementAxis::Radial,
+            parameter_keys: vec!["radius".to_string()],
+            primitive_ids: Vec::new(),
+            target_ids: vec!["legacy-target-shell".to_string()],
+            guide_id: None,
+            explanation: None,
+            formula_hint: None,
+            source: MeasurementAnnotationSource::Generated,
+        }];
+
+        validate_model_manifest(&manifest).expect("manifest should accept alias targetId");
+    }
+
+    #[test]
+    fn validate_model_manifest_accepts_measurement_target_canonical_ids() {
+        let mut manifest = sample_manifest();
+        manifest.selection_targets[0].canonical_target_id =
+            Some("canonical-target-shell".to_string());
+        manifest.measurement_annotations = vec![MeasurementAnnotation {
+            annotation_id: "measurement-shell-outer-radius".to_string(),
+            label: "Outer Radius".to_string(),
+            basis: MeasurementBasis::Outer,
+            axis: MeasurementAxis::Radial,
+            parameter_keys: vec!["radius".to_string()],
+            primitive_ids: Vec::new(),
+            target_ids: vec!["canonical-target-shell".to_string()],
+            guide_id: None,
+            explanation: None,
+            formula_hint: None,
+            source: MeasurementAnnotationSource::Generated,
+        }];
+
+        validate_model_manifest(&manifest).expect("manifest should accept canonical targetId");
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_duplicate_selection_target_alias_ids() {
+        let mut manifest = sample_manifest();
+        manifest.selection_targets[0].alias_ids = vec!["duplicate-target".to_string()];
+        manifest.selection_targets.push(SelectionTarget {
+            target_id: Some("target-shell-2".to_string()),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: vec!["duplicate-target".to_string()],
+            part_id: "part-shell".to_string(),
+            viewer_node_id: "node-shell".to_string(),
+            label: "Shell 2".to_string(),
+            kind: SelectionTargetKind::Object,
+            editable: true,
+            parameter_keys: vec![],
+            primitive_ids: vec![],
+            view_ids: vec![],
+        });
+
+        let err = validate_model_manifest(&manifest).expect_err("manifest should reject alias dup");
+        assert!(err.message.contains("selection target alias"));
     }
 
     #[test]
@@ -6092,6 +6563,162 @@ mod tests {
     }
 
     #[test]
+    fn validate_model_runtime_bundle_accepts_selection_target_alias_ids() {
+        let mut manifest = sample_manifest();
+        manifest.selection_targets[0].alias_ids = vec![
+            "legacy-target-shell".to_string(),
+            "legacy-target-shell-edge".to_string(),
+            "legacy-target-shell-face".to_string(),
+        ];
+
+        let bundle = ArtifactBundle {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: manifest.model_id.clone(),
+            source_kind: ModelSourceKind::Generated,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: "/tmp/model.json".to_string(),
+            macro_path: Some("/tmp/model.py".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: vec![ViewerEdgeTarget {
+                target_id: "legacy-target-shell-edge".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: vec!["target-shell".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell edge".to_string(),
+                editable: false,
+                start: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: ViewerEdgePoint {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            }],
+            face_targets: vec![ViewerFaceTarget {
+                target_id: "legacy-target-shell-face".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: vec!["legacy-target-shell".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell face".to_string(),
+                editable: false,
+                center: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                normal: Some([0.0, 0.0, 1.0]),
+                area: Some(10.0),
+            }],
+            callout_anchors: vec![CalloutAnchor {
+                anchor_id: "anchor-shell-center".to_string(),
+                position: [0.0, 0.0, 0.0],
+                normal: None,
+            }],
+            measurement_guides: vec![MeasurementGuide {
+                guide_id: "guide-shell-radius".to_string(),
+                kind: MeasurementGuideKind::Linear,
+                anchor_ids: vec!["anchor-shell-center".to_string()],
+                label_anchor_id: None,
+                target_ids: vec!["legacy-target-shell".to_string()],
+            }],
+            export_artifacts: Vec::new(),
+        };
+
+        validate_model_runtime_bundle(&manifest, &bundle)
+            .expect("runtime pair should accept aliased target ids");
+    }
+
+    #[test]
+    fn validate_model_runtime_bundle_accepts_selection_target_canonical_ids() {
+        let mut manifest = sample_manifest();
+        manifest.selection_targets[0].canonical_target_id =
+            Some("canonical-target-shell".to_string());
+        manifest.selection_targets[0].alias_ids = vec!["legacy-target-shell".to_string()];
+
+        let bundle = ArtifactBundle {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: manifest.model_id.clone(),
+            source_kind: ModelSourceKind::Generated,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: "/tmp/model.json".to_string(),
+            macro_path: Some("/tmp/model.py".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: vec![ViewerEdgeTarget {
+                target_id: "legacy-target-shell".to_string(),
+                durable_target_id: None,
+                canonical_target_id: Some("canonical-target-shell".to_string()),
+                alias_ids: vec!["target-shell".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell edge".to_string(),
+                editable: false,
+                start: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: ViewerEdgePoint {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            }],
+            face_targets: vec![ViewerFaceTarget {
+                target_id: "legacy-target-shell".to_string(),
+                durable_target_id: None,
+                canonical_target_id: Some("canonical-target-shell".to_string()),
+                alias_ids: vec!["legacy-target-shell".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell face".to_string(),
+                editable: false,
+                center: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                normal: Some([0.0, 0.0, 1.0]),
+                area: Some(10.0),
+            }],
+            callout_anchors: vec![CalloutAnchor {
+                anchor_id: "anchor-shell-center".to_string(),
+                position: [0.0, 0.0, 0.0],
+                normal: None,
+            }],
+            measurement_guides: vec![MeasurementGuide {
+                guide_id: "guide-shell-radius".to_string(),
+                kind: MeasurementGuideKind::Linear,
+                anchor_ids: vec!["anchor-shell-center".to_string()],
+                label_anchor_id: None,
+                target_ids: vec!["canonical-target-shell".to_string()],
+            }],
+            export_artifacts: Vec::new(),
+        };
+
+        validate_model_runtime_bundle(&manifest, &bundle)
+            .expect("runtime pair should accept canonical target ids");
+    }
+
+    #[test]
     fn validate_model_runtime_bundle_rejects_edge_target_without_manifest_target() {
         let manifest = sample_manifest();
         let bundle = ArtifactBundle {
@@ -6110,6 +6737,9 @@ mod tests {
             viewer_assets: Vec::new(),
             edge_targets: vec![ViewerEdgeTarget {
                 target_id: "missing-edge-target".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
                 part_id: "part-shell".to_string(),
                 viewer_node_id: "node-shell".to_string(),
                 label: "Shell edge".to_string(),
@@ -6157,6 +6787,9 @@ mod tests {
             edge_targets: Vec::new(),
             face_targets: vec![ViewerFaceTarget {
                 target_id: "missing-face-target".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
                 part_id: "part-shell".to_string(),
                 viewer_node_id: "node-shell".to_string(),
                 label: "Shell face".to_string(),

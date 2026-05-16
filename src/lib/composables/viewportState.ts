@@ -1,6 +1,6 @@
-import { viewportTargetKey } from '../agents/screenshot';
+import { viewportCameraKey, viewportTargetKey } from '../agents/screenshot';
 import { formatAgentOriginLabel } from './agentOps';
-import { listConceptPreviewMessages, resolveEffectiveConceptPreviewMessage, type ConceptPreviewUiState, type ViewportPresentationMode } from '../viewportBlueprint';
+import { listConceptPreviewMessages, resolveLatestConceptPreviewMessage } from '../viewportBlueprint';
 import type { ArtifactBundle, Message, ViewportCameraState, ViewerAsset } from '../types/domain';
 
 export type ViewportStateInput = {
@@ -10,7 +10,7 @@ export type ViewportStateInput = {
   activeVersionId: string | null;
   activeVersionMessage: Message | null;
   cameraStateByTarget: Record<string, ViewportCameraState>;
-  conceptPreviewUiByThread: Record<string, ConceptPreviewUiState>;
+  runtimeRevision?: number;
   stlUrl: string | null;
   toAssetUrl: (path: string | null | undefined) => string;
 };
@@ -18,33 +18,13 @@ export type ViewportStateInput = {
 export type ViewportState = {
   viewerAssets: ViewerAsset[];
   hasRenderableModel: boolean;
-  activeThreadConceptPreviewState: ConceptPreviewUiState;
   conceptPreviewMessages: Message[];
   effectiveConceptPreviewMessage: Message | null;
-  viewportPresentationMode: ViewportPresentationMode;
-  showBlueprintViewport: boolean;
-  blueprintAttentionVisible: boolean;
   currentViewportTargetKey: string | null;
   currentViewerModelKey: string | null;
   persistedViewportCameraState: ViewportCameraState | null;
   activeVersionAgentLabel: string | null;
 };
-
-export function defaultConceptPreviewUiState(): ConceptPreviewUiState {
-  return {
-    pinnedMessageId: null,
-    lastAutoPinnedMessageId: null,
-    mode: 'model',
-  };
-}
-
-export function sameConceptPreviewUiState(left: ConceptPreviewUiState, right: ConceptPreviewUiState): boolean {
-  return (
-    left.pinnedMessageId === right.pinnedMessageId &&
-    left.lastAutoPinnedMessageId === right.lastAutoPinnedMessageId &&
-    left.mode === right.mode
-  );
-}
 
 export function deriveViewportState(input: ViewportStateInput): ViewportState {
   const viewerAssets = (input.activeArtifactBundle?.viewerAssets || []).map((asset) => ({
@@ -54,34 +34,37 @@ export function deriveViewportState(input: ViewportStateInput): ViewportState {
   const hasRenderableModel = Boolean(
     input.activeThreadId && ((input.stlUrl || '').trim() || viewerAssets.length > 0),
   );
-  const activeThreadConceptPreviewState =
-    input.activeThreadId
-      ? input.conceptPreviewUiByThread[input.activeThreadId] ?? defaultConceptPreviewUiState()
-      : defaultConceptPreviewUiState();
   const conceptPreviewMessages = listConceptPreviewMessages(input.activeThreadMessages);
-  const effectiveConceptPreviewMessage = resolveEffectiveConceptPreviewMessage(
+  const effectiveConceptPreviewMessage = resolveLatestConceptPreviewMessage(
     input.activeThreadMessages,
-    activeThreadConceptPreviewState.pinnedMessageId,
   );
-  const viewportPresentationMode = activeThreadConceptPreviewState.mode;
-  const showBlueprintViewport =
-    viewportPresentationMode === 'blueprint' && Boolean(effectiveConceptPreviewMessage);
-  const blueprintAttentionVisible =
-    hasRenderableModel &&
-    Boolean(effectiveConceptPreviewMessage) &&
-    viewportPresentationMode !== 'blueprint';
   const currentViewportTargetKey =
     input.activeThreadId && input.activeVersionId
-      ? viewportTargetKey(input.activeThreadId, input.activeVersionId)
+      ? viewportCameraKey(
+          input.activeThreadId,
+          input.activeVersionId,
+          input.activeArtifactBundle?.modelId ?? null,
+          input.activeArtifactBundle?.artifactVersion ?? null,
+          input.activeArtifactBundle?.contentHash ?? null,
+        )
       : null;
-  const currentViewerModelKey = currentViewportTargetKey
+  const runtimeRevision =
+    typeof input.runtimeRevision === 'number' && input.runtimeRevision > 0
+      ? `r${input.runtimeRevision}`
+      : '';
+  const currentViewerModelKey = input.activeArtifactBundle
     ? [
-        currentViewportTargetKey,
-        input.activeArtifactBundle?.modelId ?? '',
-        input.activeArtifactBundle?.artifactVersion ?? '',
-        input.activeArtifactBundle?.contentHash ?? '',
+        input.activeArtifactBundle.modelId,
+        input.activeArtifactBundle.artifactVersion ?? '',
+        input.activeArtifactBundle.contentHash ?? '',
+        input.stlUrl ?? '',
+        ...(runtimeRevision ? [runtimeRevision] : []),
       ].join(':')
-    : null;
+    : input.stlUrl || (
+        input.activeThreadId && input.activeVersionId
+          ? viewportTargetKey(input.activeThreadId, input.activeVersionId)
+          : null
+      );
   const persistedViewportCameraState =
     currentViewportTargetKey ? input.cameraStateByTarget[currentViewportTargetKey] ?? null : null;
   const activeVersionAgentLabel = formatAgentOriginLabel(input.activeVersionMessage?.agentOrigin);
@@ -89,12 +72,8 @@ export function deriveViewportState(input: ViewportStateInput): ViewportState {
   return {
     viewerAssets,
     hasRenderableModel,
-    activeThreadConceptPreviewState,
     conceptPreviewMessages,
     effectiveConceptPreviewMessage,
-    viewportPresentationMode,
-    showBlueprintViewport,
-    blueprintAttentionVisible,
     currentViewportTargetKey,
     currentViewerModelKey,
     persistedViewportCameraState,

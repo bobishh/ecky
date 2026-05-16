@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   buildAgentGenieTraits,
   buildGenieTraitsFromSeed,
+  buildModelGenieTraits,
   DEFAULT_GENIE_TRAITS,
   deriveGenieSeed,
   resolveModeTraits,
@@ -118,4 +119,70 @@ test('buildAgentGenieTraits is stable per agent identity', () => {
 
   assert.deepEqual(geminiA, geminiB);
   assert.notDeepEqual(geminiA, claude);
+});
+
+test('buildModelGenieTraits uses model version and harness identity', () => {
+  const base = buildModelGenieTraits({
+    artifactBundle: {
+      modelId: 'model-1',
+      sourceKind: 'generated',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+      contentHash: 'hash-1',
+      artifactVersion: 1,
+      fcstdPath: '',
+      manifestPath: '',
+      previewStlPath: '',
+    },
+    messageId: 'version-1',
+    authoringContext: {
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    },
+  });
+  const same = buildModelGenieTraits({
+    artifactBundle: {
+      modelId: 'model-1',
+      sourceKind: 'generated',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+      contentHash: 'hash-1',
+      artifactVersion: 1,
+      fcstdPath: '',
+      manifestPath: '',
+      previewStlPath: '',
+    },
+    messageId: 'version-1',
+    authoringContext: {
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    },
+  });
+  const nextVersion = buildModelGenieTraits({
+    artifactBundle: {
+      modelId: 'model-1',
+      sourceKind: 'generated',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+      contentHash: 'hash-1',
+      artifactVersion: 1,
+      fcstdPath: '',
+      manifestPath: '',
+      previewStlPath: '',
+    },
+    messageId: 'version-2',
+    authoringContext: {
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    },
+  });
+
+  assert.deepEqual(base, same);
+  assert.notDeepEqual(base, nextVersion);
 });

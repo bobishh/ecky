@@ -14,6 +14,15 @@ export function isRenderableVersionTimelineMessage(message: Message): boolean {
   return isVersionTimelineMessage(message) && message.status === 'success';
 }
 
+function isAgentToolErrorMessage(message: Message): boolean {
+  return (
+    message.role === 'assistant' &&
+    message.status === 'error' &&
+    Boolean(message.agentOrigin) &&
+    !message.artifactBundle
+  );
+}
+
 export function versionTimelineTitle(message: Message | null | undefined): string {
   if (!message) return 'this version';
   return (
@@ -39,7 +48,9 @@ export function threadTimelineMessages(messages: Message[]): Message[] {
   return messages
     .map((message, index) => ({ message, index }))
     .filter(
-      ({ message }) => message.status !== 'discarded' || isVersionTimelineMessage(message),
+      ({ message }) =>
+        !isAgentToolErrorMessage(message) &&
+        (message.status !== 'discarded' || isVersionTimelineMessage(message)),
     )
     .sort((left, right) => {
       if (left.message.timestamp !== right.message.timestamp) {

@@ -10,6 +10,7 @@
     loadInventory,
     restoreVersion,
     activeThreadLoadingId,
+    rememberLatestThreadVersion,
   } from './stores/history';
   import { historyStore as history, activeThreadIdStore as activeThreadId } from './stores/domainState';
   import {
@@ -27,6 +28,7 @@
   import ManualImportModal from './ManualImportModal.svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { deriveProjectThreadBadges } from './projectThreadBadges';
 
   let {
     onImportFcstd,
@@ -138,6 +140,9 @@
     try {
       const version = await getThreadLatestVersion(threadId);
       latestVersions = { ...latestVersions, [threadId]: version };
+      if (version) {
+        rememberLatestThreadVersion(threadId, version);
+      }
       if (version?.imageData) {
         previewImages = { ...previewImages, [threadId]: version.imageData };
         return;
@@ -398,6 +403,7 @@
       <div class="project-grid">
         {#if activeTab === 'in-work'}
           {#each filteredInWork as thread (thread.id)}
+            {@const badges = deriveProjectThreadBadges(thread)}
             <div class="project-card" class:active={$activeThreadId === thread.id}>
               <div class="card-thumb">
                 {#if threadPreviewImage(thread)}
@@ -417,6 +423,15 @@
                 </div>
                 {#if thread.summary}
                   <p class="summary">{thread.summary}</p>
+                {/if}
+                {#if badges.length > 0}
+                  <div class="card-badges">
+                    {#each badges as badge (`${thread.id}-${badge.label}`)}
+                      <span class={`card-badge ${badge.className}`} title={badge.title}>
+                        {badge.label}
+                      </span>
+                    {/each}
+                  </div>
                 {/if}
                 <div class="card-footer">
                   <div class="stats">{thread.versionCount || 0} versions</div>
@@ -570,12 +585,13 @@
   {/if}
 
   {#if threadToDelete}
-    <Modal title="Purge Project" onclose={() => threadToDelete = null}>
+    <Modal title="Trash Project" onclose={() => threadToDelete = null}>
       <div class="confirm-delete">
-        <p>Purge <strong>{threadToDelete.title}</strong>?</p>
+        <p>Move <strong>{threadToDelete.title}</strong> to trash?</p>
+        <p class="confirm-delete__hint">You can recover it from <strong>TRASH</strong>.</p>
         <div class="actions">
-          <button onclick={() => threadToDelete = null}>CANCEL</button>
-          <button class="danger" onclick={() => { deleteThread(threadToDelete!.id); threadToDelete = null; }}>DELETE FOREVER</button>
+          <button class="btn btn-ghost" onclick={() => threadToDelete = null}>CANCEL</button>
+          <button class="btn btn-danger" onclick={() => { deleteThread(threadToDelete!.id); threadToDelete = null; }}>MOVE TO TRASH</button>
         </div>
       </div>
     </Modal>
@@ -760,6 +776,38 @@
     margin-top: auto;
   }
 
+  .card-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .card-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 0 6px;
+    border: 1px solid var(--bg-400);
+    background: var(--bg-300);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+  }
+
+  .card-badge.queued {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .card-badge.confirm {
+    border-color: var(--secondary);
+    color: var(--secondary);
+  }
+
   .stats {
     font-size: 0.65rem;
     color: var(--bg-400);
@@ -812,17 +860,20 @@
     gap: 16px;
   }
 
-  .confirm-delete .actions {
-    justify-content: flex-end;
+  .confirm-delete p {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text);
   }
 
-  .danger {
-    background: var(--red);
-    color: white;
-    border: none;
-    padding: 6px 12px;
-    font-weight: bold;
-    cursor: pointer;
+  .confirm-delete__hint {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
+  .confirm-delete .actions {
+    justify-content: flex-end;
   }
 
   .new-chooser {

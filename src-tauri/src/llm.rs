@@ -14,13 +14,6 @@ pub struct IntentClassification {
     pub final_response: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ConceptPreviewDraft {
-    pub svg: String,
-    #[serde(default)]
-    pub caption: String,
-}
-
 pub enum ResponseFormat {
     DesignOutput,
     JsonObject,
@@ -190,92 +183,6 @@ If intent is "design", "response" must be one short routing sentence for the ass
         } else {
             "Intent looks like a design change request.".to_string()
         };
-    }
-    Ok(LlmOutcome {
-        data: parsed,
-        usage: raw.usage,
-    })
-}
-
-pub async fn generate_concept_preview(
-    engine: &Engine,
-    prompt: &str,
-    images: Vec<String>,
-) -> Result<LlmOutcome<ConceptPreviewDraft>, String> {
-    if !engine.enabled {
-        return Err(format!(
-            "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
-            engine.name
-        ));
-    }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let system_prompt = r#"Return ONLY JSON with fields:
-1) "svg": full SVG markup string
-2) "caption": one short user-facing sentence
-
-Task: produce a fast concept sketch for a CAD idea.
-
-Rules for svg:
-- valid standalone <svg>...</svg>
-- no markdown fences
-- no explanations outside JSON
-- transparent or white background
-- clean line-art / concept-sketch style
-- simple fills allowed, but prioritize readable silhouette and proportions
-- include one clear object only unless prompt explicitly asks for multiple objects
-- no text labels inside the drawing
-- keep it compact and renderable in a browser image tag
-- use a viewBox
-- avoid external assets, fonts, scripts, filters, or CSS imports
-
-The sketch should help a human confirm rough shape, proportions, and major features before CAD generation.
-"#;
-
-    let user_prompt = format!(
-        "Create a concept preview sketch for this request:\n\n{}",
-        prompt.trim()
-    );
-
-    let raw = match engine.provider.as_str() {
-        "openai" | "ollama" => {
-            call_openai_compatible(
-                &client,
-                engine,
-                engine.model.as_str(),
-                system_prompt,
-                &user_prompt,
-                images,
-                "concept_preview",
-                ResponseFormat::JsonObject,
-            )
-            .await?
-        }
-        "gemini" => {
-            call_gemini(
-                &client,
-                engine,
-                engine.model.as_str(),
-                system_prompt,
-                &user_prompt,
-                images,
-                "concept_preview",
-                ResponseFormat::JsonObject,
-            )
-            .await?
-        }
-        _ => return Err(format!("Unsupported provider: {}", engine.provider)),
-    };
-
-    let mut parsed: ConceptPreviewDraft = serde_json::from_value(raw.data)
-        .map_err(|e| format!("Concept preview parse error: {}", e))?;
-    parsed.svg = extract_svg_markup(&parsed.svg)?;
-    parsed.caption = parsed.caption.trim().to_string();
-    if parsed.caption.is_empty() {
-        parsed.caption = "Concept preview ready.".to_string();
     }
     Ok(LlmOutcome {
         data: parsed,

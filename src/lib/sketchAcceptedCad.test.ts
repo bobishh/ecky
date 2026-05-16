@@ -28,7 +28,6 @@ const passingProjection: BrepHiddenLineProjectionResponse = {
     { view: 'top', direction: [0, 0, -1], visibleEdges: [], hiddenEdges: [] },
     { view: 'side', direction: [-1, 0, 0], visibleEdges: [], hiddenEdges: [] },
   ],
-  warnings: [],
   validation: {
     passed: true,
     issues: [],
@@ -53,7 +52,7 @@ test('buildSketchAcceptedCadRow passes only after explicit BRep/sketch validatio
   );
 });
 
-test('buildSketchAcceptedCadRow fails with raw BRep/sketch issue text', () => {
+test('buildSketchAcceptedCadRow fails with structured bounds mismatch issue', () => {
   const row = buildSketchAcceptedCadRow({
     artifactBundle,
     hiddenLineResponse: {
@@ -63,6 +62,8 @@ test('buildSketchAcceptedCadRow fails with raw BRep/sketch issue text', () => {
         issues: [
           {
             sketchId: 'sketch-front',
+            kind: 'boundsMismatch',
+            view: 'front',
             primitiveId: 'primitive-front',
             severity: 'error',
             message: 'raw BREP/SKETCH bounds mismatch: front sketch bounds x=10..60; OCCT bounds x=0..80',
@@ -76,7 +77,44 @@ test('buildSketchAcceptedCadRow fails with raw BRep/sketch issue text', () => {
   });
 
   assert.equal(row?.status, 'fail');
-  assert.match(row?.detail ?? '', /raw BREP\/SKETCH bounds mismatch/);
+  assert.match(row?.detail ?? '', /bounds mismatch/i);
+});
+
+test('buildSketchAcceptedCadRow fails with structured issue summary when message is neutral', () => {
+  const row = buildSketchAcceptedCadRow({
+    artifactBundle,
+    hiddenLineResponse: {
+      ...passingProjection,
+      validation: {
+        passed: false,
+        issues: [
+          {
+            sketchId: 'sketch-alpha',
+            view: 'front',
+            kind: 'containmentMismatch',
+            primitiveId: 'primitive-front-hole',
+            edgeId: 'front-v1',
+            severity: 'error',
+            message: 'projection exits source profile',
+            topology: {
+              loopId: 'front-hole',
+              edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+              loopRole: 'hole',
+              sourceClass: 'derived',
+            },
+          },
+        ],
+        evidence: [],
+      },
+    },
+    hiddenLineErrorText: '',
+    hiddenLineLoading: false,
+  });
+
+  assert.equal(row?.status, 'fail');
+  assert.match(row?.detail ?? '', /containment mismatch/i);
+  assert.match(row?.detail ?? '', /hole/i);
+  assert.match(row?.detail ?? '', /front-v1/i);
 });
 
 test('buildSketchAcceptedCadRow keeps mesh preview pending instead of accepting it as CAD', () => {
@@ -93,4 +131,18 @@ test('buildSketchAcceptedCadRow keeps mesh preview pending instead of accepting 
     status: 'pending',
     detail: 'Preview artifact only; accepted CAD requires exact BRep/STEP validation.',
   });
+});
+
+test('buildSketchAcceptedCadRow stays pass when structured hidden-line validation already passes', () => {
+  const row = buildSketchAcceptedCadRow({
+    artifactBundle,
+    hiddenLineResponse: {
+      ...passingProjection,
+    },
+    hiddenLineErrorText: '',
+    hiddenLineLoading: false,
+  });
+
+  assert.equal(row?.status, 'pass');
+  assert.match(row?.detail ?? '', /Accepted BRep/i);
 });

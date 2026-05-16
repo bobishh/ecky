@@ -17,11 +17,14 @@ __all__ = [
     "_ecky_fuse_many",
     "_ecky_cut_many",
     "_ecky_common_many",
+    "_ecky_select_edges",
+    "_ecky_select_shell_faces",
     "_ecky_path_frame",
     "_ecky_as_location",
     "_ecky_location",
     "_ecky_place",
     "_ecky_extrude",
+    "_ecky_loft",
     "_ecky_clip_box",
     "_ecky_non_uniform_scale",
 ]
@@ -233,6 +236,379 @@ def _ecky_common_many(*shapes):
     return current[0] if len(current) == 1 else Compound(children=current)
 
 
+_ECKY_EDGE_SELECTOR_HELP = (
+    "`all`, `top`, `bottom`, `left`, `right`, `front`, `back`, `vertical`, "
+    "`axis-x`, `axis-y`, `axis-z`, `x-min`, `x-max`, `y-min`, `y-max`, `z-min`, `z-max`, "
+    "`target-id:<id>`, `target-ids:<id>|<id>`, or `+` intersections such as `x-min+axis-z`."
+)
+
+_ECKY_FACE_SELECTOR_HELP = (
+    "`all`, `planar`, `normal-x`, `normal-y`, `normal-z`, `area-min`, `area-max`, "
+    "`top`, `bottom`, `left`, `right`, `front`, `back`, "
+    "`x-min`, `x-max`, `y-min`, `y-max`, `z-min`, `z-max`, "
+    "`target-id:<id>`, `target-ids:<id>|<id>`, or `+` intersections such as `planar+normal-z+z-max`."
+)
+
+
+def _ecky_edge_selector_error(selector):
+    raise ValueError(f"Unknown edge selector `{selector}`. Use {_ECKY_EDGE_SELECTOR_HELP}")
+
+
+def _ecky_face_selector_error(selector):
+    raise ValueError(f"Unknown face selector `{selector}`. Use {_ECKY_FACE_SELECTOR_HELP}")
+
+
+def _ecky_selector_kind(selector):
+    if isinstance(selector, dict):
+        return str(selector.get("kind") or "").strip()
+    return ""
+
+
+def _ecky_selector_target_ids(selector):
+    if selector is None:
+        return None
+    if not isinstance(selector, dict):
+        raise ValueError(f"Edge selector `{selector}` requires typed selector payload.")
+    if _ecky_selector_kind(selector) != "targetIds":
+        return None
+    target_ids = []
+    for item in selector.get("targetIds") or []:
+        text = str(item).strip()
+        if text and text not in target_ids:
+            target_ids.append(text)
+    if not target_ids:
+        raise ValueError(f"Edge selector `{selector}` did not include any target ids.")
+    return target_ids
+
+
+def _ecky_face_selector_target_ids(selector):
+    if selector is None:
+        return None
+    if not isinstance(selector, dict):
+        raise ValueError(f"Face selector `{selector}` requires typed selector payload.")
+    if _ecky_selector_kind(selector) != "targetIds":
+        return None
+    target_ids = []
+    for item in selector.get("targetIds") or []:
+        text = str(item).strip()
+        if text and ":face:" in text and text not in target_ids:
+            target_ids.append(text)
+    if not target_ids:
+        raise ValueError(f"Face selector `{selector}` did not include any face target ids.")
+    return target_ids
+
+
+def _ecky_selector_clauses(selector):
+    if selector is None:
+        return []
+    if not isinstance(selector, dict):
+        raise ValueError(f"Edge selector `{selector}` requires typed selector payload.")
+    kind = _ecky_selector_kind(selector)
+    if kind == "all":
+        return []
+    if kind != "clauses":
+        _ecky_edge_selector_error(selector)
+    clauses = []
+    for clause in selector.get("clauses") or []:
+        if not isinstance(clause, dict):
+            _ecky_edge_selector_error(selector)
+        clause_kind = str(clause.get("kind") or "").strip()
+        if clause_kind == "axis":
+            axis = str(clause.get("axis") or "").strip().lower()
+            if axis not in ("x", "y", "z"):
+                _ecky_edge_selector_error(selector)
+            clauses.append(("axis", axis))
+            continue
+        if clause_kind == "boundary":
+            axis = str(clause.get("axis") or "").strip().lower()
+            bound = str(clause.get("bound") or "").strip().lower()
+            if axis not in ("x", "y", "z") or bound not in ("min", "max"):
+                _ecky_edge_selector_error(selector)
+            clauses.append(("boundary", axis, bound))
+            continue
+        _ecky_edge_selector_error(selector)
+    return clauses
+
+
+def _ecky_face_selector_clauses(selector):
+    if selector is None:
+        return []
+    if not isinstance(selector, dict):
+        raise ValueError(f"Face selector `{selector}` requires typed selector payload.")
+    kind = _ecky_selector_kind(selector)
+    if kind == "all":
+        return []
+    if kind != "clauses":
+        _ecky_face_selector_error(selector)
+    clauses = []
+    for clause in selector.get("clauses") or []:
+        if not isinstance(clause, dict):
+            _ecky_face_selector_error(selector)
+        clause_kind = str(clause.get("kind") or "").strip().lower()
+        if clause_kind == "boundary":
+            axis = str(clause.get("axis") or "").strip().lower()
+            bound = str(clause.get("bound") or "").strip().lower()
+            if axis not in ("x", "y", "z") or bound not in ("min", "max"):
+                _ecky_face_selector_error(selector)
+            clauses.append(("boundary", axis, bound))
+            continue
+        if clause_kind == "planar":
+            clauses.append(("planar",))
+            continue
+        if clause_kind == "normal":
+            axis = str(clause.get("axis") or "").strip().lower()
+            if axis not in ("x", "y", "z"):
+                _ecky_face_selector_error(selector)
+            clauses.append(("normal", axis))
+            continue
+        if clause_kind == "area":
+            rank = str(clause.get("rank") or "").strip().lower()
+            if rank not in ("min", "max"):
+                _ecky_face_selector_error(selector)
+            clauses.append(("area", rank))
+            continue
+        _ecky_face_selector_error(selector)
+    return clauses
+
+
+def _ecky_axis_value(vec, axis):
+    return {"x": float(vec.X), "y": float(vec.Y), "z": float(vec.Z)}[axis]
+
+
+def _ecky_format_coordinate(value):
+    value = float(value)
+    if abs(value) < 0.0005:
+        return "0"
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def _ecky_point_signature(point):
+    return "-".join(
+        _ecky_format_coordinate(coord)
+        for coord in (point.X, point.Y, point.Z)
+    )
+
+
+def _ecky_edge_target_id(edge, edge_index, object_name):
+    start = edge.start_point()
+    end = edge.end_point()
+    first = _ecky_point_signature(start)
+    second = _ecky_point_signature(end)
+    if second < first:
+        first, second = second, first
+    return f"{object_name}:edge:{int(edge_index)}:{first}_{second}"
+
+
+def _ecky_stable_target_suffix(payload):
+    if ":" not in payload:
+        return payload
+    prefix, suffix = payload.split(":", 1)
+    return suffix if prefix.isdigit() else payload
+
+
+def _ecky_stable_edge_target_id(target_id):
+    marker = ":edge:"
+    if marker not in target_id:
+        return target_id
+    prefix, payload = target_id.split(marker, 1)
+    return f"{prefix}{marker}{_ecky_stable_target_suffix(payload)}"
+
+
+def _ecky_face_target_id(face, face_index, object_name):
+    center = face.center()
+    return (
+        f"{object_name}:face:{int(face_index)}:"
+        f"{_ecky_point_signature(center)}:{_ecky_format_coordinate(face.area)}"
+    )
+
+
+def _ecky_stable_face_target_id(target_id):
+    marker = ":face:"
+    if marker not in target_id:
+        return target_id
+    prefix, payload = target_id.split(marker, 1)
+    return f"{prefix}{marker}{_ecky_stable_target_suffix(payload)}"
+
+
+def _ecky_edge_axis_span(edge):
+    box = edge.bounding_box()
+    return float(box.size.X), float(box.size.Y), float(box.size.Z)
+
+
+def _ecky_edge_matches_clause(edge, shape_box, clause, tol):
+    edge_box = edge.bounding_box()
+    if clause[0] == "axis":
+        x_span, y_span, z_span = _ecky_edge_axis_span(edge)
+        if clause[1] == "x":
+            return x_span > tol and y_span <= tol and z_span <= tol
+        if clause[1] == "y":
+            return y_span > tol and x_span <= tol and z_span <= tol
+        return z_span > tol and x_span <= tol and y_span <= tol
+    _, axis, bound = clause
+    target = _ecky_axis_value(shape_box.min if bound == "min" else shape_box.max, axis)
+    return (
+        abs(_ecky_axis_value(edge_box.min, axis) - target) <= tol
+        and abs(_ecky_axis_value(edge_box.max, axis) - target) <= tol
+    )
+
+
+def _ecky_face_matches_clause(face, shape_box, clause, tol):
+    face_box = face.bounding_box()
+    if clause[0] == "planar":
+        return getattr(face, "geom_type", None) == GeomType.PLANE
+    if clause[0] == "normal":
+        if getattr(face, "geom_type", None) != GeomType.PLANE:
+            return False
+        axis = clause[1]
+        return float(_ecky_axis_value(face_box.size, axis)) <= tol
+    _, axis, bound = clause
+    target = _ecky_axis_value(shape_box.min if bound == "min" else shape_box.max, axis)
+    return (
+        abs(_ecky_axis_value(face_box.min, axis) - target) <= tol
+        and abs(_ecky_axis_value(face_box.max, axis) - target) <= tol
+    )
+
+
+def _ecky_filter_faces_by_area(faces, rank):
+    if not faces:
+        return []
+    areas = [float(face.area) for face in faces]
+    target = min(areas) if rank == "min" else max(areas)
+    tol = max(abs(float(target)), 1.0) * 1e-6
+    return [face for face, area in zip(faces, areas) if abs(float(area) - target) <= tol]
+
+
+def _ecky_select_edges(shape, selector=None, object_name=None):
+    edges = list(shape.edges())
+    if not edges:
+        raise ValueError("Shape has no edges for fillet/chamfer.")
+    target_ids = _ecky_selector_target_ids(selector)
+    if target_ids is not None:
+        if not object_name:
+            raise ValueError(
+                f"Edge selector `{selector}` requires an object name for exact target-id matching."
+            )
+        edge_records = []
+        stable_counts = {}
+        for edge_index, edge in enumerate(edges):
+            target_id = _ecky_edge_target_id(edge, edge_index, object_name)
+            stable_id = _ecky_stable_edge_target_id(target_id)
+            edge_records.append((edge, target_id, stable_id))
+            stable_counts[stable_id] = stable_counts.get(stable_id, 0) + 1
+        selected = []
+        matched = set()
+        for requested_target_id in target_ids:
+            exact = next(
+                (record for record in edge_records if record[1] == requested_target_id),
+                None,
+            )
+            if exact is not None:
+                if exact[1] not in matched:
+                    selected.append(exact[0])
+                    matched.add(exact[1])
+                continue
+            stable_requested = _ecky_stable_edge_target_id(requested_target_id)
+            candidates = [
+                record for record in edge_records if record[2] == stable_requested
+            ]
+            if not candidates:
+                raise ValueError(
+                    f"Edge selector `{selector}` did not match target ids: {[requested_target_id]}"
+                )
+            if len(candidates) > 1 or stable_counts.get(stable_requested, 0) > 1:
+                raise ValueError(
+                    f"Edge selector `{selector}` ambiguously matched stable edge target `{requested_target_id}`."
+                )
+            candidate = candidates[0]
+            if candidate[1] not in matched:
+                selected.append(candidate[0])
+                matched.add(candidate[1])
+        return selected
+    clauses = _ecky_selector_clauses(selector)
+    if not clauses:
+        return edges
+    shape_box = shape.bounding_box()
+    tol = max(abs(float(shape_box.size.X)), abs(float(shape_box.size.Y)), abs(float(shape_box.size.Z)), 1.0) * 1e-6
+    selected = [edge for edge in edges if all(_ecky_edge_matches_clause(edge, shape_box, clause, tol) for clause in clauses)]
+    if not selected:
+        raise ValueError(f"Edge selector `{selector}` matched no edges.")
+    return selected
+
+
+def _ecky_select_shell_faces(shape, selector, object_name=None):
+    faces = list(shape.faces())
+    if not faces:
+        raise ValueError("Shape has no faces for shell openings.")
+    target_ids = _ecky_face_selector_target_ids(selector)
+    if target_ids is not None:
+        if not object_name:
+            raise ValueError(
+                f"Shell face selector `{selector}` requires an object name for exact target-id matching."
+            )
+        face_records = []
+        stable_counts = {}
+        for face_index, face in enumerate(faces):
+            target_id = _ecky_face_target_id(face, face_index, object_name)
+            stable_id = _ecky_stable_face_target_id(target_id)
+            face_records.append((face, target_id, stable_id))
+            stable_counts[stable_id] = stable_counts.get(stable_id, 0) + 1
+        selected = []
+        matched = set()
+        for requested_target_id in target_ids:
+            exact = next(
+                (record for record in face_records if record[1] == requested_target_id),
+                None,
+            )
+            if exact is not None:
+                if exact[1] not in matched:
+                    selected.append(exact[0])
+                    matched.add(exact[1])
+                continue
+            stable_requested = _ecky_stable_face_target_id(requested_target_id)
+            candidates = [
+                record for record in face_records if record[2] == stable_requested
+            ]
+            if not candidates:
+                raise ValueError(
+                    f"Shell face selector `{selector}` did not match target ids: {[requested_target_id]}"
+                )
+            if len(candidates) > 1 or stable_counts.get(stable_requested, 0) > 1:
+                raise ValueError(
+                    f"Shell face selector `{selector}` ambiguously matched stable face target `{requested_target_id}`."
+                )
+            candidate = candidates[0]
+            if candidate[1] not in matched:
+                selected.append(candidate[0])
+                matched.add(candidate[1])
+        return selected
+    clauses = _ecky_face_selector_clauses(selector)
+    if selector is None:
+        return []
+    if not clauses:
+        return faces
+    shape_box = shape.bounding_box()
+    tol = max(
+        abs(float(shape_box.size.X)),
+        abs(float(shape_box.size.Y)),
+        abs(float(shape_box.size.Z)),
+        1.0,
+    ) * 1e-6
+    selected = list(faces)
+    for clause in clauses:
+        if clause[0] == "area":
+            selected = _ecky_filter_faces_by_area(selected, clause[1])
+            continue
+        selected = [
+            face
+            for face in selected
+            if _ecky_face_matches_clause(face, shape_box, clause, tol)
+        ]
+    if not selected:
+        raise ValueError(f"Shell face selector `{selector}` matched no faces.")
+    return selected
+
+
 def _ecky_path_frame(path, at="end", up=None):
     if at == "start":
         position = 0.0
@@ -265,6 +641,11 @@ def _ecky_extrude(sketch, amount, symmetric=False):
     if symmetric:
         return Pos(0, 0, -amount / 2.0) * out
     return out
+
+
+def _ecky_loft(sections):
+    faces = [_ecky_face(section) for section in sections]
+    return _ecky_solid(loft(faces))
 
 
 def _ecky_clip_box(shape, xmin, xmax, ymin, ymax, zmin, zmax):

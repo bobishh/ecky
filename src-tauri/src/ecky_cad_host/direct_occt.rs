@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp,
     CoreNode, CoreNodeKind, CoreOperation, CoreParameterKind, CorePart, CorePathOp, CorePrimitive,
-    CoreProgram, CoreReference, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
-    CoreValueKind, NodeId,
+    CoreProgram, CoreReference, CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol,
+    CoreTransformOp, CoreValueKind, NodeId,
 };
 use crate::models::{AppError, AppResult, DesignParams, ParamValue};
 
@@ -97,9 +97,63 @@ pub enum OcctOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum OcctKeywordValue {
+    Arg(OcctArg),
+    Selector {
+        source: OcctArg,
+        payload: CoreSelectorPayload,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct OcctKeyword {
     pub name: String,
-    pub value: OcctArg,
+    pub value: OcctKeywordValue,
+}
+
+impl OcctKeyword {
+    pub fn arg(name: String, value: OcctArg) -> Self {
+        Self {
+            name,
+            value: OcctKeywordValue::Arg(value),
+        }
+    }
+
+    pub fn selector(name: String, source: OcctArg, payload: CoreSelectorPayload) -> Self {
+        Self {
+            name,
+            value: OcctKeywordValue::Selector { source, payload },
+        }
+    }
+
+    pub fn source_arg(&self) -> &OcctArg {
+        match &self.value {
+            OcctKeywordValue::Arg(value) => value,
+            OcctKeywordValue::Selector { source, .. } => source,
+        }
+    }
+
+    pub fn source_arg_mut(&mut self) -> &mut OcctArg {
+        match &mut self.value {
+            OcctKeywordValue::Arg(value) => value,
+            OcctKeywordValue::Selector { source, .. } => source,
+        }
+    }
+
+    pub fn selector_payload(&self) -> Option<&CoreSelectorPayload> {
+        match &self.value {
+            OcctKeywordValue::Arg(_) => None,
+            OcctKeywordValue::Selector { payload, .. } => Some(payload),
+        }
+    }
+
+    pub fn set_selector_payload(&mut self, selector: Option<CoreSelectorPayload>) {
+        let source = self.source_arg().clone();
+        self.value = match selector {
+            Some(payload) => OcctKeywordValue::Selector { source, payload },
+            None => OcctKeywordValue::Arg(source),
+        };
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -334,14 +388,19 @@ fn expand_node_for_direct_occt(
                 keywords: keywords
                     .iter()
                     .map(|keyword| {
-                        Ok(CoreKeywordArg {
-                            name: keyword.name.clone(),
-                            value: expand_node_for_direct_occt(
-                                &keyword.value,
-                                param_names,
-                                env,
-                                next_node_id,
-                            )?,
+                        let value = expand_node_for_direct_occt(
+                            keyword.source_node(),
+                            param_names,
+                            env,
+                            next_node_id,
+                        )?;
+                        Ok(match keyword.selector_payload() {
+                            Some(selector) => CoreKeywordArg::selector(
+                                keyword.name.clone(),
+                                value,
+                                selector.clone(),
+                            ),
+                            None => CoreKeywordArg::expr(keyword.name.clone(), value),
                         })
                     })
                     .collect::<AppResult<Vec<_>>>()?,
@@ -637,9 +696,13 @@ fn sampled_replaced_keywords(
         .iter()
         .map(|keyword| {
             if keyword.name == name {
-                CoreKeywordArg {
-                    name: keyword.name.clone(),
-                    value: value.clone(),
+                match keyword.selector_payload() {
+                    Some(selector) => CoreKeywordArg::selector(
+                        keyword.name.clone(),
+                        value.clone(),
+                        selector.clone(),
+                    ),
+                    None => CoreKeywordArg::expr(keyword.name.clone(), value.clone()),
                 }
             } else {
                 keyword.clone()
@@ -700,7 +763,7 @@ fn sampled_optional_keyword_node<'a>(
     keywords
         .iter()
         .find(|keyword| keyword.name == name)
-        .map(|keyword| &keyword.value)
+        .map(|keyword| keyword.source_node())
 }
 
 fn sampled_count(value: f64, minimum: usize, label: &str) -> AppResult<usize> {
@@ -785,7 +848,11 @@ fn max_node_id(node: &CoreNode) -> u64 {
         CoreNodeKind::Call { args, keywords, .. } => args
             .iter()
             .map(max_node_id)
-            .chain(keywords.iter().map(|keyword| max_node_id(&keyword.value)))
+            .chain(
+                keywords
+                    .iter()
+                    .map(|keyword| max_node_id(keyword.source_node())),
+            )
             .max()
             .unwrap_or(0),
         CoreNodeKind::Range { start, end } => [max_node_id(start), max_node_id(end)]
@@ -853,9 +920,12 @@ impl<'a> PartPlanner<'a> {
                 let keywords = keywords
                     .iter()
                     .map(|keyword| {
-                        Ok(OcctKeyword {
-                            name: keyword.name.clone(),
-                            value: self.plan_arg(&keyword.value)?,
+                        let value = self.plan_arg(keyword.source_node())?;
+                        Ok(match keyword.selector_payload() {
+                            Some(selector) => {
+                                OcctKeyword::selector(keyword.name.clone(), value, selector.clone())
+                            }
+                            None => OcctKeyword::arg(keyword.name.clone(), value),
                         })
                     })
                     .collect::<AppResult<Vec<_>>>()?;
@@ -1048,7 +1118,7 @@ fn keyword_text(keywords: &[CoreKeywordArg], name: &str) -> Option<String> {
     keywords
         .iter()
         .find(|keyword| keyword.name == name)
-        .and_then(|keyword| match &keyword.value.kind {
+        .and_then(|keyword| match &keyword.source_node().kind {
             CoreNodeKind::Literal(CoreLiteral::Text(text)) => Some(text.clone()),
             _ => None,
         })
@@ -1138,7 +1208,7 @@ mod tests {
     use super::*;
     use crate::ecky_core_ir::{
         CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive, CoreProgram,
-        CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
+        CoreSelectorPayload, CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
     };
 
     fn compile(source: &str) -> CoreProgram {
@@ -1222,6 +1292,122 @@ mod tests {
             vec![OcctOp::Circle, OcctOp::Extrude, OcctOp::Shell]
         );
         assert_eq!(plan.parts[0].root, plan.parts[0].commands[2].output);
+    }
+
+    #[test]
+    fn plans_exact_edge_selector_payload_into_direct_occt_keywords() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:edge:0:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("plan");
+        let fillet = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        assert_eq!(
+            fillet.keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::EdgeTargetIds(vec![
+                "body:edge:0:0-0-0_0-0-10".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn plans_coarse_edge_selector_payload_into_direct_occt_keywords() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "left+vertical"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("plan");
+        let fillet = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        assert_eq!(
+            fillet.keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::EdgeClauses(vec![
+                crate::ecky_core_ir::CoreEdgeSelectorClause::Boundary {
+                    axis: crate::ecky_core_ir::CoreEdgeAxis::X,
+                    bound: crate::ecky_core_ir::CoreEdgeBound::Min,
+                },
+                crate::ecky_core_ir::CoreEdgeSelectorClause::Axis(
+                    crate::ecky_core_ir::CoreEdgeAxis::Z,
+                ),
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn plans_exact_face_selector_payload_into_direct_occt_keywords() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "target-id:body:face:0:0-0-10:400"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("plan");
+        let shell = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Shell)
+            .expect("shell");
+        assert_eq!(
+            shell.keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceTargetIds(vec![
+                "body:face:0:0-0-10:400".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn plans_richer_face_selector_payload_into_direct_occt_keywords() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "planar+normal-z+area-max"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("plan");
+        let shell = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Shell)
+            .expect("shell");
+        assert_eq!(
+            shell.keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceClauses(vec![
+                crate::ecky_core_ir::CoreFaceSelectorClause::Planar,
+                crate::ecky_core_ir::CoreFaceSelectorClause::Normal(
+                    crate::ecky_core_ir::CoreEdgeAxis::Z,
+                ),
+                crate::ecky_core_ir::CoreFaceSelectorClause::Area(
+                    crate::ecky_core_ir::CoreFaceAreaRank::Max,
+                ),
+            ]))
+            .as_ref()
+        );
     }
 
     #[test]
@@ -1599,10 +1785,16 @@ mod tests {
         );
         let frame = &plan.parts[0].commands[2];
         assert_eq!(frame.keywords[0].name, "at");
-        assert_eq!(frame.keywords[0].value, OcctArg::Symbol("end".into()));
+        assert_eq!(
+            frame.keywords[0].source_arg(),
+            &OcctArg::Symbol("end".into())
+        );
         let place = &plan.parts[0].commands[3];
         assert_eq!(place.keywords[0].name, "offset");
-        assert_eq!(place.keywords[0].value, OcctArg::Point3([0.0, 0.0, -3.0]));
+        assert_eq!(
+            place.keywords[0].source_arg(),
+            &OcctArg::Point3([0.0, 0.0, -3.0])
+        );
     }
 
     #[test]

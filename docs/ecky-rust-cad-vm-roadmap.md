@@ -19,22 +19,60 @@ Pipeline:
 
 Goal: make model output boringly checkable before any backend executes it.
 
+The product spine this runtime now supports is:
+
+```text
+SketchIntent
+  -> MeshDraft
+  -> exact rebuild candidate
+  -> backend build
+  -> validation
+  -> committed ExactModel
+```
+
+Today the runtime already owns the exact-source lane and preview lane. Next work is turning that into a shared-scene runtime where sketch, draft, and exact state can coexist with stable correspondence.
+
 ## Roadmap Position
 
 - Productized hidden CAD VM path: roughly 99.2%.
 - Completed: truthful guides, typed Core IR checks, deterministic generative helpers, hidden direct-OCCT STEP/STL fast path, artifact-gated STEP UX, public direct-OCCT STEP failure/ready status near export actions, MCP artifact truth, full artifact manifest MCP consumer, verification artifact digests, structural STL topology/overhang metrics, dynamic list/tuple item typing, render mutation artifact digests, direct-OCCT product fixture corpus, release `.app`/DMG build proof, accepted-CAD gate, bounded accepted-CAD bounds auto-repair, bounded containment envelope expansion, BRep-derived sketch conversion with explicit provenance, multi-loop BRep-derived sketch seeds, executable topology/concavity redraw seeds, Math Lens copy for accepted-CAD repair actions, strict confirmation gating for fork actions, first-pass arbitrary 3-view candidate cell reconstruction/search that drives preview source, first accepted candidate-cell BRep path with hard STEP gate plus explicit-port component package surface, UI accept proof for candidate-cell accepted CAD, exact front-profile prism selection for concave source profiles with rectangular depth views, backend projected-loop topology validation for BRep holes, FreeCAD exact edge/face target export, and Direct OCCT exact edge/face target export into manifest/bundle topology selections.
-- Remaining hard work: richer arbitrary exact BRep topology selection beyond cell unions/front-profile prisms and exported edge/face targets, richer arbitrary BRep-to-sketch topology semantics beyond loop roles/counts/edge endpoints/face centers, and demo-ready product pass.
+- Remaining hard work: first-class `MeshDraftDocument`, `WorkspaceScene` contract, stable correspondence across sketch/draft/exact entities, recognizer-driven exact rebuild for a limited feature subset, richer arbitrary exact BRep topology selection beyond cell unions/front-profile prisms and exported edge/face targets, richer arbitrary BRep-to-sketch topology semantics beyond loop roles/counts/edge endpoints/face centers, and demo-ready product pass.
 
 ## Current Split
 
-- `.ecky` language: portable authoring surface.
-- Core IR: backend-neutral CAD program.
-- Mesh/eckyRust backend: fast preview, wall-patterns, implicit fields, mesh output, plus internal direct-OCCT STEP/STL fast path for the supported Core IR subset.
-- build123d backend: Python OCCT-backed exact CAD.
-- FreeCAD backend: FreeCAD/OCCT exact CAD.
-- Future direct OCCT backend: Rust-owned exact CAD adapter, not user-selectable today.
+- `SketchDocument` / `SketchIntent`: current sketch-authoring truth on the frontend side.
+- `.ecky` language: portable exact authoring surface and current rebuild source.
+- Core IR: backend-neutral exact CAD program.
+- Mesh/eckyRust backend: current draft preview lane and future draft-form lane; today it renders fast preview, wall-patterns, implicit fields, mesh output, plus internal direct-OCCT STEP/STL fast path for the supported Core IR subset.
+- build123d backend: Python OCCT-backed exact rebuild/commit lane.
+- FreeCAD backend: FreeCAD/OCCT exact rebuild/commit lane.
+- Future direct OCCT backend: Rust-owned exact rebuild/commit adapter, not user-selectable today.
+- Missing runtime contract: `WorkspaceScene`, `MeshDraftDocument`, `CorrespondenceGraph`, and `AgentScenePacket`.
 
 Do not let guide text imply a backend supports an op unless capability manifest and tests prove it.
+
+## Shared Scene Contract
+
+The runtime should converge on one shared scene contract:
+
+- `SketchIntent`: user-authored 2D intent and constraints
+- `MeshDraft`: editable draft form with stable region/entity ids
+- `ExactModel`: exact rebuild state and exportable outputs
+- `CorrespondenceGraph`: links between sketch primitives, draft regions, exact entities, and validation targets
+- representation status: `fresh`, `stale`, `rebuildable`, `failed`, `committed`
+
+Agent-facing scene packet should include:
+
+- selected sketch primitives
+- selected mesh regions
+- selected exact entities
+- active lens
+- viewport/projection evidence
+- local source fragments
+- correspondence evidence
+- stale/rebuildable status
+- allowed patch targets
+- locked constraints
 
 ## Current Landed Truth
 
@@ -57,13 +95,14 @@ Do not let guide text imply a backend supports an op unless capability manifest 
 - MCP `artifactBundle` digest reports geometry backend, edge/face target counts, export formats, and STEP availability/path so agents can inspect artifacts before promising export.
 - MCP `artifact_manifest_get` returns full validated `artifactBundle` + `modelManifest` JSON for the active target/model; `target_meta_get` includes lightweight artifact routing flags.
 - MCP structural verification responses include artifact digest fields, so pass/fail checks carry export truth with them.
-- MCP render mutation responses include artifact digest fields, so `params_patch_and_render`, `macro_replace_and_render`, and macro-buffer render tools carry STEP truth directly after mutations.
+- MCP render mutation responses include artifact digest fields, so `params_preview_render`, `macro_preview_render`, and macro-buffer render tools carry STEP truth directly after mutations.
 - Candidate-cell accept command recomputes search from the SketchDocument, selects an explicit solution, emits either cell-union source or exact front-profile prism source when rectangular depth views make that topology determinate, preserves source front-profile holes as `profile :outer/:holes`, renders through normal EckyRust dispatch, rejects mesh fallback unless a STEP export artifact exists, and runs existing STEP/FCStd hidden-line validation before returning accepted evidence.
 - Accepted candidate-cell component package command requires explicit user/agent ports and known port types; heuristic geometry never becomes assembly meaning silently.
 - Sketch workspace can create a reusable accepted-BRep package from an accepted STEP candidate with explicit `front_mount` / `mechanical.plane.mount.v1` port evidence, optional explicit control surface (`params`, `uiSpec`, `initialParams`), and raw backend package errors surfaced unchanged.
 - BRep hidden-line projections can carry projected loops with `outer` / `hole` / `unknown` roles. When loops are absent, validation derives closed loops from edge chains, classifies roles by containment parity, and rejects loop-count or hole-count mismatches against source sketch profiles.
 - FreeCAD runner reports exact BRep edge endpoint targets from `Shape.Edges` and face center/normal/area targets from `Shape.Faces`. Rust converts those into `SelectionTargetKind::Edge` / `SelectionTargetKind::Face` manifest entries plus `ArtifactBundle.edgeTargets` / `ArtifactBundle.faceTargets` entries with matching target ids, so viewer/assembly code can select real model topology instead of guessed semantic parts.
 - Cached FreeCAD bundles reconcile edge-target labels/editability against the current manifest while preserving endpoint coordinates, so accepted bindings and later port labels do not leave stale edge overlays.
+- Current exact-source spine is `SketchDocument` -> generated `.ecky` -> Core IR -> backend build. Preview mesh and validation loops already exist, but first-class editable draft state and shared-scene identity are still missing.
 - `.ecky` now exposes exact-only `sampled-radial-loft` for formula-driven sampled radial section lofts. FreeCAD/build123d lower it natively; build123d and internal direct-OCCT sampled shell planning both synthesize inner sampled radial lofts for `(shell wall (sampled-radial-loft ...))`; `EckyRust` render dispatch now probes direct-OCCT first for sampled radial lofts and falls forward to build123d when the internal SDK is unavailable or blocked, while mixed `wall-pattern` + `sampled-radial-loft` sources still reject early instead of pretending one backend can do both.
 - Component ports can carry `targetIds`, and accepted-BRep package creation validates those ids against accepted artifact bundle edge/face targets before preserving them in the package.
 - Generic runtime/exact bundles can now be wrapped into portable component package projects without sketch-accept coupling. Packaging prefers reusable source when `macroPath` exists, falls back to STEP when needed, preserves source language/backend hints for source-backed components, auto-derives full source param surface (`params`, `uiSpec`, `initialParams`) from reusable source when explicit package params are omitted, preserves explicit package-request `uiSpec` and `initialParams` for non-source-backed bundles, allows zero-port decorative/source-backed components, validates explicit port `targetIds` against runtime manifest plus bundle topology before install/reuse, backfills empty param surfaces for installed legacy source-backed packages on resolve, merges stored `initialParams` with runtime overrides during installed component and assembly render, exposes cheap installed-component and installed-assembly controls resolve without rendering, and echoes merged values back from installed-component runtime responses.
@@ -77,6 +116,11 @@ Do not let guide text imply a backend supports an op unless capability manifest 
 ## Next CAD VM Tranche Checklist
 
 - Track `.ecky` language improvements in [Ecky Language Improvement Roadmap](./ecky-language-improvement-roadmap.md): face/edge selectors, units/types, component/port contracts, and earlier lowerer errors.
+- Add `MeshDraftDocument` with stable draft topology ids and region-local edit identity.
+- Add `WorkspaceScene` contract shared with frontend and agent/runtime surfaces.
+- Add `CorrespondenceGraph` / entity provenance between sketch, draft, exact, and validation targets.
+- Add recognizer-driven exact rebuild for a limited subset: extrude, revolve, sweep, loft, shell, cuts, holes.
+- Add `AgentScenePacket` / local patch contract for model+agent collaboration on shared scene state.
 - More Typed Core IR tightening: richer heterogeneous tuple schemas for `zip` / `enumerate` / destructuring.
 - Promote candidate-cell reconstruction/search beyond cell-union, exact front-profile-prism STEP proof, exported FreeCAD edge/face targets, and Direct OCCT edge/face targets into richer exact BRep topology selection.
 - Demo-ready product pass.

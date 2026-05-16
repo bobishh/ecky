@@ -6,39 +6,38 @@
 
 ## Summary
 
-This roadmap defines Ecky's sketch-first modeling spine and learning product direction. Ecky should become a modeling playground plus AI mentor: a place where users build real CAD, learn the math behind shape, and get coached through modeling decisions. Reusable CAD components, packages, assemblies, fusing, molding, and public sharing remain important, but the immediate product path is drawing or proposing sketches, rendering feedback while the sketch changes, explaining why geometry behaves as it does, generating valid `.ecky`, and validating the final model against the sketch contract.
+This roadmap defines Ecky's final modeling spine. Ecky should become a shared modeling workspace where users shape one object across sketch intent, draft form, and exact rebuild without losing state between those representations. Reusable CAD components, packages, assemblies, fusing, molding, and public sharing remain important, but the product center is now the live loop between sketch edits, draft-form edits, exact rebuild candidates, validation, and agent-guided local patches.
 
-The core decision:
+The core product decision:
 
-- sketches should become structured constraints, not disposable images
-- meshes are useful for fast preview and validation, but BRep remains the final CAD truth
-- accepted modeling steps should become source, not chat transcript
-- every rendered model should expose useful 2D projections
+- one workspace scene owns the live object state
+- one object may carry `SketchIntent`, `MeshDraft`, and `ExactModel` at the same time
+- users must be able to move back and forth between sketch and draft-form editing without destructive conversion
+- exact rebuild should happen incrementally, per region or feature, when the shape is stable enough to commit
+- accepted modeling steps should become structured source and validation evidence, not chat transcript
+- every representation should expose useful projections, selection evidence, and stale/fresh status
 - editable authoring sketches should exist only when source/history supports them
 - derived projection sketches should explain models when source/history is missing
 - thread authoring context is removed; source and backend ownership belong to model versions, generated artifacts, and session config
-- subagents may propose changes, but solvers and validators own correctness
+- agents may propose local patches, but solvers and validators own correctness
 - geometry alone is not enough for later reuse
 - reusable components need an explicit interface
-- LLMs may propose sketches and source, but solvers and validators own correctness
-- manual and LLM-authored sketches should use the same SketchDocument -> `.ecky` polygon/extrude pipeline; no separate MCP sketching path is planned yet
+- manual and agent-authored sketch changes should use the same `SketchDocument` -> generated `.ecky` path that exists today until a first-class `MeshDraftDocument` and shared-scene contract land
 
 The target architecture is:
 
 ```text
 user intent
-  -> continuous sketch stream
-  -> stroke paths / profiles / continuous-body drafts
-  -> Math Lens explains coordinates/geometry/features
-  -> subagent proposes next visible step
-  -> Sketch IR update
-  -> preview mesh update
+  -> SketchIntent update
+  -> MeshDraft seed/update
+  -> local draft-form edits
   -> useful 2D projections update
   -> validation ledger update
-  -> .ecky source patch
+  -> agent patch or rebuild request
+  -> .ecky / Core IR exact rebuild candidate
   -> backend build
-  -> sketch/BRep validation
-  -> accepted model state
+  -> sketch/draft/exact validation
+  -> accepted exact model state
 ```
 
 Later packaging and assembly use the accepted model state:
@@ -54,33 +53,140 @@ accepted model
 
 ## Product Goals
 
-1. Ecky is a modeling playground plus AI mentor, not only an AI CAD generator.
-2. Users can sketch first in orthographic views and progressively turn sketches into real parametric CAD.
-3. Users can also sketch stroke skeletons that become thickened, swept, or extruded printable bodies.
-4. The app renders feedback while users draw, then produces deterministic feature suggestions without requiring an LLM.
-5. Accepted sketch steps generate `.ecky` source and remain editable as construction history.
-6. Every rendered model exposes useful 2D projections for inspection, learning, and validation.
-7. Generated solids are validated against sketch envelopes, required regions, keepouts, and backend structural checks.
-8. LLMs can suggest sketches, source, ports, explanations, and repair steps inside the same validation loop.
-9. Users can save accepted models as reusable components after the sketch loop works.
+1. Ecky is a modeling workspace plus AI mentor where users shape one object through sketch intent, draft form, and exact rebuild.
+2. Users can sketch first in orthographic views, push and pull a live draft form, return to sketch when intent changes, and only commit exact regions when they are stable.
+3. Users can sketch stroke skeletons that become thickened, swept, or extruded draft bodies before exact rebuild.
+4. The app renders feedback while users draw or edit draft form, then produces deterministic rebuild candidates without requiring an agent for every step.
+5. Accepted sketch and draft steps generate structured source and remain editable as construction history.
+6. Every rendered representation exposes useful 2D projections for inspection, learning, validation, and agent context.
+7. Generated exact models are validated against sketch envelopes, draft-form intent, required regions, keepouts, and backend structural checks.
+8. Agents can suggest local sketch patches, local draft-form patches, exact rebuild candidates, explanations, and repair steps inside the same validation loop.
+9. Users can save accepted exact results as reusable components after the sketch/draft/exact loop works.
 10. Components expose stable params, ports, clearances, keepouts, validation rules, and previews.
 11. Components can later be packaged, shared, assembled, joined, fused, or molded.
 
-## Non-Goals
+## Final Interaction Loop
 
-- Do not position Ecky as only prompt-to-CAD generation.
-- Do not treat STL as an authoritative reusable source.
-- Do not rely on raw mesh fusion for high-quality CAD.
-- Do not make hardcoded port and mate types the only extension path.
-- Do not run arbitrary untrusted package code for custom port solvers in v1.
-- Do not promise perfect automatic inference from drawings in the first release.
-- Do not make package privacy depend on base64. Base64 is transport encoding, not packaging or protection.
+The final interaction loop is:
+
+```text
+seed shape in sketch
+  -> touch draft form directly
+  -> return to sketch when intent changes
+  -> ask agent for a local patch or rebuild
+  -> validate the result
+  -> keep sketch, draft, and exact state alive together
+  -> commit exact regions and features when they are ready
+```
+
+This loop should tolerate iteration:
+
+- edit sketch, then draft
+- edit draft, then sketch
+- accept one agent patch and reject the next
+- keep an exact rebuild candidate for one region while the rest stays draft
+- preserve enough shared state that user and agent both see the same object without rediscovering it from scratch
 
 ## Core Concepts
 
-### Modeling Playground And AI Mentor
+### WorkspaceScene
 
-Ecky should help users learn by making modeling state visible and explainable.
+`WorkspaceScene` is the shared object container for one modeling session. It should carry:
+
+- `SketchIntent`
+- `MeshDraft`
+- `ExactModel`
+- `CorrespondenceGraph`
+- selection state
+- validation state
+- artifact/build state
+- stale/fresh/rebuildable/failed/committed status for each representation
+
+The user should move between lenses on the same object, not between disconnected documents.
+
+### SketchIntent
+
+`SketchIntent` is the user-authored 2D intent layer.
+
+Purpose:
+
+- orthographic structure
+- profiles, axes, holes, keepouts, and dimensions
+- semantic labels and constraints
+- source-backed authoring history
+
+Current implementation truth:
+
+- `SketchDocument` is the live sketch structure today
+- manual and deterministic sketch flows already feed generated `.ecky`
+
+### MeshDraft
+
+`MeshDraft` is the editable 3D draft-form layer.
+
+Purpose:
+
+- rapid form exploration
+- region-local edits
+- immediate volume feedback
+- preview/subd-like shaping
+- staging ground for later exact rebuild
+
+Current implementation truth:
+
+- preview mesh exists today
+- first-class editable `MeshDraftDocument`, stable draft entity ids, and region-local editing remain next
+
+### ExactModel
+
+`ExactModel` is the exact rebuild and manufacturing layer.
+
+Purpose:
+
+- rebuildable exact feature graph
+- BRep/STEP/FCStd outputs
+- exact topology and validation targets
+- commit/manufacture/export state
+
+Current implementation truth:
+
+- generated `.ecky` plus Core IR already drive exact backends today
+- accepted exact validation/repair loop already exists
+
+### CorrespondenceGraph
+
+`CorrespondenceGraph` links representations.
+
+Purpose:
+
+- sketch primitive -> mesh region links
+- mesh region -> exact feature/entity links
+- validation target -> source intent links
+- stale/fresh invalidation across lenses
+- exact target evidence for user-visible repair and agent patches
+
+This is the missing identity spine between current sketch, preview mesh, and exact validation work.
+
+### AgentScenePacket
+
+`AgentScenePacket` is the shared context contract for user+agent collaboration.
+
+It should include:
+
+- selected sketch primitives
+- selected mesh regions
+- selected exact entities
+- active lens
+- viewport/projection evidence
+- local source fragments
+- correspondence evidence
+- stale/rebuildable status
+- allowed patch target
+- locked constraints
+
+Agent output should be a local patch against one or more representations, not a blind whole-model rewrite.
+
+### Modeling Playground And AI Mentor
 
 Primary roles:
 
@@ -92,9 +198,10 @@ Primary roles:
 
 The mentor should stay grounded in visible model state:
 
-- current sketch geometry
-- selected feature
-- generated `.ecky` source
+- current sketch intent
+- current draft form
+- selected feature or region
+- generated `.ecky` / exact source
 - validation ledger
 - rendered model
 - 2D projections
@@ -199,7 +306,7 @@ Implications for Ecky:
 - It needs vector Sketch IR, not pixels.
 - It needs hidden/visible line state, construction lines, dimensions, and curve kinds.
 - It can produce multiple valid solids from the same views.
-- Search can grow exponentially, so user/LLM intent labels and constraints are product features, not hacks.
+- Search can grow exponentially, so user/agent intent labels and constraints are product features, not hacks.
 - Validation must report raw projection/topology mismatches.
 
 #### Track C: BRep To Sketch Projections
@@ -235,7 +342,7 @@ The reconstruction stack should be:
 SketchDocument
   -> view regions / vector entities
   -> live preview hull mesh
-  -> user/LLM intent labels
+  -> user/agent intent labels
   -> BRep candidate graph
   -> accepted .ecky feature source
   -> backend BRep build
@@ -699,30 +806,28 @@ Validation must run after every boolean or blend:
 
 ## Sketch-First Modeling
 
-Sketch-first modeling should be treated as a constraint workflow and learning surface, not image-to-mesh generation.
+Sketch-first modeling should be treated as the intent lens of a larger sketch/draft/exact workflow.
 
 First UI shape:
 
 ```text
-+----------------+----------------+----------------+
-| Front View     | Side View      | Top View       |
-| draw profile   | draw depth     | draw footprint |
-+----------------+----------------+----------------+
-                |
-                v
-       preview hull mesh
-                |
-                v
-      user marks intent and constraints
-                |
-                v
-          generated .ecky source
-                |
-                v
-             BRep build
-                |
-                v
-     validation overlay against sketches
++----------------+----------------+----------------+----------------+
+| Front Sketch   | Side Sketch    | Top Sketch     | Draft View     |
+| draw profile   | draw depth     | draw footprint | touch the form |
++----------------+----------------+----------------+----------------+
+                         |
+                         v
+                shared WorkspaceScene
+                         |
+     +-------------------+-------------------+
+     |                                       |
+     v                                       v
+local sketch/draft validation         exact rebuild candidate
+     |                                       |
+     +-------------------+-------------------+
+                         |
+                         v
+                 commit exact regions
 ```
 
 Supported sketch primitives:
@@ -752,7 +857,7 @@ Supported first features:
 - chamfer
 - fillet
 
-The first version should avoid full automatic inference. Users or LLM proposals should specify intent:
+The first version should avoid full automatic inference. Users or agent patches should specify intent:
 
 - this sketch is a revolve profile
 - this top sketch is a footprint
@@ -769,9 +874,22 @@ The workspace should also explain feature math:
 - shell: offset surfaces plus wall thickness
 - fillet/chamfer: edge selection plus radius or distance
 
+The sketch lens should remain editable after draft-form edits and after exact rebuild attempts. Editing sketch intent should invalidate downstream draft/exact state, not replace it.
+
 ## Sketch As Source
 
-Sketch lines should become `.ecky` source, not disappear.
+Sketch intent should remain durable source, not disappear when a draft or exact model exists.
+
+Today the exact-source path is:
+
+```text
+SketchDocument
+  -> generated `.ecky`
+  -> Core IR
+  -> backend build
+```
+
+That remains current implementation truth. The roadmap extension is not replacing that path. It is adding a first-class draft-form lane and a shared-scene contract around it.
 
 Example target shape:
 
@@ -810,13 +928,13 @@ Generated source can choose packaging behavior:
 
 Default should keep sketches. Users will want to edit the original design intent.
 
-Rendered models without editable sketch history should still produce derived projection sketches. These projections can support measurement, validation, Math Lens explanations, and repair suggestions, but they should not be saved as authoring history unless the user explicitly converts or redraws them.
+Rendered models without editable sketch history should still produce derived projection sketches. These projections can support measurement, validation, Math Lens explanations, repair suggestions, and later draft reconstruction, but they should not be saved as authoring history unless the user explicitly converts or redraws them.
 
-## Three Internal Representations
+## Internal Representations And Correspondence
 
-Ecky should use three representations with clear responsibility.
+Ecky should use linked representations with clear responsibility.
 
-### Sketch IR
+### SketchIntent
 
 Purpose:
 
@@ -827,17 +945,29 @@ Purpose:
 - view planes
 - construction geometry
 
-### Preview IR
+Current shape today:
+
+- `SketchDocument`
+- sketch-source envelope embedded in generated `.ecky`
+
+### MeshDraft
 
 Purpose:
 
-- fast rough mesh
-- SDF or voxel-like approximation if useful
+- editable draft form
+- stable draft region/entity ids
 - immediate visual feedback
+- local push/pull/brush/inset/extrude style operations
 - silhouette comparison
-- inside/outside validation
+- staging for exact rebuild
 
-### Solid IR
+Current shape today:
+
+- preview hull mesh
+- backend preview mesh assets
+- no first-class editable `MeshDraftDocument` yet
+
+### ExactModel
 
 Purpose:
 
@@ -848,76 +978,87 @@ Purpose:
 - validations
 - exports
 
-The preview mesh is disposable. The BRep and source graph are authoritative.
+Current shape today:
 
-## LLM-Assisted Sketch Loop
+- generated `.ecky`
+- Core IR
+- exact backend build
+- accepted exact validation/repair loop
 
-LLMs can propose sketches and repairs, but they should operate inside the solver/validator loop.
+### CorrespondenceGraph
 
-Manual sketches and LLM sketch proposals share the same data path: SketchDocument primitives become generated `.ecky` polygon/extrude source, then the existing preview/build/validation loop handles the result. No separate MCP is planned for sketching yet.
+Purpose:
+
+- sketch primitive -> draft region links
+- draft region -> exact feature/entity links
+- projection/validation target links
+- stale/fresh/rebuildable/failed/committed status propagation
+
+This graph should make the shared object state inspectable for both users and agents.
+
+## Agent Patch Loop And Rebuild Requests
+
+Agents can propose local patches and rebuilds, but they should operate inside the shared-scene solver/validator loop.
+
+Manual sketch edits and agent sketch patches share the same current path: `SketchDocument` primitives become generated `.ecky` source, then the existing preview/build/validation loop handles the result. The next step is to give agents the same shared-scene view over sketch, draft, and exact state.
 
 Workflow:
 
 ```text
 user intent
-  -> LLM proposes sketch primitives
-  -> sketch solver validates 2D constraints
-  -> preview mesh shows volume
-  -> LLM proposes .ecky features from sketch
-  -> BRep backend builds solid
-  -> validator compares solid back to sketch
-  -> LLM repairs source if validation fails
+  -> user edits sketch or draft
+  -> shared WorkspaceScene updates
+  -> agent receives AgentScenePacket
+  -> agent proposes local sketch patch, draft patch, or exact rebuild
+  -> solver/validator checks the patch
+  -> preview and projections update
+  -> exact backend builds candidate where requested
+  -> validator compares exact result back to sketch and draft intent
+  -> accepted patch becomes part of scene history
 ```
 
-This creates a self-constraining loop:
+This creates a constrained local-edit loop:
 
-- language proposal is converted to structured sketch
-- sketch solver rejects bad geometry early
-- preview mesh gives fast feedback
-- BRep backend builds real CAD
-- validator compares BRep result to sketch contract
-- repair is targeted to specific failures
+- user and agent act on the same selected object state
+- sketch solver rejects bad 2D geometry early
+- draft-form edits give fast feedback
+- exact rebuild happens only where requested and supported
+- validator compares exact output back to sketch and draft intent
+- repair stays targeted to specific failures and regions
 
-Example LLM proposal package:
+Example agent scene packet:
 
 ```json
 {
-  "proposalId": "classic_bottle_cage",
-  "sketches": [
-    {
-      "view": "front",
-      "profiles": ["outer_wrap", "mouth_opening", "bottom_lip"]
-    },
-    {
-      "view": "side",
-      "profiles": ["rear_spine", "rail_slot"]
-    }
-  ],
-  "params": {
-    "bottle_diameter": 74,
-    "wall_thickness": 4,
-    "mount_spacing": 64
+  "selection": {
+    "activeLens": "draft",
+    "sketchPrimitiveIds": ["front_outer"],
+    "meshRegionIds": ["body_shoulder_left"],
+    "exactEntityIds": []
   },
-  "ports": ["bolt_pattern", "dovetail_slot"],
-  "warnings": [
-    "Dovetail clearance needs validation after BRep build."
-  ]
+  "status": {
+    "sketch": "fresh",
+    "draft": "fresh",
+    "exact": "stale"
+  },
+  "constraints": {
+    "lockedDimensions": ["front_width"],
+    "allowedPatchTargets": ["draft", "exactRebuildCandidate"]
+  },
+  "evidence": {
+    "projectionViews": ["front", "side", "top"],
+    "sourceFragments": ["SketchDocument", "generatedEcky"],
+    "correspondence": ["front_outer -> body_shoulder_left"]
+  }
 }
 ```
 
-The UI can show multiple proposals:
+Agent responses should be local:
 
-- classic side rails
-- split clamp shell
-- modular dovetail cage
-
-Each proposal should include:
-
-- three-view sketch
-- rough mesh preview
-- parameter list
-- likely ports
-- validation warnings
+- patch selected sketch primitives
+- patch selected draft regions
+- propose exact rebuild for selected rebuildable region
+- explain blocked rebuild or validation failure in terms of visible scene state
 - Math Lens explanation of core geometry and feature choices
 
 ## Subagent Execution Model
@@ -1040,13 +1181,24 @@ Checks:
 
 ## User Experience
 
-### Learning And Jarvis Mentor
+### Workspace Lenses And Selection
 
 Capabilities:
 
-- Tutor role explains active CAD concepts in context.
-- Builder role proposes the next valid operation.
-- Coach role suggests constraints, dimensions, feature order, and simplifications.
+- one object stays visible across sketch, draft, and exact lenses
+- users can switch lenses without destroying other representations
+- selected sketch primitives, draft regions, and exact entities stay inspectable
+- each representation exposes `fresh`, `stale`, `rebuildable`, `failed`, or `committed` status
+- exact rebuild can be region-local while the rest of the object remains draft
+- projection views stay attached to the current scene state, not a disconnected export
+
+### Learning And Mentor
+
+Capabilities:
+
+- Tutor role explains active modeling concepts in context.
+- Builder role proposes the next valid operation or rebuild.
+- Coach role suggests constraints, dimensions, region selection, feature order, and simplifications.
 - Debugger role explains raw solver/backend/provider failures.
 - Math narrator role links coordinates, vectors, projections, functions, transforms, and tolerances to visible geometry.
 - Mentor copy appears in Ecky bubble state and relevant panels.
@@ -1057,60 +1209,67 @@ Capabilities:
 Capabilities:
 
 - show coordinate frames, axes, vectors, normals, tangents, and dimensions
-- explain extrude/revolve/loft as profile-driven operations
+- explain extrude/revolve/loft/sweep/shell as profile- or path-driven operations
+- explain draft-form edits as visible region changes with local geometric consequences
 - explain transforms as visible frame changes
 - show slope, curvature, radius, and continuity for curves and blends
 - show tolerance, clearance, wall thickness, and fit checks with measured values
-- tie highlighted geometry to generated `.ecky` source and validation ledger entries
+- tie highlighted geometry to generated `.ecky` source, draft state, and validation ledger entries
 
 ### Model Projections
 
 Capabilities:
 
-- generate front, side, and top projections for every rendered model
+- generate front, side, and top projections for every representation
 - show section or face projections where useful
 - expose derived projection sketches for models without editable source/history
-- expose authoring sketches only when backed by Sketch IR or feature profiles
-- compare BRep/mesh projections against authoring sketches and tolerance overlays
-- keep derived projections useful for learning and validation without claiming they are original intent
+- expose authoring sketches only when backed by `SketchIntent` or exact feature profiles
+- compare draft/exact projections against authoring sketches and tolerance overlays
+- keep derived projections useful for learning, validation, rebuild guidance, and agent context without claiming they are original intent
 
 ### Sketch Workspace
 
 Capabilities:
 
 - draw front/side/top sketches
+- inspect and edit one shared object state
 - use polylines/splines/arcs
 - dimension sketch
 - mark construction geometry
 - mark holes, axes, ports, keepouts
-- see ghost preview mesh while drawing
-- generate `.ecky`
-- compare BRep result to sketch
+- see live draft-form feedback while drawing
+- switch between sketch, draft, and exact lenses
+- generate `.ecky` and exact rebuild candidates
+- compare draft and exact result back to sketch
 - accept or repair step by step
 - switch Math Lens overlays on selected geometry and operations
 
-### Continuous Agent Stream
+### Agent Patch Loop
 
 Capabilities:
 
-- show planner/sketch/validator/preview/source/build/repair steps
+- send selected scene state to the agent through a shared packet
+- let the agent patch sketch, draft, or exact rebuild candidates locally
+- show planner/sketch/draft/validator/preview/source/build/repair steps
 - record accepted and rejected steps in a visible ledger
 - preserve raw backend and validator failures
 - keep accepted model state separate from failed proposals
-- replay accepted sketch and source patches deterministically
+- replay accepted sketch, draft, and source patches deterministically
 
 ### Validation And Progress Ledger
 
 Capabilities:
 
 - show current sketch validity
+- show current draft validity
+- show current exact rebuild status
 - show drawn profile evidence
 - show live SketchDocument source evidence with primitive ids
-- show preview mesh evidence
-- show generated source state
+- show draft mesh evidence
+- show generated exact source state
 - show source-backed projection evidence
 - show backend build state
-- show sketch/BRep validation state
+- show sketch/draft/exact validation state
 - keep raw backend/provider error bodies attached to rejected steps
 
 ### Assembly Editor
@@ -1215,13 +1374,13 @@ Status meanings:
 | Done | Source-backed viewport silhouette overlay | Main viewport can show source-authored sketch silhouettes over sketch preview output. Overlay is UI evidence from SketchDocument/projection records, not a BRep-derived silhouette or geometric compare. |
 | Done | Dimensions/constraints readout | Sketch workspace exposes current source-backed dimensions and constraint/readout copy for authored profiles. Readout is inspection evidence, not exact constraint solving. |
 | Done | Projection validation copy | Projection UI now labels source-backed projection evidence and clarifies validation scope. Copy does not claim full BRep/silhouette compare, inside/outside validation, or geometric truth beyond authored-source projections. |
-| Done | Sketch cleanup UX | Deterministic cleanup of rough closed source profiles into clean editable source geometry landed. `CLEAN UP` converts the latest rough closed source profile into a source-bounds rectangle, preserves primitive id/view, refreshes SketchDocument/source/projection/preview evidence, and reports exact local validation for open profiles without backend calls. This is not BRep reverse engineering, arbitrary model-to-sketch inference, or LLM magic. |
+| Done | Sketch cleanup UX | Deterministic cleanup of rough closed source profiles into clean editable source geometry landed. `CLEAN UP` converts the latest rough closed source profile into a source-bounds rectangle, preserves primitive id/view, refreshes SketchDocument/source/projection/preview evidence, and reports exact local validation for open profiles without backend calls. This is not BRep reverse engineering, arbitrary model-to-sketch inference, or speculative agent magic. |
 | In progress | Arbitrary model-to-sketch projection | Source-backed authoring projections landed. Exact HLR front/top/side projection evidence can now produce derived editable sketch seeds with `derivedFromBRep` provenance and a user-triggered convert path. Closed and multi-loop HLR edge loops are preserved as separate editable primitives when possible; otherwise conversion falls back to a bounded editable seed. This stays separate from authoring history. Rich topology semantics, hole intent, and feature reconstruction remain pending. |
 | Done | Live local sketch ghost | Main viewport now shows immediate local sketch ghost feedback while a user draws open profiles and while closed-profile backend preview is queued/generating. It is disposable UI evidence only, distinct from real mesh preview, BRep build, silhouette comparison, and sketch/BRep validation. |
-| In progress | Sketch Preview Mesh | Backend preview path, UI preview evidence, main viewport sketch preview handoff, generated `.ecky` CODE affordance, compact preview STL/asset evidence, cursor-aligned pane drawing, viewport-local ghost feedback, source-backed silhouette overlay, and ledger-backed preview artifact evidence landed. Real mesh preview remains backend-generated, while BRep validation, BRep-derived silhouette comparison, and inside/outside checks remain next. |
-| In progress | Sketch To Ecky Draft | Draft source generation, drawn-profile workspace trigger, deterministic suggestion UI from SketchDocument, and accepted-suggestion path through draft source, preview asset evidence, and source output landed. Rich feature generation and backend build validation remain. |
-| In progress | Sketch Against BRep Validation | Exact HLR, BRep-derived sketch overlays, bounds validation, sampled containment validation, projected-loop topology validation, repair-target surfacing, accepted-CAD gating, bounded bounds-mismatch auto-repair, bounded containment envelope expansion, BRep-derived sketch conversion, explicit topology/concavity redraw execution, first-pass arbitrary 3-view candidate cell reconstruction/search, and exact front-profile prism selection for rectangular depth views landed. General exact BRep topology selection remains. |
-| Next | LLM Sketch Proposals | Prompt-to-sketch proposal workflow, LLM proposal cards, and repair from raw validation errors remain later work. Deterministic suggestions are visible now without LLM dependency. |
+| In progress | Draft Mesh Seed | Backend preview path, UI preview evidence, main viewport sketch preview handoff, generated `.ecky` CODE affordance, compact preview STL/asset evidence, cursor-aligned pane drawing, viewport-local ghost feedback, source-backed silhouette overlay, and ledger-backed preview artifact evidence landed. Real mesh preview remains backend-generated, while BRep validation, BRep-derived silhouette comparison, and inside/outside checks remain next. |
+| In progress | Exact Rebuild Seed | Draft source generation, drawn-profile workspace trigger, deterministic suggestion UI from SketchDocument, and accepted-suggestion path through draft source, preview asset evidence, and source output landed. Rich feature generation and backend build validation remain. |
+| In progress | Shared Scene / Exact Validation Seed | Exact HLR, BRep-derived sketch overlays, bounds validation, sampled containment validation, projected-loop topology validation, repair-target surfacing, accepted-CAD gating, bounded bounds-mismatch auto-repair, bounded containment envelope expansion, BRep-derived sketch conversion, explicit topology/concavity redraw execution, first-pass arbitrary 3-view candidate cell reconstruction/search, and exact front-profile prism selection for rectangular depth views landed. General exact BRep topology selection remains. |
+| Next | Agent Patch Loop | Prompt-to-scene proposal workflow, local agent patch cards, and repair from structured validation state remain later work. Deterministic suggestions are visible now without agent dependency. |
 | Done | Package contracts | Component package schema, package visibility modes, params, ports, data-defined port and mate type definitions, mate pair allow-lists, mate compatibility validation, assembly recipes, operation kinds, keepouts, fusion zones, package-level Sketch IR contracts. |
 | Done | `.ecky` header and payload archive | ZIP outer envelope with `ecky-header.json` plus `ecky-payload.b64`; header model omits source refs and sketch internals; header can be read without full manifest payload. |
 | Done | Local package install/import | Local component library install, header listing, Projects package browser/import, and raw backend error display landed. |
@@ -1233,17 +1392,18 @@ Status meanings:
 
 | Phase | Status | Progress |
 | --- | --- | --- |
-| Phase 0: Sketch Stream Contracts And Ledger | In progress | SketchDocument, suggestion, draft, validation contracts, visible sketch-step ledger, camelCase SketchDocument source evidence, primitive-id evidence, accepted suggestion draft/preview/source evidence, source-backed projection evidence, source silhouette overlay evidence, dimensions/constraints readout evidence, tolerance/readout ledger evidence, projection validation copy, source-fit/containment validation seed evidence, raw backend error evidence, editable import, local validation, and shared manual/LLM SketchDocument -> `.ecky` polygon/extrude pipeline direction landed. Append-only accepted/rejected source patch replay remains. |
+| Phase 0: Sketch Stream Contracts And Ledger | In progress | SketchDocument, suggestion, draft, validation contracts, visible sketch-step ledger, camelCase SketchDocument source evidence, primitive-id evidence, accepted suggestion draft/preview/source evidence, source-backed projection evidence, source silhouette overlay evidence, dimensions/constraints readout evidence, tolerance/readout ledger evidence, projection validation copy, source-fit/containment validation seed evidence, raw backend error evidence, editable import, local validation, and shared manual/agent SketchDocument -> `.ecky` polygon/extrude pipeline direction landed. Append-only accepted/rejected source patch replay remains. |
 | Phase 1: Sketch Workspace Continuous Flow | In progress | `SKETCH` window supports real full-pane cursor-aligned drawing into structured SketchDocument state, automatic closed-profile preview, local invalid-state gating, pending UI, editable SketchDocument paste/import, pasteable `.ecky` source-envelope import, replay to strokes, point handles, configurable grid snap for drawing and point edits, selected point coordinate editing, delete point, simple profile dimension editing, exact profile origin placement, profile size/origin grid snaps, source-backed dimension lock/unlock constraints, locked-axis point-edit solver seed, deterministic cleanup of rough closed source profiles into clean editable source geometry, dimensions/constraints readout, preview mesh, main viewport preview handoff, viewport-local ghost feedback, source silhouette overlay, and ledger UI. Richer source edit round-trip, richer overlays, and full constraint solving remain. |
 | Phase 2: Learning Mentor And Math Lens | In progress | Product roles and Math Lens scope documented. Extrude math lens is live, and BRep auto-snap / auto-contain repairs now explain the affine source-to-BRep bounds mapping from ledger evidence. Grounded tutor/builder/coach/debugger/math narrator UI, richer overlays, and source/ledger links remain. |
 | Phase 3: Projection Principle And Reconstruction Math | In progress | Source authoring sketches vs derived projection sketches rule documented. Orthographic reconstruction spine now separates live preview hull, exact BRep candidate reconstruction, BRep hidden-line reprojection, and learned proposal generation. Deterministic projection helper, UI projection panel, viewport source silhouette overlay, validation-scope copy, exact HLR overlays, and BRep-derived sketch conversion seeded. Live local projection preview now shows closed profiles as deterministic orthographic projections before backend preview returns and blocks open profiles. Rich arbitrary model-to-sketch topology conversion and richer overlays remain pending. |
-| Phase 4: Subagent Execution Model | Next | Planner/tutor/sketch/validator/preview/projection/source/build/repair task boundaries and ledger-backed UI remain. |
-| Phase 5: Sketch Preview Mesh | In progress | Backend draft preview renders an Ecky mesh bundle, workspace shows preview asset path, main viewport shows disposable local ghost feedback before backend preview, then switches to the sketch preview with compact preview STL/asset evidence plus generated `.ecky` CODE and source-backed silhouette overlay. Front+Top/Side now route through a dedicated preview-hull command that uses candidate cell search and embeds the full SketchDocument. The ledger treats preview assets and source overlay state as sketch/build validation seed evidence. Exact accepted-BRep topology selection remains next. |
-| Phase 6: Sketch To Ecky Draft | In progress | Draft source generator, deterministic suggestion UI from SketchDocument, and accepted-suggestion path through draft source, preview asset evidence, source output, and primitive-id traceability landed. Rich feature generation and replay from stored source remain. |
-| Phase 7: Sketch Against BRep Validation | In progress | Candidate graph seed builds 3D vertices/edges from orthographic sketch endpoints, replays them into source projections with visible pass/fail coverage, searches silhouette-consistent candidate cells, and feeds preview source from selected cells. Exact OCCT hidden-line extraction from accepted backend geometry is done for FCStd and STEP artifacts. Hidden-line extraction now returns backend-authoritative BRep/sketch validation evidence from the current SketchDocument; Front/Top/Side panes overlay BRep visible/hidden projection edges with failed-view styling; backend validation checks bounds plus sampled projection containment against closed source profiles; the OCCT panel exposes compact repair targets keyed by sketch/primitive id. Bounded bounds-mismatch auto-repair and bounded containment envelope expansion now mutate source polylines only when the target is unambiguous, then rerun exact validation once. BRep projection conversion now creates derived editable sketch seeds without claiming authoring history, including multi-loop projection seeds. Topology/concavity redraw actions can replace a targeted source primitive from exact BRep projection evidence and rerun validation once. FreeCAD exact edge/face topology and Direct OCCT exact edge/face topology now flow into manifest selection targets and bundle edgeTargets/faceTargets for later port/mate labeling. Richer arbitrary loop/feature topology semantics remain pending. |
-| Phase 8: LLM Sketch Proposals | Next | Prompt-to-sketch proposal workflow, LLM proposal cards, Math Lens explanations, and repair from raw validation errors remain later. Deterministic suggestions are already visible from SketchDocument. Manual and LLM sketches should share the same SketchDocument -> `.ecky` polygon/extrude path; no separate MCP sketching path is planned yet. |
-| Phase 9: Save Accepted Model As Component | Next | Component extraction from accepted sketch/source/imported model state remains. External import wrapper doctrine lives in [External Model Import And Component Reuse](./external-model-imports.md). |
-| Phase 10+: Parked Package/Library/Assembly/Fusion/Registry | Parked | Package archive/import contracts landed. Rich package detail, assembly editor, fuse/mold UI, public registry deferred until sketch-first loop works; package/library stays parked. |
+| Phase 4: Shared Scene And Mentor Grounding | Next | Planner/tutor/sketch/draft/validator/preview/source/build/repair task boundaries and ledger-backed UI remain. This phase introduces `WorkspaceScene`, scene-owned selection, representation status (`fresh` / `stale` / `rebuildable` / `failed` / `committed`), and the first `AgentScenePacket` contract so user and agent act on the same object state. |
+| Phase 5: Draft Mesh Seed | In progress | Backend draft preview already renders an Ecky mesh bundle, workspace shows preview asset path, main viewport shows disposable local ghost feedback before backend preview, then switches to the sketch preview with compact preview STL/asset evidence plus generated `.ecky` CODE and source-backed silhouette overlay. Front+Top/Side now route through a dedicated preview-hull command that uses candidate cell search and embeds the full SketchDocument. The next step is to present that lane as the first draft-form seed in the shared scene instead of only a disposable preview artifact. |
+| Phase 6: First-Class MeshDraft | Next | `MeshDraftDocument`, editable draft regions, stable draft entity ids, region-local draft edits, and persistence of draft state remain. Existing preview-hull, preview asset, and source-backed silhouette work become the seed for this editable draft lane. |
+| Phase 7: Shared Scene And Correspondence | In progress | Candidate graph seed builds 3D vertices/edges from orthographic sketch endpoints, replays them into source projections with visible pass/fail coverage, searches silhouette-consistent candidate cells, and feeds preview source from selected cells. Exact OCCT hidden-line extraction from accepted backend geometry is done for FCStd and STEP artifacts. Hidden-line extraction now returns backend-authoritative BRep/sketch validation evidence from the current SketchDocument; Front/Top/Side panes overlay BRep visible/hidden projection edges with failed-view styling; backend validation checks bounds plus sampled projection containment against closed source profiles; the OCCT panel exposes compact repair targets keyed by sketch/primitive id. BRep projection conversion now creates derived editable sketch seeds without claiming authoring history, including multi-loop projection seeds. FreeCAD exact edge/face topology and Direct OCCT exact edge/face topology now flow into manifest selection targets and bundle edgeTargets/faceTargets for later port/mate labeling. Next step: promote this work into a first-class `CorrespondenceGraph` linking sketch primitives, draft regions, exact targets, and validation/repair evidence. |
+| Phase 8: Exact Rebuild | In progress | Draft source generator, deterministic suggestion UI from SketchDocument, accepted-suggestion path through draft source, preview asset evidence, source output, primitive-id traceability, exact OCCT hidden-line validation, bounded bounds-mismatch auto-repair, bounded containment envelope expansion, and topology/concavity redraw actions already seed the exact-rebuild story. Next step: recognizer/compiler for rebuildable exact subsets such as extrude, revolve, sweep, loft, shell, cuts, and holes, with incremental rebuild per region or feature instead of only whole-model acceptance. |
+| Phase 9: Agent Patch Loop | Next | Prompt-to-scene proposal workflow, local agent patch cards, scene-backed Math Lens explanations, and repair from structured validation state remain later. Agent patches should target sketch, draft, or exact rebuild locally through `AgentScenePacket` on the same shared scene path. |
+| Phase 10: Commit And Package | Next | Accepted exact regions/features become committed model state, component extraction from accepted sketch/draft/exact state remains, and package/archive/install flows build on that committed exact state. External import wrapper doctrine lives in [External Model Import And Component Reuse](./external-model-imports.md). |
+| Phase 11+: Parked Package/Library/Assembly/Fusion/Registry | Parked | Package archive/import contracts landed. Rich package detail, assembly editor, fuse/mold UI, public registry, and broader component lifecycle remain deferred until the sketch/draft/exact loop works end-to-end. |
 
 ## Landed Foundation Tranche
 
@@ -1350,13 +1510,13 @@ Status as of 2026-04-30:
 - Selected point coordinate editor binds to one selected closed-profile point, allows exact x/y entry, refreshes SketchDocument/source/preview evidence, and reports validation failures with raw backend/provider details where backend work is involved.
 - Simple profile dimension editor is done for closed-profile width/height scaling.
 - Profile size edits preserve primitive ids, scale from the min corner, refresh SketchDocument/source/preview evidence, and show exact local validation for invalid dimensions without backend calls.
-- Manual and LLM-authored sketches use the same SketchDocument -> `.ecky` polygon/extrude pipeline; no separate MCP sketching path is planned yet.
+- Manual and agent-authored sketches use the same SketchDocument -> `.ecky` polygon/extrude pipeline on the shared scene path.
 - Constraint solver seed landed after the simple profile dimension editor, source-backed dimension locks, and readout evidence. Dimension snaps landed for exact size/origin controls. Source-backed dimension constraint validation landed; full BRep constraint validation remains next.
 - Import repair action is done for stale source-backed width/height dimension constraints. Tiny mismatches auto-snap geometry to the explicit dimension first; large stale mismatches keep raw mismatch visible, then repair only after user clicks `REPAIR IMPORT`.
 - Source patch ledger is done for cleanup and import repair actions. It records action, primitive id, and evidence text; replay/undo semantics remain later.
 - Delete point is done with source/preview refresh, minimum-point guard, and e2e proof.
 - Sketch cleanup UX is done after point edit mechanics.
-- Cleanup scope is deterministic source-profile cleanup: rough closed source profiles become clean editable source geometry with preserved primitive ids, source/projection/preview refresh, and local open-profile validation. It is not BRep reverse engineering, arbitrary model-to-sketch inference, or LLM magic.
+- Cleanup scope is deterministic source-profile cleanup: rough closed source profiles become clean editable source geometry with preserved primitive ids, source/projection/preview refresh, and local open-profile validation. It is not BRep reverse engineering, arbitrary model-to-sketch inference, or speculative agent magic.
 - Model-to-sketch round trip now has a first accepted-BRep path: exact HLR projections can become derived editable sketch seeds with explicit provenance, preserving closed and multi-loop HLR loops when available and falling back to bounds. Rich topology reconstruction, hole intent, and feature semantics remain.
 - Source authoring sketches and derived projection sketches remain distinct in copy and validation language.
 - Raw backend/provider errors remain user-visible as failure evidence instead of generic API-key copy.
@@ -1366,7 +1526,7 @@ Status as of 2026-04-30:
 - BRep-derived projections for models without editable source/history are visible as derived/non-history seeds.
 - Constraint solver seed landed after simple profile scaling, source-backed dimension locks, and readout evidence. Dimension snaps landed for exact size/origin controls. Source-backed dimension constraint validation landed; full BRep constraint validation remains next.
 - BRep-derived projection validation seed, projected-loop hole mismatch checks, repair-target surfacing, bounded bounds auto-repair, bounded containment envelope expansion, derived sketch conversion, topology/concavity redraw execution, accepted-CAD repair Math Lens copy, candidate cell reconstruction/search, exact front-profile prism strategy with source front-profile holes, backend accepted candidate-cell STEP proof, candidate accept UI proof, accepted-BRep reusable package UI proof, FreeCAD exact edge/face target manifest/bundle export, and Direct OCCT exact edge/face target manifest/bundle export are done. Tolerance overlays and richer exact accepted-BRep loop/feature topology selection remain pending.
-- LLM sketch proposals, proposal cards, and repair from raw validation errors stay later in Phase 8.
+- Agent sketch/rebuild proposals, proposal cards, and repair from structured validation state stay later in Phase 9.
 - Package/library work stays parked with assembly/fuse/mold/registry; this tranche stays limited to sketch source/replay, artifact evidence, session-configured backend choice, and simple precision controls.
 
 ### Phase 0: RFC And Data Contracts
@@ -1553,31 +1713,32 @@ Acceptance:
 - closed profile validation works
 - constraint errors are specific
 
-### Phase 9: Sketch Preview Mesh
+### Phase 9: Draft Mesh Seed
 
-Goal: give immediate feedback before BRep build.
+Goal: give immediate editable draft-form feedback before exact rebuild.
 
 Deliverables:
 
 - sketch to rough mesh path
+- draft-form viewport/lens
 - extrusion/revolve/loft preview
 - ghost rendering
 - silhouette overlays
-- inside/outside checks
+- first region-local draft selection and status
 
 Acceptance:
 
-- user draws closed profile and gets rough preview
+- user draws closed profile and gets a draft-form seed
 - invalid sketch does not generate misleading preview
 - preview updates interactively
 
-### Phase 10: Sketch To Ecky Draft
+### Phase 10: Exact Rebuild Seed
 
-Goal: turn accepted sketch steps into parametric source.
+Goal: turn accepted sketch and draft steps into exact rebuild candidates.
 
 Deliverables:
 
-- feature generation from sketch
+- feature generation from sketch and recognized draft regions
 - extrude
 - revolve
 - loft
@@ -1589,17 +1750,19 @@ Deliverables:
 
 Acceptance:
 
-- user can create a simple part from sketches
+- user can create a simple exact candidate from sketch or recognized draft regions
 - generated `.ecky` builds through backend
-- source keeps sketch construction history
+- source keeps sketch construction history and stays linked to draft state
 
-### Phase 11: Sketch Against BRep Validation
+### Phase 11: Shared Scene / Exact Validation
 
-Goal: make sketches a contract for generated CAD.
+Goal: make sketch, draft, and exact state visible as one validated object.
 
 Deliverables:
 
-- BRep to validation mesh
+- shared scene contract
+- correspondence graph
+- exact-to-projection validation
 - silhouette comparison
 - tolerance settings
 - required region checks
@@ -1608,28 +1771,29 @@ Deliverables:
 
 Acceptance:
 
-- generated model can be checked against front/side/top sketches
+- generated exact model can be checked against front/side/top intent and draft evidence
 - failures highlight the offending region
-- repair loop can target the failed feature
+- repair loop can target the failed feature or draft region
 
-### Phase 12: LLM Sketch Proposals
+### Phase 12: Agent Patch Loop
 
-Goal: let LLMs propose constrained designs instead of unconstrained blobs.
+Goal: let agents propose local scene patches instead of whole-model rewrites.
 
 Deliverables:
 
-- prompt to sketch proposal
+- scene packet construction
+- local sketch patch proposals
+- local draft patch proposals
+- exact rebuild proposals for selected regions
 - proposal validation
-- multiple proposal cards
-- sketch repair from raw validation errors
-- `.ecky` draft generation from accepted proposal
+- repair from structured validation state
 
 Acceptance:
 
-- LLM can propose three-view sketches for a prompt
-- invalid proposal is rejected by solver
-- accepted proposal becomes editable sketch and source
-- repair loop uses raw validation errors
+- agent can propose a local patch for a selected region
+- invalid proposal is rejected by solver/validator
+- accepted proposal updates the shared scene without discarding other representations
+- repair loop uses structured validation state
 
 ### Phase 13: Public Registry
 
@@ -1717,7 +1881,7 @@ Automatic inference from drawings is unreliable.
 Mitigation:
 
 - require explicit feature intent in v1
-- support LLM proposals as editable drafts
+- support agent proposals as editable drafts
 - validate every sketch and generated source step
 
 ### Package Privacy
@@ -1735,7 +1899,7 @@ Mitigation:
 
 1. Should `.ecky` be both source extension and package extension, or should packages use `.eckypkg`?
 2. Should compiled packages expose generated `.ecky` interface stubs?
-3. Which artifact should be canonical for generated BRep: `.FCStd`, internal Solid IR, or both?
+3. Which artifact should be canonical for generated exact output: `.FCStd`, internal ExactModel / Solid IR, or both?
 4. How much of STEP AP242 assembly semantics should be imported/exported?
 5. Should custom port type definitions live inside packages, global registry, or both?
 6. Should sketches remain visible in final public source packages by default?
@@ -1745,19 +1909,21 @@ Mitigation:
 
 ## Architecture Direction
 
-Keep the UI approachable, but make the data model boring and inspectable:
+Keep the UI approachable, but make the scene model boring and inspectable:
 
 ```text
-params
-sketches
-features
-ports
-mates
-operations
-validations
-exports
+workspaceScene
+  params
+  sketchIntent
+  meshDraft
+  exactModel
+  correspondenceGraph
+  selection
+  validations
+  artifacts
+  exports
 ```
 
-The UI may feel like assisted CAD. Internally every accepted step should become source, constraints, and validation evidence.
+The UI may feel like assisted CAD. Internally every accepted step should become source, correspondence, constraints, and validation evidence. The current `SketchDocument` -> generated `.ecky` -> Core IR path remains the exact-source spine until first-class `MeshDraftDocument` and `WorkspaceScene` contracts land.
 
 This is the durable foundation for public reusable Ecky components.

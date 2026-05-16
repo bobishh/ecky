@@ -7,6 +7,7 @@ import {
   rememberTargetCameraState,
   rememberTargetScreenshot,
   resolveFallbackScreenshotSource,
+  viewportCameraKey,
   viewportTargetKey,
 } from './screenshot';
 
@@ -45,7 +46,7 @@ test('chooseViewportCaptureMode uses the visible viewer only for matching target
   );
 });
 
-test('chooseViewportCaptureMode requires user choice when the requested target is not the visible viewport', () => {
+test('chooseViewportCaptureMode uses hidden viewer when the requested target is not visible', () => {
   assert.equal(
     chooseViewportCaptureMode({
       currentView: 'workbench',
@@ -56,7 +57,7 @@ test('chooseViewportCaptureMode requires user choice when the requested target i
       cameraOverride: null,
       hasVisibleViewer: true,
     }),
-    'needs-user-choice',
+    'hidden-target',
   );
 
   assert.equal(
@@ -69,7 +70,7 @@ test('chooseViewportCaptureMode requires user choice when the requested target i
       cameraOverride: null,
       hasVisibleViewer: false,
     }),
-    'needs-user-choice',
+    'hidden-target',
   );
 });
 
@@ -103,4 +104,15 @@ test('rememberTargetCameraState ignores non-persistent override captures', () =>
   const key = viewportTargetKey('thread-1', 'message-1');
   const cache = rememberTargetCameraState({}, key, sampleCamera, false);
   assert.deepEqual(cache, {});
+});
+
+test('viewportCameraKey scopes persisted camera to a concrete artifact identity', () => {
+  assert.equal(
+    viewportCameraKey('thread-1', 'message-1', 'model-9', 4, 'hash-9'),
+    'thread-1:message-1:model-9:4:hash-9',
+  );
+  assert.equal(
+    viewportCameraKey('thread-1', 'message-1', null, null, null),
+    'thread-1:message-1',
+  );
 });

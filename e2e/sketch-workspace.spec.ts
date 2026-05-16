@@ -9,19 +9,35 @@ type BrepHiddenLineMockMode =
   | 'unavailable'
   | 'ok'
   | 'step-ok'
+  | 'warning-entry-top-no-edges'
   | 'multi-loop-ok'
+  | 'multi-loop-edges-topology-mismatch-then-ok'
+  | 'multi-loop-edges-topology-churn-then-ok'
   | 'error'
   | 'bounds-mismatch'
+  | 'bounds-kind-then-ok'
+  | 'bounds-hole-topology-then-ok'
   | 'bounds-mismatch-then-ok'
   | 'bounds-mismatch-no-primitive-then-ok'
   | 'bounds-mismatch-repeat'
   | 'bounds-mismatch-unsupported'
   | 'containment-expand-then-ok'
+  | 'containment-kind-then-ok'
   | 'containment-expand-repeat'
   | 'containment-mismatch'
+  | 'containment-view-edge-topology'
+  | 'containment-view-edge-topology-then-ok'
+  | 'containment-plus-topology-then-topology'
+  | 'containment-duplicate-topology-exact-front'
+  | 'containment-topology-no-view-neutral'
+  | 'containment-topology-stale-view-neutral'
+  | 'containment-topology-generic-sketch-neutral'
+  | 'view-only-stale-top-no-locator'
   | 'topology-mismatch'
+  | 'topology-kind-then-ok'
   | 'topology-mismatch-then-ok'
   | 'concavity-mismatch'
+  | 'concavity-kind-then-ok'
   | 'concavity-mismatch-then-ok';
 type SketchPointTuple = [number, number];
 
@@ -48,6 +64,30 @@ async function installSketchMocks(
     mockWindow.__SKETCH_BREP_ACCEPT_CALLS__ = [];
     mockWindow.__SKETCH_BREP_PACKAGE_CALLS__ = [];
     mockWindow.__BREP_HIDDEN_LINE_CALLS__ = [];
+
+    const previewHullSourceForRequest = (request: any) => {
+      if (mockHiddenLineMode !== 'multi-loop-ok' && mockHiddenLineMode !== 'multi-loop-edges-topology-mismatch-then-ok') {
+        return `; preview-hull-source\n${mockSource}`;
+      }
+
+      const frontSketch = request?.document?.sketches?.find((sketch: any) => sketch?.view === 'front');
+      const closedPolylines = (frontSketch?.primitives ?? []).filter(
+        (primitive: any) => primitive?.kind === 'polyline' && primitive?.closed && Array.isArray(primitive?.points) && primitive.points.length >= 4,
+      );
+      if (closedPolylines.length < 2) {
+        return `; preview-hull-source\n${mockSource}`;
+      }
+
+      const polygonSource = (primitive: any) =>
+        `(polygon (${primitive.points.map((point: any) => `(${point[0]} ${point[1]})`).join(' ')}))`;
+      const sortedPolylines = [...closedPolylines].sort((left: any, right: any) => {
+        const roleRank = (primitive: any) =>
+          primitive?.topology?.loopRole === 'outer' ? 0 : primitive?.topology?.loopRole === 'hole' ? 1 : 2;
+        return roleRank(left) - roleRank(right);
+      });
+      const [outer, ...holes] = sortedPolylines;
+      return `; preview-hull-source\n(profile :outer ${polygonSource(outer)} :holes (${holes.map(polygonSource).join(' ')}))`;
+    };
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
@@ -180,7 +220,7 @@ async function installSketchMocks(
             sourceLanguage: 'ecky',
             geometryBackend: mockHiddenLineMode === 'unavailable' || mockHiddenLineMode === 'step-ok' ? 'mesh' : 'freecad',
             macroDialect: 'ecky',
-            source: `; preview-hull-source\n${mockSource}`,
+            source: previewHullSourceForRequest(request),
             warnings: [`preview hull from ${viewLabel} candidate cell search; not accepted BRep`],
           },
           {
@@ -231,6 +271,7 @@ async function installSketchMocks(
         const hiddenLineCallCount = mockWindow.__BREP_HIDDEN_LINE_CALLS__.length;
         const shouldReturnBoundsMismatch =
           mockHiddenLineMode === 'bounds-mismatch' ||
+          (mockHiddenLineMode === 'bounds-kind-then-ok' && hiddenLineCallCount === 1) ||
           mockHiddenLineMode === 'bounds-mismatch-repeat' ||
           mockHiddenLineMode === 'bounds-mismatch-unsupported' ||
           (mockHiddenLineMode === 'bounds-mismatch-no-primitive-then-ok' && hiddenLineCallCount === 1) ||
@@ -274,18 +315,90 @@ async function installSketchMocks(
                 hiddenEdges: [],
               },
             ],
-            warnings: [
-              'raw BREP/SKETCH bounds mismatch: front sketch bounds x=10..60 y=20..50; OCCT bounds x=0..80 y=0..40',
-            ],
             validation: {
               passed: false,
               issues: [
                 {
                   sketchId: 'sketch-front',
                   primitiveId,
+                  kind: 'boundsMismatch',
+                  view: 'front',
                   severity: 'error',
                   message:
-                    'raw BREP/SKETCH bounds mismatch: front sketch bounds x=10..60 y=20..50; OCCT bounds x=0..80 y=0..40',
+                    mockHiddenLineMode === 'bounds-kind-then-ok'
+                      ? 'projection envelope deviates from source profile'
+                      : 'raw BREP/SKETCH bounds mismatch: front sketch bounds x=10..60 y=20..50; OCCT bounds x=0..80 y=0..40',
+                },
+              ],
+              evidence: [],
+            },
+          };
+        }
+        if (mockHiddenLineMode === 'bounds-hole-topology-then-ok' && hiddenLineCallCount === 1) {
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'outer-a', points: [[0, 0], [80, 0]], sourceClass: 'V' },
+                  { edgeId: 'outer-b', points: [[80, 0], [80, 50]], sourceClass: 'V' },
+                  { edgeId: 'outer-c', points: [[80, 50], [0, 50]], sourceClass: 'V' },
+                  { edgeId: 'outer-d', points: [[0, 50], [0, 0]], sourceClass: 'V' },
+                  { edgeId: 'inner-a', points: [[25, 18], [46, 18]], sourceClass: 'V' },
+                  { edgeId: 'inner-b', points: [[46, 18], [46, 35]], sourceClass: 'V' },
+                  { edgeId: 'inner-c', points: [[46, 35], [25, 35]], sourceClass: 'V' },
+                  { edgeId: 'inner-d', points: [[25, 35], [25, 18]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+                loops: [
+                  {
+                    loopId: 'front-outer',
+                    edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+                    points: [[0, 0], [80, 0], [80, 50], [0, 50], [0, 0]],
+                    role: 'outer',
+                    sourceClass: 'V',
+                  },
+                  {
+                    loopId: 'front-hole',
+                    edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                    points: [[25, 18], [46, 18], [46, 35], [25, 35], [25, 18]],
+                    role: 'hole',
+                    sourceClass: 'V',
+                  },
+                ],
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [{ edgeId: 'top-a', points: [[0, 0], [80, 20]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [{ edgeId: 'side-a', points: [[0, 0], [20, 50]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+            ],
+            validation: {
+              passed: false,
+              issues: [
+                {
+                  sketchId: 'sketch-alpha',
+                  primitiveId: 'primitive-front-outer',
+                  kind: 'boundsMismatch',
+                  view: 'front',
+                  severity: 'error',
+                  message: 'projection envelope deviates from source profile',
+                  topology: {
+                    loopId: 'front-hole',
+                    edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                    loopRole: 'hole',
+                    sourceClass: 'derived',
+                  },
                 },
               ],
               evidence: [],
@@ -294,6 +407,7 @@ async function installSketchMocks(
         }
         if (
           mockHiddenLineMode === 'containment-expand-repeat' ||
+          (mockHiddenLineMode === 'containment-kind-then-ok' && hiddenLineCallCount === 1) ||
           (mockHiddenLineMode === 'containment-expand-then-ok' && hiddenLineCallCount === 1)
         ) {
           return {
@@ -328,18 +442,20 @@ async function installSketchMocks(
                 hiddenEdges: [],
               },
             ],
-            warnings: [
-              'raw BREP/SKETCH containment mismatch: front edge front-v1 has 8 samples outside source profile, maxOutside=4.2mm',
-            ],
             validation: {
               passed: false,
               issues: [
                 {
                   sketchId: 'sketch-front',
                   primitiveId: 'primitive-front-hidden-line-containment',
+                  kind: 'containmentMismatch',
+                  view: 'front',
+                  edgeId: 'front-v1',
                   severity: 'error',
                   message:
-                    'raw BREP/SKETCH containment mismatch: front edge front-v1 has 8 samples outside source profile, maxOutside=4.2mm',
+                    mockHiddenLineMode === 'containment-kind-then-ok'
+                      ? 'projection exits source profile, maxOutside=4.2mm'
+                      : 'raw BREP/SKETCH containment mismatch: front edge front-v1 has 8 samples outside source profile, maxOutside=4.2mm',
                 },
               ],
               evidence: [],
@@ -379,15 +495,14 @@ async function installSketchMocks(
                 hiddenEdges: [],
               },
             ],
-            warnings: [
-              'raw BREP/SKETCH containment mismatch: front edge front-v1 has 8 samples outside source profile, maxOutside=4.2mm',
-            ],
             validation: {
               passed: false,
               issues: [
                 {
                   sketchId: 'sketch-front',
+                  view: 'front',
                   primitiveId: 'primitive-front-hidden-line-containment',
+                  kind: 'containmentMismatch',
                   severity: 'error',
                   message:
                     'raw BREP/SKETCH containment mismatch: front edge front-v1 has 8 samples outside source profile, maxOutside=4.2mm',
@@ -398,7 +513,230 @@ async function installSketchMocks(
           };
         }
         if (
+          mockHiddenLineMode === 'containment-view-edge-topology' ||
+          mockHiddenLineMode === 'containment-topology-no-view-neutral' ||
+          mockHiddenLineMode === 'containment-topology-stale-view-neutral' ||
+          mockHiddenLineMode === 'containment-topology-generic-sketch-neutral' ||
+          mockHiddenLineMode === 'containment-duplicate-topology-exact-front' ||
+          (mockHiddenLineMode === 'containment-plus-topology-then-topology' && hiddenLineCallCount === 1) ||
+          (mockHiddenLineMode === 'containment-view-edge-topology-then-ok' && hiddenLineCallCount === 1)
+        ) {
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'front-v0', points: [[0, 0], [80, 0]], sourceClass: 'V' },
+                  { edgeId: 'front-v1', points: [[46, 17], [46, 35]], sourceClass: 'V1' },
+                ],
+                hiddenEdges: [
+                  { edgeId: 'front-h0', points: [[0, 50], [80, 50]], sourceClass: 'H' },
+                ],
+                ...(mockHiddenLineMode === 'containment-view-edge-topology-then-ok'
+                  ? {
+                      loops: [
+                        {
+                          loopId: 'front-outer',
+                          edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+                          points: [[0, 0], [80, 0], [80, 50], [0, 50], [0, 0]],
+                          role: 'outer',
+                          sourceClass: 'derived',
+                        },
+                        {
+                          loopId: 'front-hole',
+                          edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                          points: [[25, 18], [46, 18], [46, 35], [25, 35], [25, 18]],
+                          role: 'hole',
+                          sourceClass: 'derived',
+                        },
+                      ],
+                    }
+                  : {}),
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [
+                  { edgeId: 'top-v0', points: [[10, 5], [60, 27]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [
+                  { edgeId: 'side-v0', points: [[5, 20], [27, 50]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+              },
+            ],
+            validation: {
+              passed: false,
+              issues: [
+                {
+                  sketchId:
+                    mockHiddenLineMode === 'containment-topology-generic-sketch-neutral'
+                      ? 'model'
+                      : mockHiddenLineMode === 'containment-duplicate-topology-exact-front'
+                        ? 'sketch-front-exact'
+                        : 'sketch-alpha',
+                  kind: 'containmentMismatch',
+                  view: mockHiddenLineMode === 'containment-topology-stale-view-neutral' ? 'top' : 'front',
+                  primitiveId:
+                    mockHiddenLineMode === 'containment-duplicate-topology-exact-front'
+                      ? 'primitive-front-hole'
+                      : mockHiddenLineMode === 'containment-topology-no-view-neutral' ||
+                    mockHiddenLineMode === 'containment-topology-stale-view-neutral' ||
+                    mockHiddenLineMode === 'containment-topology-generic-sketch-neutral'
+                      ? 'primitive-outer'
+                      : 'primitive-front-outer',
+                  edgeId: 'front-v1',
+                  severity: 'error',
+                  message:
+                    mockHiddenLineMode === 'containment-topology-no-view-neutral' ||
+                    mockHiddenLineMode === 'containment-topology-stale-view-neutral' ||
+                    mockHiddenLineMode === 'containment-topology-generic-sketch-neutral'
+                      ? 'projection exits source profile'
+                      : 'raw BREP/SKETCH containment mismatch: projection exits source profile, maxOutside=4.2mm',
+                  topology: {
+                    loopId:
+                      mockHiddenLineMode === 'containment-duplicate-topology-exact-front'
+                        ? 'shared-hole'
+                        : 
+                      mockHiddenLineMode === 'containment-topology-no-view-neutral' ||
+                      mockHiddenLineMode === 'containment-topology-stale-view-neutral' ||
+                      mockHiddenLineMode === 'containment-topology-generic-sketch-neutral'
+                        ? 'hole-alpha'
+                        : 'front-hole',
+                    edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                    loopRole: 'hole',
+                    sourceClass: 'derived',
+                  },
+                },
+                ...(mockHiddenLineMode === 'containment-plus-topology-then-topology'
+                  ? [
+                      {
+                        sketchId: 'sketch-alpha',
+                        primitiveId: 'primitive-front-hole',
+                        kind: 'topologyMismatch' as const,
+                        view: 'front' as const,
+                        severity: 'error' as const,
+                        message: 'closed loop cannot be matched',
+                        topology: {
+                          loopId: 'front-hole',
+                          edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                          loopRole: 'hole' as const,
+                          sourceClass: 'derived' as const,
+                        },
+                      },
+                    ]
+                  : []),
+              ],
+              evidence: [],
+            },
+          };
+        }
+        if (mockHiddenLineMode === 'containment-plus-topology-then-topology') {
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'front-v0', points: [[0, 0], [80, 0]], sourceClass: 'V' },
+                  { edgeId: 'front-v1', points: [[46, 18], [46, 35]], sourceClass: 'V1' },
+                ],
+                hiddenEdges: [{ edgeId: 'front-h0', points: [[0, 50], [80, 50]], sourceClass: 'H' }],
+                loops: [
+                  {
+                    loopId: 'front-outer',
+                    edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+                    points: [[0, 0], [80, 0], [80, 50], [0, 50], [0, 0]],
+                    role: 'outer',
+                    sourceClass: 'derived',
+                  },
+                  {
+                    loopId: 'front-hole',
+                    edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                    points: [[25, 18], [46, 18], [46, 35], [25, 35], [25, 18]],
+                    role: 'hole',
+                    sourceClass: 'derived',
+                  },
+                ],
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [{ edgeId: 'top-v0', points: [[10, 5], [60, 27]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [{ edgeId: 'side-v0', points: [[5, 20], [27, 50]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+            ],
+            validation: {
+              passed: false,
+              issues: [
+                {
+                  sketchId: 'sketch-alpha',
+                  primitiveId: 'primitive-front-hole',
+                  kind: 'topologyMismatch',
+                  view: 'front',
+                  severity: 'error',
+                  message: 'closed loop cannot be matched',
+                  topology: {
+                    loopId: 'front-hole',
+                    edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                    loopRole: 'hole',
+                    sourceClass: 'derived',
+                  },
+                },
+              ],
+              evidence: [],
+            },
+          };
+        }
+        if (mockHiddenLineMode === 'containment-view-edge-topology-then-ok') {
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'front-v0', points: [[0, 0], [80, 0]], sourceClass: 'V' },
+                  { edgeId: 'front-v1', points: [[46, 18], [46, 35]], sourceClass: 'V1' },
+                ],
+                hiddenEdges: [{ edgeId: 'front-h0', points: [[0, 50], [80, 50]], sourceClass: 'H' }],
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [{ edgeId: 'top-v0', points: [[10, 5], [60, 27]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [{ edgeId: 'side-v0', points: [[5, 20], [27, 50]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+            ],
+            validation: { passed: true, issues: [], evidence: [] },
+          };
+        }
+        if (
           mockHiddenLineMode === 'topology-mismatch' ||
+          (mockHiddenLineMode === 'topology-kind-then-ok' && hiddenLineCallCount === 1) ||
           (mockHiddenLineMode === 'topology-mismatch-then-ok' && hiddenLineCallCount === 1)
         ) {
           return {
@@ -433,15 +771,19 @@ async function installSketchMocks(
                 hiddenEdges: [],
               },
             ],
-            warnings: ['raw BREP/SKETCH topology mismatch: front face loop cannot be matched'],
             validation: {
               passed: false,
               issues: [
                 {
                   sketchId: 'sketch-front',
                   primitiveId: 'primitive-front-hidden-line-topology',
+                  kind: 'topologyMismatch',
+                  view: 'front',
                   severity: 'error',
-                  message: 'raw BREP/SKETCH topology mismatch: front face loop cannot be matched',
+                  message:
+                    mockHiddenLineMode === 'topology-kind-then-ok' || mockHiddenLineMode === 'topology-mismatch-then-ok'
+                      ? 'closed loop cannot be matched'
+                      : 'raw BREP/SKETCH topology mismatch: front face loop cannot be matched',
                 },
               ],
               evidence: [],
@@ -450,6 +792,7 @@ async function installSketchMocks(
         }
         if (
           mockHiddenLineMode === 'concavity-mismatch' ||
+          (mockHiddenLineMode === 'concavity-kind-then-ok' && hiddenLineCallCount === 1) ||
           (mockHiddenLineMode === 'concavity-mismatch-then-ok' && hiddenLineCallCount === 1)
         ) {
           return {
@@ -485,16 +828,19 @@ async function installSketchMocks(
                 hiddenEdges: [],
               },
             ],
-            warnings: ['raw BREP/SKETCH concavity mismatch: front silhouette has concave notch missing from source profile'],
             validation: {
               passed: false,
               issues: [
                 {
                   sketchId: 'sketch-front',
                   primitiveId: 'primitive-front-hidden-line-concavity',
+                  kind: 'concavityMismatch',
+                  view: 'front',
                   severity: 'error',
                   message:
-                    'raw BREP/SKETCH concavity mismatch: front silhouette has concave notch missing from source profile',
+                    mockHiddenLineMode === 'concavity-kind-then-ok'
+                      ? 'visible silhouette has concave notch missing from source profile'
+                      : 'raw BREP/SKETCH concavity mismatch: front silhouette has concave notch missing from source profile',
                 },
               ],
               evidence: [],
@@ -520,6 +866,34 @@ async function installSketchMocks(
                   { edgeId: 'inner-d', points: [[25, 34], [25, 18]], sourceClass: 'V' },
                 ],
                 hiddenEdges: [],
+                loops: [
+                  {
+                    loopId: 'front-outer',
+                    edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+                    points: [
+                      [0, 0],
+                      [80, 0],
+                      [80, 50],
+                      [0, 50],
+                      [0, 0],
+                    ],
+                    role: 'outer',
+                    sourceClass: 'V',
+                  },
+                  {
+                    loopId: 'front-hole',
+                    edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                    points: [
+                      [25, 18],
+                      [45, 18],
+                      [45, 34],
+                      [25, 34],
+                      [25, 18],
+                    ],
+                    role: 'hole',
+                    sourceClass: 'V',
+                  },
+                ],
               },
               {
                 view: 'top',
@@ -538,11 +912,222 @@ async function installSketchMocks(
                 hiddenEdges: [],
               },
             ],
-            warnings: [],
             validation: {
               passed: true,
               issues: [],
               evidence: ['backend BRep/sketch validation: front 8 visible / 0 hidden; top 1 visible / 0 hidden; side 1 visible / 0 hidden'],
+            },
+          };
+        }
+        if (mockHiddenLineMode === 'warning-entry-top-no-edges') {
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'front-v0', points: [[10, 20], [60, 20]], sourceClass: 'V' },
+                  { edgeId: 'front-v1', points: [[60, 20], [60, 50]], sourceClass: 'V1' },
+                ],
+                hiddenEdges: [
+                  { edgeId: 'front-h0', points: [[10, 50], [60, 50]], sourceClass: 'H' },
+                ],
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [
+                  { edgeId: 'side-v0', points: [[5, 20], [27, 50]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+              },
+            ],
+            warningEntries: [
+              {
+                kind: 'projectionNoEdges',
+                view: 'top',
+                message: 'projection produced no edges.',
+              },
+            ],
+            validation: {
+              passed: true,
+              issues: [],
+              evidence: [
+                'backend BRep/sketch validation: front 2 visible / 1 hidden; top 0 visible / 0 hidden; side 1 visible / 0 hidden',
+              ],
+            },
+          };
+        }
+        if (mockHiddenLineMode === 'view-only-stale-top-no-locator') {
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'front-v0', points: [[10, 20], [60, 20]], sourceClass: 'V' },
+                  { edgeId: 'front-v1', points: [[60, 20], [60, 50]], sourceClass: 'V1' },
+                ],
+                hiddenEdges: [{ edgeId: 'front-h0', points: [[10, 50], [60, 50]], sourceClass: 'H' }],
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [{ edgeId: 'top-v0', points: [[10, 5], [60, 27]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [{ edgeId: 'side-v0', points: [[5, 20], [27, 50]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+            ],
+            validation: {
+              passed: false,
+              issues: [
+                {
+                  sketchId: 'ghost-sketch',
+                  view: 'top',
+                  primitiveId: 'ghost-primitive',
+                  kind: 'containmentMismatch',
+                  severity: 'error',
+                  message: 'projection lies outside source profile',
+                },
+              ],
+              evidence: [],
+            },
+          };
+        }
+        if (mockHiddenLineMode === 'multi-loop-edges-topology-mismatch-then-ok') {
+          const mismatch = hiddenLineCallCount === 1;
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'outer-a', points: [[0, 0], [80, 0]], sourceClass: 'V' },
+                  { edgeId: 'outer-b', points: [[80, 0], [80, 50]], sourceClass: 'V' },
+                  { edgeId: 'outer-c', points: [[80, 50], [0, 50]], sourceClass: 'V' },
+                  { edgeId: 'outer-d', points: [[0, 50], [0, 0]], sourceClass: 'V' },
+                  { edgeId: 'inner-a', points: [[24, 17], [46, 17]], sourceClass: 'V' },
+                  { edgeId: 'inner-b', points: [[46, 17], [46, 35]], sourceClass: 'V' },
+                  { edgeId: 'inner-c', points: [[46, 35], [24, 35]], sourceClass: 'V' },
+                  { edgeId: 'inner-d', points: [[24, 35], [24, 17]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [
+                  { edgeId: 'top-a', points: [[0, 0], [80, 20]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [
+                  { edgeId: 'side-a', points: [[0, 0], [20, 50]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+              },
+            ],
+            validation: {
+              passed: !mismatch,
+              issues: mismatch
+                ? [
+                    {
+                      sketchId: 'sketch-front',
+                      view: 'front',
+                      kind: 'topologyMismatch',
+                      severity: 'error',
+                      message: 'raw BREP/SKETCH topology mismatch: front face loop cannot be matched',
+                      topology: {
+                        loopId: 'front-hole',
+                        edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                        loopRole: 'hole',
+                        sourceClass: 'derived',
+                      },
+                    },
+                  ]
+                : [],
+              evidence: [],
+            },
+          };
+        }
+        if (mockHiddenLineMode === 'multi-loop-edges-topology-churn-then-ok') {
+          const mismatch = hiddenLineCallCount === 1;
+          return {
+            modelId: 'sketch-preview-hull',
+            sourceArtifactPath: '/mock/sketch/model.FCStd',
+            views: [
+              {
+                view: 'front',
+                direction: [0, -1, 0],
+                visibleEdges: [
+                  { edgeId: 'outer-z0', points: [[0, 0], [80, 0]], sourceClass: 'V' },
+                  { edgeId: 'outer-z1', points: [[80, 0], [80, 50]], sourceClass: 'V' },
+                  { edgeId: 'outer-z2', points: [[80, 50], [0, 50]], sourceClass: 'V' },
+                  { edgeId: 'outer-z3', points: [[0, 50], [0, 0]], sourceClass: 'V' },
+                  { edgeId: 'hole-a-z0', points: [[12, 12], [22, 12]], sourceClass: 'V' },
+                  { edgeId: 'hole-a-z1', points: [[22, 12], [22, 22]], sourceClass: 'V' },
+                  { edgeId: 'hole-a-z2', points: [[22, 22], [12, 22]], sourceClass: 'V' },
+                  { edgeId: 'hole-a-z3', points: [[12, 22], [12, 12]], sourceClass: 'V' },
+                  { edgeId: 'hole-b-z0', points: [[52, 24], [66, 24]], sourceClass: 'V' },
+                  { edgeId: 'hole-b-z1', points: [[66, 24], [66, 38]], sourceClass: 'V' },
+                  { edgeId: 'hole-b-z2', points: [[66, 38], [52, 38]], sourceClass: 'V' },
+                  { edgeId: 'hole-b-z3', points: [[52, 38], [52, 24]], sourceClass: 'V' },
+                ],
+                hiddenEdges: [],
+              },
+              {
+                view: 'top',
+                direction: [0, 0, -1],
+                visibleEdges: [{ edgeId: 'top-a', points: [[0, 0], [80, 20]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+              {
+                view: 'side',
+                direction: [-1, 0, 0],
+                visibleEdges: [{ edgeId: 'side-a', points: [[0, 0], [20, 50]], sourceClass: 'V' }],
+                hiddenEdges: [],
+              },
+            ],
+            validation: {
+              passed: !mismatch,
+              issues: mismatch
+                ? [
+                    {
+                      sketchId: 'sketch-front',
+                      view: 'front',
+                      kind: 'topologyMismatch',
+                      severity: 'error',
+                      message: 'closed loop cannot be matched',
+                      topology: {
+                        loopId: 'front-hole-b',
+                        edgeIds: ['hole-b-a', 'hole-b-b', 'hole-b-c', 'hole-b-d'],
+                        loopRole: 'hole',
+                        sourceClass: 'derived',
+                      },
+                    },
+                  ]
+                : [],
+              evidence: [],
             },
           };
         }
@@ -578,7 +1163,6 @@ async function installSketchMocks(
               hiddenEdges: [],
             },
           ],
-          warnings: [],
           validation: {
             passed: true,
             issues: [],
@@ -726,6 +1310,7 @@ async function installSketchMocks(
               mockCandidateAcceptMode === 'edge-targets'
                 ? Array.from({ length: 12 }, (_: unknown, index: number) => ({
                     targetId: `accepted-edge-${index}`,
+                    durableTargetId: `accepted-body:node:42:edge:${index}`,
                     partId: 'sketch-preview-hull',
                     viewerNodeId: 'sketch-preview-hull',
                     label: `Accepted BRep edge ${index + 1}`,
@@ -744,7 +1329,6 @@ async function installSketchMocks(
               { view: 'top', direction: [0, 0, -1], visibleEdges: [{ edgeId: 'top-v0', points: [[10, 5], [60, 27]], sourceClass: 'V' }], hiddenEdges: [] },
               { view: 'side', direction: [-1, 0, 0], visibleEdges: [{ edgeId: 'side-v0', points: [[5, 20], [27, 50]], sourceClass: 'V' }], hiddenEdges: [] },
             ],
-            warnings: [],
             validation: {
               passed: true,
               issues: [],
@@ -972,6 +1556,12 @@ async function sketchDraftCallCount(page: Page) {
   return page.evaluate(() => (window as any).__SKETCH_DRAFT_CALLS__?.length ?? 0);
 }
 
+async function sketchPreviewRequestCount(page: Page) {
+  return page.evaluate(
+    () => ((window as any).__SKETCH_DRAFT_CALLS__?.length ?? 0) + ((window as any).__SKETCH_PREVIEW_HULL_CALLS__?.length ?? 0),
+  );
+}
+
 async function lastSketchDraftRequest(page: Page) {
   return page.evaluate(() => {
     const calls = (window as any).__SKETCH_DRAFT_CALLS__ ?? [];
@@ -1048,6 +1638,14 @@ function occtHiddenLinePanel(page: Page) {
 
 function brepTopologyRepairPanel(page: Page) {
   return page.getByLabel('BRep topology repair proposals');
+}
+
+function draftModePanel(page: Page) {
+  return page.getByLabel('Draft mode');
+}
+
+function brepCandidatePanel(page: Page) {
+  return page.getByLabel('BRep candidate graph');
 }
 
 async function expectValidationLedgerPassRow(ledger: Locator, label: string) {
@@ -1583,6 +2181,29 @@ test.describe('Sketch workspace', () => {
 
     await expect(page.getByText(/primitive-front-\d+ \/ front \/ open/i)).toHaveCount(0);
     await expect(frontSketchPointHandles(page)).toHaveCount(0);
+  });
+
+  test('Given sketch pane controls render When open polyline exists Then point handles stay compact and reset chip matches pane chrome', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    await drawOpenStroke(page);
+
+    const handle = frontSketchPointHandle(page, 'primitive-front-1', 0);
+    await expect(handle).toBeVisible();
+    const handleBox = await handle.boundingBox();
+    expect(handleBox).not.toBeNull();
+    expect(handleBox?.width ?? 0).toBeLessThanOrEqual(16);
+    expect(handleBox?.height ?? 0).toBeLessThanOrEqual(16);
+
+    const resetPan = page.getByLabel('Front sketch pane').getByRole('button', { name: /^RESET PAN$/i });
+    await expect(resetPan).toBeVisible();
+    const resetPanBox = await resetPan.boundingBox();
+    expect(resetPanBox).not.toBeNull();
+    expect(resetPanBox?.height ?? 0).toBeLessThanOrEqual(22);
+    expect(resetPanBox?.width ?? 0).toBeLessThanOrEqual(86);
   });
 
   test('Given open Front polyline exists When first point handle is clicked with slight pointer jitter Then loop closes instead of moving point', async ({
@@ -3072,7 +3693,7 @@ test.describe('Sketch workspace', () => {
     await expect(page.getByLabel('Sketch primitives').getByText('NO PROFILE')).toBeVisible();
     await expect(page.locator('.sketch-primitive-list').getByText(/primitive-front-1/)).toHaveCount(0);
 
-    const callsBeforeReplay = await sketchDraftCallCount(page);
+    const callsBeforeReplay = await sketchPreviewRequestCount(page);
     await replayControl.click();
 
     await ensureSketchPreviewRequested(page, callsBeforeReplay);
@@ -3448,6 +4069,146 @@ test.describe('Sketch workspace', () => {
     expect(request?.document?.sketches?.map((sketch: any) => sketch.view)).toEqual(['front', 'top', 'side']);
   });
 
+  test('Given empty workspace When sketch opens Then draft mode shows pending mesh state without workspace scene panel', async ({ page }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    await expect(page.getByLabel('Workspace scene')).toHaveCount(0);
+    const panel = draftModePanel(page);
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText(/PENDING/i);
+    await expect(panel.getByRole('button')).toHaveCount(0);
+  });
+
+  test('Given exact candidate accepted When sketch changes Then scene keeps draft fresh and exact turns stale', async ({ page }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('scene-stale'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const candidatePanel = page.getByLabel('BRep candidate graph');
+    await candidatePanel.getByRole('button', { name: /ACCEPT CANDIDATE/i }).click();
+    await expect(candidatePanel).toContainText(/ACCEPTED BREP solution0/i);
+    await expect(candidatePanel).toContainText(/EXACT MODEL COMMITTED/i);
+
+    const callsBeforeResize = await sketchPreviewRequestCount(page);
+    await frontSketchPointHandles(page).first().click();
+    await page.getByRole('textbox', { name: 'PROFILE WIDTH' }).fill('64');
+    await page.getByRole('button', { name: 'APPLY SIZE' }).click();
+    await page.waitForFunction(
+      (previousCount) =>
+        ((window as any).__SKETCH_DRAFT_CALLS__?.length ?? 0) + ((window as any).__SKETCH_PREVIEW_HULL_CALLS__?.length ?? 0) > previousCount,
+      callsBeforeResize,
+    );
+
+    const draftPanel = draftModePanel(page);
+    await expect(draftPanel).toContainText(/MESH DRAFT FRESH/i);
+    await expect(candidatePanel).toContainText(/EXACT MODEL STALE/i);
+  });
+
+  test('Given exact candidate ready When candidate graph accepts exact Then exact state commits in existing exact panel', async ({ page }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('scene-panel-accept'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const exactAction = brepCandidatePanel(page).getByRole('button', { name: /ACCEPT EXACT/i });
+    await expect(exactAction).toHaveText(/ACCEPT EXACT/i);
+    await exactAction.click();
+
+    await expect(brepCandidatePanel(page)).toContainText(/EXACT MODEL COMMITTED/i);
+  });
+
+  test('Given fresh draft scene When draft mode refreshes draft Then mesh draft reruns preview from existing draft panel', async ({ page }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+    await generateSketchPreview(page);
+
+    const draftPanel = draftModePanel(page);
+    await expect(draftPanel).toContainText(/MESH DRAFT FRESH/i);
+
+    const callsBeforeRefresh = await sketchPreviewRequestCount(page);
+    const draftAction = draftPanel.getByRole('button', { name: /REFRESH DRAFT/i });
+    await expect(draftAction).toHaveText(/REFRESH DRAFT/i);
+    await draftAction.click();
+    await page.waitForFunction(
+      (previousCount) =>
+        ((window as any).__SKETCH_DRAFT_CALLS__?.length ?? 0) + ((window as any).__SKETCH_PREVIEW_HULL_CALLS__?.length ?? 0) > previousCount,
+      callsBeforeRefresh,
+    );
+
+    await expect(draftPanel).toContainText(/MESH DRAFT FRESH/i);
+  });
+
+  test('Given delayed draft refresh When draft mode rebuilds mesh draft Then draft panel locks and shows pending label until fresh', async ({ page }) => {
+    await installSketchMocks(page, 'delay');
+    await openSketchWorkspace(page);
+    await generateSketchPreview(page);
+
+    const draftPanel = draftModePanel(page);
+    const draftAction = draftPanel.getByRole('button', { name: /REFRESH DRAFT/i });
+    await expect(draftAction).toHaveText(/REFRESH DRAFT/i);
+
+    await draftAction.click();
+
+    await expect(draftPanel).toContainText(/MESH DRAFT PENDING/i);
+    await expect(draftPanel.getByRole('button')).toHaveText(/BUILDING\.\.\./i);
+    await expect(draftPanel.getByRole('button')).toBeDisabled();
+
+    await page.waitForFunction(
+      () => (((window as any).__SKETCH_DRAFT_CALLS__?.length ?? 0) + ((window as any).__SKETCH_PREVIEW_HULL_CALLS__?.length ?? 0)) >= 2,
+    );
+    await expect(draftPanel).toContainText(/MESH DRAFT FRESH/i);
+  });
+
+  test('Given draft preview is pending When draft mode previews draft and backend fails Then mesh draft shows failure from existing draft panel', async ({ page }) => {
+    await installSketchMocks(page, 'error');
+    await openSketchWorkspace(page);
+    await drawClosedRectangle(page);
+
+    const draftPanel = draftModePanel(page);
+    await expect(draftPanel).toContainText(/MESH DRAFT PENDING/i);
+
+    const draftAction = draftPanel.getByRole('button', { name: /BUILD DRAFT/i });
+    await expect(draftAction).toHaveText(/BUILD DRAFT/i);
+    await draftAction.click();
+
+    await expect(page.getByRole('alert')).toContainText('draft generation failed');
+    await expect(page.getByRole('alert')).toContainText('raw sketch backend body: missing closed profile');
+    await expect(draftPanel).toContainText(/MESH DRAFT FAILED/i);
+  });
+
+  test('Given stale exact scene When candidate graph rebuilds exact Then exact state recommits in existing exact panel', async ({ page }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('scene-panel-rebuild'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const candidatePanel = brepCandidatePanel(page);
+    await candidatePanel.getByRole('button', { name: /ACCEPT EXACT/i }).click();
+    await expect(candidatePanel).toContainText(/EXACT MODEL COMMITTED/i);
+
+    const callsBeforeResize = await sketchPreviewRequestCount(page);
+    await frontSketchPointHandles(page).first().click();
+    await page.getByRole('textbox', { name: 'PROFILE WIDTH' }).fill('66');
+    await page.getByRole('button', { name: 'APPLY SIZE' }).click();
+    await page.waitForFunction(
+      (previousCount) =>
+        ((window as any).__SKETCH_DRAFT_CALLS__?.length ?? 0) + ((window as any).__SKETCH_PREVIEW_HULL_CALLS__?.length ?? 0) > previousCount,
+      callsBeforeResize,
+    );
+
+    await expect(candidatePanel).toContainText(/EXACT MODEL STALE/i);
+    const rebuildAction = candidatePanel.getByRole('button', { name: /REBUILD EXACT/i });
+    await expect(rebuildAction).toHaveText(/REBUILD EXACT/i);
+    await rebuildAction.click();
+
+    await expect(candidatePanel).toContainText(/EXACT MODEL COMMITTED/i);
+  });
+
   test('Given accepted STEP BRep When reusable package is created Then explicit port package evidence appears', async ({
     page,
   }) => {
@@ -3502,6 +4263,30 @@ test.describe('Sketch workspace', () => {
 
     await expect(candidatePanel).toContainText(/EXACT BREP TOPOLOGY 12 EDGES/i);
     await expect(candidatePanel).not.toContainText(/PREVIEW-ONLY TOPOLOGY/i);
+  });
+
+  test('Given accepted STEP BRep exposes exact topology When reusable package is created Then request carries exact targetIds', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'unavailable', 'edge-targets');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('package-topology-targets'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const candidatePanel = page.getByLabel('BRep candidate graph');
+    await candidatePanel.getByRole('button', { name: /ACCEPT CANDIDATE/i }).click();
+    await expect(candidatePanel).toContainText(/EXACT BREP TOPOLOGY 12 EDGES/i);
+    await candidatePanel.getByRole('button', { name: /CREATE REUSABLE PACKAGE/i }).click();
+
+    const request = await lastSketchBrepPackageRequest(page);
+    expect(request?.ports).toContainEqual(
+      expect.objectContaining({
+        portId: 'front_mount',
+        typeId: 'mechanical.plane.mount.v1',
+        targetIds: ['accepted-body:node:42:edge:0'],
+      }),
+    );
   });
 
   test('Given accepted STEP BRep has no exact edge targets When candidate is accepted Then topology status is pending', async ({
@@ -3704,17 +4489,27 @@ test.describe('Sketch workspace', () => {
 
     await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('derived-brep-multi-loop'), null, 2));
     await ensureSketchPreviewRequested(page, 0);
+    const callsBeforeReplay = await sketchPreviewRequestCount(page);
 
     const derivedPanel = page.getByLabel('Derived BRep sketches');
     await expect(derivedPanel).toContainText(/DERIVED FROM BREP/i);
     await derivedPanel.getByRole('button', { name: /CONVERT DERIVED SKETCHES/i }).click();
 
     await expect(page.getByLabel('Source patch ledger')).toContainText(/DERIVE BREP/i);
+    await ensureSketchPreviewRequested(page, callsBeforeReplay);
     const document = JSON.parse(await page.getByLabel('Sketch document or ecky source').inputValue());
     const frontSketch = document.sketches?.find((sketch: any) => sketch.view === 'front');
     expect(frontSketch?.primitives?.map((primitive: any) => primitive.primitiveId)).toEqual([
-      'derived-brep-front',
-      'derived-brep-front-2',
+      'derived-brep-front-front-outer',
+      'derived-brep-front-front-hole',
+    ]);
+    expect(frontSketch?.primitives?.map((primitive: any) => primitive.topology?.loopId)).toEqual([
+      'front-outer',
+      'front-hole',
+    ]);
+    expect(frontSketch?.primitives?.map((primitive: any) => primitive.topology?.loopRole)).toEqual([
+      'outer',
+      'hole',
     ]);
     expect(frontSketch?.primitives?.[1]?.points).toEqual([
       [25, 18],
@@ -3723,6 +4518,25 @@ test.describe('Sketch workspace', () => {
       [25, 34],
       [25, 18],
     ]);
+    const replayRequest = await lastSketchPreviewHullRequest(page);
+    const replayFrontSketch = replayRequest?.document?.sketches?.find((sketch: any) => sketch.view === 'front');
+    expect(replayFrontSketch?.primitives?.map((primitive: any) => primitive.primitiveId)).toEqual([
+      'derived-brep-front-front-outer',
+      'derived-brep-front-front-hole',
+    ]);
+    expect(replayFrontSketch?.primitives?.map((primitive: any) => primitive.topology?.loopId)).toEqual([
+      'front-outer',
+      'front-hole',
+    ]);
+    expect(replayFrontSketch?.primitives?.map((primitive: any) => primitive.topology?.loopRole)).toEqual([
+      'outer',
+      'hole',
+    ]);
+    const sourcePanel = page
+      .locator('.sketch-workspace__section')
+      .filter({ hasText: 'SOURCE STATUS' })
+      .first();
+    await expect(sourcePanel.locator('pre.sketch-source')).toContainText(/\(profile :outer[\s\S]*:holes/i);
   });
 
   test('Given repairable BRep bounds mismatch When preview runs Then BRep auto snap reruns and accepted CAD passes', async ({
@@ -3759,7 +4573,35 @@ test.describe('Sketch workspace', () => {
     ]);
   });
 
-  test('Given BRep bounds mismatch lacks primitive id When one source primitive matches view Then BRep auto snap reruns', async ({
+  test('Given bounds issue kind is structured and message is neutral When preview runs Then BRep auto snap reruns', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'bounds-kind-then-ok');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('hidden-line-mismatch'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect
+      .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
+      .toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/BREP AUTO SNAP FRONT primitive-front-hidden-line-mismatch/i);
+
+    const ledger = validationLedgerPanel(page);
+    const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
+    await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.points).toEqual([
+      [0, 0],
+      [80, 0],
+      [80, 40],
+      [0, 40],
+      [0, 0],
+    ]);
+  });
+
+  test('Given BRep bounds mismatch lacks primitive id When preview runs Then BRep auto snap does not guess source primitive', async ({
     page,
   }) => {
     await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'bounds-mismatch-no-primitive-then-ok');
@@ -3770,13 +4612,12 @@ test.describe('Sketch workspace', () => {
 
     await expect
       .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
-      .toBe(2);
-    await expect(page.getByLabel('Source patch ledger')).toContainText(/BREP AUTO SNAP FRONT/i);
-    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hidden-line-mismatch/i);
+      .toBe(1);
+    await expect(page.getByLabel('Source patch ledger')).toHaveCount(0);
 
     const ledger = validationLedgerPanel(page);
     const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
-    await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
+    await expect(acceptedCadRow).toContainText(/\b(FAIL|FAILED|ERROR)\b/i);
   });
 
   test('Given OCCT hidden-line bounds mismatch When preview runs Then BREP/SKETCH validation fails with raw evidence and OCCT panel stays visible', async ({
@@ -3882,7 +4723,639 @@ test.describe('Sketch workspace', () => {
     );
   });
 
-  test('Given BRep topology mismatch When preview runs Then app proposes explicit redraw instead of silent mutation', async ({
+  test('Given containment issue carries explicit view and edge locator When preview runs Then front repair target resolves exact hole without message parsing', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-view-edge-topology');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-containment-explicit');
+    document.activeSketchId = 'sketch-alpha';
+    document.sketches[0] = {
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      primitives: [
+        {
+          primitiveId: 'primitive-front-outer',
+          kind: 'polyline',
+          points: [
+            [0, 0],
+            [80, 0],
+            [80, 50],
+            [0, 50],
+            [0, 0],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
+        },
+        {
+          primitiveId: 'primitive-front-hole',
+          kind: 'polyline',
+          points: [
+            [25, 18],
+            [45, 18],
+            [45, 34],
+            [25, 34],
+            [25, 18],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const hiddenLinePanel = occtHiddenLinePanel(page);
+    await expect(hiddenLinePanel).toContainText(/raw BREP\/SKETCH containment mismatch: projection exits source profile/i);
+    await expect(hiddenLinePanel.locator('[data-brep-repair-target]')).toHaveCount(1);
+    const repairTarget = hiddenLinePanel.locator('[data-brep-repair-target]').first();
+    await expect(repairTarget).toContainText(/FRONT/i);
+    await expect(repairTarget).toContainText(/primitive-front-hole/i);
+    await expect(repairTarget).not.toContainText(/primitive-front-outer/i);
+    await expect(repairTarget).toContainText(/front-v1/i);
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'fail',
+    );
+  });
+
+  test('Given containment issue targets hole topology When preview runs Then BRep auto contain reruns on hole only', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-view-edge-topology-then-ok');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-containment-explicit-auto');
+    document.activeSketchId = 'sketch-alpha';
+    document.sketches[0] = {
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      primitives: [
+        {
+          primitiveId: 'primitive-front-outer',
+          kind: 'polyline',
+          points: [
+            [0, 0],
+            [80, 0],
+            [80, 50],
+            [0, 50],
+            [0, 0],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
+        },
+        {
+          primitiveId: 'primitive-front-hole',
+          kind: 'polyline',
+          points: [
+            [25, 18],
+            [45, 18],
+            [45, 34],
+            [25, 34],
+            [25, 18],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect.poll(() => brepHiddenLineCallCount(page), { timeout: 5000 }).toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/BREP AUTO CONTAIN FRONT/i);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hole/i);
+    await expect(page.getByLabel('Source patch ledger')).not.toContainText(/primitive-front-outer/i);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.points).toEqual([
+      [0, 0],
+      [80, 0],
+      [80, 50],
+      [0, 50],
+      [0, 0],
+    ]);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[1]?.points).toEqual([
+      [25, 18],
+      [46, 18],
+      [46, 35],
+      [25, 35],
+      [25, 18],
+    ]);
+  });
+
+  test('Given bounds issue targets hole topology When preview runs Then BRep auto snap reruns on hole only', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'bounds-hole-topology-then-ok');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-bounds-explicit-auto');
+    document.activeSketchId = 'sketch-alpha';
+    document.sketches[0] = {
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      primitives: [
+        {
+          primitiveId: 'primitive-front-outer',
+          kind: 'polyline',
+          points: [
+            [0, 0],
+            [80, 0],
+            [80, 50],
+            [0, 50],
+            [0, 0],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
+        },
+        {
+          primitiveId: 'primitive-front-hole',
+          kind: 'polyline',
+          points: [
+            [25, 18],
+            [45, 18],
+            [45, 34],
+            [25, 34],
+            [25, 18],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect.poll(() => brepHiddenLineCallCount(page), { timeout: 5000 }).toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/BREP AUTO SNAP FRONT/i);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hole/i);
+    await expect(page.getByLabel('Source patch ledger')).not.toContainText(/primitive-front-outer/i);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.points).toEqual([
+      [0, 0],
+      [80, 0],
+      [80, 50],
+      [0, 50],
+      [0, 0],
+    ]);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[1]?.points).toEqual([
+      [25, 18],
+      [46, 18],
+      [46, 35],
+      [25, 35],
+      [25, 18],
+    ]);
+  });
+
+  test('Given mixed containment and topology issues When preview runs Then containment reruns and topology proposal remains', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-plus-topology-then-topology');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-containment-plus-topology');
+    document.activeSketchId = 'sketch-alpha';
+    document.sketches[0] = {
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      primitives: [
+        {
+          primitiveId: 'primitive-front-outer',
+          kind: 'polyline',
+          points: [
+            [0, 0],
+            [80, 0],
+            [80, 50],
+            [0, 50],
+            [0, 0],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
+        },
+        {
+          primitiveId: 'primitive-front-hole',
+          kind: 'polyline',
+          points: [
+            [25, 18],
+            [45, 18],
+            [45, 34],
+            [25, 34],
+            [25, 18],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect.poll(() => brepHiddenLineCallCount(page), { timeout: 5000 }).toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/BREP AUTO CONTAIN FRONT/i);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hole/i);
+    await expect(brepTopologyRepairPanel(page)).toContainText(/TOPOLOGY REPAIR PROPOSALS/i);
+    await expect(brepTopologyRepairPanel(page)).toContainText(/primitive-front-hole/i);
+  });
+
+  test('Given containment issue has structured front view and neutral message When preview runs Then front overlay fails from structured topology match', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-topology-no-view-neutral');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-containment-no-view');
+    document.activeSketchId = 'sketch-alpha';
+    document.sketches[0] = {
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      primitives: [
+        {
+          primitiveId: 'primitive-front-outer',
+          kind: 'polyline',
+          points: [
+            [0, 0],
+            [80, 0],
+            [80, 50],
+            [0, 50],
+            [0, 0],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
+        },
+        {
+          primitiveId: 'primitive-front-hole',
+          kind: 'polyline',
+          points: [
+            [25, 18],
+            [45, 18],
+            [45, 34],
+            [25, 34],
+            [25, 18],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'fail',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="top"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="side"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+
+    const hiddenLinePanel = occtHiddenLinePanel(page);
+    await expect(hiddenLinePanel).toContainText(/containment mismatch/i);
+    await expect(hiddenLinePanel).toContainText(/FRONT/i);
+    await expect(hiddenLinePanel).toContainText(/HOLE/i);
+    await expect(hiddenLinePanel).toContainText(/front-v1/i);
+
+    const ledger = validationLedgerPanel(page);
+    const brepSketchRow = validationLedgerRow(ledger, 'BREP/SKETCH VALIDATION');
+    await expect(brepSketchRow).toContainText(/hole/i);
+    await expect(brepSketchRow).toContainText(/front-v1/i);
+    const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
+    await expect(acceptedCadRow).toContainText(/hole/i);
+    await expect(acceptedCadRow).toContainText(/front-v1/i);
+  });
+
+  test('Given containment issue has generic sketch id with structured front view When preview runs Then front overlay still fails from topology-only match', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-topology-generic-sketch-neutral');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-containment-topology-only');
+    document.activeSketchId = 'sketch-alpha';
+    document.sketches[0] = {
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      primitives: [
+        {
+          primitiveId: 'primitive-front-outer',
+          kind: 'polyline',
+          points: [
+            [0, 0],
+            [80, 0],
+            [80, 50],
+            [0, 50],
+            [0, 0],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
+        },
+        {
+          primitiveId: 'primitive-front-hole',
+          kind: 'polyline',
+          points: [
+            [25, 18],
+            [45, 18],
+            [45, 34],
+            [25, 34],
+            [25, 18],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'fail',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="top"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="side"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+  });
+
+  test('Given containment issue has stale top view but front topology When preview runs Then topology match beats stale view', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-topology-stale-view-neutral');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-containment-stale-view');
+    document.activeSketchId = 'sketch-alpha';
+    document.sketches[0] = {
+      sketchId: 'sketch-alpha',
+      view: 'front',
+      primitives: [
+        {
+          primitiveId: 'primitive-front-outer',
+          kind: 'polyline',
+          points: [
+            [0, 0],
+            [80, 0],
+            [80, 50],
+            [0, 50],
+            [0, 0],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
+        },
+        {
+          primitiveId: 'primitive-front-hole',
+          kind: 'polyline',
+          points: [
+            [25, 18],
+            [45, 18],
+            [45, 34],
+            [25, 34],
+            [25, 18],
+          ],
+          closed: true,
+          topology: {
+            loopId: 'front-hole',
+            edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+            loopRole: 'hole',
+            sourceClass: 'derived',
+          },
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'fail',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="top"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="side"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+  });
+
+  test('Given exact front issue with duplicate topology in top sketch When preview runs Then exact front identity beats duplicate topology', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-duplicate-topology-exact-front');
+    await openSketchWorkspace(page);
+
+    const document: any = {
+      documentId: 'workspace-sketch-document',
+      activeSketchId: 'sketch-front-exact',
+      units: 'mm',
+      sketches: [
+        {
+          sketchId: 'sketch-top-duplicate',
+          view: 'top',
+          primitives: [
+            {
+              primitiveId: 'primitive-top-hole',
+              kind: 'polyline',
+              points: [
+                [25, 18],
+                [45, 18],
+                [45, 34],
+                [25, 34],
+                [25, 18],
+              ],
+              closed: true,
+              topology: {
+                loopId: 'shared-hole',
+                edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                loopRole: 'hole',
+                sourceClass: 'derived',
+              },
+            },
+          ],
+        },
+        {
+          sketchId: 'sketch-front-exact',
+          view: 'front',
+          primitives: [
+            {
+              primitiveId: 'primitive-front-outer',
+              kind: 'polyline',
+              points: [
+                [0, 0],
+                [80, 0],
+                [80, 50],
+                [0, 50],
+                [0, 0],
+              ],
+              closed: true,
+              topology: {
+                loopId: 'front-outer',
+                edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+                loopRole: 'outer',
+                sourceClass: 'derived',
+              },
+            },
+            {
+              primitiveId: 'primitive-front-hole',
+              kind: 'polyline',
+              points: [
+                [25, 18],
+                [45, 18],
+                [45, 34],
+                [25, 34],
+                [25, 18],
+              ],
+              closed: true,
+              topology: {
+                loopId: 'shared-hole',
+                edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+                loopRole: 'hole',
+                sourceClass: 'derived',
+              },
+            },
+          ],
+        },
+        {
+          sketchId: 'sketch-side',
+          view: 'side',
+          primitives: [
+            {
+              primitiveId: 'primitive-side',
+              kind: 'polyline',
+              points: [
+                [5, 20],
+                [27, 20],
+                [27, 50],
+                [5, 50],
+                [5, 20],
+              ],
+              closed: true,
+            },
+          ],
+        },
+      ],
+    };
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const repairTarget = occtHiddenLinePanel(page).locator('[data-brep-repair-target]').first();
+    await expect(repairTarget).toContainText(/primitive-front-hole/i);
+    await expect(repairTarget).not.toContainText(/primitive-top-hole/i);
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'fail',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="top"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+  });
+
+  test('Given validation issue has stale top view and no locator When preview runs Then pane overlays do not guess failing view', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'view-only-stale-top-no-locator');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('hidden-line-view-only'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="top"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="side"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+
+    const ledger = validationLedgerPanel(page);
+    const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
+    await expect(acceptedCadRow).toContainText(/\b(FAIL|FAILED|ERROR)\b/i);
+  });
+
+  test('Given BRep topology mismatch is structured When preview runs Then redraw proposal appears and accepted CAD fails', async ({
     page,
   }) => {
     await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'topology-mismatch');
@@ -3891,23 +5364,53 @@ test.describe('Sketch workspace', () => {
     await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('hidden-line-topology'), null, 2));
     await ensureSketchPreviewRequested(page, 0);
 
-    await expect
-      .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
-      .toBe(1);
-    await expect(page.getByText(/BREP AUTO (SNAP|CONTAIN)/i)).toHaveCount(0);
-
     const topologyRepairPanel = brepTopologyRepairPanel(page);
-    await expect(topologyRepairPanel, 'topology mismatch must expose explicit redraw proposal').toContainText(
-      /TOPOLOGY REPAIR PROPOSALS/i,
-    );
-    await expect(topologyRepairPanel).toContainText(/TOPOLOGY FRONT/i);
+    await expect(topologyRepairPanel).toContainText(/TOPOLOGY REPAIR PROPOSALS/i);
     await expect(topologyRepairPanel).toContainText(/primitive-front-hidden-line-topology/i);
-    await expect(topologyRepairPanel).toContainText(/explicit sketch topology repair/i);
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute('data-brep-projection-status', 'fail');
+    await expect(page.locator('[data-brep-hidden-line-overlay="top"]')).toHaveAttribute('data-brep-projection-status', 'pass');
+    await expect(page.locator('[data-brep-hidden-line-overlay="side"]')).toHaveAttribute('data-brep-projection-status', 'pass');
 
     const ledger = validationLedgerPanel(page);
+    const brepSketchRow = validationLedgerRow(ledger, 'BREP/SKETCH VALIDATION');
+    await expect(brepSketchRow).toContainText(/\b(FAIL|FAILED|ERROR)\b/i);
+    await expect(brepSketchRow).toContainText(/topology mismatch/i);
     const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
     await expect(acceptedCadRow).toContainText(/\b(FAIL|FAILED|ERROR)\b/i);
-    await expect(occtHiddenLinePanel(page)).toContainText(/raw BREP\/SKETCH topology mismatch/i);
+    await expect(acceptedCadRow).toContainText(/topology mismatch/i);
+    await expect(occtHiddenLinePanel(page)).toContainText(/topology mismatch/i);
+  });
+
+  test('Given structured top projection warning When preview runs Then top pane warns but CAD rows still pass', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'warning-entry-top-no-edges');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('hidden-line-topology'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect(page.locator('[data-brep-hidden-line-overlay="front"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="top"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'warn',
+    );
+    await expect(page.locator('[data-brep-hidden-line-overlay="side"]')).toHaveAttribute(
+      'data-brep-projection-status',
+      'pass',
+    );
+
+    const hiddenLinePanel = occtHiddenLinePanel(page);
+    await expect(hiddenLinePanel).toContainText(/TOP projection produced no edges/i);
+
+    const ledger = validationLedgerPanel(page);
+    const brepSketchRow = validationLedgerRow(ledger, 'BREP/SKETCH VALIDATION');
+    await expect(brepSketchRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
+    const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
+    await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
   });
 
   test('Given BRep topology repair proposal When user applies redraw seed Then source updates and accepted CAD reruns', async ({
@@ -3941,6 +5444,227 @@ test.describe('Sketch workspace', () => {
     const ledger = validationLedgerPanel(page);
     const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
     await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
+  });
+
+  test('Given topology issue kind is structured and message is neutral When user applies redraw seed Then source updates and accepted CAD reruns', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'topology-kind-then-ok');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('hidden-line-topology'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const topologyRepairPanel = brepTopologyRepairPanel(page);
+    await expect(topologyRepairPanel).toContainText(/TOPOLOGY REPAIR PROPOSALS/i);
+    await topologyRepairPanel.getByRole('button', { name: /APPLY REDRAW SEED/i }).click();
+
+    await expect
+      .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
+      .toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/TOPOLOGY REDRAW/i);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hidden-line-topology/i);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.points).toEqual([
+      [10, 20],
+      [60, 20],
+      [60, 50],
+      [10, 50],
+      [10, 20],
+    ]);
+
+    const ledger = validationLedgerPanel(page);
+    const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
+    await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
+  });
+
+  test('Given edge-only multi-loop front sketch has hole before outer When topology redraw applies Then repair updates hole loop and leaves outer loop untouched', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'multi-loop-edges-topology-mismatch-then-ok');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-topology-edge-only');
+    document.sketches[0].primitives = [
+      {
+        primitiveId: 'primitive-front-hole',
+        kind: 'polyline',
+        points: [
+          [25, 18],
+          [45, 18],
+          [45, 34],
+          [25, 34],
+          [25, 18],
+        ],
+        closed: true,
+        topology: {
+          loopId: 'front-hole',
+          edgeIds: ['inner-a', 'inner-b', 'inner-c', 'inner-d'],
+          loopRole: 'hole',
+          sourceClass: 'derived',
+        },
+      },
+      {
+        primitiveId: 'primitive-front-outer',
+        kind: 'polyline',
+        points: [
+          [0, 0],
+          [80, 0],
+          [80, 50],
+          [0, 50],
+          [0, 0],
+        ],
+        closed: true,
+        topology: {
+          loopId: 'front-outer',
+          edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+          loopRole: 'outer',
+          sourceClass: 'derived',
+        },
+      },
+    ];
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const topologyRepairPanel = brepTopologyRepairPanel(page);
+    await expect(topologyRepairPanel).toContainText(/TOPOLOGY REPAIR PROPOSALS/i);
+    await expect(topologyRepairPanel).toContainText(/primitive-front-hole/i);
+    await topologyRepairPanel.getByRole('button', { name: /APPLY REDRAW SEED/i }).click();
+
+    await expect
+      .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
+      .toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hole/i);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    const frontSketch = request?.sketchDocument?.sketches?.find((sketch: any) => sketch?.view === 'front');
+    expect(frontSketch?.primitives?.map((primitive: any) => primitive.primitiveId)).toEqual([
+      'primitive-front-hole',
+      'primitive-front-outer',
+    ]);
+    expect(frontSketch?.primitives?.[0]?.points).toEqual([
+      [24, 17],
+      [46, 17],
+      [46, 35],
+      [24, 35],
+      [24, 17],
+    ]);
+    expect(frontSketch?.primitives?.[1]?.points).toEqual([
+      [0, 0],
+      [80, 0],
+      [80, 50],
+      [0, 50],
+      [0, 0],
+    ]);
+    expect(frontSketch?.primitives?.map((primitive: any) => primitive.topology?.loopRole)).toEqual([
+      'hole',
+      'outer',
+    ]);
+  });
+
+  test('Given edge-only multi-hole front sketch with churned topology ids When topology redraw applies Then exact target hole updates and sibling hole stays untouched', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'multi-loop-edges-topology-churn-then-ok');
+    await openSketchWorkspace(page);
+
+    const document: any = threeViewSketchDocument('hidden-line-topology-edge-churn');
+    document.sketches[0].primitives = [
+      {
+        primitiveId: 'primitive-front-hole-b',
+        kind: 'polyline',
+        points: [
+          [50, 22],
+          [64, 22],
+          [64, 36],
+          [50, 36],
+          [50, 22],
+        ],
+        closed: true,
+        topology: {
+          loopId: 'front-hole-b',
+          edgeIds: ['hole-b-a', 'hole-b-b', 'hole-b-c', 'hole-b-d'],
+          loopRole: 'hole',
+          sourceClass: 'derived',
+        },
+      },
+      {
+        primitiveId: 'primitive-front-hole-a',
+        kind: 'polyline',
+        points: [
+          [12, 12],
+          [22, 12],
+          [22, 22],
+          [12, 22],
+          [12, 12],
+        ],
+        closed: true,
+        topology: {
+          loopId: 'front-hole-a',
+          edgeIds: ['hole-a-a', 'hole-a-b', 'hole-a-c', 'hole-a-d'],
+          loopRole: 'hole',
+          sourceClass: 'derived',
+        },
+      },
+      {
+        primitiveId: 'primitive-front-outer',
+        kind: 'polyline',
+        points: [
+          [0, 0],
+          [80, 0],
+          [80, 50],
+          [0, 50],
+          [0, 0],
+        ],
+        closed: true,
+        topology: {
+          loopId: 'front-outer',
+          edgeIds: ['outer-a', 'outer-b', 'outer-c', 'outer-d'],
+          loopRole: 'outer',
+          sourceClass: 'derived',
+        },
+      },
+    ];
+    await importSketchDocumentJson(page, JSON.stringify(document, null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const topologyRepairPanel = brepTopologyRepairPanel(page);
+    await expect(topologyRepairPanel).toContainText(/primitive-front-hole-b/i);
+    await topologyRepairPanel.getByRole('button', { name: /APPLY REDRAW SEED/i }).click();
+
+    await expect
+      .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
+      .toBe(2);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    const frontSketch = request?.sketchDocument?.sketches?.find((sketch: any) => sketch?.view === 'front');
+    expect(frontSketch?.primitives?.map((primitive: any) => primitive.primitiveId)).toEqual([
+      'primitive-front-hole-b',
+      'primitive-front-hole-a',
+      'primitive-front-outer',
+    ]);
+    expect(frontSketch?.primitives?.[0]?.points).toEqual([
+      [52, 24],
+      [66, 24],
+      [66, 38],
+      [52, 38],
+      [52, 24],
+    ]);
+    expect(frontSketch?.primitives?.[1]?.points).toEqual([
+      [12, 12],
+      [22, 12],
+      [22, 22],
+      [12, 22],
+      [12, 12],
+    ]);
+    expect(frontSketch?.primitives?.[2]?.points).toEqual([
+      [0, 0],
+      [80, 0],
+      [80, 50],
+      [0, 50],
+      [0, 0],
+    ]);
   });
 
   test('Given BRep concavity repair proposal When user applies redraw seed Then source uses concave projection loop and accepted CAD reruns', async ({
@@ -3982,6 +5706,35 @@ test.describe('Sketch workspace', () => {
     await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
   });
 
+  test('Given concavity issue kind is structured and message is neutral When user applies redraw seed Then source uses concave projection loop', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'concavity-kind-then-ok');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('hidden-line-concavity'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    const topologyRepairPanel = brepTopologyRepairPanel(page);
+    await expect(topologyRepairPanel).toContainText(/CONCAVITY FRONT/i);
+    await topologyRepairPanel.getByRole('button', { name: /APPLY REDRAW SEED/i }).click();
+
+    await expect
+      .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
+      .toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hidden-line-concavity/i);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.points).toEqual([
+      [10, 20],
+      [60, 20],
+      [60, 50],
+      [35, 35],
+      [10, 50],
+      [10, 20],
+    ]);
+  });
+
   test('Given BRep containment mismatch has outside projection bounds When preview runs Then BRep auto contain reruns and accepted CAD passes', async ({
     page,
   }) => {
@@ -4000,6 +5753,31 @@ test.describe('Sketch workspace', () => {
     const ledger = validationLedgerPanel(page);
     const acceptedCadRow = validationLedgerRow(ledger, 'ACCEPTED CAD');
     await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
+
+    const request = await lastBrepHiddenLineRequest(page);
+    expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.points).toEqual([
+      [10, 20],
+      [64.2, 20],
+      [64.2, 50],
+      [10, 50],
+      [10, 20],
+    ]);
+  });
+
+  test('Given containment issue kind is structured and message is neutral When preview runs Then BRep auto contain reruns', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok', 'ok', sketchSource, 'ok', 'containment-kind-then-ok');
+    await openSketchWorkspace(page);
+
+    await importSketchDocumentJson(page, JSON.stringify(threeViewSketchDocument('hidden-line-containment'), null, 2));
+    await ensureSketchPreviewRequested(page, 0);
+
+    await expect
+      .poll(() => brepHiddenLineCallCount(page), { timeout: 5000 })
+      .toBe(2);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/BREP AUTO CONTAIN FRONT/i);
+    await expect(page.getByLabel('Source patch ledger')).toContainText(/primitive-front-hidden-line-containment/i);
 
     const request = await lastBrepHiddenLineRequest(page);
     expect(request?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.points).toEqual([
@@ -4659,7 +6437,7 @@ test.describe('Sketch workspace', () => {
     await page.getByRole('button', { name: 'CLEAR' }).click();
     await expect(page.getByLabel('Sketch primitives').getByText('NO PROFILE')).toBeVisible();
 
-    const callsBeforeReplay = await sketchDraftCallCount(page);
+    const callsBeforeReplay = await sketchPreviewRequestCount(page);
     await sketchDocumentReplayControl(page).click();
 
     await ensureSketchPreviewRequested(page, callsBeforeReplay);

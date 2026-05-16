@@ -68,6 +68,7 @@ function createDefaultConfig(): AppConfig {
       mode: 'passive',
       primaryAgentId: null,
       promptTimeoutSecs: 1800,
+      eckyAstAuthoring: false,
       autoAgents: [],
     },
     hasSeenOnboarding: false,

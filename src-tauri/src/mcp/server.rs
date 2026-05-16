@@ -330,7 +330,7 @@ fn validate_origin(headers: &HeaderMap) -> Option<Response> {
             return Some(plain_text_response(
                 StatusCode::FORBIDDEN,
                 "Origin not allowed.",
-            ))
+            ));
         }
     };
     if allowed_origin(origin) {
@@ -454,6 +454,53 @@ async fn resolve_target_for_session(
     explicit_thread_id: Option<String>,
     explicit_message_id: Option<String>,
 ) -> AppResult<ResolvedTargetRef> {
+    if let Some(session) = state.mcp_sessions.lock().await.get(session_id).cloned() {
+        let ctx = current_context(session_id, &session);
+        if let Some(preview) = handlers::resolve_session_render_preview_for_request(
+            state,
+            &ctx,
+            explicit_thread_id.as_deref(),
+            explicit_message_id.as_deref(),
+        )
+        .await?
+        {
+            let design = preview.design_output.clone();
+            let (range_count, number_count, select_count, checkbox_count) = design
+                .ui_spec
+                .fields
+                .iter()
+                .fold((0, 0, 0, 0), |acc, field| match field {
+                    crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
+                    crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
+                    crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
+                    crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
+                    crate::models::UiField::Image { .. } => acc,
+                });
+            return Ok(ResolvedTargetRef {
+                thread_id: preview.thread_id,
+                message_id: preview.preview_id,
+                model_id: Some(preview.artifact_bundle.model_id.clone()),
+                source_language: design.source_language,
+                geometry_backend: design.geometry_backend,
+                preview_stl_path: Some(preview.artifact_bundle.preview_stl_path),
+                viewer_assets: preview.artifact_bundle.viewer_assets,
+                title: design.title,
+                version_name: design.version_name,
+                has_draft: true,
+                ui_field_count: design.ui_spec.fields.len(),
+                range_count,
+                number_count,
+                select_count,
+                checkbox_count,
+                parameter_count: design.initial_params.len(),
+                has_semantic_manifest: true,
+                control_primitive_count: preview.model_manifest.control_primitives.len(),
+                control_relation_count: preview.model_manifest.control_relations.len(),
+                control_view_count: preview.model_manifest.control_views.len(),
+            });
+        }
+    }
+
     let cached_target = {
         state
             .mcp_sessions
@@ -764,6 +811,13 @@ fn target_ref_from_value(value: &Value) -> Option<McpTargetRef> {
                 .and_then(|bundle| bundle.get("modelId"))
                 .and_then(Value::as_str)
                 .map(str::to_string)
+        })
+        .or_else(|| {
+            value
+                .get("artifactDigest")
+                .and_then(|digest| digest.get("modelId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
         });
     Some(McpTargetRef {
         thread_id,
@@ -772,11 +826,94 @@ fn target_ref_from_value(value: &Value) -> Option<McpTargetRef> {
     })
 }
 
-fn thread_list_entry(thread: crate::models::Thread) -> ThreadListEntry {
-    ThreadListEntry {
+fn source_line_count(source: &str) -> usize {
+    source.lines().count()
+}
+
+fn compact_macro_replace_response_value(response: &MacroReplaceResponse) -> Value {
+    json!({
+        "threadId": &response.thread_id,
+        "messageId": &response.message_id,
+        "modelId": &response.artifact_digest.model_id,
+        "digest": crate::mcp::macro_buffer::source_digest(&response.macro_code),
+        "lineCount": source_line_count(&response.macro_code),
+        "artifactDigest": &response.artifact_digest,
+        "structuralVerification": &response.structural_verification,
+    })
+}
+
+fn ecky_ast_edit_operation_name(operation: &EckyAstEditOperation) -> &'static str {
+    match operation {
+        EckyAstEditOperation::Replace => "replace",
+        EckyAstEditOperation::InsertBefore => "insertBefore",
+        EckyAstEditOperation::InsertAfter => "insertAfter",
+        EckyAstEditOperation::Delete => "delete",
+        EckyAstEditOperation::Rename => "rename",
+    }
+}
+
+fn compact_ecky_ast_replace_and_render_response_value(
+    response: &MacroReplaceResponse,
+    operation: &str,
+    edited_path: &str,
+) -> Value {
+    json!({
+        "threadId": &response.thread_id,
+        "messageId": &response.message_id,
+        "modelId": &response.artifact_digest.model_id,
+        "newSourceDigest": crate::mcp::macro_buffer::source_digest(&response.macro_code),
+        "editedPath": edited_path,
+        "operation": operation,
+        "lineCount": source_line_count(&response.macro_code),
+        "artifactDigest": &response.artifact_digest,
+        "structuralVerification": &response.structural_verification,
+    })
+}
+
+fn compact_params_patch_response_value(response: &ParamsPatchResponse) -> Value {
+    json!({
+        "threadId": &response.thread_id,
+        "messageId": &response.message_id,
+        "modelId": &response.artifact_digest.model_id,
+        "mergedParamCount": response.merged_params.len(),
+        "artifactDigest": &response.artifact_digest,
+        "structuralVerification": &response.structural_verification,
+    })
+}
+
+fn compact_macro_buffer_replace_and_preview_response_value(
+    response: &MacroBufferReplaceAndRenderResponse,
+) -> Value {
+    json!({
+        "threadId": &response.thread_id,
+        "messageId": &response.message_id,
+        "modelId": &response.artifact_digest.model_id,
+        "digest": &response.digest,
+        "lineCount": response.line_count,
+        "artifactDigest": &response.artifact_digest,
+        "structuralVerification": &response.structural_verification,
+    })
+}
+
+fn thread_list_entry(
+    conn: &rusqlite::Connection,
+    thread: crate::models::Thread,
+) -> Result<ThreadListEntry, AppError> {
+    let latest_pending_message_id = db::get_latest_pending_user_message_id(conn, &thread.id)
+        .map_err(|e| AppError::persistence(e.to_string()))?;
+    Ok(ThreadListEntry {
         thread_id: thread.id,
         title: thread.title,
-    }
+        updated_at: thread.updated_at,
+        version_count: thread.version_count,
+        pending_count: thread.pending_count,
+        queued_count: thread.queued_count,
+        error_count: thread.error_count,
+        status: thread.status,
+        finalized_at: thread.finalized_at,
+        pending_confirm: thread.pending_confirm,
+        latest_pending_message_id,
+    })
 }
 
 fn identity_props() -> Value {
@@ -956,7 +1093,7 @@ fn workflow_guide_text(state: &AppState) -> String {
             "5. Use target_macro_get for macro reasoning, macro_buffer_get for line-numbered source edits, artifact_manifest_get for full artifact JSON, and target_detail_get(section=...) for exact chunks.\n",
             "6. Use target_get only when you truly need the full payload.\n",
             "7. If semantic bindings matter, call semantic_manifest_get before changing views or annotations.\n",
-            "8. Then mutate with params_patch_and_render, macro_buffer_replace_and_render, macro_replace_and_render, or semantic tools; prefer buffer replacement for non-trivial edits and use macro_replace_and_render for the first version after thread_create.\n",
+            "8. Then mutate with params_preview_render, macro_buffer_replace_and_preview, macro_preview_render, or semantic tools; prefer buffer replacement for non-trivial edits and use macro_preview_render for the first version after thread_create.\n",
             "9. Use measurement_annotation tools for dimension meaning, and long_action_notice/long_action_clear for slow work.\n"
         ),
         selected_engine_label(state),
@@ -1245,6 +1382,7 @@ fn surface_manifest_json(backend: crate::models::GeometryBackend) -> Value {
     let manifest = crate::ecky_language_surface::supported_surface_manifest(backend);
     json!({
         "backend": manifest.backend,
+        "referenceUri": surface_reference_uri_for_backend(backend),
         "modelClauses": manifest.model_clauses,
         "modelWrappers": manifest.model_wrappers,
         "expressionForms": manifest.expression_forms,
@@ -1254,7 +1392,6 @@ fn surface_manifest_json(backend: crate::models::GeometryBackend) -> Value {
         "cadOps": manifest.cad_ops,
         "wallPatternModes": manifest.wall_pattern_modes,
         "typedHolePolicy": manifest.typed_hole_policy,
-        "reference": surface_reference_json(backend),
     })
 }
 
@@ -1263,6 +1400,14 @@ fn surface_reference_json(backend: crate::models::GeometryBackend) -> Value {
         backend,
     ))
     .unwrap_or_else(|_| json!({ "backend": backend, "entries": [] }))
+}
+
+fn surface_reference_uri_for_backend(backend: crate::models::GeometryBackend) -> &'static str {
+    match backend {
+        crate::models::GeometryBackend::Build123d => "ecky://guides/surface-reference/build123d",
+        crate::models::GeometryBackend::Freecad => "ecky://guides/surface-reference/freecad",
+        crate::models::GeometryBackend::EckyRust => "ecky://guides/surface-reference/ecky-rust",
+    }
 }
 
 fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
@@ -1493,8 +1638,13 @@ fn prompt_payload(state: &AppState, name: &str) -> Option<Value> {
     }
 }
 
+#[cfg(test)]
 fn tool_definitions() -> Vec<Value> {
-    vec![
+    tool_definitions_with_ast_enabled(false)
+}
+
+fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
+    let mut tools = vec![
         json!({
             "name": "health_check",
             "description": "Confirm server is alive and can reach storage/runtime.",
@@ -1544,14 +1694,14 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "thread_list",
-            "description": "Lightweight browsing of available work targets.",
+            "description": "Lightweight browsing of available work targets. Includes queued/pending counts, pendingConfirm, and latestPendingMessageId so agents can sweep inbox threads without loading full histories.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "thread_create",
             "description": concat!(
                 "Create a new blank thread and borrow it as this MCP session's current target. ",
-                "Use this for a new design before calling macro_replace_and_render. ",
+                "Use this for a new design before calling macro_preview_render. ",
                 "Authoring language/backend belong to the model version or session config, not the thread."
             ),
             "inputSchema": with_identity(
@@ -1580,7 +1730,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "thread_meta_get",
-            "description": "Fetch thread metadata without messages.",
+            "description": "Fetch thread metadata without messages. Includes pendingConfirm and latestPendingMessageId for inbox/claim workflows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1651,7 +1801,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "target_meta_get",
-            "description": "Fetch a lightweight summary of the current editable target. Preferred default read step after workspace_overview. Includes artifact routing flags hasArtifactBundle, hasRuntimeManifest, edgeTargetCount, faceTargetCount, exportFormats, hasStepExport, and stepExportPath; call artifact_manifest_get for full JSON.",
+            "description": "Fetch a lightweight summary of the current editable target. Preferred default read step after workspace_overview. Includes scenePacket plus artifact routing flags hasArtifactBundle, hasRuntimeManifest, edgeTargetCount, faceTargetCount, exportFormats, hasStepExport, and stepExportPath; call artifact_manifest_get for full JSON.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -1662,22 +1812,26 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "target_macro_get",
-            "description": "Fetch only the active editable macro payload plus authoringContext and artifactDigest for geometry, orientation, export truth, and structure reasoning. Prefer this over target_get for macro questions.",
+            "description": "Fetch active editable source metadata plus a 1-based line window, authoringContext, and artifactDigest. Pass startLine/endLine for a specific range. Prefer macro_buffer_get for edits.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
-                    ("messageId", json!({ "type": "string" }))
+                    ("messageId", json!({ "type": "string" })),
+                    ("startLine", json!({ "type": "integer", "minimum": 1 })),
+                    ("endLine", json!({ "type": "integer", "minimum": 1 }))
                 ],
                 &[],
             )
         }),
         json!({
             "name": "macro_buffer_get",
-            "description": "Read the active target source into this MCP session's editable macro buffer. Returns digest, artifactDigest, and 1-based line records. Use before macro_buffer_replace_range, macro_buffer_apply_patch, or macro_buffer_render.",
+            "description": "Open the active target source into this MCP session's editable source buffer. Returns digest, artifactDigest, lineCount, and a 1-based line window only. Pass startLine/endLine for a specific range. Use before macro_buffer_replace_range, macro_buffer_apply_patch, or macro_buffer_preview_render.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
-                    ("messageId", json!({ "type": "string" }))
+                    ("messageId", json!({ "type": "string" })),
+                    ("startLine", json!({ "type": "integer", "minimum": 1 })),
+                    ("endLine", json!({ "type": "integer", "minimum": 1 }))
                 ],
                 &[],
             )
@@ -1716,8 +1870,8 @@ fn tool_definitions() -> Vec<Value> {
             )
         }),
         json!({
-            "name": "macro_buffer_render",
-            "description": "Validate/render this session's macro buffer through the existing macro_replace_and_render path. Preserves sourceLanguage, macroDialect, and geometryBackend captured by macro_buffer_get. Returns artifactDigest; check hasStepExport before promising STEP.",
+            "name": "macro_buffer_preview_render",
+            "description": "Validate/render this session's macro buffer through the existing macro_preview_render path. Preserves sourceLanguage, macroDialect, and geometryBackend captured by macro_buffer_get. Returns artifactDigest; check hasStepExport before promising STEP.",
             "inputSchema": with_identity(
                 &[
                     ("expectedDigest", json!({ "type": "string" })),
@@ -1728,8 +1882,8 @@ fn tool_definitions() -> Vec<Value> {
             )
         }),
         json!({
-            "name": "macro_buffer_replace_and_render",
-            "description": "Compatibility shortcut: replace 1-based inclusive line ranges in this session's macro buffer, then validate/render through macro_replace_and_render. Returns artifactDigest; check hasStepExport before promising STEP. Prefer separate edit then render for large changes.",
+            "name": "macro_buffer_replace_and_preview",
+            "description": "Replace 1-based inclusive line ranges in this session's macro buffer, then validate/render a preview through macro_preview_render. Returns artifactDigest; check hasStepExport before promising STEP. Prefer separate edit then render for large changes.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -1814,20 +1968,20 @@ fn tool_definitions() -> Vec<Value> {
             )
         }),
         json!({
-            "name": "concept_preview_generate",
-            "description": "Generate a fast concept sketch for the current bound thread and save it as an assistant concept preview. Uses the selected app model as a sketcher and stores the result directly in thread history so Ecky's blueprint viewport can open it immediately.",
+            "name": "concept_preview_save",
+            "description": "Save a concept preview image produced by the connected MCP agent into the current bound thread. Ecky does not call any configured app model or provider for this tool.",
             "inputSchema": with_identity(
                 &[
-                    ("prompt", json!({ "type": "string", "description": "Short sketch request describing object, silhouette, and key features." })),
-                    ("attachments", json!({ "type": "array", "items": { "type": "object" }, "description": "Optional reference attachments. For images, prefer inline dataUrl payloads from request_user_prompt." })),
+                    ("imageData", json!({ "type": "string", "description": "data:image URL generated by the MCP agent." })),
+                    ("caption", json!({ "type": "string", "description": "Short note to show with the concept preview." })),
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" }))
                 ],
-                &["prompt"],
+                &["imageData"],
             )
         }),
         json!({
-            "name": "params_patch_and_render",
+            "name": "params_preview_render",
             "description": "Patch a subset of parameters and rerender a draft. Works without prior browsing by resolving the default target automatically. Returns artifactDigest; check hasStepExport before promising STEP.",
             "inputSchema": with_identity(
                 &[
@@ -1844,7 +1998,7 @@ fn tool_definitions() -> Vec<Value> {
             )
         }),
         json!({
-            "name": "macro_replace_and_render",
+            "name": "macro_preview_render",
             "description": concat!(
                 "Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. ",
                 "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses build123d or freecad lowering; source extension does not. ",
@@ -2005,7 +2159,7 @@ fn tool_definitions() -> Vec<Value> {
             )
         }),
         json!({
-            "name": "version_save",
+            "name": "commit_preview_version",
             "description": "Persist the latest successful draft as a new saved version.",
             "inputSchema": with_identity(
                 &[
@@ -2081,7 +2235,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mark_as_read",
-            "description": "Claim queued user thread messages after you read them from thread_get/thread_list. Pass any one pending user message id from the thread; Ecky will drain the whole pending batch for that thread into the current turn.",
+            "description": "Claim queued user thread messages after you inspect them. Pass latestPendingMessageId from thread_list/thread_meta_get, or any pending user message id from thread_get/thread_messages_get; Ecky will drain the whole pending batch for that thread into the current turn.",
             "inputSchema": with_identity(
                 &[
                     ("messageId", json!({ "type": "string" })),
@@ -2186,7 +2340,72 @@ fn tool_definitions() -> Vec<Value> {
                 &[],
             )
         }),
-    ]
+    ];
+
+    if ecky_ast_authoring {
+        tools.retain(|tool| {
+            !matches!(
+                tool.get("name").and_then(Value::as_str),
+                Some(
+                    "macro_buffer_get"
+                        | "macro_buffer_replace_range"
+                        | "macro_buffer_apply_patch"
+                        | "macro_buffer_preview_render"
+                        | "macro_buffer_replace_and_preview"
+                )
+            )
+        });
+        tools.push(json!({
+            "name": "ecky_ast_get",
+            "description": "Experimental AST authoring read for sourceLanguage=ecky. Returns bounded Core AST nodes with stable structural paths, subtree digests, value kinds, spans, authoringContext, and artifactDigest. Use instead of macro_buffer_get when mcp.eckyAstAuthoring=true.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("path", json!({ "type": "string" })),
+                    ("depth", json!({ "type": "integer", "minimum": 0, "maximum": 12 })),
+                    ("maxNodes", json!({ "type": "integer", "minimum": 1, "maximum": 500 }))
+                ],
+                &[],
+            )
+        }));
+        tools.push(json!({
+            "name": "ecky_ast_replace_and_render",
+            "description": "Experimental AST authoring mutation for sourceLanguage=ecky. Edits one source-addressable Core AST node by structural path with sourceDigest and expectedNodeDigest guards, then renders a draft. operation defaults to replace; insertBefore/insertAfter add a sibling around the path; delete removes an arg or keyword pair; rename updates supported binding declarations plus in-scope references. Returns artifactDigest and structuralVerification; check hasStepExport before promising STEP.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("operation", json!({
+                        "type": "string",
+                        "enum": ["replace", "insertBefore", "insertAfter", "delete", "rename"],
+                        "description": "Default replace. insertBefore/insertAfter require replacementSource. delete ignores replacementSource. rename requires newName."
+                    })),
+                    ("sourceDigest", json!({ "type": "string" })),
+                    ("path", json!({ "type": "string" })),
+                    ("expectedNodeDigest", json!({ "type": "string" })),
+                    ("replacementSource", json!({
+                        "type": "string",
+                        "description": "Required for replace/insert operations. For keyword insert, pass the full keyword pair such as `:edges \"top\"`."
+                    })),
+                    ("newName", json!({
+                        "type": "string",
+                        "description": "Required for rename."
+                    })),
+                    ("parameters", json!({ "type": "object" })),
+                    ("postProcessing", json!({ "type": "object" })),
+                    ("geometryBackend", json!({
+                        "type": "string",
+                        "enum": ["freecad", "build123d", "mesh", "eckyRust"],
+                        "description": "Optional: Explicitly choose geometry backend for Ecky source."
+                    }))
+                ],
+                &["sourceDigest", "path", "expectedNodeDigest"],
+            )
+        }));
+    }
+
+    tools
 }
 
 /// Default port range tried (in random order) when no port is configured.
@@ -2462,7 +2681,13 @@ async fn dispatch_request(
                 Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
             }
         }
-        "tools/list" => json_rpc_result(req.id, json!({ "tools": tool_definitions() })),
+        "tools/list" => {
+            let ecky_ast_authoring = server.state.config.lock().unwrap().mcp.ecky_ast_authoring;
+            json_rpc_result(
+                req.id,
+                json!({ "tools": tool_definitions_with_ast_enabled(ecky_ast_authoring) }),
+            )
+        }
         "tools/call" => {
             match serde_json::from_value::<CallToolParams>(req.params.unwrap_or_default()) {
                 Ok(params) => match dispatch_tool_call(server, session_id, params).await {
@@ -2499,18 +2724,20 @@ fn dispatched_tool_names() -> Vec<&'static str> {
         "agent_identity_set",
         "target_meta_get",
         "target_macro_get",
+        "ecky_ast_get",
+        "ecky_ast_replace_and_render",
         "macro_buffer_get",
         "macro_buffer_replace_range",
         "macro_buffer_apply_patch",
-        "macro_buffer_render",
+        "macro_buffer_preview_render",
         "target_detail_get",
         "artifact_manifest_get",
         "target_get",
         "get_model_screenshot",
-        "concept_preview_generate",
-        "params_patch_and_render",
-        "macro_replace_and_render",
-        "macro_buffer_replace_and_render",
+        "concept_preview_save",
+        "params_preview_render",
+        "macro_preview_render",
+        "macro_buffer_replace_and_preview",
         "semantic_manifest_get",
         "semantic_manifest_detail_get",
         "control_primitive_save",
@@ -2519,7 +2746,7 @@ fn dispatched_tool_names() -> Vec<&'static str> {
         "control_view_delete",
         "measurement_annotation_save",
         "measurement_annotation_delete",
-        "version_save",
+        "commit_preview_version",
         "thread_fork_from_target",
         "compare_models",
         "version_restore",
@@ -2616,8 +2843,8 @@ async fn dispatch_tool_call(
             let recent_threads = db::get_recent_threads_limited(&conn, 5)
                 .map_err(|e| AppError::persistence(e.to_string()))?
                 .into_iter()
-                .map(thread_list_entry)
-                .collect::<Vec<_>>();
+                .map(|thread| thread_list_entry(&conn, thread))
+                .collect::<AppResult<Vec<_>>>()?;
 
             let _ = req_args;
             let (response, next_target) = match target_result {
@@ -2810,6 +3037,8 @@ async fn dispatch_tool_call(
                     identity: AgentIdentityOverride::default(),
                     thread_id: None,
                     message_id: None,
+                    start_line: None,
+                    end_line: None,
                 });
             let target = resolve_target_for_session(
                 &server.state,
@@ -2832,12 +3061,111 @@ async fn dispatch_tool_call(
             let next_target = target_ref_from_value(&value);
             Ok((value, next_target))
         }
+        "ecky_ast_get" => {
+            let mut req_args =
+                serde_json::from_value::<EckyAstGetRequest>(args).unwrap_or(EckyAstGetRequest {
+                    identity: AgentIdentityOverride::default(),
+                    thread_id: None,
+                    message_id: None,
+                    path: None,
+                    depth: None,
+                    max_nodes: None,
+                });
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            let response = handlers::handle_ecky_ast_get(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await?;
+            let value = serde_json::to_value(&response).unwrap();
+            let next_target = target_ref_from_value(&value);
+            Ok((value, next_target))
+        }
+        "ecky_ast_replace_and_render" => {
+            let mut req_args: EckyAstReplaceAndRenderRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let action_ctx = current_ctx.with_override(&req_args.identity);
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            let (source_language, geometry_backend) = effective_existing_authoring_context(
+                target.source_language,
+                target.geometry_backend,
+                req_args.geometry_backend,
+            );
+            ensure_authoring_guides_read(
+                &server.state,
+                session_id,
+                source_language,
+                geometry_backend,
+                "ecky_ast_replace_and_render",
+            )
+            .await?;
+            let lease_target = McpTargetRef {
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                model_id: target.model_id.clone(),
+            };
+            acquire_lease(&server.state, &action_ctx, &lease_target).await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            let edited_path = req_args.path.clone();
+            let operation = ecky_ast_edit_operation_name(&req_args.operation).to_string();
+            match handlers::handle_ecky_ast_replace_and_render(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &action_ctx,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let value = compact_ecky_ast_replace_and_render_response_value(
+                        &response,
+                        &operation,
+                        &edited_path,
+                    );
+                    let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    Ok((value, Some(next_target)))
+                }
+                Err(err) => {
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    Err(err)
+                }
+            }
+        }
         "macro_buffer_get" => {
+            if server.state.config.lock().unwrap().mcp.ecky_ast_authoring {
+                return Err(AppError::validation(
+                    "macro_buffer_get is disabled while mcp.eckyAstAuthoring=true. Use ecky_ast_get.",
+                ));
+            }
             let mut req_args = serde_json::from_value::<MacroBufferGetRequest>(args).unwrap_or(
                 MacroBufferGetRequest {
                     identity: AgentIdentityOverride::default(),
                     thread_id: None,
                     message_id: None,
+                    start_line: None,
+                    end_line: None,
                 },
             );
             let target = resolve_target_for_session(
@@ -2862,6 +3190,11 @@ async fn dispatch_tool_call(
             Ok((value, next_target))
         }
         "macro_buffer_replace_range" => {
+            if server.state.config.lock().unwrap().mcp.ecky_ast_authoring {
+                return Err(AppError::validation(
+                    "macro_buffer_replace_range is disabled while mcp.eckyAstAuthoring=true.",
+                ));
+            }
             let req_args: MacroBufferReplaceAndRenderRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let target = resolve_target_for_session(
@@ -2885,6 +3218,11 @@ async fn dispatch_tool_call(
             Ok((serde_json::to_value(&response).unwrap(), None))
         }
         "macro_buffer_apply_patch" => {
+            if server.state.config.lock().unwrap().mcp.ecky_ast_authoring {
+                return Err(AppError::validation(
+                    "macro_buffer_apply_patch is disabled while mcp.eckyAstAuthoring=true.",
+                ));
+            }
             let req_args: MacroBufferApplyPatchRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let target = resolve_target_for_session(
@@ -2907,7 +3245,12 @@ async fn dispatch_tool_call(
                 handlers::handle_macro_buffer_apply_patch(req_args, &current_ctx).await?;
             Ok((serde_json::to_value(&response).unwrap(), None))
         }
-        "macro_buffer_render" => {
+        "macro_buffer_preview_render" => {
+            if server.state.config.lock().unwrap().mcp.ecky_ast_authoring {
+                return Err(AppError::validation(
+                    "macro_buffer_preview_render is disabled while mcp.eckyAstAuthoring=true.",
+                ));
+            }
             let req_args: MacroBufferRenderRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let target = resolve_target_for_session(
@@ -2923,17 +3266,17 @@ async fn dispatch_tool_call(
                 session_id,
                 target.source_language,
                 target.geometry_backend,
-                "macro_buffer_render",
+                "macro_buffer_preview_render",
             )
             .await?;
-            let response = handlers::handle_macro_buffer_render(
+            let response = handlers::handle_macro_buffer_preview_render(
                 &server.state,
                 server.app.as_ref(),
                 req_args,
                 &current_ctx,
             )
             .await?;
-            let value = serde_json::to_value(&response).unwrap();
+            let value = compact_macro_replace_response_value(&response);
             let next_target = target_ref_from_value(&value);
             Ok((value, next_target))
         }
@@ -3022,11 +3365,11 @@ async fn dispatch_tool_call(
             let value = request_model_screenshot(server, session_id, req_args).await?;
             Ok((value, None))
         }
-        "concept_preview_generate" => {
-            let req_args: ConceptPreviewGenerateRequest =
+        "concept_preview_save" => {
+            let req_args: ConceptPreviewSaveRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let response =
-                handlers::handle_concept_preview_generate(&server.state, req_args, &current_ctx)
+                handlers::handle_concept_preview_save(&server.state, req_args, &current_ctx)
                     .await?;
             let value = serde_json::json!({
                 "threadId": response.thread_id,
@@ -3036,7 +3379,7 @@ async fn dispatch_tool_call(
             });
             Ok((value, None))
         }
-        "params_patch_and_render" => {
+        "params_preview_render" => {
             let mut req_args: ParamsPatchRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
 
@@ -3059,7 +3402,7 @@ async fn dispatch_tool_call(
                 session_id,
                 source_language,
                 geometry_backend,
-                "params_patch_and_render",
+                "params_preview_render",
             )
             .await?;
 
@@ -3091,7 +3434,7 @@ async fn dispatch_tool_call(
             acquire_lease(&server.state, &action_ctx, &lease_target).await?;
             req_args.thread_id = Some(target.thread_id.clone());
             req_args.message_id = Some(target.message_id.clone());
-            match handlers::handle_params_patch_and_render(
+            match handlers::handle_params_preview_render(
                 &server.state,
                 server.app.as_ref(),
                 req_args,
@@ -3100,7 +3443,7 @@ async fn dispatch_tool_call(
             .await
             {
                 Ok(response) => {
-                    let value = serde_json::to_value(&response).unwrap();
+                    let value = compact_params_patch_response_value(&response);
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
                     move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
                         .await?;
@@ -3113,7 +3456,7 @@ async fn dispatch_tool_call(
                 }
             }
         }
-        "macro_replace_and_render" => {
+        "macro_preview_render" => {
             let mut req_args: MacroReplaceRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let action_ctx = current_ctx.with_override(&req_args.identity);
@@ -3138,7 +3481,7 @@ async fn dispatch_tool_call(
                         session_id,
                         source_language,
                         geometry_backend,
-                        "macro_replace_and_render",
+                        "macro_preview_render",
                     )
                     .await?;
                     let lease_target = McpTargetRef {
@@ -3149,7 +3492,7 @@ async fn dispatch_tool_call(
                     acquire_lease(&server.state, &action_ctx, &lease_target).await?;
                     req_args.thread_id = Some(target.thread_id.clone());
                     req_args.message_id = Some(target.message_id.clone());
-                    match handlers::handle_macro_replace_and_render(
+                    match handlers::handle_macro_preview_render(
                         &server.state,
                         server.app.as_ref(),
                         req_args,
@@ -3158,7 +3501,7 @@ async fn dispatch_tool_call(
                     .await
                     {
                         Ok(response) => {
-                            let value = serde_json::to_value(&response).unwrap();
+                            let value = compact_macro_replace_response_value(&response);
                             let next_target =
                                 target_ref_from_value(&value).unwrap_or(lease_target.clone());
                             move_or_refresh_lease(
@@ -3199,10 +3542,10 @@ async fn dispatch_tool_call(
                         session_id,
                         source_language,
                         geometry_backend,
-                        "macro_replace_and_render",
+                        "macro_preview_render",
                     )
                     .await?;
-                    match handlers::handle_macro_replace_and_render(
+                    match handlers::handle_macro_preview_render(
                         &server.state,
                         server.app.as_ref(),
                         req_args,
@@ -3211,7 +3554,7 @@ async fn dispatch_tool_call(
                     .await
                     {
                         Ok(response) => {
-                            let value = serde_json::to_value(&response).unwrap();
+                            let value = compact_macro_replace_response_value(&response);
                             let next_target = target_ref_from_value(&value);
                             Ok((value, next_target))
                         }
@@ -3221,7 +3564,12 @@ async fn dispatch_tool_call(
                 Err(e) => Err(e),
             }
         }
-        "macro_buffer_replace_and_render" => {
+        "macro_buffer_replace_and_preview" => {
+            if server.state.config.lock().unwrap().mcp.ecky_ast_authoring {
+                return Err(AppError::validation(
+                    "macro_buffer_replace_and_preview is disabled while mcp.eckyAstAuthoring=true.",
+                ));
+            }
             let mut req_args: MacroBufferReplaceAndRenderRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let action_ctx = current_ctx.with_override(&req_args.identity);
@@ -3243,7 +3591,7 @@ async fn dispatch_tool_call(
                 session_id,
                 source_language,
                 geometry_backend,
-                "macro_buffer_replace_and_render",
+                "macro_buffer_replace_and_preview",
             )
             .await?;
             let lease_target = McpTargetRef {
@@ -3254,7 +3602,7 @@ async fn dispatch_tool_call(
             acquire_lease(&server.state, &action_ctx, &lease_target).await?;
             req_args.thread_id = Some(target.thread_id.clone());
             req_args.message_id = Some(target.message_id.clone());
-            match handlers::handle_macro_buffer_replace_and_render(
+            match handlers::handle_macro_buffer_replace_and_preview(
                 &server.state,
                 server.app.as_ref(),
                 req_args,
@@ -3263,7 +3611,7 @@ async fn dispatch_tool_call(
             .await
             {
                 Ok(response) => {
-                    let value = serde_json::to_value(&response).unwrap();
+                    let value = compact_macro_buffer_replace_and_preview_response_value(&response);
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
                     move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
                         .await?;
@@ -3629,7 +3977,7 @@ async fn dispatch_tool_call(
                 }
             }
         }
-        "version_save" => {
+        "commit_preview_version" => {
             let mut req_args =
                 serde_json::from_value::<VersionSaveRequest>(args).unwrap_or(VersionSaveRequest {
                     identity: AgentIdentityOverride::default(),
@@ -3655,7 +4003,7 @@ async fn dispatch_tool_call(
             acquire_lease(&server.state, &action_ctx, &lease_target).await?;
             req_args.thread_id = Some(target.thread_id.clone());
             req_args.message_id = Some(target.message_id.clone());
-            match handlers::handle_version_save(
+            match handlers::handle_commit_preview_version(
                 &server.state,
                 server.app.as_ref(),
                 req_args,
@@ -4109,13 +4457,14 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_include_concept_preview_generate() {
+    fn tool_definitions_include_concept_preview_save_without_generate() {
         let tool_names = tool_definitions()
             .into_iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        assert!(tool_names
+        assert!(tool_names.iter().any(|name| name == "concept_preview_save"));
+        assert!(!tool_names
             .iter()
             .any(|name| name == "concept_preview_generate"));
     }
@@ -4136,7 +4485,9 @@ mod tests {
         assert!(tool_names
             .iter()
             .any(|name| name == "macro_buffer_apply_patch"));
-        assert!(tool_names.iter().any(|name| name == "macro_buffer_render"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_preview_render"));
         assert!(tool_names.iter().any(|name| name == "target_detail_get"));
         assert!(tool_names
             .iter()
@@ -4144,7 +4495,27 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "target_get"));
         assert!(tool_names
             .iter()
-            .any(|name| name == "macro_buffer_replace_and_render"));
+            .any(|name| name == "macro_buffer_replace_and_preview"));
+    }
+
+    #[test]
+    fn ast_authoring_tool_definitions_swap_buffer_tools_for_ast_tool() {
+        let tool_names = tool_definitions_with_ast_enabled(true)
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(tool_names.iter().any(|name| name == "ecky_ast_get"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_replace_and_render"));
+        assert!(!tool_names.iter().any(|name| name == "macro_buffer_get"));
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_replace_range"));
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_replace_and_preview"));
     }
 
     #[test]
@@ -4320,7 +4691,7 @@ mod tests {
             "session-1",
             crate::models::SourceLanguage::EckyIrV0,
             crate::models::GeometryBackend::Build123d,
-            "macro_replace_and_render",
+            "macro_preview_render",
         )
         .await
         .expect_err("ecky source edits should be blocked until guides are read");
@@ -4350,7 +4721,7 @@ mod tests {
             "session-1",
             crate::models::SourceLanguage::EckyIrV0,
             crate::models::GeometryBackend::Build123d,
-            "macro_replace_and_render",
+            "macro_preview_render",
         )
         .await
         .expect("guide reads should unlock ecky source edits");
@@ -4376,7 +4747,7 @@ mod tests {
             "session-1",
             crate::models::SourceLanguage::EckyIrV0,
             crate::models::GeometryBackend::Freecad,
-            "macro_buffer_render",
+            "macro_buffer_preview_render",
         )
         .await
         .expect("legacy resource alias should count as canonical ecky source guide");
@@ -4391,7 +4762,7 @@ mod tests {
             "session-1",
             crate::models::SourceLanguage::LegacyPython,
             crate::models::GeometryBackend::Freecad,
-            "macro_replace_and_render",
+            "macro_preview_render",
         )
         .await
         .expect("legacy source edits should not require ecky guide resources");
@@ -4410,7 +4781,7 @@ mod tests {
             "session-http",
             crate::models::SourceLanguage::EckyIrV0,
             crate::models::GeometryBackend::Build123d,
-            "macro_replace_and_render",
+            "macro_preview_render",
         )
         .await
         .expect("tool-only mcp-http sessions cannot satisfy resources/read guard");
@@ -4467,10 +4838,10 @@ mod tests {
             .contains("artifactDigest"));
 
         for name in [
-            "params_patch_and_render",
-            "macro_replace_and_render",
-            "macro_buffer_render",
-            "macro_buffer_replace_and_render",
+            "params_preview_render",
+            "macro_preview_render",
+            "macro_buffer_preview_render",
+            "macro_buffer_replace_and_preview",
         ] {
             let tool = tools
                 .iter()
@@ -4539,7 +4910,7 @@ mod tests {
         assert!(workflow.contains("Ecky authoring card"));
         assert!(workflow.contains("(extrude (polygon"));
         assert!(workflow.contains("let*"));
-        assert!(workflow.contains("macro_replace_and_render"));
+        assert!(workflow.contains("macro_preview_render"));
         assert!(workflow.contains("thread_create"));
         assert!(workflow.contains("thread_borrow"));
         assert!(workflow.contains("resources/read"));
@@ -4678,7 +5049,7 @@ mod tests {
         assert!(guide.contains("Ecky authoring card"));
         assert!(guide.contains("sourceLanguage=ecky"));
         assert!(guide.contains("geometryBackend"));
-        assert!(guide.contains("macro_replace_and_render"));
+        assert!(guide.contains("macro_preview_render"));
         assert!(guide.contains("session config"));
         assert!(!guide.contains("thread config"));
     }
@@ -4843,9 +5214,15 @@ mod tests {
         assert!(ecky_rust_wall_pattern_modes
             .iter()
             .any(|mode| mode.as_str() == Some("attractor-field")));
-        let helper_refs = ecky_rust
-            .get("reference")
-            .and_then(|reference| reference.get("entries"))
+        assert!(ecky_rust.get("reference").is_none());
+        assert_eq!(
+            ecky_rust.get("referenceUri").and_then(Value::as_str),
+            Some("ecky://guides/surface-reference/ecky-rust")
+        );
+        let reference =
+            read_surface_manifest_resource(&state, "ecky://guides/surface-reference/ecky-rust");
+        let helper_refs = reference
+            .get("entries")
             .and_then(Value::as_array)
             .expect("reference entries");
         assert!(helper_refs.iter().any(|entry| {
@@ -4975,6 +5352,206 @@ mod tests {
 
         let response = mcp_tool_success(Some(json!(1)), &payload);
         assert_eq!(response.result, Some(payload));
+    }
+
+    fn compact_test_design(macro_code: &str) -> crate::models::DesignOutput {
+        crate::models::DesignOutput {
+            title: "Render".to_string(),
+            version_name: "V-render".to_string(),
+            response: "ok".to_string(),
+            interaction_mode: crate::models::InteractionMode::Design,
+            macro_code: macro_code.to_string(),
+            macro_dialect: crate::models::MacroDialect::Legacy,
+            engine_kind: crate::models::EngineKind::Freecad,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            ui_spec: crate::models::UiSpec::default(),
+            initial_params: std::collections::BTreeMap::from([(
+                "diameter".to_string(),
+                crate::models::ParamValue::Number(42.0),
+            )]),
+            post_processing: None,
+        }
+    }
+
+    fn compact_test_bundle(model_id: &str) -> crate::models::ArtifactBundle {
+        crate::models::ArtifactBundle {
+            schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: model_id.to_string(),
+            source_kind: crate::models::ModelSourceKind::Generated,
+            engine_kind: crate::models::EngineKind::Freecad,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            content_hash: format!("hash-{model_id}"),
+            artifact_version: 1,
+            fcstd_path: format!("/tmp/{model_id}.FCStd"),
+            manifest_path: format!("/tmp/{model_id}.json"),
+            macro_path: Some(format!("/tmp/{model_id}.py")),
+            preview_stl_path: format!("/tmp/{model_id}.stl"),
+            viewer_assets: Vec::new(),
+            edge_targets: Vec::new(),
+            face_targets: Vec::new(),
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: vec![crate::models::ExportArtifact {
+                label: "STEP".to_string(),
+                format: "step".to_string(),
+                path: format!("/tmp/{model_id}.step"),
+                role: "cad-exchange".to_string(),
+            }],
+        }
+    }
+
+    fn compact_test_manifest(model_id: &str) -> crate::models::ModelManifest {
+        crate::models::ModelManifest {
+            schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: model_id.to_string(),
+            source_kind: crate::models::ModelSourceKind::Generated,
+            engine_kind: crate::models::EngineKind::Freecad,
+            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_language: crate::models::SourceLanguage::LegacyPython,
+            document: crate::models::DocumentMetadata {
+                document_name: "Doc".to_string(),
+                document_label: "Doc".to_string(),
+                source_path: None,
+                object_count: 1,
+                warnings: Vec::new(),
+            },
+            parts: Vec::new(),
+            parameter_groups: Vec::new(),
+            control_primitives: Vec::new(),
+            control_relations: Vec::new(),
+            control_views: Vec::new(),
+            advisories: Vec::new(),
+            selection_targets: Vec::new(),
+            measurement_annotations: Vec::new(),
+            warnings: Vec::new(),
+            enrichment_state: crate::models::ManifestEnrichmentState {
+                status: crate::models::EnrichmentStatus::None,
+                proposals: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn mutation_tool_response_json_omits_heavy_runtime_payloads() {
+        let bundle = compact_test_bundle("model-render");
+        let digest = ArtifactBundleDigest {
+            model_id: "model-render".to_string(),
+            source_language: "legacyPython".to_string(),
+            geometry_backend: "freecad".to_string(),
+            has_preview_stl: true,
+            viewer_asset_count: 0,
+            edge_target_count: 0,
+            face_target_count: 0,
+            export_format_count: 1,
+            export_formats: vec!["step".to_string()],
+            has_step_export: true,
+            step_export_path: Some("/tmp/model-render.step".to_string()),
+            multipart: false,
+        };
+        let manifest = compact_test_manifest("model-render");
+        let design = compact_test_design("render_macro()");
+
+        let macro_response = MacroReplaceResponse {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-render".to_string(),
+            macro_code: design.macro_code.clone(),
+            ui_spec: design.ui_spec.clone(),
+            initial_params: design.initial_params.clone(),
+            artifact_bundle: bundle.clone(),
+            model_manifest: manifest.clone(),
+            structural_verification: None,
+            artifact_digest: digest.clone(),
+        };
+        let params_response = ParamsPatchResponse {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-render".to_string(),
+            merged_params: design.initial_params.clone(),
+            artifact_bundle: bundle.clone(),
+            model_manifest: manifest.clone(),
+            design_output: design.clone(),
+            structural_verification: None,
+            artifact_digest: digest.clone(),
+        };
+        let buffer_response = MacroBufferReplaceAndRenderResponse {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-render".to_string(),
+            digest: "source-digest".to_string(),
+            line_count: 1,
+            macro_code: design.macro_code,
+            ui_spec: design.ui_spec,
+            initial_params: design.initial_params,
+            artifact_bundle: bundle,
+            model_manifest: manifest,
+            structural_verification: None,
+            artifact_digest: digest,
+        };
+
+        for value in [
+            compact_macro_replace_response_value(&macro_response),
+            compact_params_patch_response_value(&params_response),
+            compact_macro_buffer_replace_and_preview_response_value(&buffer_response),
+        ] {
+            assert_eq!(value["artifactDigest"]["modelId"], "model-render");
+            assert!(value.get("artifactBundle").is_none());
+            assert!(value.get("modelManifest").is_none());
+            assert!(value.get("designOutput").is_none());
+            assert!(value.get("macroCode").is_none());
+            assert!(value.get("uiSpec").is_none());
+            assert!(value.get("initialParams").is_none());
+        }
+    }
+
+    #[test]
+    fn ecky_ast_replace_and_render_response_json_reports_compact_edit_metadata() {
+        let bundle = compact_test_bundle("model-render");
+        let digest = ArtifactBundleDigest {
+            model_id: "model-render".to_string(),
+            source_language: "ecky".to_string(),
+            geometry_backend: "build123d".to_string(),
+            has_preview_stl: true,
+            viewer_asset_count: 0,
+            edge_target_count: 0,
+            face_target_count: 0,
+            export_format_count: 0,
+            export_formats: Vec::new(),
+            has_step_export: false,
+            step_export_path: None,
+            multipart: false,
+        };
+        let manifest = compact_test_manifest("model-render");
+        let mut design = compact_test_design("(model\n  (box 10 20 30))");
+        design.source_language = crate::models::SourceLanguage::EckyIrV0;
+        design.geometry_backend = crate::models::GeometryBackend::Build123d;
+
+        let response = MacroReplaceResponse {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-render".to_string(),
+            macro_code: design.macro_code.clone(),
+            ui_spec: design.ui_spec,
+            initial_params: design.initial_params,
+            artifact_bundle: bundle,
+            model_manifest: manifest,
+            structural_verification: None,
+            artifact_digest: digest,
+        };
+
+        let value =
+            compact_ecky_ast_replace_and_render_response_value(&response, "insertAfter", "body/0");
+
+        assert_eq!(
+            value["newSourceDigest"],
+            crate::mcp::macro_buffer::source_digest(&response.macro_code)
+        );
+        assert_eq!(value["editedPath"], "body/0");
+        assert_eq!(value["operation"], "insertAfter");
+        assert_eq!(value["lineCount"], 2);
+        assert!(value.get("macroCode").is_none());
+        assert!(value.get("artifactBundle").is_none());
+        assert!(value.get("modelManifest").is_none());
+        assert!(value.get("uiSpec").is_none());
+        assert!(value.get("initialParams").is_none());
     }
 
     #[test]

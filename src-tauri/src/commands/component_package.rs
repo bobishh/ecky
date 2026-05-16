@@ -18,6 +18,7 @@ use crate::models::{
     InstalledComponentSource, MacroDialect, ModelManifest, OperationKind, PathResolver, PortFrame,
     PortReference, SourceLanguage,
 };
+use crate::topology_target_ids::{is_stable_topology_target_id, portable_topology_target_id};
 
 const FRAME_EPSILON: f64 = 1.0e-6;
 
@@ -178,6 +179,11 @@ fn write_artifact_bundle_component_package_project_impl(
     let packaged_source = resolve_packaged_component_source(&request)?;
     let derived_component_contract =
         resolve_packaged_component_contract(&request, &packaged_source)?;
+    let ports = normalize_packaged_component_ports(
+        &request.ports,
+        &request.artifact_bundle,
+        should_normalize_packaged_topology_ids(&packaged_source, &request.artifact_bundle),
+    )?;
     let runtime_target_ids = artifact_bundle_target_ids(&request.artifact_bundle)?;
     let known_port_type_ids = request
         .port_types
@@ -224,7 +230,7 @@ fn write_artifact_bundle_component_package_project_impl(
             params: derived_component_contract.params,
             ui_spec: derived_component_contract.ui_spec,
             initial_params: derived_component_contract.initial_params,
-            ports: request.ports,
+            ports,
         }],
         assemblies: Vec::new(),
     };
@@ -259,6 +265,145 @@ fn write_artifact_bundle_component_package_project_impl(
     }
     component_package_runtime::write_component_package_manifest(project_dir, &package)?;
     Ok(package)
+}
+
+fn normalize_packaged_component_ports(
+    ports: &[ComponentPort],
+    artifact_bundle: &ArtifactBundle,
+    prefer_stable_topology_ids: bool,
+) -> AppResult<Vec<ComponentPort>> {
+    if !prefer_stable_topology_ids {
+        return Ok(ports.to_vec());
+    }
+
+    let manifest = read_model_manifest_from_path(Path::new(&artifact_bundle.manifest_path))?;
+    let preferred_target_ids = manifest
+        .selection_targets
+        .iter()
+        .flat_map(|target| {
+            let Some(preferred) = preferred_packaged_target_id(target) else {
+                return Vec::new();
+            };
+            target
+                .target_id
+                .iter()
+                .chain(target.durable_target_id.iter())
+                .chain(target.canonical_target_id.iter())
+                .chain(target.alias_ids.iter())
+                .map(|target_id| (target_id.clone(), preferred.clone()))
+                .collect::<Vec<_>>()
+        })
+        .chain(artifact_bundle.edge_targets.iter().flat_map(|target| {
+            target
+                .durable_target_id
+                .iter()
+                .map(|durable_target_id| (durable_target_id.clone(), target.target_id.clone()))
+                .chain(
+                    target
+                        .canonical_target_id
+                        .iter()
+                        .map(|canonical_target_id| {
+                            (canonical_target_id.clone(), target.target_id.clone())
+                        })
+                        .chain(
+                            target
+                                .alias_ids
+                                .iter()
+                                .map(|alias_id| (alias_id.clone(), target.target_id.clone())),
+                        ),
+                )
+                .collect::<Vec<_>>()
+        }))
+        .chain(artifact_bundle.face_targets.iter().flat_map(|target| {
+            target
+                .durable_target_id
+                .iter()
+                .map(|durable_target_id| (durable_target_id.clone(), target.target_id.clone()))
+                .chain(
+                    target
+                        .canonical_target_id
+                        .iter()
+                        .map(|canonical_target_id| {
+                            (canonical_target_id.clone(), target.target_id.clone())
+                        })
+                        .chain(
+                            target
+                                .alias_ids
+                                .iter()
+                                .map(|alias_id| (alias_id.clone(), target.target_id.clone())),
+                        ),
+                )
+                .collect::<Vec<_>>()
+        }))
+        .collect::<HashMap<_, _>>();
+
+    Ok(ports
+        .iter()
+        .cloned()
+        .map(|mut port| {
+            port.target_ids = port
+                .target_ids
+                .into_iter()
+                .map(|target_id| {
+                    preferred_target_ids
+                        .get(&target_id)
+                        .cloned()
+                        .unwrap_or(target_id)
+                })
+                .collect();
+            port
+        })
+        .collect())
+}
+
+fn should_normalize_packaged_topology_ids(
+    packaged_source: &PackagedComponentSource,
+    artifact_bundle: &ArtifactBundle,
+) -> bool {
+    let source_ref = packaged_source.source_ref.to_ascii_lowercase();
+    source_ref.ends_with(".step")
+        || source_ref.ends_with(".stp")
+        || artifact_bundle.geometry_backend == GeometryBackend::EckyRust
+        || artifact_bundle
+            .edge_targets
+            .iter()
+            .any(|target| target.durable_target_id.is_some())
+        || artifact_bundle
+            .face_targets
+            .iter()
+            .any(|target| target.durable_target_id.is_some())
+}
+
+fn preferred_packaged_target_id(target: &crate::models::SelectionTarget) -> Option<String> {
+    target
+        .durable_target_id
+        .clone()
+        .or_else(|| {
+            target
+                .alias_ids
+                .iter()
+                .filter(|alias_id| is_stable_topology_target_id(alias_id))
+                .min_by_key(|alias_id| alias_id.len())
+                .cloned()
+        })
+        .or_else(|| target.target_id.clone())
+}
+
+fn read_model_manifest_from_path(path: &Path) -> AppResult<ModelManifest> {
+    let data = fs::read_to_string(path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read model manifest '{}': {}",
+            path.display(),
+            err
+        ))
+    })?;
+    serde_json::from_str(&data).map_err(|err| {
+        AppError::validation(format!(
+            "Failed to parse model manifest '{}': {}",
+            path.display(),
+            err
+        ))
+    })
 }
 
 fn resolve_packaged_component_source(
@@ -437,19 +582,19 @@ fn artifact_bundle_target_ids(bundle: &ArtifactBundle) -> AppResult<HashSet<Stri
     Ok(manifest
         .selection_targets
         .iter()
-        .filter_map(|target| target.target_id.clone())
-        .chain(
-            bundle
-                .edge_targets
+        .flat_map(|target| {
+            target
+                .target_id
                 .iter()
-                .map(|target| target.target_id.clone()),
-        )
-        .chain(
-            bundle
-                .face_targets
-                .iter()
-                .map(|target| target.target_id.clone()),
-        )
+                .cloned()
+                .chain(target.alias_ids.iter().cloned())
+        })
+        .chain(bundle.edge_targets.iter().flat_map(|target| {
+            std::iter::once(target.target_id.clone()).chain(target.alias_ids.iter().cloned())
+        }))
+        .chain(bundle.face_targets.iter().flat_map(|target| {
+            std::iter::once(target.target_id.clone()).chain(target.alias_ids.iter().cloned())
+        }))
         .collect())
 }
 
@@ -1991,7 +2136,7 @@ fn merge_component_render_parameters(
     merged
 }
 
-fn validate_rendered_component_port_targets(
+pub(crate) fn validate_rendered_component_port_targets(
     installed_source: &InstalledComponentSource,
     artifact_bundle: &crate::models::ArtifactBundle,
     model_manifest: &crate::models::ModelManifest,
@@ -1999,24 +2144,50 @@ fn validate_rendered_component_port_targets(
     let runtime_target_ids = model_manifest
         .selection_targets
         .iter()
-        .filter_map(|target| target.target_id.clone())
-        .chain(
-            artifact_bundle
-                .edge_targets
+        .flat_map(|target| {
+            target
+                .target_id
                 .iter()
-                .map(|target| target.target_id.clone()),
-        )
-        .chain(
-            artifact_bundle
-                .face_targets
-                .iter()
-                .map(|target| target.target_id.clone()),
-        )
+                .cloned()
+                .chain(target.durable_target_id.iter().cloned())
+                .chain(target.canonical_target_id.iter().cloned())
+                .chain(target.alias_ids.iter().cloned())
+        })
+        .chain(artifact_bundle.edge_targets.iter().flat_map(|target| {
+            std::iter::once(target.target_id.clone())
+                .chain(target.durable_target_id.iter().cloned())
+                .chain(target.canonical_target_id.iter().cloned())
+                .chain(target.alias_ids.iter().cloned())
+        }))
+        .chain(artifact_bundle.face_targets.iter().flat_map(|target| {
+            std::iter::once(target.target_id.clone())
+                .chain(target.durable_target_id.iter().cloned())
+                .chain(target.canonical_target_id.iter().cloned())
+                .chain(target.alias_ids.iter().cloned())
+        }))
         .collect::<HashSet<_>>();
+    let is_step_source = Path::new(installed_source.source_path.trim())
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "step" | "stp"))
+        .unwrap_or(false);
+    let runtime_portable_topology_target_ids = if is_step_source {
+        runtime_target_ids
+            .iter()
+            .filter_map(|target_id| portable_topology_target_id(target_id))
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
 
     for port in &installed_source.component.ports {
         for target_id in &port.target_ids {
-            if !runtime_target_ids.contains(target_id) {
+            let literal_match = runtime_target_ids.contains(target_id);
+            let portable_match = is_step_source
+                && portable_topology_target_id(target_id)
+                    .map(|portable| runtime_portable_topology_target_ids.contains(&portable))
+                    .unwrap_or(false);
+            if !literal_match && !portable_match {
                 return Err(crate::models::AppError::validation(format!(
                     "Installed component '{}@{}:{}' port '{}' targetId '{}' was not found in rendered runtime topology.",
                     installed_source.package_id,
@@ -2037,12 +2208,150 @@ mod tests {
     use super::*;
 
     use crate::models::{
-        AssemblyComponentRef, AssemblyMate, AssemblyOutput, AssemblyOutputMode,
+        ArtifactBundle, AssemblyComponentRef, AssemblyMate, AssemblyOutput, AssemblyOutputMode,
         ComponentDefinition, ComponentFusionZone, ComponentInterfaceValue, ComponentKeepoutVolume,
-        ComponentParam, ComponentParamKind, ComponentPort, GeometryBackend,
+        ComponentParam, ComponentParamKind, ComponentPort, EngineKind, GeometryBackend,
         InstalledComponentSource, KeepoutVolumeKind, MacroDialect, ParamValue, ParsedParamsResult,
         PortReference, PortTypeDefinition, SelectOption, SelectValue, SourceLanguage, UiField,
+        ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
     };
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TestResolver {
+        root: PathBuf,
+    }
+
+    impl crate::models::PathResolver for TestResolver {
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    fn sample_manifest_value(alias_ids: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            "modelId": "generated-abc123",
+            "sourceKind": "generated",
+            "engineKind": "freecad",
+            "sourceLanguage": "legacyPython",
+            "geometryBackend": "freecad",
+            "document": {
+                "documentName": "Doc",
+                "documentLabel": "Doc",
+                "sourcePath": null,
+                "objectCount": 1,
+                "warnings": [],
+            },
+            "parts": [{
+                "partId": "part-shell",
+                "freecadObjectName": "Shell",
+                "label": "Shell",
+                "kind": "Part::Feature",
+                "semanticRole": "body",
+                "viewerAssetPath": "/tmp/node-shell.stl",
+                "viewerNodeIds": ["node-shell"],
+                "parameterKeys": ["radius"],
+                "editable": true,
+                "bounds": null,
+                "volume": null,
+                "area": null,
+            }],
+            "parameterGroups": [],
+            "controlPrimitives": [],
+            "controlRelations": [],
+            "controlViews": [],
+            "advisories": [],
+            "selectionTargets": [{
+                "targetId": "target-shell",
+                "aliasIds": alias_ids,
+                "partId": "part-shell",
+                "viewerNodeId": "node-shell",
+                "label": "Shell",
+                "kind": "object",
+                "editable": true,
+                "parameterKeys": [],
+                "primitiveIds": [],
+                "viewIds": [],
+            }],
+            "measurementAnnotations": [],
+            "warnings": [],
+            "enrichmentState": {
+                "status": "none",
+                "proposals": [],
+            },
+        })
+    }
+
+    fn sample_manifest(alias_ids: &[&str]) -> crate::models::ModelManifest {
+        serde_json::from_value(sample_manifest_value(alias_ids)).expect("sample manifest")
+    }
+
+    fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
+        ArtifactBundle {
+            schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: "generated-abc123".to_string(),
+            source_kind: crate::models::ModelSourceKind::Generated,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: manifest_path.to_string(),
+            macro_path: Some("/tmp/model.py".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: vec![ViewerEdgeTarget {
+                target_id: "alias-edge".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: vec!["legacy-edge".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell edge".to_string(),
+                editable: true,
+                start: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: ViewerEdgePoint {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            }],
+            face_targets: vec![ViewerFaceTarget {
+                target_id: "alias-face".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: vec!["legacy-face".to_string()],
+                part_id: "part-shell".to_string(),
+                viewer_node_id: "node-shell".to_string(),
+                label: "Shell face".to_string(),
+                editable: true,
+                center: ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                normal: Some([0.0, 0.0, 1.0]),
+                area: Some(10.0),
+            }],
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
+        }
+    }
 
     fn test_port(port_id: &str, frame: Option<PortFrame>) -> ComponentPort {
         ComponentPort {
@@ -2062,6 +2371,11 @@ mod tests {
         port_id: &str,
         frame: Option<PortFrame>,
     ) -> ComponentDefinition {
+        let initial_params = if component_id == "frame-rail" {
+            DesignParams::from([("mount_spacing".to_string(), ParamValue::Number(64.0))])
+        } else {
+            DesignParams::new()
+        };
         ComponentDefinition {
             component_id: component_id.to_string(),
             version: "1.0.0".to_string(),
@@ -2094,7 +2408,7 @@ mod tests {
                 unit: Some("mm".to_string()),
             }],
             ui_spec: crate::models::UiSpec::default(),
-            initial_params: DesignParams::new(),
+            initial_params,
             ports: vec![test_port(port_id, frame)],
         }
     }
@@ -2574,5 +2888,333 @@ mod tests {
                 ("rail".to_string(), "zone".to_string()),
             ])
         );
+    }
+
+    #[test]
+    fn artifact_bundle_target_ids_include_manifest_alias_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-component-package-target-ids-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let manifest_path = root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&sample_manifest_value(&["legacy-shell"]))
+                .expect("manifest json"),
+        )
+        .expect("manifest write");
+
+        let target_ids =
+            artifact_bundle_target_ids(&sample_artifact_bundle(&manifest_path.to_string_lossy()))
+                .expect("target ids");
+
+        assert!(target_ids.contains("target-shell"));
+        assert!(target_ids.contains("legacy-shell"));
+        assert!(target_ids.contains("alias-edge"));
+        assert!(target_ids.contains("legacy-edge"));
+        assert!(target_ids.contains("alias-face"));
+        assert!(target_ids.contains("legacy-face"));
+    }
+
+    #[test]
+    fn validate_rendered_component_port_targets_accepts_manifest_alias_ids() {
+        let mut installed = InstalledComponentSource {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            package_display_name: "Pkg".to_string(),
+            package_dir: "/tmp/pkg".to_string(),
+            component: test_component("frame-rail", "dovetail_rail", Some(PortFrame::identity())),
+            port_types: vec![PortTypeDefinition {
+                type_id: "mechanical.dovetail.rail.v1".to_string(),
+                display_name: "Rail".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            mate_types: Vec::new(),
+            source_path: "/tmp/pkg/component.ecky".to_string(),
+        };
+        installed.component.ports[0].target_ids = vec!["legacy-shell".to_string()];
+
+        validate_rendered_component_port_targets(
+            &installed,
+            &sample_artifact_bundle("/tmp/manifest.json"),
+            &sample_manifest(&["legacy-shell"]),
+        )
+        .expect("alias target id should resolve");
+    }
+
+    #[test]
+    fn validate_rendered_component_port_targets_accepts_viewer_alias_ids() {
+        let mut installed = InstalledComponentSource {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            package_display_name: "Pkg".to_string(),
+            package_dir: "/tmp/pkg".to_string(),
+            component: test_component("frame-rail", "dovetail_rail", Some(PortFrame::identity())),
+            port_types: vec![PortTypeDefinition {
+                type_id: "mechanical.dovetail.rail.v1".to_string(),
+                display_name: "Rail".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            mate_types: Vec::new(),
+            source_path: "/tmp/pkg/component.ecky".to_string(),
+        };
+        installed.component.ports[0].target_ids = vec!["legacy-edge".to_string()];
+
+        validate_rendered_component_port_targets(
+            &installed,
+            &sample_artifact_bundle("/tmp/manifest.json"),
+            &sample_manifest(&[]),
+        )
+        .expect("viewer alias target id should resolve");
+    }
+
+    #[test]
+    fn normalize_packaged_component_ports_prefers_public_viewer_target_ids_for_alias_input() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-component-package-normalize-viewer-alias-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let manifest_path = root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&sample_manifest_value(&[])).expect("manifest json"),
+        )
+        .expect("manifest write");
+
+        let normalized = normalize_packaged_component_ports(
+            &[ComponentPort {
+                port_id: "anchor".to_string(),
+                type_id: "mechanical.anchor.v1".to_string(),
+                target_ids: vec!["legacy-edge".to_string()],
+                frame: None,
+                params: Default::default(),
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+            }],
+            &sample_artifact_bundle(&manifest_path.to_string_lossy()),
+            true,
+        )
+        .expect("viewer alias target id should normalize");
+
+        assert_eq!(normalized[0].target_ids, vec!["alias-edge".to_string()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn normalize_packaged_component_ports_prefers_public_viewer_target_ids_for_canonical_input() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-component-package-normalize-viewer-canonical-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let manifest_path = root.join("manifest.json");
+        let mut manifest_value = sample_manifest_value(&[]);
+        manifest_value["selectionTargets"][0]["canonicalTargetId"] =
+            serde_json::Value::String("canonical-shell".to_string());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest_value).expect("manifest json"),
+        )
+        .expect("manifest write");
+
+        let mut bundle = sample_artifact_bundle(&manifest_path.to_string_lossy());
+        bundle.edge_targets[0].canonical_target_id = Some("canonical-edge".to_string());
+
+        let normalized = normalize_packaged_component_ports(
+            &[ComponentPort {
+                port_id: "anchor".to_string(),
+                type_id: "mechanical.anchor.v1".to_string(),
+                target_ids: vec!["canonical-edge".to_string()],
+                frame: None,
+                params: Default::default(),
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+            }],
+            &bundle,
+            true,
+        )
+        .expect("viewer canonical target id should normalize");
+
+        assert_eq!(normalized[0].target_ids, vec!["alias-edge".to_string()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn normalize_packaged_component_ports_prefers_public_viewer_target_ids_for_durable_input() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-component-package-normalize-viewer-durable-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let manifest_path = root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&sample_manifest_value(&[])).expect("manifest json"),
+        )
+        .expect("manifest write");
+
+        let mut bundle = sample_artifact_bundle(&manifest_path.to_string_lossy());
+        bundle.edge_targets[0].durable_target_id = Some("durable-edge".to_string());
+
+        let normalized = normalize_packaged_component_ports(
+            &[ComponentPort {
+                port_id: "anchor".to_string(),
+                type_id: "mechanical.anchor.v1".to_string(),
+                target_ids: vec!["durable-edge".to_string()],
+                frame: None,
+                params: Default::default(),
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+            }],
+            &bundle,
+            true,
+        )
+        .expect("viewer durable target id should normalize");
+
+        assert_eq!(normalized[0].target_ids, vec!["alias-edge".to_string()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn write_artifact_bundle_component_package_project_round_trips_build123d_exact_target_ids_through_step(
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-component-package-build123d-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let resolver = TestResolver { root: root.clone() };
+        let build123d_capability = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
+        let freecad_capability =
+            crate::runtime_capabilities::probe_freecad_runtime(None, &resolver);
+        if !build123d_capability.available || !freecad_capability.available {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+
+        let source = r#"(model
+                (part body
+                  (box 10.246912 7.135791 3.864209)))"#;
+        let bundle = crate::build123d::render_model_with_sources(
+            &crate::ecky_ir::lower_to_build123d(source).expect("lower"),
+            Some(source),
+            &DesignParams::new(),
+            &resolver,
+            SourceLanguage::EckyIrV0,
+        )
+        .expect("build123d render");
+        let edge_target_id = bundle
+            .edge_targets
+            .first()
+            .map(|target| target.target_id.clone())
+            .expect("edge target");
+        let face_target_id = bundle
+            .face_targets
+            .first()
+            .map(|target| target.target_id.clone())
+            .expect("face target");
+        let build123d_manifest = read_model_manifest_from_path(Path::new(&bundle.manifest_path))
+            .expect("bundle manifest");
+        let expected_edge_target_id = build123d_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .and_then(|target| target.target_id.clone())
+            .expect("edge target");
+        let expected_face_target_id = build123d_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .and_then(|target| target.target_id.clone())
+            .expect("face target");
+        let project_dir = root.join("pkg");
+        fs::create_dir_all(&project_dir).expect("project dir");
+
+        let package = write_artifact_bundle_component_package_project_impl(
+            &project_dir,
+            ArtifactBundleComponentPackageRequest {
+                package_id: "pkg.build123d".to_string(),
+                version: "1.0.0".to_string(),
+                display_name: "Build123d Pkg".to_string(),
+                tags: Vec::new(),
+                component_id: "body".to_string(),
+                component_version: "1.0.0".to_string(),
+                component_display_name: "Body".to_string(),
+                source_ref: Some("components/body/source.step".to_string()),
+                artifact_bundle: bundle,
+                port_types: vec![PortTypeDefinition {
+                    type_id: "mechanical.anchor.v1".to_string(),
+                    display_name: "Anchor".to_string(),
+                    base: None,
+                    interfaces: Vec::new(),
+                    compatible_with: Vec::new(),
+                    allowed_ops: Vec::new(),
+                    params: Vec::new(),
+                }],
+                params: Vec::new(),
+                ui_spec: crate::models::UiSpec::default(),
+                initial_params: DesignParams::new(),
+                ports: vec![ComponentPort {
+                    port_id: "anchor".to_string(),
+                    type_id: "mechanical.anchor.v1".to_string(),
+                    target_ids: vec![edge_target_id, face_target_id],
+                    frame: None,
+                    params: Default::default(),
+                    interfaces: Vec::new(),
+                    compatible_with: Vec::new(),
+                    allowed_ops: Vec::new(),
+                }],
+            },
+        )
+        .expect("package write");
+
+        assert_eq!(package.components.len(), 1);
+        assert_eq!(package.components[0].ports.len(), 1);
+        assert_eq!(package.components[0].ports[0].target_ids.len(), 2);
+        assert_eq!(
+            package.components[0].ports[0].target_ids,
+            vec![expected_edge_target_id, expected_face_target_id]
+        );
+        let source_path = project_dir.join("components/body/source.step");
+        assert!(source_path.is_file());
+
+        let imported_bundle =
+            crate::freecad::import_step(source_path.to_string_lossy().as_ref(), None, &resolver)
+                .expect("import packaged step");
+        let imported_manifest =
+            read_model_manifest_from_path(Path::new(&imported_bundle.manifest_path))
+                .expect("imported manifest");
+        let installed_source = InstalledComponentSource {
+            package_id: package.package_id.clone(),
+            version: package.version.clone(),
+            package_display_name: package.display_name.clone(),
+            package_dir: project_dir.to_string_lossy().to_string(),
+            component: package.components[0].clone(),
+            port_types: package.port_types.clone(),
+            mate_types: package.mate_types.clone(),
+            source_path: source_path.to_string_lossy().to_string(),
+        };
+
+        validate_rendered_component_port_targets(
+            &installed_source,
+            &imported_bundle,
+            &imported_manifest,
+        )
+        .expect("round-trip target ids");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

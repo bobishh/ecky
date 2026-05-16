@@ -30,6 +30,12 @@ const document: SketchDocument = {
             [10, 20],
           ],
           closed: true,
+          topology: {
+            loopId: 'front-outer',
+            edgeIds: ['front-a', 'front-b', 'front-c', 'front-d'],
+            loopRole: 'outer',
+            sourceClass: 'derived',
+          },
         },
       ],
     },
@@ -130,7 +136,9 @@ test('sketchDocumentToStrokes replays closed polylines with primitiveId and view
   assert.deepEqual(result.strokes, [
     {
       primitiveId: 'primitive-front-7',
+      sketchId: 'sketch-front',
       view: 'front',
+      kind: 'polyline',
       points: [
         [10, 20],
         [40, 20],
@@ -139,10 +147,18 @@ test('sketchDocumentToStrokes replays closed polylines with primitiveId and view
         [10, 20],
       ],
       closed: true,
+      topology: {
+        loopId: 'front-outer',
+        edgeIds: ['front-a', 'front-b', 'front-c', 'front-d'],
+        loopRole: 'outer',
+        sourceClass: 'derived',
+      },
     },
     {
       primitiveId: 'primitive-top-3',
+      sketchId: 'sketch-top',
       view: 'top',
+      kind: 'polyline',
       points: [
         [5, 5],
         [25, 5],
@@ -154,6 +170,36 @@ test('sketchDocumentToStrokes replays closed polylines with primitiveId and view
   ]);
 });
 
+test('sketchDocumentToStrokes preserves source sketchId on replayed strokes', () => {
+  const result = sketchDocumentToStrokes({
+    ...document,
+    sketches: [
+      {
+        sketchId: 'sketch-alpha',
+        view: 'front',
+        primitives: [
+          {
+            primitiveId: 'primitive-front-7',
+            kind: 'polyline',
+            points: [
+              [10, 20],
+              [40, 20],
+              [40, 50],
+              [10, 50],
+              [10, 20],
+            ],
+            closed: true,
+          },
+        ],
+      },
+    ],
+    activeSketchId: 'sketch-alpha',
+  });
+
+  assert.ok(!('error' in result));
+  assert.equal(result.strokes[0]?.sketchId, 'sketch-alpha');
+});
+
 test('sketchDocumentJsonToStrokes replays closed polylines from JSON text', () => {
   const result = sketchDocumentJsonToStrokes(JSON.stringify({ document }));
 
@@ -161,7 +207,9 @@ test('sketchDocumentJsonToStrokes replays closed polylines from JSON text', () =
   assert.deepEqual(result.strokes, [
     {
       primitiveId: 'primitive-front-7',
+      sketchId: 'sketch-front',
       view: 'front',
+      kind: 'polyline',
       points: [
         [10, 20],
         [40, 20],
@@ -170,10 +218,18 @@ test('sketchDocumentJsonToStrokes replays closed polylines from JSON text', () =
         [10, 20],
       ],
       closed: true,
+      topology: {
+        loopId: 'front-outer',
+        edgeIds: ['front-a', 'front-b', 'front-c', 'front-d'],
+        loopRole: 'outer',
+        sourceClass: 'derived',
+      },
     },
     {
       primitiveId: 'primitive-top-3',
+      sketchId: 'sketch-top',
       view: 'top',
+      kind: 'polyline',
       points: [
         [5, 5],
         [25, 5],
@@ -342,10 +398,11 @@ test('sketchDocumentJsonToStrokes replays circle primitives with center and radi
     ),
     {
       strokes: [
-        {
-          primitiveId: 'primitive-front-1',
-          view: 'front',
-          kind: 'circle',
+      {
+        primitiveId: 'primitive-front-1',
+        sketchId: 'sketch-front',
+        view: 'front',
+        kind: 'circle',
           points: [[10, 20]],
           closed: true,
           radius: 12,

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import type { ArtifactBundle, Message, ModelManifest } from '../types/domain';
 import {
+  beginThreadSwitchForTests,
+  mergeActiveThreadMessagesForTests,
   rememberVersionRuntimePayloadForTests,
   mergeCommittedVersionMessageForTests,
   persistVersionRuntimePayloadForTests,
@@ -10,6 +12,9 @@ import {
   resetVersionRuntimePayloadCacheForTests,
 } from './history';
 import type { Thread } from '../types/domain';
+import { activeThreadIdStore, activeVersionId } from './domainState';
+import { session } from './sessionStore';
+import { get } from 'svelte/store';
 
 function sampleBundle(modelId: string, previewStlPath: string): ArtifactBundle {
   return {
@@ -155,4 +160,47 @@ test('mergeCommittedVersionMessage inserts committed fork message into new activ
   assert.equal(merged[0].messages[0]?.id, 'msg-fork');
   assert.equal(merged[0].versionCount, 1);
   assert.equal(merged[1].id, 'thread-old');
+});
+
+test('mergeActiveThreadMessages preserves seeded active version when first page omits it', () => {
+  const active = sampleMessage('msg-active', sampleBundle('model-active', '/tmp/active.stl'), sampleManifest('model-active'));
+  const older = sampleMessage('msg-older', sampleBundle('model-older', '/tmp/older.stl'), sampleManifest('model-older'));
+
+  const merged = mergeActiveThreadMessagesForTests([active], [older], 'msg-active');
+
+  assert.deepEqual(merged.map((message) => message.id), ['msg-active', 'msg-older']);
+});
+
+test('mergeActiveThreadMessages hydrates skinny page payload from seeded active version', () => {
+  const active = sampleMessage('msg-active', sampleBundle('model-active', '/tmp/active.stl'), sampleManifest('model-active'));
+  const skinny: Message = {
+    ...active,
+    output: null,
+    artifactBundle: null,
+    modelManifest: null,
+  };
+
+  const merged = mergeActiveThreadMessagesForTests([active], [skinny], 'msg-active');
+
+  assert.equal(merged[0]?.id, 'msg-active');
+  assert.equal(merged[0]?.artifactBundle?.previewStlPath, '/tmp/active.stl');
+  assert.equal(merged[0]?.modelManifest?.modelId, 'model-active');
+});
+
+test('Given thread switch starts When previous model is still loaded Then stale version runtime is detached before new thread becomes active', () => {
+  const oldBundle = sampleBundle('model-old', '/tmp/old.stl');
+  const oldManifest = sampleManifest('model-old');
+
+  activeThreadIdStore.set('thread-old');
+  activeVersionId.set('message-old');
+  session.setStlUrl('/tmp/old.stl');
+  session.setModelRuntime(oldBundle, oldManifest);
+
+  beginThreadSwitchForTests('thread-new');
+
+  assert.equal(get(activeThreadIdStore), 'thread-new');
+  assert.equal(get(activeVersionId), null);
+  assert.equal(get(session).stlUrl, null);
+  assert.equal(get(session).artifactBundle, null);
+  assert.equal(get(session).modelManifest, null);
 });

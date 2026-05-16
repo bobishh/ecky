@@ -8,6 +8,7 @@ import type {
   SketchValidationIssue,
   SketchView,
 } from './tauri/contracts';
+import { findSketchIssueMatch } from './sketchIssueLocator';
 
 type Point2d = [number, number];
 
@@ -45,9 +46,6 @@ export function autoRepairSketchDocumentFromBrepProjection(
     return { document: nextDocument, evidence: [], repaired: false };
   }
   const issues = validation.issues ?? [];
-  if (issues.some((issue) => repairKindFromIssue(issue) === null)) {
-    return { document: nextDocument, evidence: [], repaired: false };
-  }
 
   const evidence: SketchBrepAutoRepairEvidence[] = [];
   const repairedPrimitiveIds = new Set<string>();
@@ -87,7 +85,13 @@ function repairProjectionMismatch(
   const sourcePoints = primitive.points?.filter(isPoint2d) ?? [];
   const logicalPoints = stripDuplicateClosingPoint(sourcePoints);
   const sourceBounds = boundsFromPoints(logicalPoints);
-  const projectionBounds = boundsFromProjectionView(projectionView);
+  const localizedProjectionBounds = targetedProjectionBounds(projectionView, issue, primitive);
+  const projectionBounds =
+    repairKind === 'containment'
+      ? localizedProjectionBounds ?? boundsFromProjectionView(projectionView)
+      : localizedProjectionBounds && boundsAreScalable(localizedProjectionBounds)
+        ? localizedProjectionBounds
+        : boundsFromProjectionView(projectionView);
   if (!sourceBounds || !projectionBounds) return null;
 
   const targetBounds = repairKind === 'bounds' ? projectionBounds : unionBounds(sourceBounds, projectionBounds);
@@ -110,9 +114,9 @@ function repairProjectionMismatch(
 }
 
 function repairKindFromIssue(issue: SketchValidationIssue): 'bounds' | 'containment' | null {
-  const message = issue.message.toLowerCase();
-  if (message.includes('bounds mismatch')) return 'bounds';
-  if (message.includes('containment mismatch')) return 'containment';
+  const kind = issue.kind;
+  if (kind === 'boundsMismatch') return 'bounds';
+  if (kind === 'containmentMismatch') return 'containment';
   return null;
 }
 
@@ -120,52 +124,8 @@ function findPrimitive(
   document: SketchDocument,
   issue: SketchValidationIssue,
 ): { sketch: SketchDefinition; primitive: SketchPrimitive } | null {
-  if (!issue.primitiveId) {
-    return inferSingleSketchPrimitive(document, issue);
-  }
-
-  for (const sketch of document.sketches ?? []) {
-    if (issue.sketchId && sketch.sketchId !== issue.sketchId) continue;
-    const primitive = (sketch.primitives ?? []).find((item) => item.primitiveId === issue.primitiveId);
-    if (primitive) return { sketch, primitive };
-  }
-
-  for (const sketch of document.sketches ?? []) {
-    const primitive = (sketch.primitives ?? []).find((item) => item.primitiveId === issue.primitiveId);
-    if (primitive) return { sketch, primitive };
-  }
-
-  return null;
-}
-
-function inferSingleSketchPrimitive(
-  document: SketchDocument,
-  issue: SketchValidationIssue,
-): { sketch: SketchDefinition; primitive: SketchPrimitive } | null {
-  const sketch =
-    (document.sketches ?? []).find((item) => item.sketchId === issue.sketchId) ??
-    sketchByInferredView(document, issue.message);
-  if (!sketch) return null;
-
-  const candidates = (sketch.primitives ?? []).filter(
-    (primitive) => primitive.kind === 'polyline' && primitive.closed === true && (primitive.points ?? []).filter(isPoint2d).length >= 4,
-  );
-  if (candidates.length !== 1) return null;
-
-  return { sketch, primitive: candidates[0] };
-}
-
-function sketchByInferredView(document: SketchDocument, text: string): SketchDefinition | null {
-  const view = inferViewFromText(text);
-  if (!view) return null;
-  return (document.sketches ?? []).find((sketch) => sketch.view === view) ?? null;
-}
-
-function inferViewFromText(text: string): SketchView | null {
-  const lower = text.toLowerCase();
-  if (lower.includes('front')) return 'front';
-  if (lower.includes('top')) return 'top';
-  if (lower.includes('side')) return 'side';
+  const exactMatch = findSketchIssueMatch(document, issue);
+  if (exactMatch?.primitive) return exactMatch as { sketch: SketchDefinition; primitive: SketchPrimitive };
   return null;
 }
 
@@ -176,6 +136,41 @@ function boundsFromProjectionView(view: BrepHiddenLineProjectionView): Bounds2d 
 
 function edgePoints(edge: BrepProjectedEdge2d): Point2d[] {
   return (edge.points ?? []).filter(isPoint2d);
+}
+
+function targetedProjectionBounds(
+  view: BrepHiddenLineProjectionView,
+  issue: SketchValidationIssue,
+  primitive: SketchPrimitive,
+): Bounds2d | null {
+  const topology = issue.topology ?? primitive.topology ?? null;
+  const loops = view.loops ?? [];
+  const matchedLoop =
+    (topology?.loopId ? loops.find((loop) => loop.loopId === topology.loopId) : null) ??
+    (topology?.edgeIds?.length
+      ? loops.find((loop) => sameEdgeIds(loop.edgeIds, topology.edgeIds))
+      : null);
+  const loopBounds = matchedLoop ? boundsFromPoints((matchedLoop.points ?? []).filter(isPoint2d)) : null;
+  if (loopBounds) return loopBounds;
+
+  const edges = [...(view.visibleEdges ?? []), ...(view.hiddenEdges ?? [])];
+  if (topology?.edgeIds?.length) {
+    const targetEdgeIds = new Set(normalizedEdgeIds(topology.edgeIds));
+    const matchingPoints = edges
+      .filter((edge) => targetEdgeIds.has(edge.edgeId.trim()))
+      .flatMap((edge) => edgePoints(edge));
+    const edgeBounds = boundsFromPoints(matchingPoints);
+    if (edgeBounds) return edgeBounds;
+  }
+
+  if (issue.edgeId) {
+    const edgeBounds = boundsFromPoints(
+      edges.filter((edge) => edge.edgeId.trim() === issue.edgeId?.trim()).flatMap((edge) => edgePoints(edge)),
+    );
+    if (edgeBounds) return edgeBounds;
+  }
+
+  return null;
 }
 
 function boundsFromPoints(points: Point2d[]): Bounds2d | null {
@@ -224,6 +219,16 @@ function boundsEqual(left: Bounds2d, right: Bounds2d): boolean {
 
 function close(left: number, right: number): boolean {
   return Math.abs(left - right) <= 1e-6;
+}
+
+function sameEdgeIds(left: string[] | undefined, right: string[] | undefined): boolean {
+  const a = normalizedEdgeIds(left);
+  const b = normalizedEdgeIds(right);
+  return a.length > 0 && a.length === b.length && a.every((edgeId, index) => edgeId === b[index]);
+}
+
+function normalizedEdgeIds(edgeIds: string[] | undefined): string[] {
+  return [...(edgeIds ?? [])].map((edgeId) => edgeId.trim()).filter(Boolean).sort();
 }
 
 function remapPointToBounds(point: Point2d, sourceBounds: Bounds2d, targetBounds: Bounds2d): Point2d {

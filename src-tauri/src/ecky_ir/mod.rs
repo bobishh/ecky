@@ -1,5 +1,5 @@
 mod build123d_lowering;
-mod edge_ops;
+pub(crate) mod edge_ops;
 mod eval_scalar;
 mod freecad_lowering;
 mod mesh_ops;
@@ -145,7 +145,7 @@ fn core_node_uses_ecky_rust_only_cad_ops(node: &CoreNode) -> bool {
                 || args.iter().any(core_node_uses_ecky_rust_only_cad_ops)
                 || keywords
                     .iter()
-                    .any(|keyword| core_node_uses_ecky_rust_only_cad_ops(&keyword.value))
+                    .any(|keyword| core_node_uses_ecky_rust_only_cad_ops(keyword.source_node()))
         }
         CoreNodeKind::Map { sources, body, .. } => {
             sources.iter().any(core_node_uses_ecky_rust_only_cad_ops)
@@ -191,7 +191,7 @@ fn core_node_uses_exact_backend_only_cad_ops(node: &CoreNode) -> bool {
                 || args.iter().any(core_node_uses_exact_backend_only_cad_ops)
                 || keywords
                     .iter()
-                    .any(|keyword| core_node_uses_exact_backend_only_cad_ops(&keyword.value))
+                    .any(|keyword| core_node_uses_exact_backend_only_cad_ops(keyword.source_node()))
         }
         CoreNodeKind::Map { sources, body, .. } => {
             sources

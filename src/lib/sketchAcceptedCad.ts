@@ -1,6 +1,7 @@
 import type { BrepHiddenLineProjectionResponse } from './tauri/contracts';
 import type { ArtifactBundle } from './types/domain';
 import type { SketchValidationRow } from './sketchValidationLedger';
+import { summarizeSketchValidationIssues } from './sketchValidationIssueSummary';
 
 export type SketchAcceptedCadInput = {
   artifactBundle: ArtifactBundle | null;
@@ -20,11 +21,10 @@ export function buildSketchAcceptedCadRow(input: SketchAcceptedCadInput): Sketch
 
   if (input.hiddenLineResponse?.validation) {
     const validation = input.hiddenLineResponse.validation;
-    const warning = brepSketchWarning(input.hiddenLineResponse);
-    const issueText = validation.issues?.map((issue) => issue.message).filter(Boolean).join('; ') ?? '';
+    const issueText = summarizeSketchValidationIssues(validation.issues);
 
-    if (!validation.passed || warning || issueText) {
-      return acceptedCadRow('fail', warning || issueText || 'Exact BRep/sketch validation failed.');
+    if (!validation.passed || (validation.issues?.length ?? 0) > 0) {
+      return acceptedCadRow('fail', issueText || 'Exact BRep/sketch validation failed.');
     }
 
     const viewCount = input.hiddenLineResponse.views?.length ?? 0;
@@ -67,10 +67,6 @@ function acceptedCadRow(status: SketchValidationRow['status'], detail: string): 
 function hasBrepArtifact(bundle: ArtifactBundle): boolean {
   if (bundle.fcstdPath) return true;
   return Boolean(bundle.exportArtifacts?.some((artifact) => artifact.format === 'step' && artifact.path));
-}
-
-function brepSketchWarning(response: BrepHiddenLineProjectionResponse): string {
-  return response.warnings?.find((warning) => warning.toLowerCase().includes('brep/sketch')) ?? '';
 }
 
 function basename(path: string | null | undefined): string {

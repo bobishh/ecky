@@ -1,9 +1,10 @@
 use crate::models::{
-    normalize_design_output, upgraded_or_default_genie_traits, ArtifactBundle, DeletedMessage,
-    DesignOutput, DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest,
-    TargetLeaseInfo, Thread, ThreadMessagesPage, ThreadReference, UiSpec,
+    normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, ArtifactBundle,
+    DeletedMessage, DesignOutput, DesignParams, GenieTraits, Message, MessageRole, MessageStatus,
+    ModelManifest, TargetLeaseInfo, Thread, ThreadMessagesPage, ThreadReference, UiSpec,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, Clone)]
 struct ThreadMessageRow {
@@ -110,6 +111,38 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         [],
     )?;
 
+    if !table_has_column(&conn, "agent_drafts", "preview_id")? {
+        let _ = conn.execute("DROP TABLE IF EXISTS agent_drafts", []);
+    }
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_drafts (
+            preview_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            base_message_id TEXT,
+            design_output TEXT NOT NULL,
+            artifact_bundle TEXT NOT NULL,
+            model_manifest TEXT NOT NULL,
+            draft_feedback TEXT,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    let _ = conn.execute(
+        "ALTER TABLE agent_drafts ADD COLUMN draft_feedback TEXT",
+        [],
+    );
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_drafts_session
+         ON agent_drafts(session_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_drafts_thread_updated
+         ON agent_drafts(thread_id, updated_at DESC)",
+        [],
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS target_leases (
             lease_id TEXT PRIMARY KEY,
@@ -160,7 +193,6 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN artifact_bundle TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN model_manifest TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN agent_origin TEXT", []);
-    let _ = conn.execute("DROP TABLE IF EXISTS agent_drafts", []);
     let _ = conn.execute(
         "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'success'",
         [],
@@ -210,6 +242,21 @@ fn deserialize_thread_genie_traits(thread_id: &str, raw: Option<&str>) -> GenieT
 
 fn deserialize_agent_origin(raw: Option<&str>) -> Option<crate::models::AgentOrigin> {
     raw.and_then(|json| serde_json::from_str(json).ok())
+}
+
+fn serialize_json<T: serde::Serialize>(value: &T) -> SqlResult<String> {
+    serde_json::to_string(value).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn deserialize_json<T: DeserializeOwned>(raw: &str) -> SqlResult<T> {
+    serde_json::from_str(raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+fn deserialize_design_output_json(raw: &str) -> SqlResult<DesignOutput> {
+    let parsed: DesignOutput = deserialize_json(raw)?;
+    Ok(normalize_design_output(parsed))
 }
 
 fn migrate_thread_genie_traits(conn: &Connection) -> SqlResult<()> {
@@ -313,7 +360,7 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm
@@ -371,7 +418,7 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm
@@ -618,7 +665,7 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND deleted_at IS NULL) as e_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm
@@ -742,7 +789,11 @@ pub fn add_thread_reference(conn: &Connection, reference: &ThreadReference) -> S
 pub fn get_thread_messages(conn: &Connection, thread_id: &str) -> SqlResult<Vec<Message>> {
     Ok(load_thread_message_rows(conn, thread_id, false)?
         .into_iter()
-        .filter(|row| row.deleted_at.is_none() && row.message.status != MessageStatus::Discarded)
+        .filter(|row| {
+            row.deleted_at.is_none()
+                && row.message.status != MessageStatus::Discarded
+                && !is_agent_tool_error_message(&row.message)
+        })
         .map(|row| row.message)
         .collect())
 }
@@ -763,6 +814,10 @@ pub fn get_thread_messages_for_thread_view(
             }
 
             if row.message.status == MessageStatus::Discarded && !is_version_message(&row.message) {
+                return None;
+            }
+
+            if is_agent_tool_error_message(&row.message) {
                 return None;
             }
 
@@ -804,6 +859,25 @@ pub fn get_thread_message_version(
         Some(1),
     )?;
     Ok(rows.into_iter().next().map(|row| row.message))
+}
+
+pub fn get_latest_pending_user_message_id(
+    conn: &Connection,
+    thread_id: &str,
+) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT id
+         FROM messages
+         WHERE thread_id = ?1
+           AND deleted_at IS NULL
+           AND role = 'user'
+           AND status = 'pending'
+         ORDER BY timestamp DESC, rowid DESC
+         LIMIT 1",
+        [thread_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 pub fn get_thread_messages_page(
@@ -849,6 +923,9 @@ pub fn get_thread_messages_page(
             } else if row.message.status == MessageStatus::Discarded
                 && !is_version_message(&row.message)
             {
+                return None;
+            }
+            if is_agent_tool_error_message(&row.message) {
                 return None;
             }
 
@@ -930,6 +1007,9 @@ pub fn get_thread_messages_for_context(
 
     for (index, row) in rows.iter().enumerate() {
         if row.deleted_at.is_some() || row.message.status == MessageStatus::Discarded {
+            continue;
+        }
+        if is_agent_tool_error_message(&row.message) {
             continue;
         }
 
@@ -1049,6 +1129,13 @@ fn load_thread_message_rows_from_stmt(
 
 fn is_version_message(message: &Message) -> bool {
     message.role == MessageRole::Assistant && message.artifact_bundle.is_some()
+}
+
+fn is_agent_tool_error_message(message: &Message) -> bool {
+    message.role == MessageRole::Assistant
+        && message.status == MessageStatus::Error
+        && message.agent_origin.is_some()
+        && message.artifact_bundle.is_none()
 }
 
 pub fn get_thread_references(
@@ -1458,6 +1545,93 @@ pub fn update_message_artifact_bundle(
     conn.execute(
         "UPDATE messages SET artifact_bundle = ?1 WHERE id = ?2",
         params![serialized, message_id],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_agent_draft(conn: &Connection, draft: &AgentDraft) -> SqlResult<()> {
+    let design_output = serialize_json(&draft.design_output)?;
+    let artifact_bundle = serialize_json(&draft.artifact_bundle)?;
+    let model_manifest = serialize_json(&draft.model_manifest)?;
+    let draft_feedback = match &draft.draft_feedback {
+        Some(feedback) => Some(serialize_json(feedback)?),
+        None => None,
+    };
+    conn.execute(
+        "INSERT INTO agent_drafts (
+            preview_id,
+            session_id,
+            thread_id,
+            base_message_id,
+            design_output,
+            artifact_bundle,
+            model_manifest,
+            draft_feedback,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(session_id) DO UPDATE SET
+            preview_id = excluded.preview_id,
+            thread_id = excluded.thread_id,
+            base_message_id = excluded.base_message_id,
+            design_output = excluded.design_output,
+            artifact_bundle = excluded.artifact_bundle,
+            model_manifest = excluded.model_manifest,
+            draft_feedback = excluded.draft_feedback,
+            updated_at = excluded.updated_at",
+        params![
+            draft.preview_id,
+            draft.session_id,
+            draft.thread_id,
+            draft.base_message_id,
+            design_output,
+            artifact_bundle,
+            model_manifest,
+            draft_feedback,
+            draft.updated_at as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn agent_draft_from_row(row: &rusqlite::Row<'_>) -> SqlResult<AgentDraft> {
+    let design_output: String = row.get(4)?;
+    let artifact_bundle: String = row.get(5)?;
+    let model_manifest: String = row.get(6)?;
+    let draft_feedback: Option<String> = row.get(7)?;
+    Ok(AgentDraft {
+        preview_id: row.get(0)?,
+        session_id: row.get(1)?,
+        thread_id: row.get(2)?,
+        base_message_id: row.get(3)?,
+        design_output: deserialize_design_output_json(&design_output)?,
+        artifact_bundle: deserialize_json(&artifact_bundle)?,
+        model_manifest: deserialize_json(&model_manifest)?,
+        draft_feedback: draft_feedback
+            .as_deref()
+            .map(deserialize_json)
+            .transpose()?,
+        updated_at: row.get::<_, i64>(8)? as u64,
+    })
+}
+
+pub fn get_agent_draft_for_session(
+    conn: &Connection,
+    session_id: &str,
+) -> SqlResult<Option<AgentDraft>> {
+    conn.query_row(
+        "SELECT preview_id, session_id, thread_id, base_message_id, design_output, artifact_bundle, model_manifest, draft_feedback, updated_at
+         FROM agent_drafts
+         WHERE session_id = ?1",
+        params![session_id],
+        agent_draft_from_row,
+    )
+    .optional()
+}
+
+pub fn delete_agent_draft_for_session(conn: &Connection, session_id: &str) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM agent_drafts WHERE session_id = ?1",
+        params![session_id],
     )?;
     Ok(())
 }
@@ -1980,6 +2154,30 @@ mod tests {
                 updated_at INTEGER NOT NULL,
                 managed_runtime INTEGER NOT NULL DEFAULT 0
             )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS agent_drafts (
+                preview_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                base_message_id TEXT,
+                design_output TEXT NOT NULL,
+                artifact_bundle TEXT NOT NULL,
+                model_manifest TEXT NOT NULL,
+                draft_feedback TEXT,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_drafts_session
+             ON agent_drafts(session_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_drafts_thread_updated
+             ON agent_drafts(thread_id, updated_at DESC)",
             [],
         )?;
         conn.execute(
@@ -2624,6 +2822,99 @@ mod tests {
     }
 
     #[test]
+    fn thread_message_reads_hide_agent_tool_errors_from_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        create_or_update_thread(&conn, "thread-agent-errors", "Thread", 100, None).unwrap();
+        let visible_user = Message {
+            id: "user-visible".to_string(),
+            role: MessageRole::User,
+            content: "make roof pins".to_string(),
+            status: MessageStatus::Success,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            agent_origin: None,
+            timestamp: 100,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        let agent_error = Message {
+            id: "agent-error".to_string(),
+            role: MessageRole::Assistant,
+            content: "Expected a symbolic head for runtime list expression.".to_string(),
+            status: MessageStatus::Error,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            agent_origin: Some(crate::models::AgentOrigin {
+                host_label: "Codex MCP Client".to_string(),
+                client_kind: "mcp-http".to_string(),
+                agent_label: "Ecky".to_string(),
+                llm_model_id: None,
+                llm_model_label: None,
+                session_id: "session-1".to_string(),
+                created_at: 101,
+            }),
+            timestamp: 101,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        let generation_error = Message {
+            id: "generation-error".to_string(),
+            role: MessageRole::Assistant,
+            content: "Generation failed.".to_string(),
+            status: MessageStatus::Error,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            agent_origin: None,
+            timestamp: 102,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        add_message(&conn, "thread-agent-errors", &visible_user).unwrap();
+        add_message(&conn, "thread-agent-errors", &agent_error).unwrap();
+        add_message(&conn, "thread-agent-errors", &generation_error).unwrap();
+
+        let full = get_thread_messages(&conn, "thread-agent-errors").unwrap();
+        assert_eq!(
+            full.iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-visible", "generation-error"]
+        );
+
+        let page = get_thread_messages_page(&conn, "thread-agent-errors", None, 50, true).unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-visible", "generation-error"]
+        );
+
+        let context = get_thread_messages_for_context(&conn, "thread-agent-errors").unwrap();
+        assert_eq!(
+            context
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-visible", "generation-error"]
+        );
+
+        let threads = get_all_threads(&conn).unwrap();
+        assert_eq!(threads[0].error_count, 1);
+    }
+
+    #[test]
     fn create_or_update_thread_preserves_existing_title_on_conflict() {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
@@ -2754,7 +3045,9 @@ mod tests {
 
     #[test]
     fn test_read_real_db() {
-        let db_path = std::path::Path::new("/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/history.sqlite");
+        let db_path = std::path::Path::new(
+            "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/history.sqlite",
+        );
         if !db_path.exists() {
             println!("No DB found at path");
             return;
@@ -2856,7 +3149,7 @@ mod tests {
     }
 
     #[test]
-    fn init_db_drops_legacy_agent_drafts_table() {
+    fn init_db_preserves_agent_drafts_table() {
         let db_path =
             std::env::temp_dir().join(format!("ecky-agent-drafts-legacy-{}", uuid::Uuid::new_v4()));
         {
@@ -2882,7 +3175,119 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 0);
+        assert_eq!(table_count, 1);
+        assert!(table_has_column(&conn, "agent_drafts", "draft_feedback").unwrap());
+    }
+
+    #[test]
+    fn agent_draft_roundtrip_preserves_draft_feedback() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let draft = AgentDraft {
+            preview_id: "preview-1".to_string(),
+            session_id: "session-1".to_string(),
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: crate::models::DesignOutput {
+                title: "Draft".to_string(),
+                version_name: String::new(),
+                response: "ok".to_string(),
+                interaction_mode: InteractionMode::Design,
+                macro_code: "draft_macro()".to_string(),
+                macro_dialect: crate::models::MacroDialect::Legacy,
+                engine_kind: crate::models::EngineKind::Freecad,
+                source_language: crate::models::SourceLanguage::LegacyPython,
+                geometry_backend: crate::models::GeometryBackend::Freecad,
+                ui_spec: UiSpec { fields: Vec::new() },
+                initial_params: DesignParams::from([(
+                    "diameter".to_string(),
+                    ParamValue::Number(12.0),
+                )]),
+                post_processing: None,
+            },
+            artifact_bundle: ArtifactBundle {
+                schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+                model_id: "model-1".to_string(),
+                source_kind: crate::models::ModelSourceKind::Generated,
+                engine_kind: crate::models::EngineKind::Freecad,
+                geometry_backend: crate::models::GeometryBackend::Freecad,
+                source_language: crate::models::SourceLanguage::LegacyPython,
+                content_hash: "hash-1".to_string(),
+                artifact_version: 1,
+                fcstd_path: "/tmp/model-1.FCStd".to_string(),
+                manifest_path: "/tmp/model-1.json".to_string(),
+                macro_path: Some("/tmp/model-1.py".to_string()),
+                preview_stl_path: "/tmp/model-1.stl".to_string(),
+                viewer_assets: Vec::new(),
+                edge_targets: Vec::new(),
+                face_targets: Vec::new(),
+                callout_anchors: Vec::new(),
+                measurement_guides: Vec::new(),
+                export_artifacts: Vec::new(),
+            },
+            model_manifest: crate::models::ModelManifest {
+                schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+                model_id: "model-1".to_string(),
+                source_kind: crate::models::ModelSourceKind::Generated,
+                engine_kind: crate::models::EngineKind::Freecad,
+                source_language: crate::models::SourceLanguage::LegacyPython,
+                geometry_backend: crate::models::GeometryBackend::Freecad,
+                document: crate::models::DocumentMetadata {
+                    document_name: "Doc".to_string(),
+                    document_label: "Doc".to_string(),
+                    source_path: None,
+                    object_count: 1,
+                    warnings: Vec::new(),
+                },
+                parts: vec![crate::models::PartBinding {
+                    part_id: "body".to_string(),
+                    freecad_object_name: "Body".to_string(),
+                    label: "Body".to_string(),
+                    kind: "solid".to_string(),
+                    semantic_role: None,
+                    viewer_asset_path: None,
+                    viewer_node_ids: vec!["body".to_string()],
+                    parameter_keys: Vec::new(),
+                    editable: true,
+                    bounds: None,
+                    volume: None,
+                    area: None,
+                }],
+                parameter_groups: Vec::new(),
+                control_primitives: Vec::new(),
+                control_relations: Vec::new(),
+                control_views: Vec::new(),
+                advisories: Vec::new(),
+                selection_targets: Vec::new(),
+                measurement_annotations: Vec::new(),
+                warnings: Vec::new(),
+                enrichment_state: crate::contracts::ManifestEnrichmentState {
+                    status: crate::contracts::EnrichmentStatus::None,
+                    proposals: Vec::new(),
+                },
+            },
+            draft_feedback: Some(crate::models::AgentDraftFeedback {
+                session_id: "session-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                preview_id: "preview-1".to_string(),
+                status: crate::models::AgentDraftFeedbackStatus::Failed,
+                summary: "Preview STL file not found.".to_string(),
+                items: vec![crate::models::AgentDraftFeedbackItem {
+                    code: "PREVIEW_STL_MISSING".to_string(),
+                    message: "Preview STL file not found.".to_string(),
+                }],
+                source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+            }),
+            updated_at: 123,
+        };
+
+        upsert_agent_draft(&conn, &draft).unwrap();
+        let loaded = get_agent_draft_for_session(&conn, "session-1")
+            .unwrap()
+            .expect("draft");
+
+        assert_eq!(loaded.draft_feedback, draft.draft_feedback);
     }
 
     #[test]

@@ -597,6 +597,15 @@ mod tests {
     }
 
     #[test]
+    fn fillet_box_compound_edges() {
+        let root = render_root();
+        let resolver = TestResolver { root };
+        let src = r#"(model (part body (fillet 1 :edges "x-min+z-max" (box 20 20 10))))"#;
+        render_model(src, &DesignParams::new(), &resolver)
+            .expect("fillet box compound edges should render");
+    }
+
+    #[test]
     fn chamfer_cylinder() {
         let root = render_root();
         let resolver = TestResolver { root };

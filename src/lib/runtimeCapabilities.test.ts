@@ -25,6 +25,7 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       mode: 'passive',
       primaryAgentId: null,
       promptTimeoutSecs: 1800,
+      eckyAstAuthoring: false,
       autoAgents: [],
     },
     hasSeenOnboarding: true,

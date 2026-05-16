@@ -75,6 +75,75 @@ def merge_shapes(shapes):
     return Compound(children=shapes)
 
 
+def format_coordinate(value):
+    rounded = 0.0 if abs(float(value)) < 1e-9 else float(value)
+    text = f"{rounded:.6f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def point_signature(point):
+    return "-".join(format_coordinate(coord) for coord in (point.X, point.Y, point.Z))
+
+
+def edge_signature(start, end):
+    first = point_signature(start)
+    second = point_signature(end)
+    if second < first:
+        first, second = second, first
+    return f"{first}_{second}"
+
+
+def shape_edges(shape, object_name):
+    edges = []
+    try:
+        source_edges = list(shape.edges())
+    except Exception:
+        return edges
+    for edge_index, edge in enumerate(source_edges):
+        try:
+            start = edge.start_point()
+            end = edge.end_point()
+            label = f"{object_name}.Edge{edge_index + 1}"
+            edges.append({
+                "target_id": f"{object_name}:edge:{edge_index}:{edge_signature(start, end)}",
+                "edge_index": edge_index,
+                "label": label,
+                "start": {"x": float(start.X), "y": float(start.Y), "z": float(start.Z)},
+                "end": {"x": float(end.X), "y": float(end.Y), "z": float(end.Z)},
+            })
+        except Exception:
+            continue
+    return edges
+
+
+def shape_faces(shape, object_name):
+    faces = []
+    try:
+        source_faces = list(shape.faces())
+    except Exception:
+        return faces
+    for face_index, face in enumerate(source_faces):
+        try:
+            center = face.center()
+            normal = face.normal_at()
+            area = float(face.area)
+            label = f"{object_name}.Face{face_index + 1}"
+            faces.append({
+                "target_id": (
+                    f"{object_name}:face:{face_index}:"
+                    f"{point_signature(center)}:{format_coordinate(area)}"
+                ),
+                "face_index": face_index,
+                "label": label,
+                "center": {"x": float(center.X), "y": float(center.Y), "z": float(center.Z)},
+                "normal": {"x": float(normal.X), "y": float(normal.Y), "z": float(normal.Z)},
+                "area": area,
+            })
+        except Exception:
+            continue
+    return faces
+
+
 def main():
     source_path = os.environ["ECKYCAD_SOURCE"]
     stl_path = os.environ["ECKYCAD_STL"]
@@ -138,6 +207,8 @@ def main():
             "bounds": bounds,
             "volume": volume,
             "area": area,
+            "edges": shape_edges(shape, part_id),
+            "faces": shape_faces(shape, part_id),
         })
 
     try:
