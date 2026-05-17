@@ -68,9 +68,42 @@ function buildConfig(model: string): {
   };
 }
 
+function buildConfigWithPromptSwitch(model: string) {
+  const base = buildConfig(model);
+  return {
+    ...base,
+    engines: [
+      base.engines[0],
+      {
+        id: 'gemini-main',
+        name: 'Gemini Main',
+        provider: 'gemini',
+        apiKey: 'gemini-test',
+        model: 'gemini-2.5-flash',
+        lightModel: 'gemini-2.5-flash-lite',
+        baseUrl: '',
+        enabled: true,
+      },
+    ],
+  };
+}
+
 async function installNimMock(page: Page, model: string) {
+  await installNimMockWithConfig(page, buildConfig(model));
+}
+
+async function installNimMockWithConfig(page: Page, configInput: ReturnType<typeof buildConfig>) {
   await page.addInitScript((mockConfig) => {
     const config = structuredClone(mockConfig);
+    (window as any).__SYSTEM_PROMPT_COPY__ = '';
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (value: string) => {
+          (window as any).__SYSTEM_PROMPT_COPY__ = value;
+        },
+      },
+    });
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
@@ -78,6 +111,9 @@ async function installNimMock(page: Page, model: string) {
       if (cmd === 'save_config') {
         Object.assign(config, args.config);
         return null;
+      }
+      if (cmd === 'get_design_system_prompt') {
+        return 'Return a JSON object with:\\n1. \"title\": 2-5 words project title.';
       }
       if (cmd === 'list_models') {
         return [
@@ -114,7 +150,7 @@ async function installNimMock(page: Page, model: string) {
       if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
       return null;
     };
-  }, buildConfig(model));
+  }, configInput);
 }
 
 async function openNimEngineSettings(page: Page) {
@@ -122,7 +158,7 @@ async function openNimEngineSettings(page: Page) {
   await expect(page.getByRole('button', { name: '⚙️' })).toBeVisible();
   await page.getByRole('button', { name: '⚙️' }).click();
   await expect(page.getByText('CONNECTION TYPE')).toBeVisible();
-  await expect(page.locator('.engine-card')).toHaveCount(1);
+  await expect(page.locator('.engine-card')).not.toHaveCount(0);
   await page.locator('.engine-card').first().click();
   await expect(page.locator('#e-baseurl')).toBeVisible();
 }
@@ -144,12 +180,31 @@ test.describe('NVIDIA NIM vision capability hints', () => {
     await expect(page.getByTestId('engine-vision-warning')).toHaveCount(0);
   });
 
-  test('Given engine settings When opened Then raw system prompt editor is hidden', async ({ page }) => {
+  test('Given engine settings When opened Then readonly system prompt is visible and copyable', async ({ page }) => {
     await installNimMock(page, 'microsoft/phi-4-multimodal-instruct');
     await openNimEngineSettings(page);
 
-    await expect(page.getByRole('button', { name: 'PROMPTS' })).toHaveCount(0);
-    await expect(page.getByLabel(/SYSTEM PROMPT/i)).toHaveCount(0);
-    await expect(page.locator('.system-prompt-input')).toHaveCount(0);
+    await expect(page.getByTestId('engine-system-prompt')).toBeVisible();
+    await expect(page.getByTestId('engine-system-prompt-carrier')).toContainText('OPENAI / OLLAMA SYSTEM MESSAGE');
+    await expect(page.getByLabel(/SYSTEM PROMPT/i)).toBeEditable({ editable: false });
+
+    await page.getByRole('button', { name: 'COPY SYSTEM PROMPT' }).click();
+
+    await expect.poll(async () =>
+      page.evaluate(() => (window as any).__SYSTEM_PROMPT_COPY__ ?? ''),
+    ).toContain('Return a JSON object with:');
+  });
+
+  test('Given selected engine changes When engine settings stay open Then system prompt carrier updates for selected engine', async ({ page }) => {
+    await installNimMockWithConfig(page, buildConfigWithPromptSwitch('microsoft/phi-4-multimodal-instruct'));
+    await openNimEngineSettings(page);
+
+    await expect(page.getByTestId('engine-system-prompt-carrier')).toContainText('OPENAI / OLLAMA SYSTEM MESSAGE');
+
+    await page.getByRole('button', { name: '← AGENTS' }).click();
+    await expect(page.locator('.engine-card')).toHaveCount(2);
+    await page.getByRole('button', { name: /Gemini Main/i }).click();
+
+    await expect(page.getByTestId('engine-system-prompt-carrier')).toContainText('GEMINI SYSTEM INSTRUCTION');
   });
 });

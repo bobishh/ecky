@@ -511,6 +511,129 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     expect(previewUpdates).toBe(0);
   });
 
+  test('Given version thumbnail update When switching current version Then viewport model selection stays on selected render key', async ({ page }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const versionMessage = (id: string, versionName: string, timestamp: number) => ({
+      id,
+      role: 'assistant',
+      content: `${versionName} ready.`,
+      status: 'success',
+      output: {
+        title: 'Render Key Guard',
+        versionName,
+        interactionMode: 'design',
+        macroCode: '(model)',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        uiSpec: { fields: [] },
+        initialParams: {},
+        postProcessing: null,
+      },
+      usage: null,
+      artifactBundle: {
+        modelId: `model-${id}`,
+        sourceKind: 'generated',
+        engineKind: 'ecky',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        contentHash: `hash-${id}`,
+        artifactVersion: 1,
+        fcstdPath: '',
+        manifestPath: `/mock/${id}-manifest.json`,
+        macroPath: `/mock/${id}.ecky`,
+        previewStlPath: `/mock/${id}.stl`,
+        viewerAssets: [],
+      },
+      modelManifest: {
+        modelId: `model-${id}`,
+        sourceKind: 'generated',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        document: {
+          documentName: 'Render Key Guard',
+          documentLabel: 'Render Key Guard',
+          objectCount: 1,
+          warnings: [],
+        },
+        parts: [],
+        parameterGroups: [],
+        controlPrimitives: [],
+        controlRelations: [],
+        controlViews: [],
+        selectionTargets: [],
+        advisories: [],
+        measurementAnnotations: [],
+        warnings: [],
+        enrichmentState: { status: 'none', proposals: [] },
+      },
+      agentOrigin: null,
+      imageData: null,
+      visualKind: null,
+      attachmentImages: [],
+      timestamp,
+    });
+
+    await installPassiveThreadAgentMock(page, {
+      messages: [
+        versionMessage('version-1', 'V-1', now - 2),
+        versionMessage('version-2', 'V-2', now - 1),
+      ],
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.viewer-shell canvas')).toBeVisible();
+
+    const versionOne = page.locator('.trail-item').filter({ hasText: 'V-1' });
+    const setCurrentVersionOne = versionOne.getByRole('button', { name: 'SET CURRENT' });
+    if (await setCurrentVersionOne.count()) {
+      await setCurrentVersionOne.click();
+    }
+    await expect(versionOne.getByRole('button', { name: 'CURRENT' })).toBeVisible();
+
+    const invokeCallCounts = await page.evaluate(() => {
+      const calls =
+        (window as Window & typeof globalThis & {
+          __MOCK_AGENT_INVOKE_CALLS__?: Array<{ cmd: string; args: unknown }>;
+        }).__MOCK_AGENT_INVOKE_CALLS__ ?? [];
+      return {
+        exists: calls.filter((call) => call.cmd === 'plugin:fs|exists').length,
+        renderModel: calls.filter((call) => call.cmd === 'render_model').length,
+      };
+    });
+
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new CustomEvent('ecky:version-preview-updated', {
+          detail: {
+            threadId: 'thread-1',
+            messageId: 'version-2',
+            imageData: 'data:image/png;base64,refresh',
+          },
+        }),
+      );
+    });
+
+    await page.waitForTimeout(400);
+    await expect(versionOne.getByRole('button', { name: 'CURRENT' })).toBeVisible();
+    const invokeCallCountsAfterUpdate = await page.evaluate(() => {
+      const calls =
+        (window as Window & typeof globalThis & {
+          __MOCK_AGENT_INVOKE_CALLS__?: Array<{ cmd: string; args: unknown }>;
+        }).__MOCK_AGENT_INVOKE_CALLS__ ?? [];
+      return {
+        exists: calls.filter((call) => call.cmd === 'plugin:fs|exists').length,
+        renderModel: calls.filter((call) => call.cmd === 'render_model').length,
+      };
+    });
+    expect(invokeCallCountsAfterUpdate).toEqual(invokeCallCounts);
+  });
+
   test('Given version runtime is missing When view opens preview Then loupe rebuilds runtime instead of showing empty artifact state', async ({ page }) => {
     const now = Math.floor(Date.now() / 1000);
     await installPassiveThreadAgentMock(page, {
@@ -1021,6 +1144,10 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     ]);
     expect(styles[0].background).not.toBe('rgb(239, 239, 239)');
     expect(styles[1].background).not.toBe('rgb(239, 239, 239)');
+
+    await trashButton.click();
+    await expect(modal).toBeHidden();
+    await expect(page.getByText('Passive MCP Thread', { exact: true })).toHaveCount(0);
   });
 
   test('Given agent tool errors in thread history When dialogue opens Then iteration errors stay out of visible history', async ({ page }) => {
@@ -1135,6 +1262,64 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
         ),
       )
       .toMatchObject({ queue: 1, generate: 0 });
+  });
+
+  test('Given planner analyze recipes prompt When queued in passive MCP thread Then flow stays preview-only without auto-commit until explicit apply', async ({ page }) => {
+    await installPassiveThreadAgentMock(page);
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+    await page.locator('.prompt-input').fill('planner: run printability analyze + recipes preview only; no commit');
+    await page.locator('.prompt-input').press('Meta+Enter');
+
+    await expect(page.locator('.trail-user')).toContainText(
+      'planner: run printability analyze + recipes preview only; no commit',
+    );
+    await expect.poll(async () =>
+      page.evaluate(
+        () =>
+          (window as Window & typeof globalThis & {
+            __MOCK_AGENT_DIALOGUE_CALLS__?: { queue: number; generate: number };
+          }).__MOCK_AGENT_DIALOGUE_CALLS__,
+      ),
+    ).toMatchObject({ queue: 1, generate: 0 });
+
+    const commitLikeCalls = await page.evaluate(() =>
+      ((window as Window & typeof globalThis & {
+        __MOCK_AGENT_INVOKE_CALLS__?: Array<{ cmd: string; args: unknown }>;
+      }).__MOCK_AGENT_INVOKE_CALLS__ ?? [])
+        .map((call) => call.cmd)
+        .filter((cmd) =>
+          ['add_manual_version', 'apply_imported_model', 'update_version_runtime', 'update_version_preview'].includes(cmd),
+        ),
+    );
+    expect(commitLikeCalls).toEqual([]);
+  });
+
+  test('Given thread messages are still loading When blank project starts Then empty dialogue is not blocked', async ({ page }) => {
+    await installPassiveThreadAgentMock(page, { latestVersionDelayMs: 10_000 });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.thread-loading')).toContainText('LOADING THREAD MESSAGES');
+
+    await page.locator('button[title="New project"]').click();
+    await page.getByRole('button', { name: 'Blank Project' }).click();
+
+    await expect(page.locator('.thread-loading')).toHaveCount(0);
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.prompt-input')).toBeVisible();
   });
 
   test('Given passive config and queue failure When sending message Then UI shows agent queue error, not generation error', async ({ page }) => {

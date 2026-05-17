@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,10 +7,10 @@ use csgrs::traits::CSG;
 use sha2::{Digest, Sha256};
 
 use crate::models::{
-    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
-    GeometryBackend, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, ParameterGroup,
-    ParsedParamsResult, PartBinding, PathResolver, SourceLanguage, ViewerAsset, ViewerAssetFormat,
-    MODEL_RUNTIME_SCHEMA_VERSION,
+    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind, FeatureGraph,
+    FeatureNode, FeatureOutputRef, GeometryBackend, ManifestBounds, ModelManifest, ModelSourceKind,
+    ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, PathResolver, SelectionTarget,
+    SourceLanguage, SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 use super::mesh_ops::eval_geometry_expr;
@@ -21,9 +21,9 @@ use super::model::{
 use super::shared::{unsupported, validation, IrMesh};
 use super::syntax::canonicalize;
 use crate::ecky_core_ir::{
-    CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
-    CoreOperation, CorePart, CorePathOp, CorePrimitive, CoreProgram, CoreReference,
-    CoreSelectorPayload, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
+    CoreArrayOp, CoreBooleanOp, CoreFeatureDecl, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode,
+    CoreNodeKind, CoreOperation, CorePart, CorePathOp, CorePrimitive, CoreProgram, CoreReference,
+    CoreSelectorPayload, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind, SourceSpan,
 };
 use crate::ecky_ir::edge_ops::{
     edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
@@ -36,6 +36,7 @@ pub(super) const MANIFEST_FILE_NAME: &str = "manifest.json";
 pub(super) const SOURCE_FILE_NAME: &str = "source.ecky";
 pub(super) const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
 pub(super) const PARTS_DIR_NAME: &str = "parts";
+const CORE_AST_SCHEMA_VERSION: u32 = 1;
 pub(super) fn mesh_volume(mesh: &IrMesh) -> Option<f64> {
     let tri_mesh = mesh.triangulate();
     if tri_mesh.polygons.is_empty() {
@@ -178,6 +179,128 @@ struct RuntimePart {
     part_id: String,
     label: String,
     expr: IrExpr,
+    feature_decl: Option<CoreFeatureDecl>,
+    source_ref: Option<SourceRef>,
+    dependency_ids: Vec<String>,
+}
+
+#[derive(Clone)]
+struct CoreAstIdentity {
+    core_digest: String,
+    ast_schema_version: u32,
+}
+
+fn runtime_part_feature_id(part_id: &str) -> String {
+    format!("part:{}", part_id)
+}
+
+fn runtime_part_source_ref(part_id: &str, span: Option<SourceSpan>) -> Option<SourceRef> {
+    if part_id.trim().is_empty() {
+        return None;
+    }
+
+    Some(SourceRef {
+        source_id: None,
+        path: Some(format!("/parts/{}/root", part_id)),
+        start_byte: span.map(|span| span.start),
+        end_byte: span.map(|span| span.end),
+    })
+}
+
+fn runtime_part_feature_graph(
+    parts: &[RuntimePart],
+    selection_targets: &[SelectionTarget],
+) -> FeatureGraph {
+    let nodes = parts
+        .iter()
+        .map(|part| {
+            let fallback_feature_id = runtime_part_feature_id(&part.part_id);
+            let feature_id = part
+                .feature_decl
+                .as_ref()
+                .map(|decl| decl.feature_id.trim())
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| fallback_feature_id.clone());
+            let kind = part
+                .feature_decl
+                .as_ref()
+                .map(|decl| decl.role.trim())
+                .filter(|role| !role.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| "part".to_string());
+            let target_ids = selection_targets
+                .iter()
+                .filter(|target| target.part_id == part.part_id)
+                .filter_map(runtime_selection_target_output_id)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let output_refs = if target_ids.is_empty() {
+                Vec::new()
+            } else {
+                vec![FeatureOutputRef {
+                    feature_id: feature_id.clone(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids,
+                }]
+            };
+
+            FeatureNode {
+                feature_id,
+                kind,
+                label: if part.label.trim().is_empty() {
+                    part.part_id.clone()
+                } else {
+                    part.label.clone()
+                },
+                source_ref: part.source_ref.clone(),
+                dependency_ids: runtime_feature_dependency_ids(part),
+                output_refs,
+                ports: Vec::new(),
+            }
+        })
+        .collect();
+
+    FeatureGraph { nodes }
+}
+
+fn runtime_selection_target_output_id(target: &SelectionTarget) -> Option<&str> {
+    target
+        .target_id
+        .as_deref()
+        .or(target.durable_target_id.as_deref())
+        .or(target.canonical_target_id.as_deref())
+}
+
+fn runtime_feature_dependency_ids(part: &RuntimePart) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut ids = Vec::new();
+
+    if let Some(feature_decl) = &part.feature_decl {
+        for key in &feature_decl.param_keys {
+            let key = key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let normalized = key.to_string();
+            if seen.insert(normalized.clone()) {
+                ids.push(normalized);
+            }
+        }
+    }
+
+    for key in &part.dependency_ids {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let normalized = key.to_string();
+        if seen.insert(normalized.clone()) {
+            ids.push(normalized);
+        }
+    }
+
+    ids
 }
 
 pub(crate) fn build_core_program_param_env_for_eval(
@@ -240,6 +363,7 @@ fn core_node_to_eval_ir_expr(
 fn runtime_core_part_to_runtime_part(
     part: &CorePart,
     param_names: &BTreeMap<u64, String>,
+    feature_decls: &BTreeMap<String, CoreFeatureDecl>,
 ) -> AppResult<RuntimePart> {
     let mut used_local_names = BTreeMap::new();
     Ok(RuntimePart {
@@ -252,7 +376,119 @@ fn runtime_core_part_to_runtime_part(
             &BTreeMap::new(),
             &mut used_local_names,
         )?)?,
+        feature_decl: feature_decls.get(&part.key).cloned(),
+        source_ref: runtime_part_source_ref(&part.key, part.root.span),
+        dependency_ids: core_node_parameter_dependencies(&part.root, param_names),
     })
+}
+
+fn core_node_parameter_dependencies(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    collect_core_node_parameter_dependencies(node, param_names, &mut keys);
+    keys.into_iter().collect()
+}
+
+fn collect_core_node_parameter_dependencies(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    keys: &mut BTreeSet<String>,
+) {
+    match &node.kind {
+        CoreNodeKind::Literal(_) => {}
+        CoreNodeKind::Reference(CoreReference::Parameter(param_id)) => {
+            if let Some(key) = param_names.get(&param_id.raw()) {
+                keys.insert(key.clone());
+            }
+        }
+        CoreNodeKind::Reference(_) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            for binding in bindings {
+                collect_core_node_parameter_dependencies(&binding.value, param_names, keys);
+            }
+            collect_core_node_parameter_dependencies(result, param_names, keys);
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            for binding in bindings {
+                collect_core_node_parameter_dependencies(&binding.value, param_names, keys);
+            }
+            collect_core_node_parameter_dependencies(body, param_names, keys);
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_core_node_parameter_dependencies(condition, param_names, keys);
+            collect_core_node_parameter_dependencies(then_branch, param_names, keys);
+            collect_core_node_parameter_dependencies(else_branch, param_names, keys);
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                collect_core_node_parameter_dependencies(arg, param_names, keys);
+            }
+            for keyword in keywords {
+                collect_core_node_parameter_dependencies(keyword.source_node(), param_names, keys);
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            collect_core_node_parameter_dependencies(start, param_names, keys);
+            collect_core_node_parameter_dependencies(end, param_names, keys);
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for source in sources {
+                collect_core_node_parameter_dependencies(source, param_names, keys);
+            }
+            collect_core_node_parameter_dependencies(body, param_names, keys);
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                collect_core_node_parameter_dependencies(arg, param_names, keys);
+            }
+            collect_core_node_parameter_dependencies(list, param_names, keys);
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for item in items {
+                collect_core_node_parameter_dependencies(item, param_names, keys);
+            }
+        }
+    }
+}
+
+fn ir_expr_parameter_dependencies(expr: &IrExpr, parameter_keys: &[String]) -> Vec<String> {
+    let parameter_key_set = parameter_keys.iter().cloned().collect::<BTreeSet<_>>();
+    let mut used = BTreeSet::new();
+    collect_ir_expr_parameter_dependencies(expr, &parameter_key_set, &mut used);
+    used.into_iter().collect()
+}
+
+fn collect_ir_expr_parameter_dependencies(
+    expr: &IrExpr,
+    parameter_keys: &BTreeSet<String>,
+    used: &mut BTreeSet<String>,
+) {
+    match expr {
+        IrExpr::Symbol(symbol) => {
+            if parameter_keys.contains(symbol) {
+                used.insert(symbol.clone());
+            }
+        }
+        IrExpr::List(items) => {
+            for (index, item) in items.iter().enumerate() {
+                if index == 0 && matches!(item, IrExpr::Symbol(_)) {
+                    continue;
+                }
+                collect_ir_expr_parameter_dependencies(item, parameter_keys, used);
+            }
+        }
+        IrExpr::Number(_)
+        | IrExpr::Boolean(_)
+        | IrExpr::String(_)
+        | IrExpr::Keyword(_)
+        | IrExpr::Selector(_) => {}
+    }
 }
 
 fn runtime_ir_expr_from_core_selector_payload(payload: &CoreSelectorPayload) -> AppResult<IrExpr> {
@@ -673,6 +909,111 @@ fn runtime_core_operation_name(op: &CoreOperation) -> String {
     }
 }
 
+fn core_ast_identity(program: &CoreProgram) -> CoreAstIdentity {
+    let mut canonical = program.clone();
+    clear_core_program_spans(&mut canonical);
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"ecky-core-ast");
+    hasher.update(CORE_AST_SCHEMA_VERSION.to_string().as_bytes());
+    hasher.update(format!("{canonical:#?}").as_bytes());
+
+    CoreAstIdentity {
+        core_digest: format!("sha256:{:x}", hasher.finalize()),
+        ast_schema_version: CORE_AST_SCHEMA_VERSION,
+    }
+}
+
+fn clear_core_program_spans(program: &mut CoreProgram) {
+    for part in &mut program.parts {
+        clear_core_node_spans(&mut part.root);
+    }
+}
+
+fn clear_core_node_spans(node: &mut CoreNode) {
+    node.span = None;
+    match &mut node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            for binding in bindings {
+                clear_core_node_spans(&mut binding.value);
+            }
+            clear_core_node_spans(result);
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            for binding in bindings {
+                clear_core_node_spans(&mut binding.value);
+            }
+            clear_core_node_spans(body);
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            clear_core_node_spans(condition);
+            clear_core_node_spans(then_branch);
+            clear_core_node_spans(else_branch);
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                clear_core_node_spans(arg);
+            }
+            for keyword in keywords {
+                clear_core_node_spans(keyword.source_node_mut());
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            clear_core_node_spans(start);
+            clear_core_node_spans(end);
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for source in sources {
+                clear_core_node_spans(source);
+            }
+            clear_core_node_spans(body);
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                clear_core_node_spans(arg);
+            }
+            clear_core_node_spans(list);
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for item in items {
+                clear_core_node_spans(item);
+            }
+        }
+    }
+}
+
+fn cached_bundle_satisfies_manifest_identity(
+    bundle: &ArtifactBundle,
+    source_digest: &str,
+    ast_identity: Option<&CoreAstIdentity>,
+) -> bool {
+    let Ok(raw) = fs::read_to_string(&bundle.manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<ModelManifest>(&raw) else {
+        return false;
+    };
+    if manifest.source_digest.as_deref() != Some(source_digest) {
+        return false;
+    }
+    if manifest.feature_graph.is_none() {
+        return false;
+    }
+
+    match ast_identity {
+        Some(identity) => {
+            manifest.core_digest.as_deref() == Some(identity.core_digest.as_str())
+                && manifest.ast_schema_version == Some(identity.ast_schema_version)
+        }
+        None => manifest.core_digest.is_none() && manifest.ast_schema_version.is_none(),
+    }
+}
+
 fn render_prepared_parts(
     parts: &[RuntimePart],
     parameter_keys: &[String],
@@ -680,6 +1021,7 @@ fn render_prepared_parts(
     parameters: &DesignParams,
     env: &BTreeMap<String, ParamValue>,
     app: &dyn PathResolver,
+    ast_identity: Option<CoreAstIdentity>,
 ) -> AppResult<ArtifactBundle> {
     let part_ids = parts
         .iter()
@@ -691,12 +1033,25 @@ fn render_prepared_parts(
     hasher.update(b"|");
     hasher.update(params_json.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
+    let mut source_hasher = Sha256::new();
+    source_hasher.update(source_identity.as_bytes());
+    let source_digest = format!("sha256:{:x}", source_hasher.finalize());
     let model_id = format!("generated-ir-{}", &hash[..12]);
     let dir = bundle_dir(app, &model_id)?;
 
     if let Some(cached) = load_cached_bundle(&dir)? {
-        return Ok(cached);
+        if cached_bundle_satisfies_manifest_identity(&cached, &source_digest, ast_identity.as_ref())
+        {
+            return Ok(cached);
+        }
     }
+
+    let core_digest = ast_identity
+        .as_ref()
+        .map(|identity| identity.core_digest.clone());
+    let ast_schema_version = ast_identity
+        .as_ref()
+        .map(|identity| identity.ast_schema_version);
 
     let parts_dir = dir.join(PARTS_DIR_NAME);
     fs::create_dir_all(&parts_dir).map_err(|err| AppError::persistence(err.to_string()))?;
@@ -760,10 +1115,15 @@ fn render_prepared_parts(
     fs::write(&macro_path, source_identity.as_bytes())
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
+    let selection_targets = Vec::new();
+    let feature_graph = runtime_part_feature_graph(parts, &selection_targets);
     let manifest = ModelManifest {
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
         source_kind: ModelSourceKind::Generated,
+        source_digest: Some(source_digest),
+        core_digest,
+        ast_schema_version,
         engine_kind: EngineKind::EckyIrV0,
         source_language: SourceLanguage::EckyIrV0,
         geometry_backend: GeometryBackend::EckyRust,
@@ -788,8 +1148,10 @@ fn render_prepared_parts(
         control_relations: Vec::new(),
         control_views: Vec::new(),
         advisories: Vec::new(),
-        selection_targets: Vec::new(),
+        selection_targets,
         measurement_annotations: Vec::new(),
+        feature_graph: Some(feature_graph),
+        correspondence_graph: None,
         warnings: Vec::new(),
         enrichment_state: crate::models::ManifestEnrichmentState {
             status: crate::models::EnrichmentStatus::None,
@@ -843,6 +1205,9 @@ pub(crate) fn render_model_from_model(
             part_id: part.part_id.clone(),
             label: part.label.clone(),
             expr: part.expr.clone(),
+            feature_decl: None,
+            source_ref: runtime_part_source_ref(&part.part_id, None),
+            dependency_ids: ir_expr_parameter_dependencies(&part.expr, &parameter_keys),
         })
         .collect::<Vec<_>>();
     render_prepared_parts(
@@ -852,6 +1217,7 @@ pub(crate) fn render_model_from_model(
         parameters,
         &env,
         app,
+        None,
     )
 }
 
@@ -870,7 +1236,7 @@ pub(crate) fn render_core_program(
     let parts = program
         .parts
         .iter()
-        .map(|part| runtime_core_part_to_runtime_part(part, &param_names))
+        .map(|part| runtime_core_part_to_runtime_part(part, &param_names, &program.feature_decls))
         .collect::<AppResult<Vec<_>>>()?;
     let parameter_keys = program
         .parameters
@@ -885,6 +1251,7 @@ pub(crate) fn render_core_program(
         parameters,
         &env,
         app,
+        Some(core_ast_identity(program)),
     )
 }
 
@@ -896,13 +1263,22 @@ mod tests {
     use crate::ecky_core_ir::{
         CoreNode, CoreNodeKind, CoreOperation, CoreParameter, CoreParameterConstraints,
         CoreParameterKind, CoreParameterValue, CorePart, CorePrimitive, CoreProgram, CoreValueKind,
-        NodeId, ParamId, PartId, ProgramId,
+        NodeId, ParamId, PartId, ProgramId, SourceFileId, SourceSpan,
     };
     use crate::ecky_ir::model::{core_part_to_ir_part, core_program_to_model, parse_model};
     use crate::models::ModelManifest;
 
     fn render_root() -> PathBuf {
         std::env::temp_dir().join(format!("ecky-ir-runtime-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn example_fixture(name: &str) -> String {
+        let path = format!(
+            "{}/../model-runtime/examples/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
     }
 
     #[derive(Clone)]
@@ -968,6 +1344,219 @@ mod tests {
     }
 
     #[test]
+    fn render_model_from_model_film_gap_coupon_fixture_has_stable_parts_and_export_readiness() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root };
+        let source = example_fixture("film-adapter-film-gap-coupon.ecky");
+        let model = parse_model(&source).expect("model");
+
+        let bundle = render_model_from_model(&model, &source, &DesignParams::new(), &resolver)
+            .expect("render");
+        let manifest = read_manifest(&bundle);
+        let part_ids = manifest
+            .parts
+            .iter()
+            .map(|part| part.part_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(bundle.viewer_assets.len(), 2);
+        assert_eq!(manifest.document.object_count, 2);
+        assert_eq!(manifest.parts.len(), 2);
+        assert_eq!(part_ids, vec!["film_gate", "lens_adapter"]);
+        assert!(bundle.export_artifacts.is_empty());
+    }
+
+    #[test]
+    fn render_model_from_model_film_adapter_golden_closest_fixture_keeps_deterministic_count_and_step_readiness_signal(
+    ) {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root };
+        let source = example_fixture("film-adapter-film-gap-coupon.ecky");
+        let model = parse_model(&source).expect("model");
+        let model_part_ids = model
+            .parts
+            .iter()
+            .map(|part| part.part_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            model_part_ids,
+            vec!["film_gate", "lens_adapter"],
+            "film adapter golden closest fixture has deterministic runtime part ids/count=2 (not trench-doc 6 for integrated helicoid path)"
+        );
+
+        let bundle = render_model_from_model(&model, &source, &DesignParams::new(), &resolver)
+            .expect("render");
+        let manifest = read_manifest(&bundle);
+        let manifest_part_ids = manifest
+            .parts
+            .iter()
+            .map(|part| part.part_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            manifest_part_ids,
+            vec!["film_gate", "lens_adapter"],
+            "manifest part ids must stay deterministic for film adapter golden closest runtime render"
+        );
+        assert_eq!(
+            manifest.parts.len(),
+            2,
+            "manifest deterministic part count for film adapter golden closest fixture is 2 on this backend path"
+        );
+        assert_eq!(
+            manifest.document.object_count, 2,
+            "document object count stays aligned with deterministic manifest part count"
+        );
+        assert!(bundle.export_artifacts.is_empty());
+        assert!(
+            matches!(
+                manifest.enrichment_state.status,
+                crate::contracts::EnrichmentStatus::None
+            ),
+            "manifest enrichment state stays none on EckyRust backend path (STEP export not materialized)"
+        );
+    }
+
+    #[test]
+    fn render_model_from_model_film_path_gap_coupon_fixture_has_stable_parts_and_count() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root };
+        let source = example_fixture("film-path-gap-coupon.ecky");
+        let model = parse_model(&source).expect("model");
+
+        let model_part_ids = model
+            .parts
+            .iter()
+            .map(|part| part.part_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            model_part_ids,
+            vec![
+                "film_path_lower_035",
+                "film_path_upper_clamp_035",
+                "film_path_lower_045",
+                "film_path_upper_clamp_045",
+                "film_path_lower_055",
+                "film_path_upper_clamp_055"
+            ]
+        );
+
+        let bundle = render_model_from_model(&model, &source, &DesignParams::new(), &resolver)
+            .expect("render");
+        let manifest = read_manifest(&bundle);
+        let manifest_part_ids = manifest
+            .parts
+            .iter()
+            .map(|part| part.part_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(bundle.viewer_assets.len(), 6);
+        assert_eq!(manifest.document.object_count, 6);
+        assert_eq!(manifest.parts.len(), 6);
+        assert_eq!(
+            manifest_part_ids,
+            vec![
+                "film_path_lower_035",
+                "film_path_upper_clamp_035",
+                "film_path_lower_045",
+                "film_path_upper_clamp_045",
+                "film_path_lower_055",
+                "film_path_upper_clamp_055"
+            ]
+        );
+        assert!(bundle.export_artifacts.is_empty());
+    }
+
+    #[test]
+    fn render_model_from_model_helicoid_thread_coupon_fixture_keeps_clearance_variants() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root };
+        let source = example_fixture("helicoid-thread-coupon.ecky");
+        let model = parse_model(&source).expect("model");
+        let part_ids = model
+            .parts
+            .iter()
+            .map(|part| part.part_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_ids,
+            vec![
+                "coupon_male_020",
+                "coupon_female_020",
+                "coupon_male_025",
+                "coupon_female_025",
+                "coupon_male_030",
+                "coupon_female_030",
+                "coupon_male_035",
+                "coupon_female_035"
+            ]
+        );
+        let err = render_model_from_model(&model, &source, &DesignParams::new(), &resolver)
+            .expect_err("ecky runtime should reject helical-ridge");
+        assert!(
+            err.message
+                .contains("Unsupported on current geometry backend"),
+            "{err:?}"
+        );
+        assert!(
+            err.details
+                .as_deref()
+                .unwrap_or_default()
+                .contains("helical-ridge"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn render_model_from_model_magnet_clamp_coupon_fixture_has_stable_parts_and_count() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root };
+        let source = example_fixture("magnet-clamp-coupon.ecky");
+        let model = parse_model(&source).expect("model");
+
+        let model_part_ids = model
+            .parts
+            .iter()
+            .map(|part| part.part_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            model_part_ids,
+            vec![
+                "magnet_clamp_base_n",
+                "magnet_clamp_base_s",
+                "magnet_polarity_mask_n",
+                "magnet_polarity_mask_s"
+            ]
+        );
+
+        let bundle = render_model_from_model(&model, &source, &DesignParams::new(), &resolver)
+            .expect("render");
+        let manifest = read_manifest(&bundle);
+        let manifest_part_ids = manifest
+            .parts
+            .iter()
+            .map(|part| part.part_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(bundle.viewer_assets.len(), 4);
+        assert_eq!(manifest.document.object_count, 4);
+        assert_eq!(manifest.parts.len(), 4);
+        assert_eq!(
+            manifest_part_ids,
+            vec![
+                "magnet_clamp_base_n",
+                "magnet_clamp_base_s",
+                "magnet_polarity_mask_n",
+                "magnet_polarity_mask_s"
+            ]
+        );
+        assert!(bundle.export_artifacts.is_empty());
+    }
+
+    #[test]
     fn render_core_program_matches_public_render_entrypoint() {
         let source = r#"
             (define base-radius 14)
@@ -1019,6 +1608,185 @@ mod tests {
             public_manifest.parts[0].volume
         );
         assert_eq!(direct_manifest.parts[0].area, public_manifest.parts[0].area);
+    }
+
+    #[test]
+    fn render_core_program_manifest_includes_ast_identity() {
+        let source = r#"
+            (model
+              (params
+                (number width 10 :label "Width"))
+              (part body (box width 8 6)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let bundle = render_core_program(
+            &program,
+            source,
+            &DesignParams::new(),
+            &TestResolver { root },
+        )
+        .expect("render");
+
+        let manifest = read_manifest(&bundle);
+
+        assert!(manifest.source_digest.is_some());
+        assert!(manifest.core_digest.is_some());
+        assert_eq!(manifest.ast_schema_version, Some(1));
+    }
+
+    #[test]
+    fn render_core_program_manifest_includes_part_feature_graph_provenance() {
+        let source = r#"
+            (model
+              (params
+                (number width 10 :label "Width"))
+              (part body (box width 8 6)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let bundle = render_core_program(
+            &program,
+            source,
+            &DesignParams::new(),
+            &TestResolver { root },
+        )
+        .expect("render");
+
+        let manifest = read_manifest(&bundle);
+        let feature_graph = manifest.feature_graph.expect("feature graph");
+
+        assert_eq!(feature_graph.nodes.len(), 1);
+        assert_eq!(feature_graph.nodes[0].feature_id, "part:body");
+        assert_eq!(feature_graph.nodes[0].kind, "part");
+        assert_eq!(feature_graph.nodes[0].label, "Body");
+        assert_eq!(
+            feature_graph.nodes[0]
+                .source_ref
+                .as_ref()
+                .and_then(|source_ref| source_ref.path.as_deref()),
+            Some("/parts/body/root")
+        );
+        assert_eq!(feature_graph.nodes[0].dependency_ids, vec!["width"]);
+    }
+
+    #[test]
+    fn render_core_program_manifest_uses_feature_metadata_for_feature_graph_nodes() {
+        let source = r#"
+            (model
+              (params
+                (number width 10 :label "Width"))
+              (feature shell-cutout :role subtraction :params (width gap) (box width 8 6)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let bundle = render_core_program(
+            &program,
+            source,
+            &DesignParams::new(),
+            &TestResolver { root },
+        )
+        .expect("render");
+
+        let manifest = read_manifest(&bundle);
+        let feature_graph = manifest.feature_graph.expect("feature graph");
+
+        assert_eq!(feature_graph.nodes.len(), 1);
+        assert_eq!(feature_graph.nodes[0].feature_id, "shell-cutout");
+        assert_eq!(feature_graph.nodes[0].kind, "subtraction");
+        assert_eq!(feature_graph.nodes[0].dependency_ids, vec!["width", "gap"]);
+    }
+
+    #[test]
+    fn runtime_part_feature_graph_links_selection_target_outputs() {
+        let parts = vec![RuntimePart {
+            part_id: "body".to_string(),
+            label: "Body".to_string(),
+            expr: IrExpr::symbol("body"),
+            feature_decl: None,
+            source_ref: runtime_part_source_ref("body", None),
+            dependency_ids: vec!["width".to_string()],
+        }];
+        let selection_targets = vec![crate::models::SelectionTarget {
+            target_id: Some("target-body".to_string()),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body".to_string(),
+            kind: crate::models::SelectionTargetKind::Object,
+            editable: true,
+            parameter_keys: vec!["width".to_string()],
+            primitive_ids: Vec::new(),
+            view_ids: Vec::new(),
+        }];
+
+        let graph = runtime_part_feature_graph(&parts, &selection_targets);
+
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].output_refs.len(), 1);
+        assert_eq!(graph.nodes[0].output_refs[0].feature_id, "part:body");
+        assert_eq!(
+            graph.nodes[0].output_refs[0].target_ids,
+            vec!["target-body"]
+        );
+    }
+
+    #[test]
+    fn core_ast_identity_is_deterministic_and_ignores_spans() {
+        let source = r#"(model (part body (box 1 2 3)))"#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let repeated = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let changed =
+            crate::ecky_scheme::compile_to_core_program(r#"(model (part body (box 1 2 4)))"#)
+                .expect("changed program");
+        let mut with_span = program.clone();
+        with_span.parts[0].root.span = Some(SourceSpan::new(Some(SourceFileId::new(9)), 12, 34));
+
+        let identity = core_ast_identity(&program);
+
+        assert_eq!(
+            identity.core_digest,
+            core_ast_identity(&repeated).core_digest
+        );
+        assert_eq!(
+            identity.core_digest,
+            core_ast_identity(&with_span).core_digest
+        );
+        assert_ne!(
+            identity.core_digest,
+            core_ast_identity(&changed).core_digest
+        );
+    }
+
+    #[test]
+    fn render_model_from_model_manifest_keeps_ast_identity_empty() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root };
+        let source = r#"(model (part body (box 10 8 6)))"#;
+        let model = parse_model(source).expect("model");
+
+        let bundle = render_model_from_model(&model, source, &DesignParams::new(), &resolver)
+            .expect("render");
+        let manifest = read_manifest(&bundle);
+
+        assert!(manifest.source_digest.is_some());
+        assert_eq!(manifest.core_digest, None);
+        assert_eq!(manifest.ast_schema_version, None);
+        assert_eq!(
+            manifest
+                .feature_graph
+                .as_ref()
+                .and_then(|graph| graph.nodes.first())
+                .and_then(|node| node.source_ref.as_ref())
+                .and_then(|source_ref| source_ref.path.as_deref()),
+            Some("/parts/body/root")
+        );
     }
 
     #[test]
@@ -1151,8 +1919,12 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         let legacy = core_part_to_ir_part(&program.parts[0], &param_names).expect("legacy");
-        let runtime =
-            runtime_core_part_to_runtime_part(&program.parts[0], &param_names).expect("runtime");
+        let runtime = runtime_core_part_to_runtime_part(
+            &program.parts[0],
+            &param_names,
+            &program.feature_decls,
+        )
+        .expect("runtime");
 
         assert_eq!(runtime.part_id, legacy.part_id);
         assert_eq!(runtime.label, legacy.label);
@@ -1170,8 +1942,12 @@ mod tests {
             .map(|param| (param.id.raw(), param.key.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        let runtime =
-            runtime_core_part_to_runtime_part(&program.parts[0], &param_names).expect("runtime");
+        let runtime = runtime_core_part_to_runtime_part(
+            &program.parts[0],
+            &param_names,
+            &program.feature_decls,
+        )
+        .expect("runtime");
         assert!(
             contains_edge_selector(&runtime.expr),
             "expected typed selector in {:?}",
@@ -1190,8 +1966,12 @@ mod tests {
             .map(|param| (param.id.raw(), param.key.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        let runtime =
-            runtime_core_part_to_runtime_part(&program.parts[0], &param_names).expect("runtime");
+        let runtime = runtime_core_part_to_runtime_part(
+            &program.parts[0],
+            &param_names,
+            &program.feature_decls,
+        )
+        .expect("runtime");
         assert!(
             contains_face_selector(&runtime.expr),
             "expected typed face selector in {:?}",
@@ -1215,7 +1995,11 @@ mod tests {
             .map(|param| (param.id.raw(), param.key.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        let err = match runtime_core_part_to_runtime_part(&program.parts[0], &param_names) {
+        let err = match runtime_core_part_to_runtime_part(
+            &program.parts[0],
+            &param_names,
+            &program.feature_decls,
+        ) {
             Ok(_) => panic!("missing selector payload should fail"),
             Err(err) => err,
         };
@@ -1246,7 +2030,11 @@ mod tests {
             .map(|param| (param.id.raw(), param.key.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        let err = match runtime_core_part_to_runtime_part(&program.parts[0], &param_names) {
+        let err = match runtime_core_part_to_runtime_part(
+            &program.parts[0],
+            &param_names,
+            &program.feature_decls,
+        ) {
             Ok(_) => panic!("wrong-kind selector payload should fail"),
             Err(err) => err,
         };
@@ -1255,5 +2043,24 @@ mod tests {
                 .contains("CoreProgram `:edges` keyword requires edge selector payload"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn ecky_lowering_failure_exposes_operation_stable_node_key_and_line_range() {
+        let source = r#"(model (part body (wall-pattern (:mode ribs :depth 1) (shell 2 (cylinder 10 20)))))"#;
+        let err = crate::ecky_ir::lower_to_build123d(source)
+            .expect_err("wall-pattern should fail on build123d")
+            .with_operation("lower:build123d")
+            .with_line_range(1, 1)
+            .with_stable_node_key("sha256:test-lowering-span");
+
+        assert_eq!(err.operation.as_deref(), Some("lower:build123d"));
+        assert_eq!(
+            err.stable_node_key.as_deref(),
+            Some("sha256:test-lowering-span")
+        );
+        assert_eq!(err.start_line, Some(1));
+        assert_eq!(err.end_line, Some(1));
+        assert!(err.start_line.unwrap() <= err.end_line.unwrap(), "{err:?}");
     }
 }

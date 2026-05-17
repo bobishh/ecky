@@ -105,6 +105,7 @@
     glyph: string;
     note: string;
   };
+  type ViewerMode = 'orbit' | 'select' | 'measure';
   type PrimitiveBindingDraft = {
     parameterKey: string;
     scale: string;
@@ -112,6 +113,7 @@
     min: string;
     max: string;
   };
+  const PARAM_UNDO_LIMIT = 50;
 
   let {
     uiSpec = $bindable(null),
@@ -133,7 +135,9 @@
     onShowCode = undefined,
     outlineEnabled = true,
     topologyMode = 'mesh',
+    selectionMode = 'orbit',
     onViewerDisplayChange,
+    onViewerSelectionModeChange,
     activeVersionId = null,
     messageId = null,
     macroCode = '',
@@ -161,7 +165,9 @@
     onShowCode?: () => void;
     outlineEnabled?: boolean;
     topologyMode?: TopologyMode;
+    selectionMode?: ViewerMode;
     onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
+    onViewerSelectionModeChange?: (mode: ViewerMode) => void;
     activeVersionId?: string | null;
     messageId?: string | null;
     macroCode?: string;
@@ -170,7 +176,11 @@
   let editing = $state(false);
   let editFields = $state<EditableUiField[]>([]);
   let localParams = $state<DesignParams>({});
-  let hasPendingChanges = $derived(JSON.stringify(localParams) !== JSON.stringify(parameters));
+  let pendingParamDrafts = $state<DesignParams>({});
+  let paramUndoStack = $state<DesignParams[]>([]);
+  let paramUndoDepth = $derived(paramUndoStack.length);
+  const effectiveLocalParams = $derived.by(() => ({ ...localParams, ...pendingParamDrafts }));
+  let hasPendingChanges = $derived(JSON.stringify(effectiveLocalParams) !== JSON.stringify(parameters));
   let saveValuesState = $state<'idle' | 'saving' | 'saved'>('idle');
   let macroParamKeys = $state<Set<string> | null>(null);
   let macroParseSeq = 0;
@@ -233,7 +243,10 @@
   let relationOffset = $state('0');
 
   let lastVersionId = $state<string | null>(null);
+  let lastHistorySourceSignature = $state<string | null>(null);
   let lastIncomingParamsSignature = $state('');
+  let lastIncomingParamsSnapshot = $state<DesignParams | null>(null);
+  let suppressNextIncomingHistory = $state(false);
   let localPostProcessing = $state<PostProcessingSpec | null>(null);
   let lastIncomingPostProcessingSignature = $state('');
   let selectedLithoId = $state<string | null>(null);
@@ -401,7 +414,7 @@
   }
 
   function getSelectValue(key: string): string | number | null {
-    const value = localParams[key];
+    const value = effectiveLocalParams[key];
     return typeof value === 'string' || typeof value === 'number' ? value : null;
   }
 
@@ -470,29 +483,51 @@
 
     if (isBlankSession) {
       localParams = {};
+      pendingParamDrafts = {};
+      paramUndoStack = [];
       localPostProcessing = null;
       selectedLithoId = null;
       lastVersionId = null;
+      lastHistorySourceSignature = null;
       lastIncomingParamsSignature = incomingParamsSignature;
+      lastIncomingParamsSnapshot = null;
+      suppressNextIncomingHistory = false;
       lastIncomingPostProcessingSignature = JSON.stringify(null);
       editing = false;
       editFields = [];
       return;
     }
 
+    const historySourceSignature = currentHistorySourceSignature();
+    if (historySourceSignature !== lastHistorySourceSignature) {
+      pendingParamDrafts = {};
+      paramUndoStack = [];
+      lastHistorySourceSignature = historySourceSignature;
+    }
+
     // If we switched to a different version/thread, we must reset everything
     if (activeVersionId !== lastVersionId) {
       localParams = { ...parameters };
+      pendingParamDrafts = {};
       lastVersionId = activeVersionId;
       lastIncomingParamsSignature = incomingParamsSignature;
+      lastIncomingParamsSnapshot = { ...parameters };
+      suppressNextIncomingHistory = false;
       editing = false;
       editFields = [];
       return;
     }
 
     if (incomingParamsSignature !== lastIncomingParamsSignature && !editing) {
+      if (suppressNextIncomingHistory) {
+        suppressNextIncomingHistory = false;
+      } else if (lastIncomingParamsSnapshot && !paramsEqual(lastIncomingParamsSnapshot, parameters)) {
+        pushParamHistory(lastIncomingParamsSnapshot);
+      }
       localParams = { ...parameters };
+      pendingParamDrafts = {};
       lastIncomingParamsSignature = incomingParamsSignature;
+      lastIncomingParamsSnapshot = { ...parameters };
       return;
     }
 
@@ -504,8 +539,10 @@
 
     if (JSON.stringify(localParams) !== incomingParamsSignature) {
       localParams = { ...parameters };
+      pendingParamDrafts = {};
     }
     lastIncomingParamsSignature = incomingParamsSignature;
+    lastIncomingParamsSnapshot = { ...parameters };
   });
 
   $effect(() => {
@@ -624,6 +661,8 @@
     return filterFieldsBySearch(editFields, searchQuery);
   });
 
+  const isSelectMode = $derived(selectionMode === 'select');
+
   $effect(() => {
     if (editing) return;
     if (controlViews.length === 0) {
@@ -638,6 +677,16 @@
 
   $effect(() => {
     localSelectedPartId = selectedTarget?.partId ?? selectedPartId;
+  });
+
+  $effect(() => {
+    if (!isSelectMode || localSelectedPartId) return;
+    const fallbackTarget = (modelManifest?.selectionTargets || []).length === 1
+      ? modelManifest?.selectionTargets?.[0]
+      : null;
+    const fallbackPartId = fallbackTarget?.partId ?? null;
+    if (!fallbackPartId) return;
+    selectPart(fallbackPartId);
   });
 
   const partCount = $derived(modelManifest?.parts?.length ?? 0);
@@ -716,6 +765,33 @@
     return keys;
   });
 
+  const contextualSelectionKeys = $derived.by(() => {
+    const keys = new Set<string>(selectedParameterKeys);
+    if (keys.size > 0) return keys;
+    if (!isSelectMode) return keys;
+
+    for (const key of selectedTarget?.parameterKeys || []) {
+      keys.add(key);
+    }
+    if (keys.size > 0) return keys;
+
+    const fallbackTarget = (modelManifest?.selectionTargets || []).length === 1
+      ? modelManifest?.selectionTargets?.[0]
+      : null;
+    for (const key of fallbackTarget?.parameterKeys || []) {
+      keys.add(key);
+    }
+    if (keys.size > 0) return keys;
+
+    const fallbackPart = localSelectedPartId
+      ? (modelManifest?.parts || []).find((part) => part.partId === localSelectedPartId)
+      : null;
+    for (const key of fallbackPart?.parameterKeys || []) {
+      keys.add(key);
+    }
+    return keys;
+  });
+
   const focusedFields = $derived.by(() => {
     if (!localSelectedPartId || selectedParameterKeys.size === 0) return [];
     return filteredFields.filter((field) => selectedParameterKeys.has(field.key));
@@ -732,7 +808,24 @@
   });
 
   const filteredSemanticSections = $derived.by(() => {
-    return resolveContextSections(activeSemanticView, null, searchQuery);
+    if (isSelectMode && !selectedPart && (modelManifest?.selectionTargets?.length ?? 0) > 1) {
+      return [];
+    }
+    const sections = resolveContextSections(activeSemanticView, selectedTarget, searchQuery);
+    if (!isSelectMode || contextualSelectionKeys.size === 0) {
+      return sections;
+    }
+    return sections
+      .map((section) => ({
+        ...section,
+        controls: section.controls.filter((control) => {
+          if (control.rawField && contextualSelectionKeys.has(control.rawField.key)) return true;
+          return (control.bindings || []).some((binding) =>
+            contextualSelectionKeys.has(binding.parameterKey),
+          );
+        }),
+      }))
+      .filter((section) => section.controls.length > 0);
   });
 
   const primitiveCatalog = $derived.by(() => {
@@ -743,6 +836,7 @@
         label: primitive.label,
         editable: primitive.editable,
         partIds: primitive.partIds || [],
+        parameterKeys: (primitive.bindings || []).map((binding) => binding.parameterKey),
         partLabels: (primitive.partIds || [])
           .map((partId) => partsById.get(partId)?.label || partId)
           .filter(Boolean),
@@ -751,12 +845,19 @@
   });
 
   const composerVisiblePrimitives = $derived.by(() => {
-    if (composerViewScope !== 'part' || !composerViewPartId) {
-      return primitiveCatalog;
+    const scopeFiltered =
+      composerViewScope !== 'part' || !composerViewPartId
+        ? primitiveCatalog
+        : primitiveCatalog.filter(
+            (primitive) =>
+              primitive.partIds.length === 0 || primitive.partIds.includes(composerViewPartId as string),
+          );
+    if (!isSelectMode || contextualSelectionKeys.size === 0) {
+      return scopeFiltered;
     }
-    return primitiveCatalog.filter(
+    return scopeFiltered.filter(
       (primitive) =>
-        primitive.partIds.length === 0 || primitive.partIds.includes(composerViewPartId as string),
+        primitive.parameterKeys.some((key) => contextualSelectionKeys.has(key)),
     );
   });
 
@@ -945,6 +1046,44 @@
     editFields = [];
   }
 
+  function paramsEqual(left: DesignParams, right: DesignParams): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function cloneParams(params: DesignParams): DesignParams {
+    return { ...params };
+  }
+
+  function currentHistorySourceSignature(): string {
+    return JSON.stringify({
+      macroCode: macroCode ?? '',
+      fields: (uiSpec?.fields || []).map((field) => field?.key ?? ''),
+    });
+  }
+
+  function pushParamHistory(snapshot: DesignParams) {
+    lastHistorySourceSignature = currentHistorySourceSignature();
+    const cloned = cloneParams(snapshot);
+    const previous = paramUndoStack[paramUndoStack.length - 1];
+    if (previous && paramsEqual(previous, cloned)) return;
+    paramUndoStack = [...paramUndoStack, cloned].slice(-PARAM_UNDO_LIMIT);
+  }
+
+  function clearPendingParamDraft(key: string) {
+    if (!(key in pendingParamDrafts)) return;
+    const nextDrafts = { ...pendingParamDrafts };
+    delete nextDrafts[key];
+    pendingParamDrafts = nextDrafts;
+  }
+
+  function stageParamDraft(key: string, value: ParamValue) {
+    const nextParams = { ...effectiveLocalParams, [key]: value };
+    if (!paramsEqual(nextParams, effectiveLocalParams)) {
+      pushParamHistory(effectiveLocalParams);
+    }
+    pendingParamDrafts = { ...pendingParamDrafts, [key]: value };
+  }
+
   function update(key: string, value: ParamValue) {
     let clampedValue = value;
     const field = mergedFields.find(f => f.key === key);
@@ -954,7 +1093,7 @@
       clampedValue = Math.max(props.min, Math.min(props.max, value));
     }
 
-    const nextParams: DesignParams = { ...localParams, [key]: clampedValue };
+    const nextParams: DesignParams = { ...effectiveLocalParams, [key]: clampedValue };
 
     // Cascade clamping for dependent fields
     for (const otherField of mergedFields) {
@@ -977,7 +1116,11 @@
       }
     }
 
+    if (!paramsEqual(nextParams, effectiveLocalParams)) {
+      pushParamHistory(effectiveLocalParams);
+    }
     localParams = nextParams;
+    clearPendingParamDraft(key);
     if ($liveApply && onchange) {
       onchange(localParams);
     } else {
@@ -1026,12 +1169,18 @@
 
   async function applyChanges() {
     if (applying) return;
-    console.log('ParamPanel: applyChanges clicked', { localParams, hasPendingChanges, live: $liveApply });
+    const paramsToApply = cloneParams(effectiveLocalParams);
+    console.log('ParamPanel: applyChanges clicked', { localParams: paramsToApply, hasPendingChanges, live: $liveApply });
     if (onchange) {
+      if (!paramsEqual(paramsToApply, parameters)) {
+        pushParamHistory(parameters);
+      }
+      localParams = paramsToApply;
+      pendingParamDrafts = {};
       applying = true;
       session.setError(null);
       try {
-        await onchange(localParams);
+        await onchange(paramsToApply);
       } catch (e: unknown) {
         console.error('ParamPanel: onchange failed', e);
         session.setError(`Apply Failed: ${formatBackendError(e)}`);
@@ -1044,13 +1193,43 @@
     }
   }
 
+  async function undoParams() {
+    if (applying || paramUndoStack.length === 0) return;
+    const previousParams = cloneParams(paramUndoStack[paramUndoStack.length - 1]);
+    paramUndoStack = paramUndoStack.slice(0, -1);
+    localParams = previousParams;
+    pendingParamDrafts = {};
+
+    if (!onchange) {
+      session.setStatus('Parameters restored. Apply to rerender.');
+      return;
+    }
+
+    applying = true;
+    session.setError(null);
+    try {
+      suppressNextIncomingHistory = true;
+      await onchange(previousParams);
+      session.setStatus('Parameters restored.');
+    } catch (e: unknown) {
+      suppressNextIncomingHistory = false;
+      console.error('ParamPanel: undo apply failed', e);
+      session.setError(`Undo Failed: ${formatBackendError(e)}`);
+    } finally {
+      applying = false;
+    }
+  }
+
   async function commitChanges() {
     if (committing) return;
+    const paramsToCommit = cloneParams(effectiveLocalParams);
+    localParams = paramsToCommit;
+    pendingParamDrafts = {};
     if (oncommit) {
       committing = true;
       session.setError(null);
       try {
-        await oncommit(localParams);
+        await oncommit(paramsToCommit);
       } catch (e: unknown) {
         console.error('ParamPanel: oncommit failed', e);
         session.setError(`Commit Failed: ${formatBackendError(e)}`);
@@ -1084,16 +1263,16 @@
   }
 
   function getRangeProps(field: RangeLikeField) {
-    const rawVal = Number(localParams[field.key]);
+    const rawVal = Number(effectiveLocalParams[field.key]);
     const val = Number.isFinite(rawVal) ? rawVal : 0;
     let min = parseOptionalNumber(field.min) ?? 0;
-    if (field.minFrom && localParams[field.minFrom] !== undefined) {
-      min = asNumber(localParams[field.minFrom], min);
+    if (field.minFrom && effectiveLocalParams[field.minFrom] !== undefined) {
+      min = asNumber(effectiveLocalParams[field.minFrom], min);
     }
 
     let max = parseOptionalNumber(field.max) ?? Math.max(200, val * 4);
-    if (field.maxFrom && localParams[field.maxFrom] !== undefined) {
-      max = asNumber(localParams[field.maxFrom], max);
+    if (field.maxFrom && effectiveLocalParams[field.maxFrom] !== undefined) {
+      max = asNumber(effectiveLocalParams[field.maxFrom], max);
     }
 
     if (max < min) max = min;
@@ -2067,11 +2246,13 @@
     applying={applying}
     committing={committing}
     reading={reading}
+    undoDepth={paramUndoDepth}
     saveValuesState={saveValuesState}
     liveApply={$liveApply}
     activeVersionId={activeVersionId}
     onSearchQueryChange={(value) => searchQuery = value}
     onApplyChanges={applyChanges}
+    onUndoParams={undoParams}
     onCommitChanges={commitChanges}
     onSaveValues={saveValues}
     onStartEditing={startEditing}
@@ -2179,10 +2360,12 @@
       activeTab={activeTab}
       outlineEnabled={outlineEnabled}
       topologyMode={topologyMode}
+      selectionMode={selectionMode}
       macroCode={macroCode}
       onActiveTabChange={(tab) => activeTab = tab}
       onShowCode={onShowCode}
       onViewerDisplayChange={updateViewerDisplay}
+      onViewerSelectionModeChange={onViewerSelectionModeChange}
     />
 
     {#if enrichmentProposals.length > 0 && modelManifest?.sourceKind === 'importedFcstd'}
@@ -2819,7 +3002,9 @@
         <div class="no-params">
           {selectedPart
             ? 'No semantic controls are mapped to this part yet. Open RAW for fallback.'
-            : 'No semantic controls match your search.'}
+            : isSelectMode && (modelManifest?.selectionTargets?.length ?? 0) > 1
+              ? 'Multiple face targets found. Select one in viewport; fallback waits for explicit target.'
+              : 'No semantic controls match your search.'}
         </div>
       {/if}
       {:else}
@@ -2833,7 +3018,7 @@
               <ParamPanelControlField
                 elementId={field.key}
                 field={field}
-                value={localParams[field.key]}
+                value={effectiveLocalParams[field.key]}
                 rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
                 editable={!field.frozen}
                 frozen={field.frozen}
@@ -2842,6 +3027,7 @@
                 highlighted={highlightedParamKey === field.key}
                 cadTone={getCadHint(field).tone}
                 liveApply={$liveApply}
+                onDraftValue={(nextValue) => stageParamDraft(field.key, nextValue)}
                 onUpdate={(nextValue) => update(field.key, nextValue)}
                 onPickImage={async () => {
                   const file = await open({
@@ -2872,7 +3058,7 @@
           <ParamPanelControlField
             elementId={field.key}
             field={field}
-            value={localParams[field.key]}
+            value={effectiveLocalParams[field.key]}
             rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
             editable={!field.frozen}
             frozen={field.frozen}
@@ -2880,6 +3066,7 @@
             highlighted={highlightedParamKey === field.key}
             cadTone={getCadHint(field).tone}
             liveApply={$liveApply}
+            onDraftValue={(nextValue) => stageParamDraft(field.key, nextValue)}
             onUpdate={(nextValue) => update(field.key, nextValue)}
             onPickImage={async () => {
               const file = await open({

@@ -1003,6 +1003,30 @@ pub fn get_thread_messages_for_context(
     thread_id: &str,
 ) -> SqlResult<Vec<Message>> {
     let rows = load_thread_message_rows(conn, thread_id, true)?;
+    Ok(filter_thread_messages_for_context(&rows))
+}
+
+pub fn get_recent_thread_messages_for_summary(
+    conn: &Connection,
+    thread_id: &str,
+    limit: usize,
+) -> SqlResult<Vec<Message>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut rows = load_thread_message_rows_with_clause(
+        conn,
+        "thread_id = ?1 AND status != 'discarded'",
+        &[&thread_id],
+        "timestamp DESC, rowid DESC",
+        Some(limit),
+    )?;
+    rows.reverse();
+    Ok(filter_thread_messages_for_context(&rows))
+}
+
+fn filter_thread_messages_for_context(rows: &[ThreadMessageRow]) -> Vec<Message> {
     let mut messages = Vec::new();
 
     for (index, row) in rows.iter().enumerate() {
@@ -1032,7 +1056,7 @@ pub fn get_thread_messages_for_context(
         messages.push(row.message.clone());
     }
 
-    Ok(messages)
+    messages
 }
 
 fn load_thread_message_rows(
@@ -1276,16 +1300,16 @@ pub struct MessageStatusUpdate<'a> {
     pub content: Option<&'a str>,
 }
 
-pub fn delete_thread(conn: &Connection, id: &str) -> SqlResult<()> {
+pub fn delete_thread(conn: &Connection, id: &str) -> SqlResult<bool> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    conn.execute(
-        "UPDATE threads SET deleted_at = ?1 WHERE id = ?2",
+    let changed = conn.execute(
+        "UPDATE threads SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
         params![now, id],
     )?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub fn delete_message(conn: &Connection, id: &str) -> SqlResult<()> {
@@ -2948,6 +2972,50 @@ mod tests {
     }
 
     #[test]
+    fn recent_thread_messages_for_summary_returns_visible_tail_in_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "thread-summary-tail";
+        create_or_update_thread(&conn, thread_id, "Summary Tail", 100, None).unwrap();
+
+        for index in 0..6 {
+            add_message(
+                &conn,
+                thread_id,
+                &Message {
+                    id: format!("msg-{}", index),
+                    role: if index % 2 == 0 {
+                        MessageRole::User
+                    } else {
+                        MessageRole::Assistant
+                    },
+                    content: format!("message {}", index),
+                    status: MessageStatus::Success,
+                    output: None,
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    agent_origin: None,
+                    timestamp: 100 + index as u64,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+
+        let tail = get_recent_thread_messages_for_summary(&conn, thread_id, 3).unwrap();
+        assert_eq!(
+            tail.iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-3", "msg-4", "msg-5"]
+        );
+    }
+
+    #[test]
     fn migrate_threads_drop_authoring_columns_removes_legacy_thread_context() {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
@@ -3230,6 +3298,9 @@ mod tests {
                 schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
                 source_kind: crate::models::ModelSourceKind::Generated,
+                source_digest: None,
+                core_digest: None,
+                ast_schema_version: None,
                 engine_kind: crate::models::EngineKind::Freecad,
                 source_language: crate::models::SourceLanguage::LegacyPython,
                 geometry_backend: crate::models::GeometryBackend::Freecad,
@@ -3261,6 +3332,8 @@ mod tests {
                 advisories: Vec::new(),
                 selection_targets: Vec::new(),
                 measurement_annotations: Vec::new(),
+                feature_graph: None,
+                correspondence_graph: None,
                 warnings: Vec::new(),
                 enrichment_state: crate::contracts::ManifestEnrichmentState {
                     status: crate::contracts::EnrichmentStatus::None,

@@ -596,7 +596,7 @@ test('resolveMeasurementCallout falls back to selected target matching when no f
   assert.deepEqual(callout?.targetIds, ['legacy-body-edge']);
 });
 
-test('pickContextControls orders exact target controls before part and global controls', () => {
+test('pickContextControls shows only exact controls for edge targets', () => {
   const target: ContextSelectionTarget = {
     targetId: 'target-edge',
     aliasIds: [],
@@ -627,8 +627,137 @@ test('pickContextControls orders exact target controls before part and global co
 
   assert.deepEqual(
     result.map((entry) => entry.primitiveId),
-    ['wall-thickness', 'body-height', 'global-finish'],
+    ['wall-thickness'],
   );
+});
+
+test('pickContextControls does not fall back to unrelated model controls for an unmapped part', () => {
+  const target: ContextSelectionTarget = {
+    targetId: 'target-nose',
+    aliasIds: [],
+    kind: 'part',
+    partId: 'nose',
+    label: 'Nose',
+    editable: true,
+    viewerNodeId: 'Nose001',
+    parameterKeys: [],
+    primitiveIds: [],
+    viewIds: [],
+  };
+  const result = pickContextControls(
+    view([
+      {
+        sectionId: 'main',
+        label: 'Main',
+        collapsed: false,
+        controls: [
+          control('body-height', 'Body Height', ['body'], 'body_height'),
+          control('global-finish', 'Global Finish', [], 'surface_finish'),
+        ],
+      },
+    ]),
+    target,
+  );
+
+  assert.deepEqual(result, []);
+});
+
+test('pickContextControls keeps mapped part controls isolated from unrelated global controls', () => {
+  const target: ContextSelectionTarget = {
+    targetId: 'target-film-gate',
+    aliasIds: [],
+    kind: 'part',
+    partId: 'film_gate',
+    label: 'Film Gate',
+    editable: true,
+    viewerNodeId: 'FilmGate001',
+    parameterKeys: ['film_gap', 'film_frame_width'],
+    primitiveIds: [],
+    viewIds: [],
+  };
+  const result = pickContextControls(
+    view([
+      {
+        sectionId: 'main',
+        label: 'Main',
+        collapsed: false,
+        controls: [
+          control('film-gap', 'Film Gap', [], 'film_gap'),
+          control('frame-width', 'Frame Width', [], 'film_frame_width'),
+          control('helicoid-pitch', 'Helicoid Pitch', [], 'helicoid_pitch'),
+          control('helicoid-clearance', 'Helicoid Clearance', [], 'helicoid_clearance'),
+        ],
+      },
+    ]),
+    target,
+  );
+
+  assert.deepEqual(
+    result.map((entry) => entry.primitiveId),
+    ['film-gap', 'frame-width'],
+  );
+});
+
+test('pickContextControls does not fall back to a whole part group for unbound face targets', () => {
+  const target: ContextSelectionTarget = {
+    targetId: 'body:face:top',
+    aliasIds: [],
+    kind: 'face',
+    partId: 'body',
+    label: 'Top Face',
+    editable: true,
+    viewerNodeId: 'Body001',
+    parameterKeys: [],
+    primitiveIds: [],
+    viewIds: [],
+  };
+  const result = pickContextControls(
+    view([
+      {
+        sectionId: 'main',
+        label: 'Main',
+        collapsed: false,
+        controls: [
+          control('body-height', 'Body Height', ['body'], 'body_height'),
+          control('wall-thickness', 'Wall Thickness', ['body'], 'wall_thickness'),
+        ],
+      },
+    ]),
+    target,
+  );
+
+  assert.deepEqual(result, []);
+});
+
+test('pickContextControls shows one bound control for a face target with exact parameter keys', () => {
+  const target: ContextSelectionTarget = {
+    targetId: 'body:face:wall',
+    aliasIds: [],
+    kind: 'face',
+    partId: 'body',
+    label: 'Wall Face',
+    editable: true,
+    viewerNodeId: 'Body001',
+    parameterKeys: ['wall_thickness'],
+    primitiveIds: [],
+    viewIds: [],
+  };
+  const result = pickContextControls(
+    view([
+      {
+        sectionId: 'main',
+        label: 'Main',
+        collapsed: false,
+        controls: [
+          control('body-height', 'Body Height', ['body'], 'body_height'),
+          control('wall-thickness', 'Wall Thickness', ['body'], 'wall_thickness'),
+        ],
+      },
+    ]),
+    target,
+  );
+
+  assert.deepEqual(result.map((entry) => entry.primitiveId), ['wall-thickness']);
 });
 
 test('resolveContextSections applies target scoping and shared search query together', () => {

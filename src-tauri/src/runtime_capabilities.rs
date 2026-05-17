@@ -38,19 +38,19 @@ pub fn recommended_authoring_context(
     freecad_available: bool,
     build123d_available: bool,
 ) -> RuntimeAuthoringContext {
-    if freecad_available {
-        return RuntimeAuthoringContext {
-            engine_kind: EngineKind::Freecad,
-            source_language: SourceLanguage::LegacyPython,
-            geometry_backend: GeometryBackend::Freecad,
-        };
-    }
-
     if build123d_available {
         return RuntimeAuthoringContext {
             engine_kind: EngineKind::EckyIrV0,
             source_language: SourceLanguage::EckyIrV0,
             geometry_backend: GeometryBackend::Build123d,
+        };
+    }
+
+    if freecad_available {
+        return RuntimeAuthoringContext {
+            engine_kind: EngineKind::EckyIrV0,
+            source_language: SourceLanguage::EckyIrV0,
+            geometry_backend: GeometryBackend::Freecad,
         };
     }
 
@@ -395,16 +395,16 @@ mod tests {
     }
 
     #[test]
-    fn recommended_authoring_context_prefers_freecad_then_build123d_then_ecky_rust() {
-        let freecad = recommended_authoring_context(true, true);
-        assert_eq!(freecad.engine_kind, EngineKind::Freecad);
-        assert_eq!(freecad.source_language, SourceLanguage::LegacyPython);
-        assert_eq!(freecad.geometry_backend, GeometryBackend::Freecad);
-
-        let build123d = recommended_authoring_context(false, true);
+    fn recommended_authoring_context_prefers_ecky_source_over_raw_freecad() {
+        let build123d = recommended_authoring_context(true, true);
         assert_eq!(build123d.engine_kind, EngineKind::EckyIrV0);
         assert_eq!(build123d.source_language, SourceLanguage::EckyIrV0);
         assert_eq!(build123d.geometry_backend, GeometryBackend::Build123d);
+
+        let freecad = recommended_authoring_context(true, false);
+        assert_eq!(freecad.engine_kind, EngineKind::EckyIrV0);
+        assert_eq!(freecad.source_language, SourceLanguage::EckyIrV0);
+        assert_eq!(freecad.geometry_backend, GeometryBackend::Freecad);
 
         let ecky_rust = recommended_authoring_context(false, false);
         assert_eq!(ecky_rust.engine_kind, EngineKind::EckyIrV0);

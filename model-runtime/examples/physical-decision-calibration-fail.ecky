@@ -1,0 +1,66 @@
+(model
+  (params
+    (number magnet_d 6.0 :label "magnet diameter" :min 3.0 :max 12.0 :step 0.1)
+    (number magnet_thickness 2.0 :label "magnet thickness" :min 1.0 :max 6.0 :step 0.1)
+    (number magnet_pocket_d 5.5 :label "magnet pocket diameter" :min 3.1 :max 12.5 :step 0.1)
+    (number magnet_pocket_h 1.8 :label "magnet pocket depth" :min 1.1 :max 7.0 :step 0.1)
+
+    (number film_thickness_target 0.14 :label "film thickness target" :min 0.08 :max 0.30 :step 0.01)
+    (number film_gap 0.12 :label "film path gap" :min 0.10 :max 1.20 :step 0.01)
+    (number film_gap_min 0.24 :label "film gap minimum" :min 0.10 :max 1.20 :step 0.01)
+    (number film_path_w 35.0 :label "film path width" :min 20.0 :max 80.0 :step 0.1)
+
+    (number clamp_force_proxy 1.0 :label "clamp force proxy" :min 1.0 :max 12.0 :step 0.1)
+    (number clamp_force_min 2.0 :label "clamp force proxy min" :min 0.5 :max 12.0 :step 0.1)
+    (number clamp_force_max 8.0 :label "clamp force proxy max" :min 1.0 :max 20.0 :step 0.1)
+
+    (number lens_barrel_od_measured 58.60 :label "lens barrel measured OD" :min 40.0 :max 80.0 :step 0.01)
+    (number lens_od_tolerance 0.50 :label "lens OD tolerance" :min 0.01 :max 1.00 :step 0.01)
+    (number lens_od_tolerance_max 0.30 :label "lens OD tolerance max" :min 0.05 :max 1.50 :step 0.01)
+    (number lens_fit_floor 58.40 :label "lens fit floor" :min 40.0 :max 82.0 :step 0.01)
+    (number lens_bore_d 58.30 :label "lens bore diameter" :min 40.0 :max 82.0 :step 0.01)
+
+    (number nozzle_d 0.40 :label "nozzle diameter" :min 0.20 :max 1.20 :step 0.01)
+    (number layer_h 0.35 :label "layer height" :min 0.05 :max 0.80 :step 0.01)
+    (number layer_h_max 0.28 :label "layer height max" :min 0.10 :max 0.90 :step 0.01)
+
+    (number thread_clearance 0.15 :label "thread clearance" :min 0.05 :max 1.20 :step 0.01)
+    (number thread_clearance_min 0.20 :label "thread clearance min" :min 0.05 :max 0.80 :step 0.01)
+    (number carrier_wall 0.70 :label "carrier wall" :min 0.60 :max 6.00 :step 0.01)
+    (number carrier_wall_min 0.80 :label "carrier wall min" :min 0.50 :max 4.00 :step 0.01)
+
+    :relations (
+      (>= magnet_pocket_d magnet_d)
+      (>= magnet_pocket_h magnet_thickness)
+      (>= film_gap film_gap_min)
+      (>= film_gap film_thickness_target)
+      (>= clamp_force_proxy clamp_force_min)
+      (<= clamp_force_proxy clamp_force_max)
+      (>= lens_fit_floor lens_barrel_od_measured)
+      (>= lens_bore_d lens_fit_floor)
+      (<= lens_od_tolerance lens_od_tolerance_max)
+      (<= layer_h layer_h_max)
+      (<= layer_h nozzle_d)
+      (>= thread_clearance thread_clearance_min)
+      (>= carrier_wall carrier_wall_min)))
+
+  (part calibration_magnet_coupon
+    (build
+      (shape blank (box 40 22 6))
+      (shape pocket_n (translate -9 0 1 (cylinder (/ magnet_pocket_d 2) magnet_pocket_h)))
+      (shape pocket_s (translate 9 0 1 (cylinder (/ magnet_pocket_d 2) magnet_pocket_h)))
+      (result (difference blank pocket_n pocket_s))))
+
+  (part calibration_film_clamp_coupon
+    (build
+      (shape base (box 52 18 (+ carrier_wall 2.0)))
+      (shape film_slot (translate 0 0 carrier_wall (box film_path_w film_gap 1.2)))
+      (shape spring_pad (translate 0 0 (+ carrier_wall 0.6) (box clamp_force_proxy 6.0 1.0)))
+      (result (difference (union base spring_pad) film_slot))))
+
+  (part calibration_lens_thread_coupon
+    (build
+      (shape shell (cylinder (+ (/ lens_bore_d 2) carrier_wall) 8.0))
+      (shape bore (cylinder (/ lens_bore_d 2) 8.0))
+      (shape gauge_notch (translate 0 0 4.0 (box thread_clearance nozzle_d layer_h)))
+      (result (difference shell bore gauge_notch)))))

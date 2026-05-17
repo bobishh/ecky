@@ -445,6 +445,59 @@ endsolid mock
     expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('update_parameters');
   });
 
+  test('Given applied params When Undo is clicked Then previous params rerender', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a param box');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    const width = page.locator('.param-panel input.param-input').first();
+    const beforeRenderCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    );
+
+    await width.fill('42');
+    await page.getByRole('button', { name: 'APPLY' }).click();
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+        ),
+      )
+      .toBe(beforeRenderCount + 1);
+    const appliedRenderCall = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');
+      return calls[calls.length - 1];
+    });
+    expect(appliedRenderCall?.args?.parameters?.width).toBe(42);
+
+    await page.getByRole('button', { name: 'UNDO' }).click();
+    await expect(width).toHaveValue('10');
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+        ),
+      )
+      .toBe(beforeRenderCount + 2);
+
+    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+    const renderCall = calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model').at(-1);
+    expect(renderCall?.args?.parameters?.width).toBe(10);
+    await expect(page.getByRole('button', { name: 'UNDO' })).toBeDisabled();
+  });
+
   test('Given staged params When Commit is clicked Then one immutable version is saved', async ({ page }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a param box');
@@ -468,6 +521,48 @@ endsolid mock
     const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
     const addVersionCall = calls.find((entry: { cmd: string }) => entry.cmd === 'add_manual_version');
     expect(addVersionCall?.args?.input?.macroCode).toBe('print("box")');
+    expect(addVersionCall?.args?.input?.parameters?.width).toBe(42);
+    expect(addVersionCall?.args?.input?.artifactBundle?.previewStlPath).toBe('/mock.stl');
+  });
+
+  test('Given params were applied When Commit is clicked Then saved version reuses rendered draft', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a param box');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    const width = page.locator('.param-panel input.param-input').first();
+    await width.fill('42');
+
+    const renderCountBeforeApply = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    );
+    await page.getByRole('button', { name: 'APPLY' }).click();
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+        ),
+      )
+      .toBe(renderCountBeforeApply + 1);
+
+    await page.getByRole('button', { name: 'COMMIT' }).click();
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () => (window as any).__PARAM_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'add_manual_version'),
+        ),
+      )
+      .toBe(true);
+
+    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+    expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model')).toHaveLength(
+      renderCountBeforeApply + 1,
+    );
+    const addVersionCall = calls.find((entry: { cmd: string }) => entry.cmd === 'add_manual_version');
     expect(addVersionCall?.args?.input?.parameters?.width).toBe(42);
     expect(addVersionCall?.args?.input?.artifactBundle?.previewStlPath).toBe('/mock.stl');
   });

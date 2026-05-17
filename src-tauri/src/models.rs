@@ -162,6 +162,7 @@ pub struct AppState {
     pub config: Arc<Mutex<Config>>,
     pub last_snapshot: Arc<Mutex<Option<LastDesignSnapshot>>>,
     pub db: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    pub db_read: Option<Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     pub render_lock: Arc<tokio::sync::Mutex<()>>,
     pub mcp_status: Arc<Mutex<McpServerStatus>>,
     pub mcp_sessions: Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>>,
@@ -191,10 +192,20 @@ impl AppState {
         last_snapshot: Option<LastDesignSnapshot>,
         conn: rusqlite::Connection,
     ) -> Self {
+        Self::new_with_read_connection(config, last_snapshot, conn, None)
+    }
+
+    pub fn new_with_read_connection(
+        config: Config,
+        last_snapshot: Option<LastDesignSnapshot>,
+        conn: rusqlite::Connection,
+        read_conn: Option<rusqlite::Connection>,
+    ) -> Self {
         Self {
             config: Arc::new(Mutex::new(config)),
             last_snapshot: Arc::new(Mutex::new(last_snapshot)),
             db: Arc::new(tokio::sync::Mutex::new(conn)),
+            db_read: read_conn.map(|conn| Arc::new(tokio::sync::Mutex::new(conn))),
             render_lock: Arc::new(tokio::sync::Mutex::new(())),
             mcp_status: Arc::new(Mutex::new(McpServerStatus {
                 running: false,

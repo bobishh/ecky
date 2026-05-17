@@ -1,0 +1,50 @@
+(model
+  (params
+    (number tray_w 180 :label "tray width" :min 120 :max 320 :step 1)
+    (number tray_d 120 :label "tray depth" :min 80 :max 220 :step 1)
+    (number lid_thickness 3.0 :label "lid thickness" :min 1.6 :max 8 :step 0.1)
+    (number lip_h 8.0 :label "lip height" :min 3 :max 20 :step 0.1)
+    (number vent_w 10.0 :label "vent width" :min 4 :max 24 :step 0.1)
+    (number vent_d 6.0 :label "vent depth" :min 2 :max 16 :step 0.1))
+
+  (part vermi_lid_020
+    (build
+      (shape plate (box tray_w tray_d lid_thickness))
+      (shape lip
+        (translate 0 0 (+ lid_thickness (/ lip_h 2))
+          (box (- tray_w 0.40) (- tray_d 0.40) lip_h)))
+      (shape lip_hollow
+        (translate 0 0 (+ lid_thickness (/ lip_h 2))
+          (box (- tray_w 6.0) (- tray_d 6.0) (+ lip_h 0.2))))
+      (shape vent_a (translate -35 0 0 (box vent_w vent_d lid_thickness)))
+      (shape vent_b (translate 0 0 0 (box vent_w vent_d lid_thickness)))
+      (shape vent_c (translate 35 0 0 (box vent_w vent_d lid_thickness)))
+      (result (difference (union plate lip) lip_hollow vent_a vent_b vent_c))))
+
+  (part vermi_lid_040
+    (build
+      (shape plate (box tray_w tray_d lid_thickness))
+      (shape lip
+        (translate 0 0 (+ lid_thickness (/ lip_h 2))
+          (box (- tray_w 0.80) (- tray_d 0.80) lip_h)))
+      (shape lip_hollow
+        (translate 0 0 (+ lid_thickness (/ lip_h 2))
+          (box (- tray_w 6.0) (- tray_d 6.0) (+ lip_h 0.2))))
+      (shape vent_a (translate -35 0 0 (box vent_w vent_d lid_thickness)))
+      (shape vent_b (translate 0 0 0 (box vent_w vent_d lid_thickness)))
+      (shape vent_c (translate 35 0 0 (box vent_w vent_d lid_thickness)))
+      (result (difference (union plate lip) lip_hollow vent_a vent_b vent_c))))
+
+  (part vermi_lid_060
+    (build
+      (shape plate (box tray_w tray_d lid_thickness))
+      (shape lip
+        (translate 0 0 (+ lid_thickness (/ lip_h 2))
+          (box (- tray_w 1.20) (- tray_d 1.20) lip_h)))
+      (shape lip_hollow
+        (translate 0 0 (+ lid_thickness (/ lip_h 2))
+          (box (- tray_w 6.0) (- tray_d 6.0) (+ lip_h 0.2))))
+      (shape vent_a (translate -35 0 0 (box vent_w vent_d lid_thickness)))
+      (shape vent_b (translate 0 0 0 (box vent_w vent_d lid_thickness)))
+      (shape vent_c (translate 35 0 0 (box vent_w vent_d lid_thickness)))
+      (result (difference (union plate lip) lip_hollow vent_a vent_b vent_c)))))

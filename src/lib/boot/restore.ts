@@ -30,6 +30,11 @@ import { activeThreadMessagesLoading, loadVersion, threadMessagePageState } from
 import { isRenderableVersionTimelineMessage } from '../threadTimeline';
 import type { LastDesignSnapshot, Message, Thread, ThreadMessagesPage } from '../types/domain';
 
+const BOOT_RESTORE_TIMEOUT_MS = 6000;
+const BOOT_VERSION_LOOKUP_TIMEOUT_MS = 4000;
+const BOOT_MODEL_LOAD_TIMEOUT_MS = 6000;
+const THREAD_MESSAGES_TIMEOUT_MS = 8000;
+
 type TauriBridgeWindow = Window & typeof globalThis & {
   __TAURI_INTERNALS__?: {
     invoke?: unknown;
@@ -76,7 +81,8 @@ export async function boot() {
     // 3. Load History
     await loadHistory();
 
-    // 4. Restore Last Design
+    // 4. Restore Last Design. Runtime rebuild is intentionally skipped here:
+    // boot must open the workbench even when old model assets are missing.
     await restoreLastDesign();
     
     session.setPhase('idle');
@@ -143,6 +149,20 @@ async function loadConfig() {
   if (typeof loadedConfig.freecadCmd !== 'string') {
     loadedConfig.freecadCmd = '';
     needsSave = true;
+  }
+
+  if (!Array.isArray(loadedConfig.freecadLibraryRoots)) {
+    loadedConfig.freecadLibraryRoots = [];
+    needsSave = true;
+  } else {
+    const normalizedRoots = loadedConfig.freecadLibraryRoots
+      .map((root) => `${root}`.trim())
+      .filter(Boolean);
+    if (normalizedRoots.length !== loadedConfig.freecadLibraryRoots.length ||
+      normalizedRoots.some((root, index) => root !== loadedConfig.freecadLibraryRoots[index])) {
+      loadedConfig.freecadLibraryRoots = normalizedRoots;
+      needsSave = true;
+    }
   }
 
   if (!loadedConfig.defaultEngineKind) {
@@ -282,7 +302,11 @@ async function loadHistory() {
 
 async function restoreLastDesign() {
   try {
-    const last = await getLastDesign();
+    const last = await withBootTimeout(
+      getLastDesign(),
+      BOOT_RESTORE_TIMEOUT_MS,
+      'Last design lookup timed out',
+    );
     if (!last?.threadId || !last?.messageId) {
       await resetToBlankSession(Boolean(last));
       await fetchDefaultMacro();
@@ -290,8 +314,24 @@ async function restoreLastDesign() {
     }
 
     activeThreadId.set(last.threadId);
-    const pointedMessage = await getThreadMessageVersion(last.threadId, last.messageId);
-    const latestMessage = pointedMessage ? null : await getThreadLatestVersion(last.threadId);
+    const pointedMessage = await withBootTimeout(
+      getThreadMessageVersion(last.threadId, last.messageId),
+      BOOT_VERSION_LOOKUP_TIMEOUT_MS,
+      'Last message lookup timed out',
+    ).catch((e) => {
+      console.warn('[Boot] Failed to load pointed last message:', e);
+      return null;
+    });
+    const latestMessage = pointedMessage
+      ? null
+      : await withBootTimeout(
+          getThreadLatestVersion(last.threadId),
+          BOOT_VERSION_LOOKUP_TIMEOUT_MS,
+          'Latest version lookup timed out',
+        ).catch((e) => {
+          console.warn('[Boot] Failed to load latest thread version:', e);
+          return null;
+        });
     const targetMessage = pointedMessage ?? latestMessage ?? snapshotToMessage(last);
 
     if (!targetMessage) {
@@ -301,7 +341,14 @@ async function restoreLastDesign() {
     }
 
     upsertRestoredMessage(last.threadId, targetMessage);
-    await loadVersion(targetMessage, last.threadId, { rebuildMissingRuntime: true });
+    await withBootTimeout(
+      loadVersion(targetMessage, last.threadId, { rebuildMissingRuntime: true }),
+      BOOT_MODEL_LOAD_TIMEOUT_MS,
+      'Last design runtime load timed out',
+    ).catch((e) => {
+      console.warn('[Boot] Last design runtime was not restored:', e);
+      session.setStatus('Last design runtime unavailable.');
+    });
     void loadRestoredThreadPage(last.threadId);
 
     if (last.selectedPartId) {
@@ -397,7 +444,11 @@ async function loadRestoredThreadPage(threadId: string) {
     },
   }));
   try {
-    const page = await getThreadMessagesPage(threadId, null, 50, false);
+    const page = await withBootTimeout(
+      getThreadMessagesPage(threadId, null, 50, false),
+      THREAD_MESSAGES_TIMEOUT_MS,
+      'Thread messages load timed out',
+    );
     if (get(activeThreadId) !== threadId) return;
     mergeRestoredThreadPage(threadId, page);
   } catch (e) {
@@ -417,6 +468,16 @@ async function loadRestoredThreadPage(threadId: string) {
       activeThreadMessagesLoading.set(false);
     }
   }
+}
+
+function withBootTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
 }
 
 function mergeRestoredThreadPage(threadId: string, page: ThreadMessagesPage) {

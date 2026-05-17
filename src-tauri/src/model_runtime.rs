@@ -3,14 +3,15 @@ use std::path::{Path, PathBuf};
 
 use crate::models::{
     validate_artifact_bundle, validate_model_manifest, validate_model_runtime_bundle, AppError,
-    AppResult, ArtifactBundle, ModelManifest, ModelSourceKind, PathResolver, ViewerAsset,
-    ViewerAssetFormat,
+    AppResult, ArtifactBundle, FeatureGraph, FeatureNode, FeatureOutputRef, ModelManifest,
+    ModelSourceKind, PathResolver, SelectionTarget, ViewerAsset, ViewerAssetFormat,
 };
 
 const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const GENERATED_ARTIFACT_DIR: &str = "generated";
 const IMPORTED_FCSTD_ARTIFACT_DIR: &str = "imported-fcstd";
 const IMPORTED_STEP_ARTIFACT_DIR: &str = "imported-step";
+const IMPORTED_MESH_ARTIFACT_DIR: &str = "imported-mesh";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const FCSTD_FILE_NAME: &str = "model.FCStd";
@@ -93,14 +94,16 @@ pub fn write_model_manifest(
         )));
     }
     validate_model_id_source_kind(model_id, manifest.source_kind.clone())?;
-    validate_model_manifest(manifest)?;
+    let mut stored_manifest = manifest.clone();
+    backfill_feature_graph_from_parts(&mut stored_manifest);
+    validate_model_manifest(&stored_manifest)?;
 
-    let bundle_dir = artifact_dir(app, manifest.source_kind.clone(), model_id)?;
+    let bundle_dir = artifact_dir(app, stored_manifest.source_kind.clone(), model_id)?;
     fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
-    write_manifest_file(&manifest_path, manifest)?;
-    refresh_stored_bundle_for_manifest(&bundle_dir, manifest)?;
-    Ok(manifest.clone())
+    write_manifest_file(&manifest_path, &stored_manifest)?;
+    refresh_stored_bundle_for_manifest(&bundle_dir, &stored_manifest)?;
+    Ok(stored_manifest)
 }
 
 pub fn read_runtime_bundle(
@@ -127,15 +130,17 @@ pub fn write_runtime_bundle(
         )));
     }
     validate_model_id_source_kind(model_id, manifest.source_kind.clone())?;
-    validate_model_manifest(manifest)?;
+    let mut stored_manifest = manifest.clone();
+    backfill_feature_graph_from_parts(&mut stored_manifest);
+    validate_model_manifest(&stored_manifest)?;
     validate_artifact_bundle(bundle)?;
 
-    let bundle_dir = artifact_dir(app, manifest.source_kind.clone(), model_id)?;
+    let bundle_dir = artifact_dir(app, stored_manifest.source_kind.clone(), model_id)?;
     fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
-    let stored_bundle = bundle_from_manifest(&bundle_dir, bundle.clone(), manifest)?;
-    write_manifest_file(&bundle_dir.join(MANIFEST_FILE_NAME), manifest)?;
+    let stored_bundle = bundle_from_manifest(&bundle_dir, bundle.clone(), &stored_manifest)?;
+    write_manifest_file(&bundle_dir.join(MANIFEST_FILE_NAME), &stored_manifest)?;
     write_bundle_file(&bundle_dir, &stored_bundle)?;
-    Ok((stored_bundle, manifest.clone()))
+    Ok((stored_bundle, stored_manifest))
 }
 
 pub fn refresh_artifact_bundle_from_manifest(
@@ -167,6 +172,8 @@ fn source_kind_from_model_id(model_id: &str) -> AppResult<ModelSourceKind> {
         Ok(ModelSourceKind::ImportedFcstd)
     } else if model_id.starts_with("imported-step-") {
         Ok(ModelSourceKind::ImportedStep)
+    } else if model_id.starts_with("imported-mesh-") {
+        Ok(ModelSourceKind::ImportedMesh)
     } else {
         Err(AppError::not_found(format!(
             "Unknown model id '{}'.",
@@ -191,6 +198,7 @@ fn source_kind_dir_name(source_kind: ModelSourceKind) -> &'static str {
         ModelSourceKind::Generated => GENERATED_ARTIFACT_DIR,
         ModelSourceKind::ImportedFcstd => IMPORTED_FCSTD_ARTIFACT_DIR,
         ModelSourceKind::ImportedStep => IMPORTED_STEP_ARTIFACT_DIR,
+        ModelSourceKind::ImportedMesh => IMPORTED_MESH_ARTIFACT_DIR,
     }
 }
 
@@ -229,8 +237,9 @@ fn read_manifest_file(path: &Path) -> AppResult<ModelManifest> {
             err
         ))
     })?;
-    let manifest: ModelManifest = serde_json::from_str(&raw)
+    let mut manifest: ModelManifest = serde_json::from_str(&raw)
         .map_err(|err| AppError::parse(format!("Failed to parse model manifest: {}", err)))?;
+    backfill_feature_graph_from_parts(&mut manifest);
     validate_model_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -359,6 +368,61 @@ fn viewer_assets_from_manifest(
     Ok(assets)
 }
 
+fn backfill_feature_graph_from_parts(manifest: &mut ModelManifest) {
+    if manifest.feature_graph.is_some() {
+        return;
+    }
+
+    let nodes = manifest
+        .parts
+        .iter()
+        .map(|part| {
+            let feature_id = format!("part:{}", part.part_id);
+            let target_ids = manifest
+                .selection_targets
+                .iter()
+                .filter(|target| target.part_id == part.part_id)
+                .filter_map(selection_target_output_id)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let output_refs = if target_ids.is_empty() {
+                Vec::new()
+            } else {
+                vec![FeatureOutputRef {
+                    feature_id: feature_id.clone(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids,
+                }]
+            };
+
+            FeatureNode {
+                feature_id,
+                kind: "part".to_string(),
+                label: if part.label.trim().is_empty() {
+                    part.part_id.clone()
+                } else {
+                    part.label.clone()
+                },
+                source_ref: None,
+                dependency_ids: Vec::new(),
+                output_refs,
+                ports: Vec::new(),
+            }
+        })
+        .collect();
+
+    manifest.feature_graph = Some(FeatureGraph { nodes });
+}
+
+fn selection_target_output_id(target: &SelectionTarget) -> Option<&str> {
+    target
+        .target_id
+        .as_deref()
+        .or(target.durable_target_id.as_deref())
+        .or(target.canonical_target_id.as_deref())
+        .or_else(|| target.alias_ids.first().map(String::as_str))
+}
+
 fn path_to_string(path: &Path) -> AppResult<String> {
     path.to_str()
         .map(|value| value.to_string())
@@ -370,7 +434,8 @@ mod tests {
     use super::*;
     use crate::models::{
         DocumentMetadata, EngineKind, EnrichmentStatus, GeometryBackend, ManifestEnrichmentState,
-        PartBinding, SourceLanguage, MODEL_RUNTIME_SCHEMA_VERSION,
+        PartBinding, SelectionTarget, SelectionTargetKind, SourceLanguage,
+        MODEL_RUNTIME_SCHEMA_VERSION,
     };
 
     struct TestResolver {
@@ -404,6 +469,9 @@ mod tests {
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: EngineKind::Build123d,
             source_language: SourceLanguage::Build123d,
             geometry_backend: GeometryBackend::Build123d,
@@ -435,6 +503,8 @@ mod tests {
             advisories: Vec::new(),
             selection_targets: Vec::new(),
             measurement_annotations: Vec::new(),
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -522,6 +592,86 @@ mod tests {
 
         assert!(dir.ends_with(Path::new("model-runtime/imported-step/imported-step-test")));
         assert!(!dir.ends_with(Path::new("model-runtime/generated/imported-step-test")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_model_manifest_backfills_missing_feature_graph_from_parts_and_selection_targets() {
+        let root = test_root("feature-graph");
+        let resolver = TestResolver { root: root.clone() };
+        let model_id = "generated-feature-graph-test";
+        let dir = runtime_bundle_dir(&resolver, model_id).expect("dir");
+        fs::create_dir_all(&dir).expect("dir");
+
+        let mut manifest = manifest(model_id, ModelSourceKind::Generated);
+        manifest.parts.push(PartBinding {
+            part_id: "lid".to_string(),
+            freecad_object_name: "Lid".to_string(),
+            label: "Lid".to_string(),
+            kind: "solid".to_string(),
+            semantic_role: None,
+            viewer_asset_path: Some("parts/lid.stl".to_string()),
+            viewer_node_ids: vec!["node-lid".to_string()],
+            parameter_keys: Vec::new(),
+            editable: false,
+            bounds: None,
+            volume: None,
+            area: None,
+        });
+        manifest.selection_targets = vec![
+            SelectionTarget {
+                target_id: Some("target-body".to_string()),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
+                part_id: "body".to_string(),
+                viewer_node_id: "node-body".to_string(),
+                label: "Body".to_string(),
+                kind: SelectionTargetKind::Object,
+                editable: false,
+                parameter_keys: Vec::new(),
+                primitive_ids: Vec::new(),
+                view_ids: Vec::new(),
+            },
+            SelectionTarget {
+                target_id: Some("target-lid".to_string()),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
+                part_id: "lid".to_string(),
+                viewer_node_id: "node-lid".to_string(),
+                label: "Lid".to_string(),
+                kind: SelectionTargetKind::Object,
+                editable: false,
+                parameter_keys: Vec::new(),
+                primitive_ids: Vec::new(),
+                view_ids: Vec::new(),
+            },
+        ];
+
+        fs::write(
+            dir.join(MANIFEST_FILE_NAME),
+            serde_json::to_string_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("write manifest");
+
+        let read_manifest = read_model_manifest(&resolver, model_id).expect("manifest");
+        let feature_graph = read_manifest.feature_graph.expect("feature graph");
+
+        assert_eq!(feature_graph.nodes.len(), 2);
+        assert_eq!(feature_graph.nodes[0].feature_id, "part:body");
+        assert_eq!(feature_graph.nodes[0].kind, "part");
+        assert_eq!(feature_graph.nodes[0].label, "Body");
+        assert_eq!(
+            feature_graph.nodes[0].output_refs[0].target_ids,
+            vec!["target-body"]
+        );
+        assert_eq!(feature_graph.nodes[1].feature_id, "part:lid");
+        assert_eq!(
+            feature_graph.nodes[1].output_refs[0].target_ids,
+            vec!["target-lid"]
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -21,6 +21,7 @@ import {
   reopenThread as reopenThreadCommand,
   getInventory as getInventoryCommand,
   formatBackendError,
+  getDefaultMacro,
   getHistory,
   getMessStlPath,
   getModelManifest,
@@ -60,6 +61,8 @@ export const threadMessagePageState = writable<Record<string, ThreadMessagePageS
 
 const INITIAL_THREAD_MESSAGE_PAGE_LIMIT = 20;
 const OLDER_THREAD_MESSAGE_PAGE_LIMIT = 50;
+const THREAD_MESSAGES_PAGE_TIMEOUT_MS = 8000;
+const THREAD_LATEST_VERSION_TIMEOUT_MS = 8000;
 
 export type LoadVersionOptions = {
   rebuildMissingRuntime?: boolean;
@@ -77,6 +80,20 @@ async function hydrateVersionCandidate(
 
 function isCurrentThreadLoad(token: number, threadId: string): boolean {
   return isCurrentThreadLoadState(token, latestThreadSwitchToken, get(activeThreadId), threadId);
+}
+
+function withBackendTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
 }
 
 function setThreadPageState(threadId: string, patch: Partial<ThreadMessagePageState>) {
@@ -493,6 +510,12 @@ export async function loadFromHistory(thread: Thread) {
   const targetThreadId = thread.id;
   const existingThread = get(history).find((candidate) => candidate.id === targetThreadId);
   const existingPageState = get(threadMessagePageState)[targetThreadId];
+  const seededMessages = existingThread?.messages ?? thread.messages ?? [];
+  const seededLatestVersion = [...seededMessages].reverse().find(isVersionCandidate) ?? null;
+  const skipInitialMessagesFetch =
+    thread.status === 'finalized' &&
+    seededMessages.length > 0 &&
+    seededLatestVersion !== null;
   if (
     shouldSkipThreadSelect(targetThreadId, {
       activeThreadId: get(activeThreadId),
@@ -505,9 +528,14 @@ export async function loadFromHistory(thread: Thread) {
   const switchToken = ++latestThreadSwitchToken;
   beginThreadSwitch(targetThreadId);
   activeThreadLoadingId.set(targetThreadId);
-  activeThreadMessagesLoading.set(true);
+  activeThreadMessagesLoading.set(!skipInitialMessagesFetch);
   activeThreadVersionLoading.set(true);
-  setThreadPageState(targetThreadId, { isLoading: true, error: null });
+  setThreadPageState(targetThreadId, {
+    isLoading: !skipInitialMessagesFetch,
+    hasMore: skipInitialMessagesFetch ? false : existingPageState?.hasMore ?? false,
+    nextBefore: skipInitialMessagesFetch ? null : existingPageState?.nextBefore ?? null,
+    error: null,
+  });
 
   history.update((items) => {
     const preservedMessages = existingThread?.messages ?? thread.messages ?? [];
@@ -519,15 +547,23 @@ export async function loadFromHistory(thread: Thread) {
       : [summaryThread, ...items];
   });
 
-  const latestVersionPromise = getThreadLatestVersion(targetThreadId);
-  const messagesPromise = getThreadMessagesPage(
-    targetThreadId,
-    null,
-    INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
-    false,
+  const latestVersionPromise = withBackendTimeout(
+    getThreadLatestVersion(targetThreadId),
+    THREAD_LATEST_VERSION_TIMEOUT_MS,
+    'Thread latest version load timed out',
   );
-  const seededMessages = existingThread?.messages ?? thread.messages ?? [];
-  const seededLatestVersion = [...seededMessages].reverse().find(isVersionCandidate) ?? null;
+  const messagesPromise = skipInitialMessagesFetch
+    ? Promise.resolve(null)
+    : withBackendTimeout(
+        getThreadMessagesPage(
+          targetThreadId,
+          null,
+          INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
+          false,
+        ),
+        THREAD_MESSAGES_PAGE_TIMEOUT_MS,
+        'Thread messages load timed out',
+      );
   let bootstrappedVersionId: string | null = null;
 
   try {
@@ -597,6 +633,15 @@ export async function loadFromHistory(thread: Thread) {
   try {
     const page = await messagesPromise;
     if (!isCurrentThreadLoad(switchToken, targetThreadId)) return;
+    if (!page) {
+      setThreadPageState(targetThreadId, {
+        isLoading: false,
+        hasMore: false,
+        nextBefore: null,
+        error: null,
+      });
+      return;
+    }
     history.update((items) =>
       items.map((candidate) =>
         candidate.id === targetThreadId
@@ -639,7 +684,7 @@ export async function loadFromHistory(thread: Thread) {
   }
 }
 
-export async function deleteThread(id: string) {
+export async function deleteThread(id: string): Promise<boolean> {
   try {
     await deleteThreadCommand(id);
     if (get(activeThreadId) === id) {
@@ -651,9 +696,11 @@ export async function deleteThread(id: string) {
       await clearLastSessionSnapshot();
     }
     const freshHistory = await getHistory();
-    history.set(freshHistory);
+    history.set(freshHistory.filter((thread) => thread.id !== id));
+    return true;
   } catch (e) {
     session.setError(`Delete Error: ${formatBackendError(e)}`);
+    return false;
   }
 }
 
@@ -777,11 +824,18 @@ export async function restoreVersion(messageId: string) {
 
 export function createNewThread(payload: NewThreadPayload | null | undefined) {
   const newId = crypto.randomUUID();
-  activeThreadId.set(newId);
-  activeVersionId.set(null);
-  workingCopy.reset();
-  paramPanelState.reset();
-  session.setStlUrl(null);
+  latestThreadSwitchToken += 1;
+  latestLoadVersionToken += 1;
+  beginThreadSwitch(newId);
+  activeThreadLoadingId.set(null);
+  activeThreadMessagesLoading.set(false);
+  activeThreadVersionLoading.set(false);
+  setThreadPageState(newId, {
+    isLoading: false,
+    hasMore: false,
+    nextBefore: null,
+    error: null,
+  });
   void clearLastSessionSnapshot();
   
   if (payload?.mode === 'macro' && payload.code) {
@@ -790,6 +844,28 @@ export function createNewThread(payload: NewThreadPayload | null | undefined) {
     commitInitialMacro(payload.code, payload.title);
   } else {
     session.setStatus('New design session started.');
+    void seedBlankThreadDefaultMacro(newId);
+  }
+}
+
+async function seedBlankThreadDefaultMacro(threadId: string) {
+  try {
+    const code = await getDefaultMacro();
+    if (get(activeThreadId) !== threadId) return;
+    if (get(workingCopy).macroCode.trim()) return;
+
+    workingCopy.patch({
+      macroCode: code,
+      dirty: false,
+    });
+    paramPanelState.hydrate({
+      versionId: null,
+      macroCode: code,
+      uiSpec: { fields: [] },
+      params: {},
+    });
+  } catch (error) {
+    console.error('[History] Failed to seed blank thread macro:', error);
   }
 }
 
@@ -971,12 +1047,7 @@ export async function loadOlderThreadMessages(threadId: string) {
 }
 
 export async function loadInventory(): Promise<Thread[]> {
-  try {
-    return await getInventoryCommand();
-  } catch (e) {
-    console.error('[History] Failed to load inventory:', e);
-    return [];
-  }
+  return await getInventoryCommand();
 }
 
 export async function refreshHistory() {

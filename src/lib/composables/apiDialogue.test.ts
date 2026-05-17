@@ -89,6 +89,19 @@ test('deriveOptimisticDialogueMessages drops placeholders once persisted assista
   assert.deepEqual(messages, [persisted]);
 });
 
+test('deriveOptimisticDialogueMessages shows terminal error over stale routing copy', () => {
+  const messages = deriveOptimisticDialogueMessages([], [
+    request({
+      phase: 'error',
+      lightResponse: 'Routing request...',
+      error: 'Structural verification failed: PREVIEW_STL_DISCONNECTED_COMPONENTS',
+    }),
+  ]);
+
+  assert.equal(messages[1]?.status, 'error');
+  assert.equal(messages[1]?.content, 'Structural verification failed: PREVIEW_STL_DISCONNECTED_COMPONENTS');
+});
+
 test('mergeOptimisticQueuedDialogueMessages shows pending MCP user message before backend refresh', () => {
   const optimistic = buildOptimisticQueuedDialogueMessage({
     id: 'optimistic-queued-1',

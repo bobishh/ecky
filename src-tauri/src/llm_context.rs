@@ -621,6 +621,9 @@ mod tests {
             schema_version: 2,
             model_id: "model-1".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: EngineKind::Freecad,
             source_language: SourceLanguage::LegacyPython,
             geometry_backend: GeometryBackend::Freecad,
@@ -691,6 +694,8 @@ mod tests {
             advisories: vec![],
             selection_targets: vec![],
             measurement_annotations: vec![],
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: vec![],
             enrichment_state: crate::contracts::ManifestEnrichmentState {
                 status: crate::contracts::EnrichmentStatus::None,

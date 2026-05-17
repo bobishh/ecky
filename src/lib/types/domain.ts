@@ -249,6 +249,7 @@ export interface AppConfig {
   engines: EngineConfig[];
   selectedEngineId: string;
   freecadCmd: string;
+  freecadLibraryRoots: string[];
   assets: AssetConfig[];
   microwave: MicrowaveConfig | null;
   voice: VoiceConfig;
@@ -275,6 +276,7 @@ export type AdvisoryCondition = Contract.AdvisoryCondition;
 export type ViewerAsset = Contract.ViewerAsset;
 export type ViewerEdgePoint = Contract.ViewerEdgePoint;
 export type ViewerEdgeTarget = Contract.ViewerEdgeTarget;
+export type ViewerFaceTarget = Contract.ViewerFaceTarget;
 export type CalloutAnchor = Contract.CalloutAnchor;
 export type MeasurementGuideKind = Contract.MeasurementGuideKind;
 export type MeasurementGuide = Contract.MeasurementGuide;
@@ -1045,6 +1047,11 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
     selectedEngineId:
       config.selectedEngineId ?? (legacy.selected_engine_id as string | undefined) ?? '',
     freecadCmd: typeof config.freecadCmd === 'string' ? config.freecadCmd : '',
+    freecadLibraryRoots: Array.isArray((config as AppConfig).freecadLibraryRoots)
+      ? [...(config as AppConfig).freecadLibraryRoots]
+      : Array.isArray((legacy as any).freecad_library_roots)
+        ? [...((legacy as any).freecad_library_roots as string[])]
+        : [],
     assets: Array.isArray(config.assets) ? [...config.assets] : [],
     microwave: config.microwave
       ? {

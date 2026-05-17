@@ -11,7 +11,8 @@ use crate::db;
 use crate::freecad;
 use crate::models::{
     AppError, AppResult, AppState, ArtifactBundle, BrepHiddenLineProjectionRequest,
-    BrepHiddenLineProjectionResponse, DesignOutput, DesignParams, ExportPartInput, InteractionMode,
+    BrepHiddenLineProjectionResponse, DesignOutput, DesignParams, ExportPartInput,
+    FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest, InteractionMode,
     MacroDialect, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, UiField, UiSpec,
 };
 
@@ -312,21 +313,35 @@ pub(crate) fn export_multipart_stl_zip_impl(
                 ))
             })?;
         } else {
-            let bytes = fs::read(&part.path).map_err(|err| {
-                AppError::persistence(format!(
-                    "Failed to read export part '{}' at '{}': {}",
-                    export_part_label(part),
-                    part.path,
-                    err
-                ))
-            })?;
-            zip.write_all(&bytes).map_err(|err| {
-                AppError::persistence(format!(
-                    "Failed to write '{}' into multipart STL archive: {}",
-                    export_part_label(part),
-                    err
-                ))
-            })?;
+            match read_binary_stl_triangles(Path::new(&part.path)) {
+                Ok(triangles) => {
+                    let (triangles, _) = localize_stl_triangles(triangles);
+                    write_binary_stl_triangles(&mut zip, &triangles).map_err(|err| {
+                        AppError::persistence(format!(
+                            "Failed to write localized '{}' into multipart STL archive: {}",
+                            export_part_label(part),
+                            err
+                        ))
+                    })?;
+                }
+                Err(_) => {
+                    let bytes = fs::read(&part.path).map_err(|err| {
+                        AppError::persistence(format!(
+                            "Failed to read export part '{}' at '{}': {}",
+                            export_part_label(part),
+                            part.path,
+                            err
+                        ))
+                    })?;
+                    zip.write_all(&bytes).map_err(|err| {
+                        AppError::persistence(format!(
+                            "Failed to write '{}' into multipart STL archive: {}",
+                            export_part_label(part),
+                            err
+                        ))
+                    })?;
+                }
+            }
         }
     }
 
@@ -346,7 +361,37 @@ struct MultipartThreeMfObject {
     name: String,
     color_index: usize,
     transform: Option<String>,
-    triangles: Vec<[[f32; 3]; 3]>,
+    vertices: Vec<[f32; 3]>,
+    triangles: Vec<[usize; 3]>,
+}
+
+fn three_mf_vertex_key(vertex: [f32; 3]) -> [i64; 3] {
+    vertex.map(|value| (value as f64 * 100_000.0).round() as i64)
+}
+
+fn indexed_three_mf_mesh(triangles: Vec<[[f32; 3]; 3]>) -> (Vec<[f32; 3]>, Vec<[usize; 3]>) {
+    let mut vertices = Vec::<[f32; 3]>::new();
+    let mut index_by_key = std::collections::BTreeMap::<[i64; 3], usize>::new();
+    let mut indexed_triangles = Vec::<[usize; 3]>::with_capacity(triangles.len());
+
+    for triangle in triangles {
+        let mut indices = [0usize; 3];
+        for (slot, vertex) in triangle.into_iter().enumerate() {
+            let key = three_mf_vertex_key(vertex);
+            let index = if let Some(index) = index_by_key.get(&key).copied() {
+                index
+            } else {
+                let index = vertices.len();
+                vertices.push(vertex);
+                index_by_key.insert(key, index);
+                index
+            };
+            indices[slot] = index;
+        }
+        indexed_triangles.push(indices);
+    }
+
+    (vertices, indexed_triangles)
 }
 
 fn read_f32<R: Read>(reader: &mut R) -> AppResult<f32> {
@@ -416,6 +461,32 @@ fn transform_stl_triangles(
         .into_iter()
         .map(|triangle| triangle.map(|vertex| transform_stl_vertex(vertex, frame)))
         .collect()
+}
+
+fn localize_stl_triangles(mut triangles: Vec<[[f32; 3]; 3]>) -> (Vec<[[f32; 3]; 3]>, [f32; 3]) {
+    let min = triangles.iter().flat_map(|triangle| triangle.iter()).fold(
+        [f32::INFINITY; 3],
+        |mut acc, vertex| {
+            for axis in 0..3 {
+                acc[axis] = acc[axis].min(vertex[axis]);
+            }
+            acc
+        },
+    );
+
+    if min.iter().any(|value| !value.is_finite()) {
+        return (triangles, [0.0, 0.0, 0.0]);
+    }
+
+    for triangle in &mut triangles {
+        for vertex in triangle {
+            for axis in 0..3 {
+                vertex[axis] -= min[axis];
+            }
+        }
+    }
+
+    (triangles, min)
 }
 
 fn transform_stl_vertex(vertex: [f32; 3], frame: &crate::models::PortFrame) -> [f32; 3] {
@@ -541,17 +612,44 @@ fn export_part_transform_attr(part: &ExportPartInput) -> Option<String> {
     Some(
         [
             frame.x_axis[0],
-            frame.y_axis[0],
-            frame.z_axis[0],
-            frame.origin[0],
             frame.x_axis[1],
-            frame.y_axis[1],
-            frame.z_axis[1],
-            frame.origin[1],
             frame.x_axis[2],
+            frame.y_axis[0],
+            frame.y_axis[1],
             frame.y_axis[2],
+            frame.z_axis[0],
+            frame.z_axis[1],
             frame.z_axis[2],
+            frame.origin[0],
+            frame.origin[1],
             frame.origin[2],
+        ]
+        .into_iter()
+        .map(format_3mf_transform_scalar)
+        .collect::<Vec<_>>()
+        .join(" "),
+    )
+}
+
+fn export_part_translation_transform_attr(offset: [f32; 3]) -> Option<String> {
+    if offset.iter().all(|value| value.abs() <= f32::EPSILON) {
+        return None;
+    }
+
+    Some(
+        [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            offset[0] as f64,
+            offset[1] as f64,
+            offset[2] as f64,
         ]
         .into_iter()
         .map(format_3mf_transform_scalar)
@@ -617,24 +715,19 @@ fn write_multipart_3mf_package(
             object.color_index,
             xml_escape(&object.name)
         );
-        for triangle in &object.triangles {
-            for vertex in triangle {
-                let _ = write!(
-                    xml,
-                    r#"<vertex x="{:.5}" y="{:.5}" z="{:.5}"/>"#,
-                    vertex[0], vertex[1], vertex[2]
-                );
-            }
+        for vertex in &object.vertices {
+            let _ = write!(
+                xml,
+                r#"<vertex x="{:.5}" y="{:.5}" z="{:.5}"/>"#,
+                vertex[0], vertex[1], vertex[2]
+            );
         }
         xml.push_str("</vertices><triangles>");
-        for triangle_index in 0..object.triangles.len() {
-            let base = triangle_index * 3;
+        for triangle in &object.triangles {
             let _ = write!(
                 xml,
                 r#"<triangle v1="{}" v2="{}" v3="{}"/>"#,
-                base,
-                base + 1,
-                base + 2
+                triangle[0], triangle[1], triangle[2]
             );
         }
         xml.push_str("</triangles></mesh></object>");
@@ -680,12 +773,24 @@ pub(crate) fn export_multipart_3mf_impl(
                 colors.push(color.clone());
                 colors.len() - 1
             };
+        let (transform, triangles) = if part.placement_frame.is_some() {
+            (
+                export_part_transform_attr(part),
+                read_binary_stl_triangles(Path::new(&part.path))?,
+            )
+        } else {
+            let (triangles, offset) =
+                localize_stl_triangles(read_binary_stl_triangles(Path::new(&part.path))?);
+            (export_part_translation_transform_attr(offset), triangles)
+        };
+        let (vertices, triangles) = indexed_three_mf_mesh(triangles);
         objects.push(MultipartThreeMfObject {
             id: (index + 1) as u32,
             name: export_object_name(part, index),
             color_index,
-            transform: export_part_transform_attr(part),
-            triangles: read_binary_stl_triangles(Path::new(&part.path))?,
+            transform,
+            vertices,
+            triangles,
         });
     }
 
@@ -764,6 +869,60 @@ pub async fn import_fcstd(
         configured_freecad_cmd(&state).as_deref(),
         &app,
     );
+    if result.is_ok() {
+        let runtime_cache_dir = freecad::runtime_cache_dir(&app)?;
+        freecad::evict_cache_if_needed(&runtime_cache_dir);
+    }
+    result
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn search_freecad_library(
+    request: FreecadLibrarySearchRequest,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<FreecadLibraryItem>> {
+    let configured_roots = {
+        let config = state.config.lock().unwrap();
+        config.freecad_library_roots.clone()
+    };
+    crate::freecad_library::search_freecad_library(&request, &configured_roots)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn import_freecad_library_part(
+    request: FreecadLibraryImportRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<ArtifactBundle> {
+    let import_path = crate::freecad_library::import_path_from_request(&request)?;
+    let source_path = import_path
+        .to_str()
+        .ok_or_else(|| AppError::internal("Invalid FreeCAD library import path."))?;
+    let extension = import_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if matches!(extension.as_str(), "stl" | "obj" | "3mf") {
+        return crate::freecad_library::import_mesh_from_request(&request, &app);
+    }
+
+    let _guard = state.render_lock.lock().await;
+    let result = match extension.as_str() {
+        "fcstd" => {
+            freecad::import_fcstd(source_path, configured_freecad_cmd(&state).as_deref(), &app)
+        }
+        "step" | "stp" => {
+            freecad::import_step(source_path, configured_freecad_cmd(&state).as_deref(), &app)
+        }
+        other => Err(AppError::validation(format!(
+            "FreeCAD library format '{}' is not importable yet.",
+            other
+        ))),
+    };
     if result.is_ok() {
         let runtime_cache_dir = freecad::runtime_cache_dir(&app)?;
         freecad::evict_cache_if_needed(&runtime_cache_dir);
@@ -899,7 +1058,9 @@ pub async fn save_model_manifest(
 
         if matches!(
             manifest.source_kind,
-            ModelSourceKind::ImportedFcstd | ModelSourceKind::ImportedStep
+            ModelSourceKind::ImportedFcstd
+                | ModelSourceKind::ImportedStep
+                | ModelSourceKind::ImportedMesh
         ) {
             let existing_output = db::get_message_output_and_thread(&db, message_id)
                 .map_err(|err: rusqlite::Error| {
@@ -1031,12 +1192,19 @@ mod tests {
     }
 
     fn write_binary_stl(path: &Path) {
+        write_binary_stl_vertices(
+            path,
+            [[0.0f32, 0.0, 0.0], [10.0f32, 0.0, 0.0], [0.0f32, 10.0, 0.0]],
+        );
+    }
+
+    fn write_binary_stl_vertices(path: &Path, vertices: [[f32; 3]; 3]) {
         let mut bytes = vec![0u8; 80];
         bytes.extend_from_slice(&(1u32).to_le_bytes());
         bytes.extend_from_slice(&0.0f32.to_le_bytes());
         bytes.extend_from_slice(&0.0f32.to_le_bytes());
         bytes.extend_from_slice(&1.0f32.to_le_bytes());
-        for vertex in [[0.0f32, 0.0, 0.0], [10.0f32, 0.0, 0.0], [0.0f32, 10.0, 0.0]] {
+        for vertex in vertices {
             bytes.extend_from_slice(&vertex[0].to_le_bytes());
             bytes.extend_from_slice(&vertex[1].to_le_bytes());
             bytes.extend_from_slice(&vertex[2].to_le_bytes());
@@ -1045,11 +1213,20 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    fn write_binary_stl_triangles_to_path(path: &Path, triangles: &[[[f32; 3]; 3]]) {
+        let mut bytes = Vec::new();
+        write_binary_stl_triangles(&mut bytes, triangles).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
     fn sample_imported_manifest() -> ModelManifest {
         ModelManifest {
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "imported-fcstd-test".to_string(),
             source_kind: ModelSourceKind::ImportedFcstd,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: crate::models::EngineKind::Freecad,
             geometry_backend: crate::models::GeometryBackend::Freecad,
             source_language: crate::models::SourceLanguage::LegacyPython,
@@ -1161,6 +1338,8 @@ mod tests {
                 view_ids: vec!["view-outer-shell".to_string()],
             }],
             measurement_annotations: Vec::new(),
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: vec![
                 "Imported FCStd bindings were accepted from heuristic proposals.".to_string(),
             ],
@@ -1292,6 +1471,61 @@ mod tests {
     }
 
     #[test]
+    fn export_multipart_stl_zip_localizes_unplaced_part_meshes() {
+        let root = temp_export_dir("multipart-zip-localize");
+        let body_path = root.join("body.stl");
+        let ring_path = root.join("ring.stl");
+        let zip_path = root.join("shade-parts.zip");
+        let extracted_path = root.join("body-exported.stl");
+        write_binary_stl_vertices(
+            &body_path,
+            [
+                [100.0, 200.0, 42.0],
+                [110.0, 200.0, 42.0],
+                [100.0, 210.0, 42.0],
+            ],
+        );
+        write_binary_stl(&ring_path);
+
+        export_multipart_stl_zip_impl(
+            &[
+                ExportPartInput {
+                    label: "Shade Body".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: Some("Body".to_string()),
+                    part_id: Some("part-body".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "Trim Ring".to_string(),
+                    path: ring_path.to_string_lossy().to_string(),
+                    object_name: Some("Ring".to_string()),
+                    part_id: Some("part-ring".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+            ],
+            zip_path.to_string_lossy().as_ref(),
+            "Bulb Lamp Shade".to_string(),
+        )
+        .unwrap();
+
+        let file = fs::File::open(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name("01-shade-body.stl").unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        fs::write(&extracted_path, bytes).unwrap();
+
+        let triangles = read_binary_stl_triangles(&extracted_path).unwrap();
+        assert_eq!(
+            triangles,
+            vec![[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]]
+        );
+    }
+
+    #[test]
     fn export_multipart_3mf_writes_all_parts_as_separate_objects_and_colors() {
         let root = temp_export_dir("multipart-3mf");
         let body_path = root.join("body.stl");
@@ -1344,8 +1578,119 @@ mod tests {
         assert!(model_xml.contains("displaycolor=\"#2F4F6FFF\""));
         assert!(model_xml.contains("<item objectid=\"1\"/>"));
         assert!(
-            model_xml.contains("<item objectid=\"2\" transform=\"1 0 0 12 0 1 0 34 0 0 1 56\"/>")
+            model_xml.contains("<item objectid=\"2\" transform=\"1 0 0 0 1 0 0 0 1 12 34 56\"/>")
         );
+    }
+
+    #[test]
+    fn export_multipart_3mf_indexes_shared_vertices_so_slicers_keep_mesh_topology() {
+        let root = temp_export_dir("multipart-3mf-indexed");
+        let body_path = root.join("quad.stl");
+        let ring_path = root.join("ring.stl");
+        let output_path = root.join("quad.3mf");
+        write_binary_stl_triangles_to_path(
+            &body_path,
+            &[
+                [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+                [[10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]],
+            ],
+        );
+        write_binary_stl(&ring_path);
+
+        export_multipart_3mf_impl(
+            &[
+                ExportPartInput {
+                    label: "Shared Quad".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: Some("Quad".to_string()),
+                    part_id: Some("part-quad".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "Trim Ring".to_string(),
+                    path: ring_path.to_string_lossy().to_string(),
+                    object_name: Some("Ring".to_string()),
+                    part_id: Some("part-ring".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+            ],
+            output_path.to_string_lossy().as_ref(),
+            "Shared Quad".to_string(),
+        )
+        .unwrap();
+
+        let file = fs::File::open(&output_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut model_xml = String::new();
+        archive
+            .by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model_xml)
+            .unwrap();
+
+        let first_object = model_xml.split("</object>").next().unwrap();
+        assert_eq!(first_object.matches("<vertex ").count(), 4);
+        assert_eq!(first_object.matches("<triangle ").count(), 2);
+        assert!(first_object.contains(r#"<triangle v1="0" v2="1" v3="2"/>"#));
+        assert!(first_object.contains(r#"<triangle v1="1" v2="3" v3="2"/>"#));
+    }
+
+    #[test]
+    fn export_multipart_3mf_localizes_unplaced_part_meshes_and_preserves_height_offset() {
+        let root = temp_export_dir("multipart-3mf-localize");
+        let body_path = root.join("body.stl");
+        let ring_path = root.join("ring.stl");
+        let output_path = root.join("shade.3mf");
+        write_binary_stl_vertices(
+            &body_path,
+            [
+                [100.0, 200.0, 42.0],
+                [110.0, 200.0, 42.0],
+                [100.0, 210.0, 42.0],
+            ],
+        );
+        write_binary_stl(&ring_path);
+
+        export_multipart_3mf_impl(
+            &[
+                ExportPartInput {
+                    label: "Shade Body".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: Some("Body".to_string()),
+                    part_id: Some("part-body".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "Trim Ring".to_string(),
+                    path: ring_path.to_string_lossy().to_string(),
+                    object_name: Some("Ring".to_string()),
+                    part_id: Some("part-ring".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+            ],
+            output_path.to_string_lossy().as_ref(),
+            "Bulb Lamp Shade".to_string(),
+        )
+        .unwrap();
+
+        let file = fs::File::open(&output_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut model_xml = String::new();
+        archive
+            .by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model_xml)
+            .unwrap();
+
+        assert!(model_xml.contains(r#"<vertex x="0.00000" y="0.00000" z="0.00000"/>"#));
+        assert!(model_xml.contains(r#"transform="1 0 0 0 1 0 0 0 1 100 200 42""#));
+        assert!(!model_xml.contains(r#"x="100.00000""#));
+        assert!(!model_xml.contains(r#"y="200.00000""#));
+        assert!(!model_xml.contains(r#"z="42.00000""#));
     }
 
     #[test]

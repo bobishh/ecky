@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import Dropdown from './Dropdown.svelte';
+  import VertexGenie from './VertexGenie.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { derivePrimaryAgentId, normalizeMcpMode } from './agents/state';
   import { inferModelCapabilities } from './modelRuntime/modelCapabilities';
   import {
     formatBackendError,
     getAppLogs,
+    getDesignSystemPrompt,
     getMcpServerStatus,
     listAgentModels,
     saveRecordedAudio,
@@ -18,6 +20,7 @@
     AutoAgent,
     McpServerStatus,
     RuntimeCapabilities,
+    GenieTraits,
   } from './types/domain';
 
   type ActiveSection = 'agents' | 'engines' | 'freecad' | 'sounds' | 'logs';
@@ -35,6 +38,8 @@
     availableModels = [],
     isLoadingModels = false,
     runtimeCapabilities = null,
+    eckyTraits = null,
+    onRerollEcky,
     onfetch,
     onsave,
   }: {
@@ -42,6 +47,8 @@
     availableModels?: string[];
     isLoadingModels?: boolean;
     runtimeCapabilities?: RuntimeCapabilities | null;
+    eckyTraits?: Partial<GenieTraits> | null;
+    onRerollEcky?: (() => void) | null;
     onfetch?: () => Promise<void> | void;
     onsave?: () => Promise<void> | void;
   } = $props();
@@ -124,6 +131,8 @@
   let mcpStatusMessage = $state('');
   let appLogs = $state<AppLogEntry[]>([]);
   let logsLoading = $state(false);
+  let designSystemPrompt = $state('');
+  let designSystemPromptError = $state('');
 
   type McpAgentSnippet = {
     id: string;
@@ -249,6 +258,16 @@
   const freecadCapability = $derived(runtimeCapabilities?.freecad ?? null);
   const build123dCapability = $derived(runtimeCapabilities?.build123d ?? null);
   const directOcctCapability = $derived(runtimeCapabilities?.directOcct ?? null);
+  const selectedEnginePromptCarrier = $derived.by(() => {
+    switch (selectedEngine?.provider) {
+      case 'gemini':
+        return 'GEMINI SYSTEM INSTRUCTION';
+      case 'ollama':
+      case 'openai':
+      default:
+        return 'OPENAI / OLLAMA SYSTEM MESSAGE';
+    }
+  });
 
   function setDefaultFreecadContext() {
     if (!freecadCapability?.available) return;
@@ -542,6 +561,34 @@
     }
   }
 
+  async function refreshDesignSystemPrompt(provider: string | null | undefined) {
+    designSystemPromptError = '';
+    try {
+      designSystemPrompt = (await getDesignSystemPrompt(provider ?? null)) || '';
+    } catch (e: unknown) {
+      designSystemPrompt = '';
+      designSystemPromptError = `Prompt load failed: ${formatBackendError(e)}`;
+    }
+  }
+
+  async function copyDesignSystemPrompt() {
+    try {
+      await navigator.clipboard.writeText(designSystemPrompt);
+      message = `Copied ${selectedEngine?.name || 'engine'} system prompt.`;
+    } catch (e: unknown) {
+      message = `Copy failed: ${formatBackendError(e)}`;
+    }
+  }
+
+  $effect(() => {
+    if (!selectedEngine) {
+      designSystemPrompt = '';
+      designSystemPromptError = '';
+      return;
+    }
+    void refreshDesignSystemPrompt(selectedEngine.provider);
+  });
+
   function addEngine() {
     const id = `engine-${Date.now()}`;
     const newEngine = {
@@ -778,6 +825,25 @@
   <main class="engine-details">
     <div class="details-scrollable">
       <div class="details-content">
+      <section class="ecky-settings-card" aria-label="Ecky settings preview">
+        <div class="ecky-settings-card__copy">
+          <div class="field-title">ECKY PREVIEW</div>
+          <div class="field-help">Seed override lives here now. Workbench corner stays clean.</div>
+          <div class="ecky-settings-card__actions">
+            <button
+              class="btn btn-xs"
+              type="button"
+              aria-label="Reroll Ecky seed"
+              onclick={() => onRerollEcky?.()}
+            >
+              REROLL
+            </button>
+          </div>
+        </div>
+        <div class="ecky-settings-card__preview" data-testid="settings-ecky-preview">
+          <VertexGenie mode="idle" bubble="" traits={eckyTraits} safeRightInset={0} />
+        </div>
+      </section>
 
       {#if activeSection === 'freecad'}
         {#if runtimeCapabilities}
@@ -1382,6 +1448,32 @@
             </div>
           {/if}
 
+          <div class="field engine-system-prompt" data-testid="engine-system-prompt">
+            <div class="prompt-header">
+              <div class="field-title">SYSTEM PROMPT</div>
+              <button
+                class="btn btn-xs btn-ghost"
+                onclick={copyDesignSystemPrompt}
+                disabled={!designSystemPrompt}
+              >
+                COPY SYSTEM PROMPT
+              </button>
+            </div>
+            <div class="field-note" data-testid="engine-system-prompt-carrier">
+              {selectedEnginePromptCarrier}
+            </div>
+            <textarea
+              class="input-mono system-prompt-preview"
+              aria-label="SYSTEM PROMPT"
+              readonly
+              spellcheck="false"
+              value={designSystemPrompt}
+            ></textarea>
+            {#if designSystemPromptError}
+              <div class="field-note">{designSystemPromptError}</div>
+            {/if}
+          </div>
+
           <div class="danger-zone">
             <button class="btn btn-xs btn-ghost" onclick={() => removeEngine(selectedEngine.id)}>REMOVE ENGINE</button>
           </div>
@@ -1581,6 +1673,38 @@
     gap: 20px;
   }
 
+  .ecky-settings-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 150px;
+    gap: 18px;
+    align-items: center;
+    padding: 14px 16px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    overflow: hidden;
+  }
+
+  .ecky-settings-card__copy {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .ecky-settings-card__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .ecky-settings-card__preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 150px;
+    overflow: hidden;
+  }
+
   .field-row {
     display: flex;
     gap: 16px;
@@ -1590,6 +1714,13 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  @media (max-width: 860px) {
+    .ecky-settings-card {
+      grid-template-columns: 1fr;
+      justify-items: start;
+    }
   }
 
   .field-help {
@@ -1613,6 +1744,14 @@
     font-size: 0.65rem;
     line-height: 1.45;
     overflow: hidden;
+  }
+
+  .system-prompt-preview {
+    min-height: 220px;
+    resize: vertical;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow: auto;
   }
 
   .direct-occt-fastpath {

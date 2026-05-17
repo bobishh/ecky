@@ -1061,7 +1061,7 @@ pub(super) fn shell_from_contour_slices(
     let mut start_inner = None;
 
     for ((next_outer, next_outer_z), (next_inner, next_inner_z)) in
-        outer_slices.into_iter().zip(inner_slices.into_iter())
+        outer_slices.into_iter().zip(inner_slices)
     {
         if !approx_eq(next_outer_z, next_inner_z) {
             return Err(validation(format!(

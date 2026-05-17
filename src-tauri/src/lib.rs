@@ -1,4 +1,20 @@
 #![allow(unexpected_cfgs)]
+#![allow(
+    clippy::bool_assert_comparison,
+    clippy::derivable_impls,
+    clippy::explicit_auto_deref,
+    clippy::if_same_then_else,
+    clippy::len_zero,
+    clippy::manual_is_multiple_of,
+    clippy::manual_map,
+    clippy::map_identity,
+    clippy::needless_borrow,
+    clippy::needless_range_loop,
+    clippy::redundant_guards,
+    clippy::result_large_err,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 
 pub mod bindings;
 pub mod build123d;
@@ -16,6 +32,7 @@ pub mod ecky_ir_patterns;
 pub mod ecky_language_surface;
 pub mod ecky_scheme;
 pub mod freecad;
+pub mod freecad_library;
 pub mod legacy_python_to_ecky_ir;
 pub mod lithophane;
 pub mod llm;
@@ -269,8 +286,7 @@ pub(crate) fn persist_user_prompt_references(
     }
 
     if let Some(attachments) = attachments {
-        let mut ordinal_offset = 100;
-        for attachment in attachments {
+        for (ordinal_offset, attachment) in (100..).zip(attachments.iter()) {
             let ext = attachment
                 .path
                 .split('.')
@@ -320,7 +336,6 @@ pub(crate) fn persist_user_prompt_references(
                 created_at,
             };
             db::add_thread_reference(conn, &reference).map_err(|e| e.to_string())?;
-            ordinal_offset += 1;
         }
     }
 
@@ -358,8 +373,10 @@ pub(crate) fn persist_thread_summary(
     thread_id: &str,
     title: &str,
 ) -> Result<String, String> {
+    const THREAD_SUMMARY_CONTEXT_LIMIT: usize = 32;
     let messages =
-        db::get_thread_messages_for_context(conn, thread_id).map_err(|e| e.to_string())?;
+        db::get_recent_thread_messages_for_summary(conn, thread_id, THREAD_SUMMARY_CONTEXT_LIMIT)
+            .map_err(|e| e.to_string())?;
     let summary = build_thread_summary(title, &messages);
     db::update_thread_summary(conn, thread_id, &summary).map_err(|e| e.to_string())?;
     Ok(summary)
@@ -499,6 +516,7 @@ pub fn run() {
         }],
         selected_engine_id: "default-gemini".to_string(),
         freecad_cmd: String::new(),
+        freecad_library_roots: Vec::new(),
         assets: vec![],
         microwave: None,
         voice: crate::models::VoiceConfig::default(),
@@ -588,8 +606,16 @@ pub fn run() {
                 }
             }
 
+            let db_path = config_dir.join("history.sqlite");
             let (conn, startup_warnings) = init_history_db_with_recovery(&config_dir)
                 .map_err(|err| tauri::Error::Io(std::io::Error::other(err)))?;
+            let read_conn = db::init_db(&db_path).map_err(|err| {
+                tauri::Error::Io(std::io::Error::other(format!(
+                    "Failed to open read history database at {}: {}",
+                    db_path.display(),
+                    err
+                )))
+            })?;
             if let Ok(interrupted) = db::mark_interrupted_pending_messages(&conn) {
                 if interrupted > 0 {
                     eprintln!(
@@ -601,7 +627,8 @@ pub fn run() {
             let _ = migrate_legacy_references(&conn);
 
             let mcp_port = config.mcp.port;
-            let state = AppState::new(config, last_snapshot, conn);
+            let state =
+                AppState::new_with_read_connection(config, last_snapshot, conn, Some(read_conn));
             state.set_app_handle(app.handle().clone());
             app.manage(state.clone());
             for warning in startup_warnings {

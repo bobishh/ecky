@@ -7,11 +7,13 @@
     applying = false,
     committing = false,
     reading = false,
+    undoDepth = 0,
     saveValuesState = 'idle',
     liveApply = false,
     activeVersionId = null,
     onSearchQueryChange,
     onApplyChanges,
+    onUndoParams,
     onCommitChanges,
     onSaveValues,
     onStartEditing,
@@ -25,11 +27,13 @@
     applying?: boolean;
     committing?: boolean;
     reading?: boolean;
+    undoDepth?: number;
     saveValuesState?: SaveValuesState;
     liveApply?: boolean;
     activeVersionId?: string | null;
     onSearchQueryChange?: (value: string) => void;
     onApplyChanges?: () => void;
+    onUndoParams?: () => void;
     onCommitChanges?: () => void;
     onSaveValues?: () => void;
     onStartEditing?: () => void;
@@ -77,6 +81,16 @@
         {:else}
           APPLY
         {/if}
+      </button>
+      <button
+        class="btn btn-xs btn-secondary"
+        onclick={onUndoParams}
+        data-undo-depth={undoDepth}
+        data-applying={applying}
+        disabled={undoDepth === 0 || applying}
+        title="Undo last parameter change and rerender"
+      >
+        UNDO
       </button>
       <button
         class="btn btn-xs btn-primary"

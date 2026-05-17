@@ -340,6 +340,14 @@ pub struct AppError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_node_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 impl AppError {
@@ -348,6 +356,10 @@ impl AppError {
             code,
             message: message.into(),
             details: None,
+            stable_node_key: None,
+            start_line: None,
+            end_line: None,
+            operation: None,
         }
     }
 
@@ -360,6 +372,10 @@ impl AppError {
             code,
             message: message.into(),
             details: Some(details.into()),
+            stable_node_key: None,
+            start_line: None,
+            end_line: None,
+            operation: None,
         }
     }
 
@@ -393,6 +409,22 @@ impl AppError {
 
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(AppErrorCode::Internal, message)
+    }
+
+    pub fn with_stable_node_key(mut self, stable_node_key: impl Into<String>) -> Self {
+        self.stable_node_key = Some(stable_node_key.into());
+        self
+    }
+
+    pub fn with_line_range(mut self, start_line: usize, end_line: usize) -> Self {
+        self.start_line = Some(start_line);
+        self.end_line = Some(end_line);
+        self
+    }
+
+    pub fn with_operation(mut self, operation: impl Into<String>) -> Self {
+        self.operation = Some(operation.into());
+        self
     }
 }
 
@@ -550,6 +582,8 @@ pub struct Config {
     #[serde(default, alias = "freecad_cmd")]
     pub freecad_cmd: String,
     #[serde(default)]
+    pub freecad_library_roots: Vec<String>,
+    #[serde(default)]
     pub assets: Vec<Asset>,
     #[serde(default)]
     pub microwave: Option<MicrowaveConfig>,
@@ -573,29 +607,67 @@ pub struct Config {
     pub max_verify_attempts: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FreecadLibrarySearchRequest {
+    pub query: String,
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub include_architecture: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FreecadLibraryItem {
+    pub id: String,
+    pub name: String,
+    pub category_path: String,
+    pub root_path: String,
+    pub relative_path: String,
+    pub formats: Vec<String>,
+    pub preferred_format: String,
+    pub import_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_path: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FreecadLibraryImportRequest {
+    pub item: FreecadLibraryItem,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
 fn default_max_generation_attempts() -> u32 {
     3
 }
 
 fn default_engine_kind() -> EngineKind {
-    EngineKind::Freecad
+    EngineKind::EckyIrV0
 }
 
 fn default_source_language() -> SourceLanguage {
-    SourceLanguage::LegacyPython
+    SourceLanguage::EckyIrV0
 }
 
 fn default_geometry_backend() -> GeometryBackend {
-    GeometryBackend::Freecad
+    GeometryBackend::Build123d
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum EngineKind {
-    #[default]
     Freecad,
     #[serde(rename = "ecky", alias = "eckyIrV0", alias = "ecky_ir_v0")]
     #[specta(rename = "ecky")]
+    #[default]
     EckyIrV0,
     #[serde(rename = "build123d")]
     #[specta(rename = "build123d")]
@@ -605,10 +677,10 @@ pub enum EngineKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceLanguage {
-    #[default]
     LegacyPython,
     #[serde(rename = "ecky", alias = "eckyIrV0", alias = "ecky_ir_v0")]
     #[specta(rename = "ecky")]
+    #[default]
     EckyIrV0,
     #[serde(rename = "build123d")]
     #[specta(rename = "build123d")]
@@ -617,9 +689,9 @@ pub enum SourceLanguage {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 pub enum GeometryBackend {
-    #[default]
     #[serde(rename = "freecad")]
     Freecad,
+    #[default]
     #[serde(rename = "build123d")]
     Build123d,
     #[serde(rename = "mesh", alias = "eckyRust", alias = "ecky_rust")]
@@ -2314,6 +2386,7 @@ pub enum ModelSourceKind {
     Generated,
     ImportedFcstd,
     ImportedStep,
+    ImportedMesh,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -2322,6 +2395,10 @@ pub enum ViewerAssetFormat {
     Stl,
     Gltf,
     Glb,
+    Obj,
+    #[serde(rename = "3mf")]
+    #[specta(rename = "3mf")]
+    ThreeMf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -2806,6 +2883,90 @@ pub struct ManifestEnrichmentState {
     pub proposals: Vec<EnrichmentProposal>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_byte: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_byte: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureOutputRef {
+    pub feature_id: String,
+    pub output_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeaturePort {
+    pub port_id: String,
+    pub type_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<PortFrame>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, ComponentInterfaceValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<SourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureNode {
+    pub feature_id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<SourceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_refs: Vec<FeatureOutputRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<FeaturePort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureGraph {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<FeatureNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrespondenceEdge {
+    pub edge_id: String,
+    pub source: FeatureOutputRef,
+    pub target: FeatureOutputRef,
+    pub relation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<SourceRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrespondenceGraph {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<CorrespondenceEdge>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelManifest {
@@ -2813,6 +2974,12 @@ pub struct ModelManifest {
     pub schema_version: u32,
     pub model_id: String,
     pub source_kind: ModelSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ast_schema_version: Option<u32>,
     #[serde(default = "default_engine_kind")]
     pub engine_kind: EngineKind,
     #[serde(default = "default_source_language")]
@@ -2836,6 +3003,10 @@ pub struct ModelManifest {
     pub selection_targets: Vec<SelectionTarget>,
     #[serde(default)]
     pub measurement_annotations: Vec<MeasurementAnnotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_graph: Option<FeatureGraph>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correspondence_graph: Option<CorrespondenceGraph>,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default = "default_manifest_enrichment_state")]
@@ -4334,6 +4505,54 @@ pub fn validate_artifact_bundle(bundle: &ArtifactBundle) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_feature_source_ref_path(
+    path: &str,
+    owner_id: &str,
+    owner_kind: &str,
+    part_ids: &HashSet<&str>,
+    parameter_keys: &HashSet<&str>,
+) -> AppResult<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('/') {
+        return Err(AppError::validation(format!(
+            "{owner_kind} '{owner_id}' has invalid sourceRef.path '{}'.",
+            path
+        )));
+    }
+
+    let segments = trimmed
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.len() < 2 {
+        return Ok(());
+    }
+
+    match segments[0] {
+        "parts" => {
+            let part_id = segments[1];
+            if !part_ids.contains(part_id) {
+                return Err(AppError::validation(format!(
+                    "{owner_kind} '{owner_id}' references stale sourceRef partId '{}'.",
+                    part_id
+                )));
+            }
+        }
+        "params" => {
+            let parameter_key = segments[1];
+            if !parameter_keys.contains(parameter_key) {
+                return Err(AppError::validation(format!(
+                    "{owner_kind} '{owner_id}' references stale sourceRef parameterKey '{}'.",
+                    parameter_key
+                )));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
     if manifest.schema_version == 0 {
         return Err(AppError::validation(
@@ -4646,6 +4865,190 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
                         .unwrap_or(target.viewer_node_id.as_str()),
                     view_id
                 )));
+            }
+        }
+    }
+
+    if let Some(feature_graph) = manifest.feature_graph.as_ref() {
+        let mut feature_ids = HashSet::new();
+        for node in &feature_graph.nodes {
+            if node.feature_id.trim().is_empty() {
+                return Err(AppError::validation(
+                    "feature graph nodes must include non-empty featureId values.",
+                ));
+            }
+            if !feature_ids.insert(node.feature_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "feature '{}' is duplicated.",
+                    node.feature_id
+                )));
+            }
+        }
+
+        let mut feature_port_ids = HashSet::new();
+        let mut feature_output_refs = HashSet::new();
+        for node in &feature_graph.nodes {
+            if let Some(source_ref) = node.source_ref.as_ref() {
+                if let Some(path) = source_ref.path.as_deref() {
+                    validate_feature_source_ref_path(
+                        path,
+                        &node.feature_id,
+                        "feature",
+                        &part_ids,
+                        &known_parameter_keys,
+                    )?;
+                }
+                if let (Some(start), Some(end)) = (source_ref.start_byte, source_ref.end_byte) {
+                    if start >= end {
+                        return Err(AppError::validation(format!(
+                            "feature '{}' has invalid sourceRef byte range {}..{}.",
+                            node.feature_id, start, end
+                        )));
+                    }
+                }
+            }
+            for dependency_id in &node.dependency_ids {
+                let is_feature_dependency = feature_ids.contains(dependency_id.as_str());
+                let is_param_dependency = known_parameter_keys.contains(dependency_id.as_str())
+                    || dependency_id
+                        .strip_prefix("/params/")
+                        .is_some_and(|key| known_parameter_keys.contains(key));
+                if !is_feature_dependency && !is_param_dependency {
+                    return Err(AppError::validation(format!(
+                        "feature '{}' references unknown dependency '{}'.",
+                        node.feature_id, dependency_id
+                    )));
+                }
+            }
+            for output in &node.output_refs {
+                if output.feature_id != node.feature_id {
+                    return Err(AppError::validation(format!(
+                        "feature '{}' outputRef uses mismatched featureId '{}'.",
+                        node.feature_id, output.feature_id
+                    )));
+                }
+                if output.output_id.trim().is_empty() {
+                    return Err(AppError::validation(format!(
+                        "feature '{}' contains an outputRef with an empty outputId.",
+                        node.feature_id
+                    )));
+                }
+                let output_ref_key = format!("{}::{}", output.feature_id, output.output_id);
+                if !feature_output_refs.insert(output_ref_key.clone()) {
+                    return Err(AppError::validation(format!(
+                        "feature outputRef '{}' is duplicated.",
+                        output_ref_key
+                    )));
+                }
+                for target_id in &output.target_ids {
+                    if !selection_target_ids.contains(target_id.as_str()) {
+                        return Err(AppError::validation(format!(
+                            "feature '{}' outputRef '{}' references unknown targetId '{}'.",
+                            node.feature_id, output.output_id, target_id
+                        )));
+                    }
+                }
+            }
+            for port in &node.ports {
+                if port.port_id.trim().is_empty() {
+                    return Err(AppError::validation(format!(
+                        "feature '{}' contains a port with an empty portId.",
+                        node.feature_id
+                    )));
+                }
+                if !feature_port_ids.insert(port.port_id.as_str()) {
+                    return Err(AppError::validation(format!(
+                        "feature port '{}' is duplicated.",
+                        port.port_id
+                    )));
+                }
+                if port.type_id.trim().is_empty() {
+                    return Err(AppError::validation(format!(
+                        "feature port '{}' must include a non-empty typeId.",
+                        port.port_id
+                    )));
+                }
+                if let Some(confidence) = port.confidence {
+                    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+                        return Err(AppError::validation(format!(
+                            "feature port '{}' confidence must be between 0 and 1.",
+                            port.port_id
+                        )));
+                    }
+                }
+                if let Some(source_ref) = port.source_ref.as_ref() {
+                    if let Some(path) = source_ref.path.as_deref() {
+                        validate_feature_source_ref_path(
+                            path,
+                            &port.port_id,
+                            "feature port",
+                            &part_ids,
+                            &known_parameter_keys,
+                        )?;
+                    }
+                    if let (Some(start), Some(end)) = (source_ref.start_byte, source_ref.end_byte) {
+                        if start >= end {
+                            return Err(AppError::validation(format!(
+                                "feature port '{}' has invalid sourceRef byte range {}..{}.",
+                                port.port_id, start, end
+                            )));
+                        }
+                    }
+                }
+                for target_id in &port.target_ids {
+                    if !selection_target_ids.contains(target_id.as_str()) {
+                        return Err(AppError::validation(format!(
+                            "feature port '{}' references unknown targetId '{}'.",
+                            port.port_id, target_id
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(correspondence_graph) = manifest.correspondence_graph.as_ref() {
+            let mut edge_ids = HashSet::new();
+            for edge in &correspondence_graph.edges {
+                if edge.edge_id.trim().is_empty() {
+                    return Err(AppError::validation(
+                        "correspondence graph edges must include non-empty edgeId values.",
+                    ));
+                }
+                if !edge_ids.insert(edge.edge_id.as_str()) {
+                    return Err(AppError::validation(format!(
+                        "correspondence edge '{}' is duplicated.",
+                        edge.edge_id
+                    )));
+                }
+                if edge.relation.trim().is_empty() {
+                    return Err(AppError::validation(format!(
+                        "correspondence edge '{}' must include a non-empty relation.",
+                        edge.edge_id
+                    )));
+                }
+                for output in [&edge.source, &edge.target] {
+                    if output.feature_id.trim().is_empty() || output.output_id.trim().is_empty() {
+                        return Err(AppError::validation(format!(
+                            "correspondence edge '{}' references an empty feature/output id.",
+                            edge.edge_id
+                        )));
+                    }
+                    let output_ref_key = format!("{}::{}", output.feature_id, output.output_id);
+                    if !feature_output_refs.contains(output_ref_key.as_str()) {
+                        return Err(AppError::validation(format!(
+                            "correspondence edge '{}' references unknown feature output '{}'.",
+                            edge.edge_id, output_ref_key
+                        )));
+                    }
+                    for target_id in &output.target_ids {
+                        if !selection_target_ids.contains(target_id.as_str()) {
+                            return Err(AppError::validation(format!(
+                                "correspondence edge '{}' references unknown targetId '{}'.",
+                                edge.edge_id, target_id
+                            )));
+                        }
+                    }
+                }
             }
         }
     }
@@ -6078,6 +6481,9 @@ mod tests {
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: EngineKind::Freecad,
             source_language: SourceLanguage::LegacyPython,
             geometry_backend: GeometryBackend::Freecad,
@@ -6196,6 +6602,8 @@ mod tests {
                 view_ids: vec!["view-shell".to_string()],
             }],
             measurement_annotations: Vec::new(),
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -6319,6 +6727,9 @@ mod tests {
                 part_count, node_count, parameter_count
             ),
             source_kind: ModelSourceKind::Generated,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: EngineKind::Freecad,
             source_language: SourceLanguage::LegacyPython,
             geometry_backend: GeometryBackend::Freecad,
@@ -6337,6 +6748,8 @@ mod tests {
             advisories: Vec::new(),
             selection_targets,
             measurement_annotations: Vec::new(),
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -6348,6 +6761,357 @@ mod tests {
     #[test]
     fn validate_model_manifest_accepts_consistent_manifest() {
         validate_model_manifest(&sample_manifest()).expect("manifest should be valid");
+    }
+
+    #[test]
+    fn model_manifest_deserializes_missing_graphs_as_none() {
+        let manifest: ModelManifest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": MODEL_RUNTIME_SCHEMA_VERSION,
+            "modelId": "generated-abc123",
+            "sourceKind": "generated",
+            "engineKind": "freecad",
+            "sourceLanguage": "legacyPython",
+            "geometryBackend": "freecad",
+            "document": {
+                "documentName": "Doc",
+                "documentLabel": "Doc"
+            }
+        }))
+        .expect("manifest");
+
+        assert_eq!(manifest.feature_graph, None);
+        assert_eq!(manifest.correspondence_graph, None);
+
+        let value = serde_json::to_value(&manifest).expect("serialize manifest");
+        assert!(value.get("featureGraph").is_none());
+        assert!(value.get("correspondenceGraph").is_none());
+    }
+
+    #[test]
+    fn model_manifest_deserializes_missing_ast_identity_as_none() {
+        let manifest: ModelManifest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": MODEL_RUNTIME_SCHEMA_VERSION,
+            "modelId": "generated-abc123",
+            "sourceKind": "generated",
+            "engineKind": "ecky",
+            "sourceLanguage": "ecky",
+            "geometryBackend": "mesh",
+            "document": {
+                "documentName": "Doc",
+                "documentLabel": "Doc",
+                "sourcePath": "/tmp/source.ecky"
+            }
+        }))
+        .expect("manifest");
+
+        assert_eq!(manifest.source_digest, None);
+        assert_eq!(manifest.core_digest, None);
+        assert_eq!(manifest.ast_schema_version, None);
+    }
+
+    #[test]
+    fn model_manifest_serializes_ast_identity_in_camel_case() {
+        let mut manifest = sample_manifest();
+        manifest.source_digest = Some("sha256:source".to_string());
+        manifest.core_digest = Some("sha256:core".to_string());
+        manifest.ast_schema_version = Some(1);
+
+        let value = serde_json::to_value(&manifest).expect("serialize manifest");
+
+        assert_eq!(value["sourceDigest"], "sha256:source");
+        assert_eq!(value["coreDigest"], "sha256:core");
+        assert_eq!(value["astSchemaVersion"], 1);
+        assert!(value.get("source_digest").is_none());
+        assert!(value.get("core_digest").is_none());
+        assert!(value.get("ast_schema_version").is_none());
+    }
+
+    #[test]
+    fn model_manifest_serializes_feature_and_correspondence_graphs_in_camel_case() {
+        let mut manifest = sample_manifest();
+        manifest.feature_graph = Some(FeatureGraph {
+            nodes: vec![FeatureNode {
+                feature_id: "feature-sketch-profile".to_string(),
+                kind: "sketchProfile".to_string(),
+                label: "Sketch Profile".to_string(),
+                source_ref: Some(SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("body.profile".to_string()),
+                    start_byte: Some(12),
+                    end_byte: Some(42),
+                }),
+                dependency_ids: vec!["feature-base-plane".to_string()],
+                output_refs: vec![FeatureOutputRef {
+                    feature_id: "feature-sketch-profile".to_string(),
+                    output_id: "profile-loop".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                }],
+                ports: vec![FeaturePort {
+                    port_id: "mount-face".to_string(),
+                    type_id: "mechanical.mount".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                    frame: Some(PortFrame::identity()),
+                    interfaces: vec!["m3-clearance".to_string()],
+                    params: BTreeMap::from([(
+                        "clearanceMm".to_string(),
+                        ComponentInterfaceValue::Number(0.3),
+                    )]),
+                    source_ref: Some(SourceRef {
+                        source_id: Some("source-main".to_string()),
+                        path: Some("body.ports.mount-face".to_string()),
+                        start_byte: Some(44),
+                        end_byte: Some(64),
+                    }),
+                    confidence: Some(0.8),
+                    target_role: Some("mountingFace".to_string()),
+                }],
+            }],
+        });
+        manifest.correspondence_graph = Some(CorrespondenceGraph {
+            edges: vec![CorrespondenceEdge {
+                edge_id: "edge-profile-to-face".to_string(),
+                source: FeatureOutputRef {
+                    feature_id: "feature-sketch-profile".to_string(),
+                    output_id: "profile-loop".to_string(),
+                    target_ids: Vec::new(),
+                },
+                target: FeatureOutputRef {
+                    feature_id: "feature-extrude-shell".to_string(),
+                    output_id: "shell-face".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                },
+                relation: "produces".to_string(),
+                source_ref: None,
+            }],
+        });
+
+        let value = serde_json::to_value(&manifest).expect("serialize manifest");
+
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["featureId"],
+            "feature-sketch-profile"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["sourceRef"]["startByte"],
+            12
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["dependencyIds"][0],
+            "feature-base-plane"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["outputRefs"][0]["targetIds"][0],
+            "target-shell"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["portId"],
+            "mount-face"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["targetIds"][0],
+            "target-shell"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["frame"]["xAxis"][0],
+            1.0
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["interfaces"][0],
+            "m3-clearance"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["params"]["clearanceMm"],
+            0.3
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["sourceRef"]["path"],
+            "body.ports.mount-face"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["confidence"],
+            0.8
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["targetRole"],
+            "mountingFace"
+        );
+        assert_eq!(
+            value["correspondenceGraph"]["edges"][0]["source"]["featureId"],
+            "feature-sketch-profile"
+        );
+        assert_eq!(
+            value["correspondenceGraph"]["edges"][0]["target"]["targetIds"][0],
+            "target-shell"
+        );
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_feature_ports_with_unknown_target_ids() {
+        let mut manifest = sample_manifest();
+        manifest.feature_graph = Some(FeatureGraph {
+            nodes: vec![FeatureNode {
+                feature_id: "feature-sketch-profile".to_string(),
+                kind: "sketchProfile".to_string(),
+                label: "Sketch Profile".to_string(),
+                source_ref: None,
+                dependency_ids: Vec::new(),
+                output_refs: Vec::new(),
+                ports: vec![FeaturePort {
+                    port_id: "mount-face".to_string(),
+                    type_id: "mechanical.mount".to_string(),
+                    target_ids: vec!["missing-target".to_string()],
+                    frame: None,
+                    interfaces: Vec::new(),
+                    params: BTreeMap::new(),
+                    source_ref: None,
+                    confidence: Some(0.8),
+                    target_role: Some("mountingFace".to_string()),
+                }],
+            }],
+        });
+
+        let err =
+            validate_model_manifest(&manifest).expect_err("manifest should reject bad port target");
+
+        assert!(err.message.contains("feature port 'mount-face'"));
+        assert!(err.message.contains("missing-target"));
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_feature_output_refs_with_unknown_target_ids() {
+        let mut manifest = sample_manifest();
+        manifest.feature_graph = Some(FeatureGraph {
+            nodes: vec![FeatureNode {
+                feature_id: "feature-shell".to_string(),
+                kind: "extrude".to_string(),
+                label: "Shell".to_string(),
+                source_ref: Some(SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/part-shell/root".to_string()),
+                    start_byte: Some(10),
+                    end_byte: Some(20),
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![FeatureOutputRef {
+                    feature_id: "feature-shell".to_string(),
+                    output_id: "shell-face".to_string(),
+                    target_ids: vec!["missing-target".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        let err = validate_model_manifest(&manifest)
+            .expect_err("manifest should reject feature output target mismatch");
+        assert!(err.message.contains("outputRef"));
+        assert!(err.message.contains("missing-target"));
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_correspondence_edges_with_unknown_outputs() {
+        let mut manifest = sample_manifest();
+        manifest.feature_graph = Some(FeatureGraph {
+            nodes: vec![FeatureNode {
+                feature_id: "feature-shell".to_string(),
+                kind: "extrude".to_string(),
+                label: "Shell".to_string(),
+                source_ref: Some(SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/part-shell/root".to_string()),
+                    start_byte: Some(10),
+                    end_byte: Some(20),
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![FeatureOutputRef {
+                    feature_id: "feature-shell".to_string(),
+                    output_id: "shell-face".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+        manifest.correspondence_graph = Some(CorrespondenceGraph {
+            edges: vec![CorrespondenceEdge {
+                edge_id: "edge-missing".to_string(),
+                source: FeatureOutputRef {
+                    feature_id: "feature-shell".to_string(),
+                    output_id: "shell-face".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                },
+                target: FeatureOutputRef {
+                    feature_id: "feature-missing".to_string(),
+                    output_id: "missing-output".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                },
+                relation: "feeds".to_string(),
+                source_ref: None,
+            }],
+        });
+
+        let err = validate_model_manifest(&manifest)
+            .expect_err("manifest should reject stale correspondence output refs");
+        assert!(err.message.contains("unknown feature output"));
+        assert!(err.message.contains("feature-missing::missing-output"));
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_feature_source_ref_with_stale_part_id() {
+        let mut manifest = sample_manifest();
+        manifest.feature_graph = Some(FeatureGraph {
+            nodes: vec![FeatureNode {
+                feature_id: "feature-shell".to_string(),
+                kind: "extrude".to_string(),
+                label: "Shell".to_string(),
+                source_ref: Some(SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/missing/root".to_string()),
+                    start_byte: Some(10),
+                    end_byte: Some(20),
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![FeatureOutputRef {
+                    feature_id: "feature-shell".to_string(),
+                    output_id: "shell-face".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        let err = validate_model_manifest(&manifest)
+            .expect_err("manifest should reject stale feature sourceRef partId");
+        assert!(err.message.contains("stale sourceRef partId"));
+        assert!(err.message.contains("missing"));
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_feature_source_ref_with_stale_parameter_key() {
+        let mut manifest = sample_manifest();
+        manifest.feature_graph = Some(FeatureGraph {
+            nodes: vec![FeatureNode {
+                feature_id: "feature-shell".to_string(),
+                kind: "extrude".to_string(),
+                label: "Shell".to_string(),
+                source_ref: Some(SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/params/missing".to_string()),
+                    start_byte: Some(10),
+                    end_byte: Some(20),
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![FeatureOutputRef {
+                    feature_id: "feature-shell".to_string(),
+                    output_id: "shell-face".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        let err = validate_model_manifest(&manifest)
+            .expect_err("manifest should reject stale feature sourceRef parameterKey");
+        assert!(err.message.contains("stale sourceRef parameterKey"));
+        assert!(err.message.contains("missing"));
     }
 
     #[test]

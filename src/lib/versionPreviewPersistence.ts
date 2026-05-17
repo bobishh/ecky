@@ -1,5 +1,18 @@
 import type { ArtifactBundle, Message } from './types/domain';
 
+export function sameArtifactVersion(
+  versionBundle: ArtifactBundle | null | undefined,
+  runtimeBundle: ArtifactBundle | null | undefined,
+): boolean {
+  if (!versionBundle || !runtimeBundle) return false;
+  return (
+    versionBundle.modelId === runtimeBundle.modelId &&
+    versionBundle.contentHash === runtimeBundle.contentHash &&
+    (versionBundle.artifactVersion ?? null) === (runtimeBundle.artifactVersion ?? null) &&
+    versionBundle.previewStlPath === runtimeBundle.previewStlPath
+  );
+}
+
 export function shouldPersistVersionPreview(
   activeVersionMessage: Message | null,
   artifactBundle: ArtifactBundle | null,
@@ -8,5 +21,5 @@ export function shouldPersistVersionPreview(
   if (!activeVersionMessage) return false;
   if (!artifactBundle) return false;
   if (!stlUrl?.trim()) return false;
-  return !activeVersionMessage.imageData?.trim();
+  return sameArtifactVersion(activeVersionMessage.artifactBundle, artifactBundle);
 }

@@ -1,7 +1,7 @@
 use crate::models::{
-    AgentOrigin, AgentScenePacket, ArtifactBundle, ControlPrimitive, ControlView, DesignOutput,
-    DesignParams, MeasurementAnnotation, ModelManifest, StructuralVerificationResult,
-    TargetLeaseInfo, Thread, ThreadStatus, UiSpec,
+    AgentOrigin, AgentScenePacket, ArtifactBundle, ControlPrimitive, ControlView,
+    CorrespondenceGraph, DesignOutput, DesignParams, FeatureGraph, MeasurementAnnotation,
+    ModelManifest, StructuralVerificationResult, TargetLeaseInfo, Thread, ThreadStatus, UiSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -368,6 +368,11 @@ pub struct WorkspaceOverviewBrief {
     pub source_language: String,
     pub macro_dialect: String,
     pub geometry_backend: String,
+    pub primary_guide_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compatibility_manifest_uri: Option<String>,
+    pub must_read: Vec<String>,
+    pub read_when_needed: Vec<String>,
     pub summary: String,
     pub rules: Vec<String>,
     pub resources: Vec<String>,
@@ -591,6 +596,48 @@ pub struct EckyAstGetRequest {
     pub path: Option<String>,
     pub depth: Option<usize>,
     pub max_nodes: Option<usize>,
+    pub include_source: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstGetNodeRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub stable_node_key: Option<String>,
+    pub path: Option<String>,
+    pub include_source: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyDependencyGetRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckySelectorResolveRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum EckySelectorResolveConfidence {
+    Exact,
+    Inferred,
+    Ambiguous,
+    None,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -602,8 +649,19 @@ pub struct EckyAstSpan {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EckyAstSourceSlice {
+    pub span: EckyAstSpan,
+    pub text: String,
+    pub truncated: bool,
+    pub max_bytes: usize,
+    pub byte_len: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EckyAstNode {
     pub path: String,
+    pub stable_node_key: String,
     pub digest: String,
     pub node_id: u64,
     pub kind: String,
@@ -614,6 +672,12 @@ pub struct EckyAstNode {
     pub part_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<EckyAstSpan>,
+    pub source_addressable: bool,
+    pub editable_ops: Vec<EckyAstEditOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_editable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EckyAstSourceSlice>,
     pub child_paths: Vec<String>,
 }
 
@@ -637,7 +701,104 @@ pub struct EckyAstGetResponse {
     pub artifact_digest: Option<ArtifactBundleDigest>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyDependencyGetResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub resolved_from: TargetResolvedFrom,
+    pub source_digest: String,
+    pub path: String,
+    pub dependency_kind: String,
+    pub dependent_source_paths: Vec<String>,
+    pub impacted_part_ids: Vec<String>,
+    pub impact_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feature_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameter_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_ids: Vec<String>,
+    pub reference_count: usize,
+    pub authoring_context: TargetAuthoringContext,
+    pub artifact_digest: Option<ArtifactBundleDigest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckySelectorResolveProvenanceCandidates {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_role: Option<String>,
+    #[serde(default)]
+    pub source_stable_node_keys: Vec<String>,
+    #[serde(default)]
+    pub operation_kinds: Vec<String>,
+    #[serde(default)]
+    pub primitive_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckySelectorResolveResponse {
+    pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feature_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameter_keys: Vec<String>,
+    #[serde(default)]
+    pub provenance_candidates: EckySelectorResolveProvenanceCandidates,
+    pub confidence: EckySelectorResolveConfidence,
+    pub reason: String,
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyConstraintsValidateRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub parameters: Option<DesignParams>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyConstraintValidationRow {
+    pub path: String,
+    pub status: String,
+    pub severity: String,
+    pub raw_value: serde_json::Value,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub involved_param_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_stable_node_keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyConstraintsValidateResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub resolved_from: TargetResolvedFrom,
+    pub source_digest: String,
+    pub parameter_source: String,
+    pub pass_count: usize,
+    pub fail_count: usize,
+    pub rows: Vec<EckyConstraintValidationRow>,
+    pub authoring_context: TargetAuthoringContext,
+    pub artifact_digest: Option<ArtifactBundleDigest>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum EckyAstEditOperation {
     Replace,
@@ -663,7 +824,8 @@ pub struct EckyAstReplaceAndRenderRequest {
     #[serde(default)]
     pub operation: EckyAstEditOperation,
     pub source_digest: String,
-    pub path: String,
+    pub stable_node_key: Option<String>,
+    pub path: Option<String>,
     pub expected_node_digest: String,
     pub replacement_source: Option<String>,
     pub new_name: Option<String>,
@@ -671,6 +833,85 @@ pub struct EckyAstReplaceAndRenderRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_processing: Option<crate::models::PostProcessingSpec>,
     pub geometry_backend: Option<crate::models::GeometryBackend>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstPatchValidateRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub operation: EckyAstEditOperation,
+    pub source_digest: String,
+    pub stable_node_key: Option<String>,
+    pub path: Option<String>,
+    pub expected_node_digest: String,
+    pub replacement_source: Option<String>,
+    pub new_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstPatchTextDiffSide {
+    pub digest: String,
+    pub byte_len: usize,
+    pub line_len: usize,
+    pub span: EckyAstSpan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstPatchDiff {
+    pub old: EckyAstPatchTextDiffSide,
+    pub new: EckyAstPatchTextDiffSide,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstPatchAffectedPath {
+    pub change: String,
+    pub old_path: String,
+    pub new_path: String,
+    pub old_digest: String,
+    pub new_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstPatchDependencyImpactSummary {
+    pub path: String,
+    pub dependency_kind: String,
+    pub dependent_source_paths: Vec<String>,
+    pub impacted_part_ids: Vec<String>,
+    pub impact_labels: Vec<String>,
+    pub reference_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyAstPatchValidateResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub resolved_from: TargetResolvedFrom,
+    pub operation: String,
+    pub edited_path: String,
+    pub status: String,
+    pub source_digest: String,
+    pub new_source_digest: String,
+    pub old_node_digest: String,
+    pub new_node_digest: String,
+    pub affected_paths: Vec<String>,
+    pub affected_path_details: Vec<EckyAstPatchAffectedPath>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_node_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_impact: Option<EckyAstPatchDependencyImpactSummary>,
+    pub diff: EckyAstPatchDiff,
+    pub authoring_context: TargetAuthoringContext,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -762,6 +1003,7 @@ pub enum TargetDetailSection {
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactBundleDigest {
     pub model_id: String,
+    pub content_hash: String,
     pub source_language: String,
     pub geometry_backend: String,
     pub has_preview_stl: bool,
@@ -795,6 +1037,27 @@ pub struct ArtifactManifestResponse {
     pub artifact_bundle: ArtifactBundle,
     pub model_manifest: ModelManifest,
     pub runtime_manifest_valid: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactFeatureGraphGetRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactFeatureGraphGetResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub model_id: String,
+    pub artifact_digest: ArtifactBundleDigest,
+    pub feature_graph: Option<FeatureGraph>,
+    pub correspondence_graph: Option<CorrespondenceGraph>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1326,4 +1589,85 @@ pub struct StructuralVerificationSummaryResponse {
     pub issue_count: usize,
     pub verifier_status: crate::contracts::VerifierStatus,
     pub verifier_source: Option<crate::contracts::VerifierSource>,
+}
+
+// ── Printability MCP ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintabilityAnalyzeRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintabilityAnalyzeResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub model_id: String,
+    pub artifact_digest: ArtifactBundleDigest,
+    pub preview_stl_path: String,
+    pub analysis: crate::services::printability::PrintabilityAnalysis,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintabilityTransformRecipesGetRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintabilityTransformRecipesGetResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub model_id: String,
+    pub artifact_digest: ArtifactBundleDigest,
+    pub preview_stl_path: String,
+    pub recipes: Vec<crate::services::printability::SupportlessFdmTransformRecipe>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticTransformArtifactGuard {
+    pub model_id: String,
+    pub preview_stl_path: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticTransformPreviewRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+    pub recipe_id: String,
+    pub action_kind: crate::services::printability::SupportlessFdmRecipeActionKind,
+    pub expected_artifact: SemanticTransformArtifactGuard,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticTransformPreviewResponse {
+    pub thread_id: String,
+    pub base_message_id: String,
+    pub preview_id: String,
+    pub model_id: String,
+    pub recipe_id: String,
+    pub action_kind: crate::services::printability::SupportlessFdmRecipeActionKind,
+    pub source_digest: String,
+    pub new_source_digest: String,
+    pub preview_support_status: crate::services::printability::TransformRecipeSupportStatus,
+    pub apply_support_status: crate::services::printability::TransformRecipeSupportStatus,
+    pub artifact_digest: ArtifactBundleDigest,
 }

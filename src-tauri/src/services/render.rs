@@ -7,6 +7,149 @@ use crate::models::{
 use std::fs;
 use std::path::Path;
 
+const ECKY_LOWERING_STACK_SIZE: usize = 32 * 1024 * 1024;
+
+fn source_line_for_offset(source: &str, offset: usize) -> Option<usize> {
+    if offset > source.len() {
+        return None;
+    }
+    Some(
+        source.as_bytes()[..offset]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            + 1,
+    )
+}
+
+fn parse_byte_offset_from_message(message: &str) -> Option<usize> {
+    let marker = "byte ";
+    let idx = message.find(marker)?;
+    let digits = message[idx + marker.len()..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty())
+        .then(|| digits.parse::<usize>().ok())
+        .flatten()
+}
+
+fn source_line_range_for_span(
+    source: &str,
+    span: crate::ecky_core_ir::SourceSpan,
+) -> Option<(usize, usize)> {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+    let start_line = source_line_for_offset(source, start)?;
+    let inclusive_end = end.saturating_sub(1);
+    let end_line = source_line_for_offset(source, inclusive_end)?;
+    Some((start_line, end_line.max(start_line)))
+}
+
+fn stable_node_key_for_span(source: &str, span: crate::ecky_core_ir::SourceSpan) -> Option<String> {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"ecky-diagnostic-span|");
+    hasher.update(&source.as_bytes()[start..end]);
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn annotate_lowering_error(mut error: AppError, source: &str, operation: &str) -> AppError {
+    if let Some(kind) = classify_lowering_diagnostic_kind(&error.message, error.details.as_deref())
+    {
+        error.message = format!("lowering_diagnostic[{kind}] {}", error.message);
+    }
+    error = error.with_operation(operation.to_string());
+    if let Err(compile_error) = crate::ecky_scheme::compile_to_core_program(source) {
+        if let Some(span) = compile_error.primary_span {
+            if let Some((start_line, end_line)) = source_line_range_for_span(source, span) {
+                error = error.with_line_range(start_line, end_line);
+            }
+            if let Some(stable_node_key) = stable_node_key_for_span(source, span) {
+                error = error.with_stable_node_key(stable_node_key);
+            }
+        } else if let Some(byte_offset) = parse_byte_offset_from_message(&compile_error.message) {
+            if let Some(line) = source_line_for_offset(source, byte_offset.min(source.len())) {
+                error = error.with_line_range(line, line);
+            }
+        }
+    }
+    error
+}
+
+fn classify_lowering_diagnostic_kind(message: &str, details: Option<&str>) -> Option<&'static str> {
+    let mut combined =
+        String::with_capacity(message.len() + details.map(str::len).unwrap_or(0) + 1);
+    combined.push_str(&message.to_ascii_lowercase());
+    if let Some(details) = details {
+        if !details.is_empty() {
+            combined.push(' ');
+            combined.push_str(&details.to_ascii_lowercase());
+        }
+    }
+
+    if combined.contains("unsupported") && combined.contains("backend") {
+        return Some("unsupported_backend");
+    }
+    if combined.contains("null topods_shape")
+        || (combined.contains("null") && combined.contains("boolean"))
+    {
+        return Some("null_boolean");
+    }
+    if combined.contains("non-manifold") {
+        return Some("non_manifold_output");
+    }
+    if combined.contains("empty part")
+        || combined.contains("no solids")
+        || combined.contains("contains no solids")
+    {
+        return Some("empty_part");
+    }
+    if combined.contains("invalid parameter")
+        || combined.contains("requires `:")
+        || combined.contains("must be positive")
+        || combined.contains("expects keyword")
+    {
+        return Some("invalid_parameter");
+    }
+    None
+}
+
+fn lower_ecky_with_large_stack(
+    label: &'static str,
+    macro_code: &str,
+    lower: fn(&str) -> AppResult<String>,
+) -> AppResult<String> {
+    let source = macro_code.to_string();
+    let source_for_diagnostics = source.clone();
+    let lowered = std::thread::Builder::new()
+        .name(format!("ecky-{label}-lower"))
+        .stack_size(ECKY_LOWERING_STACK_SIZE)
+        .spawn(move || lower(&source))
+        .map_err(|err| AppError::internal(format!("Failed to spawn Ecky {label} lowerer: {err}")))?
+        .join()
+        .map_err(|_| AppError::internal(format!("Ecky {label} lowerer panicked.")))?;
+    lowered.map_err(|err| {
+        annotate_lowering_error(err, &source_for_diagnostics, &format!("lower:{label}"))
+    })
+}
+
 fn load_manifest_for_bundle(bundle: &ArtifactBundle) -> AppResult<Option<ModelManifest>> {
     let path = bundle.manifest_path.trim();
     if path.is_empty() {
@@ -305,12 +448,16 @@ fn render_model_unlocked(
     // Lower Ecky IR to the target backend before dispatch.
     // Legacy Python and Build123d sources stay as-is.
     let lowered = match (dispatch_backend, effective_dialect.clone()) {
-        (GeometryBackend::Build123d, MacroDialect::EckyIrV0) => {
-            Some(crate::ecky_ir::lower_to_build123d(macro_code)?)
-        }
-        (GeometryBackend::Freecad, MacroDialect::EckyIrV0) => {
-            Some(crate::ecky_ir::lower_to_freecad(macro_code)?)
-        }
+        (GeometryBackend::Build123d, MacroDialect::EckyIrV0) => Some(lower_ecky_with_large_stack(
+            "build123d",
+            macro_code,
+            crate::ecky_ir::lower_to_build123d,
+        )?),
+        (GeometryBackend::Freecad, MacroDialect::EckyIrV0) => Some(lower_ecky_with_large_stack(
+            "freecad",
+            macro_code,
+            crate::ecky_ir::lower_to_freecad,
+        )?),
         _ => None,
     };
     let dispatch_source = lowered.as_deref().unwrap_or(macro_code);
@@ -322,7 +469,11 @@ fn render_model_unlocked(
                     if effective_dialect == MacroDialect::EckyIrV0
                         && crate::ecky_ir::source_uses_exact_backend_only_cad_ops(macro_code)
                     {
-                        let lowered = crate::ecky_ir::lower_to_build123d(macro_code)?;
+                        let lowered = lower_ecky_with_large_stack(
+                            "build123d",
+                            macro_code,
+                            crate::ecky_ir::lower_to_build123d,
+                        )?;
                         crate::build123d::render_model_with_sources(
                             &lowered,
                             Some(macro_code),
@@ -496,8 +647,8 @@ fn resolve_source_macro_dialect(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_requested_post_processing, load_manifest_for_bundle, render_model,
-        resolve_dispatch_backend, resolve_geometry_backend,
+        annotate_lowering_error, apply_requested_post_processing, load_manifest_for_bundle,
+        render_model, resolve_dispatch_backend, resolve_geometry_backend,
     };
     use crate::contracts::{
         Config, DisplacementSpec, LithophaneAttachment, LithophaneAttachmentSource,
@@ -505,7 +656,9 @@ mod tests {
         LithophaneRelief, LithophaneSide, MacroDialect, McpConfig, OverflowMode,
         PostProcessingSpec, ProjectionType,
     };
-    use crate::models::{AppState, DesignParams, GeometryBackend, ParamValue, PathResolver};
+    use crate::models::{
+        AppError, AppState, DesignParams, GeometryBackend, ParamValue, PathResolver,
+    };
     use std::path::PathBuf;
 
     #[derive(Clone)]
@@ -539,6 +692,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
             voice: crate::models::VoiceConfig::default(),
@@ -556,6 +710,42 @@ mod tests {
     fn test_state(root: &std::path::Path) -> AppState {
         let conn = crate::db::init_db(&root.join("test.db")).expect("test db");
         AppState::new(test_config(), None, conn)
+    }
+
+    fn example_fixture_source(name: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../model-runtime/examples")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read fixture {}: {err}", path.display()))
+    }
+
+    fn film_adapter_golden_six_part_fixture_source() -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../model-runtime/examples/film-adapter-golden-6part.ecky");
+        std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            r#"(model
+  (part film_gate_lower_035 (box 40 16 3))
+  (part film_gate_upper_035 (translate 0 0 3 (box 40 8 2)))
+  (part film_gate_lower_045 (translate 44 0 0 (box 40 16 3)))
+  (part film_gate_upper_045 (translate 44 0 3 (box 40 8 2)))
+  (part film_gate_lower_055 (translate 88 0 0 (box 40 16 3)))
+  (part film_gate_upper_055 (translate 88 0 3 (box 40 8 2))))"#
+                .to_string()
+        })
+    }
+
+    fn fixture_part_ids(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                let rest = trimmed.strip_prefix("(part ")?;
+                rest.split_whitespace()
+                    .next()
+                    .map(|token| token.trim_end_matches(')').to_string())
+            })
+            .collect()
     }
 
     #[test]
@@ -608,6 +798,95 @@ mod tests {
             error
         );
         assert_eq!(bundle.content_hash, "unchanged");
+    }
+
+    #[test]
+    fn ecky_lowering_annotation_adds_operation_and_source_lines_for_span_errors() {
+        let source = "(model\n  (part body (box 1 2 3))))";
+        let error = annotate_lowering_error(
+            AppError::validation("compile failed"),
+            source,
+            "lower:build123d",
+        );
+
+        assert_eq!(error.operation.as_deref(), Some("lower:build123d"));
+        assert!(error.start_line.is_some());
+        assert!(error.end_line.is_some());
+        assert!(error.start_line.unwrap() <= error.end_line.unwrap());
+    }
+
+    #[test]
+    fn ecky_lowering_annotation_tags_known_lowering_diagnostic_kind() {
+        let source = "(model\n  (part body (box 1 2 3))))";
+        let error = annotate_lowering_error(
+            AppError::validation("Null TopoDS_Shape while resolving boolean difference"),
+            source,
+            "lower:build123d",
+        );
+
+        assert!(
+            error
+                .message
+                .starts_with("lowering_diagnostic[null_boolean] "),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn lowering_diagnostic_kind_classifier_detects_required_categories() {
+        assert_eq!(
+            super::classify_lowering_diagnostic_kind(
+                "Unsupported backend for op helical-ridge",
+                None
+            ),
+            Some("unsupported_backend")
+        );
+        assert_eq!(
+            super::classify_lowering_diagnostic_kind("invalid parameter for :pitch", None),
+            Some("invalid_parameter")
+        );
+        assert_eq!(
+            super::classify_lowering_diagnostic_kind("Null TopoDS_Shape", None),
+            Some("null_boolean")
+        );
+        assert_eq!(
+            super::classify_lowering_diagnostic_kind("mesh became non-manifold after fuse", None),
+            Some("non_manifold_output")
+        );
+        assert_eq!(
+            super::classify_lowering_diagnostic_kind("part contains no solids after shell", None),
+            Some("empty_part")
+        );
+    }
+
+    #[test]
+    fn broken_helical_ridge_lowering_surfaces_operation_and_diagnostic_kind() {
+        let source = r#"(model
+  (part body
+    (wall-pattern
+      (:mode ribs :depth 1.0)
+      (shell 2 (cylinder 10 20)))))"#;
+
+        let err = super::lower_ecky_with_large_stack(
+            "build123d",
+            source,
+            crate::ecky_ir::lower_to_build123d,
+        )
+        .expect_err("wall-pattern should fail for build123d lowering");
+
+        assert_eq!(err.operation.as_deref(), Some("lower:build123d"));
+        assert!(
+            err.message
+                .starts_with("lowering_diagnostic[unsupported_backend] "),
+            "{err:?}"
+        );
+        assert!(
+            err.details
+                .as_deref()
+                .is_some_and(|text| text.contains("wall-pattern")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -753,6 +1032,9 @@ mod tests {
                 schema_version: 1,
                 model_id: "model".to_string(),
                 source_kind: crate::models::ModelSourceKind::Generated,
+                source_digest: None,
+                core_digest: None,
+                ast_schema_version: None,
                 engine_kind: crate::models::EngineKind::EckyIrV0,
                 source_language: crate::models::SourceLanguage::EckyIrV0,
                 geometry_backend: crate::models::GeometryBackend::EckyRust,
@@ -791,6 +1073,8 @@ mod tests {
                 advisories: vec![],
                 selection_targets: vec![],
                 measurement_annotations: vec![],
+                feature_graph: None,
+                correspondence_graph: None,
                 warnings: vec![],
                 enrichment_state: crate::models::ManifestEnrichmentState {
                     status: crate::models::EnrichmentStatus::None,
@@ -1138,6 +1422,190 @@ mod tests {
             .selection_targets
             .iter()
             .any(|target| target.kind == crate::models::SelectionTargetKind::Face));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn film_scanning_adapter_helicoid_fixture_non_eckyrust_path_keeps_parts_and_step_readiness(
+    ) {
+        let root = temp_root("film-scanning-adapter-helicoid-golden");
+        let resolver = TestResolver { root: root.clone() };
+        let state = test_state(&root);
+        let source = example_fixture_source("film-scanning-adapter-helicoid.ecky");
+
+        assert!(
+            source.contains("(helical-ridge"),
+            "fixture must contain helicoid ops"
+        );
+
+        let build123d = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
+        let freecad =
+            crate::runtime_capabilities::probe_freecad_runtime(Some("FreeCADCmd"), &resolver);
+
+        if build123d.available || freecad.available {
+            let backend = if build123d.available {
+                GeometryBackend::Build123d
+            } else {
+                GeometryBackend::Freecad
+            };
+
+            let bundle = render_model(
+                &source,
+                &DesignParams::new(),
+                Some(MacroDialect::EckyIrV0),
+                Some(backend),
+                None,
+                &state,
+                &resolver,
+            )
+            .await
+            .expect("non-eckyrust render");
+
+            assert_eq!(bundle.geometry_backend, backend);
+            assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+            assert!(
+                bundle
+                    .export_artifacts
+                    .iter()
+                    .any(|artifact| artifact.format == "step"
+                        && std::path::Path::new(&artifact.path).is_file()),
+                "step artifact must exist on non-EckyRust render path"
+            );
+
+            let manifest = load_manifest_for_bundle(&bundle)
+                .expect("load manifest")
+                .expect("runtime manifest");
+            assert_eq!(manifest.document.object_count, 2);
+            assert_eq!(
+                manifest
+                    .parts
+                    .iter()
+                    .map(|part| part.part_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["top_cover_integrated_helicoid", "moving_lens_carrier"]
+            );
+        } else {
+            let dispatch = resolve_dispatch_backend(
+                &source,
+                &MacroDialect::EckyIrV0,
+                GeometryBackend::Build123d,
+            )
+            .expect("dispatch backend");
+            assert_eq!(dispatch, GeometryBackend::Build123d);
+
+            let lowered = super::lower_ecky_with_large_stack(
+                "build123d",
+                &source,
+                crate::ecky_ir::lower_to_build123d,
+            )
+            .expect("build123d lower");
+
+            assert!(lowered.contains("_ecky_helical_ridge("), "{}", lowered);
+            assert!(lowered.contains("Edge.make_helix("), "{}", lowered);
+            assert!(
+                lowered.contains(r#"("top_cover_integrated_helicoid","#)
+                    && lowered.contains(r#"("moving_lens_carrier","#),
+                "{}",
+                lowered
+            );
+            assert!(
+                lowered.contains("_ecky_parts"),
+                "fallback readiness signal must preserve deterministic part tuple"
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn film_adapter_golden_six_part_fixture_non_eckyrust_path_keeps_six_parts_and_step_readiness(
+    ) {
+        let root = temp_root("film-adapter-golden-6part");
+        let resolver = TestResolver { root: root.clone() };
+        let state = test_state(&root);
+        let source = film_adapter_golden_six_part_fixture_source();
+        let expected_part_ids = fixture_part_ids(&source);
+        assert_eq!(
+            expected_part_ids.len(),
+            6,
+            "fixture must declare exactly 6 parts"
+        );
+
+        let build123d = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
+        let freecad =
+            crate::runtime_capabilities::probe_freecad_runtime(Some("FreeCADCmd"), &resolver);
+
+        if build123d.available || freecad.available {
+            let backend = if build123d.available {
+                GeometryBackend::Build123d
+            } else {
+                GeometryBackend::Freecad
+            };
+            let bundle = render_model(
+                &source,
+                &DesignParams::new(),
+                Some(MacroDialect::EckyIrV0),
+                Some(backend),
+                None,
+                &state,
+                &resolver,
+            )
+            .await
+            .expect("non-eckyrust render");
+
+            assert_eq!(bundle.geometry_backend, backend);
+            assert!(
+                bundle
+                    .export_artifacts
+                    .iter()
+                    .any(|artifact| artifact.format == "step"
+                        && std::path::Path::new(&artifact.path).is_file()),
+                "step artifact must exist on non-EckyRust render path"
+            );
+
+            let manifest = load_manifest_for_bundle(&bundle)
+                .expect("load manifest")
+                .expect("runtime manifest");
+            assert_eq!(manifest.parts.len(), 6);
+            assert_eq!(manifest.document.object_count, 6);
+            let manifest_ids = manifest
+                .parts
+                .iter()
+                .map(|part| part.part_id.as_str())
+                .collect::<Vec<_>>();
+            let expected_ids = expected_part_ids
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(manifest_ids, expected_ids);
+        } else {
+            let dispatch = resolve_dispatch_backend(
+                &source,
+                &MacroDialect::EckyIrV0,
+                GeometryBackend::Build123d,
+            )
+            .expect("dispatch backend");
+            assert_eq!(dispatch, GeometryBackend::Build123d);
+
+            let lowered = super::lower_ecky_with_large_stack(
+                "build123d",
+                &source,
+                crate::ecky_ir::lower_to_build123d,
+            )
+            .expect("build123d lower");
+
+            assert!(
+                lowered.contains("_ecky_parts"),
+                "fallback readiness signal must preserve deterministic part tuple"
+            );
+            for part_id in expected_part_ids {
+                assert!(
+                    lowered.contains(&format!(r#"("{part_id}","#)),
+                    "missing tuple entry for part id {part_id}"
+                );
+            }
+        }
 
         std::fs::remove_dir_all(root).unwrap();
     }

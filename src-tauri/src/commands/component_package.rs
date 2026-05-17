@@ -277,7 +277,7 @@ fn normalize_packaged_component_ports(
     }
 
     let manifest = read_model_manifest_from_path(Path::new(&artifact_bundle.manifest_path))?;
-    let preferred_target_ids = manifest
+    let mut preferred_target_ids = manifest
         .selection_targets
         .iter()
         .flat_map(|target| {
@@ -336,6 +336,46 @@ fn normalize_packaged_component_ports(
                 .collect::<Vec<_>>()
         }))
         .collect::<HashMap<_, _>>();
+
+    for target in &manifest.selection_targets {
+        let Some(preferred) = preferred_packaged_target_id(target) else {
+            continue;
+        };
+        let manifest_portable_ids = target
+            .target_id
+            .iter()
+            .chain(target.durable_target_id.iter())
+            .chain(target.canonical_target_id.iter())
+            .chain(target.alias_ids.iter())
+            .filter_map(|target_id| portable_topology_target_id(target_id))
+            .collect::<HashSet<_>>();
+        if manifest_portable_ids.is_empty() {
+            continue;
+        }
+        match target.kind {
+            crate::models::SelectionTargetKind::Edge => {
+                for edge_target in &artifact_bundle.edge_targets {
+                    if portable_topology_target_id(&edge_target.target_id)
+                        .is_some_and(|portable| manifest_portable_ids.contains(&portable))
+                    {
+                        preferred_target_ids
+                            .insert(edge_target.target_id.clone(), preferred.clone());
+                    }
+                }
+            }
+            crate::models::SelectionTargetKind::Face => {
+                for face_target in &artifact_bundle.face_targets {
+                    if portable_topology_target_id(&face_target.target_id)
+                        .is_some_and(|portable| manifest_portable_ids.contains(&portable))
+                    {
+                        preferred_target_ids
+                            .insert(face_target.target_id.clone(), preferred.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     Ok(ports
         .iter()
@@ -2117,6 +2157,16 @@ async fn render_resolved_component_source(
     .await?;
     let model_manifest = crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
     validate_rendered_component_port_targets(&installed_source, &artifact_bundle, &model_manifest)?;
+    let model_manifest = populate_component_feature_graph_ports(
+        &installed_source,
+        &artifact_bundle,
+        &model_manifest,
+    )?;
+    let model_manifest = crate::model_runtime::write_model_manifest(
+        app,
+        &artifact_bundle.model_id,
+        &model_manifest,
+    )?;
     Ok(InstalledComponentRuntime {
         installed_source,
         parameters,
@@ -2201,6 +2251,211 @@ pub(crate) fn validate_rendered_component_port_targets(
     }
 
     Ok(())
+}
+
+fn populate_component_feature_graph_ports(
+    installed_source: &InstalledComponentSource,
+    _artifact_bundle: &crate::models::ArtifactBundle,
+    model_manifest: &crate::models::ModelManifest,
+) -> AppResult<crate::models::ModelManifest> {
+    let mut manifest = model_manifest.clone();
+    let Some(feature_graph) = manifest.feature_graph.as_mut() else {
+        return Ok(manifest);
+    };
+
+    let target_id_map = component_feature_port_target_id_map(installed_source, model_manifest);
+    let target_kind_map = component_feature_port_target_kind_map(model_manifest);
+
+    for component_port in &installed_source.component.ports {
+        let resolved_target_ids = component_port
+            .target_ids
+            .iter()
+            .filter_map(|target_id| target_id_map.get(target_id).cloned())
+            .collect::<Vec<_>>();
+
+        let target_node_index = if component_port.target_ids.is_empty() {
+            (feature_graph.nodes.len() == 1).then_some(0)
+        } else {
+            feature_graph.nodes.iter().position(|node| {
+                node.output_refs.iter().any(|output_ref| {
+                    output_ref
+                        .target_ids
+                        .iter()
+                        .any(|target_id| resolved_target_ids.contains(target_id))
+                })
+            })
+        };
+
+        let Some(target_node_index) = target_node_index else {
+            continue;
+        };
+
+        let targets_fully_resolved = !component_port.target_ids.is_empty()
+            && resolved_target_ids.len() == component_port.target_ids.len();
+        let feature_port = crate::models::FeaturePort {
+            port_id: component_port.port_id.clone(),
+            type_id: component_port.type_id.clone(),
+            target_ids: resolved_target_ids,
+            frame: component_port.frame.clone(),
+            interfaces: component_port.interfaces.clone(),
+            params: component_port.params.clone(),
+            source_ref: Some(component_feature_port_source_ref(
+                installed_source,
+                component_port,
+            )),
+            confidence: targets_fully_resolved.then_some(1.0),
+            target_role: component_feature_port_target_role(
+                &component_port.target_ids,
+                &target_id_map,
+                &target_kind_map,
+            ),
+        };
+
+        let node = &mut feature_graph.nodes[target_node_index];
+        node.ports
+            .retain(|existing| existing.port_id != feature_port.port_id);
+        node.ports.push(feature_port);
+    }
+
+    Ok(manifest)
+}
+
+fn component_feature_port_target_id_map(
+    installed_source: &InstalledComponentSource,
+    model_manifest: &crate::models::ModelManifest,
+) -> HashMap<String, String> {
+    let is_step_source = Path::new(installed_source.source_path.trim())
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "step" | "stp"))
+        .unwrap_or(false);
+
+    let mut target_id_map = HashMap::new();
+    let mut portable_target_id_map = HashMap::new();
+
+    for target in &model_manifest.selection_targets {
+        let Some(preferred) = target.target_id.clone().or_else(|| {
+            target
+                .durable_target_id
+                .clone()
+                .or_else(|| target.canonical_target_id.clone())
+                .or_else(|| target.alias_ids.first().cloned())
+        }) else {
+            continue;
+        };
+
+        for target_id in target
+            .target_id
+            .iter()
+            .chain(target.durable_target_id.iter())
+            .chain(target.canonical_target_id.iter())
+            .chain(target.alias_ids.iter())
+        {
+            target_id_map.insert(target_id.clone(), preferred.clone());
+            if is_step_source {
+                if let Some(portable) = portable_topology_target_id(target_id) {
+                    portable_target_id_map.insert(portable, preferred.clone());
+                }
+            }
+        }
+    }
+
+    if is_step_source {
+        for component_port in &installed_source.component.ports {
+            for target_id in &component_port.target_ids {
+                if target_id_map.contains_key(target_id) {
+                    continue;
+                }
+                if let Some(preferred) = portable_topology_target_id(target_id)
+                    .and_then(|portable| portable_target_id_map.get(&portable).cloned())
+                {
+                    target_id_map.insert(target_id.clone(), preferred);
+                }
+            }
+        }
+    }
+
+    target_id_map
+}
+
+fn component_feature_port_target_kind_map(
+    model_manifest: &crate::models::ModelManifest,
+) -> HashMap<String, crate::models::SelectionTargetKind> {
+    model_manifest
+        .selection_targets
+        .iter()
+        .flat_map(|target| {
+            target
+                .target_id
+                .iter()
+                .chain(target.durable_target_id.iter())
+                .chain(target.canonical_target_id.iter())
+                .chain(target.alias_ids.iter())
+                .map(|target_id| (target_id.clone(), target.kind.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn component_feature_port_target_role(
+    source_target_ids: &[String],
+    target_id_map: &HashMap<String, String>,
+    target_kind_map: &HashMap<String, crate::models::SelectionTargetKind>,
+) -> Option<String> {
+    let mut role = None;
+    for source_target_id in source_target_ids {
+        let resolved_target_id = target_id_map.get(source_target_id)?;
+        let next_role = selection_target_kind_role(target_kind_map.get(resolved_target_id)?)?;
+        if role.is_some_and(|existing| existing != next_role) {
+            return None;
+        }
+        role = Some(next_role);
+    }
+    role.map(str::to_string)
+}
+
+fn selection_target_kind_role(kind: &crate::models::SelectionTargetKind) -> Option<&'static str> {
+    match kind {
+        crate::models::SelectionTargetKind::Object => Some("object"),
+        crate::models::SelectionTargetKind::Edge => Some("edge"),
+        crate::models::SelectionTargetKind::Face => Some("face"),
+        crate::models::SelectionTargetKind::Part | crate::models::SelectionTargetKind::Group => {
+            None
+        }
+    }
+}
+
+fn component_feature_port_source_ref(
+    installed_source: &InstalledComponentSource,
+    component_port: &ComponentPort,
+) -> crate::models::SourceRef {
+    let base = installed_source
+        .component
+        .source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|source_ref| !source_ref.is_empty())
+        .map(|source_ref| source_ref.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "packages/{}/{}/components/{}",
+                installed_source.package_id,
+                installed_source.version,
+                installed_source.component.component_id
+            )
+        });
+
+    crate::models::SourceRef {
+        source_id: Some(format!(
+            "{}@{}:{}",
+            installed_source.package_id,
+            installed_source.version,
+            installed_source.component.component_id
+        )),
+        path: Some(format!("{}/ports/{}", base, component_port.port_id)),
+        start_byte: None,
+        end_byte: None,
+    }
 }
 
 #[cfg(test)]
@@ -2975,6 +3230,281 @@ mod tests {
             &sample_manifest(&[]),
         )
         .expect("viewer alias target id should resolve");
+    }
+
+    #[test]
+    fn populate_component_feature_graph_ports_attaches_matching_target_ports() {
+        let mut installed = InstalledComponentSource {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            package_display_name: "Pkg".to_string(),
+            package_dir: "/tmp/pkg".to_string(),
+            component: test_component("frame-rail", "dovetail_rail", Some(PortFrame::identity())),
+            port_types: vec![PortTypeDefinition {
+                type_id: "mechanical.dovetail.rail.v1".to_string(),
+                display_name: "Rail".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            mate_types: Vec::new(),
+            source_path: "/tmp/pkg/component.ecky".to_string(),
+        };
+        installed.component.ports[0].target_ids = vec!["target-shell".to_string()];
+        installed.component.ports[0].interfaces = vec!["mount".to_string()];
+        installed.component.ports[0].params = BTreeMap::from([(
+            "clearanceMm".to_string(),
+            ComponentInterfaceValue::Number(0.3),
+        )]);
+        let mut manifest = sample_manifest(&[]);
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "part:part-shell".to_string(),
+                kind: "part".to_string(),
+                label: "Shell".to_string(),
+                source_ref: None,
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "part:part-shell".to_string(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids: vec!["target-shell".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        let populated = populate_component_feature_graph_ports(
+            &installed,
+            &sample_artifact_bundle("/tmp/manifest.json"),
+            &manifest,
+        )
+        .expect("populate ports");
+
+        crate::models::validate_model_manifest(&populated).expect("valid manifest");
+        let port = &populated
+            .feature_graph
+            .as_ref()
+            .expect("feature graph")
+            .nodes[0]
+            .ports[0];
+        assert_eq!(port.port_id, "dovetail_rail");
+        assert_eq!(port.target_ids, vec!["target-shell".to_string()]);
+        assert_eq!(port.interfaces, vec!["mount".to_string()]);
+        assert_eq!(
+            port.source_ref
+                .as_ref()
+                .and_then(|source_ref| source_ref.path.as_deref()),
+            Some("components/frame-rail/source.ecky/ports/dovetail_rail")
+        );
+        assert_eq!(port.confidence, Some(1.0));
+        assert_eq!(port.target_role.as_deref(), Some("object"));
+        assert_eq!(
+            port.params.get("clearanceMm"),
+            Some(&ComponentInterfaceValue::Number(0.3))
+        );
+    }
+
+    #[test]
+    fn populate_component_feature_graph_ports_resolves_step_portable_ids_to_manifest_targets() {
+        let mut installed = InstalledComponentSource {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            package_display_name: "Pkg".to_string(),
+            package_dir: "/tmp/pkg".to_string(),
+            component: test_component("frame-rail", "dovetail_rail", Some(PortFrame::identity())),
+            port_types: vec![PortTypeDefinition {
+                type_id: "mechanical.dovetail.rail.v1".to_string(),
+                display_name: "Rail".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            mate_types: Vec::new(),
+            source_path: "/tmp/pkg/component.step".to_string(),
+        };
+        installed.component.ports[0].target_ids = vec!["part:face:9:0-0-1:10".to_string()];
+        let mut manifest = sample_manifest(&[]);
+        manifest.selection_targets[0].target_id = Some("runtime-face-id".to_string());
+        manifest.selection_targets[0].canonical_target_id =
+            Some("part:face:0:0-0-1:10".to_string());
+        manifest.selection_targets[0].kind = crate::models::SelectionTargetKind::Face;
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "part:part-shell".to_string(),
+                kind: "part".to_string(),
+                label: "Shell".to_string(),
+                source_ref: None,
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "part:part-shell".to_string(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids: vec!["runtime-face-id".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        let populated = populate_component_feature_graph_ports(
+            &installed,
+            &sample_artifact_bundle("/tmp/manifest.json"),
+            &manifest,
+        )
+        .expect("populate ports");
+
+        crate::models::validate_model_manifest(&populated).expect("valid manifest");
+        let port = &populated
+            .feature_graph
+            .as_ref()
+            .expect("feature graph")
+            .nodes[0]
+            .ports[0];
+        assert_eq!(port.target_ids, vec!["runtime-face-id".to_string()]);
+        assert_eq!(
+            port.source_ref
+                .as_ref()
+                .and_then(|source_ref| source_ref.path.as_deref()),
+            Some("components/frame-rail/source.ecky/ports/dovetail_rail")
+        );
+        assert_eq!(port.confidence, Some(1.0));
+        assert_eq!(port.target_role.as_deref(), Some("face"));
+    }
+
+    #[test]
+    fn populate_component_feature_graph_ports_leaves_mixed_target_roles_empty() {
+        let mut installed = InstalledComponentSource {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            package_display_name: "Pkg".to_string(),
+            package_dir: "/tmp/pkg".to_string(),
+            component: test_component("frame-rail", "dovetail_rail", Some(PortFrame::identity())),
+            port_types: vec![PortTypeDefinition {
+                type_id: "mechanical.dovetail.rail.v1".to_string(),
+                display_name: "Rail".to_string(),
+                base: None,
+                interfaces: Vec::new(),
+                compatible_with: Vec::new(),
+                allowed_ops: Vec::new(),
+                params: Vec::new(),
+            }],
+            mate_types: Vec::new(),
+            source_path: "/tmp/pkg/component.ecky".to_string(),
+        };
+        installed.component.ports[0].target_ids =
+            vec!["target-edge".to_string(), "target-face".to_string()];
+        let mut manifest = sample_manifest(&[]);
+        let mut edge_target = manifest.selection_targets[0].clone();
+        edge_target.target_id = Some("target-edge".to_string());
+        edge_target.kind = crate::models::SelectionTargetKind::Edge;
+        let mut face_target = manifest.selection_targets[0].clone();
+        face_target.target_id = Some("target-face".to_string());
+        face_target.kind = crate::models::SelectionTargetKind::Face;
+        manifest.selection_targets = vec![edge_target, face_target];
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "part:part-shell".to_string(),
+                kind: "part".to_string(),
+                label: "Shell".to_string(),
+                source_ref: None,
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "part:part-shell".to_string(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids: vec!["target-edge".to_string(), "target-face".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        let populated = populate_component_feature_graph_ports(
+            &installed,
+            &sample_artifact_bundle("/tmp/manifest.json"),
+            &manifest,
+        )
+        .expect("populate ports");
+
+        crate::models::validate_model_manifest(&populated).expect("valid manifest");
+        let port = &populated
+            .feature_graph
+            .as_ref()
+            .expect("feature graph")
+            .nodes[0]
+            .ports[0];
+        assert_eq!(
+            port.target_ids,
+            vec!["target-edge".to_string(), "target-face".to_string()]
+        );
+        assert_eq!(port.confidence, Some(1.0));
+        assert_eq!(port.target_role, None);
+    }
+
+    #[test]
+    fn populate_component_feature_graph_ports_skips_targetless_ports_on_multi_part_graph() {
+        let installed = InstalledComponentSource {
+            package_id: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            package_display_name: "Pkg".to_string(),
+            package_dir: "/tmp/pkg".to_string(),
+            component: test_component("frame-rail", "dovetail_rail", Some(PortFrame::identity())),
+            port_types: Vec::new(),
+            mate_types: Vec::new(),
+            source_path: "/tmp/pkg/component.ecky".to_string(),
+        };
+        let mut manifest = sample_manifest(&[]);
+        manifest.parts.push(crate::models::PartBinding {
+            part_id: "part-lid".to_string(),
+            freecad_object_name: "Lid".to_string(),
+            label: "Lid".to_string(),
+            kind: "Part::Feature".to_string(),
+            semantic_role: Some("lid".to_string()),
+            viewer_asset_path: Some("/tmp/node-lid.stl".to_string()),
+            viewer_node_ids: vec!["node-lid".to_string()],
+            parameter_keys: Vec::new(),
+            editable: true,
+            bounds: None,
+            volume: None,
+            area: None,
+        });
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![
+                crate::models::FeatureNode {
+                    feature_id: "part:part-shell".to_string(),
+                    kind: "part".to_string(),
+                    label: "Shell".to_string(),
+                    source_ref: None,
+                    dependency_ids: Vec::new(),
+                    output_refs: Vec::new(),
+                    ports: Vec::new(),
+                },
+                crate::models::FeatureNode {
+                    feature_id: "part:part-lid".to_string(),
+                    kind: "part".to_string(),
+                    label: "Lid".to_string(),
+                    source_ref: None,
+                    dependency_ids: Vec::new(),
+                    output_refs: Vec::new(),
+                    ports: Vec::new(),
+                },
+            ],
+        });
+
+        let populated = populate_component_feature_graph_ports(
+            &installed,
+            &sample_artifact_bundle("/tmp/manifest.json"),
+            &manifest,
+        )
+        .expect("populate ports");
+
+        assert!(populated
+            .feature_graph
+            .as_ref()
+            .expect("feature graph")
+            .nodes
+            .iter()
+            .all(|node| node.ports.is_empty()));
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub const MODULE: ModuleSpec = ModuleSpec {
     exports: &[
         "model",
         "part",
+        "feature",
         "build",
         "shape",
         "result",
@@ -19,6 +20,7 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "cylinder",
         "cone",
         "circle",
+        "ring",
         "rectangle",
         "rounded-rect",
         "rounded-polygon",
@@ -27,6 +29,7 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "revolve",
         "loft",
         "sweep",
+        "helical-ridge",
         "shell",
         "offset",
         "offset-rounded",
@@ -82,6 +85,12 @@ pub fn source() -> String {
            (syntax-rules ()\n\
              [(_ name expr) (list 'part (quote name) expr)]\n\
              [(_ name label expr) (list 'part (quote name) label expr)]))\n\
+         (define-syntax feature\n\
+           (syntax-rules ()\n\
+             [(_ name role-key role params-key (param ...) expr)\n\
+              (list 'feature (quote name) role-key (quote role) params-key (list (quote param) ...) expr)]\n\
+             [(_ name role-key role expr)\n\
+              (list 'feature (quote name) role-key (quote role) expr)]))\n\
          (define-syntax build\n\
            (syntax-rules ()\n\
              [(_ item ...) (list 'build item ...)]))\n\
@@ -103,7 +112,14 @@ pub fn source() -> String {
     for name in MODULE.exports {
         if matches!(
             *name,
-            "model" | "part" | "build" | "shape" | "result" | "for-union" | "for-compound"
+            "model"
+                | "part"
+                | "feature"
+                | "build"
+                | "shape"
+                | "result"
+                | "for-union"
+                | "for-compound"
         ) {
             continue;
         }

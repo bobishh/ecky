@@ -82,7 +82,7 @@ test('deriveViewportState resolves preview mode, URLs, and active viewport keys'
   assert.equal(state.hasRenderableModel, true);
   assert.equal(state.effectiveConceptPreviewMessage?.id, 'msg-1');
   assert.equal(state.currentViewportTargetKey, 'thread-1:msg-1:model-1:3:hash-1');
-  assert.equal(state.currentViewerModelKey, 'model-1:3:hash-1:file:///tmp/model.stl');
+  assert.equal(state.currentViewerModelKey, 'thread-1:model-1:3:hash-1:file:///tmp/model.stl');
   assert.deepEqual(state.persistedViewportCameraState, cameraState);
   assert.equal(state.activeVersionAgentLabel, 'Ecky · Gemini');
 });
@@ -137,6 +137,32 @@ test('deriveViewportState keeps viewer model key stable across version ids for s
   });
 
   assert.equal(first.currentViewerModelKey, second.currentViewerModelKey);
+  assert.notEqual(first.currentViewportTargetKey, second.currentViewportTargetKey);
+});
+
+test('deriveViewportState changes viewer model key across projects for the same artifact identity', () => {
+  const first = deriveViewportState({
+    activeThreadId: 'thread-1',
+    activeVersionId: 'msg-1',
+    activeArtifactBundle: bundle(),
+    activeVersionMessage: conceptMessage('msg-1'),
+    activeThreadMessages: [conceptMessage('msg-1')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {},
+    toAssetUrl: (path) => `asset:${path ?? ''}`,
+  });
+  const second = deriveViewportState({
+    activeThreadId: 'thread-2',
+    activeVersionId: 'msg-1',
+    activeArtifactBundle: bundle(),
+    activeVersionMessage: conceptMessage('msg-1'),
+    activeThreadMessages: [conceptMessage('msg-1')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {},
+    toAssetUrl: (path) => `asset:${path ?? ''}`,
+  });
+
+  assert.notEqual(first.currentViewerModelKey, second.currentViewerModelKey);
   assert.notEqual(first.currentViewportTargetKey, second.currentViewportTargetKey);
 });
 

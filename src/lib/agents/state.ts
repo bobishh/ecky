@@ -193,7 +193,7 @@ export function deriveMascotStateForThreadAgent(
     case 'sleeping':
       return {
         connected: false,
-        mode: 'idle',
+        mode: 'sleeping',
         bubble: '',
       };
     case 'waking':

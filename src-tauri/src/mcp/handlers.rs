@@ -4,17 +4,18 @@ use crate::mcp::contracts::*;
 use crate::mcp::runtime;
 use crate::models::{
     AgentDraft, AgentSession, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle,
-    ControlPrimitive, ControlView, ControlViewSource, DesignOutput, InteractionMode, MacroDialect,
-    MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest, ModelSourceKind,
-    PathResolver, SourceLanguage, UiSpec, WorkspaceSceneLens, WorkspaceSceneRepresentation,
-    WorkspaceSceneRepresentationKind, WorkspaceSceneRepresentationStatus, WorkspaceSceneTopology,
+    ControlPrimitive, ControlView, ControlViewSource, DesignOutput, DesignParams, InteractionMode,
+    MacroDialect, MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest,
+    ModelSourceKind, ParamValue, PathResolver, SourceLanguage, UiSpec, WorkspaceSceneLens,
+    WorkspaceSceneRepresentation, WorkspaceSceneRepresentationKind,
+    WorkspaceSceneRepresentationStatus, WorkspaceSceneTopology,
 };
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
 };
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::{agent_dialogue, history, render};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -118,6 +119,118 @@ fn live_thread_claim_target(
                 .clone()
                 .map(|thread_id| (thread_id, None, None))
         })
+}
+
+fn push_unique_strings(target: &mut Vec<String>, values: &[String]) {
+    for value in values {
+        if !target.iter().any(|existing| existing == value) {
+            target.push(value.clone());
+        }
+    }
+}
+
+fn selection_target_match_ids(target: &crate::models::SelectionTarget) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(target_id) = target.target_id.as_deref() {
+        ids.push(target_id.to_string());
+    }
+    if let Some(durable_target_id) = target.durable_target_id.as_deref() {
+        ids.push(durable_target_id.to_string());
+    }
+    if let Some(canonical_target_id) = target.canonical_target_id.as_deref() {
+        ids.push(canonical_target_id.to_string());
+    }
+    ids.extend(target.alias_ids.iter().cloned());
+    ids
+}
+
+fn is_specific_selection_binding(target: &crate::models::SelectionTarget) -> bool {
+    !target.primitive_ids.is_empty()
+        || !target.view_ids.is_empty()
+        || target.parameter_keys.len() <= 2
+}
+
+fn carry_forward_semantic_manifest(
+    previous: Option<&ModelManifest>,
+    next: ModelManifest,
+    artifact_bundle: &ArtifactBundle,
+) -> ModelManifest {
+    let Some(previous) = previous else {
+        return next;
+    };
+
+    let mut merged = next.clone();
+    if !previous.control_primitives.is_empty() {
+        merged.control_primitives = previous.control_primitives.clone();
+        merged.control_relations = previous.control_relations.clone();
+        merged.control_views = previous.control_views.clone();
+    }
+    if !previous.advisories.is_empty() {
+        merged.advisories = previous.advisories.clone();
+    }
+    if !previous.measurement_annotations.is_empty() {
+        merged.measurement_annotations = previous.measurement_annotations.clone();
+    }
+    let previous_feature_graph = previous.feature_graph.clone();
+    let previous_correspondence_graph = previous.correspondence_graph.clone();
+    merged.feature_graph = previous_feature_graph;
+    merged.correspondence_graph = previous_correspondence_graph;
+    if previous.enrichment_state.status != crate::models::EnrichmentStatus::None
+        || !previous.enrichment_state.proposals.is_empty()
+    {
+        merged.enrichment_state = previous.enrichment_state.clone();
+    }
+
+    let mut previous_targets: HashMap<String, &crate::models::SelectionTarget> = HashMap::new();
+    for target in &previous.selection_targets {
+        for id in selection_target_match_ids(target) {
+            previous_targets.entry(id).or_insert(target);
+        }
+    }
+
+    for target in &mut merged.selection_targets {
+        let match_ids = selection_target_match_ids(target);
+        for id in match_ids {
+            if let Some(previous_target) = previous_targets.get(&id) {
+                if !is_specific_selection_binding(previous_target) {
+                    continue;
+                }
+                push_unique_strings(&mut target.parameter_keys, &previous_target.parameter_keys);
+                push_unique_strings(&mut target.primitive_ids, &previous_target.primitive_ids);
+                push_unique_strings(&mut target.view_ids, &previous_target.view_ids);
+            }
+        }
+    }
+
+    if crate::models::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
+        return merged;
+    }
+
+    merged.feature_graph = None;
+    merged.correspondence_graph = None;
+    if crate::models::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
+        merged.warnings.push(
+            "Feature graph was not carried forward because rendered topology no longer validates old feature bindings."
+                .to_string(),
+        );
+        return merged;
+    }
+
+    merged.measurement_annotations.clear();
+    if crate::models::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
+        merged.warnings.push(
+            "Measurement annotations were not carried forward because rendered topology no longer validates old measurement bindings."
+                .to_string(),
+        );
+        return merged;
+    }
+
+    let mut fallback = next;
+    fallback.warnings.push(
+        "Semantic manifest was not carried forward because rendered topology no longer validates old semantic bindings."
+            .to_string(),
+    );
+    fallback
 }
 
 fn live_claim_session(
@@ -2929,13 +3042,14 @@ pub async fn handle_target_macro_get(
             req.thread_id.as_deref(),
             req.message_id.as_deref(),
         );
-        let (target_thread_id, target_message_id, design_output, artifact_bundle) =
+        let (target_thread_id, target_message_id, design_output, artifact_bundle, _model_manifest) =
             if let Some(preview) = preview {
                 (
                     preview.thread_id,
                     preview.preview_id,
                     preview.design_output,
                     Some(preview.artifact_bundle),
+                    Some(preview.model_manifest),
                 )
             } else {
                 let target = crate::services::target::resolve_editable_target(
@@ -2949,6 +3063,7 @@ pub async fn handle_target_macro_get(
                     target.message_id,
                     target.design_output,
                     target.artifact_bundle,
+                    target.model_manifest,
                 )
             };
 
@@ -3323,6 +3438,7 @@ const DEFAULT_ECKY_AST_DEPTH: usize = 3;
 const DEFAULT_ECKY_AST_MAX_NODES: usize = 120;
 const MAX_ECKY_AST_DEPTH: usize = 12;
 const MAX_ECKY_AST_NODES: usize = 500;
+const ECKY_AST_SOURCE_MAX_BYTES: usize = 4096;
 const DEFAULT_MACRO_BUFFER_WINDOW_LINES: usize = 200;
 
 fn macro_buffer_lines(macro_code: &str) -> Vec<MacroBufferLine> {
@@ -3527,6 +3643,175 @@ fn core_node_digest(node: &crate::ecky_core_ir::CoreNode) -> String {
     crate::mcp::macro_buffer::source_digest(&parts.join("|"))
 }
 
+#[derive(Debug, Clone)]
+struct EckyAstNodeAddressability {
+    stable_node_key: String,
+    source_addressable: bool,
+    editable_ops: Vec<EckyAstEditOperation>,
+    non_editable_reason: Option<String>,
+}
+
+fn binding_label_for_ast_path(path: &str) -> Option<String> {
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(path_segment_decode)
+        .collect::<Vec<_>>();
+    if segments.len() == 2 && matches!(segments[0].as_str(), "params" | "parts") {
+        return Some(segments[1].clone());
+    }
+    segments.windows(2).find_map(|window| {
+        if matches!(window[0].as_str(), "bindings" | "keywords") {
+            Some(window[1].clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn source_slice_digest(source: &str, span: Option<(usize, usize)>) -> Option<String> {
+    let (start, end) = span?;
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+    Some(crate::mcp::macro_buffer::source_digest(&source[start..end]))
+}
+
+fn bounded_ecky_ast_source_slice(source: &str, span: (usize, usize)) -> Option<EckyAstSourceSlice> {
+    let (start, end) = span;
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+
+    let byte_len = end - start;
+    let mut text_end = end.min(start + ECKY_AST_SOURCE_MAX_BYTES);
+    while text_end > start && !source.is_char_boundary(text_end) {
+        text_end -= 1;
+    }
+    if text_end == start {
+        return None;
+    }
+
+    Some(EckyAstSourceSlice {
+        span: EckyAstSpan {
+            start: start as u32,
+            end: end as u32,
+        },
+        text: source[start..text_end].to_string(),
+        truncated: text_end < end,
+        max_bytes: ECKY_AST_SOURCE_MAX_BYTES,
+        byte_len,
+    })
+}
+
+fn attach_ecky_ast_source_slices(source: &str, nodes: &mut [EckyAstNode]) {
+    for node in nodes.iter_mut() {
+        if !node.source_addressable {
+            continue;
+        }
+        let Ok(span) = source_span_for_ecky_path(source, &node.path) else {
+            continue;
+        };
+        node.source = bounded_ecky_ast_source_slice(source, span);
+    }
+}
+
+fn stable_ast_node_key(
+    source: &str,
+    path: &str,
+    kind: &str,
+    value_kind: &str,
+    op: Option<&str>,
+    span: Option<(usize, usize)>,
+) -> String {
+    let mut parts = vec![
+        format!("path={path}"),
+        format!("kind={kind}"),
+        format!("valueKind={value_kind}"),
+    ];
+    if let Some(op) = op {
+        parts.push(format!("op={op}"));
+    }
+    if let Some(binding) = binding_label_for_ast_path(path) {
+        parts.push(format!("binding={binding}"));
+    }
+    if let Some(digest) = source_slice_digest(source, span) {
+        parts.push(format!("source={digest}"));
+    }
+    crate::mcp::macro_buffer::source_digest(&parts.join("|"))
+}
+
+fn editable_ops_for_source_target_kind(kind: &SourcePathTargetKind) -> Vec<EckyAstEditOperation> {
+    match kind {
+        SourcePathTargetKind::Root
+        | SourcePathTargetKind::BuildResult
+        | SourcePathTargetKind::LetBody => vec![EckyAstEditOperation::Replace],
+        SourcePathTargetKind::PositionalArg | SourcePathTargetKind::KeywordValue { .. } => vec![
+            EckyAstEditOperation::Replace,
+            EckyAstEditOperation::InsertBefore,
+            EckyAstEditOperation::InsertAfter,
+            EckyAstEditOperation::Delete,
+        ],
+        SourcePathTargetKind::PartClause { .. }
+        | SourcePathTargetKind::ParamDecl { .. }
+        | SourcePathTargetKind::BuildBinding { .. }
+        | SourcePathTargetKind::LetBinding { .. } => vec![
+            EckyAstEditOperation::Replace,
+            EckyAstEditOperation::InsertBefore,
+            EckyAstEditOperation::InsertAfter,
+            EckyAstEditOperation::Delete,
+            EckyAstEditOperation::Rename,
+        ],
+    }
+}
+
+fn ecky_ast_node_addressability(
+    source: &str,
+    path: &str,
+    kind: &str,
+    value_kind: &str,
+    op: Option<&str>,
+    fallback_span: Option<(usize, usize)>,
+) -> EckyAstNodeAddressability {
+    let source_target = SourceExprParser::new(source).parse_all().and_then(|exprs| {
+        let target = source_target_for_ecky_path(&exprs, source, path)?;
+        Ok((
+            (target.expr.start, target.expr.end),
+            editable_ops_for_source_target_kind(&target.kind),
+        ))
+    });
+
+    match source_target {
+        Ok((source_span, editable_ops)) => EckyAstNodeAddressability {
+            stable_node_key: stable_ast_node_key(
+                source,
+                path,
+                kind,
+                value_kind,
+                op,
+                Some(source_span),
+            ),
+            source_addressable: true,
+            editable_ops,
+            non_editable_reason: None,
+        },
+        Err(err) => EckyAstNodeAddressability {
+            stable_node_key: stable_ast_node_key(source, path, kind, value_kind, op, fallback_span),
+            source_addressable: false,
+            editable_ops: Vec::new(),
+            non_editable_reason: Some(err.message),
+        },
+    }
+}
+
 fn core_param_digest(param: &crate::ecky_core_ir::CoreParameter) -> String {
     crate::mcp::macro_buffer::source_digest(&format!(
         "param|{}|{}|{:?}|{:?}|{}|{:?}",
@@ -3567,8 +3852,18 @@ fn collect_core_part_clause_ast_nodes(
                 start: start as u32,
                 end: end as u32,
             });
+        let addressability = ecky_ast_node_addressability(
+            source,
+            &path,
+            "Part",
+            "Part",
+            None,
+            span.as_ref()
+                .map(|span| (span.start as usize, span.end as usize)),
+        );
         nodes.push(EckyAstNode {
             path,
+            stable_node_key: addressability.stable_node_key,
             digest: core_part_digest(part),
             node_id: 0,
             kind: "Part".to_string(),
@@ -3576,6 +3871,10 @@ fn collect_core_part_clause_ast_nodes(
             op: None,
             part_key: Some(part.key.clone()),
             span,
+            source_addressable: addressability.source_addressable,
+            editable_ops: addressability.editable_ops,
+            non_editable_reason: addressability.non_editable_reason,
+            source: None,
             child_paths: vec![format!("/parts/{}/root", path_segment(&part.key))],
         });
     }
@@ -3609,15 +3908,30 @@ fn collect_core_param_ast_nodes(
                 start: start as u32,
                 end: end as u32,
             });
+        let value_kind = format!("{:?}", param.kind);
+        let addressability = ecky_ast_node_addressability(
+            source,
+            &path,
+            "Param",
+            &value_kind,
+            None,
+            span.as_ref()
+                .map(|span| (span.start as usize, span.end as usize)),
+        );
         nodes.push(EckyAstNode {
             path,
+            stable_node_key: addressability.stable_node_key,
             digest: core_param_digest(param),
             node_id: 0,
             kind: "Param".to_string(),
-            value_kind: format!("{:?}", param.kind),
+            value_kind,
             op: None,
             part_key: None,
             span,
+            source_addressable: addressability.source_addressable,
+            editable_ops: addressability.editable_ops,
+            non_editable_reason: addressability.non_editable_reason,
+            source: None,
             child_paths: Vec::new(),
         });
     }
@@ -3628,6 +3942,7 @@ fn collect_core_param_ast_nodes(
 }
 
 fn collect_core_ast_nodes(
+    source: &str,
     node: &crate::ecky_core_ir::CoreNode,
     path: &str,
     part_key: Option<&str>,
@@ -3643,25 +3958,51 @@ fn collect_core_ast_nodes(
         .iter()
         .map(|(child_path, _)| child_path.clone())
         .collect::<Vec<_>>();
+    let kind = core_node_kind_label(&node.kind).to_string();
+    let value_kind = format!("{:?}", node.value_kind);
+    let op = core_node_op_label(node);
+    let span = node.span.map(|span| EckyAstSpan {
+        start: span.start,
+        end: span.end,
+    });
+    let addressability = ecky_ast_node_addressability(
+        source,
+        path,
+        &kind,
+        &value_kind,
+        op.as_deref(),
+        span.as_ref()
+            .map(|span| (span.start as usize, span.end as usize)),
+    );
     nodes.push(EckyAstNode {
         path: path.to_string(),
+        stable_node_key: addressability.stable_node_key,
         digest: core_node_digest(node),
         node_id: node.id.raw(),
-        kind: core_node_kind_label(&node.kind).to_string(),
-        value_kind: format!("{:?}", node.value_kind),
-        op: core_node_op_label(node),
+        kind,
+        value_kind,
+        op,
         part_key: part_key.map(str::to_string),
-        span: node.span.map(|span| EckyAstSpan {
-            start: span.start,
-            end: span.end,
-        }),
+        span,
+        source_addressable: addressability.source_addressable,
+        editable_ops: addressability.editable_ops,
+        non_editable_reason: addressability.non_editable_reason,
+        source: None,
         child_paths,
     });
     if depth == 0 {
         return false;
     }
     for (child_path, child) in children {
-        if collect_core_ast_nodes(child, &child_path, part_key, depth - 1, max_nodes, nodes) {
+        if collect_core_ast_nodes(
+            source,
+            child,
+            &child_path,
+            part_key,
+            depth - 1,
+            max_nodes,
+            nodes,
+        ) {
             return true;
         }
     }
@@ -3669,6 +4010,7 @@ fn collect_core_ast_nodes(
 }
 
 fn collect_matching_core_ast_nodes(
+    source: &str,
     node: &crate::ecky_core_ir::CoreNode,
     path: &str,
     part_key: Option<&str>,
@@ -3678,11 +4020,12 @@ fn collect_matching_core_ast_nodes(
     nodes: &mut Vec<EckyAstNode>,
 ) -> bool {
     if path == requested_path {
-        return collect_core_ast_nodes(node, path, part_key, depth, max_nodes, nodes);
+        return collect_core_ast_nodes(source, node, path, part_key, depth, max_nodes, nodes);
     }
     for (child_path, child) in core_node_child_paths(node, path) {
         if requested_path.starts_with(&child_path)
             && collect_matching_core_ast_nodes(
+                source,
                 child,
                 &child_path,
                 part_key,
@@ -3729,6 +4072,943 @@ fn find_core_ast_node_in_program<'a>(
         }
     }
     None
+}
+
+fn ast_path_segments(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(path_segment_decode)
+        .collect::<Vec<_>>()
+}
+
+fn ecky_ast_operation_name(operation: &EckyAstEditOperation) -> &'static str {
+    match operation {
+        EckyAstEditOperation::Replace => "replace",
+        EckyAstEditOperation::InsertBefore => "insertBefore",
+        EckyAstEditOperation::InsertAfter => "insertAfter",
+        EckyAstEditOperation::Delete => "delete",
+        EckyAstEditOperation::Rename => "rename",
+    }
+}
+
+fn source_line_for_offset(source: &str, offset: usize) -> Option<usize> {
+    if offset > source.len() {
+        return None;
+    }
+    Some(
+        source.as_bytes()[..offset]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            + 1,
+    )
+}
+
+fn parse_byte_offset_from_message(message: &str) -> Option<usize> {
+    let marker = "byte ";
+    let idx = message.find(marker)?;
+    let digits = message[idx + marker.len()..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty())
+        .then(|| digits.parse::<usize>().ok())
+        .flatten()
+}
+
+fn source_line_range_for_span(
+    source: &str,
+    span: crate::ecky_core_ir::SourceSpan,
+) -> Option<(usize, usize)> {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+    let start_line = source_line_for_offset(source, start)?;
+    let inclusive_end = end.saturating_sub(1);
+    let end_line = source_line_for_offset(source, inclusive_end)?;
+    Some((start_line, end_line.max(start_line)))
+}
+
+fn compile_error_with_diagnostics(
+    message: String,
+    source: &str,
+    compile_error: crate::ecky_core_ir::CompilerError,
+    operation: Option<&str>,
+    stable_node_key: Option<&str>,
+) -> AppError {
+    let mut error = AppError::validation(message);
+    if let Some(operation) = operation {
+        error = error.with_operation(operation.to_string());
+    }
+    if let Some(stable_node_key) = stable_node_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        error = error.with_stable_node_key(stable_node_key.to_string());
+    }
+    if let Some(span) = compile_error.primary_span {
+        if let Some((start_line, end_line)) = source_line_range_for_span(source, span) {
+            error = error.with_line_range(start_line, end_line);
+        }
+    } else if let Some(byte_offset) = parse_byte_offset_from_message(&compile_error.message) {
+        if let Some(line) = source_line_for_offset(source, byte_offset.min(source.len())) {
+            error = error.with_line_range(line, line);
+        }
+    }
+    error
+}
+
+fn stable_node_key_for_program_path(
+    source: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+    path: &str,
+) -> Option<String> {
+    let segments = ast_path_segments(path);
+    if segments.len() == 2 && segments[0] == "params" {
+        let param = program
+            .parameters
+            .iter()
+            .find(|item| item.key == segments[1])?;
+        let span = source_span_for_ecky_path(source, path).ok();
+        return Some(stable_ast_node_key(
+            source,
+            path,
+            "Param",
+            &format!("{:?}", param.kind),
+            None,
+            span,
+        ));
+    }
+    if segments.len() == 2 && segments[0] == "parts" {
+        let _part = program.parts.iter().find(|item| item.key == segments[1])?;
+        let span = source_span_for_ecky_path(source, path).ok();
+        return Some(stable_ast_node_key(
+            source, path, "Part", "Part", None, span,
+        ));
+    }
+    let node = find_core_ast_node_in_program(program, path)?;
+    let fallback_span = node
+        .span
+        .map(|span| (span.start as usize, span.end as usize));
+    let span = source_span_for_ecky_path(source, path)
+        .ok()
+        .or(fallback_span);
+    Some(stable_ast_node_key(
+        source,
+        path,
+        core_node_kind_label(&node.kind),
+        &format!("{:?}", node.value_kind),
+        core_node_op_label(node).as_deref(),
+        span,
+    ))
+}
+
+fn collect_program_node_paths(
+    node: &crate::ecky_core_ir::CoreNode,
+    path: &str,
+    paths: &mut Vec<String>,
+) {
+    paths.push(path.to_string());
+    for (child_path, child) in core_node_child_paths(node, path) {
+        collect_program_node_paths(child, &child_path, paths);
+    }
+}
+
+fn all_program_ast_paths(program: &crate::ecky_core_ir::CoreProgram) -> Vec<String> {
+    let mut paths = Vec::new();
+    for param in &program.parameters {
+        paths.push(format!("/params/{}", path_segment(&param.key)));
+    }
+    for part in &program.parts {
+        let part_path = format!("/parts/{}", path_segment(&part.key));
+        paths.push(part_path.clone());
+        let root_path = format!("{part_path}/root");
+        collect_program_node_paths(&part.root, &root_path, &mut paths);
+    }
+    paths
+}
+
+fn resolve_path_from_stable_node_key(
+    source: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+    stable_node_key: &str,
+    tool_name: &str,
+) -> AppResult<String> {
+    let trimmed_key = stable_node_key.trim();
+    if trimmed_key.is_empty() {
+        return Err(AppError::validation(format!(
+            "{tool_name} stableNodeKey must not be empty."
+        )));
+    }
+    for path in all_program_ast_paths(program) {
+        let Some(candidate_key) = stable_node_key_for_program_path(source, program, &path) else {
+            continue;
+        };
+        if candidate_key == trimmed_key {
+            return Ok(path);
+        }
+    }
+    Err(AppError::validation(format!(
+        "{tool_name} stableNodeKey not found in AST: {trimmed_key}."
+    )))
+}
+
+fn resolve_ecky_ast_patch_path(
+    source: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+    path: Option<&str>,
+    stable_node_key: Option<&str>,
+    tool_name: &str,
+) -> AppResult<String> {
+    let explicit_path = path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let stable_node_key = stable_node_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let resolved_from_key = stable_node_key
+        .as_deref()
+        .map(|key| resolve_path_from_stable_node_key(source, program, key, tool_name))
+        .transpose()?;
+
+    match (explicit_path, resolved_from_key) {
+        (None, None) => Err(AppError::validation(format!(
+            "{tool_name} requires stableNodeKey or path."
+        ))),
+        (Some(path), None) => Ok(path),
+        (None, Some(path)) => Ok(path),
+        (Some(path), Some(resolved)) => {
+            if path == resolved {
+                Ok(path)
+            } else {
+                Err(AppError::validation(format!(
+                    "{tool_name} stableNodeKey/path mismatch: stableNodeKey resolves to {resolved}, path is {path}."
+                )))
+            }
+        }
+    }
+}
+
+fn affected_node_keys_for_patch(
+    old_source: &str,
+    old_program: &crate::ecky_core_ir::CoreProgram,
+    old_path: &str,
+    new_source: &str,
+    new_program: &crate::ecky_core_ir::CoreProgram,
+    new_path: &str,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(key) = stable_node_key_for_program_path(old_source, old_program, old_path) {
+        keys.push(key);
+    }
+    if !new_path.trim().is_empty() {
+        if let Some(key) = stable_node_key_for_program_path(new_source, new_program, new_path) {
+            if !keys.iter().any(|existing| existing == &key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+fn dependency_impact_for_patch(
+    program: &crate::ecky_core_ir::CoreProgram,
+    edited_path: &str,
+    affected_paths: &[String],
+) -> EckyAstPatchDependencyImpactSummary {
+    let summary_path = edited_path.trim();
+    let segments = ast_path_segments(summary_path);
+    if segments.len() == 2 && segments[0] == "params" {
+        if let Ok(param_id) = param_id_for_dependency_key(program, &segments[1]) {
+            let dependent_source_paths = dependent_source_paths_for_param(program, param_id);
+            let reference_count = dependent_source_paths.len();
+            let impacted_part_ids = impacted_part_ids_for_dependency_paths(&dependent_source_paths);
+            let impact_labels = impact_labels_for_dependency(&impacted_part_ids, reference_count);
+            return EckyAstPatchDependencyImpactSummary {
+                path: format!("/params/{}", path_segment(&segments[1])),
+                dependency_kind: "parameterReference".to_string(),
+                dependent_source_paths,
+                impacted_part_ids,
+                impact_labels,
+                reference_count,
+            };
+        }
+    }
+
+    let mut dependent_source_paths = Vec::new();
+    for path in affected_paths {
+        if path.trim().is_empty() {
+            continue;
+        }
+        if !dependent_source_paths
+            .iter()
+            .any(|existing| existing == path)
+        {
+            dependent_source_paths.push(path.clone());
+        }
+    }
+    let reference_count = dependent_source_paths.len();
+    let impacted_part_ids = impacted_part_ids_for_dependency_paths(&dependent_source_paths);
+    let impact_labels = impact_labels_for_dependency(&impacted_part_ids, reference_count);
+    EckyAstPatchDependencyImpactSummary {
+        path: summary_path.to_string(),
+        dependency_kind: "pathLocal".to_string(),
+        dependent_source_paths,
+        impacted_part_ids,
+        impact_labels,
+        reference_count,
+    }
+}
+
+enum EckyDependencyQuery {
+    ParameterKey(String),
+    SelectionTargetId(String),
+}
+
+fn parse_ecky_dependency_path(path: &str) -> AppResult<EckyDependencyQuery> {
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(path_segment_decode)
+        .collect::<Vec<_>>();
+    if segments.len() != 2 || segments[1].is_empty() {
+        return Err(AppError::validation(format!(
+            "ecky_dependency_get supports /params/{{key}} and /targets/{{targetId}} paths. Unsupported path: {path}."
+        )));
+    }
+
+    match segments[0].as_str() {
+        "params" => Ok(EckyDependencyQuery::ParameterKey(segments[1].clone())),
+        "targets" => Ok(EckyDependencyQuery::SelectionTargetId(segments[1].clone())),
+        _ => Err(AppError::validation(format!(
+            "ecky_dependency_get supports /params/{{key}} and /targets/{{targetId}} paths. Unsupported path: {path}."
+        ))),
+    }
+}
+
+fn param_id_for_dependency_key(
+    program: &crate::ecky_core_ir::CoreProgram,
+    key: &str,
+) -> AppResult<crate::ecky_core_ir::ParamId> {
+    program
+        .parameters
+        .iter()
+        .find(|param| param.key == key)
+        .map(|param| param.id)
+        .ok_or_else(|| {
+            AppError::validation(format!(
+                "Ecky dependency source path not found: /params/{}.",
+                key
+            ))
+        })
+}
+
+fn selection_targets_by_id<'a>(
+    manifest: &'a ModelManifest,
+    requested_id: &str,
+) -> Vec<&'a crate::models::SelectionTarget> {
+    manifest
+        .selection_targets
+        .iter()
+        .filter(|target| {
+            selection_target_match_ids(target)
+                .iter()
+                .any(|id| id == requested_id)
+        })
+        .collect()
+}
+
+fn selection_target_by_id<'a>(
+    manifest: &'a ModelManifest,
+    requested_id: &str,
+) -> Option<&'a crate::models::SelectionTarget> {
+    selection_targets_by_id(manifest, requested_id)
+        .into_iter()
+        .next()
+}
+
+fn feature_bindings_for_target_ids(
+    manifest: &ModelManifest,
+    target_ids: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let Some(graph) = manifest.feature_graph.as_ref() else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut feature_ids = Vec::new();
+    let mut source_paths = Vec::new();
+    for node in &graph.nodes {
+        let output_match = node.output_refs.iter().any(|output| {
+            output
+                .target_ids
+                .iter()
+                .any(|target_id| target_ids.iter().any(|requested| requested == target_id))
+        });
+        let port_match = node.ports.iter().any(|port| {
+            port.target_ids
+                .iter()
+                .any(|target_id| target_ids.iter().any(|requested| requested == target_id))
+        });
+        if !output_match && !port_match {
+            continue;
+        }
+
+        if !feature_ids
+            .iter()
+            .any(|existing| existing == &node.feature_id)
+        {
+            feature_ids.push(node.feature_id.clone());
+        }
+        if let Some(path) = node
+            .source_ref
+            .as_ref()
+            .and_then(|source_ref| source_ref.path.clone())
+        {
+            if !path.trim().is_empty() && !source_paths.iter().any(|existing| existing == &path) {
+                source_paths.push(path);
+            }
+        }
+        for port in &node.ports {
+            let port_hit = port
+                .target_ids
+                .iter()
+                .any(|target_id| target_ids.iter().any(|requested| requested == target_id));
+            if !port_hit {
+                continue;
+            }
+            if let Some(path) = port
+                .source_ref
+                .as_ref()
+                .and_then(|source_ref| source_ref.path.clone())
+            {
+                if !path.trim().is_empty() && !source_paths.iter().any(|existing| existing == &path)
+                {
+                    source_paths.push(path);
+                }
+            }
+        }
+    }
+
+    (feature_ids, source_paths)
+}
+
+fn selection_target_kind_role(kind: &crate::models::SelectionTargetKind) -> String {
+    match kind {
+        crate::models::SelectionTargetKind::Part => "part".to_string(),
+        crate::models::SelectionTargetKind::Object => "object".to_string(),
+        crate::models::SelectionTargetKind::Group => "group".to_string(),
+        crate::models::SelectionTargetKind::Edge => "edge".to_string(),
+        crate::models::SelectionTargetKind::Face => "face".to_string(),
+    }
+}
+
+fn collect_selector_provenance_candidates(
+    manifest: &ModelManifest,
+    selected_targets: &[&crate::models::SelectionTarget],
+    source: Option<&str>,
+) -> EckySelectorResolveProvenanceCandidates {
+    let mut source_paths = Vec::new();
+    let mut operation_kinds = Vec::new();
+    let mut primitive_ids = Vec::new();
+    let mut feature_roles = Vec::new();
+
+    for target in selected_targets {
+        push_unique_strings(&mut primitive_ids, &target.primitive_ids);
+
+        let feature_role = selection_target_kind_role(&target.kind);
+        if !feature_roles
+            .iter()
+            .any(|existing| existing == &feature_role)
+        {
+            feature_roles.push(feature_role);
+        }
+
+        let target_ids = selection_target_match_ids(target);
+        let Some(graph) = manifest.feature_graph.as_ref() else {
+            continue;
+        };
+        for node in &graph.nodes {
+            let output_match = node.output_refs.iter().any(|output| {
+                output
+                    .target_ids
+                    .iter()
+                    .any(|target_id| target_ids.iter().any(|requested| requested == target_id))
+            });
+            let port_match = node.ports.iter().any(|port| {
+                port.target_ids
+                    .iter()
+                    .any(|target_id| target_ids.iter().any(|requested| requested == target_id))
+            });
+            if !output_match && !port_match {
+                continue;
+            }
+
+            if !node.kind.trim().is_empty()
+                && !operation_kinds
+                    .iter()
+                    .any(|existing| existing == &node.kind)
+            {
+                operation_kinds.push(node.kind.clone());
+            }
+
+            if let Some(path) = node
+                .source_ref
+                .as_ref()
+                .and_then(|source_ref| source_ref.path.clone())
+                .filter(|path| !path.trim().is_empty())
+            {
+                if !source_paths.iter().any(|existing| existing == &path) {
+                    source_paths.push(path);
+                }
+            }
+
+            for port in &node.ports {
+                let port_hit = port
+                    .target_ids
+                    .iter()
+                    .any(|target_id| target_ids.iter().any(|requested| requested == target_id));
+                if !port_hit {
+                    continue;
+                }
+                if let Some(path) = port
+                    .source_ref
+                    .as_ref()
+                    .and_then(|source_ref| source_ref.path.clone())
+                    .filter(|path| !path.trim().is_empty())
+                {
+                    if !source_paths.iter().any(|existing| existing == &path) {
+                        source_paths.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut source_stable_node_keys = Vec::new();
+    if let Some(source_text) = source {
+        if let Ok(program) = crate::ecky_scheme::compile_to_core_program(source_text) {
+            let mut seen = HashSet::new();
+            for path in source_paths {
+                if let Some(stable_key) =
+                    stable_node_key_for_program_path(source_text, &program, &path)
+                {
+                    let trimmed = stable_key.trim();
+                    if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                        source_stable_node_keys.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    EckySelectorResolveProvenanceCandidates {
+        feature_role: if feature_roles.len() == 1 {
+            feature_roles.into_iter().next()
+        } else {
+            None
+        },
+        source_stable_node_keys,
+        operation_kinds,
+        primitive_ids,
+    }
+}
+
+fn collect_param_reference_paths(
+    node: &crate::ecky_core_ir::CoreNode,
+    path: &str,
+    param_id: crate::ecky_core_ir::ParamId,
+    paths: &mut Vec<String>,
+) {
+    if matches!(
+        &node.kind,
+        crate::ecky_core_ir::CoreNodeKind::Reference(
+            crate::ecky_core_ir::CoreReference::Parameter(id)
+        ) if *id == param_id
+    ) {
+        paths.push(path.to_string());
+    }
+    for (child_path, child) in core_node_child_paths(node, path) {
+        collect_param_reference_paths(child, &child_path, param_id, paths);
+    }
+}
+
+fn dependent_source_paths_for_param(
+    program: &crate::ecky_core_ir::CoreProgram,
+    param_id: crate::ecky_core_ir::ParamId,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    for part in &program.parts {
+        let root_path = format!("/parts/{}/root", path_segment(&part.key));
+        collect_param_reference_paths(&part.root, &root_path, param_id, &mut paths);
+    }
+    paths
+}
+
+fn impacted_part_ids_for_dependency_paths(paths: &[String]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for path in paths {
+        let segments = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.len() >= 2 && segments[0] == "parts" {
+            let part_id = path_segment_decode(segments[1]);
+            if !ids.iter().any(|existing| existing == &part_id) {
+                ids.push(part_id);
+            }
+        }
+    }
+    ids
+}
+
+fn impact_labels_for_dependency(
+    impacted_part_ids: &[String],
+    reference_count: usize,
+) -> Vec<String> {
+    if reference_count == 0 {
+        return vec!["local".to_string()];
+    }
+    if impacted_part_ids.is_empty() {
+        return vec!["local".to_string()];
+    }
+    if impacted_part_ids.len() == 1 {
+        return vec!["part-local".to_string(), "export-affecting".to_string()];
+    }
+    vec!["assembly-wide".to_string(), "export-affecting".to_string()]
+}
+
+fn param_value_from_core(value: &crate::ecky_core_ir::CoreParameterValue) -> ParamValue {
+    match value {
+        crate::ecky_core_ir::CoreParameterValue::Number(value) => ParamValue::Number(*value),
+        crate::ecky_core_ir::CoreParameterValue::Boolean(value) => ParamValue::Boolean(*value),
+        crate::ecky_core_ir::CoreParameterValue::Text(value)
+        | crate::ecky_core_ir::CoreParameterValue::Choice(value)
+        | crate::ecky_core_ir::CoreParameterValue::Image(value) => {
+            ParamValue::String(value.clone())
+        }
+    }
+}
+
+fn param_value_matches_core_choice(
+    value: &ParamValue,
+    choice: &crate::ecky_core_ir::CoreParameterValue,
+) -> bool {
+    match (value, choice) {
+        (ParamValue::Number(left), crate::ecky_core_ir::CoreParameterValue::Number(right)) => {
+            left == right
+        }
+        (ParamValue::String(left), crate::ecky_core_ir::CoreParameterValue::Choice(right))
+        | (ParamValue::String(left), crate::ecky_core_ir::CoreParameterValue::Text(right))
+        | (ParamValue::String(left), crate::ecky_core_ir::CoreParameterValue::Image(right)) => {
+            left == right
+        }
+        _ => false,
+    }
+}
+
+fn effective_ecky_constraint_params(
+    program: &crate::ecky_core_ir::CoreProgram,
+    design_params: &DesignParams,
+    provided_params: Option<DesignParams>,
+) -> (DesignParams, String) {
+    let mut params = DesignParams::new();
+    for param in &program.parameters {
+        params.insert(
+            param.key.clone(),
+            param_value_from_core(&param.default_value),
+        );
+    }
+
+    match provided_params {
+        Some(provided) => {
+            for (key, value) in provided {
+                params.insert(key, value);
+            }
+            (params, "provided".to_string())
+        }
+        None => {
+            for (key, value) in design_params {
+                params.insert(key.clone(), value.clone());
+            }
+            (params, "initialOrDefault".to_string())
+        }
+    }
+}
+
+fn validate_ecky_constraint_row(
+    source: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+    param: &crate::ecky_core_ir::CoreParameter,
+    value: &ParamValue,
+) -> EckyConstraintValidationRow {
+    let mut failures = Vec::new();
+    let number_value = match (&param.kind, value) {
+        (crate::ecky_core_ir::CoreParameterKind::Number, ParamValue::Number(value)) => Some(*value),
+        (crate::ecky_core_ir::CoreParameterKind::Number, other) => {
+            failures.push(format!("Expected number, got {}.", other.kind()));
+            None
+        }
+        (crate::ecky_core_ir::CoreParameterKind::Boolean, ParamValue::Boolean(_)) => None,
+        (crate::ecky_core_ir::CoreParameterKind::Boolean, other) => {
+            failures.push(format!("Expected boolean, got {}.", other.kind()));
+            None
+        }
+        (crate::ecky_core_ir::CoreParameterKind::Choice, ParamValue::String(_))
+        | (crate::ecky_core_ir::CoreParameterKind::Choice, ParamValue::Number(_))
+        | (crate::ecky_core_ir::CoreParameterKind::Text, ParamValue::String(_))
+        | (crate::ecky_core_ir::CoreParameterKind::Image, ParamValue::String(_)) => None,
+        (
+            crate::ecky_core_ir::CoreParameterKind::Choice,
+            other @ (ParamValue::Boolean(_) | ParamValue::Null),
+        ) => {
+            failures.push(format!("Expected choice value, got {}.", other.kind()));
+            None
+        }
+        (
+            crate::ecky_core_ir::CoreParameterKind::Text
+            | crate::ecky_core_ir::CoreParameterKind::Image,
+            other,
+        ) => {
+            failures.push(format!("Expected string, got {}.", other.kind()));
+            None
+        }
+    };
+
+    if let Some(value) = number_value {
+        if let Some(min) = param.constraints.min {
+            if value < min {
+                failures.push(format!("Value {value} is below min {min}."));
+            }
+        }
+        if let Some(max) = param.constraints.max {
+            if value > max {
+                failures.push(format!("Value {value} is above max {max}."));
+            }
+        }
+        if let Some(step) = param.constraints.step {
+            if !step.is_finite() || step <= 0.0 {
+                failures.push(format!("Step constraint {step} is not positive."));
+            } else {
+                let base = param.constraints.min.unwrap_or(0.0);
+                let units = (value - base) / step;
+                let nearest = units.round();
+                let tolerance = 1e-9_f64.max(units.abs() * 1e-9);
+                if (units - nearest).abs() > tolerance {
+                    failures.push(format!(
+                        "Value {value} does not align to step {step} from base {base}."
+                    ));
+                }
+            }
+        }
+    }
+
+    if !param.constraints.choices.is_empty()
+        && !param
+            .constraints
+            .choices
+            .iter()
+            .any(|choice| param_value_matches_core_choice(value, &choice.value))
+    {
+        let choices = param
+            .constraints
+            .choices
+            .iter()
+            .map(|choice| choice.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        failures.push(format!("Value is not one of allowed choices: {choices}."));
+    }
+
+    let path = format!("/params/{}", path_segment(&param.key));
+    let involved_param_keys = vec![param.key.clone()];
+    let source_stable_node_keys = stable_node_key_for_program_path(source, program, &path)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let raw_value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+    if failures.is_empty() {
+        EckyConstraintValidationRow {
+            path,
+            status: "pass".to_string(),
+            severity: "info".to_string(),
+            raw_value,
+            message: "OK.".to_string(),
+            involved_param_keys,
+            source_stable_node_keys,
+        }
+    } else {
+        EckyConstraintValidationRow {
+            path,
+            status: "fail".to_string(),
+            severity: "error".to_string(),
+            raw_value,
+            message: failures.join(" "),
+            involved_param_keys,
+            source_stable_node_keys,
+        }
+    }
+}
+
+fn validate_ecky_constraints(
+    source: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+    params: &DesignParams,
+) -> Vec<EckyConstraintValidationRow> {
+    let mut rows = program
+        .parameters
+        .iter()
+        .map(|param| {
+            let value = params
+                .get(&param.key)
+                .cloned()
+                .unwrap_or_else(|| param_value_from_core(&param.default_value));
+            validate_ecky_constraint_row(source, program, param, &value)
+        })
+        .collect::<Vec<_>>();
+    rows.extend(
+        program
+            .constraints
+            .relations
+            .iter()
+            .enumerate()
+            .map(|(index, relation)| {
+                validate_ecky_relation_constraint_row(source, program, params, relation, index)
+            }),
+    );
+    rows
+}
+
+fn evaluate_relation_operand(
+    program: &crate::ecky_core_ir::CoreProgram,
+    params: &DesignParams,
+    operand: &crate::ecky_core_ir::CoreRelationOperand,
+) -> Result<(f64, Option<String>), String> {
+    match operand {
+        crate::ecky_core_ir::CoreRelationOperand::Number(value) => Ok((*value, None)),
+        crate::ecky_core_ir::CoreRelationOperand::Parameter(param_id) => {
+            let param = program
+                .parameters
+                .iter()
+                .find(|candidate| candidate.id == *param_id)
+                .ok_or_else(|| {
+                    format!(
+                        "Relation references unknown parameter id {}.",
+                        param_id.raw()
+                    )
+                })?;
+            let value = params
+                .get(&param.key)
+                .cloned()
+                .unwrap_or_else(|| param_value_from_core(&param.default_value));
+            match value {
+                ParamValue::Number(number) => Ok((number, Some(param.key.clone()))),
+                other => Err(format!(
+                    "Relation operand `{}` expected number, got {}.",
+                    param.key,
+                    other.kind()
+                )),
+            }
+        }
+    }
+}
+
+fn validate_ecky_relation_constraint_row(
+    source: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+    params: &DesignParams,
+    relation: &crate::ecky_core_ir::CoreRelationConstraint,
+    index: usize,
+) -> EckyConstraintValidationRow {
+    let mut failures = Vec::new();
+    let mut involved_param_keys = Vec::new();
+
+    let left = evaluate_relation_operand(program, params, &relation.left).map_err(|err| {
+        failures.push(err);
+    });
+    let right = evaluate_relation_operand(program, params, &relation.right).map_err(|err| {
+        failures.push(err);
+    });
+
+    let left_value = left.ok().map(|(value, key)| {
+        if let Some(key) = key {
+            if !involved_param_keys
+                .iter()
+                .any(|candidate| candidate == &key)
+            {
+                involved_param_keys.push(key);
+            }
+        }
+        value
+    });
+    let right_value = right.ok().map(|(value, key)| {
+        if let Some(key) = key {
+            if !involved_param_keys
+                .iter()
+                .any(|candidate| candidate == &key)
+            {
+                involved_param_keys.push(key);
+            }
+        }
+        value
+    });
+
+    if let (Some(left), Some(right)) = (left_value, right_value) {
+        let relation_ok = match relation.operator {
+            crate::ecky_core_ir::CoreRelationOperator::LessThan => left < right,
+            crate::ecky_core_ir::CoreRelationOperator::LessThanOrEqual => left <= right,
+            crate::ecky_core_ir::CoreRelationOperator::GreaterThan => left > right,
+            crate::ecky_core_ir::CoreRelationOperator::GreaterThanOrEqual => left >= right,
+        };
+        if !relation_ok {
+            failures.push(format!(
+                "Relation {} failed: {} !{} {}.",
+                relation.operator.as_str(),
+                left,
+                relation.operator.as_str(),
+                right
+            ));
+        }
+    }
+
+    let path = format!("/params/:relations/{index}");
+    let source_stable_node_keys = stable_node_key_for_program_path(source, program, &path)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let raw_value = serde_json::json!({
+        "operator": relation.operator.as_str(),
+        "left": left_value,
+        "right": right_value,
+    });
+
+    if failures.is_empty() {
+        EckyConstraintValidationRow {
+            path,
+            status: "pass".to_string(),
+            severity: "info".to_string(),
+            raw_value,
+            message: "OK.".to_string(),
+            involved_param_keys,
+            source_stable_node_keys,
+        }
+    } else {
+        EckyConstraintValidationRow {
+            path,
+            status: "fail".to_string(),
+            severity: "error".to_string(),
+            raw_value,
+            message: failures.join(" "),
+            involved_param_keys,
+            source_stable_node_keys,
+        }
+    }
 }
 
 fn source_addressable_digest_for_path(
@@ -4495,9 +5775,13 @@ fn rename_ecky_source_target(source: &str, path: &str, new_name: &str) -> AppRes
     }
     let next_source = rewrite_ranges(source, &ranges, new_name)?;
     crate::ecky_scheme::compile_to_core_program(&next_source).map_err(|err| {
-        AppError::validation(format!(
-            "Rename produced invalid Ecky source at {path}: {err}"
-        ))
+        compile_error_with_diagnostics(
+            format!("Rename produced invalid Ecky source at {path}: {err}"),
+            &next_source,
+            err,
+            Some("rename"),
+            None,
+        )
     })?;
     Ok(next_source)
 }
@@ -4512,12 +5796,21 @@ fn replace_ecky_ast_source(
     new_name: Option<&str>,
 ) -> AppResult<String> {
     crate::mcp::macro_buffer::assert_expected_digest(source, expected_source_digest)?;
-    let program = crate::ecky_scheme::compile_to_core_program(source)
-        .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+    let operation_name = ecky_ast_operation_name(operation);
+    let program = crate::ecky_scheme::compile_to_core_program(source).map_err(|err| {
+        compile_error_with_diagnostics(
+            format!("Failed to compile Ecky source: {err}"),
+            source,
+            err,
+            Some(operation_name),
+            None,
+        )
+    })?;
     let exprs = SourceExprParser::new(source).parse_all()?;
     let target = source_target_for_ecky_path(&exprs, source, path)?;
     let target_kind = target.kind.clone();
     let node = find_core_ast_node_in_program(&program, path);
+    let diagnostic_stable_node_key = stable_node_key_for_program_path(source, &program, path);
     let actual_node_digest = edit_digest_for_ecky_path(&program, source, path)?;
     if actual_node_digest != expected_node_digest {
         return Err(AppError::validation(format!(
@@ -4631,11 +5924,122 @@ fn replace_ecky_ast_source(
         EckyAstEditOperation::Rename => unreachable!("rename returned above"),
     };
     crate::ecky_scheme::compile_to_core_program(&next_source).map_err(|err| {
-        AppError::validation(format!(
-            "Replacement produced invalid Ecky source at {path}: {err}"
-        ))
+        compile_error_with_diagnostics(
+            format!("Replacement produced invalid Ecky source at {path}: {err}"),
+            &next_source,
+            err,
+            Some(operation_name),
+            diagnostic_stable_node_key.as_deref(),
+        )
     })?;
     Ok(next_source)
+}
+
+fn text_line_len(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count().max(1)
+    }
+}
+
+fn ecky_ast_patch_diff_side(source: &str, start: usize, end: usize) -> EckyAstPatchTextDiffSide {
+    EckyAstPatchTextDiffSide {
+        digest: crate::mcp::macro_buffer::source_digest(&source[start..end]),
+        byte_len: end - start,
+        line_len: text_line_len(&source[start..end]),
+        span: EckyAstSpan {
+            start: start as u32,
+            end: end as u32,
+        },
+    }
+}
+
+fn patch_diff_spans(before: &str, after: &str) -> ((usize, usize), (usize, usize)) {
+    let before_bytes = before.as_bytes();
+    let after_bytes = after.as_bytes();
+
+    let mut prefix = 0usize;
+    let min_len = before_bytes.len().min(after_bytes.len());
+    while prefix < min_len && before_bytes[prefix] == after_bytes[prefix] {
+        prefix += 1;
+    }
+
+    let mut before_suffix = before_bytes.len();
+    let mut after_suffix = after_bytes.len();
+    while before_suffix > prefix
+        && after_suffix > prefix
+        && before_bytes[before_suffix - 1] == after_bytes[after_suffix - 1]
+    {
+        before_suffix -= 1;
+        after_suffix -= 1;
+    }
+
+    ((prefix, before_suffix), (prefix, after_suffix))
+}
+
+fn renamed_path(path: &str, new_name: &str) -> String {
+    let mut segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(last) = segments.last_mut() {
+        *last = path_segment(new_name);
+    }
+    format!("/{}", segments.join("/"))
+}
+
+fn validate_ecky_ast_patch(
+    source: &str,
+    expected_source_digest: &str,
+    path: &str,
+    expected_node_digest: &str,
+    operation: &EckyAstEditOperation,
+    replacement_source: Option<&str>,
+    new_name: Option<&str>,
+) -> AppResult<(String, String, String, EckyAstPatchDiff)> {
+    let next_source = replace_ecky_ast_source(
+        source,
+        expected_source_digest,
+        path,
+        expected_node_digest,
+        operation,
+        replacement_source,
+        new_name,
+    )?;
+    let next_program =
+        crate::ecky_scheme::compile_to_core_program(&next_source).map_err(|err| {
+            compile_error_with_diagnostics(
+                format!("Failed to compile Ecky source: {err}"),
+                &next_source,
+                err,
+                Some(ecky_ast_operation_name(operation)),
+                None,
+            )
+        })?;
+    let new_path = match operation {
+        EckyAstEditOperation::Rename => new_name.map(|name| renamed_path(path, name)),
+        EckyAstEditOperation::Delete => None,
+        _ => Some(path.to_string()),
+    };
+    let new_node_digest = new_path
+        .as_deref()
+        .and_then(|next_path| {
+            edit_digest_for_ecky_path(&next_program, &next_source, next_path).ok()
+        })
+        .unwrap_or_else(|| "deleted".to_string());
+    let ((old_start, old_end), (new_start, new_end)) = patch_diff_spans(source, &next_source);
+    let diff = EckyAstPatchDiff {
+        old: ecky_ast_patch_diff_side(source, old_start, old_end),
+        new: ecky_ast_patch_diff_side(&next_source, new_start, new_end),
+    };
+    Ok((
+        next_source,
+        new_node_digest,
+        new_path.unwrap_or_default(),
+        diff,
+    ))
 }
 
 fn apply_macro_buffer_replacements(
@@ -4756,13 +6160,14 @@ pub async fn handle_macro_buffer_get(
             req.thread_id.as_deref(),
             req.message_id.as_deref(),
         );
-        let (target_thread_id, target_message_id, design_output, artifact_bundle) =
+        let (target_thread_id, target_message_id, design_output, artifact_bundle, _model_manifest) =
             if let Some(preview) = preview {
                 (
                     preview.thread_id,
                     preview.preview_id,
                     preview.design_output,
                     Some(preview.artifact_bundle),
+                    Some(preview.model_manifest),
                 )
             } else {
                 let target = crate::services::target::resolve_editable_target(
@@ -4776,6 +6181,7 @@ pub async fn handle_macro_buffer_get(
                     target.message_id,
                     target.design_output,
                     target.artifact_bundle,
+                    target.model_manifest,
                 )
             };
 
@@ -4887,13 +6293,14 @@ pub async fn handle_ecky_ast_get(
             req.thread_id.as_deref(),
             req.message_id.as_deref(),
         );
-        let (target_thread_id, target_message_id, design_output, artifact_bundle) =
+        let (target_thread_id, target_message_id, design_output, artifact_bundle, _model_manifest) =
             if let Some(preview) = preview {
                 (
                     preview.thread_id,
                     preview.preview_id,
                     preview.design_output,
                     Some(preview.artifact_bundle),
+                    Some(preview.model_manifest),
                 )
             } else {
                 let target = crate::services::target::resolve_editable_target(
@@ -4907,6 +6314,7 @@ pub async fn handle_ecky_ast_get(
                     target.message_id,
                     target.design_output,
                     target.artifact_bundle,
+                    target.model_manifest,
                 )
             };
 
@@ -4988,6 +6396,7 @@ pub async fn handle_ecky_ast_get(
             if let Some(requested_path) = requested_path.as_deref() {
                 if requested_path == "/" {
                     truncated |= collect_core_ast_nodes(
+                        &source,
                         &part.root,
                         &root_path,
                         Some(&part.key),
@@ -4997,6 +6406,7 @@ pub async fn handle_ecky_ast_get(
                     );
                 } else if requested_path.starts_with(&root_path) {
                     truncated |= collect_matching_core_ast_nodes(
+                        &source,
                         &part.root,
                         &root_path,
                         Some(&part.key),
@@ -5008,6 +6418,7 @@ pub async fn handle_ecky_ast_get(
                 }
             } else {
                 truncated |= collect_core_ast_nodes(
+                    &source,
                     &part.root,
                     &root_path,
                     Some(&part.key),
@@ -5027,6 +6438,10 @@ pub async fn handle_ecky_ast_get(
                 "Ecky AST path not found: {}.",
                 requested_path.as_deref().unwrap_or_default()
             )));
+        }
+
+        if req.include_source.unwrap_or(false) {
+            attach_ecky_ast_source_slices(&source, &mut nodes);
         }
 
         let core_digest = crate::mcp::macro_buffer::source_digest(
@@ -5053,6 +6468,501 @@ pub async fn handle_ecky_ast_get(
             max_nodes,
             truncated,
             nodes,
+            authoring_context,
+            artifact_digest,
+        })
+    })();
+
+    if let Err(err) = &result {
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+pub async fn handle_ecky_dependency_get(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: EckyDependencyGetRequest,
+    ctx: &AgentContext,
+) -> AppResult<EckyDependencyGetResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = None;
+
+    let result = (|| -> AppResult<EckyDependencyGetResponse> {
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            None,
+            "reading",
+            "Reading Ecky dependency graph.",
+        )?;
+
+        let preview = session_render_preview_for_request(
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        );
+        let (target_thread_id, target_message_id, design_output, artifact_bundle, model_manifest) =
+            if let Some(preview) = preview {
+                (
+                    preview.thread_id,
+                    preview.preview_id,
+                    preview.design_output,
+                    Some(preview.artifact_bundle),
+                    Some(preview.model_manifest),
+                )
+            } else {
+                let target = crate::services::target::resolve_editable_target(
+                    &conn,
+                    app,
+                    req.thread_id.clone(),
+                    req.message_id.clone(),
+                )?;
+                (
+                    target.thread_id,
+                    target.message_id,
+                    target.design_output,
+                    target.artifact_bundle,
+                    target.model_manifest,
+                )
+            };
+
+        tracked_thread_id = Some(target_thread_id.clone());
+        tracked_message_id = Some(target_message_id.clone());
+        tracked_model_id = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.model_id.clone());
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            tracked_model_id.clone(),
+            "reading",
+            "",
+        )?;
+
+        if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+            return Err(AppError::validation(format!(
+                "ecky_dependency_get only supports sourceLanguage=ecky. Target sourceLanguage={}.",
+                design_output.source_language.as_str()
+            )));
+        }
+
+        let path = req.path.trim();
+        if path.is_empty() {
+            return Err(AppError::validation(
+                "ecky_dependency_get requires path. Supported path shapes: /params/{key}, /targets/{targetId}.",
+            ));
+        }
+
+        let source = design_output.macro_code.clone();
+        let program = crate::ecky_scheme::compile_to_core_program(&source)
+            .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+        let query = parse_ecky_dependency_path(path)?;
+
+        let (
+            dependency_kind,
+            dependent_source_paths,
+            impacted_part_ids,
+            impact_labels,
+            feature_ids,
+            parameter_keys,
+            target_ids,
+        ) = match query {
+            EckyDependencyQuery::ParameterKey(param_key) => {
+                let param_id = param_id_for_dependency_key(&program, &param_key)?;
+                let dependent_source_paths = dependent_source_paths_for_param(&program, param_id);
+                let reference_count = dependent_source_paths.len();
+                let impacted_part_ids =
+                    impacted_part_ids_for_dependency_paths(&dependent_source_paths);
+                let impact_labels =
+                    impact_labels_for_dependency(&impacted_part_ids, reference_count);
+                (
+                    "parameterReference".to_string(),
+                    dependent_source_paths,
+                    impacted_part_ids,
+                    impact_labels,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+            EckyDependencyQuery::SelectionTargetId(target_id) => {
+                let manifest = model_manifest.as_ref().ok_or_else(|| {
+                    AppError::validation(
+                        "ecky_dependency_get /targets/{targetId} requires a target modelManifest.",
+                    )
+                })?;
+                let target = selection_target_by_id(manifest, &target_id).ok_or_else(|| {
+                    AppError::validation(format!(
+                        "Ecky dependency source path not found: /targets/{}.",
+                        target_id
+                    ))
+                })?;
+
+                let target_ids = selection_target_match_ids(target);
+                let parameter_keys = target.parameter_keys.clone();
+                let impacted_part_ids = vec![target.part_id.clone()];
+                let (feature_ids, dependent_source_paths) =
+                    feature_bindings_for_target_ids(manifest, &target_ids);
+                let impact_labels =
+                    impact_labels_for_dependency(&impacted_part_ids, dependent_source_paths.len());
+                (
+                    "selectionTargetReference".to_string(),
+                    dependent_source_paths,
+                    impacted_part_ids,
+                    impact_labels,
+                    feature_ids,
+                    parameter_keys,
+                    target_ids,
+                )
+            }
+        };
+        let reference_count = dependent_source_paths.len();
+        let authoring_context = crate::mcp::authoring::target_authoring_context(&design_output);
+        let artifact_digest = artifact_bundle.as_ref().map(artifact_bundle_digest);
+
+        Ok(EckyDependencyGetResponse {
+            thread_id: target_thread_id,
+            message_id: target_message_id,
+            title: design_output.title,
+            version_name: design_output.version_name,
+            resolved_from: TargetResolvedFrom::Base,
+            source_digest: crate::mcp::macro_buffer::source_digest(&source),
+            path: path.to_string(),
+            dependency_kind,
+            dependent_source_paths,
+            impacted_part_ids,
+            impact_labels,
+            feature_ids,
+            parameter_keys,
+            target_ids,
+            reference_count,
+            authoring_context,
+            artifact_digest,
+        })
+    })();
+
+    if let Err(err) = &result {
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+pub async fn handle_ecky_selector_resolve(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: EckySelectorResolveRequest,
+    ctx: &AgentContext,
+) -> AppResult<EckySelectorResolveResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = None;
+
+    let result = (|| -> AppResult<EckySelectorResolveResponse> {
+        let requested_target_id = req.target_id.trim();
+        if requested_target_id.is_empty() {
+            return Err(AppError::validation(
+                "ecky_selector_resolve requires targetId.",
+            ));
+        }
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            None,
+            "reading",
+            "Resolving selector target.",
+        )?;
+
+        let target = crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            req.thread_id.clone(),
+            req.message_id.clone(),
+        )?;
+
+        tracked_thread_id = Some(target.thread_id.clone());
+        tracked_message_id = Some(target.message_id.clone());
+        tracked_model_id = target.model_id();
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            tracked_model_id.clone(),
+            "reading",
+            "",
+        )?;
+
+        let Some(manifest) = target.model_manifest.as_ref() else {
+            return Ok(EckySelectorResolveResponse {
+                target_id: requested_target_id.to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                feature_ids: Vec::new(),
+                parameter_keys: Vec::new(),
+                provenance_candidates: EckySelectorResolveProvenanceCandidates {
+                    feature_role: None,
+                    source_stable_node_keys: Vec::new(),
+                    operation_kinds: Vec::new(),
+                    primitive_ids: Vec::new(),
+                },
+                confidence: EckySelectorResolveConfidence::None,
+                reason: "No model manifest available for active target.".to_string(),
+            });
+        };
+
+        let matched_targets = selection_targets_by_id(manifest, requested_target_id);
+        if matched_targets.is_empty() {
+            return Ok(EckySelectorResolveResponse {
+                target_id: requested_target_id.to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                feature_ids: Vec::new(),
+                parameter_keys: Vec::new(),
+                provenance_candidates: EckySelectorResolveProvenanceCandidates {
+                    feature_role: None,
+                    source_stable_node_keys: Vec::new(),
+                    operation_kinds: Vec::new(),
+                    primitive_ids: Vec::new(),
+                },
+                confidence: EckySelectorResolveConfidence::None,
+                reason: format!(
+                    "No selection target matched targetId `{}`.",
+                    requested_target_id
+                ),
+            });
+        }
+
+        if matched_targets.len() > 1 {
+            let mut feature_ids = Vec::new();
+            let mut parameter_keys = Vec::new();
+            for matched in &matched_targets {
+                push_unique_strings(&mut parameter_keys, &matched.parameter_keys);
+                let (target_feature_ids, _) =
+                    feature_bindings_for_target_ids(manifest, &selection_target_match_ids(matched));
+                push_unique_strings(&mut feature_ids, &target_feature_ids);
+            }
+            let provenance_candidates = collect_selector_provenance_candidates(
+                manifest,
+                &matched_targets,
+                Some(&target.design_output.macro_code),
+            );
+            return Ok(EckySelectorResolveResponse {
+                target_id: requested_target_id.to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                feature_ids,
+                parameter_keys,
+                provenance_candidates,
+                confidence: EckySelectorResolveConfidence::Ambiguous,
+                reason: format!(
+                    "Alias collision: {} selection targets matched targetId `{}`.",
+                    matched_targets.len(),
+                    requested_target_id
+                ),
+            });
+        }
+
+        let selected = matched_targets[0];
+        let resolved_target_id = selected
+            .target_id
+            .clone()
+            .unwrap_or_else(|| requested_target_id.to_string());
+        let parameter_keys = selected.parameter_keys.clone();
+        let (feature_ids, _) =
+            feature_bindings_for_target_ids(manifest, &selection_target_match_ids(selected));
+        let provenance_candidates = collect_selector_provenance_candidates(
+            manifest,
+            &[selected],
+            Some(&target.design_output.macro_code),
+        );
+
+        let (confidence, reason) = if feature_ids.len() > 1 {
+            (
+                EckySelectorResolveConfidence::Ambiguous,
+                format!(
+                    "Multiple feature matches ({}) found for targetId `{}`.",
+                    feature_ids.len(),
+                    requested_target_id
+                ),
+            )
+        } else if !parameter_keys.is_empty() {
+            (
+                EckySelectorResolveConfidence::Exact,
+                "Resolved single selection target with <=1 feature match and non-empty parameter keys."
+                    .to_string(),
+            )
+        } else {
+            (
+                EckySelectorResolveConfidence::Inferred,
+                "Resolved target, but feature/parameter binding is partial.".to_string(),
+            )
+        };
+
+        Ok(EckySelectorResolveResponse {
+            target_id: resolved_target_id,
+            durable_target_id: selected.durable_target_id.clone(),
+            canonical_target_id: selected.canonical_target_id.clone(),
+            feature_ids,
+            parameter_keys,
+            provenance_candidates,
+            confidence,
+            reason,
+        })
+    })();
+
+    if let Err(err) = &result {
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+pub async fn handle_ecky_constraints_validate(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: EckyConstraintsValidateRequest,
+    ctx: &AgentContext,
+) -> AppResult<EckyConstraintsValidateResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = None;
+
+    let result = (|| -> AppResult<EckyConstraintsValidateResponse> {
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            None,
+            "reading",
+            "Validating Ecky parameter constraints.",
+        )?;
+
+        let preview = session_render_preview_for_request(
+            ctx,
+            req.thread_id.as_deref(),
+            req.message_id.as_deref(),
+        );
+        let (target_thread_id, target_message_id, design_output, artifact_bundle) =
+            if let Some(preview) = preview {
+                (
+                    preview.thread_id,
+                    preview.preview_id,
+                    preview.design_output,
+                    Some(preview.artifact_bundle),
+                )
+            } else {
+                let target = crate::services::target::resolve_editable_target(
+                    &conn,
+                    app,
+                    req.thread_id.clone(),
+                    req.message_id.clone(),
+                )?;
+                (
+                    target.thread_id,
+                    target.message_id,
+                    target.design_output,
+                    target.artifact_bundle,
+                )
+            };
+
+        tracked_thread_id = Some(target_thread_id.clone());
+        tracked_message_id = Some(target_message_id.clone());
+        tracked_model_id = artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.model_id.clone());
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            tracked_thread_id.clone(),
+            tracked_message_id.clone(),
+            tracked_model_id.clone(),
+            "reading",
+            "",
+        )?;
+
+        if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+            return Err(AppError::validation(format!(
+                "ecky_constraints_validate only supports sourceLanguage=ecky. Target sourceLanguage={}.",
+                design_output.source_language.as_str()
+            )));
+        }
+
+        let source = design_output.macro_code.clone();
+        let program = crate::ecky_scheme::compile_to_core_program(&source)
+            .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+        let (params, parameter_source) = effective_ecky_constraint_params(
+            &program,
+            &design_output.initial_params,
+            req.parameters,
+        );
+        let rows = validate_ecky_constraints(&source, &program, &params);
+        let pass_count = rows.iter().filter(|row| row.status == "pass").count();
+        let fail_count = rows.len().saturating_sub(pass_count);
+        let authoring_context = crate::mcp::authoring::target_authoring_context(&design_output);
+        let artifact_digest = artifact_bundle.as_ref().map(artifact_bundle_digest);
+
+        Ok(EckyConstraintsValidateResponse {
+            thread_id: target_thread_id,
+            message_id: target_message_id,
+            title: design_output.title,
+            version_name: design_output.version_name,
+            resolved_from: TargetResolvedFrom::Base,
+            source_digest: crate::mcp::macro_buffer::source_digest(&source),
+            parameter_source,
+            pass_count,
+            fail_count,
+            rows,
             authoring_context,
             artifact_digest,
         })
@@ -5112,10 +7022,21 @@ pub async fn handle_ecky_ast_replace_and_render(
         )));
     }
 
+    let source = design_output.macro_code.clone();
+    let program = crate::ecky_scheme::compile_to_core_program(&source)
+        .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+    let resolved_path = resolve_ecky_ast_patch_path(
+        &source,
+        &program,
+        req.path.as_deref(),
+        req.stable_node_key.as_deref(),
+        "ecky_ast_replace_and_render",
+    )?;
+
     let next_source = replace_ecky_ast_source(
-        &design_output.macro_code,
+        &source,
         &req.source_digest,
-        &req.path,
+        &resolved_path,
         &req.expected_node_digest,
         &req.operation,
         req.replacement_source.as_deref(),
@@ -5139,6 +7060,116 @@ pub async fn handle_ecky_ast_replace_and_render(
         &ctx,
     )
     .await
+}
+
+pub async fn handle_ecky_ast_patch_validate(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: EckyAstPatchValidateRequest,
+    _ctx: &AgentContext,
+) -> AppResult<EckyAstPatchValidateResponse> {
+    if !ecky_ast_authoring_enabled(state) {
+        return Err(AppError::validation(
+            "Ecky AST authoring is disabled. Set mcp.eckyAstAuthoring=true to expose ecky_ast_patch_validate.",
+        ));
+    }
+
+    let conn = state.db.lock().await;
+    let target = crate::services::target::resolve_editable_target(
+        &conn,
+        app,
+        req.thread_id.clone(),
+        req.message_id.clone(),
+    )?;
+    drop(conn);
+
+    if target.design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+        return Err(AppError::validation(format!(
+            "ecky_ast_patch_validate only supports sourceLanguage=ecky. Target sourceLanguage={}.",
+            target.design_output.source_language.as_str()
+        )));
+    }
+
+    let source = target.design_output.macro_code.clone();
+    let source_program = crate::ecky_scheme::compile_to_core_program(&source)
+        .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+    let resolved_path = resolve_ecky_ast_patch_path(
+        &source,
+        &source_program,
+        req.path.as_deref(),
+        req.stable_node_key.as_deref(),
+        "ecky_ast_patch_validate",
+    )?;
+    let (next_source, new_node_digest, new_path, diff) = validate_ecky_ast_patch(
+        &source,
+        &req.source_digest,
+        &resolved_path,
+        &req.expected_node_digest,
+        &req.operation,
+        req.replacement_source.as_deref(),
+        req.new_name.as_deref(),
+    )?;
+    let next_program = crate::ecky_scheme::compile_to_core_program(&next_source)
+        .map_err(|err| AppError::validation(format!("Failed to compile Ecky source: {err}")))?;
+    let operation = match req.operation {
+        EckyAstEditOperation::Replace => "replace",
+        EckyAstEditOperation::InsertBefore => "insertBefore",
+        EckyAstEditOperation::InsertAfter => "insertAfter",
+        EckyAstEditOperation::Delete => "delete",
+        EckyAstEditOperation::Rename => "rename",
+    };
+    let affected_path_details = vec![EckyAstPatchAffectedPath {
+        change: operation.to_string(),
+        old_path: resolved_path.clone(),
+        new_path: new_path.clone(),
+        old_digest: req.expected_node_digest.clone(),
+        new_digest: new_node_digest.clone(),
+    }];
+
+    let authoring_context = crate::mcp::authoring::target_authoring_context(&target.design_output);
+    let mut affected_paths = vec![resolved_path.clone()];
+    if !new_path.is_empty() && new_path != resolved_path {
+        affected_paths.push(new_path.clone());
+    }
+    let edited_path_for_summary = if new_path.is_empty() {
+        resolved_path.clone()
+    } else {
+        new_path.clone()
+    };
+    let affected_node_keys = affected_node_keys_for_patch(
+        &source,
+        &source_program,
+        &resolved_path,
+        &next_source,
+        &next_program,
+        &new_path,
+    );
+    let dependency_impact = Some(dependency_impact_for_patch(
+        &next_program,
+        &edited_path_for_summary,
+        &affected_paths,
+    ));
+
+    Ok(EckyAstPatchValidateResponse {
+        thread_id: target.thread_id,
+        message_id: target.message_id,
+        title: target.design_output.title,
+        version_name: target.design_output.version_name,
+        resolved_from: map_target_resolved_from(target.resolved_from),
+        operation: operation.to_string(),
+        edited_path: edited_path_for_summary,
+        status: "valid".to_string(),
+        source_digest: req.source_digest,
+        new_source_digest: crate::mcp::macro_buffer::source_digest(&next_source),
+        old_node_digest: req.expected_node_digest,
+        new_node_digest,
+        affected_paths,
+        affected_path_details,
+        affected_node_keys,
+        dependency_impact,
+        diff,
+        authoring_context,
+    })
 }
 
 pub async fn handle_target_detail_get(
@@ -5326,6 +7357,7 @@ fn artifact_bundle_digest(bundle: &ArtifactBundle) -> ArtifactBundleDigest {
         .map(|artifact| artifact.path.clone());
     ArtifactBundleDigest {
         model_id: bundle.model_id.clone(),
+        content_hash: bundle.content_hash.clone(),
         source_language: bundle.source_language.as_str().to_string(),
         geometry_backend: bundle.geometry_backend.as_str().to_string(),
         has_preview_stl: !bundle.preview_stl_path.is_empty(),
@@ -5404,6 +7436,73 @@ pub async fn handle_artifact_manifest_get(
     })
 }
 
+pub async fn handle_artifact_feature_graph_get(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: ArtifactFeatureGraphGetRequest,
+    ctx: &AgentContext,
+) -> AppResult<ArtifactFeatureGraphGetResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let conn = state.db.lock().await;
+    let target = crate::services::target::resolve_editable_target(
+        &conn,
+        app,
+        req.thread_id.clone(),
+        req.message_id.clone(),
+    )?;
+    drop(conn);
+
+    let requested_model_id = req
+        .model_id
+        .clone()
+        .or_else(|| target.model_id())
+        .ok_or_else(|| AppError::validation("Target has no artifact modelId."))?;
+
+    {
+        let conn = state.db.lock().await;
+        persist_agent_session(
+            &conn,
+            ctx,
+            Some(target.thread_id.clone()),
+            Some(target.message_id.clone()),
+            Some(requested_model_id.clone()),
+            "reading",
+            "Reading artifact feature graph.",
+        )?;
+    }
+
+    let (artifact_bundle, model_manifest) =
+        crate::model_runtime::read_runtime_bundle(app, &requested_model_id).map_err(|err| {
+            if err.message.contains("Failed to read model manifest") {
+                AppError::validation(format!(
+                    "No model manifest found for modelId '{}'. artifact_feature_graph_get requires a runtime manifest.",
+                    requested_model_id
+                ))
+            } else {
+                err
+            }
+        })?;
+    if artifact_bundle.model_id != requested_model_id
+        || model_manifest.model_id != requested_model_id
+    {
+        return Err(AppError::validation(format!(
+            "Runtime manifest modelId does not match requested modelId '{}'.",
+            requested_model_id
+        )));
+    }
+    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+
+    Ok(ArtifactFeatureGraphGetResponse {
+        thread_id: target.thread_id,
+        message_id: target.message_id,
+        model_id: requested_model_id,
+        artifact_digest: artifact_bundle_digest(&artifact_bundle),
+        feature_graph: model_manifest.feature_graph,
+        correspondence_graph: model_manifest.correspondence_graph,
+    })
+}
+
 pub async fn handle_params_preview_render(
     state: &AppState,
     app: &dyn PathResolver,
@@ -5423,7 +7522,7 @@ pub async fn handle_params_preview_render(
             req.thread_id.as_deref(),
             req.message_id.as_deref(),
         );
-        let (target_thread_id, target_message_id, base_design) =
+        let (target_thread_id, target_message_id, base_design, base_model_manifest) =
             if let Some(preview) = preview.clone() {
                 (
                     preview.thread_id.clone(),
@@ -5432,6 +7531,7 @@ pub async fn handle_params_preview_render(
                         .clone()
                         .unwrap_or_else(|| preview.preview_id.clone()),
                     preview.design_output.clone(),
+                    Some(preview.model_manifest.clone()),
                 )
             } else {
                 let target = crate::services::target::resolve_target(
@@ -5447,7 +7547,12 @@ pub async fn handle_params_preview_render(
                     .artifact_bundle
                     .as_ref()
                     .map(|bundle| bundle.model_id.clone());
-                (target.thread_id, target.message_id, base_design)
+                (
+                    target.thread_id,
+                    target.message_id,
+                    base_design,
+                    target.model_manifest,
+                )
             };
 
         if let Some(preview) = preview.as_ref() {
@@ -5594,6 +7699,16 @@ pub async fn handle_params_preview_render(
         .await?;
         let model_manifest =
             crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
+        let model_manifest = carry_forward_semantic_manifest(
+            base_model_manifest.as_ref(),
+            model_manifest,
+            &artifact_bundle,
+        );
+        let model_manifest = crate::model_runtime::write_model_manifest(
+            app,
+            &artifact_bundle.model_id,
+            &model_manifest,
+        )?;
         tracked_model_id = Some(artifact_bundle.model_id.clone());
 
         let mut design_output = base_design.clone();
@@ -5893,8 +8008,11 @@ fn first_version_authoring_context(
 ) -> MacroAuthoringContext {
     match infer_macro_source_language(macro_dialect) {
         crate::models::SourceLanguage::LegacyPython => MacroAuthoringContext {
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_language: crate::models::SourceLanguage::EckyIrV0,
+            geometry_backend: requested_geometry_backend.unwrap_or_else(|| {
+                let fallback = configured_authoring_context(state);
+                fallback.geometry_backend
+            }),
         },
         crate::models::SourceLanguage::Build123d => MacroAuthoringContext {
             source_language: crate::models::SourceLanguage::Build123d,
@@ -5923,7 +8041,7 @@ pub async fn handle_macro_preview_render(
     let mut tracked_model_id = None;
 
     let result = async {
-        let (working_thread_id, base_design) = if let Some(preview) =
+        let (working_thread_id, base_design, base_model_manifest) = if let Some(preview) =
             session_render_preview_for_request(
                 ctx,
                 req.thread_id.as_deref(),
@@ -5936,7 +8054,11 @@ pub async fn handle_macro_preview_render(
                 .clone()
                 .or_else(|| Some(preview.preview_id.clone()));
             tracked_model_id = Some(preview.artifact_bundle.model_id.clone());
-            (preview.thread_id, preview.design_output)
+            (
+                preview.thread_id,
+                preview.design_output,
+                Some(preview.model_manifest),
+            )
         } else if req.message_id.is_some() {
             let conn = state.db.lock().await;
             let target = crate::services::target::resolve_target(
@@ -5956,7 +8078,7 @@ pub async fn handle_macro_preview_render(
             let base_design = target
                 .design
                 .ok_or_else(|| AppError::validation("Target has no design output."))?;
-            (target.thread_id, base_design)
+            (target.thread_id, base_design, target.model_manifest)
         } else {
             // Bootstrap: thread has no versions yet — use an empty stub as the base.
             let thread_id = req.thread_id.clone().ok_or_else(|| {
@@ -5977,7 +8099,7 @@ pub async fn handle_macro_preview_render(
                 initial_params: std::collections::BTreeMap::new(),
                 post_processing: None,
             };
-            (thread_id, stub)
+            (thread_id, stub, None)
         };
 
         let conn = state.db.lock().await;
@@ -6060,10 +8182,19 @@ pub async fn handle_macro_preview_render(
             let parsed = parsed_legacy
                 .clone()
                 .expect("parse_macro_params should exist for IR path");
-            let params = req
-                .parameters
-                .clone()
-                .unwrap_or_else(|| parsed.params.clone());
+            let params = if let Some(provided) = req.parameters.clone() {
+                crate::commands::design::reconcile_framework_params(
+                    &parsed.fields,
+                    &provided,
+                    &parsed.params,
+                )
+            } else {
+                crate::commands::design::reconcile_framework_params(
+                    &parsed.fields,
+                    &base_design.initial_params,
+                    &parsed.params,
+                )
+            };
             (
                 req.ui_spec.clone().unwrap_or(UiSpec {
                     fields: parsed.fields,
@@ -6226,6 +8357,16 @@ pub async fn handle_macro_preview_render(
         .await?;
         let model_manifest =
             crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
+        let model_manifest = carry_forward_semantic_manifest(
+            base_model_manifest.as_ref(),
+            model_manifest,
+            &artifact_bundle,
+        );
+        let model_manifest = crate::model_runtime::write_model_manifest(
+            app,
+            &artifact_bundle.model_id,
+            &model_manifest,
+        )?;
         tracked_model_id = Some(artifact_bundle.model_id.clone());
 
         let engine_kind = authoring_context.source_language.to_engine_kind();
@@ -7722,6 +9863,506 @@ pub fn handle_structural_verification_summary(
     })
 }
 
+fn printability_manifest_source_anchor(manifest: &ModelManifest) -> Option<String> {
+    let graph = manifest.feature_graph.as_ref()?;
+    let anchors = graph
+        .nodes
+        .iter()
+        .filter_map(printability_feature_node_anchor)
+        .collect::<Vec<_>>();
+
+    match anchors.as_slice() {
+        [anchor] => Some(anchor.clone()),
+        _ => None,
+    }
+}
+
+fn printability_manifest_risk_anchor(
+    manifest: &ModelManifest,
+) -> Option<crate::services::printability::PrintabilityRiskAnchor> {
+    let graph = manifest.feature_graph.as_ref()?;
+    let mut anchors = graph
+        .nodes
+        .iter()
+        .filter_map(printability_feature_node_risk_anchor)
+        .collect::<Vec<_>>();
+    let mut anchor = match anchors.len() {
+        1 => anchors.swap_remove(0),
+        _ => return None,
+    };
+    let has_feature_id = anchor
+        .feature_id
+        .as_ref()
+        .is_some_and(|feature_id| !feature_id.trim().is_empty());
+    if !has_feature_id {
+        return None;
+    }
+    if anchor.target_ids.is_empty() {
+        return Some(anchor);
+    }
+    anchor.target_ids.dedup();
+    anchor.stable_node_keys.dedup();
+    Some(anchor)
+}
+
+fn printability_feature_node_risk_anchor(
+    node: &crate::models::FeatureNode,
+) -> Option<crate::services::printability::PrintabilityRiskAnchor> {
+    let feature_id = node.feature_id.trim();
+    if feature_id.is_empty() {
+        return None;
+    }
+
+    let mut target_ids = Vec::new();
+    for output_ref in &node.output_refs {
+        for target_id in &output_ref.target_ids {
+            let trimmed = target_id.trim();
+            if !trimmed.is_empty() {
+                target_ids.push(trimmed.to_string());
+            }
+        }
+    }
+    for port in &node.ports {
+        for target_id in &port.target_ids {
+            let trimmed = target_id.trim();
+            if !trimmed.is_empty() {
+                target_ids.push(trimmed.to_string());
+            }
+        }
+    }
+    target_ids.dedup();
+
+    let mut stable_node_keys = target_ids
+        .iter()
+        .filter_map(|target_id| printability_stable_node_key_from_target_id(target_id))
+        .collect::<Vec<_>>();
+    stable_node_keys.dedup();
+
+    Some(crate::services::printability::PrintabilityRiskAnchor {
+        feature_id: Some(feature_id.to_string()),
+        target_ids,
+        stable_node_keys,
+    })
+}
+
+fn printability_stable_node_key_from_target_id(target_id: &str) -> Option<String> {
+    let (_, remainder) = target_id.split_once(":stable-node-key:")?;
+    let (stable_node_key, _) = remainder
+        .split_once(":edge:")
+        .or_else(|| remainder.split_once(":face:"))?;
+    let stable_node_key = stable_node_key.trim();
+    (!stable_node_key.is_empty()).then(|| stable_node_key.to_string())
+}
+
+fn printability_feature_node_anchor(node: &crate::models::FeatureNode) -> Option<String> {
+    let feature_id = node.feature_id.trim();
+    if feature_id.is_empty() {
+        return None;
+    }
+
+    if let Some(source_anchor) = node
+        .source_ref
+        .as_ref()
+        .and_then(printability_source_ref_anchor)
+    {
+        return Some(format!("feature:{feature_id}@{source_anchor}"));
+    }
+
+    Some(format!("feature:{feature_id}"))
+}
+
+fn printability_source_ref_anchor(source_ref: &crate::models::SourceRef) -> Option<String> {
+    let source_id = source_ref
+        .source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let path = source_ref
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let span = match (source_ref.start_byte, source_ref.end_byte) {
+        (Some(start), Some(end)) => Some(format!("{start}-{end}")),
+        (Some(start), None) => Some(start.to_string()),
+        (None, Some(end)) => Some(format!("0-{end}")),
+        (None, None) => None,
+    };
+
+    let mut parts = Vec::new();
+    if let Some(source_id) = source_id {
+        parts.push(source_id.to_string());
+    }
+    if let Some(path) = path {
+        parts.push(path.to_string());
+    }
+    if let Some(span) = span {
+        parts.push(span);
+    }
+
+    (!parts.is_empty()).then(|| format!("source:{}", parts.join(":")))
+}
+
+pub fn handle_printability_analyze(
+    _state: &AppState,
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    model_id: &str,
+) -> AppResult<PrintabilityAnalyzeResponse> {
+    let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
+    let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
+    let artifact_digest = artifact_bundle_digest(&bundle);
+    if bundle.preview_stl_path.trim().is_empty() {
+        return Err(AppError::validation(
+            "Artifact bundle has no preview STL path.",
+        ));
+    }
+    let mut analysis = crate::services::printability::analyze_stl_path(std::path::Path::new(
+        &bundle.preview_stl_path,
+    ))
+    .map_err(|err| AppError::parse(err.to_string()))?;
+    crate::services::printability::enrich_transform_suggestions_with_source_anchor(
+        &mut analysis,
+        printability_manifest_source_anchor(&manifest),
+    );
+    crate::services::printability::enrich_transform_suggestions_with_risk_anchor(
+        &mut analysis,
+        printability_manifest_risk_anchor(&manifest),
+    );
+
+    Ok(PrintabilityAnalyzeResponse {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        model_id: model_id.to_string(),
+        artifact_digest,
+        preview_stl_path: bundle.preview_stl_path,
+        analysis,
+    })
+}
+
+pub fn handle_printability_transform_recipes_get(
+    _state: &AppState,
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    model_id: &str,
+) -> AppResult<PrintabilityTransformRecipesGetResponse> {
+    let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
+    let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
+    let artifact_digest = artifact_bundle_digest(&bundle);
+    if bundle.preview_stl_path.trim().is_empty() {
+        return Err(AppError::validation(
+            "Artifact bundle has no preview STL path.",
+        ));
+    }
+    let mut analysis = crate::services::printability::analyze_stl_path(std::path::Path::new(
+        &bundle.preview_stl_path,
+    ))
+    .map_err(|err| AppError::parse(err.to_string()))?;
+    crate::services::printability::enrich_transform_suggestions_with_source_anchor(
+        &mut analysis,
+        printability_manifest_source_anchor(&manifest),
+    );
+    crate::services::printability::enrich_transform_suggestions_with_risk_anchor(
+        &mut analysis,
+        printability_manifest_risk_anchor(&manifest),
+    );
+    let recipes = crate::services::printability::supportless_fdm_transform_recipes(&analysis);
+
+    Ok(PrintabilityTransformRecipesGetResponse {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        model_id: model_id.to_string(),
+        artifact_digest,
+        preview_stl_path: bundle.preview_stl_path,
+        recipes,
+    })
+}
+
+pub async fn handle_semantic_transform_preview(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: SemanticTransformPreviewRequest,
+    ctx: &AgentContext,
+) -> AppResult<SemanticTransformPreviewResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let mut tracked_thread_id = req.thread_id.clone();
+    let mut tracked_message_id = req.message_id.clone();
+    let mut tracked_model_id = req.model_id.clone();
+
+    let result = async {
+        let conn = state.db.lock().await;
+        let target = crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            req.thread_id.clone(),
+            req.message_id.clone(),
+        )?;
+        drop(conn);
+
+        tracked_thread_id = Some(target.thread_id.clone());
+        tracked_message_id = Some(target.message_id.clone());
+        let requested_model_id = req
+            .model_id
+            .clone()
+            .or_else(|| target.model_id())
+            .ok_or_else(|| AppError::validation("Target has no artifact modelId."))?;
+        tracked_model_id = Some(requested_model_id.clone());
+
+        {
+            let conn = state.db.lock().await;
+            persist_agent_session(
+                &conn,
+                ctx,
+                tracked_thread_id.clone(),
+                tracked_message_id.clone(),
+                tracked_model_id.clone(),
+                "patching_macro",
+                "Preparing semantic transform preview.",
+            )?;
+        }
+
+        let design_output = target.design_output;
+        let (bundle, manifest) =
+            crate::model_runtime::read_runtime_bundle(app, &requested_model_id)?;
+        crate::models::validate_model_runtime_bundle(&manifest, &bundle)?;
+        validate_semantic_transform_artifact_guard(&req.expected_artifact, &bundle)?;
+        validate_semantic_transform_ecky_source(&design_output, &bundle, &manifest)?;
+
+        match req.action_kind {
+            crate::services::printability::SupportlessFdmRecipeActionKind::Reorient => {}
+            crate::services::printability::SupportlessFdmRecipeActionKind::Chamfer => {
+                return Err(AppError::validation(
+                    "semantic_transform_preview actionKind=chamfer is unsupported.",
+                ));
+            }
+            crate::services::printability::SupportlessFdmRecipeActionKind::Split => {
+                return Err(AppError::validation(
+                    "semantic_transform_preview actionKind=split is unsupported.",
+                ));
+            }
+            crate::services::printability::SupportlessFdmRecipeActionKind::Relief => {
+                return Err(AppError::validation(
+                    "semantic_transform_preview actionKind=relief is unsupported.",
+                ));
+            }
+            crate::services::printability::SupportlessFdmRecipeActionKind::Clearance => {
+                return Err(AppError::validation(
+                    "semantic_transform_preview actionKind=clearance is unsupported.",
+                ));
+            }
+        }
+
+        if bundle.preview_stl_path.trim().is_empty() {
+            return Err(AppError::validation(
+                "Artifact bundle has no preview STL path.",
+            ));
+        }
+        let mut analysis = crate::services::printability::analyze_stl_path(std::path::Path::new(
+            &bundle.preview_stl_path,
+        ))
+        .map_err(|err| AppError::parse(err.to_string()))?;
+        crate::services::printability::enrich_transform_suggestions_with_source_anchor(
+            &mut analysis,
+            printability_manifest_source_anchor(&manifest),
+        );
+        crate::services::printability::enrich_transform_suggestions_with_risk_anchor(
+            &mut analysis,
+            printability_manifest_risk_anchor(&manifest),
+        );
+        let recipes = crate::services::printability::supportless_fdm_transform_recipes(&analysis);
+        let recipe = recipes
+            .iter()
+            .find(|recipe| {
+                recipe.recipe_id == req.recipe_id && recipe.action_kind == req.action_kind
+            })
+            .ok_or_else(|| {
+                AppError::validation(format!(
+                    "No supportless-FDM recipe matched recipeId={} actionKind={}.",
+                    req.recipe_id,
+                    semantic_transform_action_kind_label(req.action_kind)
+                ))
+            })?;
+        let rotation_degrees = recipe
+            .rotation_degrees
+            .ok_or_else(|| AppError::validation("Reorient recipe is missing rotationDegrees."))?;
+
+        let source_digest = crate::mcp::macro_buffer::source_digest(&design_output.macro_code);
+        let next_source = crate::services::printability::reorient_ecky_source(
+            &design_output.macro_code,
+            rotation_degrees,
+        )
+        .map_err(AppError::validation)?;
+        crate::ecky_scheme::compile_to_core_program(&next_source)
+            .map_err(|err| AppError::validation(err.to_string()))?;
+        let new_source_digest = crate::mcp::macro_buffer::source_digest(&next_source);
+
+        {
+            let conn = state.db.lock().await;
+            persist_agent_session(
+                &conn,
+                ctx,
+                tracked_thread_id.clone(),
+                tracked_message_id.clone(),
+                tracked_model_id.clone(),
+                "rendering",
+                "Rendering semantic transform preview.",
+            )?;
+        }
+
+        let artifact_bundle = render::render_model(
+            &next_source,
+            &design_output.initial_params,
+            Some(MacroDialect::EckyIrV0),
+            Some(design_output.geometry_backend),
+            design_output.post_processing.as_ref(),
+            state,
+            app,
+        )
+        .await?;
+        let model_manifest =
+            crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
+        let model_manifest =
+            carry_forward_semantic_manifest(Some(&manifest), model_manifest, &artifact_bundle);
+        let model_manifest = crate::model_runtime::write_model_manifest(
+            app,
+            &artifact_bundle.model_id,
+            &model_manifest,
+        )?;
+        tracked_model_id = Some(artifact_bundle.model_id.clone());
+
+        let mut preview_design = design_output.clone();
+        preview_design.version_name.clear();
+        preview_design.response = format!(
+            "Draft semantic transform preview for supportless-FDM recipe {}.",
+            req.recipe_id
+        );
+        preview_design.macro_code = next_source;
+        preview_design.macro_dialect = MacroDialect::EckyIrV0;
+        preview_design.engine_kind = crate::models::EngineKind::EckyIrV0;
+        preview_design.source_language = crate::models::SourceLanguage::EckyIrV0;
+        preview_design.geometry_backend = artifact_bundle.geometry_backend;
+
+        let sv = crate::services::structural_verification::verify_structure(
+            &artifact_bundle,
+            &model_manifest,
+        );
+        let preview = store_session_render_preview(
+            state,
+            app,
+            ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: target.thread_id.clone(),
+                base_message_id: Some(target.message_id.clone()),
+                design_output: preview_design,
+                artifact_bundle: artifact_bundle.clone(),
+                model_manifest,
+                draft_feedback: Some(draft_feedback_from_structural_verification(&sv)),
+            },
+        )
+        .await?;
+        tracked_message_id = Some(preview.preview_id.clone());
+
+        Ok(SemanticTransformPreviewResponse {
+            thread_id: target.thread_id,
+            base_message_id: target.message_id,
+            preview_id: preview.preview_id,
+            model_id: artifact_bundle.model_id.clone(),
+            recipe_id: recipe.recipe_id.clone(),
+            action_kind: recipe.action_kind,
+            source_digest,
+            new_source_digest,
+            preview_support_status: recipe.preview_support_status,
+            apply_support_status: recipe.apply_support_status,
+            artifact_digest: artifact_bundle_digest(&artifact_bundle),
+        })
+    }
+    .await;
+
+    settle_live_render_phase(
+        state,
+        ctx,
+        tracked_thread_id.as_deref(),
+        tracked_message_id.as_deref(),
+        tracked_model_id.clone(),
+        &result,
+    )
+    .await;
+
+    if let Err(err) = &result {
+        let conn = state.db.lock().await;
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            tracked_model_id,
+            err,
+        );
+    }
+
+    result
+}
+
+fn validate_semantic_transform_artifact_guard(
+    expected: &SemanticTransformArtifactGuard,
+    bundle: &ArtifactBundle,
+) -> AppResult<()> {
+    if expected.model_id != bundle.model_id
+        || expected.preview_stl_path != bundle.preview_stl_path
+        || expected.content_hash != bundle.content_hash
+    {
+        return Err(AppError::validation(
+            "semantic_transform_preview artifact guard mismatch: expected modelId, previewStlPath, and contentHash must match current runtime bundle.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_semantic_transform_ecky_source(
+    design_output: &DesignOutput,
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+) -> AppResult<()> {
+    if design_output.source_language != crate::models::SourceLanguage::EckyIrV0
+        || bundle.source_language != crate::models::SourceLanguage::EckyIrV0
+        || manifest.source_language != crate::models::SourceLanguage::EckyIrV0
+    {
+        return Err(AppError::validation(
+            "semantic_transform_preview supports sourceLanguage=ecky .ecky source only.",
+        ));
+    }
+
+    let has_ecky_source_path = bundle
+        .macro_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).extension())
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("ecky"))
+        .unwrap_or(false);
+    if !has_ecky_source_path {
+        return Err(AppError::validation(
+            "semantic_transform_preview supports sourceLanguage=ecky .ecky source only.",
+        ));
+    }
+    Ok(())
+}
+
+fn semantic_transform_action_kind_label(
+    action_kind: crate::services::printability::SupportlessFdmRecipeActionKind,
+) -> &'static str {
+    match action_kind {
+        crate::services::printability::SupportlessFdmRecipeActionKind::Reorient => "reorient",
+        crate::services::printability::SupportlessFdmRecipeActionKind::Chamfer => "chamfer",
+        crate::services::printability::SupportlessFdmRecipeActionKind::Split => "split",
+        crate::services::printability::SupportlessFdmRecipeActionKind::Relief => "relief",
+        crate::services::printability::SupportlessFdmRecipeActionKind::Clearance => "clearance",
+    }
+}
+
 pub async fn handle_compare_models(
     app: &dyn PathResolver,
     req: CompareModelsRequest,
@@ -7854,9 +10495,13 @@ mod tests {
             [[1.0f32, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
         ];
 
+        write_binary_stl(path, &triangles);
+    }
+
+    fn write_binary_stl(path: &std::path::Path, triangles: &[[[f32; 3]; 3]]) {
         let mut bytes = vec![0u8; 80];
         bytes.extend_from_slice(&(triangles.len() as u32).to_le_bytes());
-        for triangle in triangles {
+        for triangle in triangles.iter().copied() {
             for normal_component in [0.0f32, 0.0, 0.0] {
                 bytes.extend_from_slice(&normal_component.to_le_bytes());
             }
@@ -7875,6 +10520,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
             voice: crate::models::VoiceConfig::default(),
@@ -7940,6 +10586,33 @@ mod tests {
             None,
         )
         .expect_err("ecky macro should not replace legacy python model source");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("source language"));
+    }
+
+    #[test]
+    fn first_version_authoring_context_rejects_raw_freecad_by_policy() {
+        let conn = crate::db::init_db(&test_db_path("mcp-first-version-policy")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let base = first_version_authoring_context(&state, &MacroDialect::Legacy, None);
+
+        assert_eq!(
+            base.source_language,
+            crate::models::SourceLanguage::EckyIrV0
+        );
+        assert_eq!(
+            base.geometry_backend,
+            crate::models::GeometryBackend::Freecad
+        );
+
+        let err = resolve_macro_authoring_context(
+            base.source_language,
+            base.geometry_backend,
+            &MacroDialect::Legacy,
+            None,
+        )
+        .expect_err("raw FreeCAD macro must not bootstrap a new MCP version");
 
         assert_eq!(err.code, AppErrorCode::Validation);
         assert!(err.message.contains("source language"));
@@ -8066,6 +10739,9 @@ mod tests {
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: crate::models::EngineKind::Freecad,
             geometry_backend: crate::models::GeometryBackend::Freecad,
             source_language: crate::models::SourceLanguage::LegacyPython,
@@ -8178,6 +10854,8 @@ mod tests {
                 },
             ],
             measurement_annotations: Vec::new(),
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: Vec::new(),
             enrichment_state: crate::contracts::ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -8188,6 +10866,134 @@ mod tests {
 
     async fn seed_target() -> (AppState, TestPathResolver) {
         seed_target_with_macro("Base Pot", "V-base", "base_macro()").await
+    }
+
+    #[test]
+    fn carry_forward_semantic_manifest_keeps_controls_and_face_bindings() {
+        let mut previous = sample_manifest("model-base");
+        previous.selection_targets[1].parameter_keys = vec!["diameter".to_string()];
+        previous.selection_targets[1].primitive_ids = vec!["diameter".to_string()];
+        previous.selection_targets[1].view_ids = vec!["main".to_string()];
+
+        let mut next = sample_manifest("model-next");
+        next.control_primitives.clear();
+        next.control_relations.clear();
+        next.control_views.clear();
+        next.selection_targets[1].parameter_keys.clear();
+        next.selection_targets[1].primitive_ids.clear();
+        next.selection_targets[1].view_ids.clear();
+        let mut bundle = sample_bundle("model-next", "next.stl");
+        bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
+            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Edge1".to_string(),
+            editable: true,
+            start: crate::models::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::models::ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+        bundle.face_targets.push(crate::models::ViewerFaceTarget {
+            target_id: "body:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Face1".to_string(),
+            editable: true,
+            center: crate::models::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
+
+        let merged = carry_forward_semantic_manifest(Some(&previous), next, &bundle);
+
+        assert_eq!(merged.control_primitives.len(), 2);
+        assert_eq!(merged.control_views.len(), 1);
+        assert_eq!(
+            merged.selection_targets[1].parameter_keys,
+            vec!["diameter".to_string()]
+        );
+        assert_eq!(
+            merged.selection_targets[1].primitive_ids,
+            vec!["diameter".to_string()]
+        );
+        assert_eq!(
+            merged.selection_targets[1].view_ids,
+            vec!["main".to_string()]
+        );
+        assert!(merged.warnings.is_empty());
+    }
+
+    #[test]
+    fn carry_forward_semantic_manifest_ignores_broad_target_bindings() {
+        let mut previous = sample_manifest("model-base");
+        previous.selection_targets[1].parameter_keys = vec![
+            "diameter".to_string(),
+            "height".to_string(),
+            "clearance".to_string(),
+        ];
+
+        let mut next = sample_manifest("model-next");
+        next.selection_targets[1].parameter_keys.clear();
+        let mut bundle = sample_bundle("model-next", "next.stl");
+        bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
+            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Edge1".to_string(),
+            editable: true,
+            start: crate::models::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::models::ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+        bundle.face_targets.push(crate::models::ViewerFaceTarget {
+            target_id: "body:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Face1".to_string(),
+            editable: true,
+            center: crate::models::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
+
+        let merged = carry_forward_semantic_manifest(Some(&previous), next, &bundle);
+
+        assert_eq!(merged.control_primitives.len(), 2);
+        assert!(merged.selection_targets[1].parameter_keys.is_empty());
     }
 
     async fn seed_target_with_macro(
@@ -9569,6 +12375,7 @@ mod tests {
                 path: None,
                 depth: None,
                 max_nodes: None,
+                include_source: None,
             },
             &test_ctx(),
         )
@@ -9594,6 +12401,7 @@ mod tests {
                 path: None,
                 depth: Some(1),
                 max_nodes: Some(4),
+                include_source: None,
             },
             &test_ctx(),
         )
@@ -9609,13 +12417,229 @@ mod tests {
             true
         );
         assert_eq!(value["rootPaths"][0], "/parts/body/root");
-        assert!(value["nodes"].as_array().expect("nodes").len() >= 1);
-        assert_eq!(value["nodes"][0]["path"], "/parts/body/root");
-        assert!(value["nodes"][0]["digest"]
+        let nodes = value["nodes"].as_array().expect("nodes");
+        assert!(nodes.len() >= 1);
+        let root_node = nodes
+            .iter()
+            .find(|node| node["path"] == "/parts/body/root")
+            .expect("root node");
+        assert!(root_node["digest"].as_str().unwrap().starts_with("sha256:"));
+        assert!(root_node["stableNodeKey"]
             .as_str()
             .unwrap()
             .starts_with("sha256:"));
+        assert_eq!(root_node["sourceAddressable"], true);
+        assert_eq!(root_node["editableOps"], serde_json::json!(["replace"]));
+        assert!(root_node.get("nonEditableReason").is_none());
+        assert!(root_node.get("source").is_none());
         assert!(value.get("macroCode").is_none());
+    }
+
+    async fn stable_key_for_path(path: &str, source: &str) -> String {
+        let (state, resolver) = seed_target_with_macro("StableKey", "V-stable-key", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let response = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: Some(path.to_string()),
+                depth: Some(0),
+                max_nodes: Some(8),
+                include_source: Some(false),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+        response
+            .nodes
+            .first()
+            .map(|node| node.stable_node_key.clone())
+            .expect("stable node key")
+    }
+
+    #[tokio::test]
+    async fn given_unrelated_param_insert_when_ast_reloaded_then_unchanged_node_keeps_stable_key() {
+        let path = "/params/width";
+        let source_before =
+            "(model (params (number width 12) (number height 8)) (part body (box width 2 3)))";
+        let source_after = "(model (params (number depth 4) (number width 12) (number height 8)) (part body (box width 2 3)))";
+
+        let key_before = stable_key_for_path(path, source_before).await;
+        let key_after = stable_key_for_path(path, source_after).await;
+
+        assert_eq!(key_before, key_after);
+    }
+
+    #[tokio::test]
+    async fn given_unrelated_param_reorder_when_ast_reloaded_then_unchanged_node_keeps_stable_key()
+    {
+        let path = "/params/width";
+        let source_before =
+            "(model (params (number width 12) (number height 8) (number depth 4)) (part body (box width 2 3)))";
+        let source_after =
+            "(model (params (number depth 4) (number height 8) (number width 12)) (part body (box width 2 3)))";
+
+        let key_before = stable_key_for_path(path, source_before).await;
+        let key_after = stable_key_for_path(path, source_after).await;
+
+        assert_eq!(key_before, key_after);
+    }
+
+    #[tokio::test]
+    async fn given_numeric_change_elsewhere_when_ast_reloaded_then_unchanged_node_keeps_stable_key()
+    {
+        let path = "/params/width";
+        let source_before =
+            "(model (params (number width 12) (number height 8)) (part body (box width 2 3)))";
+        let source_after =
+            "(model (params (number width 12) (number height 9)) (part body (box width 2 3)))";
+
+        let key_before = stable_key_for_path(path, source_before).await;
+        let key_after = stable_key_for_path(path, source_after).await;
+
+        assert_eq!(key_before, key_after);
+    }
+
+    #[tokio::test]
+    async fn given_whitespace_only_change_when_ast_reloaded_then_unchanged_node_keeps_stable_key() {
+        let path = "/params/width";
+        let source_before =
+            "(model (params (number width 12) (number height 8)) (part body (box width 2 3)))";
+        let source_after =
+            "(model\n  (params   (number width 12)\n           (number height 8))\n  (part body (box width 2 3)))";
+
+        let key_before = stable_key_for_path(path, source_before).await;
+        let key_after = stable_key_for_path(path, source_after).await;
+
+        assert_eq!(key_before, key_after);
+    }
+
+    #[tokio::test]
+    async fn given_ast_get_include_source_false_when_serialized_then_nodes_omit_source() {
+        let (state, resolver) = seed_target_with_macro(
+            "Params",
+            "V-ast-source-off",
+            "(model (params (number width 12)) (part body (box width 2 3)))",
+        )
+        .await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let response = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: Some("/params/width".to_string()),
+                depth: Some(0),
+                max_nodes: Some(4),
+                include_source: Some(false),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+
+        let value = serde_json::to_value(&response).expect("ast json");
+        assert!(value["nodes"][0].get("source").is_none());
+    }
+
+    #[tokio::test]
+    async fn given_ast_get_include_source_true_when_param_path_then_exact_bounded_source_returns() {
+        let (state, resolver) = seed_target_with_macro(
+            "Params",
+            "V-ast-source-on",
+            "(model (params (number width 12)) (part body (box width 2 3)))",
+        )
+        .await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let response = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: Some("/params/width".to_string()),
+                depth: Some(0),
+                max_nodes: Some(4),
+                include_source: Some(true),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+
+        let value = serde_json::to_value(&response).expect("ast json");
+        let source = &value["nodes"][0]["source"];
+        assert_eq!(source["text"], "(number width 12)");
+        assert_eq!(source["span"], value["nodes"][0]["span"]);
+        assert_eq!(source["truncated"], false);
+        assert_eq!(source["maxBytes"], 4096);
+        assert_eq!(source["byteLen"], "(number width 12)".len());
+    }
+
+    #[test]
+    fn given_source_slice_exceeds_limit_when_bounded_then_text_truncates_with_metadata() {
+        let source = format!("({})", "a".repeat(ECKY_AST_SOURCE_MAX_BYTES + 100));
+        let slice =
+            bounded_ecky_ast_source_slice(&source, (0, source.len())).expect("source slice");
+
+        assert_eq!(slice.text.len(), ECKY_AST_SOURCE_MAX_BYTES);
+        assert_eq!(slice.byte_len, source.len());
+        assert_eq!(slice.max_bytes, ECKY_AST_SOURCE_MAX_BYTES);
+        assert!(slice.truncated);
+        assert_eq!(slice.span.start, 0);
+        assert_eq!(slice.span.end, source.len() as u32);
+    }
+
+    #[tokio::test]
+    async fn given_lowered_if_child_path_when_ast_get_then_node_reports_not_source_addressable() {
+        let (state, resolver) = seed_target_with_macro(
+            "Conditional",
+            "V-ast-if",
+            "(model (params (toggle raised true)) (part body (if raised (sphere 10) (cylinder 10 20))))",
+        )
+        .await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let response = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: Some("/parts/body/root/if/condition".to_string()),
+                depth: Some(0),
+                max_nodes: Some(4),
+                include_source: Some(true),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+
+        let value = serde_json::to_value(&response).expect("ast json");
+        let node = &value["nodes"][0];
+        assert_eq!(node["path"], "/parts/body/root/if/condition");
+        assert_eq!(node["sourceAddressable"], false);
+        assert_eq!(node["editableOps"], serde_json::json!([]));
+        assert!(node["stableNodeKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(node["nonEditableReason"]
+            .as_str()
+            .unwrap()
+            .contains("not source-span addressable"));
+        assert!(node.get("source").is_none());
     }
 
     #[tokio::test]
@@ -9638,6 +12662,7 @@ mod tests {
                 path: Some("/params/width".to_string()),
                 depth: Some(0),
                 max_nodes: Some(4),
+                include_source: None,
             },
             &test_ctx(),
         )
@@ -9652,6 +12677,792 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn given_ecky_param_path_when_ecky_dependency_get_then_core_reference_paths_return() {
+        let (state, resolver) = seed_target_with_macro(
+            "Params",
+            "V-deps",
+            "(model (params (number width 12) (number height 6)) (part body (box width height 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_dependency_get(
+            &state,
+            &resolver,
+            EckyDependencyGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: "/params/width".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("dependency response");
+
+        assert_eq!(response.path, "/params/width");
+        assert_eq!(response.dependency_kind, "parameterReference");
+        assert_eq!(response.reference_count, 1);
+        assert_eq!(response.impacted_part_ids, vec!["body".to_string()]);
+        assert_eq!(
+            response.impact_labels,
+            vec!["part-local".to_string(), "export-affecting".to_string()]
+        );
+        assert_eq!(
+            response.dependent_source_paths,
+            vec!["/parts/body/root/call/args/0".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn given_unsupported_path_when_ecky_dependency_get_then_validation_names_supported_shape()
+    {
+        let (state, resolver) = seed_target_with_macro(
+            "Params",
+            "V-deps",
+            "(model (params (number width 12)) (part body (box width 2 3)))",
+        )
+        .await;
+
+        let err = handle_ecky_dependency_get(
+            &state,
+            &resolver,
+            EckyDependencyGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: "/parts/body/root".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("unsupported path should fail");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("/params/{key}"));
+        assert!(err.message.contains("/targets/{targetId}"));
+        assert!(err.message.contains("/parts/body/root"));
+    }
+
+    #[tokio::test]
+    async fn given_target_path_when_ecky_dependency_get_then_returns_feature_and_parameter_bindings(
+    ) {
+        let (state, resolver) = seed_target_with_macro(
+            "Params",
+            "V-deps-target",
+            "(model (params (number lens_bore_d 42)) (part body (box lens_bore_d 2 3)))",
+        )
+        .await;
+
+        let mut manifest = sample_manifest("model-base");
+        manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
+        manifest.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        manifest.selection_targets[1].parameter_keys = vec!["lens_bore_d".to_string()];
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "lens_bore".to_string(),
+                kind: "bore".to_string(),
+                label: "Lens Bore".to_string(),
+                source_ref: Some(crate::models::SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/body/root".to_string()),
+                    start_byte: None,
+                    end_byte: None,
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "lens_bore".to_string(),
+                    output_id: "carrier-bore".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        {
+            let conn = state.db.lock().await;
+            conn.execute(
+                "UPDATE messages SET model_manifest = ?1 WHERE id = 'msg-1'",
+                rusqlite::params![serde_json::to_string(&manifest).expect("manifest json")],
+            )
+            .expect("update manifest");
+        }
+
+        let response = handle_ecky_dependency_get(
+            &state,
+            &resolver,
+            EckyDependencyGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: "/targets/body:face:0:5-5-5:100".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("dependency response");
+
+        assert_eq!(response.path, "/targets/body:face:0:5-5-5:100");
+        assert_eq!(response.dependency_kind, "selectionTargetReference");
+        assert_eq!(response.impacted_part_ids, vec!["body".to_string()]);
+        assert_eq!(response.parameter_keys, vec!["lens_bore_d".to_string()]);
+        assert_eq!(response.feature_ids, vec!["lens_bore".to_string()]);
+        assert_eq!(
+            response.target_ids,
+            vec!["body:face:0:5-5-5:100".to_string()]
+        );
+        assert_eq!(
+            response.dependent_source_paths,
+            vec!["/parts/body/root".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn given_single_target_with_one_feature_and_params_when_selector_resolve_then_exact() {
+        let (state, resolver) = seed_target_with_macro(
+            "Selector",
+            "V-selector-exact",
+            "(model (params (number lens_bore_d 42)) (part body (box lens_bore_d 2 3)))",
+        )
+        .await;
+
+        let mut manifest = sample_manifest("model-base");
+        manifest.selection_targets[1].parameter_keys = vec!["lens_bore_d".to_string()];
+        manifest.selection_targets[1].primitive_ids = vec!["primitive-face-1".to_string()];
+        manifest.selection_targets[1].durable_target_id = Some("durable-face-1".to_string());
+        manifest.selection_targets[1].canonical_target_id = Some("canonical-face-1".to_string());
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "lens_bore".to_string(),
+                kind: "bore".to_string(),
+                label: "Lens Bore".to_string(),
+                source_ref: Some(crate::models::SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/body/root".to_string()),
+                    start_byte: None,
+                    end_byte: None,
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "lens_bore".to_string(),
+                    output_id: "carrier-bore".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+
+        {
+            let conn = state.db.lock().await;
+            conn.execute(
+                "UPDATE messages SET model_manifest = ?1 WHERE id = 'msg-1'",
+                rusqlite::params![serde_json::to_string(&manifest).expect("manifest json")],
+            )
+            .expect("update manifest");
+        }
+
+        let response = handle_ecky_selector_resolve(
+            &state,
+            &resolver,
+            EckySelectorResolveRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                target_id: "body:face:0:5-5-5:100".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("selector response");
+
+        assert_eq!(response.target_id, "body:face:0:5-5-5:100");
+        assert_eq!(
+            response.durable_target_id.as_deref(),
+            Some("durable-face-1")
+        );
+        assert_eq!(
+            response.canonical_target_id.as_deref(),
+            Some("canonical-face-1")
+        );
+        assert_eq!(response.feature_ids, vec!["lens_bore".to_string()]);
+        assert_eq!(response.parameter_keys, vec!["lens_bore_d".to_string()]);
+        assert_eq!(
+            response.provenance_candidates.feature_role.as_deref(),
+            Some("face")
+        );
+        assert_eq!(
+            response.provenance_candidates.operation_kinds,
+            vec!["bore".to_string()]
+        );
+        assert_eq!(
+            response.provenance_candidates.primitive_ids,
+            vec!["primitive-face-1".to_string()]
+        );
+        assert_eq!(
+            response.provenance_candidates.source_stable_node_keys.len(),
+            1
+        );
+        assert!(!response.provenance_candidates.source_stable_node_keys[0]
+            .trim()
+            .is_empty());
+        assert_eq!(response.confidence, EckySelectorResolveConfidence::Exact);
+    }
+
+    #[tokio::test]
+    async fn given_alias_collision_when_selector_resolve_then_ambiguous() {
+        let (state, resolver) = seed_target_with_macro(
+            "Selector",
+            "V-selector-ambiguous",
+            "(model (params (number width 12)) (part body (box width 2 3)))",
+        )
+        .await;
+
+        let mut manifest = sample_manifest("model-base");
+        manifest.selection_targets[0].alias_ids = vec!["shared-face".to_string()];
+        manifest.selection_targets[1].alias_ids = vec!["shared-face".to_string()];
+        manifest.selection_targets[0].parameter_keys = vec!["edge_param".to_string()];
+        manifest.selection_targets[1].parameter_keys = vec!["face_param".to_string()];
+
+        {
+            let conn = state.db.lock().await;
+            conn.execute(
+                "UPDATE messages SET model_manifest = ?1 WHERE id = 'msg-1'",
+                rusqlite::params![serde_json::to_string(&manifest).expect("manifest json")],
+            )
+            .expect("update manifest");
+        }
+
+        let response = handle_ecky_selector_resolve(
+            &state,
+            &resolver,
+            EckySelectorResolveRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                target_id: "shared-face".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("selector response");
+
+        assert_eq!(
+            response.confidence,
+            EckySelectorResolveConfidence::Ambiguous
+        );
+        assert_eq!(response.target_id, "shared-face");
+        assert!(response.reason.contains("Alias collision"));
+        assert_eq!(response.durable_target_id, None);
+        assert_eq!(response.canonical_target_id, None);
+        assert_eq!(
+            response.parameter_keys,
+            vec!["edge_param".to_string(), "face_param".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn given_missing_target_when_selector_resolve_then_none() {
+        let (state, resolver) = seed_target_with_macro(
+            "Selector",
+            "V-selector-none",
+            "(model (params (number width 12)) (part body (box width 2 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_selector_resolve(
+            &state,
+            &resolver,
+            EckySelectorResolveRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                target_id: "missing-target".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("selector response");
+
+        assert_eq!(response.confidence, EckySelectorResolveConfidence::None);
+        assert_eq!(response.target_id, "missing-target");
+        assert!(response.reason.contains("No selection target matched"));
+        assert!(response.feature_ids.is_empty());
+        assert!(response.parameter_keys.is_empty());
+        assert!(response.provenance_candidates.feature_role.is_none());
+        assert!(response
+            .provenance_candidates
+            .source_stable_node_keys
+            .is_empty());
+        assert!(response.provenance_candidates.operation_kinds.is_empty());
+        assert!(response.provenance_candidates.primitive_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_provided_params_when_ecky_constraints_validate_then_reports_pass_fail_rows() {
+        let (state, resolver) = seed_target_with_macro(
+            "Constrained",
+            "V-constraints",
+            "(model (params (number width 12 :min 10 :max 20 :step 2) (select mount inner :options ((Inner inner) (Outer outer)))) (part body (box width 2 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: Some(BTreeMap::from([
+                    ("width".to_string(), ParamValue::Number(13.0)),
+                    ("mount".to_string(), ParamValue::String("outer".to_string())),
+                ])),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        assert_eq!(response.parameter_source, "provided");
+        assert_eq!(response.pass_count, 1);
+        assert_eq!(response.fail_count, 1);
+        let width = response
+            .rows
+            .iter()
+            .find(|row| row.path == "/params/width")
+            .expect("width row");
+        assert_eq!(width.status, "fail");
+        assert_eq!(width.severity, "error");
+        assert_eq!(width.raw_value, serde_json::json!(13.0));
+        assert!(width.message.contains("step"));
+        assert_eq!(width.involved_param_keys, vec!["width".to_string()]);
+        assert_eq!(width.source_stable_node_keys.len(), 1);
+        assert!(!width.source_stable_node_keys[0].trim().is_empty());
+        let mount = response
+            .rows
+            .iter()
+            .find(|row| row.path == "/params/mount")
+            .expect("mount row");
+        assert_eq!(mount.status, "pass");
+        assert_eq!(mount.severity, "info");
+        assert_eq!(mount.involved_param_keys, vec!["mount".to_string()]);
+        assert_eq!(mount.source_stable_node_keys.len(), 1);
+        assert!(!mount.source_stable_node_keys[0].trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_missing_params_when_ecky_constraints_validate_then_uses_core_defaults() {
+        let (state, resolver) = seed_target_with_macro(
+            "Defaults",
+            "V-constraints-default",
+            "(model (params (number width 12 :min 10 :max 20 :step 2)) (part body (box width 2 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        assert_eq!(response.parameter_source, "initialOrDefault");
+        assert_eq!(response.pass_count, 1);
+        assert_eq!(response.fail_count, 0);
+        assert_eq!(response.rows[0].path, "/params/width");
+        assert_eq!(response.rows[0].severity, "info");
+        assert_eq!(response.rows[0].raw_value, serde_json::json!(12.0));
+        assert_eq!(
+            response.rows[0].involved_param_keys,
+            vec!["width".to_string()]
+        );
+        assert_eq!(response.rows[0].source_stable_node_keys.len(), 1);
+        assert!(!response.rows[0].source_stable_node_keys[0]
+            .trim()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_passing_relation_when_ecky_constraints_validate_then_relation_row_passes() {
+        let (state, resolver) = seed_target_with_macro(
+            "Relation pass",
+            "V-relation-pass",
+            "(model (params (number lens_bore_d 8) (number tunnel_aperture_h 10) :relations ((< lens_bore_d tunnel_aperture_h))) (part body (box lens_bore_d 2 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: Some(BTreeMap::from([
+                    ("lens_bore_d".to_string(), ParamValue::Number(8.0)),
+                    ("tunnel_aperture_h".to_string(), ParamValue::Number(10.0)),
+                ])),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        assert_eq!(response.pass_count, 3);
+        assert_eq!(response.fail_count, 0);
+        let relation = response
+            .rows
+            .iter()
+            .find(|row| row.path == "/params/:relations/0")
+            .expect("relation row");
+        assert_eq!(relation.status, "pass");
+        assert_eq!(relation.severity, "info");
+        assert_eq!(
+            relation.involved_param_keys,
+            vec!["lens_bore_d".to_string(), "tunnel_aperture_h".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn given_failing_relation_when_ecky_constraints_validate_then_relation_row_fails() {
+        let (state, resolver) = seed_target_with_macro(
+            "Relation fail",
+            "V-relation-fail",
+            "(model (params (number lens_bore_d 8) (number tunnel_aperture_h 10) :relations ((< lens_bore_d tunnel_aperture_h))) (part body (box lens_bore_d 2 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: Some(BTreeMap::from([
+                    ("lens_bore_d".to_string(), ParamValue::Number(12.0)),
+                    ("tunnel_aperture_h".to_string(), ParamValue::Number(10.0)),
+                ])),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        assert_eq!(response.pass_count, 2);
+        assert_eq!(response.fail_count, 1);
+        let relation = response
+            .rows
+            .iter()
+            .find(|row| row.path == "/params/:relations/0")
+            .expect("relation row");
+        assert_eq!(relation.status, "fail");
+        assert_eq!(relation.severity, "error");
+        assert!(
+            relation.message.contains("Relation < failed"),
+            "{}",
+            relation.message
+        );
+        assert_eq!(
+            relation.involved_param_keys,
+            vec!["lens_bore_d".to_string(), "tunnel_aperture_h".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn given_physical_decision_calibration_defaults_when_ecky_constraints_validate_then_relation_rows_pass(
+    ) {
+        let source =
+            include_str!("../../../model-runtime/examples/physical-decision-calibration.ecky");
+        let (state, resolver) = seed_target_with_macro(
+            "Physical Decision Calibration",
+            "V-physical-decision-defaults",
+            source,
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let relation_rows = response
+            .rows
+            .iter()
+            .filter(|row| row.path.starts_with("/params/:relations/"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(response.parameter_source, "initialOrDefault");
+        assert_eq!(response.fail_count, 0);
+        assert_eq!(relation_rows.len(), 13);
+        assert!(relation_rows.iter().all(|row| row.status == "pass"));
+    }
+
+    #[tokio::test]
+    async fn given_physical_decision_calibration_overrides_when_ecky_constraints_validate_then_relation_rows_fail_with_expected_involved_keys(
+    ) {
+        let source =
+            include_str!("../../../model-runtime/examples/physical-decision-calibration.ecky");
+        let (state, resolver) = seed_target_with_macro(
+            "Physical Decision Calibration",
+            "V-physical-decision-overrides",
+            source,
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: Some(BTreeMap::from([
+                    ("thread_clearance".to_string(), ParamValue::Number(0.10)),
+                    ("lens_bore_d".to_string(), ParamValue::Number(58.70)),
+                ])),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let failing_relation_rows = response
+            .rows
+            .iter()
+            .filter(|row| row.path.starts_with("/params/:relations/") && row.status == "fail")
+            .collect::<Vec<_>>();
+
+        assert_eq!(response.parameter_source, "provided");
+        assert!(response.fail_count >= 2);
+
+        let thread_clearance_row = failing_relation_rows
+            .iter()
+            .find(|row| {
+                row.involved_param_keys
+                    .iter()
+                    .any(|key| key == "thread_clearance")
+                    && row
+                        .involved_param_keys
+                        .iter()
+                        .any(|key| key == "thread_clearance_min")
+            })
+            .expect("thread clearance relation fail row");
+        assert!(thread_clearance_row.message.contains("Relation >="));
+
+        let lens_row = failing_relation_rows
+            .iter()
+            .find(|row| {
+                row.involved_param_keys
+                    .iter()
+                    .any(|key| key == "lens_bore_d")
+                    && row
+                        .involved_param_keys
+                        .iter()
+                        .any(|key| key == "lens_fit_floor")
+            })
+            .expect("lens relation fail row");
+        assert!(lens_row.message.contains("Relation >="));
+    }
+
+    #[tokio::test]
+    async fn given_physical_decision_calibration_failure_when_ecky_constraints_validate_then_failing_relation_includes_source_handles(
+    ) {
+        let source =
+            include_str!("../../../model-runtime/examples/physical-decision-calibration.ecky");
+        let (state, resolver) = seed_target_with_macro(
+            "Physical Decision Calibration",
+            "V-physical-decision-traceability",
+            source,
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: Some(BTreeMap::from([(
+                    "thread_clearance".to_string(),
+                    ParamValue::Number(0.10),
+                )])),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let failing_row = response
+            .rows
+            .iter()
+            .find(|row| {
+                row.path.starts_with("/params/:relations/")
+                    && row.status == "fail"
+                    && row
+                        .involved_param_keys
+                        .iter()
+                        .any(|key| key == "thread_clearance")
+                    && row
+                        .involved_param_keys
+                        .iter()
+                        .any(|key| key == "thread_clearance_min")
+            })
+            .expect("thread clearance failing relation row");
+
+        for key in &failing_row.involved_param_keys {
+            let param_row = response
+                .rows
+                .iter()
+                .find(|row| row.path == format!("/params/{key}"))
+                .expect("param row for failing key");
+            assert!(!param_row.source_stable_node_keys.is_empty());
+            assert!(param_row
+                .source_stable_node_keys
+                .iter()
+                .all(|stable_key| !stable_key.trim().is_empty()));
+        }
+    }
+
+    fn load_physical_decision_calibration_fail_fixture() -> String {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../model-runtime/examples/physical-decision-calibration-fail.ecky");
+        fs::read_to_string(&fixture_path).unwrap_or_else(|_| {
+            "(model
+                (params
+                    (number lens_bore_d 58.70)
+                    (number lens_fit_floor 58.80)
+                    (number thread_clearance 0.10)
+                    (number thread_clearance_min 0.25)
+                    :relations
+                    (
+                        (>= lens_bore_d lens_fit_floor)
+                        (>= thread_clearance thread_clearance_min)
+                    )
+                )
+                (part calibration (box 1 1 1))
+            )"
+            .to_string()
+        })
+    }
+
+    #[tokio::test]
+    async fn given_physical_decision_fail_fixture_when_ecky_constraints_validate_then_multiple_relation_rows_fail(
+    ) {
+        let source = load_physical_decision_calibration_fail_fixture();
+        let (state, resolver) = seed_target_with_macro(
+            "Physical Decision Calibration Fail",
+            "V-physical-decision-fail-relations",
+            &source,
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let failing_relation_rows = response
+            .rows
+            .iter()
+            .filter(|row| row.path.starts_with("/params/:relations/") && row.status == "fail")
+            .collect::<Vec<_>>();
+
+        assert!(
+            failing_relation_rows.len() >= 2,
+            "expected >=2 failing relation rows, got {}",
+            failing_relation_rows.len()
+        );
+        assert!(response.fail_count >= 2);
+    }
+
+    #[tokio::test]
+    async fn given_physical_decision_fail_fixture_when_ecky_constraints_validate_then_failing_rows_include_keys_and_source_traceability(
+    ) {
+        let source = load_physical_decision_calibration_fail_fixture();
+        let (state, resolver) = seed_target_with_macro(
+            "Physical Decision Calibration Fail",
+            "V-physical-decision-fail-traceability",
+            &source,
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let failing_relation_rows = response
+            .rows
+            .iter()
+            .filter(|row| row.path.starts_with("/params/:relations/") && row.status == "fail")
+            .collect::<Vec<_>>();
+
+        assert!(
+            !failing_relation_rows.is_empty(),
+            "expected failing relation rows"
+        );
+
+        for relation_row in failing_relation_rows {
+            assert!(
+                !relation_row.involved_param_keys.is_empty(),
+                "missing involvedParamKeys for {}",
+                relation_row.path
+            );
+            for key in &relation_row.involved_param_keys {
+                let param_row = response
+                    .rows
+                    .iter()
+                    .find(|row| row.path == format!("/params/{key}"))
+                    .expect("param row for involved key");
+                assert!(
+                    !param_row.source_stable_node_keys.is_empty(),
+                    "missing source_stable_node_keys for {}",
+                    param_row.path
+                );
+                assert!(param_row
+                    .source_stable_node_keys
+                    .iter()
+                    .all(|stable_key| !stable_key.trim().is_empty()));
+            }
+        }
     }
 
     #[test]
@@ -10126,6 +13937,984 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn given_valid_replace_when_ecky_ast_patch_validate_then_structured_diff_returns_without_render_payload(
+    ) {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) = seed_target_with_macro("Box", "V-validate", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/parts/body/root";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let node_digest = source_edit_digest(source, path);
+
+        let response = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest,
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: node_digest.clone(),
+                replacement_source: Some("(box 4 5 6)".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("patch validate");
+
+        let value = serde_json::to_value(&response).expect("validate json");
+        assert_eq!(value["operation"], "replace");
+        assert_eq!(value["editedPath"], path);
+        assert_eq!(value["status"], "valid");
+        assert_eq!(value["oldNodeDigest"], node_digest);
+        assert!(value["newNodeDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_ne!(value["sourceDigest"], value["newSourceDigest"]);
+        assert_eq!(value["affectedPaths"], serde_json::json!([path]));
+        assert_eq!(
+            value["affectedPathDetails"],
+            serde_json::json!([{
+                "change": "replace",
+                "oldPath": path,
+                "newPath": path,
+                "oldDigest": value["oldNodeDigest"].clone(),
+                "newDigest": value["newNodeDigest"].clone(),
+            }])
+        );
+        assert_eq!(
+            value["affectedNodeKeys"].as_array().map(|v| v.len()),
+            Some(2)
+        );
+        assert!(value["affectedNodeKeys"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(value["affectedNodeKeys"][1]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(
+            value["dependencyImpact"]["dependencyKind"],
+            serde_json::json!("pathLocal")
+        );
+        assert_eq!(
+            value["dependencyImpact"]["impactedPartIds"],
+            serde_json::json!(["body"])
+        );
+        assert_eq!(
+            value["dependencyImpact"]["impactLabels"],
+            serde_json::json!(["part-local", "export-affecting"])
+        );
+        assert!(value["diff"]["old"]["byteLen"].as_u64().unwrap_or(0) > 0);
+        assert!(value["diff"]["new"]["byteLen"].as_u64().unwrap_or(0) > 0);
+        assert!(value["diff"]["old"]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(value["diff"]["new"]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(value.get("macroCode").is_none());
+        assert!(value.get("artifactBundle").is_none());
+        assert!(value.get("modelManifest").is_none());
+        assert!(value.get("artifactDigest").is_none());
+        assert!(value.get("draft").is_none());
+    }
+
+    #[tokio::test]
+    async fn given_stable_node_key_when_ecky_ast_patch_validate_then_patch_resolves_path() {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) = seed_target_with_macro("Box", "V-validate-key", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/parts/body/root";
+        let node_digest = source_edit_digest(source, path);
+
+        let ast = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: Some(path.to_string()),
+                depth: Some(0),
+                max_nodes: Some(8),
+                include_source: Some(false),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+        let stable_node_key = ast
+            .nodes
+            .first()
+            .map(|node| node.stable_node_key.clone())
+            .expect("stable node key");
+
+        let response = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: Some(stable_node_key),
+                path: None,
+                expected_node_digest: node_digest,
+                replacement_source: Some("(box 9 9 9)".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("patch validate");
+
+        assert_eq!(response.edited_path, path);
+    }
+
+    #[tokio::test]
+    async fn given_bogus_stable_node_key_when_ecky_ast_patch_validate_then_rejects_cleanly() {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) = seed_target_with_macro("Box", "V-validate-bogus-key", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let err = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: Some("sha256:not-a-real-node".to_string()),
+                path: None,
+                expected_node_digest: source_edit_digest(source, "/parts/body/root"),
+                replacement_source: Some("(box 4 5 6)".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("bogus stable node key");
+
+        assert!(err.message.contains("stableNodeKey not found in AST"));
+    }
+
+    #[tokio::test]
+    async fn given_mismatched_stable_node_key_and_path_when_ecky_ast_patch_validate_then_rejects() {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("Box", "V-validate-key-mismatch", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let key_path = "/parts/body/root";
+
+        let ast = handle_ecky_ast_get(
+            &state,
+            &resolver,
+            EckyAstGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: Some(key_path.to_string()),
+                depth: Some(0),
+                max_nodes: Some(8),
+                include_source: Some(false),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("ast response");
+        let stable_node_key = ast
+            .nodes
+            .first()
+            .map(|node| node.stable_node_key.clone())
+            .expect("stable node key");
+
+        let err = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: Some(stable_node_key),
+                path: Some("/parts/body/root/call/args/0".to_string()),
+                expected_node_digest: source_edit_digest(source, key_path),
+                replacement_source: Some("9".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("key/path mismatch");
+
+        assert!(err.message.contains("stableNodeKey/path mismatch"));
+    }
+
+    #[tokio::test]
+    async fn given_param_patch_when_ecky_ast_patch_validate_then_dependency_impact_uses_param_helpers(
+    ) {
+        let source =
+            "(model (params (number width 12) (number height 6)) (part body (box width height 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("Params", "V-validate-param-impact", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/params/width";
+
+        let response = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: source_edit_digest(source, path),
+                replacement_source: Some("(number width 24)".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("param patch validate");
+
+        let value = serde_json::to_value(&response).expect("param patch json");
+        assert_eq!(
+            value["dependencyImpact"]["dependencyKind"],
+            serde_json::json!("parameterReference")
+        );
+        assert_eq!(
+            value["dependencyImpact"]["path"],
+            serde_json::json!("/params/width")
+        );
+        assert_eq!(
+            value["dependencyImpact"]["impactedPartIds"],
+            serde_json::json!(["body"])
+        );
+        assert_eq!(
+            value["dependencyImpact"]["dependentSourcePaths"],
+            serde_json::json!(["/parts/body/root/call/args/0"])
+        );
+        assert_eq!(
+            value["dependencyImpact"]["referenceCount"],
+            serde_json::json!(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn given_film_coupon_fixture_when_film_gap_patch_validate_then_patch_preview_renders() {
+        let source =
+            include_str!("../../../model-runtime/examples/film-adapter-film-gap-coupon.ecky");
+        let (state, resolver) =
+            seed_target_with_macro("Film Coupon", "V-film-coupon", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/params/film_gap";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let expected_node_digest = source_edit_digest(source, path);
+        let replacement_source =
+            "(number film_gap 0.45 :label \"film gap\" :min 0.2 :max 1.2 :step 0.01)".to_string();
+
+        let validate = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: source_digest.clone(),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: expected_node_digest.clone(),
+                replacement_source: Some(replacement_source.clone()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("film gap patch validate");
+
+        assert_eq!(validate.status, "valid");
+        assert_eq!(validate.edited_path, path);
+        assert_ne!(validate.source_digest, validate.new_source_digest);
+        assert_eq!(
+            validate
+                .dependency_impact
+                .as_ref()
+                .map(|impact| impact.dependency_kind.as_str()),
+            Some("parameterReference")
+        );
+
+        let preview = handle_ecky_ast_replace_and_render(
+            &state,
+            &resolver,
+            EckyAstReplaceAndRenderRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest,
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest,
+                replacement_source: Some(replacement_source),
+                new_name: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("film gap patch preview");
+
+        assert_eq!(preview.thread_id, "thread-1");
+        assert_ne!(preview.message_id, "msg-1");
+        assert!(preview.macro_code.contains("(number film_gap 0.45"));
+        assert_eq!(
+            preview.artifact_bundle.source_language,
+            crate::models::SourceLanguage::EckyIrV0
+        );
+        assert!(!preview.artifact_bundle.preview_stl_path.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_film_coupon_fixture_when_film_gap_patch_preview_then_commit_returns_model_id_and_digest(
+    ) {
+        let source =
+            include_str!("../../../model-runtime/examples/film-adapter-film-gap-coupon.ecky");
+        let (state, resolver) =
+            seed_target_with_macro("Film Coupon", "V-film-coupon-commit", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/params/film_gap";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let expected_node_digest = source_edit_digest(source, path);
+        let replacement_source =
+            "(number film_gap 0.53 :label \"film gap\" :min 0.2 :max 1.2 :step 0.01)".to_string();
+
+        let preview = handle_ecky_ast_replace_and_render(
+            &state,
+            &resolver,
+            EckyAstReplaceAndRenderRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest,
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest,
+                replacement_source: Some(replacement_source),
+                new_name: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("film gap preview for commit");
+
+        assert_eq!(preview.thread_id, "thread-1");
+        assert_eq!(
+            preview.artifact_digest.model_id,
+            preview.artifact_bundle.model_id
+        );
+        assert_eq!(
+            preview.artifact_digest.content_hash,
+            preview.artifact_bundle.content_hash
+        );
+
+        let commit = handle_commit_preview_version(
+            &state,
+            &resolver,
+            VersionSaveRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some(preview.thread_id.clone()),
+                message_id: Some(preview.message_id.clone()),
+                title: Some("Film Coupon Committed".to_string()),
+                version_name: Some("V-film-gap-commit".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("commit film gap preview");
+
+        assert_eq!(commit.thread_id, "thread-1");
+        assert_eq!(commit.model_id, preview.artifact_bundle.model_id);
+
+        let conn = state.db.lock().await;
+        let messages = db::get_thread_messages(&conn, "thread-1").expect("thread messages");
+        let committed = messages
+            .iter()
+            .find(|message| message.id == commit.message_id)
+            .expect("committed message");
+        assert!(committed
+            .output
+            .as_ref()
+            .expect("committed output")
+            .macro_code
+            .contains("(number film_gap 0.53"));
+    }
+
+    #[tokio::test]
+    async fn given_wrapper_param_path_when_ecky_ast_replace_and_render_then_only_numeric_token_changes_and_preview_renders(
+    ) {
+        let source = "(model\n  (params\n    ; keep formatting + comment\n    (number film_gap 0.35 :label \"film gap\" :min 0.2 :max 1.2 :step 0.01))\n  (part body (box film_gap 2 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("Wrapper Path", "V-wrapper-number", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/params/film_gap";
+        let source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let expected_node_digest = source_edit_digest(source, path);
+
+        let preview = handle_ecky_ast_replace_and_render(
+            &state,
+            &resolver,
+            EckyAstReplaceAndRenderRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest,
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest,
+                replacement_source: Some(
+                    "(number film_gap 0.45 :label \"film gap\" :min 0.2 :max 1.2 :step 0.01)"
+                        .to_string(),
+                ),
+                new_name: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("wrapper-path numeric preview");
+
+        assert!(preview.macro_code.contains("; keep formatting + comment"));
+        assert!(preview
+            .macro_code
+            .contains("(number film_gap 0.45 :label \"film gap\" :min 0.2 :max 1.2 :step 0.01)"));
+        assert!(!preview.macro_code.contains("(number film_gap 0.35 "));
+        assert!(!preview.artifact_bundle.preview_stl_path.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_ecky_ast_shape_patch_when_params_omitted_then_preview_preserves_current_values()
+    {
+        let source =
+            "(model (params (number width 10) (number height 3)) (part body (box width height 2)))";
+        let (state, resolver) =
+            seed_target_with_macro("Preserve Params", "V-preserve-params", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        {
+            let conn = state.db.lock().await;
+            let mut messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
+            let mut message = messages.pop().expect("seed message");
+            let mut output = message.output.take().expect("output");
+            output
+                .initial_params
+                .insert("width".to_string(), ParamValue::Number(42.0));
+            output
+                .initial_params
+                .insert("height".to_string(), ParamValue::Number(9.0));
+            db::update_message_status_and_output(
+                &conn,
+                "msg-1",
+                db::MessageStatusUpdate {
+                    status: &MessageStatus::Success,
+                    output: Some(&output),
+                    usage: None,
+                    artifact_bundle: message.artifact_bundle.as_ref(),
+                    model_manifest: message.model_manifest.as_ref(),
+                    visual_kind: None,
+                    content: Some("Base version"),
+                },
+            )
+            .expect("update params");
+        }
+
+        let preview = handle_ecky_ast_replace_and_render(
+            &state,
+            &resolver,
+            EckyAstReplaceAndRenderRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some("/parts/body".to_string()),
+                expected_node_digest: source_edit_digest(source, "/parts/body"),
+                replacement_source: Some("(part body (box width height 4))".to_string()),
+                new_name: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("shape patch preview");
+
+        assert_eq!(
+            preview.initial_params.get("width"),
+            Some(&ParamValue::Number(42.0))
+        );
+        assert_eq!(
+            preview.initial_params.get("height"),
+            Some(&ParamValue::Number(9.0))
+        );
+    }
+
+    #[tokio::test]
+    async fn given_lens_bore_patch_when_ecky_ast_patch_validate_then_dependency_scope_stays_on_bore_controls(
+    ) {
+        let source = "(model (params (number lens_bore_d 42) (number wall_t 3)) (part bore_carrier (cylinder lens_bore_d 6)) (part wall (box wall_t wall_t 4)))";
+        let (state, resolver) =
+            seed_target_with_macro("Lens Bore Scope", "V-lens-bore-scope", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/params/lens_bore_d";
+
+        let response = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: source_edit_digest(source, path),
+                replacement_source: Some("(number lens_bore_d 44)".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("lens bore patch validate");
+
+        assert_eq!(response.status, "valid");
+        assert_eq!(response.edited_path, path);
+        assert_eq!(response.affected_paths, vec![path.to_string()]);
+        let impact = response
+            .dependency_impact
+            .as_ref()
+            .expect("dependency impact");
+        assert_eq!(impact.path, path);
+        assert_eq!(impact.dependency_kind, "parameterReference");
+        assert_eq!(impact.impacted_part_ids, vec!["bore_carrier".to_string()]);
+        assert_eq!(
+            impact.dependent_source_paths,
+            vec!["/parts/bore_carrier/root/call/args/0".to_string()]
+        );
+        assert_eq!(impact.reference_count, 1);
+        assert!(!impact.impacted_part_ids.iter().any(|id| id == "wall"));
+        assert!(!impact
+            .dependent_source_paths
+            .iter()
+            .any(|path| path.contains("/parts/wall/")));
+    }
+
+    #[tokio::test]
+    async fn given_lens_bore_dependency_fixture_when_ecky_dependency_get_then_downstream_roles_return_together(
+    ) {
+        let source = "(model
+  (params (number lens_bore_d 42))
+  (part carrier (cylinder lens_bore_d 6))
+  (part socket (cylinder lens_bore_d 5))
+  (part thread (cylinder lens_bore_d 4))
+  (part stop_lip (cylinder lens_bore_d 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("Lens Bore Dependency", "V-lens-bore-deps", source).await;
+
+        let response = handle_ecky_dependency_get(
+            &state,
+            &resolver,
+            EckyDependencyGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                path: "/params/lens_bore_d".to_string(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("lens bore dependency");
+
+        assert_eq!(response.path, "/params/lens_bore_d");
+        assert_eq!(response.dependency_kind, "parameterReference");
+        let mut impacted = response.impacted_part_ids.clone();
+        impacted.sort();
+        assert_eq!(
+            impacted,
+            vec![
+                "carrier".to_string(),
+                "socket".to_string(),
+                "stop_lip".to_string(),
+                "thread".to_string(),
+            ]
+        );
+        assert_eq!(response.reference_count, 4);
+        assert_eq!(
+            response.dependent_source_paths,
+            vec![
+                "/parts/carrier/root/call/args/0".to_string(),
+                "/parts/socket/root/call/args/0".to_string(),
+                "/parts/thread/root/call/args/0".to_string(),
+                "/parts/stop_lip/root/call/args/0".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn given_stale_source_digest_when_ecky_ast_patch_validate_then_rejects() {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("Box", "V-validate-stale-source", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/parts/body/root";
+
+        let err = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: "sha256:stale".to_string(),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: source_edit_digest(source, path),
+                replacement_source: Some("(box 4 5 6)".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("stale source digest");
+
+        assert!(err.message.contains("digest mismatch"));
+    }
+
+    #[tokio::test]
+    async fn given_stale_node_digest_when_ecky_ast_patch_validate_then_rejects() {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("Box", "V-validate-stale-node", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let err = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some("/parts/body/root".to_string()),
+                expected_node_digest: "sha256:not-current".to_string(),
+                replacement_source: Some("(box 4 5 6)".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("stale node digest");
+
+        assert!(err.message.contains("node digest mismatch"));
+    }
+
+    #[tokio::test]
+    async fn given_invalid_replacement_when_ecky_ast_patch_validate_then_rejects_before_render() {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) = seed_target_with_macro("Box", "V-validate-invalid", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/parts/body/root";
+
+        let err = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: source_edit_digest(source, path),
+                replacement_source: Some("(box 4 5 6))".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("invalid replacement");
+
+        assert!(err
+            .message
+            .contains("Replacement produced invalid Ecky source"));
+        assert_eq!(err.operation.as_deref(), Some("replace"));
+        assert!(err
+            .stable_node_key
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sha256:")));
+        assert!(err.start_line.is_some());
+        assert!(err.end_line.is_some());
+        assert!(err.start_line.unwrap() <= err.end_line.unwrap());
+    }
+
+    #[tokio::test]
+    async fn given_helical_ridge_parse_failure_when_patch_validate_then_error_keeps_stable_key_and_span_lines(
+    ) {
+        let source = "(model
+  (part body
+    (helical-ridge
+      (cylinder 12 8)
+      :pitch 2
+      :height 6)))";
+        let (state, resolver) =
+            seed_target_with_macro("Helical Ridge", "V-helical-ridge-err", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/parts/body/root";
+
+        let err = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: source_edit_digest(source, path),
+                replacement_source: Some(
+                    "(helical-ridge (cylinder 12 8) :pitch 2 :height 6))".to_string(),
+                ),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("helical ridge parse failure");
+
+        assert!(err
+            .message
+            .contains("Replacement produced invalid Ecky source"));
+        assert_eq!(err.operation.as_deref(), Some("replace"));
+        assert!(err
+            .stable_node_key
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sha256:")));
+        assert!(err.start_line.is_some());
+        assert!(err.end_line.is_some());
+        assert!(err.start_line.unwrap() <= err.end_line.unwrap());
+        assert!(err.message.contains("/parts/body/root"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error_keeps_diagnostics_and_raw_details(
+    ) {
+        let lowering_source = r#"(model
+  (part body
+    (banana-boolean
+      (box 10 10 10)
+      (sphere 4))))"#;
+        let (state, resolver) =
+            seed_target_with_macro("Lowering Fail", "V-lowering-fail", lowering_source).await;
+
+        let lowering_err = handle_macro_preview_render(
+            &state,
+            &resolver,
+            MacroReplaceRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                macro_code: lowering_source.to_string(),
+                macro_dialect: Some(MacroDialect::EckyIrV0),
+                ui_spec: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: Some(crate::models::GeometryBackend::Build123d),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("build123d lowering should fail for unsupported operation");
+
+        assert_eq!(lowering_err.operation.as_deref(), Some("lower:build123d"));
+        assert!(
+            lowering_err
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("banana-boolean")),
+            "{lowering_err:?}"
+        );
+
+        let malformed_source = "(model\n  (part body (box 1 2 3))\n$)";
+        let (state, resolver) =
+            seed_target_with_macro("Malformed", "V-malformed", malformed_source).await;
+        let malformed_err = handle_macro_preview_render(
+            &state,
+            &resolver,
+            MacroReplaceRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                macro_code: malformed_source.to_string(),
+                macro_dialect: Some(MacroDialect::EckyIrV0),
+                ui_spec: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: Some(crate::models::GeometryBackend::Build123d),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("invalid Ecky source should fail in lowering path");
+
+        assert_eq!(malformed_err.operation.as_deref(), Some("lower:build123d"));
+        assert!(malformed_err
+            .message
+            .contains("Expected a proper list for model form."));
+        assert!(
+            malformed_err
+                .start_line
+                .zip(malformed_err.end_line)
+                .is_none_or(|(start, end)| start <= end),
+            "{malformed_err:?}"
+        );
+        if let Some(stable_node_key) = malformed_err.stable_node_key.as_deref() {
+            assert!(stable_node_key.starts_with("sha256:"), "{malformed_err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn given_delete_operation_when_ecky_ast_patch_validate_then_returns_valid_delete_diff() {
+        let source = "(model (part body (build (shape rail (box 1 2 3)) (shape cap (sphere 2)) (result cap))))";
+        let (state, resolver) = seed_target_with_macro("Delete", "V-validate-delete", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/parts/body/root/build/bindings/rail";
+
+        let response = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Delete,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: source_edit_digest(source, path),
+                replacement_source: None,
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("delete validate");
+
+        let value = serde_json::to_value(&response).expect("delete json");
+        assert_eq!(value["operation"], "delete");
+        assert_eq!(value["status"], "valid");
+        assert_eq!(value["newNodeDigest"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn given_rename_operation_when_ecky_ast_patch_validate_then_returns_new_path() {
+        let source = "(model (part body (build (shape rail (box 1 2 3)) (shape cap (translate 0 0 1 rail)) (result cap))))";
+        let (state, resolver) = seed_target_with_macro("Rename", "V-validate-rename", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+        let path = "/parts/body/root/build/bindings/rail";
+
+        let response = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Rename,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some(path.to_string()),
+                expected_node_digest: source_edit_digest(source, path),
+                replacement_source: None,
+                new_name: Some("spine".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("rename validate");
+
+        let value = serde_json::to_value(&response).expect("rename json");
+        assert_eq!(value["operation"], "rename");
+        assert_eq!(
+            value["affectedPathDetails"][0]["newPath"],
+            "/parts/body/root/build/bindings/spine"
+        );
+        assert_ne!(value["newNodeDigest"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn given_non_source_addressable_path_when_ecky_ast_patch_validate_then_rejects() {
+        let source = "(model (params (toggle raised true)) (part body (if raised (sphere 10) (cylinder 10 20))))";
+        let (state, resolver) =
+            seed_target_with_macro("Conditional", "V-validate-path", source).await;
+        state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+        let err = handle_ecky_ast_patch_validate(
+            &state,
+            &resolver,
+            EckyAstPatchValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                operation: EckyAstEditOperation::Replace,
+                source_digest: crate::mcp::macro_buffer::source_digest(source),
+                stable_node_key: None,
+                path: Some("/parts/body/root/if/condition".to_string()),
+                expected_node_digest: "sha256:not-used".to_string(),
+                replacement_source: Some("raised".to_string()),
+                new_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("non source-addressable path");
+
+        assert!(err.message.contains("not source-span addressable"));
+    }
+
+    #[tokio::test]
     async fn version_restore_returns_artifact_digest_for_export_truth() {
         let (state, _resolver) = seed_target().await;
         let response = handle_version_restore(
@@ -10345,6 +15134,448 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_feature_graph_get_reads_runtime_manifest_and_returns_backfilled_graphs() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-feature-graph";
+        let mut bundle = sample_bundle(model_id, "feature-graph.stl");
+        bundle.export_artifacts.push(crate::models::ExportArtifact {
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/generated-feature-graph.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
+        let mut runtime_manifest = sample_manifest(model_id);
+        runtime_manifest.correspondence_graph = Some(crate::models::CorrespondenceGraph {
+            edges: vec![crate::models::CorrespondenceEdge {
+                edge_id: "edge-1".to_string(),
+                source: crate::models::FeatureOutputRef {
+                    feature_id: "part:body".to_string(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                },
+                target: crate::models::FeatureOutputRef {
+                    feature_id: "part:body".to_string(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                },
+                relation: "sameTopology".to_string(),
+                source_ref: None,
+            }],
+        });
+        let (stored_bundle, _stored_manifest) = crate::model_runtime::write_runtime_bundle(
+            &resolver,
+            model_id,
+            &bundle,
+            &runtime_manifest,
+        )
+        .expect("runtime bundle");
+        let stale_message_manifest = sample_manifest(model_id);
+        assert!(stale_message_manifest.feature_graph.is_none());
+        assert!(stale_message_manifest.correspondence_graph.is_none());
+        {
+            let conn = state.db.lock().await;
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "msg-feature-graph".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Feature graph version".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_design("Graph", "V-graph", "graph_macro()")),
+                    usage: None,
+                    artifact_bundle: Some(stored_bundle),
+                    model_manifest: Some(stale_message_manifest),
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now_secs() + 1,
+                },
+            )
+            .unwrap();
+        }
+
+        let response = handle_artifact_feature_graph_get(
+            &state,
+            &resolver,
+            ArtifactFeatureGraphGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-feature-graph".to_string()),
+                model_id: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("feature graph");
+
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.message_id, "msg-feature-graph");
+        assert_eq!(response.model_id, model_id);
+        assert_eq!(response.artifact_digest.model_id, model_id);
+        assert!(response.artifact_digest.has_step_export);
+        let feature_graph = response.feature_graph.as_ref().expect("feature graph");
+        assert_eq!(feature_graph.nodes.len(), 1);
+        assert_eq!(feature_graph.nodes[0].feature_id, "part:body");
+        assert_eq!(
+            feature_graph.nodes[0].output_refs[0].target_ids,
+            vec![
+                "body:edge:0:0-0-0_10-0-0".to_string(),
+                "body:face:0:5-5-5:100".to_string()
+            ]
+        );
+        assert_eq!(
+            response
+                .correspondence_graph
+                .as_ref()
+                .expect("correspondence graph")
+                .edges[0]
+                .edge_id,
+            "edge-1"
+        );
+
+        let value = serde_json::to_value(&response).expect("feature graph json");
+        assert_eq!(value["modelId"], model_id);
+        assert!(value["artifactDigest"]["hasStepExport"].as_bool().unwrap());
+        assert_eq!(value["featureGraph"]["nodes"][0]["featureId"], "part:body");
+        assert_eq!(
+            value["correspondenceGraph"]["edges"][0]["relation"],
+            "sameTopology"
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_feature_graph_get_preserves_feature_ports() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-feature-ports";
+        let bundle = sample_bundle(model_id, "feature-ports.stl");
+        let mut runtime_manifest = sample_manifest(model_id);
+        runtime_manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "part:body".to_string(),
+                kind: "part".to_string(),
+                label: "Body".to_string(),
+                source_ref: Some(crate::models::SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/body/root".to_string()),
+                    start_byte: Some(0),
+                    end_byte: Some(42),
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "part:body".to_string(),
+                    output_id: "selectionTargets".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                }],
+                ports: vec![crate::models::FeaturePort {
+                    port_id: "mount-face".to_string(),
+                    type_id: "mechanical.mount".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                    frame: Some(crate::models::PortFrame::identity()),
+                    interfaces: vec!["m3-clearance".to_string()],
+                    params: std::collections::BTreeMap::from([(
+                        "clearanceMm".to_string(),
+                        crate::models::ComponentInterfaceValue::Number(0.3),
+                    )]),
+                    source_ref: None,
+                    confidence: Some(0.85),
+                    target_role: Some("mountingFace".to_string()),
+                }],
+            }],
+        });
+        let (stored_bundle, _stored_manifest) = crate::model_runtime::write_runtime_bundle(
+            &resolver,
+            model_id,
+            &bundle,
+            &runtime_manifest,
+        )
+        .expect("runtime bundle");
+        {
+            let conn = state.db.lock().await;
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "msg-feature-ports".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Feature ports version".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_design("Ports", "V-ports", "ports_macro()")),
+                    usage: None,
+                    artifact_bundle: Some(stored_bundle),
+                    model_manifest: Some(sample_manifest(model_id)),
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now_secs() + 1,
+                },
+            )
+            .unwrap();
+        }
+
+        let response = handle_artifact_feature_graph_get(
+            &state,
+            &resolver,
+            ArtifactFeatureGraphGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-feature-ports".to_string()),
+                model_id: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("feature graph");
+
+        let port = &response
+            .feature_graph
+            .as_ref()
+            .expect("feature graph")
+            .nodes[0]
+            .ports[0];
+        assert_eq!(port.port_id, "mount-face");
+        assert_eq!(port.target_ids, vec!["body:face:0:5-5-5:100"]);
+        assert_eq!(port.interfaces, vec!["m3-clearance"]);
+        assert_eq!(port.confidence, Some(0.85));
+        assert_eq!(port.target_role.as_deref(), Some("mountingFace"));
+
+        let value = serde_json::to_value(&response).expect("feature ports json");
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["portId"],
+            "mount-face"
+        );
+        assert_eq!(
+            value["featureGraph"]["nodes"][0]["ports"][0]["params"]["clearanceMm"],
+            0.3
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_feature_graph_get_film_adapter_fixture_exposes_expected_kinds_source_keys_and_targets(
+    ) {
+        let source =
+            include_str!("../../../model-runtime/examples/film-adapter-film-gap-coupon.ecky");
+        let model_id = "generated-film-adapter-feature-graph";
+        let (state, resolver, _) =
+            seed_ecky_printability_target(source, model_id, "film-adapter-feature-graph.stl").await;
+        let bundle = crate::model_runtime::read_artifact_bundle(&resolver, model_id)
+            .expect("runtime bundle");
+        let mut manifest = crate::model_runtime::read_model_manifest(&resolver, model_id)
+            .expect("runtime manifest");
+        let rendered_target_ids = manifest
+            .selection_targets
+            .iter()
+            .filter_map(|target| target.target_id.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            rendered_target_ids.len() >= 2,
+            "expected seeded manifest selection targets"
+        );
+        let edge_target_id = rendered_target_ids[0].clone();
+        let face_target_id = rendered_target_ids[1].clone();
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![
+                crate::models::FeatureNode {
+                    feature_id: "film_path".to_string(),
+                    kind: "film_path".to_string(),
+                    label: "Film Path".to_string(),
+                    source_ref: Some(crate::models::SourceRef {
+                        source_id: Some("source-film-path".to_string()),
+                        path: Some("/parts/body/film_path".to_string()),
+                        start_byte: Some(10),
+                        end_byte: Some(40),
+                    }),
+                    dependency_ids: Vec::new(),
+                    output_refs: vec![crate::models::FeatureOutputRef {
+                        feature_id: "film_path".to_string(),
+                        output_id: "film-path-solid".to_string(),
+                        target_ids: vec![edge_target_id.clone()],
+                    }],
+                    ports: Vec::new(),
+                },
+                crate::models::FeatureNode {
+                    feature_id: "insert_clamp".to_string(),
+                    kind: "insert_clamp".to_string(),
+                    label: "Insert Clamp".to_string(),
+                    source_ref: Some(crate::models::SourceRef {
+                        source_id: Some("source-insert-clamp".to_string()),
+                        path: Some("/parts/body/insert_clamp".to_string()),
+                        start_byte: Some(50),
+                        end_byte: Some(80),
+                    }),
+                    dependency_ids: vec!["film_path".to_string()],
+                    output_refs: vec![crate::models::FeatureOutputRef {
+                        feature_id: "insert_clamp".to_string(),
+                        output_id: "insert-clamp-solid".to_string(),
+                        target_ids: vec![face_target_id.clone()],
+                    }],
+                    ports: Vec::new(),
+                },
+                crate::models::FeatureNode {
+                    feature_id: "helicoid_thread".to_string(),
+                    kind: "helicoid_thread".to_string(),
+                    label: "Helicoid Thread".to_string(),
+                    source_ref: Some(crate::models::SourceRef {
+                        source_id: Some("source-helicoid-thread".to_string()),
+                        path: Some("/parts/body/helicoid_thread".to_string()),
+                        start_byte: Some(90),
+                        end_byte: Some(130),
+                    }),
+                    dependency_ids: vec!["insert_clamp".to_string()],
+                    output_refs: vec![crate::models::FeatureOutputRef {
+                        feature_id: "helicoid_thread".to_string(),
+                        output_id: "helicoid-thread-solid".to_string(),
+                        target_ids: vec![face_target_id.clone()],
+                    }],
+                    ports: Vec::new(),
+                },
+                crate::models::FeatureNode {
+                    feature_id: "lens_bore".to_string(),
+                    kind: "lens_bore".to_string(),
+                    label: "Lens Bore".to_string(),
+                    source_ref: Some(crate::models::SourceRef {
+                        source_id: Some("source-lens-bore".to_string()),
+                        path: Some("/parts/body/lens_bore".to_string()),
+                        start_byte: Some(140),
+                        end_byte: Some(170),
+                    }),
+                    dependency_ids: vec!["helicoid_thread".to_string()],
+                    output_refs: vec![crate::models::FeatureOutputRef {
+                        feature_id: "lens_bore".to_string(),
+                        output_id: "lens-bore-solid".to_string(),
+                        target_ids: vec![edge_target_id.clone()],
+                    }],
+                    ports: Vec::new(),
+                },
+            ],
+        });
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle with explicit film adapter graph");
+
+        let response = handle_artifact_feature_graph_get(
+            &state,
+            &resolver,
+            ArtifactFeatureGraphGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                model_id: Some(model_id.to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("feature graph from film adapter fixture");
+
+        let graph = response.feature_graph.expect("feature graph");
+        assert!(!graph.nodes.is_empty());
+        assert_eq!(graph.nodes.len(), 4);
+        let expected = [
+            (
+                "film_path",
+                "film_path",
+                "source-film-path",
+                "/parts/body/film_path",
+                vec![edge_target_id.clone()],
+            ),
+            (
+                "insert_clamp",
+                "insert_clamp",
+                "source-insert-clamp",
+                "/parts/body/insert_clamp",
+                vec![face_target_id.clone()],
+            ),
+            (
+                "helicoid_thread",
+                "helicoid_thread",
+                "source-helicoid-thread",
+                "/parts/body/helicoid_thread",
+                vec![face_target_id.clone()],
+            ),
+            (
+                "lens_bore",
+                "lens_bore",
+                "source-lens-bore",
+                "/parts/body/lens_bore",
+                vec![edge_target_id.clone()],
+            ),
+        ];
+        for (feature_id, kind, source_id, path, target_ids) in expected {
+            let node = graph
+                .nodes
+                .iter()
+                .find(|node| node.feature_id == feature_id)
+                .expect("expected feature node");
+            assert_eq!(node.kind, kind);
+            let source_ref = node.source_ref.as_ref().expect("feature source ref");
+            assert_eq!(source_ref.source_id.as_deref(), Some(source_id));
+            assert_eq!(source_ref.path.as_deref(), Some(path));
+            assert_eq!(node.output_refs.len(), 1);
+            assert_eq!(node.output_refs[0].target_ids, target_ids);
+            assert!(
+                node.output_refs[0]
+                    .target_ids
+                    .iter()
+                    .all(|target_id| rendered_target_ids.contains(target_id)),
+                "feature {feature_id} must anchor only rendered target ids"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_feature_graph_get_reports_validation_when_runtime_manifest_missing() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-no-feature-manifest";
+        let bundle = sample_bundle(model_id, "no-feature-manifest.stl");
+        let stored_bundle =
+            crate::model_runtime::write_artifact_bundle(&resolver, model_id, &bundle)
+                .expect("artifact bundle");
+        {
+            let conn = state.db.lock().await;
+            db::add_message(
+                &conn,
+                "thread-1",
+                &Message {
+                    id: "msg-no-feature-manifest".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "No manifest version".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_design("No Manifest", "V-none", "none_macro()")),
+                    usage: None,
+                    artifact_bundle: Some(stored_bundle),
+                    model_manifest: None,
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now_secs() + 1,
+                },
+            )
+            .unwrap();
+        }
+
+        let err = handle_artifact_feature_graph_get(
+            &state,
+            &resolver,
+            ArtifactFeatureGraphGetRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-no-feature-manifest".to_string()),
+                model_id: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("missing manifest should fail");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("No model manifest found"));
+        assert!(err.message.contains(model_id));
+        assert!(err.message.contains("artifact_feature_graph_get"));
+    }
+
+    #[tokio::test]
     async fn structural_verification_summary_includes_artifact_digest() {
         let (state, resolver) = seed_target().await;
         let model_id = "generated-verify";
@@ -10370,6 +15601,802 @@ mod tests {
             response.artifact_digest.step_export_path.as_deref(),
             Some("/tmp/generated-verify.step")
         );
+    }
+
+    #[tokio::test]
+    async fn printability_analyze_reads_preview_stl_and_includes_artifact_digest() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-printability";
+        let preview_stl_path = resolver.root.join("printability-preview.stl");
+        write_closed_tetra_binary_stl(&preview_stl_path);
+        let mut bundle = sample_bundle(model_id, "printability-preview.stl");
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+        bundle.export_artifacts.push(crate::models::ExportArtifact {
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/generated-printability.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
+        let manifest = sample_manifest(model_id);
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let response =
+            handle_printability_analyze(&state, &resolver, "thread-1", "msg-1", model_id)
+                .expect("printability analysis");
+
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.message_id, "msg-1");
+        assert_eq!(response.model_id, model_id);
+        assert_eq!(response.artifact_digest.model_id, model_id);
+        assert!(response.artifact_digest.has_step_export);
+        assert_eq!(
+            response.preview_stl_path,
+            preview_stl_path.display().to_string()
+        );
+        assert_eq!(response.analysis.triangle_count, 4);
+        assert_eq!(response.analysis.topology.component_count, Some(1));
+        assert_eq!(response.analysis.risk_metrics.bridge_span_mm, Some(1.0));
+        assert_eq!(response.analysis.risk_metrics.thin_wall_mm, Some(1.0));
+
+        let value = serde_json::to_value(&response).expect("printability json");
+        assert_eq!(value["artifactDigest"]["modelId"], model_id);
+        assert_eq!(
+            value["previewStlPath"],
+            preview_stl_path.display().to_string()
+        );
+        assert_eq!(value["analysis"]["triangleCount"], 4);
+        assert_eq!(value["analysis"]["topology"]["componentCount"], 1);
+        assert_eq!(value["analysis"]["riskMetrics"]["bridgeSpanMm"], 1.0);
+        assert_eq!(value["analysis"]["riskMetrics"]["thinWallMm"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn printability_analyze_anchors_suggestions_when_feature_graph_has_one_clear_target() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-printability-anchor";
+        let preview_stl_path = resolver.root.join("printability-anchor-preview.stl");
+        write_binary_stl(
+            &preview_stl_path,
+            &[
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
+            ],
+        );
+        let mut bundle = sample_bundle(model_id, "printability-anchor-preview.stl");
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+        let mut manifest = sample_manifest(model_id);
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "feature-ledge".to_string(),
+                kind: "extrude".to_string(),
+                label: "Ledge".to_string(),
+                source_ref: Some(crate::models::SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/body/ledge".to_string()),
+                    start_byte: Some(12),
+                    end_byte: Some(42),
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "feature-ledge".to_string(),
+                    output_id: "solid".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let response =
+            handle_printability_analyze(&state, &resolver, "thread-1", "msg-1", model_id)
+                .expect("printability analysis");
+
+        let suggestions = &response.analysis.transform_suggestions;
+        assert!(
+            !suggestions.is_empty(),
+            "expected transform suggestions for overhang mesh"
+        );
+        assert_eq!(
+            response.analysis.risk_metrics.unsupported_island_count,
+            Some(1)
+        );
+        let split_suggestion = suggestions
+            .iter()
+            .find(|suggestion| {
+                suggestion.kind
+                    == crate::services::printability::PrintabilityTransformSuggestionKind::Split
+            })
+            .expect("split suggestion");
+        assert_eq!(split_suggestion.unsupported_island_count, Some(1));
+        assert!(suggestions.iter().all(|suggestion| {
+            suggestion.source_anchor.as_deref()
+                == Some("feature:feature-ledge@source:source-main:/parts/body/ledge:12-42")
+        }));
+        assert!(suggestions
+            .iter()
+            .all(|suggestion| suggestion.risk_anchor.as_ref().is_some_and(
+                |risk_anchor| risk_anchor.feature_id.as_deref() == Some("feature-ledge")
+                    && risk_anchor.target_ids == vec!["body:face:0:5-5-5:100".to_string()]
+                    && risk_anchor.stable_node_keys.is_empty()
+            )));
+
+        let value = serde_json::to_value(&response).expect("printability json");
+        assert_eq!(
+            value["analysis"]["transformSuggestions"][0]["riskAnchor"]["featureId"],
+            "feature-ledge"
+        );
+        assert_eq!(
+            value["analysis"]["transformSuggestions"][0]["riskAnchor"]["targetIds"][0],
+            "body:face:0:5-5-5:100"
+        );
+        assert!(
+            value["analysis"]["transformSuggestions"][0]["riskAnchor"]["stableNodeKeys"].is_null()
+        );
+        assert_eq!(
+            value["analysis"]["riskMetrics"]["unsupportedIslandCount"],
+            1
+        );
+        let split_suggestion_json = value["analysis"]["transformSuggestions"]
+            .as_array()
+            .expect("transform suggestions array")
+            .iter()
+            .find(|suggestion| suggestion["kind"] == "split")
+            .expect("split suggestion json");
+        assert_eq!(split_suggestion_json["unsupportedIslandCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn printability_helicoid_fixture_analysis_and_recipes_include_risk_suggestions_and_anchors(
+    ) {
+        let source =
+            include_str!("../../../model-runtime/examples/film-adapter-film-gap-coupon.ecky");
+        let model_id = "generated-printability-helicoid-fixture";
+        let (state, resolver, _) = seed_ecky_printability_target(
+            source,
+            model_id,
+            "printability-helicoid-fixture-preview.stl",
+        )
+        .await;
+
+        let mut bundle = crate::model_runtime::read_artifact_bundle(&resolver, model_id)
+            .expect("runtime bundle");
+        bundle.face_targets.push(crate::models::ViewerFaceTarget {
+            target_id: "body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.HelicoidFace".to_string(),
+            editable: true,
+            center: crate::models::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
+        let mut manifest = crate::model_runtime::read_model_manifest(&resolver, model_id)
+            .expect("runtime manifest");
+        manifest
+            .selection_targets
+            .push(crate::models::SelectionTarget {
+                target_id: Some("body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string()),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
+                part_id: "body".to_string(),
+                viewer_node_id: "body".to_string(),
+                label: "Body.HelicoidFace".to_string(),
+                kind: crate::models::SelectionTargetKind::Face,
+                editable: true,
+                parameter_keys: Vec::new(),
+                primitive_ids: Vec::new(),
+                view_ids: Vec::new(),
+            });
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "feature-helicoid-thread".to_string(),
+                kind: "helical-ridge".to_string(),
+                label: "Helicoid Thread".to_string(),
+                source_ref: Some(crate::models::SourceRef {
+                    source_id: Some("source-main".to_string()),
+                    path: Some("/parts/body/helicoid".to_string()),
+                    start_byte: Some(320),
+                    end_byte: Some(420),
+                }),
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "feature-helicoid-thread".to_string(),
+                    output_id: "solid".to_string(),
+                    target_ids: vec![
+                        "body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string()
+                    ],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle with helicoid feature graph");
+
+        let analyze_response =
+            handle_printability_analyze(&state, &resolver, "thread-1", "msg-1", model_id)
+                .expect("printability analysis");
+        assert!(analyze_response
+            .analysis
+            .transform_suggestions
+            .iter()
+            .any(|suggestion| {
+                suggestion.kind
+                    == crate::services::printability::PrintabilityTransformSuggestionKind::Split
+                    || suggestion.kind
+                        == crate::services::printability::PrintabilityTransformSuggestionKind::OrientationHint
+            }));
+        assert!(analyze_response
+            .analysis
+            .transform_suggestions
+            .iter()
+            .all(|suggestion| suggestion.risk_anchor.as_ref().is_some_and(
+                |risk_anchor| risk_anchor.feature_id.as_deref() == Some("feature-helicoid-thread")
+                    && risk_anchor.target_ids
+                        == vec!["body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string()]
+                    && risk_anchor.stable_node_keys == vec!["body.helicoid".to_string()]
+            )));
+
+        let analyze_json = serde_json::to_value(&analyze_response).expect("analysis json");
+        assert_eq!(
+            analyze_json["analysis"]["transformSuggestions"][0]["riskAnchor"]["featureId"],
+            "feature-helicoid-thread"
+        );
+        assert_eq!(
+            analyze_json["analysis"]["transformSuggestions"][0]["riskAnchor"]["stableNodeKeys"][0],
+            "body.helicoid"
+        );
+
+        let recipes_response = handle_printability_transform_recipes_get(
+            &state, &resolver, "thread-1", "msg-1", model_id,
+        )
+        .expect("transform recipes");
+        assert!(recipes_response.recipes.iter().any(|recipe| {
+            recipe.action_kind
+                == crate::services::printability::SupportlessFdmRecipeActionKind::Clearance
+                || recipe.action_kind
+                    == crate::services::printability::SupportlessFdmRecipeActionKind::Reorient
+        }));
+        assert!(recipes_response.recipes.iter().all(|recipe| {
+            recipe.risk_anchor.as_ref().is_some_and(|risk_anchor| {
+                risk_anchor.feature_id.as_deref() == Some("feature-helicoid-thread")
+                    && risk_anchor.target_ids
+                        == vec!["body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string()]
+                    && risk_anchor.stable_node_keys == vec!["body.helicoid".to_string()]
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn printability_analyze_preserves_empty_anchor_when_feature_graph_is_ambiguous() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-printability-ambiguous-anchor";
+        let preview_stl_path = resolver
+            .root
+            .join("printability-ambiguous-anchor-preview.stl");
+        write_binary_stl(
+            &preview_stl_path,
+            &[
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
+            ],
+        );
+        let mut bundle = sample_bundle(model_id, "printability-ambiguous-anchor-preview.stl");
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+        let mut manifest = sample_manifest(model_id);
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![
+                crate::models::FeatureNode {
+                    feature_id: "feature-left".to_string(),
+                    kind: "part".to_string(),
+                    label: "Left".to_string(),
+                    source_ref: None,
+                    dependency_ids: Vec::new(),
+                    output_refs: Vec::new(),
+                    ports: Vec::new(),
+                },
+                crate::models::FeatureNode {
+                    feature_id: "feature-right".to_string(),
+                    kind: "part".to_string(),
+                    label: "Right".to_string(),
+                    source_ref: None,
+                    dependency_ids: Vec::new(),
+                    output_refs: Vec::new(),
+                    ports: Vec::new(),
+                },
+            ],
+        });
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let response =
+            handle_printability_analyze(&state, &resolver, "thread-1", "msg-1", model_id)
+                .expect("printability analysis");
+
+        let suggestions = response.analysis.transform_suggestions;
+        assert!(
+            !suggestions.is_empty(),
+            "expected transform suggestions for overhang mesh"
+        );
+        assert!(suggestions
+            .iter()
+            .all(|suggestion| suggestion.source_anchor.is_none()));
+    }
+
+    #[tokio::test]
+    async fn printability_transform_recipes_get_returns_digest_guarded_overhang_recipes() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-printability-recipes";
+        let preview_stl_path = resolver.root.join("printability-recipes-preview.stl");
+        write_binary_stl(
+            &preview_stl_path,
+            &[
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
+            ],
+        );
+        let mut bundle = sample_bundle(model_id, "printability-recipes-preview.stl");
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+        let mut manifest = sample_manifest(model_id);
+        manifest.feature_graph = Some(crate::models::FeatureGraph {
+            nodes: vec![crate::models::FeatureNode {
+                feature_id: "feature-ledge".to_string(),
+                kind: "extrude".to_string(),
+                label: "Ledge".to_string(),
+                source_ref: None,
+                dependency_ids: Vec::new(),
+                output_refs: vec![crate::models::FeatureOutputRef {
+                    feature_id: "feature-ledge".to_string(),
+                    output_id: "solid".to_string(),
+                    target_ids: vec!["body:face:0:5-5-5:100".to_string()],
+                }],
+                ports: Vec::new(),
+            }],
+        });
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let response = handle_printability_transform_recipes_get(
+            &state, &resolver, "thread-1", "msg-1", model_id,
+        )
+        .expect("transform recipes");
+
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.message_id, "msg-1");
+        assert_eq!(response.model_id, model_id);
+        assert_eq!(response.artifact_digest.model_id, model_id);
+        assert_eq!(
+            response.preview_stl_path,
+            preview_stl_path.display().to_string()
+        );
+        let recipe = response
+            .recipes
+            .iter()
+            .find(|recipe| {
+                recipe.action_kind
+                    == crate::services::printability::SupportlessFdmRecipeActionKind::Reorient
+            })
+            .expect("reorient recipe");
+        assert_eq!(
+            recipe.source_anchor.as_deref(),
+            Some("feature:feature-ledge")
+        );
+        assert_eq!(recipe.target.as_deref(), Some("rotateX270"));
+        assert_eq!(
+            recipe.preview_support_status,
+            crate::services::printability::TransformRecipeSupportStatus::Pending
+        );
+        assert_eq!(
+            recipe.apply_support_status,
+            crate::services::printability::TransformRecipeSupportStatus::Unsupported
+        );
+        assert!(recipe
+            .risk_anchor
+            .as_ref()
+            .is_some_and(
+                |risk_anchor| risk_anchor.feature_id.as_deref() == Some("feature-ledge")
+                    && risk_anchor.target_ids == vec!["body:face:0:5-5-5:100".to_string()]
+                    && risk_anchor.stable_node_keys.is_empty()
+            ));
+        assert!(response.recipes.iter().any(|recipe| {
+            recipe.action_kind
+                == crate::services::printability::SupportlessFdmRecipeActionKind::Relief
+        }));
+        let clearance = response
+            .recipes
+            .iter()
+            .find(|recipe| {
+                recipe.action_kind
+                    == crate::services::printability::SupportlessFdmRecipeActionKind::Clearance
+            })
+            .expect("clearance recipe");
+        assert_eq!(clearance.bridge_span_mm, Some(1.0));
+        assert_eq!(clearance.thin_wall_mm, Some(1.0));
+        assert_eq!(clearance.unsupported_island_count, Some(1));
+
+        let value = serde_json::to_value(&response).expect("recipes json");
+        assert_eq!(value["artifactDigest"]["modelId"], model_id);
+        assert_eq!(
+            value["artifactDigest"]["contentHash"],
+            format!("hash-{model_id}")
+        );
+        assert_eq!(value["recipes"][0]["previewSupportStatus"], "pending");
+        assert_eq!(value["recipes"][0]["applySupportStatus"], "unsupported");
+        assert_eq!(
+            value["recipes"][0]["riskAnchor"]["featureId"],
+            "feature-ledge"
+        );
+        let clearance_json = value["recipes"]
+            .as_array()
+            .expect("recipes array")
+            .iter()
+            .find(|recipe| recipe["actionKind"] == "clearance")
+            .expect("clearance recipe json");
+        assert_eq!(clearance_json["bridgeSpanMm"], 1.0);
+        assert_eq!(clearance_json["thinWallMm"], 1.0);
+        assert_eq!(clearance_json["unsupportedIslandCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn printability_transform_recipes_get_returns_empty_for_no_risk_stl() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-printability-no-risk-recipes";
+        let preview_stl_path = resolver.root.join("printability-no-risk-preview.stl");
+        write_closed_tetra_binary_stl(&preview_stl_path);
+        let mut bundle = sample_bundle(model_id, "printability-no-risk-preview.stl");
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+        let manifest = sample_manifest(model_id);
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let response = handle_printability_transform_recipes_get(
+            &state, &resolver, "thread-1", "msg-1", model_id,
+        )
+        .expect("transform recipes");
+
+        assert!(response.recipes.is_empty(), "{:?}", response.recipes);
+    }
+
+    #[tokio::test]
+    async fn printability_transform_recipes_get_reports_missing_preview_stl() {
+        let (state, resolver) = seed_target().await;
+        let model_id = "generated-printability-missing-preview";
+        let mut bundle = sample_bundle(model_id, "missing-preview.stl");
+        bundle.preview_stl_path.clear();
+        let manifest = sample_manifest(model_id);
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let err = handle_printability_transform_recipes_get(
+            &state, &resolver, "thread-1", "msg-1", model_id,
+        )
+        .expect_err("missing preview STL should fail");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert_eq!(err.message, "Artifact bundle has no preview STL path.");
+    }
+
+    async fn seed_ecky_printability_target(
+        source: &str,
+        model_id: &str,
+        preview_name: &str,
+    ) -> (AppState, TestPathResolver, SemanticTransformArtifactGuard) {
+        let (state, resolver) = seed_target_with_macro("Ecky Pot", "V-ecky", source).await;
+        let preview_stl_path = resolver.root.join(preview_name);
+        write_binary_stl(
+            &preview_stl_path,
+            &[
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
+            ],
+        );
+        let source_path = resolver.root.join(format!("{model_id}.ecky"));
+        fs::write(&source_path, source).expect("write ecky source");
+
+        let mut design = sample_design("Ecky Pot", "V-ecky", source);
+        design.macro_dialect = MacroDialect::EckyIrV0;
+        design.engine_kind = crate::models::EngineKind::EckyIrV0;
+        design.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        design.source_language = crate::models::SourceLanguage::EckyIrV0;
+        design.post_processing = None;
+
+        let mut bundle = sample_bundle(model_id, preview_name);
+        bundle.engine_kind = crate::models::EngineKind::EckyIrV0;
+        bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        bundle.source_language = crate::models::SourceLanguage::EckyIrV0;
+        bundle.content_hash = format!("content-{model_id}");
+        bundle.macro_path = Some(source_path.display().to_string());
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+
+        let mut manifest = sample_manifest(model_id);
+        manifest.engine_kind = crate::models::EngineKind::EckyIrV0;
+        manifest.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
+        manifest.source_digest = Some(crate::mcp::macro_buffer::source_digest(source));
+
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+        {
+            let conn = state.db.lock().await;
+            conn.execute(
+                "UPDATE messages SET output = ?1, artifact_bundle = ?2, model_manifest = ?3 WHERE id = 'msg-1'",
+                rusqlite::params![
+                    serde_json::to_string(&design).expect("design json"),
+                    serde_json::to_string(&bundle).expect("bundle json"),
+                    serde_json::to_string(&manifest).expect("manifest json"),
+                ],
+            )
+            .expect("update ecky target");
+        }
+
+        let guard = SemanticTransformArtifactGuard {
+            model_id: model_id.to_string(),
+            preview_stl_path: bundle.preview_stl_path.clone(),
+            content_hash: bundle.content_hash.clone(),
+        };
+        (state, resolver, guard)
+    }
+
+    #[tokio::test]
+    async fn semantic_transform_preview_reorient_recipe_creates_preview_draft_without_committed_message(
+    ) {
+        let source = "(model (part body (box 10 20 30)))";
+        let (state, resolver, expected_artifact) = seed_ecky_printability_target(
+            source,
+            "generated-semantic-reorient",
+            "semantic-reorient.stl",
+        )
+        .await;
+
+        let response = handle_semantic_transform_preview(
+            &state,
+            &resolver,
+            SemanticTransformPreviewRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                model_id: Some("generated-semantic-reorient".to_string()),
+                recipe_id: "supportless-fdm-orientation-best".to_string(),
+                action_kind:
+                    crate::services::printability::SupportlessFdmRecipeActionKind::Reorient,
+                expected_artifact,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("semantic reorient preview");
+
+        assert_eq!(response.thread_id, "thread-1");
+        assert_eq!(response.base_message_id, "msg-1");
+        assert_eq!(response.model_id, response.artifact_digest.model_id);
+        let rendered_bundle =
+            crate::model_runtime::read_artifact_bundle(&resolver, &response.model_id)
+                .expect("rendered runtime bundle");
+        assert_eq!(
+            response.artifact_digest.content_hash,
+            rendered_bundle.content_hash
+        );
+        assert_eq!(response.recipe_id, "supportless-fdm-orientation-best");
+        assert_eq!(
+            response.action_kind,
+            crate::services::printability::SupportlessFdmRecipeActionKind::Reorient
+        );
+        assert_eq!(
+            response.preview_support_status,
+            crate::services::printability::TransformRecipeSupportStatus::Pending
+        );
+        assert_eq!(
+            response.apply_support_status,
+            crate::services::printability::TransformRecipeSupportStatus::Unsupported
+        );
+        assert_eq!(
+            response.source_digest,
+            crate::mcp::macro_buffer::source_digest(source)
+        );
+        assert_ne!(response.source_digest, response.new_source_digest);
+
+        let draft = {
+            let conn = state.db.lock().await;
+            let committed_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?1",
+                    [&response.preview_id],
+                    |row| row.get(0),
+                )
+                .expect("message count");
+            assert_eq!(committed_count, 0);
+            db::get_agent_draft_for_session(&conn, &test_ctx().session_id)
+                .expect("draft query")
+                .expect("draft")
+        };
+        assert_eq!(draft.preview_id, response.preview_id);
+        assert!(draft.design_output.macro_code.contains("(rotate 270 0 0"));
+        assert!(draft.design_output.macro_code.contains("(part body"));
+    }
+
+    #[tokio::test]
+    async fn semantic_transform_preview_stale_model_id_or_preview_stl_guard_rejects_because_digest_lacks_preview_path(
+    ) {
+        let (state, resolver, mut expected_artifact) = seed_ecky_printability_target(
+            "(model (part body (box 10 20 30)))",
+            "generated-semantic-stale",
+            "semantic-stale.stl",
+        )
+        .await;
+        expected_artifact.preview_stl_path = "/tmp/stale-preview.stl".to_string();
+
+        let err = handle_semantic_transform_preview(
+            &state,
+            &resolver,
+            SemanticTransformPreviewRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                model_id: Some("generated-semantic-stale".to_string()),
+                recipe_id: "supportless-fdm-orientation-best".to_string(),
+                action_kind:
+                    crate::services::printability::SupportlessFdmRecipeActionKind::Reorient,
+                expected_artifact,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("stale artifact guard should fail");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("artifact guard mismatch"));
+    }
+
+    #[tokio::test]
+    async fn semantic_transform_preview_missing_content_hash_guard_rejects_at_request_boundary() {
+        let req = serde_json::json!({
+            "threadId": "thread-1",
+            "messageId": "msg-1",
+            "modelId": "generated-semantic-missing-hash",
+            "recipeId": "supportless-fdm-orientation-best",
+            "actionKind": "reorient",
+            "expectedArtifact": {
+                "modelId": "generated-semantic-missing-hash",
+                "previewStlPath": "/tmp/semantic-missing-hash.stl"
+            }
+        });
+
+        let err = serde_json::from_value::<SemanticTransformPreviewRequest>(req)
+            .expect_err("missing contentHash should fail deserialization");
+
+        assert!(err.to_string().contains("contentHash"));
+    }
+
+    #[tokio::test]
+    async fn semantic_transform_preview_stale_content_hash_guard_rejects() {
+        let (state, resolver, mut expected_artifact) = seed_ecky_printability_target(
+            "(model (part body (box 10 20 30)))",
+            "generated-semantic-stale-hash",
+            "semantic-stale-hash.stl",
+        )
+        .await;
+        expected_artifact.content_hash = "stale-content-hash".to_string();
+
+        let err = handle_semantic_transform_preview(
+            &state,
+            &resolver,
+            SemanticTransformPreviewRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                model_id: Some("generated-semantic-stale-hash".to_string()),
+                recipe_id: "supportless-fdm-orientation-best".to_string(),
+                action_kind:
+                    crate::services::printability::SupportlessFdmRecipeActionKind::Reorient,
+                expected_artifact,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("stale contentHash should fail");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("artifact guard mismatch"));
+        assert!(err.message.contains("contentHash"));
+    }
+
+    #[tokio::test]
+    async fn semantic_transform_preview_unsupported_actions_return_explicit_validation_errors() {
+        let (state, resolver, expected_artifact) = seed_ecky_printability_target(
+            "(model (part body (box 10 20 30)))",
+            "generated-semantic-unsupported",
+            "semantic-unsupported.stl",
+        )
+        .await;
+
+        for action_kind in [
+            crate::services::printability::SupportlessFdmRecipeActionKind::Chamfer,
+            crate::services::printability::SupportlessFdmRecipeActionKind::Split,
+            crate::services::printability::SupportlessFdmRecipeActionKind::Relief,
+            crate::services::printability::SupportlessFdmRecipeActionKind::Clearance,
+        ] {
+            let err = handle_semantic_transform_preview(
+                &state,
+                &resolver,
+                SemanticTransformPreviewRequest {
+                    identity: AgentIdentityOverride::default(),
+                    thread_id: Some("thread-1".to_string()),
+                    message_id: Some("msg-1".to_string()),
+                    model_id: Some("generated-semantic-unsupported".to_string()),
+                    recipe_id: "supportless-fdm-unsupported".to_string(),
+                    action_kind,
+                    expected_artifact: expected_artifact.clone(),
+                },
+                &test_ctx(),
+            )
+            .await
+            .expect_err("unsupported transform should fail");
+
+            assert_eq!(err.code, AppErrorCode::Validation);
+            assert!(err.message.contains("unsupported"));
+            assert!(err.message.contains(match action_kind {
+                crate::services::printability::SupportlessFdmRecipeActionKind::Chamfer => "chamfer",
+                crate::services::printability::SupportlessFdmRecipeActionKind::Split => "split",
+                crate::services::printability::SupportlessFdmRecipeActionKind::Relief => "relief",
+                crate::services::printability::SupportlessFdmRecipeActionKind::Clearance =>
+                    "clearance",
+                crate::services::printability::SupportlessFdmRecipeActionKind::Reorient =>
+                    unreachable!(),
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_transform_preview_non_ecky_source_is_unsupported() {
+        let (state, resolver) = seed_target().await;
+        let preview_stl_path = resolver.root.join("semantic-legacy.stl");
+        write_binary_stl(
+            &preview_stl_path,
+            &[
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
+            ],
+        );
+        let model_id = "generated-semantic-legacy";
+        let mut bundle = sample_bundle(model_id, "semantic-legacy.stl");
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+        let manifest = sample_manifest(model_id);
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+
+        let err = handle_semantic_transform_preview(
+            &state,
+            &resolver,
+            SemanticTransformPreviewRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                model_id: Some(model_id.to_string()),
+                recipe_id: "supportless-fdm-orientation-best".to_string(),
+                action_kind:
+                    crate::services::printability::SupportlessFdmRecipeActionKind::Reorient,
+                expected_artifact: SemanticTransformArtifactGuard {
+                    model_id: model_id.to_string(),
+                    preview_stl_path: bundle.preview_stl_path.clone(),
+                    content_hash: bundle.content_hash.clone(),
+                },
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("non-Ecky source should fail");
+
+        assert_eq!(err.code, AppErrorCode::Validation);
+        assert!(err.message.contains("sourceLanguage=ecky"));
     }
 
     #[tokio::test]

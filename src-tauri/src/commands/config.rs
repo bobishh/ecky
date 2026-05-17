@@ -56,6 +56,13 @@ pub async fn list_models(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn get_design_system_prompt(provider: Option<String>) -> AppResult<String> {
+    let _ = provider;
+    Ok(crate::TECHNICAL_SYSTEM_PROMPT.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_app_logs(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<crate::contracts::AppLogEntry>> {

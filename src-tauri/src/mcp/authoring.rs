@@ -10,11 +10,13 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- Do not reuse parameter keys with different meanings. Keep macroCode, uiSpec, and initialParams aligned; remove stale params.\n",
     "- Valid basics: `(box 40 20 10 :align '(min center min))`, `(extrude (polygon ((0 0) (100 0) (100 20) (0 20))) 8)`, `(place (location (plane :origin '(80 0 6)) :rotate '(0 90 0)) (cylinder 4 18))`.\n",
     "- `let` is parallel; use `let*` when later bindings depend on earlier bindings.\n",
-    "- Read `ecky://guides/ecky-source`, the backend guide, the matching surface manifest, and the matching surface reference before inventing helpers or CAD ops.\n",
+    "- Guide routing is dynamic. For `sourceLanguage=ecky`, read `ecky://guides/ecky-source` as the primary language guide. Read backend manifests only when checking a specific op/support question. Read prose backend guides only after a lowerer/render error or artifact/export claim.\n",
     "- Fillet/chamfer are topology-sensitive. If a selector matches no edges after one smaller-radius retry and one selector retry, stop retrying fillet/chamfer; rebuild the shape with rounded source geometry (`rounded-rect`, `rounded-polygon`, `offset-rounded`, `loft`, `taper`, `cone`, or explicit profiles).\n",
     "- Do not promise STEP unless current artifact truth says `hasStepExport=true` or exportArtifacts contains `format=step`; direct OCCT is internal, not a selectable user backend.\n",
     "- For an existing design target, call `thread_borrow`; for a brand-new design, call `thread_create`, then render the first version with `macro_preview_render`.\n",
     "- Render with `macro_preview_render`. If validation fails, surface exact raw error, fix source properly, and render again.\n",
+    "- Persist successful previews with `commit_preview_version`; include returned `threadId`, `messageId`, and `modelId` in agent evidence.\n",
+    "- Never write `history.sqlite` directly from scripts or agents. Version updates must flow through MCP tools only.\n",
     "- Verify geometry with `get_model_screenshot` after successful render.\n"
 );
 
@@ -51,24 +53,16 @@ pub(crate) fn guide_uris(
 
     if source_language == SourceLanguage::EckyIrV0 {
         uris.push("ecky://guides/ecky-source".to_string());
-    }
-
-    uris.push(match geometry_backend {
-        GeometryBackend::Build123d => "ecky://guides/build123d".to_string(),
-        GeometryBackend::Freecad => "ecky://guides/freecad".to_string(),
-        GeometryBackend::EckyRust => "ecky://guides/ecky-rust".to_string(),
-    });
-
-    if source_language == SourceLanguage::EckyIrV0 {
         uris.push(match geometry_backend {
             GeometryBackend::Build123d => "ecky://guides/surface-manifest/build123d".to_string(),
             GeometryBackend::Freecad => "ecky://guides/surface-manifest/freecad".to_string(),
             GeometryBackend::EckyRust => "ecky://guides/surface-manifest/ecky-rust".to_string(),
         });
+    } else {
         uris.push(match geometry_backend {
-            GeometryBackend::Build123d => "ecky://guides/surface-reference/build123d".to_string(),
-            GeometryBackend::Freecad => "ecky://guides/surface-reference/freecad".to_string(),
-            GeometryBackend::EckyRust => "ecky://guides/surface-reference/ecky-rust".to_string(),
+            GeometryBackend::Build123d => "ecky://guides/build123d".to_string(),
+            GeometryBackend::Freecad => "ecky://guides/freecad".to_string(),
+            GeometryBackend::EckyRust => "ecky://guides/ecky-rust".to_string(),
         });
     }
 

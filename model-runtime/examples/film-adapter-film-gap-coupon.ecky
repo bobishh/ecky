@@ -1,0 +1,15 @@
+(model
+  (params
+    (number film_gap 0.35 :label "film gap" :min 0.2 :max 1.2 :step 0.01)
+    (number lens_bore_d 59.6 :label "lens bore D" :min 50 :max 68 :step 0.1))
+
+  (part film_gate
+    (build
+      (shape body (box 36 24 3.2))
+      (shape slot (translate 0 0 0.2 (box 40 film_gap 2.6)))
+      (result (difference body slot))))
+
+  (part lens_adapter
+    (build
+      (shape body (box lens_bore_d 8 4))
+      (result body))))

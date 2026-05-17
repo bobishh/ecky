@@ -74,12 +74,28 @@ pub(crate) fn durable_edge_target_id(
     durable_topology_target_id(part_id, root_node_id, target_id, ":edge:")
 }
 
+pub(crate) fn durable_edge_target_id_for_stable_node_key(
+    part_id: &str,
+    stable_node_key: &str,
+    target_id: &str,
+) -> Option<String> {
+    durable_topology_target_id_for_stable_node_key(part_id, stable_node_key, target_id, ":edge:")
+}
+
 pub(crate) fn durable_face_target_id(
     part_id: &str,
     root_node_id: u64,
     target_id: &str,
 ) -> Option<String> {
     durable_topology_target_id(part_id, root_node_id, target_id, ":face:")
+}
+
+pub(crate) fn durable_face_target_id_for_stable_node_key(
+    part_id: &str,
+    stable_node_key: &str,
+    target_id: &str,
+) -> Option<String> {
+    durable_topology_target_id_for_stable_node_key(part_id, stable_node_key, target_id, ":face:")
 }
 
 pub(crate) fn topology_target_aliases(
@@ -114,6 +130,22 @@ fn durable_topology_target_id(
 ) -> Option<String> {
     let (_, payload) = target_id.trim().split_once(marker)?;
     Some(format!("{part_id}:node:{root_node_id}{marker}{payload}"))
+}
+
+fn durable_topology_target_id_for_stable_node_key(
+    part_id: &str,
+    stable_node_key: &str,
+    target_id: &str,
+    marker: &str,
+) -> Option<String> {
+    let stable_node_key = stable_node_key.trim();
+    if stable_node_key.is_empty() {
+        return None;
+    }
+    let (_, payload) = target_id.trim().split_once(marker)?;
+    Some(format!(
+        "{part_id}:stable-node-key:{stable_node_key}{marker}{payload}"
+    ))
 }
 
 fn portable_topology_target_id_with_marker(target_id: &str, marker: &str) -> Option<String> {
@@ -213,7 +245,8 @@ mod tests {
     use crate::models::{SelectionTarget, SelectionTargetKind};
 
     use super::{
-        durable_edge_target_id, durable_face_target_id, is_stable_topology_target_id,
+        durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
+        durable_face_target_id_for_stable_node_key, is_stable_topology_target_id,
         portable_topology_target_id, preferred_public_topology_target_id, stable_edge_target_id,
         stable_face_target_id, topology_target_aliases, viewer_target_alias_ids,
     };
@@ -303,6 +336,28 @@ mod tests {
         assert_eq!(
             durable_face_target_id("body", 42, "body:face:0-0-10:100").as_deref(),
             Some("body:node:42:face:0-0-10:100")
+        );
+    }
+
+    #[test]
+    fn durable_topology_target_ids_accept_stable_node_key() {
+        assert_eq!(
+            durable_edge_target_id_for_stable_node_key(
+                "body",
+                "sha256:abcdef",
+                "body:edge:0-0-0_10-0-0",
+            )
+            .as_deref(),
+            Some("body:stable-node-key:sha256:abcdef:edge:0-0-0_10-0-0")
+        );
+        assert_eq!(
+            durable_face_target_id_for_stable_node_key(
+                "body",
+                "sha256:abcdef",
+                "body:face:0-0-10:100",
+            )
+            .as_deref(),
+            Some("body:stable-node-key:sha256:abcdef:face:0-0-10:100")
         );
     }
 }

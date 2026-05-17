@@ -14,6 +14,85 @@ fn surface_fixture(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
 }
 
+fn example_fixture(name: &str) -> String {
+    let path = format!(
+        "{}/../model-runtime/examples/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        name
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
+}
+
+fn example_fixture_required(name: &str) -> String {
+    let path = format!(
+        "{}/../model-runtime/examples/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        name
+    );
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "missing fixture `{}` at `{}`; add fixture or mark test pending",
+        name,
+        path
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
+}
+
+fn fixture_part_names(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cursor = source;
+    while let Some(pos) = cursor.find("(part") {
+        cursor = &cursor[pos + "(part".len()..];
+        let trimmed = cursor.trim_start();
+        let skip = cursor.len() - trimmed.len();
+        cursor = &cursor[skip..];
+        let end = cursor
+            .find(|c: char| c.is_whitespace() || c == ')' || c == '(')
+            .unwrap_or(cursor.len());
+        let name = &cursor[..end];
+        if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+        cursor = &cursor[end..];
+    }
+    names
+}
+
+fn assert_tuple_contains_fixture_parts(code: &str, source: &str, fixture_name: &str) {
+    let part_names = fixture_part_names(source);
+    assert!(
+        !part_names.is_empty(),
+        "fixture `{}` should declare at least one part",
+        fixture_name
+    );
+    for part_name in part_names {
+        let marker = format!(r#"("{}", "#, part_name);
+        assert!(
+            code.contains(&marker),
+            "missing part `{}` in tuple for fixture `{}`: {}",
+            part_name,
+            fixture_name,
+            code
+        );
+    }
+}
+
+fn assert_marker_hits_at_least(code: &str, markers: &[&str], min_hits: usize, label: &str) {
+    let hits = markers
+        .iter()
+        .filter(|marker| code.contains(**marker))
+        .count();
+    assert!(
+        hits >= min_hits,
+        "expected at least {} marker hits for {} from {:?}, got {}: {}",
+        min_hits,
+        label,
+        markers,
+        hits,
+        code
+    );
+}
+
 #[test]
 fn lower_to_build123d_minimal_extrude() {
     let src = r#"(model (part body (extrude (rounded_rect 30 20 4) 10)))"#;
@@ -580,6 +659,65 @@ fn lower_to_build123d_sweep_profile_with_holes() {
 }
 
 #[test]
+fn lower_to_build123d_helical_ridge_uses_helix_sweep() {
+    let src = r#"(model
+        (part thread
+          (helical-ridge
+            :radius 10
+            :pitch 2
+            :height 18
+            :base-width 1.2
+            :crest-width 0.4
+            :depth 0.7)))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("_ecky_helical_ridge("),
+        "helical ridge helper: {}",
+        code
+    );
+    assert!(code.contains("Edge.make_helix("), "helix path: {}", code);
+    assert!(code.contains("Polyline("), "trapezoid profile: {}", code);
+    assert!(code.contains("sweep("), "sweep call: {}", code);
+    assert!(
+        code.contains("_ecky_helical_ridge(10.0, 2.0, 18.0, 1.2, 0.4, 0.7"),
+        "positional contract: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_helical_ridge_female_keeps_path_radius_and_expands_envelope() {
+    let src = r#"(model
+        (part thread
+          (helical-ridge
+            :radius 10
+            :pitch 2
+            :height 18
+            :base-width 1.2
+            :crest-width 0.4
+            :depth 0.7
+            :female #t
+            :clearance 0.15
+            :lefthand #t)))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("path_radius = radius"),
+        "same path radius: {}",
+        code
+    );
+    assert!(
+        code.contains("envelope_clearance = clearance if female else 0.0"),
+        "female envelope expansion: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_helical_ridge(10.0, 2.0, 18.0, 1.2, 0.4, 0.7, female=True, clearance=0.15, lefthand=True)"),
+        "female args: {}",
+        code
+    );
+}
+
+#[test]
 fn lower_to_build123d_build_shape_result_clip_and_place() {
     let src = r#"(model
         (part body
@@ -828,6 +966,21 @@ fn lower_to_build123d_profile_with_holes() {
     assert!(code.contains("Circle(10.0)"), "hole circle");
     assert!(code.contains("_ecky_face_with_holes("), "hole subtraction");
     assert!(code.contains("extrude("), "extrude");
+}
+
+#[test]
+fn lower_core_program_to_build123d_ring_alias_lowers_to_profile_with_hole() {
+    let src = r#"(model (part body (extrude (ring 20 10 96) 10)))"#;
+    let program = crate::ecky_scheme::compile_to_core_program(src).expect("compile core program");
+    let code = lower_core_program_to_build123d(&program).expect("lower core program");
+    assert!(code.contains("Circle(20.0)"), "outer circle: {}", code);
+    assert!(code.contains("Circle(10.0)"), "inner circle: {}", code);
+    assert!(
+        code.contains("_ecky_face_with_holes("),
+        "ring hole: {}",
+        code
+    );
+    assert!(code.contains("extrude("), "extrude: {}", code);
 }
 
 #[test]
@@ -1620,6 +1773,252 @@ fn lower_to_build123d_thomas_modular_ramp_fixture() {
         code.contains("tooth_phase_shift"),
         "keeps ramp helper bindings: {}",
         code
+    );
+}
+
+#[test]
+fn lower_to_build123d_direct_occt_frame_array_bracket_fixture_keeps_op_mix_markers() {
+    let source = surface_fixture("direct_occt_frame_array_bracket.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(code.contains("Bezier("), "rail bezier path: {}", code);
+    assert!(
+        code.contains("_ecky_path_frame("),
+        "path-frame helper: {}",
+        code
+    );
+    assert!(code.contains("_ecky_place("), "place helper: {}", code);
+    assert!(
+        code.contains("_ecky_clip_box("),
+        "clip-box helper: {}",
+        code
+    );
+    assert!(
+        code.contains("for __ecky_ra_i in range(1, 6)"),
+        "radial-array loop: {}",
+        code
+    );
+    assert!(
+        code.contains("for __ecky_ga_r in range(2):")
+            && code.contains("for __ecky_ga_c in range(3):"),
+        "grid-array loops: {}",
+        code
+    );
+    assert!(
+        code.contains(r#"("bracket","#),
+        "fixture part tuple should stay stable: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_direct_occt_snap_clip_fixture_keeps_tuple_and_curve_markers() {
+    let source = surface_fixture("direct_occt_snap_clip.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(
+        code.contains("RectangleRounded(42.0, 24.0, 3.0)"),
+        "saddle base: {}",
+        code
+    );
+    assert!(code.contains("fillet("), "fillet call: {}", code);
+    assert!(
+        code.contains("_ecky_cut_many("),
+        "difference helper: {}",
+        code
+    );
+    assert!(code.contains("Bezier("), "latch curve: {}", code);
+    assert!(code.contains("sweep("), "latch sweep: {}", code);
+    assert!(
+        code.contains(r#"("saddle","#) && code.contains(r#"("latch","#),
+        "fixture parts should stay stable: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_wall_pattern_fixture_reports_unsupported_operation_context() {
+    let source = surface_fixture("wall_pattern_cellular.ecky");
+    let err = crate::ecky_ir::lower_to_build123d(&source).expect_err("wall-pattern unsupported");
+    let message = err.to_string();
+    assert!(
+        message.contains("Node `wall-pattern` is not yet supported by the build123d lowerer")
+            && message.contains("Switch backend and rerender"),
+        "unexpected error context: {}",
+        message
+    );
+}
+
+#[test]
+fn lower_to_build123d_film_scanning_adapter_helicoid_fixture() {
+    let source = example_fixture("film-scanning-adapter-helicoid.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(
+        code.contains("_ecky_helical_ridge("),
+        "helicoid helper: {}",
+        code
+    );
+    assert!(code.contains("Edge.make_helix("), "helix path: {}", code);
+    assert!(
+        code.contains(r#"("top_cover_integrated_helicoid","#)
+            && code.contains(r#"("moving_lens_carrier","#),
+        "fixture part list should stay stable: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_helicoid_thread_coupon_fixture_keeps_clearance_variants() {
+    let source = example_fixture("helicoid-thread-coupon.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(
+        code.contains("_ecky_helical_ridge("),
+        "helicoid helper: {}",
+        code
+    );
+    assert!(code.contains("Edge.make_helix("), "helix path: {}", code);
+    assert!(
+        code.contains(r#"("coupon_male_020","#)
+            && code.contains(r#"("coupon_female_020","#)
+            && code.contains(r#"("coupon_male_025","#)
+            && code.contains(r#"("coupon_female_025","#)
+            && code.contains(r#"("coupon_male_030","#)
+            && code.contains(r#"("coupon_female_030","#)
+            && code.contains(r#"("coupon_male_035","#)
+            && code.contains(r#"("coupon_female_035","#),
+        "fixture part list should stay stable: {}",
+        code
+    );
+    assert!(
+        code.contains("clearance=0.2")
+            && code.contains("clearance=0.25")
+            && code.contains("clearance=0.3")
+            && code.contains("clearance=0.35"),
+        "female clearance variants should lower into helper calls: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_film_adapter_film_gap_coupon_fixture_keeps_boolean_and_part_tuple() {
+    let source = example_fixture("film-adapter-film-gap-coupon.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(
+        code.contains(r#"float(params.get("film_gap", 0.35))"#),
+        "film gap param should lower through params map: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_apply_transform("),
+        "translate helper: {}",
+        code
+    );
+    assert!(
+        code.contains("_ecky_cut_many("),
+        "difference helper: {}",
+        code
+    );
+    assert!(
+        code.contains(r#"("film_gate","#) && code.contains(r#"("lens_adapter","#),
+        "fixture part tuple should stay stable: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_film_path_gap_coupon_fixture_keeps_gap_variants_and_transforms() {
+    let source = example_fixture("film-path-gap-coupon.ecky");
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert!(
+        code.contains("_ecky_cut_many("),
+        "difference helper: {}",
+        code
+    );
+    assert!(
+        code.contains("Pos(0.0, 0.0, 0.2)") && code.contains("Pos(0.0, 0.0, 0.1)"),
+        "translate variants for lower/upper guides: {}",
+        code
+    );
+    assert!(
+        code.contains("Box(84.0, 0.35, 2.0")
+            && code.contains("Box(84.0, 0.45, 2.0")
+            && code.contains("Box(84.0, 0.55, 2.0"),
+        "gap variants should lower into strip pass solids: {}",
+        code
+    );
+    assert!(
+        code.contains(r#"("film_path_lower_035","#)
+            && code.contains(r#"("film_path_upper_clamp_035","#)
+            && code.contains(r#"("film_path_lower_045","#)
+            && code.contains(r#"("film_path_upper_clamp_045","#)
+            && code.contains(r#"("film_path_lower_055","#)
+            && code.contains(r#"("film_path_upper_clamp_055","#),
+        "fixture part tuple should stay stable: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_dovetail_box_fixture_keeps_tuple_and_boolean_markers() {
+    let fixture_name = "dovetail-box.ecky";
+    let source = example_fixture_required(fixture_name);
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert_tuple_contains_fixture_parts(&code, &source, fixture_name);
+    assert_marker_hits_at_least(
+        &code,
+        &[
+            "_ecky_cut_many(",
+            "_ecky_apply_transform(",
+            "_ecky_fuse_many(",
+        ],
+        2,
+        fixture_name,
+    );
+}
+
+#[test]
+fn lower_to_build123d_vermicomposter_lid_clearance_fixture_keeps_tuple_and_clearance_markers() {
+    let fixture_name = "vermicomposter-lid-clearance.ecky";
+    let source = example_fixture_required(fixture_name);
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert_tuple_contains_fixture_parts(&code, &source, fixture_name);
+    assert_marker_hits_at_least(
+        &code,
+        &[
+            r#"float(params.get("lid_clearance","#,
+            "float(params.get(",
+            "_ecky_cut_many(",
+            "_ecky_apply_transform(",
+        ],
+        2,
+        fixture_name,
+    );
+}
+
+#[test]
+fn lower_to_build123d_snap_hook_coupon_fixture_keeps_tuple_and_snap_markers() {
+    let fixture_name = "snap-hook-coupon.ecky";
+    let source = example_fixture_required(fixture_name);
+    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+
+    assert_tuple_contains_fixture_parts(&code, &source, fixture_name);
+    assert_marker_hits_at_least(
+        &code,
+        &[
+            "Bezier(",
+            "sweep(",
+            "fillet(",
+            "_ecky_cut_many(",
+            "_ecky_apply_transform(",
+        ],
+        2,
+        fixture_name,
     );
 }
 

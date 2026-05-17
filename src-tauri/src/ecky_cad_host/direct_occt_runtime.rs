@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::direct_occt_executor::export_core_program_step_stl_with_params;
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
-use crate::ecky_core_ir::CoreProgram;
+use crate::ecky_core_ir::{CorePart, CoreProgram};
 use crate::models::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
     EnrichmentStatus, ExportArtifact, GeometryBackend, ManifestEnrichmentState, ModelManifest,
@@ -18,8 +18,9 @@ use crate::models::{
     MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::topology_target_ids::{
-    preferred_public_topology_target_id, stable_edge_target_id, stable_face_target_id,
-    topology_target_aliases, viewer_target_alias_ids,
+    durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
+    durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
+    stable_edge_target_id, stable_face_target_id, topology_target_aliases, viewer_target_alias_ids,
 };
 
 const SOURCE_FILE_NAME: &str = "source.ecky";
@@ -141,12 +142,21 @@ pub(crate) fn render_core_program_runtime_bundle(
                 .iter()
                 .map(|part| (part.key.clone(), part.root.id.raw()))
                 .collect::<HashMap<_, _>>();
-            let manifest = build_direct_occt_manifest(
+            let part_stable_node_keys = program
+                .parts
+                .iter()
+                .filter_map(|part| {
+                    direct_occt_source_stable_node_key(source_identity, part)
+                        .map(|stable_node_key| (part.key.clone(), stable_node_key))
+                })
+                .collect::<HashMap<_, _>>();
+            let manifest = build_direct_occt_manifest_with_stable_node_keys(
                 &model_id,
                 &source_path,
                 &part_specs,
                 &parameter_keys,
                 topology_report.as_ref(),
+                &part_stable_node_keys,
                 &part_root_node_ids,
             )?;
             let bundle = build_direct_occt_bundle(
@@ -182,18 +192,46 @@ pub(crate) fn build_direct_occt_manifest(
     topology_report: Option<&DirectOcctTopologyReport>,
     part_root_node_ids: &HashMap<String, u64>,
 ) -> AppResult<ModelManifest> {
+    let part_stable_node_keys = HashMap::new();
+    build_direct_occt_manifest_with_stable_node_keys(
+        model_id,
+        source_path,
+        parts,
+        parameter_keys,
+        topology_report,
+        &part_stable_node_keys,
+        part_root_node_ids,
+    )
+}
+
+pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
+    model_id: &str,
+    source_path: &Path,
+    parts: &[(String, String)],
+    parameter_keys: &[String],
+    topology_report: Option<&DirectOcctTopologyReport>,
+    part_stable_node_keys: &HashMap<String, String>,
+    part_root_node_ids: &HashMap<String, u64>,
+) -> AppResult<ModelManifest> {
     let part_bindings = direct_occt_part_bindings(parts, parameter_keys);
     let part_ids = part_bindings
         .iter()
         .map(|part| part.part_id.clone())
         .collect::<Vec<_>>();
-    let selection_targets =
-        direct_occt_selection_targets(&part_bindings, topology_report, part_root_node_ids)?;
+    let selection_targets = direct_occt_selection_targets(
+        &part_bindings,
+        topology_report,
+        part_stable_node_keys,
+        part_root_node_ids,
+    )?;
 
     Ok(ModelManifest {
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
+        source_digest: None,
+        core_digest: None,
+        ast_schema_version: None,
         engine_kind: EngineKind::EckyIrV0,
         source_language: SourceLanguage::EckyIrV0,
         geometry_backend: GeometryBackend::EckyRust,
@@ -220,6 +258,8 @@ pub(crate) fn build_direct_occt_manifest(
         advisories: Vec::new(),
         selection_targets,
         measurement_annotations: Vec::new(),
+        feature_graph: None,
+        correspondence_graph: None,
         warnings: Vec::new(),
         enrichment_state: ManifestEnrichmentState {
             status: EnrichmentStatus::None,
@@ -325,6 +365,26 @@ fn content_hash(source_identity: &str, params_json: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn direct_occt_source_stable_node_key(source_identity: &str, part: &CorePart) -> Option<String> {
+    let span = part.root.span?;
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= end
+        || end > source_identity.len()
+        || !source_identity.is_char_boundary(start)
+        || !source_identity.is_char_boundary(end)
+    {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"direct-occt-part-root|");
+    hasher.update(part.key.as_bytes());
+    hasher.update(b"|");
+    hasher.update(&source_identity.as_bytes()[start..end]);
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
 fn model_id_from_hash(hash: &str) -> String {
     format!("generated-direct-occt-{}", &hash[..12])
 }
@@ -349,6 +409,7 @@ fn read_direct_occt_topology_report(path: &Path) -> AppResult<Option<DirectOcctT
 fn direct_occt_selection_targets(
     part_bindings: &[PartBinding],
     topology_report: Option<&DirectOcctTopologyReport>,
+    part_stable_node_keys: &HashMap<String, String>,
     part_root_node_ids: &HashMap<String, u64>,
 ) -> AppResult<Vec<SelectionTarget>> {
     let Some(topology_report) = topology_report else {
@@ -372,6 +433,8 @@ fn direct_occt_selection_targets(
             .first()
             .cloned()
             .unwrap_or_else(|| part_binding.part_id.clone());
+        let topology_parameter_keys =
+            direct_occt_topology_target_parameter_keys(&part_binding.parameter_keys);
 
         for edge in topology_part
             .edges
@@ -403,12 +466,13 @@ fn direct_occt_selection_targets(
                     continue;
                 }
             }
-            let durable_target_id = part_root_node_ids
-                .get(part_id)
-                .and_then(|root_node_id| {
-                    direct_occt_durable_edge_target_id(part_id, *root_node_id, &public_target_id)
-                })
-                .filter(|durable_target_id| seen_manifest_ids.insert(durable_target_id.clone()));
+            let durable_target_id = direct_occt_durable_edge_target_id(
+                part_id,
+                part_stable_node_keys.get(part_id).map(String::as_str),
+                part_root_node_ids.get(part_id).copied(),
+                &public_target_id,
+            )
+            .filter(|durable_target_id| seen_manifest_ids.insert(durable_target_id.clone()));
             let canonical_target_id_value = if canonical_target_id != public_target_id
                 && seen_manifest_ids.insert(canonical_target_id.clone())
             {
@@ -430,8 +494,8 @@ fn direct_occt_selection_targets(
                 viewer_node_id: viewer_node_id.clone(),
                 label: direct_occt_edge_label(topology_part, edge),
                 kind: SelectionTargetKind::Edge,
-                editable: part_binding.editable,
-                parameter_keys: part_binding.parameter_keys.clone(),
+                editable: !topology_parameter_keys.is_empty(),
+                parameter_keys: topology_parameter_keys.clone(),
                 primitive_ids: Vec::new(),
                 view_ids: Vec::new(),
             });
@@ -467,12 +531,13 @@ fn direct_occt_selection_targets(
                     continue;
                 }
             }
-            let durable_target_id = part_root_node_ids
-                .get(part_id)
-                .and_then(|root_node_id| {
-                    direct_occt_durable_face_target_id(part_id, *root_node_id, &public_target_id)
-                })
-                .filter(|durable_target_id| seen_manifest_ids.insert(durable_target_id.clone()));
+            let durable_target_id = direct_occt_durable_face_target_id(
+                part_id,
+                part_stable_node_keys.get(part_id).map(String::as_str),
+                part_root_node_ids.get(part_id).copied(),
+                &public_target_id,
+            )
+            .filter(|durable_target_id| seen_manifest_ids.insert(durable_target_id.clone()));
             let canonical_target_id_value = if canonical_target_id != public_target_id
                 && seen_manifest_ids.insert(canonical_target_id.clone())
             {
@@ -494,8 +559,8 @@ fn direct_occt_selection_targets(
                 viewer_node_id: viewer_node_id.clone(),
                 label: direct_occt_face_label(topology_part, face),
                 kind: SelectionTargetKind::Face,
-                editable: part_binding.editable,
-                parameter_keys: part_binding.parameter_keys.clone(),
+                editable: !topology_parameter_keys.is_empty(),
+                parameter_keys: topology_parameter_keys.clone(),
                 primitive_ids: Vec::new(),
                 view_ids: Vec::new(),
             });
@@ -503,6 +568,11 @@ fn direct_occt_selection_targets(
     }
 
     Ok(selection_targets)
+}
+
+fn direct_occt_topology_target_parameter_keys(parameter_keys: &[String]) -> Vec<String> {
+    let _ = parameter_keys;
+    Vec::new()
 }
 
 fn direct_occt_edge_targets(
@@ -650,10 +720,18 @@ fn direct_occt_stable_edge_target_id(target_id: &str) -> String {
 
 fn direct_occt_durable_edge_target_id(
     part_id: &str,
-    root_node_id: u64,
+    stable_node_key: Option<&str>,
+    root_node_id: Option<u64>,
     target_id: &str,
 ) -> Option<String> {
-    direct_occt_durable_topology_target_id(part_id, root_node_id, target_id, ":edge:")
+    stable_node_key
+        .and_then(|stable_node_key| {
+            durable_edge_target_id_for_stable_node_key(part_id, stable_node_key, target_id)
+        })
+        .or_else(|| {
+            root_node_id
+                .and_then(|root_node_id| durable_edge_target_id(part_id, root_node_id, target_id))
+        })
 }
 
 fn direct_occt_edge_label(
@@ -708,20 +786,18 @@ fn direct_occt_stable_face_target_id(target_id: &str) -> String {
 
 fn direct_occt_durable_face_target_id(
     part_id: &str,
-    root_node_id: u64,
+    stable_node_key: Option<&str>,
+    root_node_id: Option<u64>,
     target_id: &str,
 ) -> Option<String> {
-    direct_occt_durable_topology_target_id(part_id, root_node_id, target_id, ":face:")
-}
-
-fn direct_occt_durable_topology_target_id(
-    part_id: &str,
-    root_node_id: u64,
-    target_id: &str,
-    marker: &str,
-) -> Option<String> {
-    let (_, payload) = target_id.trim().split_once(marker)?;
-    Some(format!("{part_id}:node:{root_node_id}{marker}{payload}"))
+    stable_node_key
+        .and_then(|stable_node_key| {
+            durable_face_target_id_for_stable_node_key(part_id, stable_node_key, target_id)
+        })
+        .or_else(|| {
+            root_node_id
+                .and_then(|root_node_id| durable_face_target_id(part_id, root_node_id, target_id))
+        })
 }
 
 fn direct_occt_face_label(
@@ -1096,6 +1172,220 @@ mod tests {
         assert_eq!(bundle.edge_targets[0].end.x, 10.0);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_multi_param_topology_targets_have_empty_parameter_keys() {
+        let root = temp_root("direct-occt-multi-param-topology-keys");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model)").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                edges: vec![DirectOcctTopologyEdge {
+                    target_id: None,
+                    edge_index: Some(0),
+                    label: String::new(),
+                    start: Some(DirectOcctTopologyPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                    end: Some(DirectOcctTopologyPoint {
+                        x: 10.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                }],
+                faces: vec![DirectOcctTopologyFace {
+                    target_id: None,
+                    face_index: Some(0),
+                    label: String::new(),
+                    center: Some(DirectOcctTopologyPoint {
+                        x: 5.0,
+                        y: 5.0,
+                        z: 5.0,
+                    }),
+                    normal: Some([0.0, 0.0, 1.0]),
+                    area: Some(100.0),
+                }],
+            }],
+        };
+
+        let manifest = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &["width".to_string(), "height".to_string()],
+            Some(&topology),
+            &HashMap::new(),
+        )
+        .expect("manifest");
+
+        assert_eq!(
+            manifest.parts[0].parameter_keys,
+            vec!["width".to_string(), "height".to_string()]
+        );
+        let edge = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .expect("edge target");
+        let face = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .expect("face target");
+        assert!(edge.parameter_keys.is_empty());
+        assert!(!edge.editable);
+        assert!(face.parameter_keys.is_empty());
+        assert!(!face.editable);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_single_param_topology_targets_still_require_exact_binding() {
+        let root = temp_root("direct-occt-single-param-topology-key");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model)").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                edges: vec![DirectOcctTopologyEdge {
+                    target_id: None,
+                    edge_index: Some(0),
+                    label: String::new(),
+                    start: Some(DirectOcctTopologyPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                    end: Some(DirectOcctTopologyPoint {
+                        x: 10.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                }],
+                faces: vec![DirectOcctTopologyFace {
+                    target_id: None,
+                    face_index: Some(0),
+                    label: String::new(),
+                    center: Some(DirectOcctTopologyPoint {
+                        x: 5.0,
+                        y: 5.0,
+                        z: 5.0,
+                    }),
+                    normal: Some([0.0, 0.0, 1.0]),
+                    area: Some(100.0),
+                }],
+            }],
+        };
+
+        let manifest = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &["width".to_string()],
+            Some(&topology),
+            &HashMap::new(),
+        )
+        .expect("manifest");
+
+        assert_eq!(manifest.parts[0].parameter_keys, vec!["width".to_string()]);
+        let edge = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .expect("edge target");
+        let face = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .expect("face target");
+        assert!(edge.parameter_keys.is_empty());
+        assert!(!edge.editable);
+        assert!(face.parameter_keys.is_empty());
+        assert!(!face.editable);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_manifest_prefers_stable_node_key_for_durable_topology_ids() {
+        let root = temp_root("direct-occt-stable-node-key-topology");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model (part body (box 10 20 30)))").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                edges: vec![DirectOcctTopologyEdge {
+                    target_id: None,
+                    edge_index: Some(0),
+                    label: String::new(),
+                    start: Some(DirectOcctTopologyPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                    end: Some(DirectOcctTopologyPoint {
+                        x: 10.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                }],
+                faces: Vec::new(),
+            }],
+        };
+
+        let manifest = build_direct_occt_manifest_with_stable_node_keys(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &Vec::<String>::new(),
+            Some(&topology),
+            &HashMap::from([("body".to_string(), "sha256:abcdef".to_string())]),
+            &HashMap::from([(String::from("body"), 42_u64)]),
+        )
+        .expect("manifest");
+
+        assert!(manifest.selection_targets.iter().any(|target| {
+            target.kind == SelectionTargetKind::Edge
+                && target.durable_target_id.as_deref()
+                    == Some("body:stable-node-key:sha256:abcdef:edge:0-0-0_10-0-0")
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_source_stable_node_key_ignores_prior_traversal_allocations() {
+        let base_source = "(model (part body (box 10 20 30)))";
+        let shifted_source = "(model (part spacer (box 1 1 1)) (part body (box 10 20 30)))";
+        let base_program = compile(base_source);
+        let shifted_program = compile(shifted_source);
+        let base_part = base_program
+            .parts
+            .iter()
+            .find(|part| part.key == "body")
+            .expect("base part");
+        let shifted_part = shifted_program
+            .parts
+            .iter()
+            .find(|part| part.key == "body")
+            .expect("shifted part");
+
+        assert_ne!(base_part.root.id.raw(), shifted_part.root.id.raw());
+        assert_eq!(
+            direct_occt_source_stable_node_key(base_source, base_part),
+            direct_occt_source_stable_node_key(shifted_source, shifted_part)
+        );
     }
 
     #[test]

@@ -179,7 +179,7 @@ fn is_empty_mesh(mesh: &IrMesh) -> bool {
 fn compound_mesh(meshes: &[IrMesh]) -> IrMesh {
     let mut polygons = Vec::new();
     for mesh in meshes {
-        polygons.extend(mesh.triangulate().polygons.into_iter());
+        polygons.extend(mesh.triangulate().polygons);
     }
     IrMesh::from_polygons(&polygons, None)
 }

@@ -19,7 +19,7 @@ type ApiDialogueMockMode = 'design' | 'questionWithoutFinal';
 async function installApiDialogueMocks(
   page: Page,
   mode: ApiDialogueMockMode = 'design',
-  options: { initialHistory?: any[] } = {},
+  options: { initialHistory?: any[]; structuralResult?: any; maxGenerationAttempts?: number } = {},
 ) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
     await route.fulfill({
@@ -29,7 +29,7 @@ async function installApiDialogueMocks(
     });
   });
 
-  await page.addInitScript(({ mockMode, initialHistory }) => {
+  await page.addInitScript(({ mockMode, initialHistory, structuralResult, maxGenerationAttempts }) => {
     const mockWindow = window as any;
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -67,7 +67,9 @@ async function installApiDialogueMocks(
     mockWindow.__MOCK_BUNDLE__ = bundle;
     mockWindow.__MOCK_MANIFEST__ = manifest;
     mockWindow.__MOCK_GENERATE_CALLS__ = [];
+    mockWindow.__MOCK_FINALIZE_CALLS__ = [];
     mockWindow.__MOCK_MODE__ = mockMode;
+    mockWindow.__MOCK_STRUCTURAL_RESULT__ = structuralResult ?? null;
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
@@ -102,7 +104,7 @@ async function installApiDialogueMocks(
           defaultEngineKind: 'build123d',
           defaultSourceLanguage: 'build123d',
           defaultGeometryBackend: 'build123d',
-          maxGenerationAttempts: 1,
+          maxGenerationAttempts: maxGenerationAttempts ?? 1,
           maxVerifyAttempts: 0,
         };
       }
@@ -226,6 +228,7 @@ async function installApiDialogueMocks(
       if (cmd === 'get_model_manifest') return mockWindow.__MOCK_MANIFEST__;
       if (cmd === 'save_model_manifest') return null;
       if (cmd === 'verify_generated_model') {
+        if (mockWindow.__MOCK_STRUCTURAL_RESULT__) return mockWindow.__MOCK_STRUCTURAL_RESULT__;
         return {
           passed: true,
           summary: 'Structural checks passed.',
@@ -245,9 +248,11 @@ async function installApiDialogueMocks(
         return null;
       }
       if (cmd === 'finalize_generation_attempt') {
+        mockWindow.__MOCK_FINALIZE_CALLS__.push(args);
         const pending = mockWindow.__MOCK_PENDING_PROMPT__;
         const threadId = pending?.threadId ?? 'thread-api';
         const prompt = pending?.prompt ?? 'missing prompt';
+        const succeeded = args.status === 'success';
         const thread = {
           id: threadId,
           title: 'API Cup',
@@ -274,12 +279,12 @@ async function installApiDialogueMocks(
             {
               id: args.messageId,
               role: 'assistant',
-              content: args.responseText ?? 'Cup ready.',
-              status: 'success',
+              content: succeeded ? (args.responseText ?? 'Cup ready.') : (args.errorMessage ?? 'Generation failed.'),
+              status: args.status,
               timestamp: nowSeconds(),
               output: args.design,
-              artifactBundle: mockWindow.__MOCK_BUNDLE__,
-              modelManifest: mockWindow.__MOCK_MANIFEST__,
+              artifactBundle: succeeded ? mockWindow.__MOCK_BUNDLE__ : null,
+              modelManifest: succeeded ? mockWindow.__MOCK_MANIFEST__ : null,
               usage: null,
             },
           ],
@@ -292,7 +297,12 @@ async function installApiDialogueMocks(
       if (cmd === 'get_message_attachments') return [];
       return null;
     };
-  }, { mockMode: mode, initialHistory: options.initialHistory ?? [] });
+  }, {
+    mockMode: mode,
+    initialHistory: options.initialHistory ?? [],
+    structuralResult: options.structuralResult ?? null,
+    maxGenerationAttempts: options.maxGenerationAttempts,
+  });
 }
 
 async function openDialogue(page: Page) {
@@ -392,5 +402,53 @@ test.describe('API dialogue mode', () => {
     expect(generateCalls).toEqual([
       expect.objectContaining({ questionMode: true }),
     ]);
+  });
+
+  test('Given final structural verification fails When prompt submits Then bad model is not committed as success', async ({ page }) => {
+    await installApiDialogueMocks(page, 'design', {
+      maxGenerationAttempts: 1,
+      structuralResult: {
+        passed: false,
+        summary: 'Structural verification failed: PREVIEW_STL_DISCONNECTED_COMPONENTS',
+        issues: [
+          {
+            code: 'PREVIEW_STL_DISCONNECTED_COMPONENTS',
+            message: 'Preview STL contains 2 disconnected triangle components.',
+            partId: null,
+            numericPayload: 2,
+          },
+        ],
+        metrics: {
+          partCount: 2,
+          previewStlSizeBytes: 2048,
+          previewStlTriangleCount: 128,
+          previewStlComponentCount: 2,
+          previewStlNonManifoldEdgeCount: 0,
+          previewStlOverhangTriangleCount: 0,
+          previewStlOverhangRatio: 0,
+          totalVolume: 1000,
+          totalArea: 500,
+          bbox: null,
+        },
+        verifierStatus: 'ok',
+        verifierSource: 'rustStructural',
+      },
+    });
+
+    await openDialogue(page);
+
+    const promptInput = page.getByPlaceholder(/Type a question or design change/i);
+    await promptInput.fill('make disconnected parts');
+    await promptInput.press('Meta+Enter');
+
+    await expect(page.locator('.trail-assistant').last()).toContainText('Structural verification failed', {
+      timeout: 10000,
+    });
+
+    const finalizeCalls = await page.evaluate(() => (window as any).__MOCK_FINALIZE_CALLS__);
+    expect(finalizeCalls.at(-1)).toEqual(expect.objectContaining({
+      status: 'error',
+      errorMessage: expect.stringContaining('PREVIEW_STL_DISCONNECTED_COMPONENTS'),
+    }));
   });
 });

@@ -1,0 +1,43 @@
+(model
+  (params
+    (number film_gap 0.45 :label "film gap" :min 0.2 :max 1.2 :step 0.01)
+    (number lens_bore_d 59.6 :label "lens bore D" :min 50 :max 68 :step 0.1)
+    (number frame_w 38 :label "frame width" :min 30 :max 50 :step 0.5)
+    (number frame_h 26 :label "frame height" :min 20 :max 40 :step 0.5)
+    (number wall 2.4 :label "wall" :min 1.2 :max 6 :step 0.1)
+    (number clamp_h 3.2 :label "clamp height" :min 1 :max 8 :step 0.1))
+
+  (part film_gate_lower
+    (build
+      (shape body (box (+ frame_w 18) (+ frame_h 18) 4.0))
+      (shape aperture (translate 0 0 0.6 (box frame_w frame_h 3.4)))
+      (shape film_slot (translate 0 0 1.2 (box (+ frame_w 8) film_gap 2.4)))
+      (result (difference body aperture film_slot))))
+
+  (part film_gate_upper_clamp
+    (build
+      (shape body (box (+ frame_w 14) (+ frame_h 14) clamp_h))
+      (shape aperture (translate 0 0 0.2 (box (+ frame_w 1.6) (+ frame_h 1.6) (+ clamp_h 0.4))))
+      (result (difference body aperture))))
+
+  (part lens_bore_adapter_ring
+    (build
+      (shape outer (cylinder (+ (/ lens_bore_d 2) wall) 6.0))
+      (shape bore (translate 0 0 0.2 (cylinder (/ lens_bore_d 2) 6.2)))
+      (result (difference outer bore))))
+
+  (part lens_bore_lock_ring
+    (build
+      (shape outer (cylinder (+ (/ lens_bore_d 2) (+ wall 1.2)) 3.2))
+      (shape bore (translate 0 0 0.1 (cylinder (+ (/ lens_bore_d 2) 0.35) 3.4)))
+      (result (difference outer bore))))
+
+  (part film_guide_rail_left
+    (build
+      (shape rail (translate 0 (/ (+ frame_h 5.2) 2) 0 (box (+ frame_w 8) 1.6 1.2)))
+      (result rail)))
+
+  (part film_guide_rail_right
+    (build
+      (shape rail (translate 0 (- (/ (+ frame_h 5.2) 2)) 0 (box (+ frame_w 8) 1.6 1.2)))
+      (result rail))))

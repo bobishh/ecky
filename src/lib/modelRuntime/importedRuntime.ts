@@ -32,7 +32,7 @@ export function inferImportedDimensionValue(
 }
 
 export function buildImportedUiSpec(manifest: ModelManifest | null): UiSpec {
-  if (!manifest || manifest.sourceKind !== 'importedFcstd') {
+  if (!isImportedModel(manifest)) {
     return { fields: [] };
   }
 
@@ -68,7 +68,7 @@ export function buildImportedParams(
   currentParams: DesignParams,
   uiSpec: UiSpec,
 ): DesignParams {
-  if (!manifest || manifest.sourceKind !== 'importedFcstd') {
+  if (!isImportedModel(manifest)) {
     return currentParams;
   }
 
@@ -87,7 +87,7 @@ export function buildImportedSyntheticDesign(
   currentParams: DesignParams,
   uiSpecOverride?: UiSpec | null,
 ): DesignOutput | null {
-  if (!manifest || manifest.sourceKind !== 'importedFcstd') {
+  if (!isImportedModel(manifest)) {
     return null;
   }
 
@@ -98,18 +98,18 @@ export function buildImportedSyntheticDesign(
   const title =
     manifest.document.documentLabel ||
     manifest.document.documentName ||
-    'Imported FreeCAD Model';
+    (manifest.sourceKind === 'importedMesh' ? 'Imported Mesh Model' : 'Imported FreeCAD Model');
 
   return {
     title,
     versionName: 'Imported',
-    response: 'Imported FreeCAD model.',
+    response: manifest.sourceKind === 'importedMesh' ? 'Imported mesh reference.' : 'Imported FreeCAD model.',
     interactionMode: 'design',
     macroCode: '',
     uiSpec,
     initialParams,
-    sourceLanguage: 'legacyPython',
-    geometryBackend: 'freecad',
+    sourceLanguage: manifest.sourceLanguage ?? (manifest.sourceKind === 'importedMesh' ? 'ecky' : 'legacyPython'),
+    geometryBackend: manifest.geometryBackend ?? (manifest.sourceKind === 'importedMesh' ? 'mesh' : 'freecad'),
     postProcessing: null,
   };
 }
@@ -123,7 +123,7 @@ export function buildImportedPreviewTransforms(
   manifest: ModelManifest | null,
   currentParams: DesignParams,
 ): Record<string, ImportedPreviewTransform> {
-  if (!manifest || manifest.sourceKind !== 'importedFcstd') {
+  if (!isImportedModel(manifest)) {
     return {};
   }
 
@@ -169,4 +169,13 @@ export function buildImportedPreviewTransforms(
   }
 
   return transforms;
+}
+
+function isImportedModel(manifest: ModelManifest | null): manifest is ModelManifest {
+  return Boolean(
+    manifest &&
+      (manifest.sourceKind === 'importedFcstd' ||
+        manifest.sourceKind === 'importedStep' ||
+        manifest.sourceKind === 'importedMesh'),
+  );
 }

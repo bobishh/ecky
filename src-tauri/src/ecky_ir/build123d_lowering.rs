@@ -1090,6 +1090,18 @@ struct SampledRadialLoftCall {
     z_map: Option<Value>,
 }
 
+struct HelicalRidgeCall {
+    radius: Value,
+    pitch: Value,
+    height: Value,
+    base_width: Value,
+    crest_width: Value,
+    depth: Value,
+    female: Option<Value>,
+    clearance: Option<Value>,
+    lefthand: Option<Value>,
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct ParsedCallArgs {
     positional: Vec<Value>,
@@ -1327,6 +1339,64 @@ fn parse_sampled_radial_loft_call(args: &[Value]) -> AppResult<SampledRadialLoft
     })
 }
 
+fn parse_helical_ridge_call(args: &[Value]) -> AppResult<HelicalRidgeCall> {
+    let parsed = ParsedCallArgs::parse(
+        "helical-ridge",
+        args,
+        &[
+            "radius",
+            "pitch",
+            "height",
+            "base-width",
+            "crest-width",
+            "depth",
+            "female",
+            "clearance",
+            "lefthand",
+        ],
+    )?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`helical-ridge` expects keyword options: `:radius`, `:pitch`, `:height`, `:base-width`, `:crest-width`, and `:depth`.",
+        ));
+    }
+    Ok(HelicalRidgeCall {
+        radius: parsed
+            .keywords
+            .get("radius")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`helical-ridge` requires `:radius`."))?,
+        pitch: parsed
+            .keywords
+            .get("pitch")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`helical-ridge` requires `:pitch`."))?,
+        height: parsed
+            .keywords
+            .get("height")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`helical-ridge` requires `:height`."))?,
+        base_width: parsed
+            .keywords
+            .get("base_width")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`helical-ridge` requires `:base-width`."))?,
+        crest_width: parsed
+            .keywords
+            .get("crest_width")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`helical-ridge` requires `:crest-width`."))?,
+        depth: parsed
+            .keywords
+            .get("depth")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`helical-ridge` requires `:depth`."))?,
+        female: parsed.keywords.get("female").map(Value::dup),
+        clearance: parsed.keywords.get("clearance").map(Value::dup),
+        lefthand: parsed.keywords.get("lefthand").map(Value::dup),
+    })
+}
+
 fn parse_lambda_expr(value: &Value) -> AppResult<(Vec<String>, Value)> {
     let items = list_items(value, "lambda expression")?;
     if head_symbol(items, "lambda expression")? != "lambda" || items.len() != 3 {
@@ -1466,6 +1536,7 @@ fn b123d_preamble() -> Vec<String> {
         "def _ecky_cell_distance2(x, y, seed):\n    cx = math.floor(float(x)); cy = math.floor(float(y)); best = float('inf')\n    for oy in (-1, 0, 1):\n        for ox in (-1, 0, 1):\n            gx = cx + ox; gy = cy + oy\n            px = gx + _ecky_hash01(gx, gy, seed)\n            py = gy + _ecky_hash01(gx + 19.19, gy + 7.73, float(seed) + 31.0)\n            best = min(best, math.hypot(float(x) - px, float(y) - py))\n    return max(0.0, min(1.0, best / math.sqrt(2.0)))".into(),
         "def _ecky_voronoi2(x, y, seed):\n    return max(0.0, min(1.0, 1.0 - _ecky_cell_distance2(x, y, seed)))".into(),
         "def _ecky_signed_pow(value, exponent):\n    value = float(value); exponent = float(exponent)\n    return math.copysign(abs(value) ** exponent, value)".into(),
+        "def _ecky_helical_ridge(radius, pitch, height, base_width, crest_width, depth, female=False, clearance=0.0, lefthand=False):\n    radius = float(radius); pitch = float(pitch); height = float(height)\n    base_width = float(base_width); crest_width = float(crest_width); depth = float(depth)\n    clearance = max(0.0, float(clearance))\n    female = bool(female); lefthand = bool(lefthand)\n    if radius <= 0.0: raise ValueError('helical-ridge radius must be positive')\n    if pitch <= 0.0: raise ValueError('helical-ridge pitch must be positive')\n    if height <= 0.0: raise ValueError('helical-ridge height must be positive')\n    if base_width <= 0.0: raise ValueError('helical-ridge base-width must be positive')\n    if crest_width <= 0.0: raise ValueError('helical-ridge crest-width must be positive')\n    if depth <= 0.0: raise ValueError('helical-ridge depth must be positive')\n    envelope_clearance = clearance if female else 0.0\n    path_radius = radius\n    base_half = (base_width + 2.0 * envelope_clearance) * 0.5\n    crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5\n    ridge_depth = depth + envelope_clearance\n    path = Edge.make_helix(pitch=pitch, height=height, radius=path_radius, center=(0, 0, 0), normal=(0, 0, 1), lefthand=lefthand)\n    profile = Polyline((path_radius, 0, -base_half), (path_radius + ridge_depth, 0, -crest_half), (path_radius + ridge_depth, 0, crest_half), (path_radius, 0, base_half), close=True)\n    return _ecky_solid(sweep(_ecky_face(profile), path=path))".into(),
         String::new(),
     ]
 }
@@ -4359,6 +4430,43 @@ impl<'a> ExprLowerer<'a> {
                             format!("{result} = _ecky_loft({sections})"),
                         ],
                         result_var: result,
+                    },
+                    B123dGeomKind::Solid3d,
+                )
+            }
+            "helical-ridge" => {
+                let call = parse_helical_ridge_call(args)?;
+                let mut kwargs = Vec::new();
+                if let Some(female) = call.female.as_ref() {
+                    kwargs.push((
+                        "female".into(),
+                        PyExpr::Inline(lower_bool_expr(female, scope)?),
+                    ));
+                }
+                if let Some(clearance) = call.clearance.as_ref() {
+                    kwargs.push((
+                        "clearance".into(),
+                        PyExpr::Inline(lower_num_expr(clearance, scope)?),
+                    ));
+                }
+                if let Some(lefthand) = call.lefthand.as_ref() {
+                    kwargs.push((
+                        "lefthand".into(),
+                        PyExpr::Inline(lower_bool_expr(lefthand, scope)?),
+                    ));
+                }
+                (
+                    PyExpr::Call {
+                        func: "_ecky_helical_ridge".into(),
+                        args: vec![
+                            PyExpr::Inline(lower_num_expr(&call.radius, scope)?),
+                            PyExpr::Inline(lower_num_expr(&call.pitch, scope)?),
+                            PyExpr::Inline(lower_num_expr(&call.height, scope)?),
+                            PyExpr::Inline(lower_num_expr(&call.base_width, scope)?),
+                            PyExpr::Inline(lower_num_expr(&call.crest_width, scope)?),
+                            PyExpr::Inline(lower_num_expr(&call.depth, scope)?),
+                        ],
+                        kwargs,
                     },
                     B123dGeomKind::Solid3d,
                 )

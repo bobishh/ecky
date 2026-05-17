@@ -7,10 +7,10 @@ use uuid::Uuid;
 
 use super::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::models::{
-    validate_design_output, validate_design_params, validate_ui_spec, AppError, AppResult,
-    AppState, ArtifactBundle, DesignParams, GeometryBackend, Message, MessageRole, MessageStatus,
-    ModelManifest, ParamValue, ParsedParamsResult, SelectOption, SelectValue, SourceLanguage,
-    UiField, UiSpec,
+    validate_artifact_bundle, validate_design_output, validate_design_params, validate_ui_spec,
+    AppError, AppResult, AppState, ArtifactBundle, DesignParams, GeometryBackend, Message,
+    MessageRole, MessageStatus, ModelManifest, ParamValue, ParsedParamsResult, SelectOption,
+    SelectValue, SourceLanguage, UiField, UiSpec,
 };
 use crate::{db, persist_thread_summary};
 
@@ -1166,6 +1166,7 @@ pub async fn update_version_runtime(
 pub async fn update_version_preview(
     message_id: String,
     image_data: String,
+    artifact_bundle: ArtifactBundle,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     if !image_data.trim_start().starts_with("data:image/") {
@@ -1173,8 +1174,22 @@ pub async fn update_version_preview(
             "Version preview must be an image data URL.",
         ));
     }
+    validate_artifact_bundle(&artifact_bundle)?;
 
     let db = state.db.lock().await;
+    let (stored_artifact_bundle, _, _) = db::get_message_runtime_and_thread(&db, &message_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .ok_or_else(|| {
+            AppError::not_found(format!(
+                "Message '{}' not found for preview update.",
+                message_id
+            ))
+        })?;
+    if !same_artifact_version(stored_artifact_bundle.as_ref(), &artifact_bundle) {
+        return Err(AppError::validation(
+            "Version preview artifact does not match the target message runtime.",
+        ));
+    }
     let changed = db::update_message_image_data(&db, &message_id, &image_data)
         .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
     if !changed {
@@ -1186,9 +1201,60 @@ pub async fn update_version_preview(
     Ok(())
 }
 
+fn same_artifact_version(stored: Option<&ArtifactBundle>, expected: &ArtifactBundle) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    stored.model_id == expected.model_id
+        && stored.content_hash == expected.content_hash
+        && stored.artifact_version == expected.artifact_version
+        && stored.preview_stl_path == expected.preview_stl_path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{EngineKind, ModelSourceKind};
+
+    fn sample_artifact_bundle(model_id: &str) -> ArtifactBundle {
+        ArtifactBundle {
+            schema_version: 2,
+            model_id: model_id.to_string(),
+            source_kind: ModelSourceKind::Generated,
+            engine_kind: EngineKind::Build123d,
+            source_language: SourceLanguage::Build123d,
+            geometry_backend: GeometryBackend::Build123d,
+            content_hash: "hash-1".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: "/tmp/model.json".to_string(),
+            macro_path: Some("/tmp/model.ecky".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: Vec::new(),
+            face_targets: Vec::new(),
+            callout_anchors: Vec::new(),
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn same_artifact_version_accepts_matching_runtime_identity() {
+        let stored = sample_artifact_bundle("model-1");
+        let expected = sample_artifact_bundle("model-1");
+
+        assert!(same_artifact_version(Some(&stored), &expected));
+    }
+
+    #[test]
+    fn same_artifact_version_rejects_cross_model_preview() {
+        let stored = sample_artifact_bundle("model-1");
+        let mut expected = sample_artifact_bundle("model-1");
+        expected.content_hash = "hash-2".to_string();
+
+        assert!(!same_artifact_version(Some(&stored), &expected));
+    }
 
     #[test]
     fn derive_framework_controls_parses_literal_controls() {

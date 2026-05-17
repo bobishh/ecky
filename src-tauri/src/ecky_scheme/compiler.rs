@@ -9,12 +9,13 @@ use steel_core::rvals::SteelVal;
 
 use crate::contracts::{AppError, AppErrorCode, AppResult};
 use crate::ecky_core_ir::{
-    CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp,
-    CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CoreParameter,
-    CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart, CorePathOp,
-    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSelectorPayload, CoreShapeBinding,
-    CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind, NodeId, ParamId, PartId, ProgramId,
-    SourceFileId, SourceSpan,
+    CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFeatureDecl,
+    CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation,
+    CoreParameter, CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart,
+    CorePathOp, CorePrimitive, CoreProgram, CoreProgramConstraints, CoreReference,
+    CoreRelationConstraint, CoreRelationOperand, CoreRelationOperator, CoreResult,
+    CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
+    CoreValueKind, NodeId, ParamId, PartId, ProgramId, SourceFileId, SourceSpan,
 };
 use crate::ecky_deterministic;
 use crate::ecky_ir::edge_ops::{
@@ -398,7 +399,7 @@ fn model_level_sequence_form_error(name: &str) -> CompilerError {
     CompilerError::new(
         CompilerErrorKind::UnsupportedFeature,
         format!(
-            "Model children are clauses, not sequence expressions. Supported direct clauses: `params`, `part`, `meta`. Supported wrappers: `begin`, `let`, `let*`. `{}` belongs inside `(part ...)` geometry/list expressions.",
+            "Model children are clauses, not sequence expressions. Supported direct clauses: `params`, `part`, `feature`, `meta`. Supported wrappers: `begin`, `let`, `let*`. `{}` belongs inside `(part ...)` geometry/list expressions.",
             name
         ),
     )
@@ -719,6 +720,19 @@ struct ExpandedModelClause {
     helpers: ExpandedHelperMap,
 }
 
+#[derive(Clone, Debug)]
+enum PendingRelationOperand {
+    ParameterKey(String),
+    Number(f64),
+}
+
+#[derive(Clone, Debug)]
+struct PendingRelationConstraint {
+    operator: CoreRelationOperator,
+    left: PendingRelationOperand,
+    right: PendingRelationOperand,
+}
+
 fn parse_expanded_program(forms: &[ExprKind]) -> CoreResult<CoreProgram> {
     let (root, helpers) = collect_expanded_model_context(forms).ok_or_else(|| {
         CompilerError::new(
@@ -888,9 +902,11 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     }
 
     let mut params = Vec::new();
+    let mut pending_relations = Vec::new();
     let mut next_param = 1u64;
     let mut next_part = 1u64;
     let mut next_node = 1u64;
+    let mut feature_decls = BTreeMap::new();
 
     let clauses = collect_expanded_model_clauses(&forms[1..], helpers)?;
     let mut raw_parts = Vec::new();
@@ -903,15 +919,12 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
             })?)?;
         match clause.as_str() {
             "params" => {
-                for decl in items.into_iter().skip(1) {
-                    params.push(parse_expanded_param_decl(
-                        &decl,
-                        &mut next_param,
-                        &clause_form.helpers,
-                    )?);
-                }
+                let (mut parsed_params, mut parsed_relations) =
+                    parse_expanded_params_clause(&items, &mut next_param, &clause_form.helpers)?;
+                params.append(&mut parsed_params);
+                pending_relations.append(&mut parsed_relations);
             }
-            "part" => raw_parts.push(ExpandedModelClause {
+            "part" | "feature" => raw_parts.push(ExpandedModelClause {
                 items,
                 helpers: clause_form.helpers,
             }),
@@ -937,18 +950,40 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
         .iter()
         .map(|param| (param.key.clone(), param.id))
         .collect::<BTreeMap<_, _>>();
-    let parts = raw_parts
-        .iter()
-        .map(|items| {
-            parse_expanded_part_decl(
-                &items.items,
+    let constraints = resolve_relation_constraints(&mut params, pending_relations)?;
+    let mut parts = Vec::new();
+    for part_clause in &raw_parts {
+        let clause_name =
+            expr_name(part_clause.items.first().ok_or_else(|| {
+                CompilerError::new(CompilerErrorKind::Parse, "Empty model clause.")
+            })?)?;
+        match clause_name.as_str() {
+            "part" => parts.push(parse_expanded_part_decl(
+                &part_clause.items,
                 &mut next_part,
                 &mut next_node,
                 &param_ids,
-                &items.helpers,
-            )
-        })
-        .collect::<CoreResult<Vec<_>>>()?;
+                &part_clause.helpers,
+            )?),
+            "feature" => {
+                let (part, decl) = parse_expanded_feature_decl(
+                    &part_clause.items,
+                    &mut next_part,
+                    &mut next_node,
+                    &param_ids,
+                    &part_clause.helpers,
+                )?;
+                feature_decls.insert(part.key.clone(), decl);
+                parts.push(part);
+            }
+            _ => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!("Unsupported top-level model clause `{}`.", clause_name),
+                ))
+            }
+        }
+    }
 
     if parts.is_empty() {
         return Err(CompilerError::new(
@@ -957,7 +992,148 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
         ));
     }
 
-    Ok(CoreProgram::new(ProgramId::new(1), params, parts))
+    Ok(CoreProgram::new(ProgramId::new(1), params, parts)
+        .with_feature_decls(feature_decls)
+        .with_constraints(constraints))
+}
+
+fn parse_expanded_params_clause(
+    items: &[ExprKind],
+    next_param: &mut u64,
+    helpers: &ExpandedHelperMap,
+) -> CoreResult<(Vec<CoreParameter>, Vec<PendingRelationConstraint>)> {
+    let mut params = Vec::new();
+    let mut relations = Vec::new();
+    let mut index = 1usize;
+    while index < items.len() {
+        let clause_name = expr_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name));
+        if clause_name.as_deref() == Some(":relations") {
+            let relation_values = expr_list_items(
+                items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "`:relations` missing value in params clause.",
+                    )
+                })?,
+                "param relations",
+            )?;
+            for relation in relation_values {
+                relations.push(parse_expanded_relation_constraint(&relation)?);
+            }
+            index += 2;
+            continue;
+        }
+
+        let decl = items.get(index).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "Param declaration missing in params clause.",
+            )
+        })?;
+        params.push(parse_expanded_param_decl(decl, next_param, helpers)?);
+        index += 1;
+    }
+    Ok((params, relations))
+}
+
+fn parse_expanded_relation_constraint(value: &ExprKind) -> CoreResult<PendingRelationConstraint> {
+    let items = expr_list_items(value, "relation constraint")?;
+    if items.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Relation constraint must be `(< a b)`, `(<= a b)`, `(> a b)`, or `(>= a b)`.",
+        ));
+    }
+    let operator_name = expr_name(&items[0]).unwrap_or_else(|_| items[0].to_string());
+    let operator = parse_relation_operator_from_symbol(operator_name.trim())?;
+    Ok(PendingRelationConstraint {
+        operator,
+        left: parse_expanded_relation_operand(&items[1])?,
+        right: parse_expanded_relation_operand(&items[2])?,
+    })
+}
+
+fn parse_expanded_relation_operand(value: &ExprKind) -> CoreResult<PendingRelationOperand> {
+    if matches!(value, ExprKind::Atom(atom) if matches!(atom.syn.ty, TokenType::Number(_))) {
+        return Ok(PendingRelationOperand::Number(expr_number_value(
+            value,
+            "relation operand",
+        )?));
+    }
+    Ok(PendingRelationOperand::ParameterKey(
+        expr_value_symbol_or_text(value, "relation operand")?,
+    ))
+}
+
+fn parse_relation_operator_from_symbol(symbol: &str) -> CoreResult<CoreRelationOperator> {
+    match symbol {
+        "<" => Ok(CoreRelationOperator::LessThan),
+        "<=" => Ok(CoreRelationOperator::LessThanOrEqual),
+        ">" => Ok(CoreRelationOperator::GreaterThan),
+        ">=" => Ok(CoreRelationOperator::GreaterThanOrEqual),
+        other => Err(CompilerError::new(
+            CompilerErrorKind::UnsupportedFeature,
+            format!(
+                "Unsupported relation operator `{}`. Supported: <, <=, >, >=.",
+                other
+            ),
+        )),
+    }
+}
+
+fn resolve_relation_constraints(
+    params: &mut [CoreParameter],
+    pending_relations: Vec<PendingRelationConstraint>,
+) -> CoreResult<CoreProgramConstraints> {
+    let param_ids = params
+        .iter()
+        .map(|param| (param.key.clone(), param.id))
+        .collect::<BTreeMap<_, _>>();
+    let mut relations = Vec::new();
+
+    for pending in pending_relations {
+        let relation = CoreRelationConstraint {
+            operator: pending.operator,
+            left: resolve_relation_operand(&pending.left, &param_ids)?,
+            right: resolve_relation_operand(&pending.right, &param_ids)?,
+        };
+        for param in params.iter_mut() {
+            if relation_uses_param(&relation, param.id) {
+                param.constraints.relations.push(relation.clone());
+            }
+        }
+        relations.push(relation);
+    }
+
+    Ok(CoreProgramConstraints { relations })
+}
+
+fn resolve_relation_operand(
+    operand: &PendingRelationOperand,
+    param_ids: &BTreeMap<String, ParamId>,
+) -> CoreResult<CoreRelationOperand> {
+    match operand {
+        PendingRelationOperand::Number(value) => Ok(CoreRelationOperand::Number(*value)),
+        PendingRelationOperand::ParameterKey(key) => {
+            let param_id = param_ids.get(key).copied().ok_or_else(|| {
+                CompilerError::new(
+                    CompilerErrorKind::Resolve,
+                    format!(
+                        "Relation operand `{}` does not match any declared parameter key.",
+                        key
+                    ),
+                )
+            })?;
+            Ok(CoreRelationOperand::Parameter(param_id))
+        }
+    }
+}
+
+fn relation_uses_param(relation: &CoreRelationConstraint, param_id: ParamId) -> bool {
+    matches!(relation.left, CoreRelationOperand::Parameter(id) if id == param_id)
+        || matches!(relation.right, CoreRelationOperand::Parameter(id) if id == param_id)
 }
 
 fn collect_expanded_model_clauses(
@@ -1130,6 +1306,14 @@ fn parse_expanded_param_decl(
                 )?);
                 index += 2;
             }
+            ":unit" => {
+                constraints.unit = Some(parse_expanded_param_unit(
+                    items.get(index + 1).ok_or_else(|| {
+                        CompilerError::new(CompilerErrorKind::Parse, "`:unit` missing value.")
+                    })?,
+                )?);
+                index += 2;
+            }
             ":frozen" => {
                 frozen = expr_bool_value(
                     items.get(index + 1).ok_or_else(|| {
@@ -1180,6 +1364,10 @@ fn parse_expanded_param_decl(
     };
     *next_param += 1;
     Ok(param)
+}
+
+fn parse_expanded_param_unit(value: &ExprKind) -> CoreResult<String> {
+    parse_param_unit_name(expr_value_symbol_or_text(value, "param unit")?)
 }
 
 fn parse_expanded_choice(value: &ExprKind) -> CoreResult<crate::ecky_core_ir::CoreChoice> {
@@ -1242,6 +1430,110 @@ fn parse_expanded_part_decl(
     };
     *next_part += 1;
     Ok(part)
+}
+
+fn parse_expanded_feature_decl(
+    items: &[ExprKind],
+    next_part: &mut u64,
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+) -> CoreResult<(CorePart, CoreFeatureDecl)> {
+    if items.len() < 5 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Each `(feature ...)` needs an id, `:role`, and expression body.",
+        ));
+    }
+
+    let key = expr_value_symbol_or_text(&items[1], "feature id")?;
+    let mut role = None;
+    let mut param_keys = Vec::new();
+    let mut body = None;
+    let mut index = 2usize;
+
+    while index < items.len() {
+        let keyword = expr_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name));
+        match keyword.as_deref() {
+            Some(":role") => {
+                role = Some(expr_value_symbol_or_text(
+                    items.get(index + 1).ok_or_else(|| {
+                        CompilerError::new(
+                            CompilerErrorKind::Parse,
+                            "`feature :role` missing value.",
+                        )
+                    })?,
+                    "feature role",
+                )?);
+                index += 2;
+            }
+            Some(":params") => {
+                let values = expr_list_items(
+                    items.get(index + 1).ok_or_else(|| {
+                        CompilerError::new(
+                            CompilerErrorKind::Parse,
+                            "`feature :params` missing value list.",
+                        )
+                    })?,
+                    "feature params",
+                )?;
+                param_keys = values
+                    .iter()
+                    .map(|value| expr_value_symbol_or_text(value, "feature param key"))
+                    .collect::<CoreResult<Vec<_>>>()?;
+                index += 2;
+            }
+            _ => {
+                if index != items.len() - 1 {
+                    return Err(CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "Feature clause expects a single trailing body expression.",
+                    ));
+                }
+                body = Some(&items[index]);
+                index += 1;
+            }
+        }
+    }
+
+    let role = role.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Feature clause requires `:role` metadata.",
+        )
+    })?;
+    let body = body.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Feature clause requires a body expression.",
+        )
+    })?;
+    let root = parse_expanded_node(
+        body,
+        next_node,
+        param_ids,
+        helpers,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )?;
+    let part = CorePart {
+        id: PartId::new(*next_part),
+        key: key.clone(),
+        label: humanize(&key),
+        root,
+    };
+    *next_part += 1;
+    Ok((
+        part,
+        CoreFeatureDecl {
+            feature_id: key,
+            role,
+            param_keys,
+        },
+    ))
 }
 
 fn parse_expanded_node(
@@ -1791,14 +2083,18 @@ fn parse_expanded_node(
                             )?);
                             index += 1;
                         }
-                        (
-                            CoreNodeKind::Call {
-                                op: map_operation(&op_name),
-                                args,
-                                keywords,
-                            },
-                            infer_value_kind(&op_name),
-                        )
+                        if op_name == "ring" {
+                            parse_ring_alias_call(args, keywords, next_node)?
+                        } else {
+                            (
+                                CoreNodeKind::Call {
+                                    op: map_operation(&op_name),
+                                    args,
+                                    keywords,
+                                },
+                                infer_value_kind(&op_name),
+                            )
+                        }
                     }
                 } else {
                     (
@@ -2178,7 +2474,7 @@ fn parse_expanded_map_node(
             next_node,
         ) {
             Ok(items) => static_sources.push(items),
-            Err(err) if source.value_kind == CoreValueKind::List => {
+            Err(_err) if source.value_kind == CoreValueKind::List => {
                 all_static = false;
                 break;
             }
@@ -5265,10 +5561,12 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     }
 
     let mut params = Vec::new();
+    let mut pending_relations = Vec::new();
     let mut raw_parts = Vec::new();
     let mut next_param = 1u64;
     let mut next_part = 1u64;
     let mut next_node = 1u64;
+    let mut feature_decls = BTreeMap::new();
 
     for form in forms.into_iter().skip(1) {
         let items = list_items(&form, "model clause")?;
@@ -5278,11 +5576,12 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
             })?)?;
         match clause.as_str() {
             "params" => {
-                for decl in items.into_iter().skip(1) {
-                    params.push(parse_param_decl(&decl, &mut next_param)?);
-                }
+                let (mut parsed_params, mut parsed_relations) =
+                    parse_params_clause(&items, &mut next_param)?;
+                params.append(&mut parsed_params);
+                pending_relations.append(&mut parsed_relations);
             }
-            "part" => raw_parts.push(items),
+            "part" | "feature" => raw_parts.push(items),
             "meta" => {}
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
             other => {
@@ -5305,10 +5604,36 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
         .iter()
         .map(|param| (param.key.clone(), param.id))
         .collect::<BTreeMap<_, _>>();
-    let parts = raw_parts
-        .iter()
-        .map(|items| parse_part_decl(items, &mut next_part, &mut next_node, &param_ids))
-        .collect::<CoreResult<Vec<_>>>()?;
+    let constraints = resolve_relation_constraints(&mut params, pending_relations)?;
+    let mut parts = Vec::new();
+    for part_clause in &raw_parts {
+        let clause_name =
+            symbol_name(part_clause.first().ok_or_else(|| {
+                CompilerError::new(CompilerErrorKind::Parse, "Empty model clause.")
+            })?)?;
+        match clause_name.as_str() {
+            "part" => {
+                parts.push(parse_part_decl(
+                    part_clause,
+                    &mut next_part,
+                    &mut next_node,
+                    &param_ids,
+                )?);
+            }
+            "feature" => {
+                let (part, decl) =
+                    parse_feature_decl(part_clause, &mut next_part, &mut next_node, &param_ids)?;
+                feature_decls.insert(part.key.clone(), decl);
+                parts.push(part);
+            }
+            _ => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!("Unsupported top-level model clause `{}`.", clause_name),
+                ))
+            }
+        }
+    }
 
     if parts.is_empty() {
         return Err(CompilerError::new(
@@ -5317,7 +5642,83 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
         ));
     }
 
-    Ok(CoreProgram::new(ProgramId::new(1), params, parts))
+    Ok(CoreProgram::new(ProgramId::new(1), params, parts)
+        .with_feature_decls(feature_decls)
+        .with_constraints(constraints))
+}
+
+fn parse_params_clause(
+    items: &[SteelVal],
+    next_param: &mut u64,
+) -> CoreResult<(Vec<CoreParameter>, Vec<PendingRelationConstraint>)> {
+    let mut params = Vec::new();
+    let mut relations = Vec::new();
+    let mut index = 1usize;
+    while index < items.len() {
+        let clause_name = symbol_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name));
+        if clause_name.as_deref() == Some(":relations") {
+            let relation_values = list_items(
+                items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "`:relations` missing value in params clause.",
+                    )
+                })?,
+                "param relations",
+            )?;
+            for relation in relation_values {
+                relations.push(parse_relation_constraint(&relation)?);
+            }
+            index += 2;
+            continue;
+        }
+
+        let decl = items.get(index).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "Param declaration missing in params clause.",
+            )
+        })?;
+        params.push(parse_param_decl(decl, next_param)?);
+        index += 1;
+    }
+    Ok((params, relations))
+}
+
+fn parse_relation_constraint(value: &SteelVal) -> CoreResult<PendingRelationConstraint> {
+    let items = list_items(value, "relation constraint")?;
+    if items.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Relation constraint must be `(< a b)`, `(<= a b)`, `(> a b)`, or `(>= a b)`.",
+        ));
+    }
+    let operator = parse_relation_operator_from_symbol(&symbol_name(&items[0]).map_err(|_| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Relation operator must be one of `<`, `<=`, `>`, `>=`.",
+        )
+    })?)?;
+    Ok(PendingRelationConstraint {
+        operator,
+        left: parse_relation_operand(&items[1])?,
+        right: parse_relation_operand(&items[2])?,
+    })
+}
+
+fn parse_relation_operand(value: &SteelVal) -> CoreResult<PendingRelationOperand> {
+    if matches!(value, SteelVal::IntV(_) | SteelVal::NumV(_)) {
+        return Ok(PendingRelationOperand::Number(number_value(
+            value,
+            "relation operand",
+        )?));
+    }
+    Ok(PendingRelationOperand::ParameterKey(value_symbol_or_text(
+        value,
+        "relation operand",
+    )?))
 }
 
 fn parse_param_decl(value: &SteelVal, next_param: &mut u64) -> CoreResult<CoreParameter> {
@@ -5392,6 +5793,12 @@ fn parse_param_decl(value: &SteelVal, next_param: &mut u64) -> CoreResult<CorePa
                 )?);
                 index += 2;
             }
+            ":unit" => {
+                constraints.unit = Some(parse_param_unit(items.get(index + 1).ok_or_else(
+                    || CompilerError::new(CompilerErrorKind::Parse, "`:unit` missing value."),
+                )?)?);
+                index += 2;
+            }
             ":frozen" => {
                 frozen = bool_value(
                     items.get(index + 1).ok_or_else(|| {
@@ -5442,6 +5849,20 @@ fn parse_param_decl(value: &SteelVal, next_param: &mut u64) -> CoreResult<CorePa
     };
     *next_param += 1;
     Ok(param)
+}
+
+fn parse_param_unit(value: &SteelVal) -> CoreResult<String> {
+    parse_param_unit_name(value_symbol_or_text(value, "param unit")?)
+}
+
+fn parse_param_unit_name(unit: String) -> CoreResult<String> {
+    match unit.as_str() {
+        "length" | "angle" | "ratio" | "count" | "text" => Ok(unit),
+        other => Err(CompilerError::new(
+            CompilerErrorKind::UnsupportedFeature,
+            format!("Unsupported param unit `{}`.", other),
+        )),
+    }
 }
 
 fn parse_choice(value: &SteelVal) -> CoreResult<crate::ecky_core_ir::CoreChoice> {
@@ -5497,6 +5918,107 @@ fn parse_part_decl(
     };
     *next_part += 1;
     Ok(part)
+}
+
+fn parse_feature_decl(
+    items: &[SteelVal],
+    next_part: &mut u64,
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+) -> CoreResult<(CorePart, CoreFeatureDecl)> {
+    if items.len() < 5 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Each `(feature ...)` needs an id, `:role`, and expression body.",
+        ));
+    }
+
+    let key = value_symbol_or_text(&items[1], "feature id")?;
+    let mut role = None;
+    let mut param_keys = Vec::new();
+    let mut body = None;
+    let mut index = 2usize;
+
+    while index < items.len() {
+        let keyword = symbol_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name));
+        match keyword.as_deref() {
+            Some(":role") => {
+                role = Some(value_symbol_or_text(
+                    items.get(index + 1).ok_or_else(|| {
+                        CompilerError::new(
+                            CompilerErrorKind::Parse,
+                            "`feature :role` missing value.",
+                        )
+                    })?,
+                    "feature role",
+                )?);
+                index += 2;
+            }
+            Some(":params") => {
+                let values = list_items(
+                    items.get(index + 1).ok_or_else(|| {
+                        CompilerError::new(
+                            CompilerErrorKind::Parse,
+                            "`feature :params` missing value list.",
+                        )
+                    })?,
+                    "feature params",
+                )?;
+                param_keys = values
+                    .iter()
+                    .map(|value| value_symbol_or_text(value, "feature param key"))
+                    .collect::<CoreResult<Vec<_>>>()?;
+                index += 2;
+            }
+            _ => {
+                if index != items.len() - 1 {
+                    return Err(CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "Feature clause expects a single trailing body expression.",
+                    ));
+                }
+                body = Some(&items[index]);
+                index += 1;
+            }
+        }
+    }
+
+    let role = role.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Feature clause requires `:role` metadata.",
+        )
+    })?;
+    let body = body.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Feature clause requires a body expression.",
+        )
+    })?;
+    let root = parse_node(
+        body,
+        next_node,
+        param_ids,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+    )?;
+    let part = CorePart {
+        id: PartId::new(*next_part),
+        key: key.clone(),
+        label: humanize(&key),
+        root,
+    };
+    *next_part += 1;
+    Ok((
+        part,
+        CoreFeatureDecl {
+            feature_id: key,
+            role,
+            param_keys,
+        },
+    ))
 }
 
 fn parse_node(
@@ -5691,14 +6213,18 @@ fn parse_node(
                             )?);
                             index += 1;
                         }
-                        (
-                            CoreNodeKind::Call {
-                                op: map_operation(&op_name),
-                                args,
-                                keywords,
-                            },
-                            infer_value_kind(&op_name),
-                        )
+                        if op_name == "ring" {
+                            parse_ring_alias_call(args, keywords, next_node)?
+                        } else {
+                            (
+                                CoreNodeKind::Call {
+                                    op: map_operation(&op_name),
+                                    args,
+                                    keywords,
+                                },
+                                infer_value_kind(&op_name),
+                            )
+                        }
                     }
                 } else {
                     (
@@ -5758,6 +6284,63 @@ fn parse_typed_hole_call(
     }
 
     typed_hole_call(type_name, goal, next_node)
+}
+
+fn parse_ring_alias_call(
+    args: Vec<CoreNode>,
+    keywords: Vec<CoreKeywordArg>,
+    next_node: &mut u64,
+) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    if !keywords.is_empty() {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`ring` does not accept keyword arguments.",
+        ));
+    }
+    if !(args.len() == 2 || args.len() == 3) {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`ring` expects outer-radius inner-radius and optional segments.",
+        ));
+    }
+
+    let mut outer_args = vec![args[0].clone()];
+    let mut inner_args = vec![args[1].clone()];
+    if let Some(segments) = args.get(2) {
+        outer_args.push(segments.clone());
+        inner_args.push(segments.clone());
+    }
+
+    let outer = CoreNode::new(
+        alloc_node_id(next_node),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Circle),
+            args: outer_args,
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Sketch,
+    );
+    let inner = CoreNode::new(
+        alloc_node_id(next_node),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Circle),
+            args: inner_args,
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Sketch,
+    );
+
+    Ok((
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Profile),
+            args: Vec::new(),
+            keywords: vec![
+                CoreKeywordArg::expr("outer".to_string(), outer),
+                CoreKeywordArg::expr("holes".to_string(), inner),
+            ],
+        },
+        CoreValueKind::Sketch,
+    ))
 }
 
 fn typed_hole_call(
@@ -6048,7 +6631,7 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
         | "logistic-bifurcation-points"
         | "henon-points" => CoreValueKind::List,
         "jitter2" | "superellipse-point" => CoreValueKind::Point2,
-        "circle" | "rectangle" | "rounded-rect" | "rounded_rect" | "rounded-polygon"
+        "circle" | "ring" | "rectangle" | "rounded-rect" | "rounded_rect" | "rounded-polygon"
         | "rounded_polygon" | "polygon" | "profile" | "make-face" | "text" | "svg" | "offset"
         | "offset-rounded" => CoreValueKind::Sketch,
         "bezier-path" | "path" | "polyline" => CoreValueKind::Path,
@@ -6073,15 +6656,44 @@ fn emit_program(program: &CoreProgram) -> String {
         .map(|param| (param.id.raw(), param.key.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut out = String::from("(model");
-    if !program.parameters.is_empty() {
+    if !program.parameters.is_empty() || !program.constraints.relations.is_empty() {
         out.push_str("\n  (params");
         for param in &program.parameters {
             out.push_str("\n    ");
             out.push_str(&emit_param(param));
         }
+        if !program.constraints.relations.is_empty() {
+            out.push_str("\n    :relations (");
+            out.push_str(
+                &program
+                    .constraints
+                    .relations
+                    .iter()
+                    .map(|relation| emit_relation_constraint(relation, &param_names))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            out.push(')');
+        }
         out.push(')');
     }
     for part in &program.parts {
+        if let Some(feature_decl) = program.feature_decls.get(&part.key) {
+            out.push_str("\n  (feature ");
+            out.push_str(&feature_decl.feature_id);
+            out.push_str(" :role ");
+            out.push_str(&emit_string(&feature_decl.role));
+            if !feature_decl.param_keys.is_empty() {
+                out.push_str(" :params (");
+                out.push_str(&feature_decl.param_keys.join(" "));
+                out.push(')');
+            }
+            out.push(' ');
+            out.push_str(&emit_node(&part.root, &param_names, &BTreeMap::new()));
+            out.push(')');
+            continue;
+        }
+
         out.push_str("\n  (part ");
         out.push_str(&part.key);
         if part.label != humanize(&part.key) {
@@ -6137,6 +6749,10 @@ fn emit_param(param: &CoreParameter) -> String {
     if let Some(step) = param.constraints.step {
         out.push_str(&format!(" :step {}", emit_number(step)));
     }
+    if let Some(unit) = &param.constraints.unit {
+        out.push_str(" :unit ");
+        out.push_str(&emit_string(unit));
+    }
     if param.frozen {
         out.push_str(" :frozen #t");
     }
@@ -6175,6 +6791,31 @@ fn emit_param_value(value: &CoreParameterValue) -> String {
         CoreParameterValue::Text(text)
         | CoreParameterValue::Choice(text)
         | CoreParameterValue::Image(text) => emit_string(text),
+    }
+}
+
+fn emit_relation_constraint(
+    relation: &CoreRelationConstraint,
+    param_names: &BTreeMap<u64, String>,
+) -> String {
+    format!(
+        "({} {} {})",
+        relation.operator.as_str(),
+        emit_relation_operand(&relation.left, param_names),
+        emit_relation_operand(&relation.right, param_names)
+    )
+}
+
+fn emit_relation_operand(
+    operand: &CoreRelationOperand,
+    param_names: &BTreeMap<u64, String>,
+) -> String {
+    match operand {
+        CoreRelationOperand::Parameter(param_id) => param_names
+            .get(&param_id.raw())
+            .cloned()
+            .unwrap_or_else(|| format!("p{}", param_id.raw())),
+        CoreRelationOperand::Number(value) => emit_number(*value),
     }
 }
 
@@ -6726,7 +7367,7 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("Model children are clauses"), "{message}");
         assert!(
-            message.contains("Supported direct clauses: `params`, `part`, `meta`."),
+            message.contains("Supported direct clauses: `params`, `part`, `feature`, `meta`."),
             "{message}"
         );
         assert!(
@@ -6752,7 +7393,7 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("Model children are clauses"), "{message}");
         assert!(
-            message.contains("Supported direct clauses: `params`, `part`, `meta`."),
+            message.contains("Supported direct clauses: `params`, `part`, `feature`, `meta`."),
             "{message}"
         );
         assert!(
@@ -6889,6 +7530,35 @@ mod tests {
             profile_op,
             CoreOperation::Primitive(CorePrimitive::RoundedRectangle)
         ));
+    }
+
+    #[test]
+    fn ring_alias_infers_sketch_kind_before_typecheck() {
+        let program = compile_to_core_program("(model (part body (extrude (ring 20 10 64) 5)))")
+            .expect("ring alias should infer sketch kind");
+
+        let CoreNodeKind::Call { op, args, .. } = &program.parts[0].root.kind else {
+            panic!(
+                "expected extrude call, got {:?}",
+                program.parts[0].root.kind
+            );
+        };
+        assert!(matches!(op, CoreOperation::Surface(CoreSurfaceOp::Extrude)));
+        let CoreNodeKind::Call {
+            op: profile_op,
+            keywords,
+            ..
+        } = &args[0].kind
+        else {
+            panic!("expected profile call, got {:?}", args[0].kind);
+        };
+        assert!(matches!(
+            profile_op,
+            CoreOperation::Primitive(CorePrimitive::Profile)
+        ));
+        assert_eq!(keywords.len(), 2);
+        assert_eq!(keywords[0].name, "outer");
+        assert_eq!(keywords[1].name, "holes");
     }
 
     #[test]
@@ -7268,6 +7938,163 @@ mod tests {
         .expect("compile");
 
         assert_eq!(program.parts.len(), 1);
+    }
+
+    #[test]
+    fn parses_param_unit_metadata() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (params
+                (number width 12 :unit length)
+                (number sweep 90 :unit angle)
+                (number scale 0.5 :unit ratio)
+                (number teeth 16 :unit count)
+                (select material "PLA" :unit text :options (("PLA" "PLA") ("PETG" "PETG"))))
+              (part body (box width 10 2)))
+            "#,
+        )
+        .expect("compile");
+
+        let units = program
+            .parameters
+            .iter()
+            .map(|param| param.constraints.unit.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            units,
+            vec![
+                Some("length"),
+                Some("angle"),
+                Some("ratio"),
+                Some("count"),
+                Some("text")
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_runtime_param_unit_metadata() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (params (number width 12 :unit "length"))
+              (part body (box width 10 2)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(
+            program.parameters[0].constraints.unit.as_deref(),
+            Some("length")
+        );
+    }
+
+    #[test]
+    fn emits_param_unit_metadata() {
+        let source = compile_to_legacy_source(
+            r#"
+            (model
+              (params (number sweep 90 :unit angle))
+              (part body (rotate 0 0 sweep (box 10 10 2))))
+            "#,
+        )
+        .expect("compile");
+
+        assert!(
+            source.contains("(number sweep 90 :unit \"angle\")"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn parses_param_relation_metadata() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (params
+                (number lens_bore_d 8)
+                (number tunnel_aperture_h 10)
+                :relations ((< lens_bore_d tunnel_aperture_h)))
+              (part body (box lens_bore_d 2 3)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.constraints.relations.len(), 1);
+        assert_eq!(program.parameters[0].constraints.relations.len(), 1);
+        assert_eq!(program.parameters[1].constraints.relations.len(), 1);
+    }
+
+    #[test]
+    fn emits_param_relation_metadata() {
+        let source = compile_to_legacy_source(
+            r#"
+            (model
+              (params
+                (number lens_bore_d 8)
+                (number tunnel_aperture_h 10)
+                :relations ((< lens_bore_d tunnel_aperture_h)))
+              (part body (box lens_bore_d 2 3)))
+            "#,
+        )
+        .expect("compile");
+
+        assert!(
+            source.contains(":relations ((< lens_bore_d tunnel_aperture_h))"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn parses_feature_metadata() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (params (number width 12))
+              (feature body :role shell :params (width) (box width 8 6)))
+            "#,
+        )
+        .expect("compile");
+
+        let feature = program.feature_decls.get("body").expect("feature metadata");
+        assert_eq!(feature.feature_id, "body");
+        assert_eq!(feature.role, "shell");
+        assert_eq!(feature.param_keys, vec!["width"]);
+    }
+
+    #[test]
+    fn parses_runtime_feature_metadata() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (params (number width 12))
+              (feature body :role "shell" :params (width) (box width 8 6)))
+            "#,
+        )
+        .expect("compile");
+
+        let feature = program.feature_decls.get("body").expect("feature metadata");
+        assert_eq!(feature.feature_id, "body");
+        assert_eq!(feature.role, "shell");
+        assert_eq!(feature.param_keys, vec!["width"]);
+    }
+
+    #[test]
+    fn emits_feature_metadata() {
+        let source = compile_to_legacy_source(
+            r#"
+            (model
+              (params (number width 12))
+              (feature body :role shell :params (width) (box width 8 6)))
+            "#,
+        )
+        .expect("compile");
+
+        assert!(
+            source.contains("(feature body :role \"shell\" :params (width)"),
+            "{source}"
+        );
     }
 
     #[test]
@@ -7761,6 +8588,78 @@ mod tests {
         };
         assert!(matches!(hole_op, CoreOperation::Custom(name) if name == "hole"));
         assert_eq!(keywords.len(), 2);
+    }
+
+    #[test]
+    fn compiles_helical_ridge_as_custom_surface_with_args_and_keywords() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part thread
+                (helical-ridge
+                  :radius 18
+                  :pitch 3
+                  :height 24
+                  :base-width 1.2
+                  :crest-width 0.35
+                  :depth 0.6
+                  :female #t
+                  :clearance 0.15
+                  :lefthand #t)))
+            "#,
+        )
+        .expect("compile helical ridge");
+
+        let root = &program.parts[0].root;
+        let CoreNodeKind::Call { op, args, keywords } = &root.kind else {
+            panic!("expected helical-ridge call, got {:?}", root.kind);
+        };
+
+        assert!(matches!(op, CoreOperation::Custom(name) if name == "helical-ridge"));
+        assert_eq!(root.value_kind, CoreValueKind::Solid);
+        assert!(
+            root.span.is_some(),
+            "helical-ridge call should keep source span"
+        );
+        assert!(args.is_empty());
+
+        let names = keywords
+            .iter()
+            .map(|keyword| keyword.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "radius",
+                "pitch",
+                "height",
+                "base-width",
+                "crest-width",
+                "depth",
+                "female",
+                "clearance",
+                "lefthand"
+            ]
+        );
+
+        let numeric_values = keywords
+            .iter()
+            .filter_map(|keyword| match &keyword.source_node().kind {
+                CoreNodeKind::Literal(CoreLiteral::Number(value)) => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(numeric_values, vec![18.0, 3.0, 24.0, 1.2, 0.35, 0.6, 0.15]);
+        assert_eq!(
+            emit_node(root, &BTreeMap::new(), &BTreeMap::new()),
+            "(helical-ridge :radius 18 :pitch 3 :height 24 :base-width 1.2 :crest-width 0.35 :depth 0.6 :female #t :clearance 0.15 :lefthand #t)"
+        );
+        assert!(
+            keywords
+                .iter()
+                .all(|keyword| keyword.source_node().span.is_some()),
+            "keyword value nodes should keep source spans"
+        );
     }
 
     #[test]

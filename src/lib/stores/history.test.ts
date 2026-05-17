@@ -3,13 +3,18 @@ import assert from 'node:assert/strict';
 
 import type { ArtifactBundle, Message, ModelManifest } from '../types/domain';
 import {
+  activeThreadLoadingId,
+  activeThreadMessagesLoading,
+  activeThreadVersionLoading,
   beginThreadSwitchForTests,
+  createNewThread,
   mergeActiveThreadMessagesForTests,
   rememberVersionRuntimePayloadForTests,
   mergeCommittedVersionMessageForTests,
   persistVersionRuntimePayloadForTests,
   resolveVersionRuntimePayloadForTests,
   resetVersionRuntimePayloadCacheForTests,
+  threadMessagePageState,
 } from './history';
 import type { Thread } from '../types/domain';
 import { activeThreadIdStore, activeVersionId } from './domainState';
@@ -203,4 +208,31 @@ test('Given thread switch starts When previous model is still loaded Then stale 
   assert.equal(get(session).stlUrl, null);
   assert.equal(get(session).artifactBundle, null);
   assert.equal(get(session).modelManifest, null);
+});
+
+test('Given stale thread messages are loading When blank thread starts Then loading state is cleared', () => {
+  activeThreadIdStore.set('thread-old');
+  activeVersionId.set('message-old');
+  activeThreadLoadingId.set('thread-old');
+  activeThreadMessagesLoading.set(true);
+  activeThreadVersionLoading.set(true);
+  threadMessagePageState.set({
+    'thread-old': {
+      isLoading: true,
+      hasMore: false,
+      nextBefore: null,
+      error: null,
+    },
+  });
+
+  createNewThread({ mode: 'blank' });
+
+  const newThreadId = get(activeThreadIdStore);
+  assert.ok(newThreadId);
+  assert.notEqual(newThreadId, 'thread-old');
+  assert.equal(get(activeVersionId), null);
+  assert.equal(get(activeThreadLoadingId), null);
+  assert.equal(get(activeThreadMessagesLoading), false);
+  assert.equal(get(activeThreadVersionLoading), false);
+  assert.equal(get(threadMessagePageState)[newThreadId!]?.isLoading, false);
 });

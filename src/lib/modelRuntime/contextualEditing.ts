@@ -359,8 +359,21 @@ export function pickContextControls(
       (control.partIds || []).length === 0,
   );
 
-  const ordered = uniqueControls([...exactControls, ...partScoped, ...globalControls]);
-  return ordered.length > 0 ? ordered : visibleControls;
+  if (target.kind === 'face' || target.kind === 'edge') {
+    return exactControls;
+  }
+
+  if (exactControls.length === 0 && partScoped.length === 0) {
+    return [];
+  }
+
+  const targetHasExplicitMapping = target.parameterKeys.length > 0 || target.primitiveIds.length > 0;
+  const ordered = uniqueControls(
+    targetHasExplicitMapping
+      ? [...exactControls, ...partScoped]
+      : [...exactControls, ...partScoped, ...globalControls],
+  );
+  return ordered;
 }
 
 function matchesControlQuery(control: MaterializedSemanticControl, query: string): boolean {

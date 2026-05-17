@@ -17,6 +17,7 @@ import type {
   DesignOutput,
   DesignParams,
   MacroDialect,
+  ModelManifest,
   ParamValue,
   PostProcessingSpec,
   UiField,
@@ -33,6 +34,7 @@ import {
 } from '../tauri/client';
 
 let latestParamRenderSeq = 0;
+let latestAppliedParamDraft: AppliedParamDraft | null = null;
 
 type ManualCommitOptions = {
   targetThreadId?: string | null;
@@ -46,6 +48,147 @@ export type ManualVersionCommitInput = {
   title?: string | null;
   versionName?: string | null;
 };
+
+type AppliedParamDraft = {
+  signature: string;
+  renderableBundle: ArtifactBundle;
+  modelManifest: ModelManifest | null;
+  skippedOversizedPreview: boolean;
+};
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function paramDraftSignature(input: {
+  threadId: string | null;
+  targetVersionId: string | null;
+  macroCode: string;
+  params: DesignParams;
+  macroDialect: MacroDialect | null | undefined;
+  geometryBackend: string | null | undefined;
+  postProcessing: PostProcessingSpec | null | undefined;
+}): string {
+  return stableJson({
+    threadId: input.threadId ?? null,
+    targetVersionId: input.targetVersionId ?? null,
+    macroCode: input.macroCode,
+    params: input.params,
+    macroDialect: input.macroDialect ?? null,
+    geometryBackend: input.geometryBackend ?? null,
+    postProcessing: input.postProcessing ?? null,
+  });
+}
+
+async function commitRenderedParamDraft(input: {
+  snapshotThreadId: string;
+  codeToUse: string;
+  currentParams: DesignParams;
+  uiSpec: UiSpec;
+  postProcessing: PostProcessingSpec | null;
+  title: string;
+  versionName: string;
+  workingMacroDialect: MacroDialect | null | undefined;
+  workingSourceLanguage: string | null | undefined;
+  workingGeometryBackend: string | null | undefined;
+  draft: AppliedParamDraft;
+}) {
+  const committedDesign = buildManualDesign({
+    title: input.title,
+    versionName: input.versionName,
+    response: 'Parameter version committed.',
+    macroCode: input.codeToUse,
+    bundle: input.draft.renderableBundle,
+    uiSpec: input.uiSpec,
+    params: input.currentParams,
+    postProcessing: input.postProcessing,
+    workingMacroDialect: input.workingMacroDialect,
+  });
+  const newMsgId = await addManualVersion({
+    threadId: input.snapshotThreadId,
+    title: input.title,
+    versionName: input.versionName,
+    macroCode: input.codeToUse,
+    sourceLanguage: input.draft.renderableBundle.sourceLanguage || input.workingSourceLanguage || null,
+    geometryBackend: input.draft.renderableBundle.geometryBackend || input.workingGeometryBackend || null,
+    parameters: input.currentParams,
+    uiSpec: input.uiSpec,
+    postProcessing: input.postProcessing,
+    artifactBundle: input.draft.renderableBundle,
+    modelManifest: input.draft.modelManifest,
+  });
+
+  rememberCommittedVersionMessage(input.snapshotThreadId, input.title, {
+    id: newMsgId,
+    role: 'assistant',
+    content: committedDesign.response,
+    status: 'success',
+    output: committedDesign,
+    usage: null,
+    artifactBundle: input.draft.renderableBundle,
+    modelManifest: input.draft.modelManifest,
+    agentOrigin: null,
+    imageData: null,
+    visualKind: null,
+    attachmentImages: [],
+    timestamp: Date.now() / 1000,
+  });
+
+  activeVersionId.set(newMsgId);
+  workingCopy.loadVersion(committedDesign, newMsgId);
+  paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
+  await persistLastSessionSnapshot({
+    design: committedDesign,
+    threadId: input.snapshotThreadId,
+    messageId: newMsgId,
+    artifactBundle: input.draft.renderableBundle,
+    modelManifest: input.draft.modelManifest,
+    selectedPartId: null,
+  });
+  await refreshHistory();
+  session.setStatus(
+    input.draft.skippedOversizedPreview
+      ? 'Parameter version committed. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
+      : 'Parameter version committed.',
+  );
+}
+
+async function runManualCommitHousekeeping(
+  modelId: string,
+  shouldSaveManifest: boolean,
+  snapshotThreadId: string,
+  committedDesign: DesignOutput,
+  newMsgId: string,
+  artifactBundle: ArtifactBundle,
+  modelManifest: ModelManifest | null,
+  shouldPersistSnapshot: boolean,
+) {
+  if (shouldSaveManifest && modelManifest) {
+    await saveModelManifest(modelId, modelManifest, newMsgId);
+  }
+
+  await refreshHistory();
+
+  if (!shouldPersistSnapshot) return;
+
+  await persistLastSessionSnapshot({
+    design: committedDesign,
+    threadId: snapshotThreadId,
+    messageId: newMsgId,
+    artifactBundle,
+    modelManifest,
+    selectedPartId: null,
+  });
+}
 
 function toAssetUrl(path: string | null | undefined): string {
   if (!path) return '';
@@ -358,6 +501,45 @@ export async function handleParamChange(
     return;
   }
 
+  const currentDraftSignature = paramDraftSignature({
+    threadId: snapshotThreadId ?? null,
+    targetVersionId: targetVersionId ?? null,
+    macroCode: codeToUse,
+    params: currentParams,
+    macroDialect: wc.macroDialect ?? null,
+    geometryBackend: wc.geometryBackend ?? null,
+    postProcessing: wc.postProcessing ?? null,
+  });
+  if (persist && snapshotThreadId && latestAppliedParamDraft?.signature === currentDraftSignature) {
+    session.setStatus('Committing applied parameter draft...');
+    try {
+      await commitRenderedParamDraft({
+        snapshotThreadId,
+        codeToUse,
+        currentParams,
+        uiSpec: panel.uiSpec,
+        postProcessing: wc.postProcessing ?? null,
+        title:
+          wc.title ||
+          latestAppliedParamDraft.modelManifest?.document?.documentLabel ||
+          latestAppliedParamDraft.modelManifest?.document?.documentName ||
+          'Parameter Apply',
+        versionName: wc.versionName || 'Param Apply',
+        workingMacroDialect: wc.macroDialect,
+        workingSourceLanguage: wc.sourceLanguage,
+        workingGeometryBackend: wc.geometryBackend,
+        draft: latestAppliedParamDraft,
+      });
+      latestAppliedParamDraft = null;
+    } catch (e) {
+      console.error('[ManualController] cached commit failed:', formatBackendError(e), e);
+      if (get(activeThreadId) === snapshotThreadId) {
+        session.setError(`Commit Failed: ${formatBackendError(e)}`);
+      }
+    }
+    return;
+  }
+
   ensureContext();
 
   session.setStatus(`Executing ${workingCopyBackendLabel(wc)} engine...`);
@@ -413,13 +595,37 @@ export async function handleParamChange(
     }
 
     if (get(activeThreadId) === snapshotThreadId) {
+      const draftDesign = buildManualDesign({
+        title: wc.title || manifest.document?.documentLabel || manifest.document?.documentName || 'Parameter Apply',
+        versionName: wc.versionName || 'Param Apply',
+        response: 'Parameters applied.',
+        macroCode: codeToUse,
+        bundle: renderableBundle,
+        uiSpec: panel.uiSpec,
+        params: currentParams,
+        postProcessing: wc.postProcessing ?? null,
+        workingMacroDialect: wc.macroDialect,
+      });
       await persistLastSessionSnapshot({
+        design: draftDesign,
+        threadId: snapshotThreadId,
+        messageId: targetVersionId ?? null,
         artifactBundle: renderableBundle,
         modelManifest: manifest,
+        selectedPartId: null,
       });
+      if (!persist) {
+        latestAppliedParamDraft = {
+          signature: currentDraftSignature,
+          renderableBundle,
+          modelManifest: manifest,
+          skippedOversizedPreview: runtime.skippedOversizedPreview,
+        };
+      }
     }
 
     if (persist && snapshotThreadId) {
+      latestAppliedParamDraft = null;
       const committedTitle = wc.title || manifest.document?.documentLabel || manifest.document?.documentName || 'Parameter Apply';
       const committedVersionName = wc.versionName || 'Param Apply';
       const committedDesign = buildManualDesign({
@@ -522,7 +728,7 @@ function buildManualDesign(input: {
   uiSpec: UiSpec;
   params: DesignParams;
   postProcessing: PostProcessingSpec | null;
-  workingMacroDialect: MacroDialect;
+  workingMacroDialect: MacroDialect | null | undefined;
 }): DesignOutput {
   return {
     title: input.title,
@@ -713,6 +919,7 @@ export async function commitManualVersion(
     const manifest =
       ensureSemanticManifest(rawManifest, nextUiSpec, nextParams, previousManifest) ??
       rawManifest;
+    const shouldSaveManifest = JSON.stringify(manifest) !== JSON.stringify(rawManifest);
 
     const committedTitle = inputTitle || wc.title || "Manual Edit";
     const committedVersionName = inputVersionName?.trim() || wc.versionName || "V-manual";
@@ -729,9 +936,6 @@ export async function commitManualVersion(
       artifactBundle: bundle,
       modelManifest: manifest,
     });
-    if (JSON.stringify(manifest) !== JSON.stringify(rawManifest)) {
-      await saveModelManifest(bundle.modelId, manifest, newMsgId);
-    }
 
     const committedDesign: DesignOutput = {
       title: committedTitle,
@@ -789,21 +993,22 @@ export async function commitManualVersion(
                 : "Manual version committed."),
       );
     }
-    await refreshHistory();
-
-    if (get(activeThreadId) === snapshotThreadId) {
-      await persistLastSessionSnapshot({
-        design: committedDesign,
-        threadId: snapshotThreadId,
-        messageId: newMsgId,
-        artifactBundle: renderableBundle,
-        modelManifest: manifest,
-        selectedPartId: null,
-      });
-    }
-    
     stopMicrowaveHum('__manual__');
     setManualRenderActive(false);
+
+    const shouldPersistSnapshot = get(activeThreadId) === snapshotThreadId;
+    void runManualCommitHousekeeping(
+      bundle.modelId,
+      shouldSaveManifest,
+      snapshotThreadId,
+      committedDesign,
+      newMsgId,
+      renderableBundle,
+      manifest,
+      shouldPersistSnapshot,
+    ).catch((error) => {
+      console.warn('[ManualController] post-commit housekeeping failed:', error);
+    });
   } catch (e) {
     console.error('[ManualController] commitManualVersion error:', formatBackendError(e), e);
     session.setError(`Manual Commit Failed: ${formatBackendError(e)}`);

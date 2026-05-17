@@ -57,6 +57,7 @@ function createDefaultConfig(): AppConfig {
     engines,
     selectedEngineId: engines[0]?.id ?? '',
     freecadCmd: '',
+    freecadLibraryRoots: [],
     assets: [],
     microwave: null,
     voice: {

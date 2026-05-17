@@ -64,7 +64,7 @@ pub fn collect_image_assets(
             format,
         });
     }
-    assets.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    assets.sort_by_key(|asset| asset.name.to_lowercase());
     Ok(assets)
 }
 
@@ -88,9 +88,7 @@ pub fn sync_image_assets_into_config(
     }
 
     if changed {
-        config
-            .assets
-            .sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        config.assets.sort_by_key(|asset| asset.name.to_lowercase());
     }
 
     Ok(changed)
@@ -205,6 +203,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
             voice: crate::models::VoiceConfig::default(),

@@ -40,3 +40,21 @@ The backend executes Python macros in a headless FreeCAD environment. It injects
 - **Design Forking:** Start new threads from existing designs to mutate geometry.
 - **Manual Commits:** Edit generated Python code directly and commit as new versions.
 - **BRep Modeling:** Focuses on OCCT/Part operations for manifold output (customizable via system prompt).
+
+## Contributor MCP CAD Workflow
+
+For CAD model updates, use MCP-only state mutations:
+
+1. `thread_borrow` (or `thread_create` for new work).
+2. `macro_preview_render` with `.ecky` source.
+3. Verify `artifactDigest` in the preview response.
+4. `commit_preview_version` to persist the draft.
+5. Record returned `threadId`, `messageId`, `modelId`, and artifact digest in change notes.
+
+Do not write `history.sqlite` directly from scripts or agents.
+
+Smoke command:
+
+```bash
+npm run mcp:smoke -- <thread-id> <path-to-model.ecky> [mcp-url]
+```

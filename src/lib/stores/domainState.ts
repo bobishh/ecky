@@ -11,6 +11,7 @@ export const config = writable<AppConfig>({
   engines: [],
   selectedEngineId: '',
   freecadCmd: '',
+  freecadLibraryRoots: [],
   assets: [],
   microwave: {
     humId: null,

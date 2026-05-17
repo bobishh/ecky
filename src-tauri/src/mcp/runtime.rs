@@ -937,7 +937,7 @@ fn write_agent_instructions(
         4. When the user sends the first queued message:\n\
            a. Call `bootstrap_ecky` to load system guidance.\n\
            b. Call `workspace_overview` to inspect the current thread state.\n\
-           c. Read `ecky://guides/authoring-card`, then use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose guides before writing macro code: if sourceLanguage is `ecky`, read `ecky://guides/ecky-source` first, then read `ecky://guides/build123d`, `ecky://guides/freecad`, or `ecky://guides/ecky-rust` to match the backend.\n\
+           c. Read only `workspace_overview.agentBrief.primaryGuideUri` / `mustRead` for normal authoring. For `sourceLanguage=ecky`, write `.ecky`; the backend is a lowerer, not Python. Read `compatibilityManifestUri` only for a concrete op/support check, and read prose backend guides only after lowerer/render errors or artifact/export claims.\n\
            d. If `workspace_overview.defaultTarget.hasVersion` is true, call `target_meta_get`.\n\
               If false, use `agentBrief` config/session defaults for the first version.\n\
            e. Use `target_macro_get` for macro reasoning, `macro_buffer_get` for digest-checked line edits, \
@@ -1039,7 +1039,7 @@ fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
         absolute local files staged by Ecky; open them directly with your file/image tools \
         instead of rewriting or guessing new paths. \
         Do NOT call `bootstrap_ecky` or `workspace_overview` until the user sends the first queued message. \
-        After that, treat `bootstrap_ecky`, `workspace_overview`, `ecky://guides/authoring-card`, and the `ecky://guides/*` resources as the modeling policy source of truth. Use `workspace_overview.agentBrief.sourceLanguage` and `workspace_overview.agentBrief.geometryBackend` to choose the matching guide. If the source language is `ecky`, read `ecky://guides/ecky-source` first, then the backend guide for `build123d`, `freecad`, or `mesh`. If `workspace_overview` says the thread has no saved versions yet, \
+        After that, treat `bootstrap_ecky`, `workspace_overview`, `agentBrief.primaryGuideUri`, and `agentBrief.mustRead` as the normal modeling policy source of truth. If the source language is `ecky`, write `.ecky`; do not switch to Python because the backend is `freecad`. Read `agentBrief.compatibilityManifestUri` only for concrete op/support questions, and prose backend guides only after lowerer/render errors or artifact/export claims. If `workspace_overview` says the thread has no saved versions yet, \
         use agentBrief config/session defaults plus queued user context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, `macro_buffer_get`, `artifact_manifest_get`, and `target_detail_get(section=...)` \
         before falling back to `target_get`. Use `session_activity_set` / `session_activity_clear` for \
         long steps instead of relying on terminal text. At the end of each turn, save any final user-facing \
@@ -3231,6 +3231,7 @@ mod tests {
             engines: vec![],
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            freecad_library_roots: Vec::new(),
             assets: vec![],
             microwave: None,
             voice: crate::models::VoiceConfig::default(),
@@ -3695,8 +3696,9 @@ mod tests {
         assert!(prompt.contains("target_macro_get"));
         assert!(prompt.contains("artifact_manifest_get"));
         assert!(prompt.contains("target_detail_get(section=...)"));
-        assert!(prompt.contains("agentBrief.sourceLanguage"));
-        assert!(prompt.contains("agentBrief.geometryBackend"));
+        assert!(prompt.contains("agentBrief.primaryGuideUri"));
+        assert!(prompt.contains("agentBrief.mustRead"));
+        assert!(prompt.contains("agentBrief.compatibilityManifestUri"));
         assert!(prompt.contains("Ecky authoring card"));
         assert!(prompt.contains("(extrude (polygon"));
         assert!(prompt.contains("let*"));
@@ -3706,10 +3708,11 @@ mod tests {
         assert!(instructions.contains("call `target_meta_get`"));
         assert!(instructions.contains("`artifact_manifest_get` for full artifact JSON"));
         assert!(instructions.contains("Use `target_get` only as a last-resort full payload."));
-        assert!(instructions.contains("agentBrief.sourceLanguage"));
-        assert!(instructions.contains("agentBrief.geometryBackend"));
+        assert!(instructions.contains("workspace_overview.agentBrief.primaryGuideUri"));
+        assert!(instructions.contains("`mustRead`"));
+        assert!(instructions.contains("compatibilityManifestUri"));
         assert!(instructions.contains("Ecky authoring card"));
-        assert!(instructions.contains("ecky://guides/authoring-card"));
+        assert!(instructions.contains("ecky://guides/ecky-source"));
         assert!(instructions.contains("macro_preview_render"));
         assert!(instructions.contains("config/session defaults"));
     }

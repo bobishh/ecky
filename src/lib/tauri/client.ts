@@ -54,6 +54,9 @@ import type {
   BrepHiddenLineProjectionRequest,
   BrepHiddenLineProjectionResponse,
   ExportPartInput,
+  FreecadLibraryImportRequest,
+  FreecadLibraryItem,
+  FreecadLibrarySearchRequest,
   InstalledComponentPackage,
   PostProcessingSpec,
   PromptTranscription,
@@ -132,6 +135,10 @@ export async function listModels(
   baseUrl: string,
 ): Promise<string[]> {
   return unwrapResult(await commands.listModels(provider, apiKey, baseUrl));
+}
+
+export async function getDesignSystemPrompt(provider?: string | null): Promise<string> {
+  return unwrapResult(await commands.getDesignSystemPrompt(provider ?? null));
 }
 
 export async function listAgentModels(cmd: string): Promise<{ models: string[]; isLive: boolean }> {
@@ -347,6 +354,18 @@ export type { PostProcessingSpec };
 
 export async function importFcstd(sourcePath: string): Promise<ArtifactBundle> {
   return normalizeArtifactBundle(unwrapResult(await commands.importFcstd(sourcePath)));
+}
+
+export async function searchFreecadLibrary(
+  request: FreecadLibrarySearchRequest,
+): Promise<FreecadLibraryItem[]> {
+  return unwrapResult(await commands.searchFreecadLibrary(request));
+}
+
+export async function importFreecadLibraryPart(
+  request: FreecadLibraryImportRequest,
+): Promise<ArtifactBundle> {
+  return normalizeArtifactBundle(unwrapResult(await commands.importFreecadLibraryPart(request)));
 }
 
 export async function applyImportedModel(
@@ -585,8 +604,9 @@ export async function updateVersionRuntime(
 export async function updateVersionPreview(
   messageId: string,
   imageData: string,
+  artifactBundle: ArtifactBundle,
 ): Promise<void> {
-  unwrapResult(await commands.updateVersionPreview(messageId, imageData));
+  unwrapResult(await commands.updateVersionPreview(messageId, imageData, artifactBundle));
 }
 
 export async function parseMacroParams(macroCode: string): Promise<ParsedParamsResult> {

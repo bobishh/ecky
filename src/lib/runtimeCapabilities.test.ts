@@ -14,6 +14,7 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     engines: [],
     selectedEngineId: '',
     freecadCmd: '',
+    freecadLibraryRoots: [],
     assets: [],
     microwave: null,
     voice: {

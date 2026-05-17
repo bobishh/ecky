@@ -166,7 +166,11 @@ pub fn finalize_thread(
 
     db::finalize_thread(conn, &finalized_thread_id, now as i64)
         .map_err(|err| AppError::persistence(err.to_string()))?;
-    db::delete_thread(conn, thread_id).map_err(|err| AppError::persistence(err.to_string()))?;
+    let deleted =
+        db::delete_thread(conn, thread_id).map_err(|err| AppError::persistence(err.to_string()))?;
+    if !deleted {
+        return Err(AppError::not_found("Thread not found."));
+    }
 
     Ok(())
 }

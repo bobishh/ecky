@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import {
     loadFromHistory,
+    openInventoryThread,
     deleteThread,
     renameThread,
     createNewThread,
@@ -17,24 +18,29 @@
     getDeletedMessages,
     hideDeletedMessage,
     getThreadLatestVersion,
-    getThreadMessagesPage,
     formatBackendError,
+    getConfig,
     listInstalledComponentPackageHeaders,
+    saveConfig,
+    searchFreecadLibrary,
     installComponentPackageArchive,
   } from './tauri/client';
-  import type { ComponentHeader, ComponentPackageHeader } from './tauri/contracts';
+  import type { ComponentHeader, ComponentPackageHeader, FreecadLibraryItem } from './tauri/contracts';
   import type { Thread, DeletedMessage, Message } from './types/domain';
   import Modal from './Modal.svelte';
   import ManualImportModal from './ManualImportModal.svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { deriveProjectThreadBadges } from './projectThreadBadges';
+  import { selectThreadPreviewImage, type ProjectPreviewImage } from './projectPreview';
 
   let {
     onImportFcstd,
+    onImportFreecadLibraryPart,
     freecadUnavailableReason = null,
   }: {
     onImportFcstd?: (sourcePath: string) => void;
+    onImportFreecadLibraryPart?: (item: FreecadLibraryItem) => Promise<void> | void;
     freecadUnavailableReason?: string | null;
   } = $props();
 
@@ -45,14 +51,23 @@
   let archivedThreads = $state<Thread[]>([]);
   let deletedMessages = $state<DeletedMessage[]>([]);
   let packageHeaders = $state<ComponentPackageHeader[]>([]);
+  let freecadLibraryRoots = $state<string[]>([]);
+  let freecadLibraryQuery = $state('');
+  let freecadLibraryResults = $state<FreecadLibraryItem[]>([]);
+  let freecadLibraryError = $state<string | null>(null);
+  let freecadLibrarySearchBusy = $state(false);
+  let freecadLibraryFolderBusy = $state(false);
+  let importingFreecadLibraryItemId = $state<string | null>(null);
   let latestVersions = $state<Record<string, Message | null>>({});
-  let previewImages = $state<Record<string, string | null>>({});
-  let previewLoading = $state<Record<string, boolean>>({});
+  let previewImages = $state<Record<string, ProjectPreviewImage | null>>({});
   let archivedLoaded = $state(false);
   let trashLoaded = $state(false);
   let packagesLoaded = $state(false);
+  let loadError = $state<string | null>(null);
   let packageError = $state<string | null>(null);
   let packageImportBusy = $state(false);
+  const queuedPreviewThreadIds = new Set<string>();
+  let previewPumpActive = false;
 
   onMount(() => {
     const onPreviewUpdated = (event: Event) => {
@@ -62,7 +77,12 @@
         imageData?: string;
       }>).detail;
       if (!detail?.threadId || !detail.imageData) return;
-      previewImages = { ...previewImages, [detail.threadId]: detail.imageData };
+      if (detail.messageId) {
+        previewImages = {
+          ...previewImages,
+          [detail.threadId]: { messageId: detail.messageId, imageData: detail.imageData },
+        };
+      }
       const latest = latestVersions[detail.threadId];
       if (latest && latest.id === detail.messageId) {
         latestVersions = {
@@ -87,12 +107,7 @@
   }
 
   function threadPreviewImage(thread: Thread): string | null {
-    const latest = latestVersions[thread.id];
-    const latestPreview = previewSrc(latest?.imageData);
-    if (latestPreview) return latestPreview;
-    if (previewImages[thread.id] !== undefined) return previewSrc(previewImages[thread.id]);
-    const fallback = [...(thread.messages || [])].reverse().find((message) => message.imageData);
-    return previewSrc(fallback?.imageData);
+    return previewSrc(selectThreadPreviewImage(thread, latestVersions[thread.id], previewImages[thread.id]));
   }
 
   async function loadData() {
@@ -105,12 +120,16 @@
       return;
     }
     isLoading = true;
+    loadError = null;
     try {
       if (activeTab === 'archived') {
         archivedThreads = await loadInventory();
         archivedLoaded = true;
       } else if (activeTab === 'packages') {
         packageError = null;
+        freecadLibraryError = null;
+        const cfg = await getConfig();
+        freecadLibraryRoots = cfg.freecadLibraryRoots ?? [];
         packageHeaders = await listInstalledComponentPackageHeaders();
         packagesLoaded = true;
       } else if (activeTab === 'trash') {
@@ -124,6 +143,7 @@
         packageError = message;
         packagesLoaded = true;
       } else {
+        loadError = message;
         console.error('Failed to load projects:', message);
       }
     } finally {
@@ -144,43 +164,51 @@
         rememberLatestThreadVersion(threadId, version);
       }
       if (version?.imageData) {
-        previewImages = { ...previewImages, [threadId]: version.imageData };
+        previewImages = {
+          ...previewImages,
+          [threadId]: { messageId: version.id, imageData: version.imageData },
+        };
         return;
       }
     } catch (e) {
       console.error(`Failed to fetch latest version for ${threadId}:`, e);
       latestVersions = { ...latestVersions, [threadId]: null };
     }
-    void fetchPreviewImage(threadId);
   }
 
-  async function fetchPreviewImage(threadId: string) {
-    if (previewImages[threadId] !== undefined || previewLoading[threadId]) return;
-    previewLoading = { ...previewLoading, [threadId]: true };
-    try {
-      const page = await getThreadMessagesPage(threadId, null, 100, true);
-      const previewMessage =
-        [...page.messages].reverse().find((message) => message.imageData) ??
-        [...page.messages].reverse().find((message) => message.attachmentImages?.length);
-      previewImages = {
-        ...previewImages,
-        [threadId]: previewMessage?.imageData ?? previewMessage?.attachmentImages?.[0] ?? null,
-      };
-    } catch (e) {
-      console.error(`Failed to fetch preview image for ${threadId}:`, e);
-      previewImages = { ...previewImages, [threadId]: null };
-    } finally {
-      previewLoading = { ...previewLoading, [threadId]: false };
+  function queuePreviewFetch(threadId: string) {
+    if (latestVersions[threadId] !== undefined || queuedPreviewThreadIds.has(threadId)) return;
+    queuedPreviewThreadIds.add(threadId);
+    if (previewPumpActive) return;
+    previewPumpActive = true;
+    queueMicrotask(async () => {
+      try {
+        while (queuedPreviewThreadIds.size > 0) {
+          const nextThreadId = queuedPreviewThreadIds.values().next().value;
+          if (!nextThreadId) break;
+          queuedPreviewThreadIds.delete(nextThreadId);
+          await fetchLatestVersion(nextThreadId);
+        }
+      } finally {
+        previewPumpActive = false;
+      }
+    });
+  }
+
+  async function warmVisibleCardPreviews(threads: Thread[]) {
+    for (const thread of threads) {
+      queuePreviewFetch(thread.id);
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
   }
 
-  // Pre-fetch latest versions for visible cards in current tab
+  // Warm a few cards after first paint. Avoid N+1 storm on project open.
   $effect(() => {
-    const previewLimit = 24;
+    const previewLimit = 6;
     if (activeTab === 'in-work') {
-      filteredInWork.slice(0, previewLimit).forEach(t => fetchLatestVersion(t.id));
+      void warmVisibleCardPreviews(filteredInWork.slice(0, previewLimit));
     } else if (activeTab === 'archived') {
-      filteredArchived.slice(0, previewLimit).forEach(t => fetchLatestVersion(t.id));
+      void warmVisibleCardPreviews(filteredArchived.slice(0, previewLimit));
     }
   });
 
@@ -243,7 +271,11 @@
   // Actions
   function handleSelect(thread: Thread) {
     if (editingThreadId === thread.id) return;
-    loadFromHistory(thread);
+    if (activeTab === 'archived') {
+      void openInventoryThread(thread.id);
+      return;
+    }
+    void loadFromHistory(thread);
   }
 
   async function handleArchive(id: string) {
@@ -284,6 +316,21 @@
       await hideDeletedMessage(id);
       deletedMessages = deletedMessages.filter(m => m.id !== id);
     } finally {
+      pendingActionId = null;
+    }
+  }
+
+  async function handleDeleteConfirmed() {
+    if (!threadToDelete) return;
+    const id = threadToDelete.id;
+    pendingActionId = id;
+    try {
+      const deleted = await deleteThread(id);
+      if (deleted) {
+        archivedThreads = archivedThreads.filter((thread) => thread.id !== id);
+      }
+    } finally {
+      threadToDelete = null;
       pendingActionId = null;
     }
   }
@@ -353,6 +400,58 @@
     }
   }
 
+  async function handleSetFreecadLibraryFolder() {
+    if (freecadLibraryFolderBusy) return;
+    freecadLibraryError = null;
+    const selected = await open({
+      directory: true,
+      multiple: false,
+    });
+    if (typeof selected !== 'string' || !selected.trim()) return;
+
+    freecadLibraryFolderBusy = true;
+    try {
+      const cfg = await getConfig();
+      const roots = [selected.trim()];
+      await saveConfig({ ...cfg, freecadLibraryRoots: roots });
+      freecadLibraryRoots = roots;
+      freecadLibraryResults = [];
+      packagesLoaded = false;
+    } catch (e) {
+      freecadLibraryError = formatBackendError(e);
+    } finally {
+      freecadLibraryFolderBusy = false;
+    }
+  }
+
+  async function handleSearchFreecadLibrary() {
+    if (freecadLibrarySearchBusy) return;
+    freecadLibraryError = null;
+    freecadLibrarySearchBusy = true;
+    try {
+      freecadLibraryResults = await searchFreecadLibrary({
+        query: freecadLibraryQuery,
+        roots: freecadLibraryRoots,
+        limit: 60,
+      });
+    } catch (e) {
+      freecadLibraryResults = [];
+      freecadLibraryError = formatBackendError(e);
+    } finally {
+      freecadLibrarySearchBusy = false;
+    }
+  }
+
+  async function importFreecadLibraryItem(item: FreecadLibraryItem) {
+    if (!onImportFreecadLibraryPart || importingFreecadLibraryItemId) return;
+    importingFreecadLibraryItemId = item.id;
+    try {
+      await onImportFreecadLibraryPart(item);
+    } finally {
+      importingFreecadLibraryItemId = null;
+    }
+  }
+
   function countLabel(count: number, singular: string, plural = `${singular}s`) {
     return `${count} ${count === 1 ? singular : plural}`;
   }
@@ -373,6 +472,14 @@
 
   function retryPackages() {
     packagesLoaded = false;
+    void loadData();
+  }
+
+  function retryActiveTab() {
+    loadError = null;
+    if (activeTab === 'archived') archivedLoaded = false;
+    if (activeTab === 'trash') trashLoaded = false;
+    if (activeTab === 'packages') packagesLoaded = false;
     void loadData();
   }
 </script>
@@ -399,6 +506,14 @@
   <div class="switcher-content scrollable">
     {#if isLoading}
       <div class="loading-state">Loading...</div>
+    {:else if loadError}
+      <div class="package-error-state">
+        <div class="state-title">
+          {activeTab === 'archived' ? 'ARCHIVED LOAD ERROR' : activeTab === 'trash' ? 'TRASH LOAD ERROR' : 'LOAD ERROR'}
+        </div>
+        <pre>{loadError}</pre>
+        <button class="btn-text primary" onclick={retryActiveTab}>RETRY</button>
+      </div>
     {:else}
       <div class="project-grid">
         {#if activeTab === 'in-work'}
@@ -473,6 +588,65 @@
             </div>
           {/each}
         {:else if activeTab === 'packages'}
+          <div class="freecad-library-panel">
+            <div class="freecad-library-head">
+              <div>
+                <div class="state-title">FREECAD LIBRARY</div>
+                <div class="freecad-library-root">
+                  {freecadLibraryRoots[0] || 'NO LOCAL FOLDER CONFIGURED'}
+                </div>
+              </div>
+              <button class="btn-text primary" onclick={handleSetFreecadLibraryFolder} disabled={freecadLibraryFolderBusy}>
+                {freecadLibraryRoots.length ? 'CHANGE FOLDER' : 'SET LIBRARY FOLDER'}
+              </button>
+            </div>
+            <div class="freecad-library-search">
+              <input
+                type="text"
+                placeholder="Search FreeCAD library..."
+                bind:value={freecadLibraryQuery}
+                onkeydown={(event) => event.key === 'Enter' && handleSearchFreecadLibrary()}
+              />
+              <button class="btn-text primary" onclick={handleSearchFreecadLibrary} disabled={freecadLibrarySearchBusy}>
+                {freecadLibrarySearchBusy ? 'SEARCHING...' : 'SEARCH FREECAD'}
+              </button>
+            </div>
+            {#if freecadLibraryError}
+              <pre class="freecad-library-error">{freecadLibraryError}</pre>
+            {/if}
+            {#if freecadLibraryResults.length > 0}
+              <div class="freecad-library-results">
+                {#each freecadLibraryResults as item (item.id)}
+                  <div class="freecad-library-result">
+                    <div class="freecad-library-result__main">
+                      <strong>{item.name}</strong>
+                      <span>{item.categoryPath}</span>
+                      <div class="interface-list">
+                        {#each item.formats as format}
+                          <span>{format}</span>
+                        {/each}
+                      </div>
+                      {#if item.tags.length > 0}
+                        <div class="interface-list muted">
+                          {#each item.tags as tag}
+                            <span>{tag}</span>
+                          {/each}
+                        </div>
+                      {/if}
+                    </div>
+                    <button
+                      class="btn-text primary"
+                      aria-label={importingFreecadLibraryItemId === item.id ? `IMPORTING ${item.name}` : `IMPORT ${item.name}`}
+                      onclick={() => importFreecadLibraryItem(item)}
+                      disabled={Boolean(importingFreecadLibraryItemId)}
+                    >
+                      {importingFreecadLibraryItemId === item.id ? 'IMPORTING...' : 'IMPORT'}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
           {#if packageError}
             <div class="package-error-state">
               <div class="state-title">PACKAGE LIBRARY ERROR</div>
@@ -590,8 +764,20 @@
         <p>Move <strong>{threadToDelete.title}</strong> to trash?</p>
         <p class="confirm-delete__hint">You can recover it from <strong>TRASH</strong>.</p>
         <div class="actions">
-          <button class="btn btn-ghost" onclick={() => threadToDelete = null}>CANCEL</button>
-          <button class="btn btn-danger" onclick={() => { deleteThread(threadToDelete!.id); threadToDelete = null; }}>MOVE TO TRASH</button>
+          <button
+            class="btn btn-ghost"
+            onclick={() => threadToDelete = null}
+            disabled={pendingActionId === threadToDelete.id}
+          >
+            CANCEL
+          </button>
+          <button
+            class="btn btn-danger"
+            onclick={handleDeleteConfirmed}
+            disabled={pendingActionId === threadToDelete.id}
+          >
+            MOVE TO TRASH
+          </button>
         </div>
       </div>
     </Modal>
@@ -673,6 +859,12 @@
 
   .import-package-btn {
     background: var(--secondary);
+  }
+
+  .library-folder-btn {
+    background: var(--bg-300);
+    color: var(--primary);
+    border: 1px solid var(--primary);
   }
 
   .switcher-content {
@@ -900,6 +1092,93 @@
   .package-card {
     padding: 12px;
     gap: 10px;
+  }
+
+  .freecad-library-panel {
+    grid-column: 1 / -1;
+    background: var(--bg-200);
+    border: 1px solid var(--bg-300);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+  }
+
+  .freecad-library-head,
+  .freecad-library-search,
+  .freecad-library-result {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    overflow: hidden;
+  }
+
+  .freecad-library-root {
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 520px;
+  }
+
+  .freecad-library-search input {
+    min-width: 0;
+    flex: 1;
+    padding: 7px 10px;
+    background: var(--bg-100);
+    border: 1px solid var(--bg-300);
+    color: var(--text);
+    font-size: 0.75rem;
+  }
+
+  .freecad-library-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
+    overflow: hidden;
+  }
+
+  .freecad-library-result {
+    background: var(--bg-100);
+    border: 1px solid var(--bg-300);
+    padding: 8px;
+  }
+
+  .freecad-library-result__main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    overflow: hidden;
+  }
+
+  .freecad-library-result__main strong {
+    font-size: 0.76rem;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .freecad-library-result__main > span {
+    font-size: 0.66rem;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .freecad-library-error {
+    margin: 0;
+    white-space: pre-wrap;
+    color: var(--red);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
   }
 
   .package-card-header {

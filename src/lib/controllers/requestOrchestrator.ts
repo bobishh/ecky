@@ -858,6 +858,8 @@ class GenerationPipeline {
               // attempt cap hit — fall through to commit best-effort
             } else if (structResult.kind === 'failed_terminal') {
               console.warn('[Pipeline] structural terminal failure:', structResult.issues);
+              await this.handleVerificationFailure(data, `Structural verification failed:\n${structResult.issues}`);
+              return;
             } else if (structResult.kind === 'structural_passed') {
               structuralMetrics = structResult.metrics;
               structuralSummary = formatStructuralSummary(structResult.metrics);
@@ -915,9 +917,11 @@ class GenerationPipeline {
                 break; // break verify loop, continue generate loop
               }
 
-              // failed_terminal → commit anyway
+              // failed_terminal → stop; generated geometry is known bad.
               if (vResult.kind === 'failed_terminal') {
                 console.warn('[Pipeline] vision terminal failure:', vResult.issues);
+                await this.handleVerificationFailure(data, `Vision verification failed:\n${vResult.issues}`);
+                return;
               }
               break;
             }
@@ -1301,6 +1305,25 @@ class GenerationPipeline {
     await this.finalizeAttempt('error', data, `Render Error: ${renderError}`);
     openCodeModalManual?.(data);
     requestQueue.patch(this.requestId, { phase: 'error', error: `Render Error: ${renderError}` });
+    this.stopMicrowave(false);
+    syncSessionPhaseFromQueue();
+  }
+
+  private async handleVerificationFailure(data: DesignOutput, verificationError: string) {
+    this.updateError(verificationError);
+    if (this.isActiveThread()) {
+      try {
+        const messPath = await getMessStlPath();
+        session.setStlUrl(toAssetUrl(messPath));
+        session.clearModelRuntime();
+      } catch (e) {
+        session.setStlUrl(null);
+      }
+    }
+
+    await this.finalizeAttempt('error', data, verificationError);
+    openCodeModalManual?.(data);
+    requestQueue.patch(this.requestId, { phase: 'error', error: verificationError });
     this.stopMicrowave(false);
     syncSessionPhaseFromQueue();
   }

@@ -1,0 +1,174 @@
+(model
+  (params
+    (number thread_pitch 3.2 :label "thread pitch" :min 1.0 :max 8.0 :step 0.05)
+    (number thread_height 12.0 :label "thread height" :min 4.0 :max 24.0 :step 0.1)
+    (number thread_base_w 1.3 :label "thread base width" :min 0.4 :max 3.0 :step 0.05)
+    (number thread_depth 0.9 :label "thread depth" :min 0.2 :max 2.0 :step 0.05))
+
+  (part coupon_male_020
+    (build
+      (shape core (cylinder 10.0 thread_height))
+      (shape ridge_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth))
+      (shape ridge
+        (clip-box ridge_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape lead_in (translate 0 0 (- thread_height 1.2) (cone 10.9 10.0 1.2)))
+      (shape body (fuse core ridge lead_in))
+      (result body)))
+
+  (part coupon_female_020
+    (build
+      (shape shell (cylinder 13.0 thread_height))
+      (shape cutter_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth
+          :female #t
+          :clearance 0.20))
+      (shape cutter
+        (clip-box cutter_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape bore (cylinder 10.2 thread_height))
+      (shape lead_in_cut (translate 0 0 (- thread_height 1.2) (cone 11.3 10.2 1.2)))
+      (result (difference shell cutter bore lead_in_cut))))
+
+  (part coupon_male_025
+    (build
+      (shape core (cylinder 10.0 thread_height))
+      (shape ridge_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth))
+      (shape ridge
+        (clip-box ridge_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape lead_in (translate 0 0 (- thread_height 1.2) (cone 10.9 10.0 1.2)))
+      (shape body (fuse core ridge lead_in))
+      (result body)))
+
+  (part coupon_female_025
+    (build
+      (shape shell (cylinder 13.0 thread_height))
+      (shape cutter_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth
+          :female #t
+          :clearance 0.25))
+      (shape cutter
+        (clip-box cutter_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape bore (cylinder 10.2 thread_height))
+      (shape lead_in_cut (translate 0 0 (- thread_height 1.2) (cone 11.3 10.2 1.2)))
+      (result (difference shell cutter bore lead_in_cut))))
+
+  (part coupon_male_030
+    (build
+      (shape core (cylinder 10.0 thread_height))
+      (shape ridge_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth))
+      (shape ridge
+        (clip-box ridge_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape lead_in (translate 0 0 (- thread_height 1.2) (cone 10.9 10.0 1.2)))
+      (shape body (fuse core ridge lead_in))
+      (result body)))
+
+  (part coupon_female_030
+    (build
+      (shape shell (cylinder 13.0 thread_height))
+      (shape cutter_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth
+          :female #t
+          :clearance 0.30))
+      (shape cutter
+        (clip-box cutter_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape bore (cylinder 10.2 thread_height))
+      (shape lead_in_cut (translate 0 0 (- thread_height 1.2) (cone 11.3 10.2 1.2)))
+      (result (difference shell cutter bore lead_in_cut))))
+
+  (part coupon_male_035
+    (build
+      (shape core (cylinder 10.0 thread_height))
+      (shape ridge_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth))
+      (shape ridge
+        (clip-box ridge_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape lead_in (translate 0 0 (- thread_height 1.2) (cone 10.9 10.0 1.2)))
+      (shape body (fuse core ridge lead_in))
+      (result body)))
+
+  (part coupon_female_035
+    (build
+      (shape shell (cylinder 13.0 thread_height))
+      (shape cutter_raw
+        (helical-ridge
+          :radius 10.0
+          :pitch thread_pitch
+          :height thread_height
+          :base-width thread_base_w
+          :crest-width (* thread_base_w 0.6)
+          :depth thread_depth
+          :female #t
+          :clearance 0.35))
+      (shape cutter
+        (clip-box cutter_raw
+          :x (-12.5 12.5)
+          :y (-12.5 12.5)
+          :z (0.4 (- thread_height 0.4))))
+      (shape bore (cylinder 10.2 thread_height))
+      (shape lead_in_cut (translate 0 0 (- thread_height 1.2) (cone 11.3 10.2 1.2)))
+      (result (difference shell cutter bore lead_in_cut)))))

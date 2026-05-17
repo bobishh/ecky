@@ -9,8 +9,6 @@ use crate::models::{
     ArtifactBundle, DesignOutput, DesignParams, InteractionMode, MacroDialect, Message,
     MessageRole, MessageStatus, ModelManifest, PathResolver, PostProcessingSpec, UiSpec,
 };
-use crate::persist_thread_summary;
-use crate::services::session::{build_runtime_snapshot, write_last_snapshot};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -162,7 +160,7 @@ fn resolve_manual_authoring_context(
 pub async fn add_manual_version(
     request: AddManualVersionRequest,
     state: &AppState,
-    app: &dyn PathResolver,
+    _app: &dyn PathResolver,
 ) -> AppResult<String> {
     let AddManualVersionRequest {
         thread_id,
@@ -254,20 +252,6 @@ pub async fn add_manual_version(
     };
 
     db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
-    let _ = persist_thread_summary(&db, &thread_id, &title);
-    let snapshot = build_runtime_snapshot(
-        msg.output.clone(),
-        Some(thread_id.clone()),
-        Some(msg_id.clone()),
-        artifact_bundle,
-        model_manifest,
-        None,
-    );
-    {
-        let mut last = state.last_snapshot.lock().unwrap();
-        *last = Some(snapshot.clone());
-    }
-    write_last_snapshot(app, Some(&snapshot));
 
     Ok(msg_id)
 }

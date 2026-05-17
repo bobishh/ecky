@@ -59,7 +59,11 @@ pub fn verify_structure(
                         preview_stl_overhang_triangle_count =
                             Some(usize_metric(topology.overhang_triangle_count));
                         preview_stl_overhang_ratio = Some(topology.overhang_ratio);
-                        add_preview_stl_topology_issues(&mut issues, topology);
+                        add_preview_stl_topology_issues(
+                            &mut issues,
+                            topology,
+                            expected_preview_component_count(bundle, manifest),
+                        );
                     }
                     Ok(StlPreview::Unreadable) | Err(_) => {
                         issues.push(StructuralIssue {
@@ -573,6 +577,7 @@ fn preview_stl_topology_summary(triangles: &[StlTriangle]) -> StlTopologySummary
 fn add_preview_stl_topology_issues(
     issues: &mut Vec<StructuralIssue>,
     topology: StlTopologySummary,
+    expected_component_count: usize,
 ) {
     let non_manifold_edges = topology.non_manifold_edge_count;
     if non_manifold_edges > 0 {
@@ -588,7 +593,7 @@ fn add_preview_stl_topology_issues(
     }
 
     let component_count = topology.component_count;
-    if component_count > 1 {
+    if component_count > expected_component_count {
         issues.push(StructuralIssue {
             code: "PREVIEW_STL_DISCONNECTED_COMPONENTS".into(),
             message: format!(
@@ -599,6 +604,16 @@ fn add_preview_stl_topology_issues(
             numeric_payload: Some(component_count as f64),
         });
     }
+}
+
+fn expected_preview_component_count(bundle: &ArtifactBundle, manifest: &ModelManifest) -> usize {
+    let viewer_part_count = bundle
+        .viewer_assets
+        .iter()
+        .map(|asset| asset.part_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    viewer_part_count.max(manifest.parts.len()).max(1)
 }
 
 fn usize_metric(value: usize) -> u32 {
@@ -816,6 +831,9 @@ mod tests {
             schema_version: 1,
             model_id: "generated-test-001".into(),
             source_kind: ModelSourceKind::Generated,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: EngineKind::Freecad,
             source_language: SourceLanguage::LegacyPython,
             geometry_backend: GeometryBackend::Freecad,
@@ -854,6 +872,8 @@ mod tests {
             advisories: vec![],
             selection_targets: vec![],
             measurement_annotations: vec![],
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: vec![],
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -1004,6 +1024,48 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn multipart_preview_stl_allows_one_component_per_part() {
+        let dir = temp_dir("multipart_two_tetra");
+        let mut bundle = test_bundle(&dir);
+        write_two_tetra_binary_stl(Path::new(&bundle.preview_stl_path));
+        bundle.viewer_assets = vec![
+            ViewerAsset {
+                part_id: "part-1".into(),
+                node_id: "part-1".into(),
+                object_name: "Part1".into(),
+                label: "Part 1".into(),
+                path: "part-1.stl".into(),
+                format: ViewerAssetFormat::Stl,
+            },
+            ViewerAsset {
+                part_id: "part-2".into(),
+                node_id: "part-2".into(),
+                object_name: "Part2".into(),
+                label: "Part 2".into(),
+                path: "part-2.stl".into(),
+                format: ViewerAssetFormat::Stl,
+            },
+        ];
+        let mut manifest = test_manifest();
+        let mut second = manifest.parts[0].clone();
+        second.part_id = "part-2".into();
+        second.freecad_object_name = "Body2".into();
+        second.label = "Second Body".into();
+        manifest.parts.push(second);
+
+        let result = verify_structure(&bundle, &manifest);
+
+        assert!(result.passed, "Expected pass, got: {:?}", result.issues);
+        assert_eq!(result.metrics.preview_stl_component_count, Some(2));
+        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| i.code == "PREVIEW_STL_DISCONNECTED_COMPONENTS"));
         fs::remove_dir_all(&dir).ok();
     }
 

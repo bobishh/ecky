@@ -432,7 +432,7 @@ fn sketch_draft_embeds_source_map_comment_and_preview_renders_through_it() {
     assert_eq!(document.sketches[0].sketch_id, "front_profile");
     assert_eq!(document.sketches[0].primitives.len(), 1);
     assert_eq!(document.sketches[0].primitives[0].primitive_id, "outer");
-    assert_eq!(document.sketches[0].primitives[0].closed, true);
+    assert!(document.sketches[0].primitives[0].closed);
     assert_eq!(
         document.sketches[0].primitives[0].points,
         vec![[0.0, 0.0], [30.0, 0.0], [30.0, 12.0], [0.0, 12.0]]

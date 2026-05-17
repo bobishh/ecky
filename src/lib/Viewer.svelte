@@ -3,6 +3,8 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { ThreeMFLoader } from 'three/examples/jsm/loaders/3MFLoader.js';
+  import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
   import ViewportTransmutation from './ViewportTransmutation.svelte';
   import { estimateBase64Bytes, profileLog } from './debug/profiler';
@@ -13,10 +15,10 @@
     UiField,
     ViewerAsset,
     ViewerEdgeTarget,
+    ViewerFaceTarget,
     ViewportCameraState,
   } from './types/domain';
   import {
-    resolveViewerNodeTarget,
     shouldDisplayViewportControlList,
     type MeasurementControlFocus,
     type ResolvedMeasurementCallout,
@@ -24,9 +26,16 @@
   } from './modelRuntime/contextualEditing';
   import type { ImportedPreviewTransform } from './modelRuntime/importedRuntime';
   import type { MaterializedSemanticControl } from './modelRuntime/semanticControls';
-  import { cycleTopologyMode, topologyModeLabel, type TopologyMode } from './viewerDisplayMode';
+  import {
+    cycleTopologyMode,
+    meshTopologyOpacity,
+    meshTopologyVisible,
+    topologyModeLabel,
+    type TopologyMode,
+  } from './viewerDisplayMode';
   import { resolveViewerTone, type ViewerTone } from './viewerLook';
   import { resolveViewerAssetUrl } from './viewerAssetUrl';
+  import { shouldHandleSelectionClick, shouldHandleViewerClick } from './viewerInteraction';
 
   type ViewportBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
 
@@ -36,6 +45,7 @@
     viewerAssets = [],
     manifestParts = [],
     edgeTargets = [],
+    faceTargets = [],
     selectionTargets = [],
     selectedTarget = null,
     searchQuery = '',
@@ -54,6 +64,7 @@
     busyPhase = null,
     busyText = null,
     topologyMode = 'mesh',
+    viewerMode = 'orbit',
     persistedCameraState = null,
     onSearchQueryChange,
     onSelectTarget,
@@ -68,6 +79,7 @@
     viewerAssets?: ViewerAsset[];
     manifestParts?: PartBinding[];
     edgeTargets?: ViewerEdgeTarget[];
+    faceTargets?: ViewerFaceTarget[];
     selectionTargets?: ContextSelectionTarget[];
     selectedTarget?: ContextSelectionTarget | null;
     searchQuery?: string;
@@ -86,6 +98,7 @@
     busyPhase?: ViewportBusyPhase;
     busyText?: string | null;
     topologyMode?: TopologyMode;
+    viewerMode?: 'orbit' | 'select' | 'measure';
     persistedCameraState?: ViewportCameraState | null;
     onSearchQueryChange?: (query: string) => void;
     onSelectTarget?: (target: ContextSelectionTarget | null) => void;
@@ -114,6 +127,16 @@
     line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   };
 
+  type RuntimeFace = {
+    targetId: string;
+    durableTargetId?: string | null;
+    canonicalTargetId?: string | null;
+    aliasIds: string[];
+    partId: string;
+    basePosition: THREE.Vector3;
+    mesh: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+  };
+
   let viewerHost: HTMLDivElement;
   let scene: THREE.Scene | null = null;
   let camera: THREE.PerspectiveCamera | null = null;
@@ -122,6 +145,7 @@
   let modelRoot: THREE.Group | null = null;
   let runtimeMeshes: RuntimeMesh[] = [];
   let runtimeEdges: RuntimeEdge[] = [];
+  let runtimeFaces: RuntimeFace[] = [];
   let animationFrameId: number | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let loadToken = 0;
@@ -131,6 +155,8 @@
   let overlayFallback = $state(true);
   let hoveredPartId = $state<string | null>(null);
   let hoveredTargetId = $state<string | null>(null);
+  let inspectedPartId = $state<string | null>(null);
+  let orbitDraggedSincePointerDown = $state(false);
   let dimensionFrame = $state<{ bottom: number; height: number; left: number; right: number; top: number; width: number } | null>(null);
   let measurementOverlay = $state<{
     badgeLeft: number;
@@ -145,12 +171,42 @@
   const manifestPartSignature = $derived.by(() =>
     manifestParts.map((part) => `${part.partId}:${part.label}:${part.kind}:${part.semanticRole ?? ''}`).join('|'),
   );
+  const edgeTargetSignature = $derived.by(() =>
+    edgeTargets
+      .map((target) => [
+        target.targetId,
+        target.durableTargetId ?? '',
+        target.canonicalTargetId ?? '',
+        target.partId,
+        target.start.x,
+        target.start.y,
+        target.start.z,
+        target.end.x,
+        target.end.y,
+        target.end.z,
+      ].join(':'))
+      .join('|'),
+  );
+  const faceTargetSignature = $derived.by(() =>
+    faceTargets
+      .map((target) => [
+        target.targetId,
+        target.durableTargetId ?? '',
+        target.canonicalTargetId ?? '',
+        target.partId,
+        target.center.x,
+        target.center.y,
+        target.center.z,
+        target.normal?.join(',') ?? '',
+        target.area ?? '',
+      ].join(':'))
+      .join('|'),
+  );
   const modelLoadSignature = $derived.by(
     () => `${modelKey ?? ''}::${stlUrl ?? ''}::${viewerAssetSignature}::${manifestPartSignature}`,
   );
-  const showEditableCallouts = $derived.by(
-    () => !hideModelWhileBusy && !overlayFallback && overlayPartEditable && overlayControls.length > 0,
-  );
+  const showEditableCallouts = $derived(false);
+  const selectionMode = $derived.by(() => viewerMode === 'select');
   const showViewportControlList = $derived.by(
     () => shouldDisplayViewportControlList(selectedTarget),
   );
@@ -158,6 +214,7 @@
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   let pointerDownAt: { x: number; y: number } | null = null;
+  let isOrbitDragging = false;
 
   function currentCameraState(): ViewportCameraState | null {
     if (!camera || !controls) return null;
@@ -214,6 +271,14 @@
     ]).finally(() => {
       if (timer) clearTimeout(timer);
     });
+  }
+
+  function loadObjObject(loader: OBJLoader, url: string): Promise<THREE.Object3D> {
+    return loader.loadAsync(resolveViewerAssetUrl(url, modelKey));
+  }
+
+  function loadThreeMfObject(loader: ThreeMFLoader, url: string): Promise<THREE.Object3D> {
+    return loader.loadAsync(resolveViewerAssetUrl(url, modelKey));
   }
 
   export function getCameraState(): ViewportCameraState | null {
@@ -441,7 +506,8 @@
       renderer.domElement.removeEventListener('pointerleave', handlePointerLeave);
       renderer.domElement.removeEventListener('pointerup', handlePointerUp);
     }
-    controls?.removeEventListener?.('change', emitCameraStateChange);
+    controls?.removeEventListener?.('start', handleOrbitStart);
+    controls?.removeEventListener?.('end', handleOrbitEnd);
     disposeModel();
     controls?.dispose?.();
     if (renderer) {
@@ -468,11 +534,16 @@
   });
 
   $effect(() => {
-    if (!modelRoot) return;
-    attachEdgeTargets(modelRoot);
-    applyPreviewTransforms();
-    applySelectionStyles();
-    updateOverlayAnchor();
+    const root = modelRoot;
+    const targetSignature = `${edgeTargetSignature}::${faceTargetSignature}`;
+    void targetSignature;
+    if (!root) return;
+    untrack(() => {
+      attachEdgeTargets(root);
+      attachFaceTargets(root);
+      applySelectionStyles();
+      updateOverlayAnchor();
+    });
   });
 
   $effect(() => {
@@ -488,6 +559,10 @@
   $effect(() => {
     void outlineEnabled;
     void topologyMode;
+    void viewerMode;
+    if (controls) {
+      controls.enabled = !selectionMode && !hideModelWhileBusy;
+    }
     applySelectionStyles();
   });
 
@@ -527,7 +602,9 @@
     controls.enableDamping = true;
     controls.autoRotate = false;
     controls.autoRotateSpeed = 0;
-    controls.addEventListener('change', emitCameraStateChange);
+    controls.enabled = !selectionMode && !hideModelWhileBusy;
+    controls.addEventListener('start', handleOrbitStart);
+    controls.addEventListener('end', handleOrbitEnd);
 
     const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x182032, 0.78);
     scene.add(hemi);
@@ -560,7 +637,9 @@
     if (!controls || !renderer || !scene || !camera) return;
     animationFrameId = requestAnimationFrame(animate);
     controls.update();
-    updateOverlayAnchor();
+    if (showContextOverlay && selectionMode && !isOrbitDragging) {
+      updateOverlayAnchor();
+    }
     renderer.render(scene, camera);
   }
 
@@ -599,43 +678,24 @@
 
   async function loadMultipartAssets(token: number, assets: ViewerAsset[]) {
     if (!scene || !camera) return;
-    const loader = new STLLoader();
+    const stlLoader = new STLLoader();
+    const objLoader = new OBJLoader();
+    const threeMfLoader = new ThreeMFLoader();
     const nextRoot = new THREE.Group();
     nextRoot.rotation.x = -Math.PI / 2;
     const nextMeshes: RuntimeMesh[] = [];
 
     try {
       for (const asset of assets) {
-        const geometry = await loadStlGeometry(loader, asset.path);
+        const loaded = await loadViewerAsset(asset, stlLoader, objLoader, threeMfLoader);
         if (token !== loadToken) {
-          geometry.dispose();
+          disposeDetachedGroup(loaded);
           return;
         }
 
-        geometry.computeVertexNormals();
-        geometry.computeBoundingBox();
         const tone = resolveViewerTone(asset.partId, manifestParts);
-        const material = createMaterial(tone, asset.partId === selectedPartId);
-        const mesh = new THREE.Mesh(geometry, material);
-        const outline = createOutline(geometry, tone, asset.partId === selectedPartId);
-        const topology = createTopologyOverlay(geometry, tone);
-        if (outline) {
-          mesh.add(outline);
-        }
-        if (topology) {
-          mesh.add(topology);
-        }
-        mesh.userData.partId = asset.partId;
-        mesh.userData.nodeId = asset.nodeId;
-        nextRoot.add(mesh);
-        nextMeshes.push({
-          partId: asset.partId,
-          baseBounds: geometry.boundingBox?.clone() ?? null,
-          outline,
-          mesh,
-          topology,
-          tone,
-        });
+        nextMeshes.push(...prepareLoadedAssetMeshes(loaded, asset, tone));
+        nextRoot.add(loaded);
       }
 
       if (token !== loadToken) {
@@ -649,6 +709,9 @@
       applyPreviewTransforms();
       scene.add(modelRoot);
       frameModel(modelRoot);
+      attachEdgeTargets(modelRoot);
+      attachFaceTargets(modelRoot);
+      applyPreviewTransforms();
       applyCameraState(persistedCameraState);
       applySelectionStyles();
       updateOverlayAnchor();
@@ -663,6 +726,61 @@
       }
       notifyModelLoadError(token, 'Failed to load multipart STL assets', error);
     }
+  }
+
+  async function loadViewerAsset(
+    asset: ViewerAsset,
+    stlLoader: STLLoader,
+    objLoader: OBJLoader,
+    threeMfLoader: ThreeMFLoader,
+  ): Promise<THREE.Object3D> {
+    if (asset.format === 'stl') {
+      const geometry = await loadStlGeometry(stlLoader, asset.path);
+      return new THREE.Mesh(geometry);
+    }
+    if (asset.format === 'obj') {
+      return loadObjObject(objLoader, asset.path);
+    }
+    if (asset.format === '3mf') {
+      return loadThreeMfObject(threeMfLoader, asset.path);
+    }
+    throw new Error(`Unsupported viewer asset format: ${asset.format}`);
+  }
+
+  function prepareLoadedAssetMeshes(
+    object: THREE.Object3D,
+    asset: ViewerAsset,
+    tone: ViewerTone,
+  ): RuntimeMesh[] {
+    const meshes: RuntimeMesh[] = [];
+    object.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !(mesh.geometry instanceof THREE.BufferGeometry)) return;
+      const geometry = mesh.geometry;
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      mesh.material = createMaterial(tone, asset.partId === selectedPartId);
+      const outline = createOutline(geometry, tone, asset.partId === selectedPartId);
+      const topology = createTopologyOverlay(geometry, tone);
+      if (outline) {
+        mesh.add(outline);
+      }
+      if (topology) {
+        mesh.add(topology);
+      }
+      mesh.userData.partId = asset.partId;
+      mesh.userData.nodeId = asset.nodeId;
+      const runtimeMesh = mesh as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+      meshes.push({
+        partId: asset.partId,
+        baseBounds: geometry.boundingBox?.clone() ?? null,
+        outline,
+        mesh: runtimeMesh,
+        topology,
+        tone,
+      });
+    });
+    return meshes;
   }
 
   async function loadSingleStl(token: number, url: string) {
@@ -699,6 +817,9 @@
       applyPreviewTransforms();
       scene.add(modelRoot);
       frameModel(modelRoot);
+      attachEdgeTargets(modelRoot);
+      attachFaceTargets(modelRoot);
+      applyPreviewTransforms();
       applyCameraState(persistedCameraState);
       updateOverlayAnchor();
       emitCameraStateChange();
@@ -791,8 +912,32 @@
     return new THREE.LineBasicMaterial({
       color: isSelected ? 0xe5ca88 : isHovered ? 0x78c0a8 : 0x405371,
       transparent: true,
-      opacity: isSelected ? 1 : isHovered ? 0.95 : 0.46,
+      opacity: isSelected ? 1 : isHovered ? 0.95 : 0,
     });
+  }
+
+  function createFaceMaterial(isSelected: boolean, isHovered: boolean) {
+    return new THREE.MeshBasicMaterial({
+      color: isSelected ? 0xe5ca88 : isHovered ? 0x78c0a8 : 0xb78a4b,
+      transparent: true,
+      opacity: isSelected ? 0.36 : isHovered ? 0.3 : 0,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+  }
+
+  function faceTargetRadius(target: ViewerFaceTarget): number {
+    const area = typeof target.area === 'number' && Number.isFinite(target.area) ? target.area : null;
+    if (!area || area <= 0) return 6;
+    return Math.max(2, Math.min(18, Math.sqrt(area / Math.PI) * 0.18));
+  }
+
+  function faceTargetNormal(target: ViewerFaceTarget): THREE.Vector3 {
+    const [x, y, z] = target.normal ?? [0, 0, 1];
+    const normal = new THREE.Vector3(x, y, z);
+    if (normal.lengthSq() < 0.000001) return new THREE.Vector3(0, 0, 1);
+    return normal.normalize();
   }
 
   function disposeRuntimeEdges(root: THREE.Group | null) {
@@ -806,6 +951,19 @@
       entry.line.material?.dispose?.();
     }
     runtimeEdges = [];
+  }
+
+  function disposeRuntimeFaces(root: THREE.Group | null) {
+    if (!root) {
+      runtimeFaces = [];
+      return;
+    }
+    for (const entry of runtimeFaces) {
+      root.remove(entry.mesh);
+      entry.mesh.geometry?.dispose?.();
+      entry.mesh.material?.dispose?.();
+    }
+    runtimeFaces = [];
   }
 
   function attachEdgeTargets(root: THREE.Group) {
@@ -842,30 +1000,74 @@
     });
   }
 
+  function attachFaceTargets(root: THREE.Group) {
+    disposeRuntimeFaces(root);
+    if (faceTargets.length === 0) return;
+
+    runtimeFaces = faceTargets.map((target) => {
+      const radius = faceTargetRadius(target);
+      const geometry = new THREE.CircleGeometry(radius, 32);
+      const normal = faceTargetNormal(target);
+      const mesh = new THREE.Mesh(
+        geometry,
+        createFaceMaterial(false, false),
+      );
+      const basePosition = new THREE.Vector3(
+        target.center.x + normal.x * Math.min(0.5, radius * 0.04),
+        target.center.y + normal.y * Math.min(0.5, radius * 0.04),
+        target.center.z + normal.z * Math.min(0.5, radius * 0.04),
+      );
+      mesh.position.copy(basePosition);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+      mesh.renderOrder = 4;
+      mesh.userData.partId = target.partId;
+      mesh.userData.viewerNodeId = target.viewerNodeId;
+      mesh.userData.selectionTargetId = target.targetId;
+      mesh.userData.selectionTargetIds = [
+        target.targetId,
+        ...(target.durableTargetId ? [target.durableTargetId] : []),
+        ...(target.canonicalTargetId ? [target.canonicalTargetId] : []),
+        ...(target.aliasIds || []),
+      ];
+      root.add(mesh);
+      return {
+        targetId: target.targetId,
+        durableTargetId: target.durableTargetId,
+        canonicalTargetId: target.canonicalTargetId,
+        aliasIds: target.aliasIds || [],
+        partId: target.partId,
+        basePosition,
+        mesh,
+      };
+    });
+  }
+
   function applySelectionStyles() {
     const measurementPartIds = new Set(activeMeasurementCallout?.partIds || []);
     const measurementTargetIds = new Set(activeMeasurementCallout?.targetIds || []);
 
     for (const entry of runtimeMeshes) {
       const isSelected = !!selectedPartId && entry.partId === selectedPartId;
+      const isInspected = !isSelected && !selectedPartId && !!entry.partId && inspectedPartId === entry.partId;
+      const isActive = isSelected || isInspected;
       const isHovered = !isSelected && !!hoveredPartId && entry.partId === hoveredPartId;
       const isMeasured =
         !isSelected && !isHovered && !!entry.partId && measurementPartIds.has(entry.partId);
       entry.mesh.material.color.setHex(
-        isSelected ? 0xe5ca88 : isHovered ? entry.tone.hoverColor : isMeasured ? entry.tone.measuredColor : entry.tone.color,
+        isActive ? 0xe5ca88 : isHovered ? entry.tone.hoverColor : isMeasured ? entry.tone.measuredColor : entry.tone.color,
       );
       entry.mesh.material.emissive.setHex(
-        isSelected ? entry.tone.emissive : isHovered ? entry.tone.hoverEmissive : isMeasured ? entry.tone.measuredEmissive : 0x000000,
+        isActive ? entry.tone.emissive : isHovered ? entry.tone.hoverEmissive : isMeasured ? entry.tone.measuredEmissive : 0x000000,
       );
-      entry.mesh.material.emissiveIntensity = isSelected ? 0.38 : isHovered ? 0.24 : isMeasured ? 0.18 : 0;
+      entry.mesh.material.emissiveIntensity = isSelected ? 0.38 : isInspected ? 0.2 : isHovered ? 0.24 : isMeasured ? 0.18 : 0;
       if (entry.outline) {
-        entry.outline.visible = outlineEnabled || topologyMode === 'feature';
+        entry.outline.visible = outlineEnabled || topologyMode === 'feature' || isInspected;
         entry.outline.material.color.setHex(
-          isSelected || (topologyMode === 'feature' && isHovered) ? 0xe5ca88 : entry.tone.edge,
+          isActive || (topologyMode === 'feature' && isHovered) ? 0xe5ca88 : entry.tone.edge,
         );
         entry.outline.material.opacity = !entry.outline.visible
           ? 0
-          : isSelected
+          : isActive
             ? 0.95
             : topologyMode === 'feature' && isHovered
               ? 0.72
@@ -876,8 +1078,9 @@
                   : 0.26;
       }
       if (entry.topology) {
-        entry.topology.visible = topologyMode === 'mesh' && isHovered;
-        entry.topology.material.opacity = topologyMode === 'mesh' && isHovered ? 0.28 : 0;
+        const topologyActive = isActive || isHovered || isMeasured;
+        entry.topology.visible = meshTopologyVisible(topologyMode, topologyActive);
+        entry.topology.material.opacity = meshTopologyOpacity(topologyMode, topologyActive);
       }
     }
 
@@ -890,10 +1093,36 @@
         !isSelected &&
         !isHovered &&
         [...measurementTargetIds].some((targetId) => runtimeEdgeMatchesTargetId(entry.targetId, targetId));
+      const showFeatureTopology = topologyMode === 'feature';
+      entry.line.visible = showFeatureTopology || isSelected || isHovered || isMeasured;
       entry.line.material.color.setHex(
         isSelected ? 0xe5ca88 : isHovered ? 0x78c0a8 : isMeasured ? 0x9ad8c5 : 0x405371,
       );
-      entry.line.material.opacity = isSelected ? 1 : isHovered ? 0.95 : isMeasured ? 0.88 : 0.46;
+      entry.line.material.opacity = isSelected
+        ? 1
+        : isHovered
+          ? 0.95
+          : isMeasured
+            ? 0.88
+            : showFeatureTopology
+              ? 0.46
+              : 0;
+    }
+
+    for (const entry of runtimeFaces) {
+      const isSelected =
+        selectedTarget?.kind === 'face' &&
+        runtimeFaceMatchesTargetId(entry.targetId, selectedTarget.targetId);
+      const isHovered = !isSelected && runtimeFaceMatchesTargetId(entry.targetId, hoveredTargetId);
+      const isMeasured =
+        !isSelected &&
+        !isHovered &&
+        [...measurementTargetIds].some((targetId) => runtimeFaceMatchesTargetId(entry.targetId, targetId));
+      entry.mesh.visible = selectionMode || isSelected || isHovered || isMeasured;
+      entry.mesh.material.color.setHex(
+        isSelected ? 0xe5ca88 : isHovered ? 0x78c0a8 : isMeasured ? 0x9ad8c5 : 0xb78a4b,
+      );
+      entry.mesh.material.opacity = isSelected ? 0.36 : isHovered ? 0.3 : isMeasured ? 0.24 : 0;
     }
   }
 
@@ -935,6 +1164,23 @@
         (1 - scale.x) * anchor.x,
         (1 - scale.y) * anchor.y,
         (1 - scale.z) * anchor.z,
+      );
+    }
+
+    for (const entry of runtimeFaces) {
+      const preview = previewTransforms[entry.partId];
+      if (!preview) {
+        entry.mesh.scale.set(1, 1, 1);
+        entry.mesh.position.copy(entry.basePosition);
+        continue;
+      }
+
+      const { scale, anchor } = preview;
+      entry.mesh.scale.set(scale.x, scale.y, scale.z);
+      entry.mesh.position.set(
+        entry.basePosition.x + (1 - scale.x) * anchor.x,
+        entry.basePosition.y + (1 - scale.y) * anchor.y,
+        entry.basePosition.z + (1 - scale.z) * anchor.z,
       );
     }
   }
@@ -1058,6 +1304,25 @@
     return selectionTargetMatchesId(selectionTarget, requestedTargetId);
   }
 
+  function runtimeFaceMatchesTargetId(
+    runtimeTargetId: string | null | undefined,
+    requestedTargetId: string | null | undefined,
+  ) {
+    if (!runtimeTargetId || !requestedTargetId) return false;
+    const selectionTarget = resolveSelectionTargetByAnyId(runtimeTargetId);
+    if (!selectionTarget) {
+      const runtimeFace = runtimeFaces.find((entry) => entry.targetId === runtimeTargetId);
+      if (!runtimeFace) return runtimeTargetId === requestedTargetId;
+      return (
+        runtimeTargetId === requestedTargetId ||
+        runtimeFace.durableTargetId === requestedTargetId ||
+        runtimeFace.canonicalTargetId === requestedTargetId ||
+        runtimeFace.aliasIds.includes(requestedTargetId)
+      );
+    }
+    return selectionTargetMatchesId(selectionTarget, requestedTargetId);
+  }
+
   function projectEdgeMidpoint(targetId: string) {
     const edge = runtimeEdges.find((entry) => runtimeEdgeMatchesTargetId(entry.targetId, targetId))?.line;
     if (!edge) return null;
@@ -1072,6 +1337,11 @@
       (start.y + end.y) * 0.5,
       (start.z + end.z) * 0.5,
     ]);
+  }
+
+  function projectRuntimeFaceCenter(face: RuntimeFace) {
+    const center = face.basePosition.clone().applyMatrix4(face.mesh.parent?.matrixWorld ?? face.mesh.matrixWorld);
+    return projectWorldPoint([center.x, center.y, center.z]);
   }
 
   function fallbackMeasurementPoint(): { x: number; y: number } | null {
@@ -1215,19 +1485,24 @@
     if (!modelRoot) {
       runtimeMeshes = [];
       runtimeEdges = [];
+      runtimeFaces = [];
+      inspectedPartId = null;
       updateOverlayAnchor();
       return;
     }
     disposeRuntimeEdges(modelRoot);
+    disposeRuntimeFaces(modelRoot);
     scene?.remove(modelRoot);
     disposeDetachedGroup(modelRoot);
     modelRoot = null;
     runtimeMeshes = [];
     runtimeEdges = [];
+    runtimeFaces = [];
+    inspectedPartId = null;
     updateOverlayAnchor();
   }
 
-  function disposeDetachedGroup(group: THREE.Group) {
+  function disposeDetachedGroup(group: THREE.Object3D) {
     group.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         child.geometry?.dispose?.();
@@ -1243,17 +1518,50 @@
   function handlePointerDown(event: PointerEvent) {
     if (hideModelWhileBusy) return;
     pointerDownAt = { x: event.clientX, y: event.clientY };
+    orbitDraggedSincePointerDown = false;
   }
 
-  function fallbackPartTarget(partId: string | null, viewerNodeId: string | null): ContextSelectionTarget | null {
-    if (!partId) return null;
+  function handleOrbitStart() {
+    isOrbitDragging = true;
+    orbitDraggedSincePointerDown = true;
+    if (hoveredPartId !== null || hoveredTargetId !== null) {
+      hoveredPartId = null;
+      hoveredTargetId = null;
+      applySelectionStyles();
+    }
+    if (renderer) {
+      renderer.domElement.style.cursor = 'grabbing';
+    }
+  }
+
+  function handleOrbitEnd() {
+    isOrbitDragging = false;
+    if (showContextOverlay) {
+      updateOverlayAnchor();
+    }
+    emitCameraStateChange();
+    if (renderer) {
+      renderer.domElement.style.cursor = hideModelWhileBusy ? 'progress' : selectionMode ? 'crosshair' : 'default';
+    }
+  }
+
+  function selectionTargetFromFaceHit(object: THREE.Object3D): ContextSelectionTarget | null {
+    if (!object.userData.selectionTargetId) return null;
+    const targetId = object.userData.selectionTargetId as string;
+    const aliasIds = Array.isArray(object.userData.selectionTargetIds)
+      ? (object.userData.selectionTargetIds as string[]).filter(
+          (candidate) => typeof candidate === 'string' && candidate !== targetId,
+        )
+      : [];
+    const partId = (object.userData.partId as string | undefined) ?? null;
+    const viewerNodeId = (object.userData.viewerNodeId as string | undefined) ?? null;
     return (
-      resolveViewerNodeTarget(selectionTargets, viewerNodeId, partId) ?? {
-        targetId: `part:${partId}`,
-        aliasIds: [],
-        kind: 'part',
+      resolveSelectionTargetByAnyId(targetId) ?? {
+        targetId,
+        aliasIds,
+        kind: 'face',
         partId,
-        label: partId,
+        label: partId ? `${partId} Face` : 'Face',
         editable: true,
         viewerNodeId,
         parameterKeys: [],
@@ -1299,40 +1607,49 @@
       );
     }
 
-    const intersections = raycaster.intersectObjects(runtimeMeshes.map((entry) => entry.mesh), true);
-    const hit = intersections.find((entry) => typeof entry.object.userData.partId === 'string');
-    if (hit?.object.userData.partId) {
-      const partId = hit.object.userData.partId as string;
-      const viewerNodeId =
-        typeof hit.object.userData.nodeId === 'string' ? (hit.object.userData.nodeId as string) : null;
-      return (
-        resolveViewerNodeTarget(selectionTargets, viewerNodeId, partId) ??
-        fallbackPartTarget(partId, viewerNodeId)
-      );
+    const faceHit = raycaster
+      .intersectObjects(runtimeFaces.map((entry) => entry.mesh), true)
+      .find((entry) => typeof entry.object.userData.selectionTargetId === 'string');
+    if (faceHit?.object.userData.selectionTargetId) {
+      return selectionTargetFromFaceHit(faceHit.object);
     }
 
-    let bestPartId: string | null = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
-
-    for (const entry of runtimeMeshes) {
-      if (!entry.partId) continue;
-      const projected = projectMeshPoint(entry.mesh, 'center');
+    let bestFace: RuntimeFace | null = null;
+    let bestFaceDistance = Number.POSITIVE_INFINITY;
+    for (const entry of runtimeFaces) {
+      const projected = projectRuntimeFaceCenter(entry);
       if (!projected) continue;
       const distance = Math.hypot(
         projected.x - (event.clientX - rect.left),
         projected.y - (event.clientY - rect.top),
       );
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestPartId = entry.partId;
+      if (distance < bestFaceDistance) {
+        bestFaceDistance = distance;
+        bestFace = entry;
       }
     }
+    const facePickRadius = Math.max(24, Math.min(88, Math.min(rect.width, rect.height) * 0.18));
+    if (bestFace && bestFaceDistance <= facePickRadius) {
+      return selectionTargetFromFaceHit(bestFace.mesh);
+    }
 
-    const selectionRadius = Math.max(96, Math.min(rect.width, rect.height) * 0.4);
-    return bestDistance <= selectionRadius ? fallbackPartTarget(bestPartId, null) : null;
+    return null;
   }
 
-  function handlePointerMove(event: PointerEvent) {
+  function inspectPartFromEvent(event: PointerEvent): string | null {
+    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || runtimeMeshes.length === 0) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+
+    const meshHit = raycaster
+      .intersectObjects(runtimeMeshes.map((entry) => entry.mesh), true)
+      .find((entry) => typeof entry.object.userData.partId === 'string');
+    return (meshHit?.object.userData.partId as string | undefined) ?? null;
+  }
+
+  function handlePointerMove(_event: PointerEvent) {
     if (hideModelWhileBusy) {
       if (hoveredPartId !== null) {
         hoveredPartId = null;
@@ -1344,16 +1661,24 @@
       }
       return;
     }
-    const nextHovered = selectionTargetFromEvent(event);
-    const nextHoveredPartId = nextHovered?.partId ?? null;
-    const nextHoveredTargetId = nextHovered?.targetId ?? null;
-    if (nextHoveredPartId !== hoveredPartId || nextHoveredTargetId !== hoveredTargetId) {
-      hoveredPartId = nextHoveredPartId;
-      hoveredTargetId = nextHoveredTargetId;
+    if (!selectionMode) {
+      if (hoveredPartId !== null || hoveredTargetId !== null) {
+        hoveredPartId = null;
+        hoveredTargetId = null;
+        applySelectionStyles();
+      }
+      if (renderer) {
+        renderer.domElement.style.cursor = isOrbitDragging ? 'grabbing' : 'default';
+      }
+      return;
+    }
+    if (hoveredPartId !== null || hoveredTargetId !== null) {
+      hoveredPartId = null;
+      hoveredTargetId = null;
       applySelectionStyles();
     }
     if (renderer) {
-      renderer.domElement.style.cursor = nextHoveredTargetId ? 'pointer' : 'default';
+      renderer.domElement.style.cursor = selectionMode ? 'crosshair' : isOrbitDragging ? 'grabbing' : 'default';
     }
   }
 
@@ -1362,23 +1687,50 @@
     hoveredTargetId = null;
     applySelectionStyles();
     if (renderer) {
-      renderer.domElement.style.cursor = hideModelWhileBusy ? 'progress' : 'default';
+      renderer.domElement.style.cursor = hideModelWhileBusy ? 'progress' : selectionMode ? 'crosshair' : 'default';
     }
   }
 
   function handlePointerUp(event: PointerEvent) {
     if (hideModelWhileBusy || !renderer || !camera || !modelRoot || runtimeMeshes.length === 0) return;
-    if (pointerDownAt) {
-      const deltaX = Math.abs(event.clientX - pointerDownAt.x);
-      const deltaY = Math.abs(event.clientY - pointerDownAt.y);
-      if (deltaX > 4 || deltaY > 4) {
+    if (orbitDraggedSincePointerDown) {
+      pointerDownAt = null;
+      orbitDraggedSincePointerDown = false;
+      return;
+    }
+    if (selectionMode) {
+      if (
+        !shouldHandleSelectionClick({
+          hideModelWhileBusy,
+          selectionMode,
+          pointerDownAt,
+          current: { x: event.clientX, y: event.clientY },
+        })
+      ) {
         pointerDownAt = null;
         return;
       }
+      pointerDownAt = null;
+      inspectedPartId = null;
+      onSelectTarget?.(selectionTargetFromEvent(event));
+      return;
+    }
+    if (viewerMode === 'measure') {
+      pointerDownAt = null;
+      return;
+    }
+
+    if (!shouldHandleViewerClick({
+      hideModelWhileBusy,
+      pointerDownAt,
+      current: { x: event.clientX, y: event.clientY },
+    })) {
+      pointerDownAt = null;
+      return;
     }
     pointerDownAt = null;
-
-    onSelectTarget?.(selectionTargetFromEvent(event));
+    inspectedPartId = inspectPartFromEvent(event);
+    applySelectionStyles();
   }
 </script>
 

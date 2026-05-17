@@ -1,0 +1,40 @@
+(model
+  (part magnet_clamp_base_n
+    (build
+      (shape body (box 60 30 6))
+      (shape pocket_1 (translate -15 -7 0 (cylinder 3.2 6)))
+      (shape pocket_2 (translate 15 -7 0 (cylinder 3.2 6)))
+      (shape pocket_3 (translate -15 7 0 (cylinder 3.2 6)))
+      (shape pocket_4 (translate 15 7 0 (cylinder 3.2 6)))
+      (shape polarity_marker (translate -27 0 0 (box 4 10 6)))
+      (result (difference body pocket_1 pocket_2 pocket_3 pocket_4 polarity_marker))))
+
+  (part magnet_clamp_base_s
+    (build
+      (shape body (box 60 30 6))
+      (shape pocket_1 (translate -15 -7 0 (cylinder 3.2 6)))
+      (shape pocket_2 (translate 15 -7 0 (cylinder 3.2 6)))
+      (shape pocket_3 (translate -15 7 0 (cylinder 3.2 6)))
+      (shape pocket_4 (translate 15 7 0 (cylinder 3.2 6)))
+      (shape polarity_marker (translate 27 0 0 (box 4 10 6)))
+      (result (difference body pocket_1 pocket_2 pocket_3 pocket_4 polarity_marker))))
+
+  (part magnet_polarity_mask_n
+    (build
+      (shape plate (box 60 30 1.2))
+      (shape pocket_1 (translate -15 -7 0 (cylinder 3.5 1.2)))
+      (shape pocket_2 (translate 15 -7 0 (cylinder 3.5 1.2)))
+      (shape pocket_3 (translate -15 7 0 (cylinder 3.5 1.2)))
+      (shape pocket_4 (translate 15 7 0 (cylinder 3.5 1.2)))
+      (shape orientation_notch (translate -27 0 0 (box 5 12 1.2)))
+      (result (difference plate pocket_1 pocket_2 pocket_3 pocket_4 orientation_notch))))
+
+  (part magnet_polarity_mask_s
+    (build
+      (shape plate (box 60 30 1.2))
+      (shape pocket_1 (translate -15 -7 0 (cylinder 3.5 1.2)))
+      (shape pocket_2 (translate 15 -7 0 (cylinder 3.5 1.2)))
+      (shape pocket_3 (translate -15 7 0 (cylinder 3.5 1.2)))
+      (shape pocket_4 (translate 15 7 0 (cylinder 3.5 1.2)))
+      (shape orientation_notch (translate 27 0 0 (box 5 12 1.2)))
+      (result (difference plate pocket_1 pocket_2 pocket_3 pocket_4 orientation_notch)))))

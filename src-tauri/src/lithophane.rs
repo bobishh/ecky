@@ -1009,6 +1009,28 @@ struct ThreeMfObject {
     triangles: Vec<[Vec3; 3]>,
 }
 
+fn indexed_3mf_mesh(triangles: &[[Vec3; 3]]) -> (Vec<Vec3>, Vec<[usize; 3]>) {
+    let mut vertices = Vec::<Vec3>::new();
+    let mut vertex_map = HashMap::<(i32, i32, i32), usize>::new();
+    let mut indexed_triangles = Vec::<[usize; 3]>::with_capacity(triangles.len());
+
+    for triangle in triangles {
+        let mut indexed = [0usize; 3];
+        for (slot, vertex) in triangle.iter().copied().enumerate() {
+            let key = quantize(vertex);
+            let index = *vertex_map.entry(key).or_insert_with(|| {
+                let next = vertices.len();
+                vertices.push(vertex);
+                next
+            });
+            indexed[slot] = index;
+        }
+        indexed_triangles.push(indexed);
+    }
+
+    (vertices, indexed_triangles)
+}
+
 fn write_3mf_package(path: &Path, objects: &[ThreeMfObject]) -> AppResult<()> {
     let file = File::create(path).map_err(|e| {
         AppError::internal(format!("Failed to create 3MF '{}': {}", path.display(), e))
@@ -1039,29 +1061,25 @@ fn write_3mf_package(path: &Path, objects: &[ThreeMfObject]) -> AppResult<()> {
         r##"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><basematerials id="1"><base name="Base" displaycolor="#D8D8D8FF"/><base name="Cyan" displaycolor="#00FFFFFF"/><base name="Magenta" displaycolor="#FF00FFFF"/><base name="Yellow" displaycolor="#FFFF00FF"/><base name="Black" displaycolor="#000000FF"/></basematerials>"##,
     );
     for object in objects {
+        let (vertices, triangles) = indexed_3mf_mesh(&object.triangles);
         let _ = write!(
             xml,
             r#"<object id="{}" type="model" pid="1" pindex="{}" name="{}"><mesh><vertices>"#,
             object.id, object.color_index, object.name
         );
-        for triangle in &object.triangles {
-            for vertex in triangle {
-                let _ = write!(
-                    xml,
-                    r#"<vertex x="{:.5}" y="{:.5}" z="{:.5}"/>"#,
-                    vertex.x, vertex.y, vertex.z
-                );
-            }
+        for vertex in vertices {
+            let _ = write!(
+                xml,
+                r#"<vertex x="{:.5}" y="{:.5}" z="{:.5}"/>"#,
+                vertex.x, vertex.y, vertex.z
+            );
         }
         xml.push_str("</vertices><triangles>");
-        for triangle_index in 0..object.triangles.len() {
-            let base = triangle_index * 3;
+        for triangle in triangles {
             let _ = write!(
                 xml,
                 r#"<triangle v1="{}" v2="{}" v3="{}"/>"#,
-                base,
-                base + 1,
-                base + 2
+                triangle[0], triangle[1], triangle[2]
             );
         }
         xml.push_str("</triangles></mesh></object>");
@@ -1297,14 +1315,17 @@ pub fn export_dir_for_preview(preview_stl_path: &Path) -> PathBuf {
 mod tests {
     use super::{
         bilinear_gray, compute_fit_uv, ensure_preview_file_size_within_limit,
-        export_dir_for_preview, sample_target_segments, Bounds, PatchFrame, Vec3,
-        CYLINDRICAL_SEGMENT_CEILING, MAX_SAFE_PREVIEW_STL_BYTES,
+        export_dir_for_preview, sample_target_segments, write_3mf_package, Bounds, PatchFrame,
+        ThreeMfObject, Vec3, CYLINDRICAL_SEGMENT_CEILING, MAX_SAFE_PREVIEW_STL_BYTES,
     };
     use crate::contracts::{
         LithophanePlacement, LithophanePlacementMode, LithophaneSide, OverflowMode, ProjectionType,
     };
     use image::{GrayImage, Luma};
+    use std::fs;
+    use std::io::Read;
     use std::path::Path;
+    use zip::ZipArchive;
 
     fn sample_frame(side: LithophaneSide, projection: ProjectionType) -> PatchFrame {
         PatchFrame::from_bounds(
@@ -1349,6 +1370,74 @@ mod tests {
             "unexpected bilinear sample: {}",
             sample
         );
+    }
+
+    #[test]
+    fn cmyk_3mf_writer_indexes_shared_vertices_so_slicers_keep_mesh_topology() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-lithophane-3mf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let package = root.join("indexed.3mf");
+
+        write_3mf_package(
+            &package,
+            &[ThreeMfObject {
+                id: 1,
+                name: "Quad".to_string(),
+                color_index: 0,
+                triangles: vec![
+                    [
+                        Vec3 {
+                            x: 0.0,
+                            y: 0.0,
+                            z: 0.0,
+                        },
+                        Vec3 {
+                            x: 10.0,
+                            y: 0.0,
+                            z: 0.0,
+                        },
+                        Vec3 {
+                            x: 0.0,
+                            y: 10.0,
+                            z: 0.0,
+                        },
+                    ],
+                    [
+                        Vec3 {
+                            x: 10.0,
+                            y: 0.0,
+                            z: 0.0,
+                        },
+                        Vec3 {
+                            x: 10.0,
+                            y: 10.0,
+                            z: 0.0,
+                        },
+                        Vec3 {
+                            x: 0.0,
+                            y: 10.0,
+                            z: 0.0,
+                        },
+                    ],
+                ],
+            }],
+        )
+        .unwrap();
+
+        let file = fs::File::open(&package).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut model_xml = String::new();
+        archive
+            .by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model_xml)
+            .unwrap();
+
+        assert_eq!(model_xml.matches("<vertex ").count(), 4);
+        assert_eq!(model_xml.matches("<triangle ").count(), 2);
+        assert!(model_xml.contains(r#"<triangle v1="0" v2="1" v3="2"/>"#));
+        assert!(model_xml.contains(r#"<triangle v1="1" v2="3" v3="2"/>"#));
     }
 
     #[test]

@@ -145,13 +145,14 @@ impl DirectOcctSdkLayout {
                 self.describe_include_dir_candidates()
             ));
         }
-        if self.include_dir.is_some() && !self.missing_headers.is_empty() {
+        if let Some(include_dir) = self
+            .include_dir
+            .as_ref()
+            .filter(|_| !self.missing_headers.is_empty())
+        {
             blockers.push(format!(
                 "OCCT headers missing in selected include directory '{}': {}",
-                self.include_dir
-                    .as_ref()
-                    .expect("checked include_dir")
-                    .display(),
+                include_dir.display(),
                 self.missing_headers.join(", ")
             ));
         }

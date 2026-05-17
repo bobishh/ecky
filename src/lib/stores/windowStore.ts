@@ -370,7 +370,10 @@ export function windowState(id: WindowId) {
 
 export const windowStore = store;
 
-if (typeof window !== 'undefined') {
+if (
+  typeof window !== 'undefined' &&
+  typeof (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ === 'object'
+) {
   void listen('mcp://ui-dispatch', (event: { payload: { action: string; target: string; value?: any } }) => {
     const { action, target } = event.payload;
     if (action === 'openWindow') {

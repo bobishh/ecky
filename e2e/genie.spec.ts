@@ -10,7 +10,7 @@ endloop
 endfacet
 endsolid genie`;
 
-async function installGenieMocks(page: Page) {
+async function installGenieMocks(page: Page, agentState: Record<string, unknown> = {}) {
   await page.route(/\/mock\/.*\.stl(?:\?.*)?$/, async (route: Route) => {
     await route.fulfill({
       status: 200,
@@ -19,7 +19,7 @@ async function installGenieMocks(page: Page) {
     });
   });
 
-  await page.addInitScript(() => {
+  await page.addInitScript((mockAgentState) => {
     const snapshot = {
       design: {
         title: 'Validation Fixture',
@@ -122,23 +122,37 @@ async function installGenieMocks(page: Page) {
           attentionKind: null,
           waitingOnPrompt: false,
           updatedAt: 100,
+          ...(mockAgentState as Record<string, unknown>),
         };
       }
       return null;
     };
-  });
+  }, agentState);
 }
 
 test.describe('VertexGenie', () => {
-  test('Given workbench loads When Ecky appears Then angular SVG mascot renders in the viewport', async ({ page }) => {
+  test('Given workbench loads When Ecky appears Then Three stone mascot renders in the viewport', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
-    const mascot = page.locator('.genie-corner-svg');
+    const mascot = page.locator('.genie-stone-canvas');
     await expect(mascot).toBeVisible();
-    await expect(mascot.locator('.genie-corner-body')).toHaveCount(1);
-    await expect(mascot.locator('.genie-corner-body')).toHaveAttribute('points', /^(?:[^ ]+ ){7,}/);
-    await expect(mascot.locator('.genie-corner-node')).toHaveCount(14);
-    await expect(mascot.locator('.genie-corner-cell')).toHaveCount(8);
+    await expect(page.locator('.genie-corner-svg')).toHaveCount(0);
+    const nonTransparentPixels = await mascot.evaluate((canvas) => {
+      const gl =
+        (canvas as HTMLCanvasElement).getContext('webgl2', { preserveDrawingBuffer: true }) ||
+        (canvas as HTMLCanvasElement).getContext('webgl', { preserveDrawingBuffer: true });
+      if (!gl) return 0;
+      const width = (canvas as HTMLCanvasElement).width;
+      const height = (canvas as HTMLCanvasElement).height;
+      const data = new Uint8Array(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      let count = 0;
+      for (let index = 3; index < data.length; index += 4) {
+        if (data[index] > 0) count++;
+      }
+      return count;
+    });
+    expect(nonTransparentPixels).toBeGreaterThan(2400);
   });
 
   test('genie is present in the genie layer', async ({ page }) => {
@@ -146,6 +160,62 @@ test.describe('VertexGenie', () => {
     await page.waitForTimeout(2000);
     const genieLayer = page.locator('.genie-layer');
     await expect(genieLayer).toBeVisible();
+  });
+
+  test('Given Ecky is poked repeatedly When user clicks the mascot Then it enters angry poke state', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(2000);
+
+    const mascot = page.locator('.genie-layer .genie-stone-button');
+    await expect(mascot).toBeVisible();
+    await expect(mascot).toHaveAttribute('data-poke-state', 'calm');
+
+    for (let index = 0; index < 5; index++) {
+      await mascot.click();
+      await page.waitForTimeout(150);
+    }
+
+    await expect(mascot).toHaveAttribute('data-poke-state', 'angry');
+  });
+
+  test('Given Ecky has model DNA When user rerolls seed from settings Then mascot seed changes without poking', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(2000);
+
+    const mascot = page.locator('.genie-layer .genie-stone-button');
+    await expect(mascot).toBeVisible();
+    await expect(page.locator('.genie-layer [aria-label="Reroll Ecky seed"]')).toHaveCount(0);
+    const before = await mascot.getAttribute('data-seed');
+
+    await page.getByTitle('Settings').click();
+    const reroll = page.getByRole('button', { name: 'Reroll Ecky seed' });
+    await expect(page.getByTestId('settings-ecky-preview')).toBeVisible();
+    await expect(reroll).toBeVisible();
+    await reroll.click();
+
+    await expect(mascot).not.toHaveAttribute('data-seed', before ?? '');
+    await expect(mascot).toHaveAttribute('data-poke-state', 'calm');
+  });
+
+  test('Given Ecky is dragged When user rotates the mascot Then it does not count as a poke', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(2000);
+
+    const mascot = page.locator('.genie-stone-button');
+    await expect(mascot).toBeVisible();
+    await expect(mascot).toHaveAttribute('data-drag-revision', '0');
+
+    const box = await mascot.boundingBox();
+    expect(box).not.toBeNull();
+    if (!box) return;
+
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 36, box.y + box.height / 2 - 12, { steps: 4 });
+    await page.mouse.up();
+
+    await expect(mascot).not.toHaveAttribute('data-drag-revision', '0');
+    await expect(mascot).toHaveAttribute('data-poke-state', 'calm');
   });
 
   test('Given preview validation feedback When workbench opens Then bubble stays compact and clear of top controls', async ({ page }) => {
@@ -175,13 +245,27 @@ test.describe('VertexGenie', () => {
     expect(bubbleBox.width).toBeLessThanOrEqual(360);
   });
 
-  test('Given preview validation feedback When agent is repairing Then Ecky uses active SVG state styling', async ({ page }) => {
+  test('Given preview validation feedback When agent is repairing Then Ecky uses active Three state styling', async ({ page }) => {
     await installGenieMocks(page);
     await page.goto('/');
 
-    const mascot = page.locator('.genie-corner-svg');
+    const mascot = page.locator('.genie-stone-canvas');
     await expect(mascot).toBeVisible();
     await expect(mascot).toHaveAttribute('data-mode', 'thinking');
-    await expect(mascot.locator('.genie-corner-selected-edge')).toBeVisible();
+  });
+
+  test('Given backend reports an agent error When workbench opens Then Ecky uses red error state', async ({ page }) => {
+    await installGenieMocks(page, {
+      connectionState: 'error',
+      phase: 'error',
+      statusText: 'Renderer failed.',
+      busy: false,
+      activityLabel: null,
+    });
+    await page.goto('/');
+
+    const mascot = page.locator('.genie-stone-canvas');
+    await expect(mascot).toBeVisible();
+    await expect(mascot).toHaveAttribute('data-mode', 'error');
   });
 });

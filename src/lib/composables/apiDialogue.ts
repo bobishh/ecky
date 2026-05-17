@@ -36,6 +36,10 @@ function hasPersistedAssistantMessage(messages: Message[], request: Request): bo
 }
 
 function pendingAssistantCopy(request: Request): string {
+  if (request.phase === 'error') {
+    return normalizeText(request.error) || 'Request failed.';
+  }
+
   const bubble = normalizeText(request.lightResponse);
   if (bubble) return bubble;
 
@@ -54,8 +58,6 @@ function pendingAssistantCopy(request: Request): string {
       return 'Saving result...';
     case 'success':
       return request.result?.design?.response?.trim() || 'Done.';
-    case 'error':
-      return normalizeText(request.error) || 'Request failed.';
     case 'canceled':
       return 'Request canceled.';
     case 'generating':

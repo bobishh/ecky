@@ -1,0 +1,36 @@
+(model
+  (part film_path_lower_035
+    (build
+      (shape body (box 90 24 2.4))
+      (shape strip_pass (translate 0 0 0.2 (box 84 0.35 2.0)))
+      (result (difference body strip_pass))))
+
+  (part film_path_upper_clamp_035
+    (build
+      (shape body (box 90 16 2.0))
+      (shape strip_pass (translate 0 0 0.1 (box 84 0.35 1.7)))
+      (result (difference body strip_pass))))
+
+  (part film_path_lower_045
+    (build
+      (shape body (box 90 24 2.4))
+      (shape strip_pass (translate 0 0 0.2 (box 84 0.45 2.0)))
+      (result (difference body strip_pass))))
+
+  (part film_path_upper_clamp_045
+    (build
+      (shape body (box 90 16 2.0))
+      (shape strip_pass (translate 0 0 0.1 (box 84 0.45 1.7)))
+      (result (difference body strip_pass))))
+
+  (part film_path_lower_055
+    (build
+      (shape body (box 90 24 2.4))
+      (shape strip_pass (translate 0 0 0.2 (box 84 0.55 2.0)))
+      (result (difference body strip_pass))))
+
+  (part film_path_upper_clamp_055
+    (build
+      (shape body (box 90 16 2.0))
+      (shape strip_pass (translate 0 0 0.1 (box 84 0.55 1.7)))
+      (result (difference body strip_pass)))))

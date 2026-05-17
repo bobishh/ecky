@@ -16,7 +16,8 @@ use crate::models::{
     MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::topology_target_ids::{
-    durable_edge_target_id, durable_face_target_id, preferred_public_topology_target_id,
+    durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
+    durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
     stable_edge_target_id, stable_face_target_id, topology_target_aliases, viewer_target_alias_ids,
 };
 
@@ -27,6 +28,7 @@ const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const GENERATED_ARTIFACT_DIR: &str = "generated";
 const IMPORTED_FCSTD_ARTIFACT_DIR: &str = "imported-fcstd";
 const IMPORTED_STEP_ARTIFACT_DIR: &str = "imported-step";
+const IMPORTED_MESH_ARTIFACT_DIR: &str = "imported-mesh";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const RUNNER_REPORT_FILE_NAME: &str = "runner-report.json";
@@ -250,14 +252,15 @@ pub fn render_model_with_sources(
 
     let report =
         normalize_runner_report_paths(&bundle_dir, read_runner_report(&runner_report_path)?)?;
-    let part_root_node_ids = authored_part_root_node_ids(source_identity, source_language)?;
+    let part_topology_ids = authored_part_topology_ids(source_identity, source_language)?;
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
-    let manifest = build_manifest(
+    let manifest = build_manifest_with_stable_node_keys(
         &model_id,
         ModelSourceKind::Generated,
         parameters.keys().cloned().collect(),
         &report,
-        &part_root_node_ids,
+        &part_topology_ids.root_node_ids,
+        &part_topology_ids.stable_node_keys,
         Some(path_to_string(&macro_path)?),
         source_language,
     )?;
@@ -1028,24 +1031,64 @@ fn runner_part_id(object: &RunnerObject) -> &str {
     }
 }
 
-fn authored_part_root_node_ids(
+#[derive(Default)]
+struct AuthoredPartTopologyIds {
+    root_node_ids: HashMap<String, u64>,
+    stable_node_keys: HashMap<String, String>,
+}
+
+fn authored_part_topology_ids(
     source: &str,
     source_language: crate::models::SourceLanguage,
-) -> AppResult<HashMap<String, u64>> {
+) -> AppResult<AuthoredPartTopologyIds> {
     if source_language != crate::models::SourceLanguage::EckyIrV0 {
-        return Ok(HashMap::new());
+        return Ok(AuthoredPartTopologyIds::default());
     }
     let Some(compiled) = try_compile_to_core_program(source) else {
-        return Ok(HashMap::new());
+        return Ok(AuthoredPartTopologyIds::default());
     };
     let Ok(program) = compiled else {
-        return Ok(HashMap::new());
+        return Ok(AuthoredPartTopologyIds::default());
     };
-    Ok(program
-        .parts
-        .iter()
-        .map(|part| (part.key.clone(), part.root.id.raw()))
-        .collect())
+    Ok(AuthoredPartTopologyIds {
+        root_node_ids: program
+            .parts
+            .iter()
+            .map(|part| (part.key.clone(), part.root.id.raw()))
+            .collect(),
+        stable_node_keys: program
+            .parts
+            .iter()
+            .filter_map(|part| {
+                freecad_source_stable_node_key(source, &part.key, part.root.span)
+                    .map(|stable_node_key| (part.key.clone(), stable_node_key))
+            })
+            .collect(),
+    })
+}
+
+fn freecad_source_stable_node_key(
+    source_identity: &str,
+    part_key: &str,
+    span: Option<crate::ecky_core_ir::SourceSpan>,
+) -> Option<String> {
+    let span = span?;
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= end
+        || end > source_identity.len()
+        || !source_identity.is_char_boundary(start)
+        || !source_identity.is_char_boundary(end)
+    {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"freecad-part-root|");
+    hasher.update(part_key.as_bytes());
+    hasher.update(b"|");
+    hasher.update(&source_identity.as_bytes()[start..end]);
+    Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn runner_edge_target_id(object_name: &str, edge: &RunnerEdgeTarget) -> String {
@@ -1075,10 +1118,18 @@ fn runner_stable_edge_target_id(target_id: &str) -> String {
 
 fn runner_durable_edge_target_id(
     part_id: &str,
-    root_node_id: u64,
+    stable_node_key: Option<&str>,
+    root_node_id: Option<u64>,
     target_id: &str,
 ) -> Option<String> {
-    durable_edge_target_id(part_id, root_node_id, target_id)
+    stable_node_key
+        .and_then(|stable_node_key| {
+            durable_edge_target_id_for_stable_node_key(part_id, stable_node_key, target_id)
+        })
+        .or_else(|| {
+            root_node_id
+                .and_then(|root_node_id| durable_edge_target_id(part_id, root_node_id, target_id))
+        })
 }
 
 fn runner_edge_label(object_name: &str, edge: &RunnerEdgeTarget) -> String {
@@ -1124,10 +1175,18 @@ fn runner_stable_face_target_id(target_id: &str) -> String {
 
 fn runner_durable_face_target_id(
     part_id: &str,
-    root_node_id: u64,
+    stable_node_key: Option<&str>,
+    root_node_id: Option<u64>,
     target_id: &str,
 ) -> Option<String> {
-    durable_face_target_id(part_id, root_node_id, target_id)
+    stable_node_key
+        .and_then(|stable_node_key| {
+            durable_face_target_id_for_stable_node_key(part_id, stable_node_key, target_id)
+        })
+        .or_else(|| {
+            root_node_id
+                .and_then(|root_node_id| durable_face_target_id(part_id, root_node_id, target_id))
+        })
 }
 
 fn runner_face_label(object_name: &str, face: &RunnerFaceTarget) -> String {
@@ -1203,6 +1262,29 @@ fn build_manifest(
     parameter_keys: Vec<String>,
     report: &RunnerReport,
     part_root_node_ids: &HashMap<String, u64>,
+    source_path: Option<String>,
+    source_language: crate::models::SourceLanguage,
+) -> AppResult<ModelManifest> {
+    let part_stable_node_keys = HashMap::new();
+    build_manifest_with_stable_node_keys(
+        model_id,
+        source_kind,
+        parameter_keys,
+        report,
+        part_root_node_ids,
+        &part_stable_node_keys,
+        source_path,
+        source_language,
+    )
+}
+
+fn build_manifest_with_stable_node_keys(
+    model_id: &str,
+    source_kind: ModelSourceKind,
+    parameter_keys: Vec<String>,
+    report: &RunnerReport,
+    part_root_node_ids: &HashMap<String, u64>,
+    part_stable_node_keys: &HashMap<String, String>,
     source_path: Option<String>,
     source_language: crate::models::SourceLanguage,
 ) -> AppResult<ModelManifest> {
@@ -1290,6 +1372,7 @@ fn build_manifest(
         });
 
         for edge in object.edges.iter().filter(|edge| valid_runner_edge(edge)) {
+            let target_parameter_keys = topology_parameter_keys(&object_parameter_keys);
             let canonical_target_id = runner_edge_target_id(source_part_id, edge);
             let stable_target_id = runner_stable_edge_target_id(&canonical_target_id);
             let public_target_id = if stable_target_id.is_empty()
@@ -1303,12 +1386,15 @@ fn build_manifest(
             } else {
                 stable_target_id
             };
-            let durable_target_id = part_root_node_ids
-                .get(source_part_id)
-                .and_then(|root_node_id| {
-                    runner_durable_edge_target_id(source_part_id, *root_node_id, &public_target_id)
-                })
-                .filter(|durable_target_id| durable_target_id != &public_target_id);
+            let durable_target_id = runner_durable_edge_target_id(
+                source_part_id,
+                part_stable_node_keys
+                    .get(source_part_id)
+                    .map(String::as_str),
+                part_root_node_ids.get(source_part_id).copied(),
+                &public_target_id,
+            )
+            .filter(|durable_target_id| durable_target_id != &public_target_id);
             selection_targets.push(SelectionTarget {
                 target_id: Some(public_target_id.clone()),
                 durable_target_id,
@@ -1323,14 +1409,15 @@ fn build_manifest(
                 viewer_node_id: node_id.clone(),
                 label: runner_edge_label(source_part_id, edge),
                 kind: SelectionTargetKind::Edge,
-                editable: is_part_editable,
-                parameter_keys: object_parameter_keys.clone(),
+                editable: !target_parameter_keys.is_empty(),
+                parameter_keys: target_parameter_keys,
                 primitive_ids: Vec::new(),
                 view_ids: Vec::new(),
             });
         }
 
         for face in object.faces.iter().filter(|face| valid_runner_face(face)) {
+            let target_parameter_keys = topology_parameter_keys(&object_parameter_keys);
             let canonical_target_id = runner_face_target_id(source_part_id, face);
             let stable_target_id = runner_stable_face_target_id(&canonical_target_id);
             let public_target_id = if stable_target_id.is_empty()
@@ -1344,12 +1431,15 @@ fn build_manifest(
             } else {
                 stable_target_id
             };
-            let durable_target_id = part_root_node_ids
-                .get(source_part_id)
-                .and_then(|root_node_id| {
-                    runner_durable_face_target_id(source_part_id, *root_node_id, &public_target_id)
-                })
-                .filter(|durable_target_id| durable_target_id != &public_target_id);
+            let durable_target_id = runner_durable_face_target_id(
+                source_part_id,
+                part_stable_node_keys
+                    .get(source_part_id)
+                    .map(String::as_str),
+                part_root_node_ids.get(source_part_id).copied(),
+                &public_target_id,
+            )
+            .filter(|durable_target_id| durable_target_id != &public_target_id);
             selection_targets.push(SelectionTarget {
                 target_id: Some(public_target_id.clone()),
                 durable_target_id,
@@ -1364,8 +1454,8 @@ fn build_manifest(
                 viewer_node_id: node_id.clone(),
                 label: runner_face_label(source_part_id, face),
                 kind: SelectionTargetKind::Face,
-                editable: is_part_editable,
-                parameter_keys: object_parameter_keys.clone(),
+                editable: !target_parameter_keys.is_empty(),
+                parameter_keys: target_parameter_keys,
                 primitive_ids: Vec::new(),
                 view_ids: Vec::new(),
             });
@@ -1396,6 +1486,9 @@ fn build_manifest(
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
+        source_digest: None,
+        core_digest: None,
+        ast_schema_version: None,
         engine_kind: source_language.to_engine_kind(),
         source_language,
         geometry_backend: crate::models::GeometryBackend::Freecad,
@@ -1422,6 +1515,8 @@ fn build_manifest(
         advisories: Vec::new(),
         selection_targets,
         measurement_annotations: Vec::new(),
+        feature_graph: None,
+        correspondence_graph: None,
         warnings,
         enrichment_state: ManifestEnrichmentState {
             status: if enrichment_proposals.is_empty() {
@@ -1609,7 +1704,9 @@ fn unique_strings(values: Vec<String>) -> Vec<String> {
 fn is_imported_source_kind(source_kind: &ModelSourceKind) -> bool {
     matches!(
         source_kind,
-        ModelSourceKind::ImportedFcstd | ModelSourceKind::ImportedStep
+        ModelSourceKind::ImportedFcstd
+            | ModelSourceKind::ImportedStep
+            | ModelSourceKind::ImportedMesh
     )
 }
 
@@ -1620,6 +1717,9 @@ fn imported_inspect_only_warning(source_kind: &ModelSourceKind) -> &'static str 
         }
         ModelSourceKind::ImportedStep => {
             "Imported STEP models are inspect-only until bindings are confirmed."
+        }
+        ModelSourceKind::ImportedMesh => {
+            "Imported mesh models are reference-only; CAD booleans and topology selectors are unavailable."
         }
         ModelSourceKind::Generated => "Generated models do not use imported warnings.",
     }
@@ -1633,6 +1733,7 @@ fn imported_accepted_warning(source_kind: &ModelSourceKind) -> &'static str {
         ModelSourceKind::ImportedStep => {
             "Imported STEP bindings were accepted from heuristic proposals."
         }
+        ModelSourceKind::ImportedMesh => "Imported mesh models do not have editable CAD bindings.",
         ModelSourceKind::Generated => "Generated models do not use imported warnings.",
     }
 }
@@ -2208,6 +2309,8 @@ fn bundle_dir_from_model_id(app: &dyn PathResolver, model_id: &str) -> AppResult
         ModelSourceKind::ImportedFcstd
     } else if model_id.starts_with("imported-step-") {
         ModelSourceKind::ImportedStep
+    } else if model_id.starts_with("imported-mesh-") {
+        ModelSourceKind::ImportedMesh
     } else {
         return Err(AppError::not_found(format!(
             "Unknown model id '{}'.",
@@ -2222,6 +2325,7 @@ fn source_kind_dir_name(source_kind: ModelSourceKind) -> &'static str {
         ModelSourceKind::Generated => GENERATED_ARTIFACT_DIR,
         ModelSourceKind::ImportedFcstd => IMPORTED_FCSTD_ARTIFACT_DIR,
         ModelSourceKind::ImportedStep => IMPORTED_STEP_ARTIFACT_DIR,
+        ModelSourceKind::ImportedMesh => IMPORTED_MESH_ARTIFACT_DIR,
     }
 }
 
@@ -2362,6 +2466,11 @@ fn assign_generated_parameters(
     }
 
     assignments
+}
+
+fn topology_parameter_keys(parameter_keys: &[String]) -> Vec<String> {
+    let _ = parameter_keys;
+    Vec::new()
 }
 
 fn import_enrichment_proposal(
@@ -2674,6 +2783,9 @@ mod tests {
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
             engine_kind: crate::models::EngineKind::Freecad,
             source_language: crate::models::SourceLanguage::LegacyPython,
             geometry_backend: crate::models::GeometryBackend::Freecad,
@@ -2705,6 +2817,8 @@ mod tests {
                 view_ids: Vec::new(),
             }],
             measurement_annotations: Vec::new(),
+            feature_graph: None,
+            correspondence_graph: None,
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -3196,11 +3310,8 @@ mod tests {
         assert_eq!(edge_target.part_id, manifest.parts[0].part_id);
         assert_eq!(edge_target.viewer_node_id, "OuterShell");
         assert_eq!(edge_target.label, "OuterShell.Edge1");
-        assert!(edge_target.editable);
-        assert_eq!(
-            edge_target.parameter_keys,
-            vec!["outer_shell_width".to_string()]
-        );
+        assert!(!edge_target.editable);
+        assert!(edge_target.parameter_keys.is_empty());
     }
 
     #[test]
@@ -3264,11 +3375,96 @@ mod tests {
         assert_eq!(face_target.part_id, manifest.parts[0].part_id);
         assert_eq!(face_target.viewer_node_id, "OuterShell");
         assert_eq!(face_target.label, "OuterShell.Face1");
-        assert!(face_target.editable);
+        assert!(!face_target.editable);
+        assert!(face_target.parameter_keys.is_empty());
+    }
+
+    #[test]
+    fn build_manifest_does_not_bind_ambiguous_part_parameters_to_topology_targets() {
+        let report = sample_report(vec![RunnerObject {
+            part_id: String::new(),
+            object_name: "OuterShell".to_string(),
+            label: "Outer Shell".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: "/tmp/shell.stl".to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+            edges: vec![RunnerEdgeTarget {
+                target_id: "OuterShell:edge:0:0-0-0_10-0-0".to_string(),
+                edge_index: Some(0),
+                label: "OuterShell.Edge1".to_string(),
+                start: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                end: Some(RunnerEdgePoint {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+            }],
+            faces: vec![RunnerFaceTarget {
+                target_id: "OuterShell:face:0:5-0-0:100".to_string(),
+                face_index: Some(0),
+                label: "OuterShell.Face1".to_string(),
+                center: Some(RunnerEdgePoint {
+                    x: 5.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                normal: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: -1.0,
+                    z: 0.0,
+                }),
+                area: Some(100.0),
+            }],
+        }]);
+
+        let manifest = build_manifest(
+            "generated-ambiguous-topology-targets",
+            ModelSourceKind::Generated,
+            vec![
+                "outer_shell_width".to_string(),
+                "outer_shell_height".to_string(),
+            ],
+            &report,
+            &HashMap::new(),
+            None,
+            crate::models::SourceLanguage::LegacyPython,
+        )
+        .expect("manifest should build");
+
+        let object_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Object)
+            .expect("object selection target");
+        let edge_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .expect("edge selection target");
+        let face_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .expect("face selection target");
+
         assert_eq!(
-            face_target.parameter_keys,
-            vec!["outer_shell_width".to_string()]
+            object_target.parameter_keys,
+            vec![
+                "outer_shell_width".to_string(),
+                "outer_shell_height".to_string()
+            ]
         );
+        assert!(object_target.editable);
+        assert!(edge_target.parameter_keys.is_empty());
+        assert!(!edge_target.editable);
+        assert!(face_target.parameter_keys.is_empty());
+        assert!(!face_target.editable);
     }
 
     #[test]
@@ -3345,6 +3541,104 @@ mod tests {
         assert_eq!(
             face_target.durable_target_id.as_deref(),
             Some("body:node:42:face:5-0-0:100")
+        );
+    }
+
+    #[test]
+    fn build_manifest_prefers_stable_source_node_key_for_durable_topology_targets() {
+        let report = sample_report(vec![RunnerObject {
+            part_id: "body".to_string(),
+            object_name: "BodyFeature".to_string(),
+            label: "Body".to_string(),
+            type_id: "Part::Feature".to_string(),
+            export_path: "/tmp/body.stl".to_string(),
+            bounds: None,
+            volume: None,
+            area: None,
+            edges: vec![RunnerEdgeTarget {
+                target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+                edge_index: Some(0),
+                label: "body.Edge1".to_string(),
+                start: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                end: Some(RunnerEdgePoint {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+            }],
+            faces: vec![RunnerFaceTarget {
+                target_id: "body:face:0:5-0-0:100".to_string(),
+                face_index: Some(0),
+                label: "body.Face1".to_string(),
+                center: Some(RunnerEdgePoint {
+                    x: 5.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+                normal: Some(RunnerEdgePoint {
+                    x: 0.0,
+                    y: -1.0,
+                    z: 0.0,
+                }),
+                area: Some(100.0),
+            }],
+        }]);
+
+        let manifest = build_manifest_with_stable_node_keys(
+            "generated-durable-targets",
+            ModelSourceKind::Generated,
+            vec!["outer_shell_width".to_string()],
+            &report,
+            &HashMap::from([("body".to_string(), 42_u64)]),
+            &HashMap::from([("body".to_string(), "sha256:source-span".to_string())]),
+            Some("/tmp/source.ecky".to_string()),
+            crate::models::SourceLanguage::EckyIrV0,
+        )
+        .expect("manifest should build");
+
+        let edge_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .expect("edge selection target");
+        let face_target = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .expect("face selection target");
+
+        assert_eq!(
+            edge_target.durable_target_id.as_deref(),
+            Some("body:stable-node-key:sha256:source-span:edge:0-0-0_10-0-0")
+        );
+        assert_eq!(
+            face_target.durable_target_id.as_deref(),
+            Some("body:stable-node-key:sha256:source-span:face:5-0-0:100")
+        );
+    }
+
+    #[test]
+    fn authored_part_topology_ids_use_source_spans_for_stable_node_keys() {
+        let base_source = "(model (part body (box 10 20 30)))";
+        let shifted_source = "(model (part spacer (box 1 1 1)) (part body (box 10 20 30)))";
+        let base_ids =
+            authored_part_topology_ids(base_source, crate::models::SourceLanguage::EckyIrV0)
+                .expect("base ids");
+        let shifted_ids =
+            authored_part_topology_ids(shifted_source, crate::models::SourceLanguage::EckyIrV0)
+                .expect("shifted ids");
+
+        assert_ne!(
+            base_ids.root_node_ids.get("body"),
+            shifted_ids.root_node_ids.get("body")
+        );
+        assert_eq!(
+            base_ids.stable_node_keys.get("body"),
+            shifted_ids.stable_node_keys.get("body")
         );
     }
 

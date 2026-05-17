@@ -568,6 +568,18 @@ struct SampledRadialLoftCall {
     z_map: Option<IrExpr>,
 }
 
+struct HelicalRidgeCall {
+    radius: IrExpr,
+    pitch: IrExpr,
+    height: IrExpr,
+    base_width: IrExpr,
+    crest_width: IrExpr,
+    depth: IrExpr,
+    female: Option<IrExpr>,
+    clearance: Option<IrExpr>,
+    lefthand: Option<IrExpr>,
+}
+
 impl ParsedCallArgs {
     fn parse(node: &str, args: &[IrExpr], allowed_keywords: &[&str]) -> AppResult<Self> {
         let allowed = allowed_keywords.iter().copied().collect::<BTreeSet<_>>();
@@ -658,6 +670,64 @@ fn parse_sampled_radial_loft_call(args: &[IrExpr]) -> AppResult<SampledRadialLof
             .cloned()
             .ok_or_else(|| validation("`sampled-radial-loft` requires `:radius`."))?,
         z_map: parsed.keywords.get("z_map").cloned(),
+    })
+}
+
+fn parse_helical_ridge_call(args: &[IrExpr]) -> AppResult<HelicalRidgeCall> {
+    let parsed = ParsedCallArgs::parse(
+        "helical-ridge",
+        args,
+        &[
+            "radius",
+            "pitch",
+            "height",
+            "base-width",
+            "crest-width",
+            "depth",
+            "female",
+            "clearance",
+            "lefthand",
+        ],
+    )?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`helical-ridge` expects keyword options: `:radius`, `:pitch`, `:height`, `:base-width`, `:crest-width`, and `:depth`.",
+        ));
+    }
+    Ok(HelicalRidgeCall {
+        radius: parsed
+            .keywords
+            .get("radius")
+            .cloned()
+            .ok_or_else(|| validation("`helical-ridge` requires `:radius`."))?,
+        pitch: parsed
+            .keywords
+            .get("pitch")
+            .cloned()
+            .ok_or_else(|| validation("`helical-ridge` requires `:pitch`."))?,
+        height: parsed
+            .keywords
+            .get("height")
+            .cloned()
+            .ok_or_else(|| validation("`helical-ridge` requires `:height`."))?,
+        base_width: parsed
+            .keywords
+            .get("base_width")
+            .cloned()
+            .ok_or_else(|| validation("`helical-ridge` requires `:base-width`."))?,
+        crest_width: parsed
+            .keywords
+            .get("crest_width")
+            .cloned()
+            .ok_or_else(|| validation("`helical-ridge` requires `:crest-width`."))?,
+        depth: parsed
+            .keywords
+            .get("depth")
+            .cloned()
+            .ok_or_else(|| validation("`helical-ridge` requires `:depth`."))?,
+        female: parsed.keywords.get("female").cloned(),
+        clearance: parsed.keywords.get("clearance").cloned(),
+        lefthand: parsed.keywords.get("lefthand").cloned(),
     })
 }
 
@@ -2839,6 +2909,41 @@ impl FreecadLowerer {
                     kind: GeomKind::Solid3d,
                 });
             }
+            "helical-ridge" => {
+                let call = parse_helical_ridge_call(args)?;
+                let radius = self.lower_num_expr(&call.radius, scope)?;
+                let pitch = self.lower_num_expr(&call.pitch, scope)?;
+                let height = self.lower_num_expr(&call.height, scope)?;
+                let base_width = self.lower_num_expr(&call.base_width, scope)?;
+                let crest_width = self.lower_num_expr(&call.crest_width, scope)?;
+                let depth = self.lower_num_expr(&call.depth, scope)?;
+                let female = call
+                    .female
+                    .as_ref()
+                    .map(|value| self.lower_bool_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "False".to_string());
+                let clearance = call
+                    .clearance
+                    .as_ref()
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "0.0".to_string());
+                let lefthand = call
+                    .lefthand
+                    .as_ref()
+                    .map(|value| self.lower_bool_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "False".to_string());
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_helical_ridge({radius}, {pitch}, {height}, {base_width}, {crest_width}, {depth}, female={female}, clearance={clearance}, lefthand={lefthand})"
+                ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Solid3d,
+                });
+            }
             "shell" => {
                 let parsed = ParsedCallArgs::parse(op, args, &["faces"])?;
                 if parsed.positional.len() != 2 {
@@ -3501,6 +3606,8 @@ fn freecad_preamble() -> Vec<String> {
         String::new(),
         "def _ecky_sweep(profile, path):\n    profile = _ecky_as_wire(profile)\n    path = _ecky_as_wire(path)\n    return path.makePipeShell([profile], True, False)".into(),
         String::new(),
+        "def _ecky_helical_ridge(radius, pitch, height, base_width, crest_width, depth, female=False, clearance=0.0, lefthand=False):\n    radius = float(radius); pitch = float(pitch); height = float(height)\n    base_width = float(base_width); crest_width = float(crest_width); depth = float(depth)\n    clearance = max(0.0, float(clearance))\n    female = bool(female); lefthand = bool(lefthand)\n    if radius <= 0.0: raise ValueError('helical-ridge radius must be positive')\n    if pitch <= 0.0: raise ValueError('helical-ridge pitch must be positive')\n    if height <= 0.0: raise ValueError('helical-ridge height must be positive')\n    if base_width <= 0.0: raise ValueError('helical-ridge base-width must be positive')\n    if crest_width <= 0.0: raise ValueError('helical-ridge crest-width must be positive')\n    if depth <= 0.0: raise ValueError('helical-ridge depth must be positive')\n    envelope_clearance = clearance if female else 0.0\n    path_radius = radius\n    base_half = (base_width + 2.0 * envelope_clearance) * 0.5\n    crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5\n    ridge_depth = depth + envelope_clearance\n    helix = Part.makeHelix(pitch, height, path_radius)\n    if lefthand:\n        helix.mirror(App.Vector(0, 0, 0), App.Vector(0, 1, 0))\n    points = [\n        App.Vector(path_radius, 0, -base_half),\n        App.Vector(path_radius + ridge_depth, 0, -crest_half),\n        App.Vector(path_radius + ridge_depth, 0, crest_half),\n        App.Vector(path_radius, 0, base_half),\n        App.Vector(path_radius, 0, -base_half),\n    ]\n    profile = Part.Wire(Part.makePolygon(points))\n    return Part.Wire(helix).makePipeShell([profile], True, False)".into(),
+        String::new(),
         "def _ecky_offset(shape, amount, openings=None):\n    base = shape\n    if openings:\n        base = _ecky_face_with_holes(shape, openings)\n    if getattr(base, 'ShapeType', '') == 'Face':\n        return base.makeOffset2D(float(amount))\n    return _ecky_as_wire(base).makeOffset2D(float(amount))".into(),
         String::new(),
         "def _ecky_planar_faces(shape):\n    faces = []\n    top = None\n    for face in list(getattr(shape, 'Faces', []) or []):\n        surface = getattr(face, 'Surface', None)\n        name = surface.__class__.__name__.lower() if surface is not None else ''\n        if 'plane' not in name:\n            continue\n        box = getattr(face, 'BoundBox', None)\n        zmax = float(box.ZMax) if box is not None else 0.0\n        if top is None or zmax > top + 1e-6:\n            faces = [face]\n            top = zmax\n        elif abs(zmax - top) <= 1e-6:\n            faces.append(face)\n    return faces".into(),
@@ -3699,6 +3806,53 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
     }
 
+    fn example_fixture(name: &str) -> String {
+        let path = format!(
+            "{}/../model-runtime/examples/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
+    }
+
+    fn example_fixture_or_fallback(name: &str, fallback: &str) -> String {
+        let path = format!(
+            "{}/../model-runtime/examples/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|_| fallback.to_string())
+    }
+
+    fn fixture_part_ids(source: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut tail = source;
+        while let Some(idx) = tail.find("(part ") {
+            let rest = &tail[idx + "(part ".len()..];
+            let Some(end) = rest.find(|ch: char| ch.is_whitespace() || ch == ')') else {
+                break;
+            };
+            if end > 0 {
+                ids.push(rest[..end].to_string());
+            }
+            tail = rest;
+        }
+        ids
+    }
+
+    fn assert_fixture_tuple_names(code: &str, source: &str) {
+        let ids = fixture_part_ids(source);
+        assert!(!ids.is_empty(), "fixture must declare at least one part");
+        for part_id in ids {
+            assert!(
+                code.contains(&format!(r#"("{}","#, part_id)),
+                "missing tuple part id `{}` in lowered output: {}",
+                part_id,
+                code
+            );
+        }
+    }
+
     #[test]
     fn freecad_lowering_emits_runner_adapter_and_parts_list() {
         let src = r#"(model (part body (box 10 20 30)))"#;
@@ -3770,6 +3924,186 @@ mod tests {
         let code = lower_to_freecad(src).expect("lower");
         assert!(code.contains("_ecky_sweep"), "sweep helper: {}", code);
         assert!(code.contains("_ecky_path"), "path helper: {}", code);
+    }
+
+    #[test]
+    fn freecad_lowering_supports_helical_ridge_smoke() {
+        let src = r#"(model
+            (part thread
+              (helical-ridge
+                :radius 10
+                :pitch 2
+                :height 18
+                :base-width 1.2
+                :crest-width 0.4
+                :depth 0.7
+                :female #t
+                :clearance 0.15
+                :lefthand #t)))"#;
+        let code = lower_to_freecad(src).expect("lower");
+        assert!(
+            code.contains("_ecky_helical_ridge("),
+            "helper call: {}",
+            code
+        );
+        assert!(code.contains("Part.makeHelix("), "helix helper: {}", code);
+        assert!(code.contains("makePipeShell("), "pipe shell: {}", code);
+        assert!(
+            code.contains("path_radius = radius"),
+            "same path radius: {}",
+            code
+        );
+        assert!(
+            code.contains("female=True, clearance=0.15, lefthand=True"),
+            "female args: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_helicoid_thread_coupon_fixture_keeps_helical_markers_and_tuple_names() {
+        let source = example_fixture("helicoid-thread-coupon.ecky");
+        let code = lower_to_freecad(&source).expect("lower");
+
+        assert!(
+            code.contains("_ecky_helical_ridge("),
+            "helical helper missing: {}",
+            code
+        );
+        assert!(code.contains("Part.makeHelix("), "helix marker: {}", code);
+        assert!(
+            code.contains("female=True, clearance=0.2")
+                && code.contains("female=True, clearance=0.35"),
+            "clearance variants missing: {}",
+            code
+        );
+        assert!(
+            code.contains(r#"("coupon_male_020","#)
+                && code.contains(r#"("coupon_female_020","#)
+                && code.contains(r#"("coupon_male_035","#)
+                && code.contains(r#"("coupon_female_035","#),
+            "part tuple names missing: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_magnet_clamp_coupon_fixture_keeps_multi_part_and_tuple_names() {
+        let source = example_fixture("magnet-clamp-coupon.ecky");
+        let code = lower_to_freecad(&source).expect("lower");
+
+        assert!(
+            code.contains("_ecky_cut_many("),
+            "difference path: {}",
+            code
+        );
+        assert!(
+            code.contains("_ecky_cylinder(3.2, 6.0")
+                && code.contains("_ecky_cylinder(3.5, 1.2")
+                && code.contains("_ecky_box(60.0, 30.0, 6.0")
+                && code.contains("_ecky_box(60.0, 30.0, 1.2"),
+            "expected magnet primitive markers missing: {}",
+            code
+        );
+        assert!(
+            code.contains(r#"("magnet_clamp_base_n","#)
+                && code.contains(r#"("magnet_clamp_base_s","#)
+                && code.contains(r#"("magnet_polarity_mask_n","#)
+                && code.contains(r#"("magnet_polarity_mask_s","#),
+            "part tuple names missing: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_dovetail_box_fixture_keeps_tuple_names_and_boolean_markers() {
+        let source = example_fixture_or_fallback(
+            "dovetail-box.ecky",
+            r#"(model
+                (part box_shell
+                  (difference
+                    (box 80 60 24)
+                    (translate 2 2 2 (box 76 56 22))))
+                (part lid
+                  (translate 0 0 24
+                    (box 80 60 2))))"#,
+        );
+        let code = lower_to_freecad(&source).expect("lower");
+
+        assert_fixture_tuple_names(&code, &source);
+        assert!(code.contains("_ecky_box("), "box marker missing: {}", code);
+        assert!(
+            code.contains("_ecky_cut_many(") || code.contains("_ecky_fuse_many("),
+            "boolean marker missing: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_vermicomposter_lid_clearance_fixture_keeps_tuple_names_and_lip_markers() {
+        let source = example_fixture_or_fallback(
+            "vermicomposter-lid-clearance.ecky",
+            r#"(model
+                (part lid_clearance_035
+                  (difference
+                    (box 160 120 8)
+                    (translate 0 0 1
+                      (grid-array 4 3 30 30 (cylinder 4 8)))))
+                (part lid_clearance_055
+                  (translate 0 140 0
+                    (difference
+                      (box 160 120 8)
+                      (translate 0 0 1
+                        (grid-array 4 3 30 30 (cylinder 5 8)))))))"#,
+        );
+        let code = lower_to_freecad(&source).expect("lower");
+
+        assert_fixture_tuple_names(&code, &source);
+        assert!(
+            code.contains("_ecky_cut_many("),
+            "cut marker missing: {}",
+            code
+        );
+        assert!(
+            code.contains("_ecky_fuse_many(") && code.contains("_ecky_translate("),
+            "lid lip/vent markers missing: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_snap_hook_coupon_fixture_keeps_tuple_names_and_curve_markers() {
+        let source = example_fixture_or_fallback(
+            "snap-hook-coupon.ecky",
+            r#"(model
+                (part snap_arm
+                  (fillet 0.8
+                    (sweep
+                      (polygon ((0 0) (2.4 0) (2.4 1.6) (0 1.6)))
+                      (bezier-path ((0 0 0) (16 0 2) (24 0 6) (36 0 10)))))
+                (part snap_mate
+                  (difference
+                    (box 40 10 12)
+                    (translate 2 2 2 (box 36 6 8)))))"#,
+        );
+        let code = lower_to_freecad(&source).expect("lower");
+
+        assert_fixture_tuple_names(&code, &source);
+        assert!(
+            code.contains("_ecky_bezier_path(") || code.contains("_ecky_bspline("),
+            "curve marker missing: {}",
+            code
+        );
+        assert!(
+            code.contains("_ecky_sweep("),
+            "sweep marker missing: {}",
+            code
+        );
+        assert!(
+            code.contains("_ecky_fillet(") || code.contains("_ecky_chamfer("),
+            "edge-finish marker missing: {}",
+            code
+        );
     }
 
     #[test]

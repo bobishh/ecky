@@ -37,6 +37,14 @@ async listAgentModels(cmd: string) : Promise<Result<AgentModelList, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getDesignSystemPrompt(provider: string | null) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_design_system_prompt", { provider }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getAppLogs() : Promise<Result<AppLogEntry[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_app_logs") };
@@ -405,6 +413,22 @@ async importFcstd(sourcePath: string) : Promise<Result<ArtifactBundle, AppError>
     else return { status: "error", error: e  as any };
 }
 },
+async searchFreecadLibrary(request: FreecadLibrarySearchRequest) : Promise<Result<FreecadLibraryItem[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("search_freecad_library", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async importFreecadLibraryPart(request: FreecadLibraryImportRequest) : Promise<Result<ArtifactBundle, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_freecad_library_part", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async applyImportedModel(artifactBundle: ArtifactBundle, manifest: ModelManifest, parameters: Partial<{ [key in string]: ParamValue }>, messageId: string | null) : Promise<Result<ArtifactBundle, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("apply_imported_model", { artifactBundle, manifest, parameters, messageId }) };
@@ -581,9 +605,9 @@ async updateVersionRuntime(messageId: string, artifactBundle: ArtifactBundle, mo
     else return { status: "error", error: e  as any };
 }
 },
-async updateVersionPreview(messageId: string, imageData: string) : Promise<Result<null, AppError>> {
+async updateVersionPreview(messageId: string, imageData: string, artifactBundle: ArtifactBundle) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_version_preview", { messageId, imageData }) };
+    return { status: "ok", data: await TAURI_INVOKE("update_version_preview", { messageId, imageData, artifactBundle }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -876,7 +900,7 @@ export type ComponentPackageHeader = { schemaVersion: number; packageId: string;
 export type ComponentParam = { key: string; label: string; kind: ComponentParamKind; unit?: string | null }
 export type ComponentParamKind = "number" | "text" | "boolean" | "choice"
 export type ComponentPort = { portId: string; typeId: string; targetIds?: string[]; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
 export type ControlRelation = { relationId: string; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number; enabled?: boolean }
@@ -885,6 +909,8 @@ export type ControlView = { viewId: string; label: string; scope: ControlViewSco
 export type ControlViewScope = "global" | "part"
 export type ControlViewSection = { sectionId: string; label: string; primitiveIds?: string[]; collapsed?: boolean }
 export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
+export type CorrespondenceEdge = { edgeId: string; source: FeatureOutputRef; target: FeatureOutputRef; relation: string; sourceRef?: SourceRef | null }
+export type CorrespondenceGraph = { edges: CorrespondenceEdge[] }
 export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
 export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
@@ -896,7 +922,14 @@ export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
 export type ExportArtifact = { label: string; format: string; path: string; role: string }
 export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null; placementFrame?: PortFrame | null }
 export type EyeStyle = "dot" | "bar" | "slant"
+export type FeatureGraph = { nodes: FeatureNode[] }
+export type FeatureNode = { featureId: string; kind: string; label: string; sourceRef?: SourceRef | null; dependencyIds: string[]; outputRefs: FeatureOutputRef[]; ports: FeaturePort[] }
+export type FeatureOutputRef = { featureId: string; outputId: string; targetIds: string[] }
+export type FeaturePort = { portId: string; typeId: string; targetIds: string[]; frame?: PortFrame | null; interfaces: string[]; params: Partial<{ [key in string]: ComponentInterfaceValue }>; sourceRef?: SourceRef | null; confidence?: number | null; targetRole?: string | null }
 export type FinalizeStatus = "success" | "error" | "discarded"
+export type FreecadLibraryImportRequest = { item: FreecadLibraryItem; threadId?: string | null; title?: string | null }
+export type FreecadLibraryItem = { id: string; name: string; categoryPath: string; rootPath: string; relativePath: string; formats: string[]; preferredFormat: string; importPath: string; previewPath?: string | null; tags: string[] }
+export type FreecadLibrarySearchRequest = { query: string; roots?: string[]; limit?: number | null; includeArchitecture?: boolean }
 export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null; engineKind?: EngineKind | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null }
 export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
@@ -955,7 +988,7 @@ promptTimeoutSecs?: number;
 /**
  * Experimental: expose read-only Ecky Core AST tools for agent authoring.
  */
-eckyAstAuthoring?: boolean;
+eckyAstAuthoring?: boolean; 
 /**
  * External processes available to Ecky in active mode.
  */
@@ -973,8 +1006,8 @@ export type MessageRole = "user" | "assistant"
 export type MessageStatus = "pending" | "working" | "success" | "error" | "discarded"
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
-export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep"
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
+export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep" | "importedMesh"
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
 export type PackageVisibility = "source" | "compiled" | "locked" | "private"
@@ -1034,6 +1067,7 @@ export type SketchValidationIssueKind = "missingClosedProfile" | "missingProject
 export type SketchValidationSeverity = "warning" | "error"
 export type SketchView = "front" | "side" | "top" | "custom"
 export type SourceLanguage = "legacyPython" | "ecky" | "build123d"
+export type SourceRef = { sourceId?: string | null; path?: string | null; startByte?: number | null; endByte?: number | null }
 export type StructuralIssue = { code: string; message: string; 
 /**
  * ID of the affected part, when the issue is part-specific.
@@ -1059,7 +1093,7 @@ export type UsageSummary = { inputTokens?: number; outputTokens?: number; totalT
 export type VerifierSource = "rust_structural" | "rust_plus_backend"
 export type VerifierStatus = "ok" | "ok_rust_only" | "ok_with_backend" | "skipped_unavailable" | "skipped_backend_unavailable"
 export type ViewerAsset = { partId: string; nodeId: string; objectName: string; label: string; path: string; format: ViewerAssetFormat }
-export type ViewerAssetFormat = "stl" | "gltf" | "glb"
+export type ViewerAssetFormat = "stl" | "gltf" | "glb" | "obj" | "3mf"
 export type ViewerEdgePoint = { x: number; y: number; z: number }
 export type ViewerEdgeTarget = { targetId: string; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds: string[]; partId: string; viewerNodeId: string; label: string; editable: boolean; start: ViewerEdgePoint; end: ViewerEdgePoint }
 export type ViewerFaceTarget = { targetId: string; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds: string[]; partId: string; viewerNodeId: string; label: string; editable: boolean; center: ViewerEdgePoint; normal?: [number, number, number] | null; area?: number | null }

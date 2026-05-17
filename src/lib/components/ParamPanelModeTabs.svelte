@@ -5,18 +5,22 @@
     activeTab = 'views',
     outlineEnabled = true,
     topologyMode = 'mesh',
+    selectionMode = 'orbit',
     macroCode = '',
     onActiveTabChange,
     onShowCode,
     onViewerDisplayChange,
+    onViewerSelectionModeChange,
   }: {
     activeTab?: 'views' | 'raw' | 'litho';
     outlineEnabled?: boolean;
     topologyMode?: TopologyMode;
+    selectionMode?: 'orbit' | 'select' | 'measure';
     macroCode?: string;
     onActiveTabChange?: (tab: 'views' | 'raw' | 'litho') => void;
     onShowCode?: () => void;
     onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
+    onViewerSelectionModeChange?: (mode: 'orbit' | 'select' | 'measure') => void;
   } = $props();
 </script>
 
@@ -57,6 +61,30 @@
     title="Cycle topology overlay: off, feature edges, mesh wireframe"
   >
     {topologyModeLabel(topologyMode)}
+  </button>
+  <button
+    class="panel-mode-tab panel-mode-tab-compact"
+    class:panel-mode-tab-active={selectionMode === 'orbit'}
+    onclick={() => onViewerSelectionModeChange?.('orbit')}
+    title="Camera orbit mode"
+  >
+    ORBIT
+  </button>
+  <button
+    class="panel-mode-tab panel-mode-tab-compact"
+    class:panel-mode-tab-active={selectionMode === 'select'}
+    onclick={() => onViewerSelectionModeChange?.('select')}
+    title="Lock camera and click model targets for parameter focus"
+  >
+    SELECT
+  </button>
+  <button
+    class="panel-mode-tab panel-mode-tab-compact"
+    class:panel-mode-tab-active={selectionMode === 'measure'}
+    onclick={() => onViewerSelectionModeChange?.('measure')}
+    title="Measure mode keeps parameter focus unchanged on viewport click/drag"
+  >
+    MEASURE
   </button>
   {#if macroCode && onShowCode}
     <button class="panel-mode-tab panel-code-btn" onclick={onShowCode} title="View macro code">

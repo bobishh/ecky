@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 mod signatures;
@@ -222,7 +223,46 @@ pub struct CoreParameterConstraints {
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub step: Option<f64>,
+    pub unit: Option<String>,
     pub choices: Vec<CoreChoice>,
+    pub relations: Vec<CoreRelationConstraint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreRelationOperator {
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+}
+
+impl CoreRelationOperator {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LessThan => "<",
+            Self::LessThanOrEqual => "<=",
+            Self::GreaterThan => ">",
+            Self::GreaterThanOrEqual => ">=",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreRelationOperand {
+    Parameter(ParamId),
+    Number(f64),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreRelationConstraint {
+    pub operator: CoreRelationOperator,
+    pub left: CoreRelationOperand,
+    pub right: CoreRelationOperand,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CoreProgramConstraints {
+    pub relations: Vec<CoreRelationConstraint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -244,11 +284,20 @@ pub struct CorePart {
     pub root: CoreNode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreFeatureDecl {
+    pub feature_id: String,
+    pub role: String,
+    pub param_keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreProgram {
     pub id: ProgramId,
     pub parameters: Vec<CoreParameter>,
     pub parts: Vec<CorePart>,
+    pub feature_decls: BTreeMap<String, CoreFeatureDecl>,
+    pub constraints: CoreProgramConstraints,
 }
 
 impl CoreProgram {
@@ -257,7 +306,19 @@ impl CoreProgram {
             id,
             parameters,
             parts,
+            feature_decls: BTreeMap::new(),
+            constraints: CoreProgramConstraints::default(),
         }
+    }
+
+    pub fn with_feature_decls(mut self, feature_decls: BTreeMap<String, CoreFeatureDecl>) -> Self {
+        self.feature_decls = feature_decls;
+        self
+    }
+
+    pub fn with_constraints(mut self, constraints: CoreProgramConstraints) -> Self {
+        self.constraints = constraints;
+        self
     }
 }
 

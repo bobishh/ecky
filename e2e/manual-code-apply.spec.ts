@@ -6,6 +6,12 @@ declare global {
       addManualVersionCalls: Array<{ input: Record<string, unknown> }>;
       renderModelCalls: Array<{ macroCode: string; parameters: Record<string, unknown> }>;
       updateParametersCalls: Array<{ messageId: string; parameters: Record<string, unknown> }>;
+      historyCallCount: number;
+    };
+    __manualCodeApplyMockConfig?: {
+      stallHistoryAfterCommit?: boolean;
+      stallSaveLastDesign?: boolean;
+      renderModelError?: string;
     };
   }
 }
@@ -16,6 +22,7 @@ function manualCodeApplyMockScript() {
     addManualVersionCalls: [],
     renderModelCalls: [],
     updateParametersCalls: [],
+    historyCallCount: 0,
   };
 
   const historyThread = {
@@ -52,7 +59,16 @@ function manualCodeApplyMockScript() {
       };
     }
     if (cmd === 'check_freecad') return true;
-    if (cmd === 'get_history') return [historyThread];
+    if (cmd === 'get_history') {
+      window.__manualCodeApplyMock!.historyCallCount += 1;
+      if (
+        window.__manualCodeApplyMockConfig?.stallHistoryAfterCommit &&
+        window.__manualCodeApplyMock!.historyCallCount > 1
+      ) {
+        return new Promise(() => {});
+      }
+      return [historyThread];
+    }
     if (cmd === 'get_last_design') return null;
     if (cmd === 'get_default_macro') return '# mock macro';
     if (cmd === 'init_generation_attempt') return 'mock-msg-1';
@@ -99,6 +115,9 @@ function manualCodeApplyMockScript() {
         parameters: (args?.parameters as Record<string, unknown>) ?? {},
       };
       window.__manualCodeApplyMock?.renderModelCalls.push(payload);
+      if (window.__manualCodeApplyMockConfig?.renderModelError) {
+        throw new Error(window.__manualCodeApplyMockConfig.renderModelError);
+      }
       const renderIndex = window.__manualCodeApplyMock?.renderModelCalls.length ?? 1;
       return {
         modelId: `mock-model-${renderIndex}`,
@@ -180,9 +199,14 @@ function manualCodeApplyMockScript() {
       cmd === 'update_version_runtime' ||
       cmd === 'save_model_manifest' ||
       cmd === 'finalize_generation_attempt' ||
-      cmd === 'save_last_design' ||
       cmd === 'save_config'
     ) {
+      return null;
+    }
+    if (cmd === 'save_last_design') {
+      if (window.__manualCodeApplyMockConfig?.stallSaveLastDesign) {
+        return new Promise(() => {});
+      }
       return null;
     }
     if (cmd === 'get_active_agent_sessions') return [];
@@ -224,9 +248,10 @@ endsolid mock
   await page.fill('textarea.prompt-input', 'make bracket');
   await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
   await page.getByRole('button', { name: 'PARAMS' }).click({ force: true });
-  await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-  await page.getByRole('button', { name: 'RAW' }).click();
-  await expect(page.locator('[data-param-key="width"]')).toBeVisible();
+  const paramPanel = page.locator('.param-panel');
+  await expect(paramPanel).toBeVisible({ timeout: 10000 });
+  await paramPanel.getByRole('button', { name: 'RAW' }).click();
+  await expect(paramPanel.locator('[data-param-key="width"]')).toBeVisible();
 }
 
 test.describe('Manual code apply/version coverage', () => {
@@ -304,5 +329,81 @@ test.describe('Manual code apply/version coverage', () => {
           parameters: { width: 42 },
         },
       });
+  });
+
+  test('Given post-commit refresh stalls When committing Then UI exits COMMITTING state after core save', async ({ page }) => {
+    await bootManualCodeFlow(page);
+    await page.evaluate(() => {
+      window.__manualCodeApplyMockConfig = {
+        stallHistoryAfterCommit: true,
+        stallSaveLastDesign: true,
+      };
+    });
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const editor = page.locator('.cm-content').first();
+    await editor.click();
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await page.keyboard.type('print("edited bracket")');
+
+    await page.locator('.code-modal-footer').getByRole('button', { name: 'COMMIT VERSION' }).click();
+
+    await expect
+      .poll(async () => page.evaluate(() => window.__manualCodeApplyMock?.addManualVersionCalls.length ?? 0))
+      .toBe(1);
+    await expect(page.getByText(/MACRO INSPECTOR:/i)).toHaveCount(0);
+    await expect(page.locator('.code-modal-footer').getByRole('button', { name: 'COMMITTING...' })).toHaveCount(0);
+  });
+
+  test('Given first render fails When closing and reopening from viewport code button Then failed draft stays editable without a successful model', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.__manualCodeApplyMockConfig = {
+        renderModelError: 'mock render exploded',
+      };
+    });
+    await page.route(/\/mock-\d+\.stl(?:\?.*)?$/, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'model/stl',
+        body: `solid mock
+facet normal 0 0 0
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vertex 0 1 0
+endloop
+endfacet
+endsolid mock
+`,
+      });
+    });
+    await page.addInitScript(manualCodeApplyMockScript);
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+    await page.fill('textarea.prompt-input', 'make broken bracket');
+    await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
+    await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
+    await expect(page.locator('.error-banner')).toContainText('Render Error: mock render exploded');
+
+    await page
+      .locator('[role="dialog"]')
+      .filter({ hasText: 'MACRO INSPECTOR:' })
+      .locator('.window-close')
+      .click();
+
+    const viewportCodeButton = page.locator('.export-actions').getByRole('button', { name: /CODE/i });
+    await expect(viewportCodeButton).toBeVisible();
+    await expect(viewportCodeButton).toBeEnabled();
+
+    await viewportCodeButton.click();
+
+    await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
+    await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
   });
 });

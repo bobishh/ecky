@@ -54,17 +54,18 @@ export function deriveViewportState(input: ViewportStateInput): ViewportState {
       : '';
   const currentViewerModelKey = input.activeArtifactBundle
     ? [
+        input.activeThreadId ?? '',
         input.activeArtifactBundle.modelId,
         input.activeArtifactBundle.artifactVersion ?? '',
         input.activeArtifactBundle.contentHash ?? '',
         input.stlUrl ?? '',
         ...(runtimeRevision ? [runtimeRevision] : []),
       ].join(':')
-    : input.stlUrl || (
-        input.activeThreadId && input.activeVersionId
-          ? viewportTargetKey(input.activeThreadId, input.activeVersionId)
-          : null
-      );
+    : input.stlUrl
+      ? [input.activeThreadId ?? '', input.activeVersionId ?? '', input.stlUrl].join(':')
+      : input.activeThreadId && input.activeVersionId
+        ? viewportTargetKey(input.activeThreadId, input.activeVersionId)
+        : null;
   const persistedViewportCameraState =
     currentViewportTargetKey ? input.cameraStateByTarget[currentViewportTargetKey] ?? null : null;
   const activeVersionAgentLabel = formatAgentOriginLabel(input.activeVersionMessage?.agentOrigin);

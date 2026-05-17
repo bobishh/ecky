@@ -17,3 +17,11 @@ export function topologyModeLabel(current: TopologyMode): string {
       return 'TOPOLOGY: OFF';
   }
 }
+
+export function meshTopologyVisible(current: TopologyMode, partActive: boolean): boolean {
+  return current === 'mesh' && partActive;
+}
+
+export function meshTopologyOpacity(current: TopologyMode, partActive: boolean): number {
+  return meshTopologyVisible(current, partActive) ? 0.28 : 0;
+}

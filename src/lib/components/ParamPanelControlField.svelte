@@ -22,6 +22,7 @@
     showSemanticSource = false,
     canEdit = false,
     onUpdate,
+    onDraftValue,
     onEdit,
     onPickImage,
     onMouseEnter,
@@ -44,6 +45,7 @@
     showSemanticSource?: boolean;
     canEdit?: boolean;
     onUpdate?: (value: ParamValue) => void;
+    onDraftValue?: (value: ParamValue) => void;
     onEdit?: () => void;
     onPickImage?: () => Promise<void> | void;
     onMouseEnter?: (event: MouseEvent) => void;
@@ -111,6 +113,9 @@
     beginNumericEdit(rawValue);
     const parsed = parseFloat(rawValue);
     pendingNumericValue = Number.isFinite(parsed) ? parsed : null;
+    if (pendingNumericValue !== null) {
+      onDraftValue?.(pendingNumericValue);
+    }
     if (!liveApply) return;
     if (pendingNumericUpdateTimer) clearTimeout(pendingNumericUpdateTimer);
     pendingNumericUpdateTimer = setTimeout(

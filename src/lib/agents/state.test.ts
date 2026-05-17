@@ -281,7 +281,7 @@ test('deriveMascotStateForThreadAgent keeps sleeping agents silent', () => {
     }),
     {
       connected: false,
-      mode: 'idle',
+      mode: 'sleeping',
       bubble: '',
     },
   );

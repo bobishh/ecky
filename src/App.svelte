@@ -10,7 +10,7 @@
   import { writeTextFile } from '@tauri-apps/plugin-fs';
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
-  import { buildModelGenieTraits } from './lib/genie/traits';
+  import { buildGenieTraitsFromSeed, buildModelGenieTraits } from './lib/genie/traits';
 
   import CodeModal from './lib/CodeModal.svelte';
   import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
@@ -77,7 +77,7 @@
   import { inferModelCapabilities } from './lib/modelRuntime/modelCapabilities';
   import { persistLastSessionSnapshot } from './lib/modelRuntime/sessionSnapshot';
   import { getRenderableRuntimeBundle, inspectRuntimeBundle } from './lib/modelRuntime/runtimeBundle';
-  import { shouldPersistVersionPreview } from './lib/versionPreviewPersistence';
+  import { sameArtifactVersion, shouldPersistVersionPreview } from './lib/versionPreviewPersistence';
   import {
     deriveThreadAttentionIds,
     deriveMascotStateForThreadAgent,
@@ -119,6 +119,7 @@
     writeWorkspaceCapturePrefs,
   } from './lib/agents/workspaceCapture';
   import { codeInspectorTitle } from './lib/modelEngineLabel';
+  import { buildFailedDraftSeed } from './lib/manualDraftSeed';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
@@ -192,6 +193,7 @@
     getThread,
     getThreadAgentState,
     getModelManifest,
+    importFreecadLibraryPart,
     importFcstd,
     preparePromptAttachments,
     preparePromptWorkspaceCapture,
@@ -214,7 +216,7 @@
     type ThreadAgentState,
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
-  import type { SketchDraftSource } from './lib/tauri/contracts';
+  import type { FreecadLibraryItem, SketchDraftSource } from './lib/tauri/contracts';
   import type {
     AgentSession,
     AgentTerminalInput,
@@ -248,6 +250,41 @@
     getCameraState: () => ViewportCameraState | null;
     setCameraState: (camera: ViewportCameraState | null) => void;
   };
+
+  const GENIE_SEED_OVERRIDES_KEY = 'ecky.genie.seedOverrides.v1';
+
+  function readGenieSeedOverrides(): Record<string, number> {
+    if (typeof localStorage === 'undefined') return {};
+    try {
+      const parsed = JSON.parse(localStorage.getItem(GENIE_SEED_OVERRIDES_KEY) ?? '{}');
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      return Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, number] => (
+          typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] > 0
+        )),
+      );
+    } catch {
+      return {};
+    }
+  }
+
+  function writeGenieSeedOverrides(overrides: Record<string, number>) {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(GENIE_SEED_OVERRIDES_KEY, JSON.stringify(overrides));
+    } catch {
+      // Ignore storage failures in private or restricted contexts.
+    }
+  }
+
+  function randomGenieSeed(): number {
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      const buffer = new Uint32Array(1);
+      crypto.getRandomValues(buffer);
+      return buffer[0] || 1;
+    }
+    return (Date.now() >>> 0) || 1;
+  }
 
   type AgentDraftPreviewUpdatedEvent = {
     sessionId: string;
@@ -407,9 +444,9 @@
   let sharedContextSearchQuery = $state('');
   let focusedMeasurementControl = $state<MeasurementControlFocus | null>(null);
   let lastViewportContextKey = $state<string | null>(null);
-  let showViewportOverlayControls = $state(true);
   let viewerOutlineEnabled = $state(true);
   let viewerTopologyMode = $state<TopologyMode>('mesh');
+  let viewerMode = $state<'orbit' | 'select' | 'measure'>('orbit');
   let showNewProjectChooser = $state(false);
   let showNewProjectImport = $state(false);
   let sketchPreview = $state<SketchPreviewState | null>(null);
@@ -707,7 +744,6 @@
   let hiddenViewerLoadNonce = $state(0);
   let visibleViewerRecoveryKey = $state<string | null>(null);
   let versionPreviewCaptureSeq = 0;
-  let lastSavedVersionPreviewKey = '';
   let lastLiveScreenshotByTarget = $state<Record<string, ViewportScreenshotCapture>>({});
   let drawMode = $state(false);
   let workspaceCapturePrefs = $state<Record<string, boolean>>(readWorkspaceCapturePrefs());
@@ -740,6 +776,7 @@
   });
 
   let genieWakeUpCount = $state(0);
+  let genieSeedOverrides = $state<Record<string, number>>(readGenieSeedOverrides());
   let lastAgentPresenceConnected = false;
   let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
   const terminalWindowState = $derived($windowStore.terminal);
@@ -764,6 +801,20 @@
         mountedWindows[id] = true;
       }
     }
+  });
+
+  $effect(() => {
+    if (mountedWindows.params || isBooting || $currentView !== 'workbench') return;
+    if (typeof window === 'undefined') return;
+    const mountParams = () => {
+      mountedWindows.params = true;
+    };
+    if ('requestIdleCallback' in window) {
+      const idleId = window.requestIdleCallback(mountParams, { timeout: 1500 });
+      return () => window.cancelIdleCallback(idleId);
+    }
+    const timerId = setTimeout(mountParams, 600);
+    return () => clearTimeout(timerId);
   });
 
   $effect(() => {
@@ -953,13 +1004,16 @@
   initOrchestrator({
     get viewerComponent() { return viewerComponent; },
     openCodeModalManual: (data) => {
+      const seededDraft = buildFailedDraftSeed(data, $workingCopy);
+      workingCopy.loadVersion(seededDraft, null);
+      paramPanelState.hydrateFromVersion(seededDraft, null);
       codeModalMode = 'version';
-      selectedCode.set($workingCopy.macroCode);
+      selectedCode.set(seededDraft.macroCode);
       selectedTitle.set(
         codeInspectorTitle(
-          $workingCopy.title || data.title,
-          $workingCopy.sourceLanguage || data.sourceLanguage,
-          $workingCopy.geometryBackend || data.geometryBackend,
+          seededDraft.title,
+          seededDraft.sourceLanguage,
+          seededDraft.geometryBackend,
         ),
       );
       showCodeModal.set(true);
@@ -1146,16 +1200,8 @@
     const bundle = get(session).artifactBundle;
     const stlUrlValue = get(session).stlUrl;
     if (!threadId || !messageId || !bundle || !stlUrlValue || !viewerComponent) return;
-
-    const previewKey = [
-      threadId,
-      messageId,
-      bundle.modelId,
-      bundle.artifactVersion,
-      bundle.contentHash,
-      stlUrlValue,
-    ].join(':');
-    if (previewKey === lastSavedVersionPreviewKey) return;
+    const versionMessage = activeVersionMessage;
+    if (!shouldPersistVersionPreview(versionMessage, bundle, stlUrlValue)) return;
 
     const captureSeq = ++versionPreviewCaptureSeq;
     await tick();
@@ -1166,7 +1212,8 @@
       loadNonce !== visibleViewerLoadNonce ||
       get(activeThreadId) !== threadId ||
       get(activeVersionId) !== messageId ||
-      get(session).artifactBundle?.modelId !== bundle.modelId
+      get(session).stlUrl !== stlUrlValue ||
+      !sameArtifactVersion(versionMessage?.artifactBundle, get(session).artifactBundle)
     ) {
       return;
     }
@@ -1175,8 +1222,7 @@
     if (!imageData?.startsWith('data:image/')) return;
 
     try {
-      await updateVersionPreview(messageId, imageData);
-      lastSavedVersionPreviewKey = previewKey;
+      await updateVersionPreview(messageId, imageData, bundle);
       patchThreadMessagePreview(threadId, messageId, imageData);
       window.dispatchEvent(
         new CustomEvent('ecky:version-preview-updated', {
@@ -1936,21 +1982,24 @@
       .catch(() => {});
     threadAgentPollInterval = setInterval(() => void refreshThreadAgentState(), 1000);
 
-    const unlisten = listen<AgentConfirmItem>('agent-confirm-request', (event) => {
+    const noopUnlisten = Promise.resolve(() => {});
+    const canListenToTauri = hasTauriIpc();
+
+    const unlisten = canListenToTauri ? listen<AgentConfirmItem>('agent-confirm-request', (event) => {
       const item = event.payload;
       if (!pendingConfirms.find(c => c.requestId === item.requestId)) {
         pendingConfirms = [...pendingConfirms, item];
       }
-    });
-    const unlistenPrompt = listen<PendingAgentPrompt>('agent-prompt-request', (event) => {
+    }) : noopUnlisten;
+    const unlistenPrompt = canListenToTauri ? listen<PendingAgentPrompt>('agent-prompt-request', (event) => {
       // Replace any existing prompt for this session (supersede semantics), then append the new one.
       pendingAgentPrompts = [
         ...pendingAgentPrompts.filter((prompt) => prompt.sessionId !== event.payload.sessionId),
         event.payload,
       ];
       void refreshThreadAgentState();
-    });
-    const unlistenPromptClosed = listen<ClosedAgentPrompt>('agent-prompt-closed', (event) => {
+    }) : noopUnlisten;
+    const unlistenPromptClosed = canListenToTauri ? listen<ClosedAgentPrompt>('agent-prompt-closed', (event) => {
       const { requestId, sessionId, reason } = event.payload;
       if (reason === 'session_disconnected' || reason === 'superseded' || reason === 'agent_stopped') {
         // Broad cleanup: remove all prompts for this session.
@@ -1964,14 +2013,14 @@
         );
       }
       void refreshThreadAgentState();
-    });
-    const unlistenViewportScreenshot = listen<AgentViewportScreenshotEvent>(
+    }) : noopUnlisten;
+    const unlistenViewportScreenshot = canListenToTauri ? listen<AgentViewportScreenshotEvent>(
       'agent-viewport-screenshot-request',
       (event) => {
         void handleViewportScreenshotEvent(event.payload);
       },
-    );
-    const unlistenHistory = listen('history-updated', async () => {
+    ) : noopUnlisten;
+    const unlistenHistory = canListenToTauri ? listen('history-updated', async () => {
       await refreshHistory();
       const currentThreadId = get(activeThreadId);
       if (currentThreadId) {
@@ -1979,8 +2028,8 @@
         upsertThreadInHistory(thread);
       }
       void refreshThreadAgentState();
-    });
-    const unlistenDraftPreview = listen<AgentDraftPreviewUpdatedEvent>(
+    }) : noopUnlisten;
+    const unlistenDraftPreview = canListenToTauri ? listen<AgentDraftPreviewUpdatedEvent>(
       'agent-draft-preview-updated',
       (event) => {
         const preview = event.payload;
@@ -2013,22 +2062,22 @@
           selectedPartId: null,
         });
       },
-    );
-    const unlistenSessions = listen<AgentSession[]>('agent-sessions-changed', (event) => {
+    ) : noopUnlisten;
+    const unlistenSessions = canListenToTauri ? listen<AgentSession[]>('agent-sessions-changed', (event) => {
       activeAgentSessions = event.payload;
       void refreshThreadAgentState();
-    });
-    const unlistenTerminal = listen<AgentTerminalSnapshot>('agent-terminal-updated', (event) => {
+    }) : noopUnlisten;
+    const unlistenTerminal = canListenToTauri ? listen<AgentTerminalSnapshot>('agent-terminal-updated', (event) => {
       enqueueAgentTerminalSnapshot(event.payload);
-    });
-    const unlistenWorkingVersion = listen<AgentWorkingVersionCreatedEvent>(
+    }) : noopUnlisten;
+    const unlistenWorkingVersion = canListenToTauri ? listen<AgentWorkingVersionCreatedEvent>(
       'agent-working-version-created',
       (event) => {
         void focusAgentWorkingVersion(event.payload).catch((error) => {
           console.warn('[Agent] Failed to focus working version:', error);
         });
       },
-    );
+    ) : noopUnlisten;
     return () => {
       teardownWindowStore();
       if (threadAgentPollInterval) clearInterval(threadAgentPollInterval);
@@ -2082,7 +2131,25 @@
     if (isBooting || !$runtimeCapabilities) return null;
     return $runtimeCapabilities.freecad.available ? null : $runtimeCapabilities.freecad.detail;
   });
-  const eckyTraits = $derived<Partial<GenieTraits>>(
+  const eckySeedIdentity = $derived.by(() => {
+    const bundle = activeArtifactBundle;
+    const manifest = sessionModelManifest;
+    const authoring = activeAuthoringContext;
+    return [
+      'model',
+      bundle?.modelId ?? manifest?.modelId ?? '',
+      bundle?.contentHash ?? '',
+      `${bundle?.artifactVersion ?? ''}`,
+      activeVersionMessage?.id ?? activeVersionMessage?.output?.versionName ?? '',
+      authoring?.engineKind ?? bundle?.engineKind ?? manifest?.engineKind ?? '',
+      authoring?.sourceLanguage ?? bundle?.sourceLanguage ?? manifest?.sourceLanguage ?? '',
+      authoring?.geometryBackend ?? bundle?.geometryBackend ?? manifest?.geometryBackend ?? '',
+    ]
+      .map((part) => `${part}`.trim().toLowerCase())
+      .filter(Boolean)
+      .join('|') || 'model|ecky|boot';
+  });
+  const baseEckyTraits = $derived<GenieTraits>(
     buildModelGenieTraits({
       artifactBundle: activeArtifactBundle,
       modelManifest: sessionModelManifest,
@@ -2091,7 +2158,20 @@
       authoringContext: activeAuthoringContext,
     }),
   );
+  const eckyTraits = $derived<Partial<GenieTraits>>(
+    genieSeedOverrides[eckySeedIdentity] ? buildGenieTraitsFromSeed(genieSeedOverrides[eckySeedIdentity]) : baseEckyTraits,
+  );
   const eckyIntensity = $derived(1.0 + Math.max(0, ($activeRequestCount - 1) * 0.25));
+
+  function rerollEckySeed() {
+    const nextOverrides = {
+      ...genieSeedOverrides,
+      [eckySeedIdentity]: randomGenieSeed(),
+    };
+    genieSeedOverrides = nextOverrides;
+    writeGenieSeedOverrides(nextOverrides);
+    genieWakeUpCount++;
+  }
 
   function hasTauriIpc(): boolean {
     if (typeof window === 'undefined') return false;
@@ -2214,8 +2294,11 @@
     if (threadAgentState?.connectionState === 'waiting') return 'light';
     if (threadAgentState?.connectionState === 'active') return threadAgentMascot.mode;
     if (threadAgentState?.connectionState === 'error') return 'error';
+    if (threadAgentState?.connectionState === 'sleeping') return 'sleeping';
+    if (activeMcpRenderBusy) return 'rendering';
+    if (activeMcpBusy && activeMcpBubbleSummary) return 'speaking';
+    if (activeMcpBusy) return 'thinking';
     if (hasLiveMcpSession) return 'light';
-    if (threadAgentState?.connectionState === 'sleeping') return 'idle';
     const atPhase = activeThreadHighestPhase;
     if (atPhase === 'error') return 'error';
     if (atPhase === 'repairing') return 'repairing';
@@ -2663,7 +2746,13 @@
     });
   });
 
-  function handleTargetSelect(target: ContextSelectionTarget | null) {
+  function handleTargetSelect(
+    target: ContextSelectionTarget | null,
+    options?: { allowMissReset?: boolean },
+  ) {
+    if (!target && viewerMode === 'select' && !options?.allowMissReset) {
+      return;
+    }
     const nextTarget = target ?? createGlobalContextTarget(activeModelManifest);
     const partId = deriveSelectedPartId(nextTarget);
     selectedContextTargetId = nextTarget?.targetId ?? null;
@@ -2674,7 +2763,7 @@
 
   function handlePartSelect(partId: string | null) {
     if (!partId) {
-      handleTargetSelect(null);
+      handleTargetSelect(null, { allowMissReset: true });
       return;
     }
     const nextTarget =
@@ -2768,6 +2857,59 @@
       }
     } catch (e: unknown) {
       session.setError(`FCStd Import Error: ${formatBackendError(e)}`);
+    }
+  }
+
+  async function handleImportFreecadLibraryPart(item: FreecadLibraryItem) {
+    try {
+      const isMeshLibraryItem = ['stl', 'obj', '3mf'].includes((item.preferredFormat || '').toLowerCase());
+      if (!isMeshLibraryItem && freecadUnavailableReason) {
+        session.setError(`FreeCAD Library Import Error: ${freecadUnavailableReason}`);
+        return;
+      }
+      session.setError(null);
+      session.setStatus(`Importing FreeCAD library part: ${item.name}...`);
+      const bundle = await importFreecadLibraryPart({ item });
+      const rawManifest = await getModelManifest(bundle.modelId);
+      const importedUiSpec = buildImportedUiSpec(rawManifest);
+      const importedParams = buildImportedParams(rawManifest, {}, importedUiSpec);
+      const manifest = ensureSemanticManifest(rawManifest, importedUiSpec, importedParams) ?? rawManifest;
+      const threadId = crypto.randomUUID();
+      const title =
+        manifest.document.documentLabel ||
+        manifest.document.documentName ||
+        item.name ||
+        'FreeCAD Library Part';
+      const messageId = await addImportedModelVersion({
+        threadId,
+        title,
+        artifactBundle: bundle,
+        modelManifest: manifest,
+      });
+      await saveModelManifest(bundle.modelId, manifest, messageId);
+      activeThreadId.set(threadId);
+      activeVersionId.set(messageId);
+      workingCopy.reset();
+      paramPanelState.reset();
+      session.setStlUrl(toAssetUrl(bundle.previewStlPath));
+      session.setModelRuntime(bundle, manifest);
+      await refreshHistory();
+      await persistLastSessionSnapshot({
+        design: null,
+        threadId,
+        messageId,
+        artifactBundle: bundle,
+        modelManifest: manifest,
+        selectedPartId: null,
+      });
+      session.setStatus(`Imported FreeCAD library part: ${item.name}`);
+      currentView.set('workbench');
+      if (manifest.enrichmentState?.status === 'pending') {
+        showEnrichmentModal = true;
+      }
+    } catch (e: unknown) {
+      session.setError(`FreeCAD Library Import Error: ${formatBackendError(e)}`);
+      throw e;
     }
   }
 
@@ -2900,6 +3042,7 @@
                 viewerAssets={effectiveViewerAssets}
                 manifestParts={hasSketchPreview ? [] : activeModelManifest?.parts ?? []}
                 edgeTargets={sketchPreview?.artifactBundle?.edgeTargets ?? activeArtifactBundle?.edgeTargets ?? []}
+                faceTargets={sketchPreview?.artifactBundle?.faceTargets ?? activeArtifactBundle?.faceTargets ?? []}
                 selectionTargets={hasSketchPreview ? [] : contextSelectionTargets}
                 selectedTarget={hasSketchPreview ? null : selectedTarget}
                 searchQuery={hasSketchPreview ? '' : sharedContextSearchQuery}
@@ -2909,11 +3052,12 @@
                 overlayPartLabel={hasSketchPreview ? null : selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
                 overlayPartEditable={hasSketchPreview ? false : selectedTarget?.editable ?? overlaySelectedPart?.editable ?? false}
                 overlayPreviewOnly={hasSketchPreview ? false : overlayPreviewOnly}
-                showContextOverlay={hasSketchPreview ? false : showViewportOverlayControls}
+                showContextOverlay={false}
                 overlayControls={hasSketchPreview ? [] : overlayControls}
                 overlayAdvisories={hasSketchPreview ? [] : overlayAdvisories}
                 activeMeasurementCallout={hasSketchPreview ? null : activeMeasurementCallout}
                 previewTransforms={hasSketchPreview ? {} : importedPreviewTransforms}
+                viewerMode={!hasSketchPreview && paramsWindowState.visible ? viewerMode : 'orbit'}
                 onOverlayChange={handleSemanticControlChange}
                 onControlFocusChange={(focus) => focusedMeasurementControl = focus}
                 onSearchQueryChange={(query) => sharedContextSearchQuery = query}
@@ -2956,6 +3100,7 @@
                 stlUrl={hiddenViewerSpec?.stlUrl ?? null}
                 viewerAssets={hiddenViewerSpec?.viewerAssets ?? []}
                 edgeTargets={[]}
+                faceTargets={[]}
                 selectionTargets={[]}
                 selectedTarget={null}
                 searchQuery=""
@@ -2968,6 +3113,7 @@
                 overlayAdvisories={[]}
                 activeMeasurementCallout={null}
                 previewTransforms={{}}
+                viewerMode="orbit"
                 onControlFocusChange={() => { focusedMeasurementControl = null; }}
                 onSearchQueryChange={() => {}}
                 onSelectTarget={() => {}}
@@ -3181,7 +3327,7 @@
       <div class="boot-overlay__content">
         <div class="boot-overlay__title">ECKY CAD</div>
         <div class="boot-overlay__ecky">
-          <VertexGenie mode="thinking" bubble="" />
+          <VertexGenie mode="thinking" bubble="" fitToCanvas={true} />
         </div>
         <div class="boot-overlay__status">{status || 'Restoring environment...'}</div>
       </div>
@@ -3205,12 +3351,13 @@
     >
       <ProjectSwitcher
         onImportFcstd={handleImportFcstd}
+        onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
         freecadUnavailableReason={freecadUnavailableReason}
       />
     </Window>
   {/if}
 
-  {#if paramsWindowState.visible}
+  {#if mountedWindows.params}
     <Window
       windowId="params"
       x={paramsWindowState.x}
@@ -3259,9 +3406,13 @@
           macroCode={$workingCopy.macroCode}
           outlineEnabled={viewerOutlineEnabled}
           topologyMode={viewerTopologyMode}
+          selectionMode={viewerMode}
           onViewerDisplayChange={(display) => {
             viewerOutlineEnabled = display.outlineEnabled;
             viewerTopologyMode = display.topologyMode;
+          }}
+          onViewerSelectionModeChange={(mode) => {
+            viewerMode = mode;
           }}
           onShowCode={() => {
             codeModalMode = 'version';
@@ -3303,6 +3454,8 @@
           availableModels={$availableModels}
           isLoadingModels={$isLoadingModels}
           runtimeCapabilities={$runtimeCapabilities}
+          eckyTraits={eckyTraits}
+          onRerollEcky={rerollEckySeed}
           onfetch={fetchModels}
           onsave={saveConfig}
         />

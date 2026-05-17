@@ -5,15 +5,25 @@ use tauri::State;
 #[tauri::command]
 #[specta::specta]
 pub async fn get_history(state: State<'_, AppState>) -> AppResult<Vec<Thread>> {
-    let conn = state.db.lock().await;
-    history_service::get_history(&conn)
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        history_service::get_history(&conn)
+    } else {
+        let conn = state.db.lock().await;
+        history_service::get_history(&conn)
+    }
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn get_thread(state: State<'_, AppState>, id: String) -> AppResult<Thread> {
-    let conn = state.db.lock().await;
-    history_service::get_thread(&conn, &id)
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        history_service::get_thread(&conn, &id)
+    } else {
+        let conn = state.db.lock().await;
+        history_service::get_thread(&conn, &id)
+    }
 }
 
 #[tauri::command]
@@ -22,8 +32,13 @@ pub async fn get_thread_latest_version(
     state: State<'_, AppState>,
     thread_id: String,
 ) -> AppResult<Option<Message>> {
-    let conn = state.db.lock().await;
-    history_service::get_thread_latest_version(&conn, &thread_id)
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        history_service::get_thread_latest_version(&conn, &thread_id)
+    } else {
+        let conn = state.db.lock().await;
+        history_service::get_thread_latest_version(&conn, &thread_id)
+    }
 }
 
 #[tauri::command]
@@ -33,8 +48,13 @@ pub async fn get_thread_message_version(
     thread_id: String,
     message_id: String,
 ) -> AppResult<Option<Message>> {
-    let conn = state.db.lock().await;
-    history_service::get_thread_message_version(&conn, &thread_id, &message_id)
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        history_service::get_thread_message_version(&conn, &thread_id, &message_id)
+    } else {
+        let conn = state.db.lock().await;
+        history_service::get_thread_message_version(&conn, &thread_id, &message_id)
+    }
 }
 
 #[tauri::command]
@@ -46,14 +66,25 @@ pub async fn get_thread_messages_page(
     limit: Option<usize>,
     include_visual_payloads: bool,
 ) -> AppResult<ThreadMessagesPage> {
-    let conn = state.db.lock().await;
-    history_service::get_thread_messages_page(
-        &conn,
-        &thread_id,
-        before,
-        limit,
-        include_visual_payloads,
-    )
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        history_service::get_thread_messages_page(
+            &conn,
+            &thread_id,
+            before,
+            limit,
+            include_visual_payloads,
+        )
+    } else {
+        let conn = state.db.lock().await;
+        history_service::get_thread_messages_page(
+            &conn,
+            &thread_id,
+            before,
+            limit,
+            include_visual_payloads,
+        )
+    }
 }
 
 #[tauri::command]
@@ -67,7 +98,13 @@ pub async fn clear_history(state: State<'_, AppState>) -> AppResult<()> {
 #[specta::specta]
 pub async fn delete_thread(id: String, state: State<'_, AppState>) -> AppResult<()> {
     let conn = state.db.lock().await;
-    crate::db::delete_thread(&conn, &id).map_err(|err| AppError::persistence(err.to_string()))
+    let changed = crate::db::delete_thread(&conn, &id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    if changed {
+        Ok(())
+    } else {
+        Err(AppError::not_found("Thread not found."))
+    }
 }
 
 #[tauri::command]
@@ -107,9 +144,15 @@ pub async fn restore_version(message_id: String, state: State<'_, AppState>) -> 
 pub async fn get_deleted_messages(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<crate::models::DeletedMessage>> {
-    let conn = state.db.lock().await;
-    crate::db::get_deleted_messages(&conn)
-        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        crate::db::get_deleted_messages(&conn)
+            .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
+    } else {
+        let conn = state.db.lock().await;
+        crate::db::get_deleted_messages(&conn)
+            .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
+    }
 }
 
 #[tauri::command]
@@ -148,8 +191,13 @@ pub async fn reopen_thread(id: String, state: State<'_, AppState>) -> AppResult<
 #[tauri::command]
 #[specta::specta]
 pub async fn get_inventory(state: State<'_, AppState>) -> AppResult<Vec<Thread>> {
-    let conn = state.db.lock().await;
-    history_service::get_inventory(&conn)
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        history_service::get_inventory(&conn)
+    } else {
+        let conn = state.db.lock().await;
+        history_service::get_inventory(&conn)
+    }
 }
 
 #[tauri::command]
@@ -158,9 +206,15 @@ pub async fn get_thread_window_layout(
     thread_id: String,
     state: State<'_, AppState>,
 ) -> AppResult<Option<crate::models::ThreadWindowLayout>> {
-    let conn = state.db.lock().await;
-    crate::db::get_thread_window_layout(&conn, &thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        crate::db::get_thread_window_layout(&conn, &thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))
+    } else {
+        let conn = state.db.lock().await;
+        crate::db::get_thread_window_layout(&conn, &thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))
+    }
 }
 
 #[tauri::command]

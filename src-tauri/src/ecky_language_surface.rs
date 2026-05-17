@@ -79,6 +79,7 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
     "cylinder",
     "cone",
     "circle",
+    "ring",
     "rectangle",
     "rounded-rect",
     "rounded-polygon",
@@ -134,7 +135,7 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
     "shape",
     "result",
 ];
-pub const EXACT_BACKEND_ONLY_CAD_OPS: &[&str] = &["sampled-radial-loft"];
+pub const EXACT_BACKEND_ONLY_CAD_OPS: &[&str] = &["sampled-radial-loft", "helical-ridge"];
 // Mesh/EckyRust-only surface. Do not add future CAD VM/OCCT names here until
 // the compiler/runtime actually exports and lowers them.
 pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &["wall-pattern"];
@@ -1023,7 +1024,7 @@ fn boolean_reference(name: &str) -> SurfaceReferenceEntry {
 fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEntry {
     let support = if name == "wall-pattern" {
         "mesh/eckyRust only; rejected by build123d/freecad lowerers"
-    } else if name == "sampled-radial-loft" {
+    } else if matches!(name, "sampled-radial-loft" | "helical-ridge") {
         "build123d/freecad only; rejected by eckyRust mesh runtime"
     } else {
         backend_support(backend)
@@ -1034,6 +1035,7 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "cylinder" => ref_entry(name, "cadOp", "(cylinder radius height segments)", "solid", "Creates a cylinder along local Z.", true, support, "(cylinder 8 30 48)", &[]),
         "cone" => ref_entry(name, "cadOp", "(cone r1 r2 height segments)", "solid", "Creates a cone or tapered cylinder along local Z.", true, support, "(cone 12 6 30 48)", &[]),
         "circle" => ref_entry(name, "cadOp", "(circle radius segments)", "sketch", "Creates a circular sketch/profile.", true, support, "(circle 20 64)", &[]),
+        "ring" => ref_entry(name, "cadOp", "(ring outer-radius inner-radius segments)", "sketch", "Creates an annular sketch aliasing to a profile with one outer and one hole circle.", true, support, "(ring 20 10 64)", &[]),
         "rectangle" => ref_entry(name, "cadOp", "(rectangle width height)", "sketch", "Creates a rectangular sketch/profile.", true, support, "(rectangle 40 20)", &[]),
         "rounded-rect" => ref_entry(name, "cadOp", "(rounded-rect width height radius)", "sketch", "Creates a rectangle profile with rounded corners.", true, support, "(rounded-rect 40 20 3)", &[]),
         "rounded-polygon" => ref_entry(name, "cadOp", "(rounded-polygon points radius)", "sketch", "Creates a polygon profile with rounded corners.", true, support, "(rounded-polygon points 2)", &[]),
@@ -1051,6 +1053,7 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "revolve" => ref_entry(name, "cadOp", "(revolve sketch angle)", "solid", "Revolves a sketch profile around an axis.", true, support, "(revolve profile 360)", &[]),
         "loft" => ref_entry(name, "cadOp", "(loft sketch...)", "solid", "Creates a solid through multiple sketch sections.", true, support, "(loft bottom top)", &[]),
         "sweep" => ref_entry(name, "cadOp", "(sweep profile path)", "solid", "Sweeps a profile along a path.", true, support, "(sweep (circle 2 16) rail)", &[]),
+        "helical-ridge" => ref_entry(name, "cadOp", "(helical-ridge :radius r :pitch p :height h :base-width w :crest-width w :depth d [:female #t] [:clearance c] [:lefthand #t])", "solid", "Creates a printable trapezoid ridge swept along a cylindrical helix.", true, support, "(helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)", &["Use the same radius, pitch, and height for the matching female groove cutter; set `:female #t` plus clearance to expand its envelope."]),
         "shell" => ref_entry(name, "cadOp", "(shell thickness [:faces selector] solid)", "solid", "Hollows or thickens a solid by wall thickness. Exact backends also accept `:faces` with `target-id:<id>` or `target-ids:<id>|<id>` to choose shell opening faces.", true, support, "(shell 2 :faces \"target-id:body:face:0-0-20:1256.637\" (cylinder 20 80))", &[]),
         "offset" => ref_entry(name, "cadOp", "(offset distance sketch)", "sketch", "Offsets a sketch/profile by distance.", true, support, "(offset 2 profile)", &[]),
         "offset-rounded" => ref_entry(name, "cadOp", "(offset-rounded distance sketch)", "sketch", "Offsets a sketch with rounded joins where supported.", true, support, "(offset-rounded 2 profile)", &[]),
@@ -1173,6 +1176,7 @@ mod tests {
             let manifest = supported_surface_manifest(backend);
 
             assert!(manifest.cad_ops.contains(&"sampled-radial-loft"));
+            assert!(manifest.cad_ops.contains(&"helical-ridge"));
             assert!(!manifest.cad_ops.contains(&"wall-pattern"));
             assert!(manifest.wall_pattern_modes.is_empty());
         }
@@ -1180,6 +1184,7 @@ mod tests {
         let mesh_manifest = supported_surface_manifest(GeometryBackend::EckyRust);
 
         assert!(!mesh_manifest.cad_ops.contains(&"sampled-radial-loft"));
+        assert!(!mesh_manifest.cad_ops.contains(&"helical-ridge"));
         assert!(mesh_manifest.cad_ops.contains(&"wall-pattern"));
         assert_eq!(mesh_manifest.wall_pattern_modes, WALL_PATTERN_MODES);
     }
@@ -1231,6 +1236,9 @@ mod tests {
         assert!(cad_ops_for_backend(GeometryBackend::Build123d).contains(&"sampled-radial-loft"));
         assert!(cad_ops_for_backend(GeometryBackend::Freecad).contains(&"sampled-radial-loft"));
         assert!(!cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"sampled-radial-loft"));
+        assert!(cad_ops_for_backend(GeometryBackend::Build123d).contains(&"helical-ridge"));
+        assert!(cad_ops_for_backend(GeometryBackend::Freecad).contains(&"helical-ridge"));
+        assert!(!cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"helical-ridge"));
         assert!(!cad_ops_for_backend(GeometryBackend::Build123d).contains(&"wall-pattern"));
         assert!(!cad_ops_for_backend(GeometryBackend::Freecad).contains(&"wall-pattern"));
         assert!(cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"wall-pattern"));
@@ -1259,6 +1267,10 @@ mod tests {
         assert_eq!(
             lookup("sampled-radial-loft").signature,
             "(sampled-radial-loft (theta z fz) :height h :z-steps n :theta-steps n :radius expr :z-map expr?)"
+        );
+        assert_eq!(
+            lookup("helical-ridge").signature,
+            "(helical-ridge :radius r :pitch p :height h :base-width w :crest-width w :depth d [:female #t] [:clearance c] [:lefthand #t])"
         );
     }
 
