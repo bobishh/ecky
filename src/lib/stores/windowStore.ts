@@ -5,7 +5,15 @@ import { triggerHighlight } from './uiHighlightStore';
 import type { ThreadWindowLayout, ThreadWindowState } from '../tauri/contracts';
 import { fitRectToViewport } from '../windowGeometry';
 
-export type WindowId = 'projects' | 'params' | 'dialogue' | 'settings' | 'terminal' | 'sketch';
+export type WindowId =
+  | 'projects'
+  | 'params'
+  | 'dialogue'
+  | 'docs'
+  | 'settings'
+  | 'terminal'
+  | 'sketch'
+  | 'activity';
 
 export type WindowRegistryEntry = {
   title: string;
@@ -33,6 +41,12 @@ export const windowRegistry: Record<WindowId, WindowRegistryEntry> = {
     minSize: { width: 350, height: 260 },
     mountPolicy: 'keepAlive',
   },
+  docs: {
+    title: 'Ecky IR Docs',
+    defaultRect: { x: 160, y: 90, width: 1120, height: 760 },
+    minSize: { width: 760, height: 480 },
+    mountPolicy: 'keepAlive',
+  },
   settings: {
     title: 'Settings',
     defaultRect: { x: 160, y: 100, width: 600, height: 500 },
@@ -50,6 +64,12 @@ export const windowRegistry: Record<WindowId, WindowRegistryEntry> = {
     defaultRect: { x: 180, y: 120, width: 760, height: 520 },
     minSize: { width: 520, height: 360 },
     mountPolicy: 'lazy',
+  },
+  activity: {
+    title: 'Session Activity',
+    defaultRect: { x: 220, y: 140, width: 760, height: 560 },
+    minSize: { width: 440, height: 320 },
+    mountPolicy: 'keepAlive',
   },
 };
 
@@ -71,7 +91,16 @@ type ThreadWindowCacheEntry = {
   rememberLayout: boolean;
 };
 
-const ALL_WINDOW_IDS: WindowId[] = ['projects', 'params', 'dialogue', 'settings', 'terminal', 'sketch'];
+const ALL_WINDOW_IDS: WindowId[] = [
+  'projects',
+  'params',
+  'dialogue',
+  'docs',
+  'settings',
+  'terminal',
+  'sketch',
+  'activity',
+];
 
 function buildDefaults(): WindowStoreState {
   const state = {} as WindowStoreState;

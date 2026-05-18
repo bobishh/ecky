@@ -12,6 +12,8 @@ declare global {
       stallHistoryAfterCommit?: boolean;
       stallSaveLastDesign?: boolean;
       renderModelError?: string;
+      sourceLanguage?: 'legacyPython' | 'ecky';
+      macroCode?: string;
     };
   }
 }
@@ -82,6 +84,10 @@ function manualCodeApplyMockScript() {
       };
     }
     if (cmd === 'generate_design') {
+      const sourceLanguage = window.__manualCodeApplyMockConfig?.sourceLanguage ?? 'legacyPython';
+      const macroCode = window.__manualCodeApplyMockConfig?.macroCode ?? 'print("base bracket")';
+      const engineKind = sourceLanguage === 'ecky' ? 'ecky' : 'freecad';
+      const geometryBackend = sourceLanguage === 'ecky' ? 'build123d' : 'freecad';
       return {
         threadId: 'mock-thread-1',
         messageId: 'mock-msg-1',
@@ -90,9 +96,10 @@ function manualCodeApplyMockScript() {
           title: 'Bracket',
           versionName: 'V1',
           interactionMode: 'design',
-          macroCode: 'print("base bracket")',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
+          macroCode,
+          sourceLanguage,
+          geometryBackend,
+          engineKind,
           uiSpec: {
             fields: [
               {
@@ -259,7 +266,9 @@ test.describe('Manual code apply/version coverage', () => {
     await bootManualCodeFlow(page);
 
     await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
-    await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal).toBeVisible();
+    await expect(modal.getByRole('button', { name: 'INSERT VERIFY' })).toHaveCount(0);
     const editor = page.locator('.cm-content').first();
     await editor.click();
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
@@ -281,6 +290,73 @@ test.describe('Manual code apply/version coverage', () => {
           parameters: { width: 10 },
         },
       });
+  });
+
+  test('Given ecky workbench code When verify template inserts and applies Then render uses authored verify source without committing', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.__manualCodeApplyMockConfig = {
+        sourceLanguage: 'ecky',
+        macroCode: '(model)',
+      };
+    });
+    await bootManualCodeFlow(page);
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal).toBeVisible();
+    await expect(modal.getByRole('button', { name: 'INSERT VERIFY' })).toBeVisible();
+    await modal.getByRole('button', { name: 'INSERT VERIFY' }).click();
+    await expect(modal.getByRole('button', { name: 'VERIFY INSERTED' })).toBeDisabled();
+    await expect(modal.locator('.cm-content')).toContainText('(verify');
+
+    await modal.locator('.code-modal-footer').getByRole('button', { name: 'APPLY' }).click();
+
+    await expect
+      .poll(async () =>
+        page.evaluate(() => ({
+          addManualVersionCount: window.__manualCodeApplyMock?.addManualVersionCalls.length ?? -1,
+          renderModel: window.__manualCodeApplyMock?.renderModelCalls.at(-1) ?? null,
+        })),
+      )
+      .toMatchObject({
+        addManualVersionCount: 0,
+        renderModel: {
+          macroCode:
+            '(model\n' +
+            '  (verify\n' +
+            '    (tag body_shell)\n' +
+            '    (metric check (manifest has-step))\n' +
+            '    (expect check (= true)))\n' +
+            ')\n',
+          parameters: { width: 10 },
+        },
+      });
+  });
+
+  test('Given ecky workbench code When code modal opens Then ecky syntax tokens are highlighted', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__manualCodeApplyMockConfig = {
+        sourceLanguage: 'ecky',
+        macroCode:
+          '; shell\n' +
+          '(model\n' +
+          '  (params\n' +
+          '    (number width 10 :label "Width")))\n',
+      };
+    });
+    await bootManualCodeFlow(page);
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('.cm-ecky-comment').filter({ hasText: '; shell' })).toBeVisible();
+    await expect(modal.locator('.cm-ecky-keyword').filter({ hasText: 'model' })).toBeVisible();
+    await expect(modal.locator('.cm-ecky-keyword').filter({ hasText: 'number' })).toBeVisible();
+    await expect(modal.locator('.cm-ecky-number').filter({ hasText: '10' })).toBeVisible();
+    await expect(modal.locator('.cm-ecky-string').filter({ hasText: '"Width"' })).toBeVisible();
+    await expect(modal.locator('.cm-ecky-atom').filter({ hasText: ':label' })).toBeVisible();
   });
 
   test('Given params changed and code edited When commit creates new version Then add_manual_version uses latest params and chosen title/version', async ({
@@ -327,6 +403,60 @@ test.describe('Manual code apply/version coverage', () => {
         renderModel: {
           macroCode: 'print("edited bracket")',
           parameters: { width: 42 },
+        },
+      });
+  });
+
+  test('Given ecky workbench code When verify template inserts and commits Then committed version keeps authored verify source', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.__manualCodeApplyMockConfig = {
+        sourceLanguage: 'ecky',
+        macroCode: '(model)',
+      };
+    });
+    await bootManualCodeFlow(page);
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal).toBeVisible();
+    await modal.getByRole('button', { name: 'INSERT VERIFY' }).click();
+    await modal.getByLabel('Version title').fill('Verified Bracket');
+    await modal.getByLabel('Version name').fill('V-verify');
+    await modal.locator('.code-modal-footer').getByRole('button', { name: 'COMMIT VERSION' }).click();
+
+    await expect
+      .poll(async () =>
+        page.evaluate(() => ({
+          addManualVersion: window.__manualCodeApplyMock?.addManualVersionCalls.at(-1) ?? null,
+          renderModel: window.__manualCodeApplyMock?.renderModelCalls.at(-1) ?? null,
+        })),
+      )
+      .toMatchObject({
+        addManualVersion: {
+          input: {
+            title: 'Verified Bracket',
+            versionName: 'V-verify',
+            macroCode:
+              '(model\n' +
+              '  (verify\n' +
+              '    (tag body_shell)\n' +
+              '    (metric check (manifest has-step))\n' +
+              '    (expect check (= true)))\n' +
+              ')\n',
+            parameters: { width: 10 },
+          },
+        },
+        renderModel: {
+          macroCode:
+            '(model\n' +
+            '  (verify\n' +
+            '    (tag body_shell)\n' +
+            '    (metric check (manifest has-step))\n' +
+            '    (expect check (= true)))\n' +
+            ')\n',
+          parameters: { width: 10 },
         },
       });
   });
@@ -397,7 +527,7 @@ endsolid mock
       .locator('.window-close')
       .click();
 
-    const viewportCodeButton = page.locator('.export-actions').getByRole('button', { name: /CODE/i });
+    const viewportCodeButton = page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i });
     await expect(viewportCodeButton).toBeVisible();
     await expect(viewportCodeButton).toBeEnabled();
 

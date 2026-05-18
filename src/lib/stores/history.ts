@@ -11,7 +11,12 @@ import { getRenderableRuntimeBundle, inspectRuntimeBundle } from '../modelRuntim
 import { confirmAction } from '../ui/confirmAction';
 import type { Message, Thread } from '../types/domain';
 import { isCurrentThreadLoad as isCurrentThreadLoadState, shouldSkipThreadSelect } from '../threadLoading';
-import { isRenderableVersionTimelineMessage } from '../threadTimeline';
+import {
+  activeVersionTimelineIndex,
+  isRenderableVersionTimelineMessage,
+  versionTimelineMessages,
+} from '../threadTimeline';
+import { sameArtifactVersion } from '../versionPreviewPersistence';
 import {
   addImportedModelVersion,
   addManualVersion,
@@ -238,6 +243,32 @@ export function beginThreadSwitchForTests(targetThreadId: string) {
   beginThreadSwitch(targetThreadId);
 }
 
+function detachActiveVersionRuntime() {
+  latestLoadVersionToken++;
+  activeVersionId.set(null);
+  workingCopy.reset();
+  paramPanelState.reset();
+  session.setStlUrl(null);
+  session.clearModelRuntime();
+}
+
+export function detachActiveVersionRuntimeForTests() {
+  detachActiveVersionRuntime();
+}
+
+function effectiveActiveVersionId(messages: Message[], currentVersionId: string | null): string | null {
+  const versions = versionTimelineMessages(messages);
+  const index = activeVersionTimelineIndex(versions, currentVersionId);
+  return index >= 0 ? versions[index]?.id ?? null : null;
+}
+
+export function effectiveActiveVersionIdForTests(
+  messages: Message[],
+  currentVersionId: string | null,
+) {
+  return effectiveActiveVersionId(messages, currentVersionId);
+}
+
 function toAssetUrl(path: string | null | undefined): string {
   if (!path) return '';
   try {
@@ -300,7 +331,8 @@ function resolveVersionRuntimePayload(message: Message): {
   if (
     message.id === currentVersionId &&
     currentThreadId &&
-    hasConsistentRuntimePayload(currentSession.artifactBundle, currentSession.modelManifest)
+    hasConsistentRuntimePayload(currentSession.artifactBundle, currentSession.modelManifest) &&
+    (!message.artifactBundle || sameArtifactVersion(message.artifactBundle, currentSession.artifactBundle))
   ) {
     return {
       artifactBundle: currentSession.artifactBundle,
@@ -385,11 +417,9 @@ export async function loadVersion(
   if (!isVersionCandidate(msg)) return;
   const rebuildMissingRuntime = options.rebuildMissingRuntime ?? true;
   const loadToken = ++latestLoadVersionToken;
-  activeVersionId.set(msg.id);
   let rebuiltRuntime = false;
   const isStale = () =>
     loadToken !== latestLoadVersionToken ||
-    get(activeVersionId) !== msg.id ||
     (expectedThreadId !== null && get(activeThreadId) !== expectedThreadId);
 
   const versionMessage = await hydrateVersionCandidate(msg, expectedThreadId);
@@ -402,6 +432,7 @@ export async function loadVersion(
     workingCopy.reset();
     paramPanelState.reset();
   }
+  activeVersionId.set(versionMessage.id);
 
   const runtimePayload = resolveVersionRuntimePayload(versionMessage);
   const trustedRuntimeBundle = getRenderableRuntimeBundle(
@@ -727,21 +758,26 @@ export async function renameThread(id: string, title: string) {
 
 export async function deleteVersion(messageId: string) {
   try {
-    await deleteVersionCommand(messageId);
     const currentThreadId = get(activeThreadId);
+    const currentThread = currentThreadId
+      ? get(history).find((thread) => thread.id === currentThreadId)
+      : null;
+    const wasActiveVersion =
+      get(activeVersionId) === messageId ||
+      effectiveActiveVersionId(currentThread?.messages ?? [], get(activeVersionId)) === messageId;
+    await deleteVersionCommand(messageId);
+    versionRuntimePayloadCache.delete(messageId);
     if (!currentThreadId) return;
+    if (wasActiveVersion) {
+      detachActiveVersionRuntime();
+    }
 
     await refreshHistory();
 
     // Update active version if we deleted the current one
-    if (get(activeVersionId) === messageId) {
+    if (wasActiveVersion) {
       const latestVersion = await getThreadLatestVersion(currentThreadId);
       if (!latestVersion) {
-        activeVersionId.set(null);
-        workingCopy.reset();
-        paramPanelState.reset();
-        session.setStlUrl(null);
-        session.clearModelRuntime();
         await clearLastSessionSnapshot();
       } else {
         await loadVersion(latestVersion, currentThreadId);
@@ -860,7 +896,6 @@ async function seedBlankThreadDefaultMacro(threadId: string) {
     });
     paramPanelState.hydrate({
       versionId: null,
-      macroCode: code,
       uiSpec: { fields: [] },
       params: {},
     });

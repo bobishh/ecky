@@ -71,6 +71,57 @@ endsolid mock
           };
         }
         if (cmd === 'generate_design') {
+          if (`${args?.prompt ?? ''}`.includes('narrow layout box')) {
+            (window as any).__PARAM_SCENARIO__ = 'narrow-layout-box';
+            return {
+              threadId: args.threadId || 'mock-thread-1',
+              messageId: 'mock-msg-1',
+              usage: null,
+              design: {
+                title: 'Narrow Layout Box',
+                versionName: 'V1',
+                interactionMode: 'design',
+                macroCode: 'print(\"narrow\")',
+                uiSpec: {
+                  fields: [
+                    {
+                      type: 'number',
+                      key: 'top_lid_side_shutter_clearance',
+                      label: 'Top Lid Side Shutter Clearance',
+                    },
+                    {
+                      type: 'number',
+                      key: 'raised_shutter_front_overlap',
+                      label: 'Raised Shutter Front Overlap',
+                    },
+                    {
+                      type: 'number',
+                      key: 'rear_adapter_mount_offset',
+                      label: 'Rear Adapter Mount Offset',
+                    },
+                    {
+                      type: 'number',
+                      key: 'left_panel_capture_depth',
+                      label: 'Left Panel Capture Depth',
+                    },
+                    {
+                      type: 'number',
+                      key: 'right_panel_capture_depth',
+                      label: 'Right Panel Capture Depth',
+                    },
+                  ],
+                },
+                initialParams: {
+                  top_lid_side_shutter_clearance: 3.4,
+                  raised_shutter_front_overlap: 1.2,
+                  rear_adapter_mount_offset: 0.7,
+                  left_panel_capture_depth: 2.1,
+                  right_panel_capture_depth: 2.1,
+                },
+                postProcessing: null,
+              },
+            };
+          }
           if (`${args?.prompt ?? ''}`.includes('heavy param box')) {
             const fields = Array.from({ length: 1200 }, (_, index) => ({
               type: 'number',
@@ -162,6 +213,45 @@ endsolid mock
           };
         }
         if (cmd === 'get_model_manifest') {
+          if ((window as any).__PARAM_SCENARIO__ === 'narrow-layout-box') {
+            return {
+              modelId: 'narrow-layout-box',
+              sourceKind: 'generated',
+              document: {
+                documentName: 'Narrow Layout Box',
+                documentLabel: 'Narrow Layout Box',
+                objectCount: 2,
+                warnings: [],
+              },
+              parts: [
+                {
+                  partId: 'part-top-lid',
+                  freecadObjectName: 'top_lid_cover_module',
+                  label: 'Top Lid Cover Module',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['top_lid_side_shutter_clearance', 'raised_shutter_front_overlap'],
+                },
+                {
+                  partId: 'part-side-panel',
+                  freecadObjectName: 'side_panel_capture_module',
+                  label: 'Side Panel Capture Module',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['left_panel_capture_depth', 'right_panel_capture_depth'],
+                },
+              ],
+              parameterGroups: [],
+              controlPrimitives: [],
+              controlRelations: [],
+              controlViews: [],
+              selectionTargets: [],
+              advisories: [],
+              measurementAnnotations: [],
+              warnings: [],
+              enrichmentState: { status: 'none', proposals: [] },
+            };
+          }
           return {
             modelId: 'litho-model',
             sourceKind: 'generated',
@@ -277,6 +367,49 @@ endsolid mock
     await expect(page.getByRole('button', { name: '+ LINK' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Model' })).toBeVisible();
     await expect(page.getByText('Main')).toBeVisible();
+  });
+
+  test('Given narrow panel When params stay visible Then tabs wrap and long labels do not collapse to ellipsis', async ({ page }) => {
+    await page.setViewportSize({ width: 820, height: 900 });
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a narrow layout box');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+
+    const tabsFitPanel = await page.locator('.panel-mode-tabs').evaluate((node) => {
+      const element = node as HTMLElement;
+      return element.scrollWidth <= element.clientWidth + 1;
+    });
+    expect(tabsFitPanel).toBe(true);
+
+    await expect(page.getByRole('button', { name: '+ VIEW' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '+ KNOB' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '+ RULE' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '+ LINK' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'RAW' }).click();
+    const longLabel = page.locator('[data-param-key=\"top_lid_side_shutter_clearance\"] .param-label');
+    await expect(longLabel).toContainText('Top Lid Side Shutter Clearance');
+
+    const labelLayout = await longLabel.evaluate((node) => {
+      const element = node as HTMLElement;
+      const style = window.getComputedStyle(element);
+      return {
+        clientHeight: element.clientHeight,
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        textOverflow: style.textOverflow,
+        whiteSpace: style.whiteSpace,
+      };
+    });
+    expect(labelLayout.textOverflow).toBe('clip');
+    expect(labelLayout.whiteSpace).not.toBe('nowrap');
+    expect(labelLayout.scrollWidth).toBeLessThanOrEqual(labelLayout.clientWidth + 1);
+    expect(labelLayout.clientHeight).toBeGreaterThan(0);
   });
 
   test('Given live apply When number changes rapidly Then only latest value renders after idle', async ({ page }) => {

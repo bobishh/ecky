@@ -1,13 +1,14 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::direct_occt_executor::export_core_program_step_stl_with_params;
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
 use crate::ecky_core_ir::{CorePart, CoreProgram};
 use crate::models::{
@@ -28,6 +29,7 @@ const MANIFEST_FILE_NAME: &str = "manifest.json";
 const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
 const STEP_FILE_NAME: &str = "model.step";
 const TOPOLOGY_FILE_NAME: &str = "topology.json";
+const DIRECT_OCCT_TEXT_FONT_ENV: &str = "ECKYCAD_FONT_PATH";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,9 +97,28 @@ pub(crate) fn render_core_program_runtime_bundle(
     layout: &DirectOcctSdkLayout,
     app: &dyn PathResolver,
 ) -> AppResult<(ArtifactBundle, ModelManifest)> {
+    render_core_program_runtime_bundle_with_font_path(
+        program,
+        source_identity,
+        parameters,
+        layout,
+        app,
+        None,
+    )
+}
+
+pub(crate) fn render_core_program_runtime_bundle_with_font_path(
+    program: &CoreProgram,
+    source_identity: &str,
+    parameters: &DesignParams,
+    layout: &DirectOcctSdkLayout,
+    app: &dyn PathResolver,
+    cad_text_font_path: Option<&str>,
+) -> AppResult<(ArtifactBundle, ModelManifest)> {
     let params_json =
         serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
-    let content_hash = content_hash(source_identity, &params_json);
+    let content_hash =
+        content_hash_with_font_path(source_identity, &params_json, cad_text_font_path);
     let model_id = model_id_from_hash(&content_hash);
     let bundle_dir = crate::model_runtime::runtime_bundle_dir(app, &model_id)?;
 
@@ -106,14 +127,21 @@ pub(crate) fn render_core_program_runtime_bundle(
     fs::write(&source_path, source_identity)
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
-    let export_outcome =
-        match export_core_program_step_stl_with_params(program, parameters, layout, &bundle_dir) {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                let _ = fs::remove_dir_all(&bundle_dir);
-                return Err(err);
-            }
-        };
+    let export_outcome = match with_direct_occt_text_font_path(cad_text_font_path, || {
+        super::direct_occt_executor::export_core_program_step_stl_with_params_runner_first(
+            program,
+            parameters,
+            layout,
+            &bundle_dir,
+            app,
+        )
+    }) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&bundle_dir);
+            return Err(err);
+        }
+    };
 
     match export_outcome {
         NativeExportOutcome::Exported {
@@ -127,6 +155,7 @@ pub(crate) fn render_core_program_runtime_bundle(
             }
             let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
             let topology_report = read_direct_occt_topology_report(&topology_path)?;
+            let topology_report = Some(&topology_report);
             let parameter_keys = program
                 .parameters
                 .iter()
@@ -155,7 +184,7 @@ pub(crate) fn render_core_program_runtime_bundle(
                 &source_path,
                 &part_specs,
                 &parameter_keys,
-                topology_report.as_ref(),
+                topology_report,
                 &part_stable_node_keys,
                 &part_root_node_ids,
             )?;
@@ -165,7 +194,7 @@ pub(crate) fn render_core_program_runtime_bundle(
                 &source_path,
                 &stl_path,
                 &step_path,
-                topology_report.as_ref(),
+                topology_report,
                 &manifest,
             )?;
             crate::model_runtime::write_runtime_bundle(app, &model_id, &bundle, &manifest)
@@ -358,11 +387,73 @@ pub(crate) fn direct_occt_step_export_artifacts(
 }
 
 fn content_hash(source_identity: &str, params_json: &str) -> String {
+    content_hash_with_font_path(source_identity, params_json, None)
+}
+
+fn content_hash_with_font_path(
+    source_identity: &str,
+    params_json: &str,
+    cad_text_font_path: Option<&str>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source_identity.as_bytes());
     hasher.update(b"|");
     hasher.update(params_json.as_bytes());
+    if let Some(cad_text_font_path) = normalized_cad_text_font_path(cad_text_font_path) {
+        hasher.update(b"|font|");
+        hasher.update(cad_text_font_path.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
+}
+
+fn normalized_cad_text_font_path(cad_text_font_path: Option<&str>) -> Option<&str> {
+    cad_text_font_path
+        .map(str::trim)
+        .filter(|cad_text_font_path| !cad_text_font_path.is_empty())
+}
+
+fn direct_occt_text_font_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct DirectOcctTextFontEnvGuard {
+    previous: Option<OsString>,
+}
+
+impl DirectOcctTextFontEnvGuard {
+    fn install(cad_text_font_path: &str) -> Self {
+        let previous = std::env::var_os(DIRECT_OCCT_TEXT_FONT_ENV);
+        unsafe {
+            std::env::set_var(DIRECT_OCCT_TEXT_FONT_ENV, cad_text_font_path);
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for DirectOcctTextFontEnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(previous) => unsafe {
+                std::env::set_var(DIRECT_OCCT_TEXT_FONT_ENV, previous);
+            },
+            None => unsafe {
+                std::env::remove_var(DIRECT_OCCT_TEXT_FONT_ENV);
+            },
+        }
+    }
+}
+
+fn with_direct_occt_text_font_path<T>(
+    cad_text_font_path: Option<&str>,
+    run: impl FnOnce() -> AppResult<T>,
+) -> AppResult<T> {
+    let Some(cad_text_font_path) = normalized_cad_text_font_path(cad_text_font_path) else {
+        return run();
+    };
+    let _env_lock = direct_occt_text_font_env_lock().lock().unwrap();
+    let _env_guard = DirectOcctTextFontEnvGuard::install(cad_text_font_path);
+    run()
 }
 
 fn direct_occt_source_stable_node_key(source_identity: &str, part: &CorePart) -> Option<String> {
@@ -389,11 +480,7 @@ fn model_id_from_hash(hash: &str) -> String {
     format!("generated-direct-occt-{}", &hash[..12])
 }
 
-fn read_direct_occt_topology_report(path: &Path) -> AppResult<Option<DirectOcctTopologyReport>> {
-    if !path.is_file() {
-        return Ok(None);
-    }
-
+fn read_direct_occt_topology_report(path: &Path) -> AppResult<DirectOcctTopologyReport> {
     let contents = fs::read_to_string(path).map_err(|err| {
         AppError::persistence(format!(
             "Direct OCCT topology report could not be read '{}': {}",
@@ -402,7 +489,6 @@ fn read_direct_occt_topology_report(path: &Path) -> AppResult<Option<DirectOcctT
         ))
     })?;
     serde_json::from_str(&contents)
-        .map(Some)
         .map_err(|err| AppError::validation(format!("Direct OCCT topology report invalid: {err}")))
 }
 
@@ -871,8 +957,10 @@ fn path_to_string(path: &Path) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecky_cad_host::direct_occt_executor::export_core_program_step_stl_with_params;
     use crate::ecky_cad_host::direct_occt_sdk::{
-        bundled_build123d_runtime_root_from_repo, inspect_build123d_ocp_runtime,
+        bundled_build123d_runtime_root_from_repo, bundled_occt_runtime_root_from_repo,
+        inspect_build123d_ocp_runtime,
     };
     use crate::models::{
         validate_model_runtime_bundle, ParamValue, PathResolver, SelectionTargetKind,
@@ -899,12 +987,426 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ResourceResolver {
+        root: PathBuf,
+    }
+
+    impl PathResolver for ResourceResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, path: &str) -> Option<PathBuf> {
+            let candidate = self.root.join("resources").join(path);
+            candidate.exists().then_some(candidate)
+        }
+    }
+
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ecky-{label}-{}", uuid::Uuid::new_v4()))
     }
 
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("write script");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("chmod");
+    }
+
     fn compile(source: &str) -> CoreProgram {
         crate::ecky_scheme::compile_to_core_program(source).expect("compile")
+    }
+
+    #[cfg(unix)]
+    fn assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+        label: &str,
+        source: &str,
+    ) {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root(label);
+        let resolver = ResourceResolver { root: root.clone() };
+        let program = compile(source);
+        let params = DesignParams::new();
+        let source_identity = source.to_string();
+        let params_json = serde_json::to_string(&params).expect("params json");
+        let content_hash = content_hash(&source_identity, &params_json);
+        let model_id = model_id_from_hash(&content_hash);
+        let direct_dir = root.join("direct");
+        fs::create_dir_all(&direct_dir).expect("direct dir");
+
+        let direct_outcome =
+            export_core_program_step_stl_with_params(&program, &params, &layout, &direct_dir)
+                .expect("direct export");
+        let NativeExportOutcome::Exported {
+            step_path: direct_step_path,
+            stl_path: direct_stl_path,
+        } = direct_outcome
+        else {
+            panic!("expected generated-source export");
+        };
+        let direct_topology_path = direct_dir.join(TOPOLOGY_FILE_NAME);
+        let direct_topology = read_direct_occt_topology_report(&direct_topology_path)
+            .expect("direct topology report");
+        let direct_source_path = direct_dir.join(SOURCE_FILE_NAME);
+        fs::write(&direct_source_path, source).expect("direct source");
+        let direct_part_stable_node_keys = program
+            .parts
+            .iter()
+            .filter_map(|part| {
+                direct_occt_source_stable_node_key(source, part)
+                    .map(|stable_node_key| (part.key.clone(), stable_node_key))
+            })
+            .collect::<HashMap<_, _>>();
+        let direct_part_root_node_ids = program
+            .parts
+            .iter()
+            .map(|part| (part.key.clone(), part.root.id.raw()))
+            .collect::<HashMap<_, _>>();
+        let direct_part_specs = program
+            .parts
+            .iter()
+            .map(|part| (part.key.clone(), part.label.clone()))
+            .collect::<Vec<_>>();
+        let direct_parameter_keys = program
+            .parameters
+            .iter()
+            .map(|parameter| parameter.key.clone())
+            .collect::<Vec<_>>();
+        let direct_manifest = build_direct_occt_manifest_with_stable_node_keys(
+            &model_id,
+            &direct_source_path,
+            &direct_part_specs,
+            &direct_parameter_keys,
+            Some(&direct_topology),
+            &direct_part_stable_node_keys,
+            &direct_part_root_node_ids,
+        )
+        .expect("direct manifest");
+        let direct_bundle = build_direct_occt_bundle(
+            &model_id,
+            &content_hash,
+            &direct_source_path,
+            &direct_stl_path,
+            &direct_step_path,
+            Some(&direct_topology),
+            &direct_manifest,
+        )
+        .expect("direct bundle");
+        validate_model_runtime_bundle(&direct_manifest, &direct_bundle).expect("direct contract");
+
+        let runner_source_dir = root.join("runner-source");
+        fs::create_dir_all(&runner_source_dir).expect("runner source dir");
+        fs::copy(&direct_step_path, runner_source_dir.join(STEP_FILE_NAME)).expect("runner step");
+        fs::copy(
+            &direct_stl_path,
+            runner_source_dir.join(PREVIEW_STL_FILE_NAME),
+        )
+        .expect("runner stl");
+        fs::copy(
+            &direct_topology_path,
+            runner_source_dir.join(TOPOLOGY_FILE_NAME),
+        )
+        .expect("runner topology");
+        let runner = root
+            .join("resources")
+            .join("bin")
+            .join("direct-occt-runner");
+        let invoked_marker = root.join("runner-invoked.txt");
+        fs::create_dir_all(runner.parent().expect("runner parent")).expect("runner parent dir");
+        let runner_script = format!(
+            r#"#!/bin/sh
+set -eu
+source_dir='{}'
+invoked_marker='{}'
+plan=""
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --plan)
+      plan=$2
+      shift 2
+      ;;
+    --out)
+      out=$2
+      shift 2
+      ;;
+    *)
+      echo "unexpected arg: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+mkdir -p "$out"
+cp "$source_dir/model.step" "$out/model.step"
+cp "$source_dir/preview.stl" "$out/preview.stl"
+cp "$source_dir/topology.json" "$out/topology.json"
+printf '%s\n' "$plan" > "$invoked_marker"
+echo "fake runner plan: $plan"
+"#,
+            runner_source_dir.display(),
+            invoked_marker.display()
+        );
+        write_executable(&runner, &runner_script);
+
+        let (runner_bundle, runner_manifest) =
+            render_core_program_runtime_bundle(&program, source, &params, &layout, &resolver)
+                .expect("runner-first bundle");
+        let runner_bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &model_id)
+            .expect("runner bundle dir");
+        let runner_topology_path = runner_bundle_dir.join(TOPOLOGY_FILE_NAME);
+
+        assert!(
+            invoked_marker.is_file(),
+            "expected fake runner invocation marker"
+        );
+        assert_eq!(
+            fs::read(&runner_bundle.preview_stl_path).expect("runner preview"),
+            fs::read(&direct_stl_path).expect("direct preview")
+        );
+        assert_eq!(
+            fs::read(&runner_bundle.export_artifacts[0].path).expect("runner step"),
+            fs::read(&direct_step_path).expect("direct step")
+        );
+        assert_eq!(
+            fs::read_to_string(&runner_topology_path).expect("runner topology"),
+            fs::read_to_string(&direct_topology_path).expect("direct topology")
+        );
+        assert_eq!(runner_bundle.model_id, direct_bundle.model_id);
+        assert_eq!(runner_bundle.content_hash, direct_bundle.content_hash);
+        assert_eq!(runner_bundle.export_artifacts.len(), 1);
+        assert_eq!(runner_bundle.export_artifacts[0].label, "STEP");
+        assert_eq!(runner_bundle.export_artifacts[0].format, "step");
+        assert_eq!(runner_bundle.export_artifacts[0].role, "primary");
+        assert_eq!(runner_bundle.edge_targets, direct_bundle.edge_targets);
+        assert_eq!(runner_bundle.face_targets, direct_bundle.face_targets);
+        assert_eq!(
+            runner_manifest.document.object_count,
+            direct_manifest.document.object_count
+        );
+        assert_eq!(runner_manifest.parts, direct_manifest.parts);
+        assert_eq!(
+            runner_manifest.parameter_groups,
+            direct_manifest.parameter_groups
+        );
+        assert_eq!(
+            runner_manifest.selection_targets,
+            direct_manifest.selection_targets
+        );
+        validate_model_runtime_bundle(&runner_manifest, &runner_bundle).expect("runner contract");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_artifacts_for_coarse_edge_selector_fixture() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-runner-parity-coarse-edge");
+        let resolver = ResourceResolver { root: root.clone() };
+        let source = r#"
+(model
+  (part body
+    (fillet 1.5 :edges "left+vertical" (box 20 20 10))))
+"#;
+        let program = compile(source);
+        let params = DesignParams::new();
+        let source_identity = source.to_string();
+        let params_json = serde_json::to_string(&params).expect("params json");
+        let content_hash = content_hash(&source_identity, &params_json);
+        let model_id = model_id_from_hash(&content_hash);
+        let direct_dir = root.join("direct");
+        fs::create_dir_all(&direct_dir).expect("direct dir");
+
+        let direct_outcome =
+            export_core_program_step_stl_with_params(&program, &params, &layout, &direct_dir)
+                .expect("direct export");
+        let NativeExportOutcome::Exported {
+            step_path: direct_step_path,
+            stl_path: direct_stl_path,
+        } = direct_outcome
+        else {
+            panic!("expected generated-source export");
+        };
+        let direct_topology_path = direct_dir.join(TOPOLOGY_FILE_NAME);
+        let direct_topology = read_direct_occt_topology_report(&direct_topology_path)
+            .expect("direct topology report");
+        let direct_source_path = direct_dir.join(SOURCE_FILE_NAME);
+        fs::write(&direct_source_path, source).expect("direct source");
+        let direct_part_stable_node_keys = program
+            .parts
+            .iter()
+            .filter_map(|part| {
+                direct_occt_source_stable_node_key(source, part)
+                    .map(|stable_node_key| (part.key.clone(), stable_node_key))
+            })
+            .collect::<HashMap<_, _>>();
+        let direct_part_root_node_ids = program
+            .parts
+            .iter()
+            .map(|part| (part.key.clone(), part.root.id.raw()))
+            .collect::<HashMap<_, _>>();
+        let direct_part_specs = program
+            .parts
+            .iter()
+            .map(|part| (part.key.clone(), part.label.clone()))
+            .collect::<Vec<_>>();
+        let direct_parameter_keys = program
+            .parameters
+            .iter()
+            .map(|parameter| parameter.key.clone())
+            .collect::<Vec<_>>();
+        let direct_manifest = build_direct_occt_manifest_with_stable_node_keys(
+            &model_id,
+            &direct_source_path,
+            &direct_part_specs,
+            &direct_parameter_keys,
+            Some(&direct_topology),
+            &direct_part_stable_node_keys,
+            &direct_part_root_node_ids,
+        )
+        .expect("direct manifest");
+        let direct_bundle = build_direct_occt_bundle(
+            &model_id,
+            &content_hash,
+            &direct_source_path,
+            &direct_stl_path,
+            &direct_step_path,
+            Some(&direct_topology),
+            &direct_manifest,
+        )
+        .expect("direct bundle");
+        validate_model_runtime_bundle(&direct_manifest, &direct_bundle).expect("direct contract");
+
+        let runner_source_dir = root.join("runner-source");
+        fs::create_dir_all(&runner_source_dir).expect("runner source dir");
+        fs::copy(&direct_step_path, runner_source_dir.join(STEP_FILE_NAME)).expect("runner step");
+        fs::copy(
+            &direct_stl_path,
+            runner_source_dir.join(PREVIEW_STL_FILE_NAME),
+        )
+        .expect("runner stl");
+        fs::copy(
+            &direct_topology_path,
+            runner_source_dir.join(TOPOLOGY_FILE_NAME),
+        )
+        .expect("runner topology");
+        let runner = root
+            .join("resources")
+            .join("bin")
+            .join("direct-occt-runner");
+        let invoked_marker = root.join("runner-invoked.txt");
+        fs::create_dir_all(runner.parent().expect("runner parent")).expect("runner parent dir");
+        let runner_script = format!(
+            r#"#!/bin/sh
+set -eu
+source_dir='{}'
+invoked_marker='{}'
+plan=""
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --plan)
+      plan=$2
+      shift 2
+      ;;
+    --out)
+      out=$2
+      shift 2
+      ;;
+    *)
+      echo "unexpected arg: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+mkdir -p "$out"
+cp "$source_dir/model.step" "$out/model.step"
+cp "$source_dir/preview.stl" "$out/preview.stl"
+cp "$source_dir/topology.json" "$out/topology.json"
+printf '%s\n' "$plan" > "$invoked_marker"
+echo "fake runner plan: $plan"
+"#,
+            runner_source_dir.display(),
+            invoked_marker.display()
+        );
+        write_executable(&runner, &runner_script);
+
+        let (runner_bundle, runner_manifest) =
+            render_core_program_runtime_bundle(&program, source, &params, &layout, &resolver)
+                .expect("runner-first bundle");
+        let runner_bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &model_id)
+            .expect("runner bundle dir");
+        let runner_topology_path = runner_bundle_dir.join(TOPOLOGY_FILE_NAME);
+
+        assert!(
+            invoked_marker.is_file(),
+            "expected fake runner invocation marker"
+        );
+        assert_eq!(
+            fs::read(&runner_bundle.preview_stl_path).expect("runner preview"),
+            fs::read(&direct_stl_path).expect("direct preview")
+        );
+        assert_eq!(
+            fs::read(&runner_bundle.export_artifacts[0].path).expect("runner step"),
+            fs::read(&direct_step_path).expect("direct step")
+        );
+        assert_eq!(
+            fs::read_to_string(&runner_topology_path).expect("runner topology"),
+            fs::read_to_string(&direct_topology_path).expect("direct topology")
+        );
+        assert_eq!(runner_bundle.model_id, direct_bundle.model_id);
+        assert_eq!(runner_bundle.content_hash, direct_bundle.content_hash);
+        assert_eq!(runner_bundle.export_artifacts.len(), 1);
+        assert_eq!(runner_bundle.export_artifacts[0].label, "STEP");
+        assert_eq!(runner_bundle.export_artifacts[0].format, "step");
+        assert_eq!(runner_bundle.export_artifacts[0].role, "primary");
+        assert_eq!(runner_bundle.edge_targets, direct_bundle.edge_targets);
+        assert_eq!(runner_bundle.face_targets, direct_bundle.face_targets);
+        assert_eq!(
+            runner_manifest.document.object_count,
+            direct_manifest.document.object_count
+        );
+        assert_eq!(runner_manifest.parts, direct_manifest.parts);
+        assert_eq!(
+            runner_manifest.parameter_groups,
+            direct_manifest.parameter_groups
+        );
+        assert_eq!(
+            runner_manifest.selection_targets,
+            direct_manifest.selection_targets
+        );
+        validate_model_runtime_bundle(&runner_manifest, &runner_bundle).expect("runner contract");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn blocked_layout(root: PathBuf) -> DirectOcctSdkLayout {
@@ -972,6 +1474,150 @@ mod tests {
         assert_eq!(read_manifest.model_id, model_id);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_artifacts_for_same_fixture() {
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity",
+            "(model (part body (box 10 20 30)))",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_coarse_edge_selector_fixture() {
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-coarse-edge-selector",
+            r#"(model (part body (fillet 1.5 :edges "left+vertical" (box 20 20 10))))"#,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_edge_all_selector_fixture() {
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-edge-all-selector",
+            r#"(model (part body (fillet 1.5 :edges "all" (box 20 20 10))))"#,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_shell_clause_fixture() {
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-shell-clause-selector",
+            r#"(model (part body (shell 1.5 :faces "planar+normal-z+area-max" (box 20 20 10))))"#,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_keywordless_shell_fixture() {
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-shell-default",
+            r#"(model (part body (shell 1.5 (box 20 20 10))))"#,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_coarse_chamfer_selector_fixture() {
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-coarse-chamfer-selector",
+            r#"(model (part body (chamfer 1.25 :edges "left+vertical" (box 20 20 10))))"#,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_exact_edge_target_id_fixture() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-runner-parity-exact-edge-target-source");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (base_bundle, _) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let edge_target_id = base_bundle
+            .edge_targets
+            .first()
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box edge target");
+        let drifted_edge_target_id = edge_target_id.replacen(":edge:0:", ":edge:999:", 1);
+        assert_ne!(drifted_edge_target_id, edge_target_id);
+        let exact_source = format!(
+            r#"(model (part body (fillet 1.5 :edges "target-id:{drifted_edge_target_id}" (box 20 20 10))))"#
+        );
+        let _ = fs::remove_dir_all(root);
+
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-exact-edge-target-id",
+            &exact_source,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_exact_face_target_id_fixture() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-runner-parity-exact-face-target-source");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (base_bundle, _) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let face_target_id = base_bundle
+            .face_targets
+            .first()
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box face target");
+        let drifted_face_target_id = face_target_id.replacen(":face:0:", ":face:999:", 1);
+        assert_ne!(drifted_face_target_id, face_target_id);
+        let exact_source = format!(
+            r#"(model (part body (shell 1.5 :faces "target-id:{drifted_face_target_id}" (box 20 20 10))))"#
+        );
+        let _ = fs::remove_dir_all(root);
+
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-exact-face-target-id",
+            &exact_source,
+        );
     }
 
     #[test]
@@ -1116,9 +1762,7 @@ mod tests {
             r#"{"parts":[{"partId":"body","label":"Body","edges":[{"edgeIndex":0,"start":{"x":0.0,"y":0.0,"z":0.0},"end":{"x":10.0,"y":0.0,"z":0.0}}],"faces":[]}]}"#,
         )
         .expect("topology");
-        let topology = read_direct_occt_topology_report(&topology_path)
-            .expect("read topology")
-            .expect("topology report");
+        let topology = read_direct_occt_topology_report(&topology_path).expect("read topology");
 
         let manifest = build_direct_occt_manifest(
             "model-1",
@@ -1170,6 +1814,105 @@ mod tests {
         assert_eq!(bundle.edge_targets[0].label, "Body.Edge1");
         assert_eq!(bundle.edge_targets[0].start.x, 0.0);
         assert_eq!(bundle.edge_targets[0].end.x, 10.0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_runtime_read_direct_occt_topology_report_fails_without_file() {
+        let root = temp_root("direct-occt-missing-topology");
+        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        let err = read_direct_occt_topology_report(&topology_path)
+            .expect_err("missing topology should fail");
+        assert!(
+            err.to_string()
+                .contains("Direct OCCT topology report could not be read"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_runtime_read_direct_occt_topology_report_fails_with_invalid_json() {
+        let root = temp_root("direct-occt-invalid-topology");
+        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&topology_path, "{ \"parts\": ").expect("invalid topology");
+
+        let err = read_direct_occt_topology_report(&topology_path)
+            .expect_err("invalid topology should fail");
+        assert!(
+            err.to_string()
+                .contains("Direct OCCT topology report invalid"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_selection_targets_remain_non_editable_without_exact_binding() {
+        let root = temp_root("direct-occt-non-editable-targets");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model)").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                edges: vec![DirectOcctTopologyEdge {
+                    target_id: None,
+                    edge_index: Some(0),
+                    label: String::new(),
+                    start: Some(DirectOcctTopologyPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                    end: Some(DirectOcctTopologyPoint {
+                        x: 10.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                }],
+                faces: vec![DirectOcctTopologyFace {
+                    target_id: None,
+                    face_index: Some(0),
+                    label: String::new(),
+                    center: Some(DirectOcctTopologyPoint {
+                        x: 5.0,
+                        y: 5.0,
+                        z: 5.0,
+                    }),
+                    normal: Some([0.0, 0.0, 1.0]),
+                    area: Some(100.0),
+                }],
+            }],
+        };
+
+        let manifest = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &["width".to_string()],
+            Some(&topology),
+            &HashMap::new(),
+        )
+        .expect("manifest");
+
+        assert!(
+            manifest
+                .selection_targets
+                .iter()
+                .all(|target| !target.editable),
+            "selection targets should be non-editable"
+        );
+        assert!(
+            manifest
+                .selection_targets
+                .iter()
+                .any(|target| target.parameter_keys.is_empty()),
+            "selection targets should not require param locks"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1504,6 +2247,21 @@ mod tests {
     }
 
     #[test]
+    fn direct_occt_model_id_includes_explicit_font_path() {
+        let source = "(model (part body (text \"A\" 12)))";
+        let params_json = serde_json::to_string(&DesignParams::new()).expect("params");
+
+        let default_model_id = model_id_from_hash(&content_hash(source, &params_json));
+        let configured_font_model_id = model_id_from_hash(&content_hash_with_font_path(
+            source,
+            &params_json,
+            Some("/tmp/fonts/technical.ttf"),
+        ));
+
+        assert_ne!(default_model_id, configured_font_model_id);
+    }
+
+    #[test]
     fn live_direct_occt_runtime_writes_bundle_manifest_when_sdk_ready() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1521,6 +2279,8 @@ mod tests {
         let resolver = TestResolver { root: root.clone() };
         let source = "(model (part body (union (box 10 10 10) (translate 8 0 0 (sphere 4)))))";
         let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
 
         let (bundle, manifest) = render_core_program_runtime_bundle(
             &program,
@@ -1533,6 +2293,9 @@ mod tests {
 
         assert!(Path::new(&bundle.preview_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         assert!(
             std::fs::metadata(&bundle.preview_stl_path)
                 .expect("stl")
@@ -1544,6 +2307,12 @@ mod tests {
                 .expect("step")
                 .len()
                 > 1024
+        );
+        assert!(
+            std::fs::metadata(bundle_dir.join(TOPOLOGY_FILE_NAME))
+                .expect("topology")
+                .len()
+                > 16
         );
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -1557,6 +2326,67 @@ mod tests {
             .selection_targets
             .iter()
             .any(|target| target.kind == SelectionTargetKind::Face));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_writes_bundle_manifest_from_standalone_occt_sdk_when_available() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        assert_eq!(
+            layout.ocp_root.as_ref().map(|path| path.as_path()),
+            Some(runtime_root.as_path())
+        );
+
+        let root = temp_root("direct-occt-standalone-live-bundle");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 10 10)))";
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT standalone SDK bundle");
+
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_some()
+        {
+            assert!(
+                !bundle_dir.join("direct_occt_executor.cpp").exists(),
+                "runner-first export should not emit generated C++ source"
+            );
+        }
+
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        assert!(!bundle.edge_targets.is_empty(), "missing edge targets");
+        assert!(!bundle.face_targets.is_empty(), "missing face targets");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1599,6 +2429,8 @@ mod tests {
             r#"(model (part body (fillet 1.5 :edges "target-id:{drifted_edge_target_id}" (box 20 20 10))))"#
         );
         let exact_program = compile(&exact_source);
+        let exact_hash = content_hash(&exact_source, "{}");
+        let exact_model_id = model_id_from_hash(&exact_hash);
         let (bundle, manifest) = render_core_program_runtime_bundle(
             &exact_program,
             &exact_source,
@@ -1627,7 +2459,443 @@ mod tests {
             edge_target_id.starts_with("body:edge:"),
             "unexpected edge target id: {edge_target_id}"
         );
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &exact_model_id).expect("dir");
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_some()
+        {
+            assert!(bundle_dir.join("plan.json").is_file());
+            assert!(!bundle_dir.join("direct_occt_executor.cpp").exists());
+        }
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_exact_edge_target_id_for_chamfer_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-exact-edge-target-id-chamfer");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (base_bundle, _) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let edge_target_id = base_bundle
+            .edge_targets
+            .first()
+            .and_then(|target| target.canonical_target_id.clone())
+            .expect("box edge target");
+        let drifted_edge_target_id = edge_target_id.replacen(":edge:0:", ":edge:999:", 1);
+        assert_ne!(drifted_edge_target_id, edge_target_id);
+
+        let exact_source = format!(
+            r#"(model (part body (chamfer 1.25 :edges "target-id:{drifted_edge_target_id}" (box 20 20 10))))"#
+        );
+        let exact_program = compile(&exact_source);
+        let exact_hash = content_hash(&exact_source, "{}");
+        let exact_model_id = model_id_from_hash(&exact_hash);
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &exact_program,
+            &exact_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT exact-target chamfer bundle");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert_eq!(manifest.parts[0].part_id, "body");
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &exact_model_id).expect("dir");
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_some()
+        {
+            assert!(bundle_dir.join("plan.json").is_file());
+            assert!(!bundle_dir.join("direct_occt_executor.cpp").exists());
+        }
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_coarse_edge_selector_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-coarse-edge-selector");
+        let resolver = TestResolver { root: root.clone() };
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let source = r#"(model (part body (fillet 1.5 :edges "left+vertical" (box 20 20 10))))"#;
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT coarse selector bundle");
+
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(
+            bundle_dir.join("plan.json").is_file(),
+            "runner-first export should persist runner plan"
+        );
+        assert!(
+            !bundle_dir.join("direct_occt_executor.cpp").exists(),
+            "runner-first coarse selector export should not emit generated C++ source"
+        );
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        assert!(!bundle.edge_targets.is_empty(), "missing edge targets");
+        assert!(!bundle.face_targets.is_empty(), "missing face targets");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_edge_all_selector_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-edge-all-selector");
+        let resolver = TestResolver { root: root.clone() };
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let source = r#"(model (part body (fillet 1.5 :edges "all" (box 20 20 10))))"#;
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT edge-all selector bundle");
+
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(
+            bundle_dir.join("plan.json").is_file(),
+            "runner-first export should persist runner plan"
+        );
+        assert!(
+            !bundle_dir.join("direct_occt_executor.cpp").exists(),
+            "runner-first edge-all export should not emit generated C++ source"
+        );
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        assert!(!bundle.edge_targets.is_empty(), "missing edge targets");
+        assert!(!bundle.face_targets.is_empty(), "missing face targets");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_shell_clause_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-shell-clause-selector");
+        let resolver = TestResolver { root: root.clone() };
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let source =
+            r#"(model (part body (shell 1.5 :faces "planar+normal-z+area-max" (box 20 20 10))))"#;
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT shell clause bundle");
+
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(
+            bundle_dir.join("plan.json").is_file(),
+            "runner-first export should persist runner plan"
+        );
+        assert!(
+            !bundle_dir.join("direct_occt_executor.cpp").exists(),
+            "runner-first shell clause export should not emit generated C++ source"
+        );
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        assert!(!bundle.edge_targets.is_empty(), "missing edge targets");
+        assert!(!bundle.face_targets.is_empty(), "missing face targets");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_keywordless_shell_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-shell-default");
+        let resolver = TestResolver { root: root.clone() };
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let source = r#"(model (part body (shell 1.5 (box 20 20 10))))"#;
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT shell default bundle");
+
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(
+            bundle_dir.join("plan.json").is_file(),
+            "runner-first export should persist runner plan"
+        );
+        assert!(
+            !bundle_dir.join("direct_occt_executor.cpp").exists(),
+            "runner-first shell default export should not emit generated C++ source"
+        );
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        assert!(!bundle.edge_targets.is_empty(), "missing edge targets");
+        assert!(!bundle.face_targets.is_empty(), "missing face targets");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_exports_xor_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-xor");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"
+            (model
+              (part body
+                (xor
+                  (box 20 20 10)
+                  (translate 10 0 0 (box 20 20 10)))))
+        "#;
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT xor bundle");
+
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_some()
+        {
+            assert!(bundle_dir.join("plan.json").is_file());
+            assert!(!bundle_dir.join("direct_occt_executor.cpp").exists());
+        }
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        assert!(!bundle.edge_targets.is_empty(), "missing edge targets");
+        assert!(!bundle.face_targets.is_empty(), "missing face targets");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_coarse_chamfer_selector_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-coarse-chamfer-selector");
+        let resolver = TestResolver { root: root.clone() };
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let source = r#"(model (part body (chamfer 1.25 :edges "left+vertical" (box 20 20 10))))"#;
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT coarse chamfer selector bundle");
+
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(
+            bundle_dir.join("plan.json").is_file(),
+            "runner-first export should persist runner plan"
+        );
+        assert!(
+            !bundle_dir.join("direct_occt_executor.cpp").exists(),
+            "runner-first coarse chamfer export should not emit generated C++ source"
+        );
+        assert_eq!(manifest.parts[0].part_id, "body");
+        validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        assert!(!bundle.edge_targets.is_empty(), "missing edge targets");
+        assert!(!bundle.face_targets.is_empty(), "missing face targets");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1687,6 +2955,130 @@ mod tests {
     }
 
     #[test]
+    fn live_direct_occt_runtime_applies_stable_and_durable_edge_alias_target_id_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-stable-durable-edge-alias-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (_base_bundle, base_manifest) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let edge_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .and_then(|target| target.target_id.clone())
+            .expect("box edge stable target");
+        let edge_durable_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Edge)
+            .and_then(|target| target.durable_target_id.clone())
+            .expect("box edge durable target");
+
+        for requested_edge_target_id in [edge_target_id, edge_durable_target_id] {
+            let exact_source = format!(
+                r#"(model (part body (fillet 1.5 :edges "target-id:{requested_edge_target_id}" (box 20 20 10))))"#
+            );
+            let exact_program = compile(&exact_source);
+            let (bundle, manifest) = render_core_program_runtime_bundle(
+                &exact_program,
+                &exact_source,
+                &DesignParams::new(),
+                &layout,
+                &resolver,
+            )
+            .expect("direct OCCT edge alias fillet bundle");
+
+            assert!(Path::new(&bundle.preview_stl_path).is_file());
+            assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+            assert_eq!(manifest.parts[0].part_id, "body");
+            validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_applies_stable_and_durable_face_alias_target_id_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-stable-durable-face-alias-target-id");
+        let resolver = TestResolver { root: root.clone() };
+        let base_source = "(model (part body (box 20 20 10)))";
+        let base_program = compile(base_source);
+        let (_base_bundle, base_manifest) = render_core_program_runtime_bundle(
+            &base_program,
+            base_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT base bundle");
+        let face_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .and_then(|target| target.target_id.clone())
+            .expect("box face stable target");
+        let face_durable_target_id = base_manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .and_then(|target| target.durable_target_id.clone())
+            .expect("box face durable target");
+
+        for requested_face_target_id in [face_target_id, face_durable_target_id] {
+            let exact_source = format!(
+                r#"(model (part body (shell 1.5 :faces "target-id:{requested_face_target_id}" (box 20 20 10))))"#
+            );
+            let exact_program = compile(&exact_source);
+            let (bundle, manifest) = render_core_program_runtime_bundle(
+                &exact_program,
+                &exact_source,
+                &DesignParams::new(),
+                &layout,
+                &resolver,
+            )
+            .expect("direct OCCT face alias shell bundle");
+
+            assert!(Path::new(&bundle.preview_stl_path).is_file());
+            assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+            assert_eq!(manifest.parts[0].part_id, "body");
+            validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn live_direct_occt_runtime_applies_exact_face_target_id_for_shell_when_sdk_ready() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1724,6 +3116,8 @@ mod tests {
             r#"(model (part body (shell 1.5 :faces "target-id:{drifted_face_target_id}" (box 20 20 10))))"#
         );
         let exact_program = compile(&exact_source);
+        let exact_hash = content_hash(&exact_source, "{}");
+        let exact_model_id = model_id_from_hash(&exact_hash);
         let (bundle, manifest) = render_core_program_runtime_bundle(
             &exact_program,
             &exact_source,
@@ -1752,6 +3146,16 @@ mod tests {
             face_target_id.starts_with("body:face:"),
             "unexpected face target id: {face_target_id}"
         );
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &exact_model_id).expect("dir");
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_some()
+        {
+            assert!(bundle_dir.join("plan.json").is_file());
+            assert!(!bundle_dir.join("direct_occt_executor.cpp").exists());
+        }
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
 
         let _ = fs::remove_dir_all(root);
@@ -2002,6 +3406,72 @@ mod tests {
             .export_artifacts
             .iter()
             .any(|artifact| artifact.format == "step"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_exports_voronoi_perforated_panel_fixture_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-voronoi-perforated-panel");
+        let resolver = TestResolver { root: root.clone() };
+        let source = include_str!("../../tests/fixtures/cad/surface/voronoi_perforated_panel.ecky");
+        let program = compile(source);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("direct OCCT voronoi panel runtime bundle");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        assert!(
+            std::fs::metadata(&bundle.preview_stl_path)
+                .expect("stl")
+                .len()
+                > 512
+        );
+        assert!(
+            std::fs::metadata(&bundle.export_artifacts[0].path)
+                .expect("step")
+                .len()
+                > 1024
+        );
+        assert_eq!(manifest.document.object_count, 1);
+        assert_eq!(
+            manifest
+                .parts
+                .iter()
+                .map(|part| part.part_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["panel"]
+        );
+
+        let bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &bundle.model_id)
+            .expect("bundle dir");
+        if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+            &resolver, true,
+        )
+        .is_some()
+        {
+            assert!(bundle_dir.join("plan.json").is_file());
+            assert!(!bundle_dir.join("direct_occt_executor.cpp").exists());
+        }
 
         let _ = fs::remove_dir_all(root);
     }

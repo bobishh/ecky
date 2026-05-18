@@ -97,6 +97,7 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
     "revolve",
     "loft",
     "sweep",
+    "helical-ridge",
     "shell",
     "offset",
     "offset-rounded",
@@ -135,7 +136,7 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
     "shape",
     "result",
 ];
-pub const EXACT_BACKEND_ONLY_CAD_OPS: &[&str] = &["sampled-radial-loft", "helical-ridge"];
+pub const EXACT_BACKEND_ONLY_CAD_OPS: &[&str] = &["sampled-radial-loft"];
 // Mesh/EckyRust-only surface. Do not add future CAD VM/OCCT names here until
 // the compiler/runtime actually exports and lowers them.
 pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &["wall-pattern"];
@@ -1024,7 +1025,7 @@ fn boolean_reference(name: &str) -> SurfaceReferenceEntry {
 fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEntry {
     let support = if name == "wall-pattern" {
         "mesh/eckyRust only; rejected by build123d/freecad lowerers"
-    } else if matches!(name, "sampled-radial-loft" | "helical-ridge") {
+    } else if matches!(name, "sampled-radial-loft") {
         "build123d/freecad only; rejected by eckyRust mesh runtime"
     } else {
         backend_support(backend)
@@ -1171,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_manifests_gate_mesh_only_wall_surface() {
+    fn backend_manifests_gate_exact_and_native_only_surfaces() {
         for backend in [GeometryBackend::Build123d, GeometryBackend::Freecad] {
             let manifest = supported_surface_manifest(backend);
 
@@ -1184,7 +1185,7 @@ mod tests {
         let mesh_manifest = supported_surface_manifest(GeometryBackend::EckyRust);
 
         assert!(!mesh_manifest.cad_ops.contains(&"sampled-radial-loft"));
-        assert!(!mesh_manifest.cad_ops.contains(&"helical-ridge"));
+        assert!(mesh_manifest.cad_ops.contains(&"helical-ridge"));
         assert!(mesh_manifest.cad_ops.contains(&"wall-pattern"));
         assert_eq!(mesh_manifest.wall_pattern_modes, WALL_PATTERN_MODES);
     }
@@ -1232,13 +1233,13 @@ mod tests {
     }
 
     #[test]
-    fn wall_pattern_is_mesh_backend_only() {
+    fn backend_cad_op_sets_match_actual_support() {
         assert!(cad_ops_for_backend(GeometryBackend::Build123d).contains(&"sampled-radial-loft"));
         assert!(cad_ops_for_backend(GeometryBackend::Freecad).contains(&"sampled-radial-loft"));
         assert!(!cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"sampled-radial-loft"));
         assert!(cad_ops_for_backend(GeometryBackend::Build123d).contains(&"helical-ridge"));
         assert!(cad_ops_for_backend(GeometryBackend::Freecad).contains(&"helical-ridge"));
-        assert!(!cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"helical-ridge"));
+        assert!(cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"helical-ridge"));
         assert!(!cad_ops_for_backend(GeometryBackend::Build123d).contains(&"wall-pattern"));
         assert!(!cad_ops_for_backend(GeometryBackend::Freecad).contains(&"wall-pattern"));
         assert!(cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"wall-pattern"));

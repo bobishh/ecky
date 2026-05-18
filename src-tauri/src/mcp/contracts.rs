@@ -775,8 +775,34 @@ pub struct EckyConstraintValidationRow {
     pub severity: String,
     pub raw_value: serde_json::Value,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stable_node_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on_param_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affects_stable_node_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub involved_param_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_stable_node_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EckyConstraintAuthoringLint {
+    pub kind: String,
+    pub part_key: String,
+    pub param_key: String,
+    pub delta: f64,
+    pub occurrence_count: usize,
+    pub suggested_param_key: String,
+    pub message: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_stable_node_keys: Vec<String>,
 }
@@ -794,6 +820,8 @@ pub struct EckyConstraintsValidateResponse {
     pub pass_count: usize,
     pub fail_count: usize,
     pub rows: Vec<EckyConstraintValidationRow>,
+    #[serde(default)]
+    pub authoring_lints: Vec<EckyConstraintAuthoringLint>,
     pub authoring_context: TargetAuthoringContext,
     pub artifact_digest: Option<ArtifactBundleDigest>,
 }
@@ -997,6 +1025,108 @@ pub enum TargetDetailSection {
     ViewerAssets,
     ExportArtifacts,
     LatestDraft,
+    ShapeGraph,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeGraphFilterSection {
+    Parts,
+    Instances,
+    Constraints,
+    Debug,
+    Dependencies,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphSectionPayload<T> {
+    pub truncated: bool,
+    pub items: Vec<T>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphPart {
+    pub part_id: String,
+    pub label: String,
+    pub kind: String,
+    pub editable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_node_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphInstance {
+    pub instance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prototype_feature_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphConstraint {
+    pub constraint_id: String,
+    pub label: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on_param_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affects_stable_node_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stable_node_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphDebugOverlay {
+    pub overlay_id: String,
+    pub kind: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphDependency {
+    pub parameter_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub impacted_part_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependent_source_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphTopologyCounts {
+    pub edge_target_count: usize,
+    pub face_target_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeGraphPacket {
+    pub source_digest: String,
+    pub core_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_digest: Option<ArtifactBundleDigest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub editable_stable_node_keys: Vec<String>,
+    pub topology_target_counts: ShapeGraphTopologyCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<ShapeGraphSectionPayload<ShapeGraphPart>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instances: Option<ShapeGraphSectionPayload<ShapeGraphInstance>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<ShapeGraphSectionPayload<ShapeGraphConstraint>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_overlays: Option<ShapeGraphSectionPayload<ShapeGraphDebugOverlay>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<ShapeGraphSectionPayload<ShapeGraphDependency>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1068,6 +1198,8 @@ pub struct TargetDetailRequest {
     pub thread_id: Option<String>,
     pub message_id: Option<String>,
     pub section: TargetDetailSection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_graph_filters: Option<Vec<ShapeGraphFilterSection>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1094,6 +1226,8 @@ pub struct TargetDetailResponse {
     pub export_artifacts: Option<Vec<crate::models::ExportArtifact>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_draft: Option<Option<crate::models::AgentDraft>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_graph: Option<ShapeGraphPacket>,
 }
 
 #[derive(Debug, Serialize)]

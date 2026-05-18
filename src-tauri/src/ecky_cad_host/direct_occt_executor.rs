@@ -4,17 +4,24 @@ use std::path::{Path, PathBuf};
 use super::direct_occt::{
     OcctArg, OcctCommand, OcctKeyword, OcctOp, OcctParameterKind, OcctPlan, OcctSlot,
 };
+use super::direct_occt_runner;
 use super::direct_occt_sdk::{run_native_export_source, DirectOcctSdkLayout, NativeExportOutcome};
 use crate::ecky_core_ir::{
-    CoreEdgeAxis, CoreEdgeBound, CoreFaceAreaRank, CoreFaceSelectorClause, CoreParameterValue,
-    CoreProgram, CoreSelectorPayload,
+    CoreEdgeAxis, CoreEdgeBound, CoreEdgeSelectorClause, CoreFaceAreaRank, CoreFaceSelectorClause,
+    CoreParameterValue, CoreProgram, CoreSelectorPayload,
 };
-use crate::models::{AppError, AppResult, DesignParams, ParamValue};
+use crate::models::{AppError, AppResult, DesignParams, ParamValue, PathResolver};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectOcctExport {
     pub step_path: PathBuf,
     pub stl_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EdgeSelector {
+    TargetIds(Vec<String>),
+    Clauses(Vec<CoreEdgeSelectorClause>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +46,24 @@ pub fn export_core_program_step_stl_with_params(
 ) -> AppResult<NativeExportOutcome> {
     let parameters = effective_program_parameters(program, parameters);
     let plan = super::direct_occt::plan_core_program_with_params(program, &parameters)?;
+    export_plan_step_stl_with_params(&plan, &parameters, layout, output_dir)
+}
+
+pub fn export_core_program_step_stl_with_params_runner_first(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+    layout: &DirectOcctSdkLayout,
+    output_dir: impl AsRef<Path>,
+    app: &dyn PathResolver,
+) -> AppResult<NativeExportOutcome> {
+    let parameters = effective_program_parameters(program, parameters);
+    let plan = super::direct_occt::plan_core_program_with_params(program, &parameters)?;
+    let resolved_plan = resolve_plan_parameters(&plan, &parameters)?;
+    if let Some(outcome) =
+        direct_occt_runner::run_plan_step_stl_if_available(&resolved_plan, &output_dir, app)?
+    {
+        return Ok(outcome);
+    }
     export_plan_step_stl_with_params(&plan, &parameters, layout, output_dir)
 }
 
@@ -125,6 +150,7 @@ pub fn emit_plan_export_source_with_params(
         r#"#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -157,15 +183,19 @@ pub fn emit_plan_export_source_with_params(
 #include <GeomAbs_SurfaceType.hxx>
 #include <GProp_GProps.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GCE2d_MakeSegment.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_CylindricalSurface.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <STEPControl_Writer.hxx>
+#include <StlAPI_Reader.hxx>
 #include <StlAPI_Writer.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -178,9 +208,11 @@ pub fn emit_plan_export_source_with_params(
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_GTrsf.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -375,9 +407,16 @@ std::string direct_occt_stable_edge_target_id(const std::string& target_id) {
     if (marker_pos == std::string::npos) {
         return target_id;
     }
-    std::string prefix = target_id.substr(0, marker_pos + marker.size());
+    std::string prefix = target_id.substr(0, marker_pos);
+    std::size_t node_marker_pos = prefix.find(":node:");
+    std::size_t stable_node_marker_pos = prefix.find(":stable-node-key:");
+    if (node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, node_marker_pos);
+    } else if (stable_node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, stable_node_marker_pos);
+    }
     std::string payload = target_id.substr(marker_pos + marker.size());
-    return prefix + direct_occt_stable_target_suffix(payload);
+    return prefix + marker + direct_occt_stable_target_suffix(payload);
 }
 
 std::string direct_occt_stable_face_target_id(const std::string& target_id) {
@@ -386,9 +425,16 @@ std::string direct_occt_stable_face_target_id(const std::string& target_id) {
     if (marker_pos == std::string::npos) {
         return target_id;
     }
-    std::string prefix = target_id.substr(0, marker_pos + marker.size());
+    std::string prefix = target_id.substr(0, marker_pos);
+    std::size_t node_marker_pos = prefix.find(":node:");
+    std::size_t stable_node_marker_pos = prefix.find(":stable-node-key:");
+    if (node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, node_marker_pos);
+    } else if (stable_node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, stable_node_marker_pos);
+    }
     std::string payload = target_id.substr(marker_pos + marker.size());
-    return prefix + direct_occt_stable_target_suffix(payload);
+    return prefix + marker + direct_occt_stable_target_suffix(payload);
 }
 
 void write_part_faces(
@@ -531,7 +577,8 @@ fn emit_command(
     if !command.keywords.is_empty()
         && !matches!(
             command.op,
-            OcctOp::Profile
+            OcctOp::Box
+                | OcctOp::Profile
                 | OcctOp::Plane
                 | OcctOp::Location
                 | OcctOp::PathFrame
@@ -549,10 +596,8 @@ fn emit_command(
     }
     match command.op {
         OcctOp::Box => {
-            let [width, depth, height] = numeric_args(&command.args)?;
-            body.push_str(&format!(
-                "    TopoDS_Shape {var} = BRepPrimAPI_MakeBox({width}, {depth}, {height}).Shape();\n"
-            ));
+            let args = box_args(&command.args, &command.keywords)?;
+            emit_box_operation(body, &var, args.width, args.depth, args.height, args.align);
         }
         OcctOp::Sphere => {
             let radius = numeric_prefix_args::<1>(&command.args)?[0];
@@ -617,6 +662,10 @@ fn emit_command(
             }
             emit_make_face_operation(body, &var, slot_var(inputs[0]));
         }
+        OcctOp::ImportStl => {
+            let path = stringish_arg(&command.args, 0, "import-stl path")?;
+            emit_import_stl_operation(body, &var, &path);
+        }
         OcctOp::Extrude => {
             let profile = ref_arg(&command.args, 0)?;
             let distance = numeric_arg(&command.args, 1)?;
@@ -656,6 +705,11 @@ fn emit_command(
         OcctOp::Path => {
             let points = point3_sequence_args(&command.args)?;
             emit_path_wire(body, &var, &points)?;
+        }
+        OcctOp::HelixPath => {
+            let [radius, pitch, height] = numeric_prefix_args::<3>(&command.args)?;
+            let lefthand = bool_arg(&command.args, 3)?;
+            emit_helix_path_wire(body, &var, radius, pitch, height, lefthand)?;
         }
         OcctOp::BezierPath => {
             let points = point3_sequence_args(&command.args)?;
@@ -743,7 +797,7 @@ fn emit_command(
         OcctOp::Fillet => {
             let radius = positive_radius_arg(&command.args, 0, "fillet")?;
             let input = ref_arg(&command.args, 1)?;
-            let target_ids = exact_edge_target_selector(&command.keywords, "fillet")?;
+            let selector = edge_selector(&command.keywords, "fillet")?;
             emit_edge_radius_operation(
                 body,
                 &var,
@@ -752,13 +806,13 @@ fn emit_command(
                 slot_var(input),
                 radius,
                 part_key,
-                target_ids.as_deref(),
+                selector.as_ref(),
             );
         }
         OcctOp::Chamfer => {
             let distance = positive_radius_arg(&command.args, 0, "chamfer")?;
             let input = ref_arg(&command.args, 1)?;
-            let target_ids = exact_edge_target_selector(&command.keywords, "chamfer")?;
+            let selector = edge_selector(&command.keywords, "chamfer")?;
             emit_edge_radius_operation(
                 body,
                 &var,
@@ -767,7 +821,7 @@ fn emit_command(
                 slot_var(input),
                 distance,
                 part_key,
-                target_ids.as_deref(),
+                selector.as_ref(),
             );
         }
         OcctOp::Shell => {
@@ -904,6 +958,19 @@ fn numeric_arg(args: &[OcctArg], index: usize) -> AppResult<f64> {
     }
 }
 
+fn bool_arg(args: &[OcctArg], index: usize) -> AppResult<bool> {
+    match args.get(index) {
+        Some(OcctArg::Boolean(value)) => Ok(*value),
+        Some(other) => Err(AppError::validation(format!(
+            "Direct OCCT executor expected literal boolean at arg {index}, got {:?}.",
+            other
+        ))),
+        None => Err(AppError::validation(format!(
+            "Direct OCCT executor expected literal boolean at arg {index}, got no argument."
+        ))),
+    }
+}
+
 fn stringish_arg(args: &[OcctArg], index: usize, label: &str) -> AppResult<String> {
     match args.get(index) {
         Some(OcctArg::Text(value)) | Some(OcctArg::Symbol(value)) => Ok(value.clone()),
@@ -917,38 +984,30 @@ fn stringish_arg(args: &[OcctArg], index: usize, label: &str) -> AppResult<Strin
     }
 }
 
-fn exact_edge_target_selector(
-    keywords: &[OcctKeyword],
-    op_name: &str,
-) -> AppResult<Option<Vec<String>>> {
+fn edge_selector(keywords: &[OcctKeyword], op_name: &str) -> AppResult<Option<EdgeSelector>> {
     let Some(keyword) = selector_keyword(keywords, op_name, "edges")? else {
         return Ok(None);
     };
-    if let Some(CoreSelectorPayload::EdgeAll | CoreSelectorPayload::EdgeClauses(_)) =
-        keyword.selector_payload()
-    {
-        return Err(AppError::validation(format!(
-            "Direct OCCT executor `{op_name}` supports exact `target-id:` / `target-ids:` selectors only for `:edges` right now.",
-        )));
-    }
-    if let Some(CoreSelectorPayload::EdgeTargetIds(target_ids)) = keyword.selector_payload() {
-        return Ok(Some(target_ids.clone()));
-    }
-    if let Some(CoreSelectorPayload::FaceTargetIds(target_ids)) = keyword.selector_payload() {
-        return Err(AppError::validation(format!(
+    match keyword.selector_payload() {
+        Some(CoreSelectorPayload::EdgeAll) => Ok(None),
+        Some(CoreSelectorPayload::EdgeTargetIds(target_ids)) => {
+            Ok(Some(EdgeSelector::TargetIds(target_ids.clone())))
+        }
+        Some(CoreSelectorPayload::EdgeClauses(clauses)) => {
+            Ok(Some(EdgeSelector::Clauses(clauses.clone())))
+        }
+        Some(CoreSelectorPayload::FaceTargetIds(target_ids)) => Err(AppError::validation(format!(
             "Direct OCCT executor `{op_name} :edges` got face selector payload {:?}.",
             target_ids
-        )));
-    }
-    if let Some(CoreSelectorPayload::FaceClauses(clauses)) = keyword.selector_payload() {
-        return Err(AppError::validation(format!(
+        ))),
+        Some(CoreSelectorPayload::FaceClauses(clauses)) => Err(AppError::validation(format!(
             "Direct OCCT executor `{op_name} :edges` got face selector clauses {:?}.",
             clauses
-        )));
+        ))),
+        None => Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :edges` requires typed selector payload.",
+        ))),
     }
-    Err(AppError::validation(format!(
-        "Direct OCCT executor `{op_name} :edges` requires typed selector payload.",
-    )))
 }
 
 fn shell_face_selector(
@@ -1257,6 +1316,87 @@ fn ref_collection_arg(arg: &OcctArg, label: &str) -> AppResult<Vec<OcctSlot>> {
             "Direct OCCT executor `{label}` expected shape reference or reference list, got {:?}.",
             other
         ))),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AxisAlign {
+    Min,
+    Center,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoxArgs {
+    width: f64,
+    depth: f64,
+    height: f64,
+    align: [AxisAlign; 3],
+}
+
+fn box_args(args: &[OcctArg], keywords: &[super::direct_occt::OcctKeyword]) -> AppResult<BoxArgs> {
+    let [width, depth, height] = numeric_args(args)?;
+    let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Min];
+    for keyword in keywords {
+        match keyword.name.as_str() {
+            "align" => align = align_tuple_arg(keyword.source_arg(), "box :align")?,
+            other => {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT executor `box` does not recognize `:{other}`."
+                )));
+            }
+        }
+    }
+    Ok(BoxArgs {
+        width,
+        depth,
+        height,
+        align,
+    })
+}
+
+fn align_tuple_arg(arg: &OcctArg, context: &str) -> AppResult<[AxisAlign; 3]> {
+    let OcctArg::List(items) = arg else {
+        return Err(AppError::validation(format!(
+            "{context} expects `(x y z)` with `min`, `center`, or `max`."
+        )));
+    };
+    if items.len() != 3 {
+        return Err(AppError::validation(format!(
+            "{context} expects exactly three axis symbols."
+        )));
+    }
+    Ok([
+        parse_align_axis(&items[0], context)?,
+        parse_align_axis(&items[1], context)?,
+        parse_align_axis(&items[2], context)?,
+    ])
+}
+
+fn parse_align_axis(arg: &OcctArg, context: &str) -> AppResult<AxisAlign> {
+    let symbol = match arg {
+        OcctArg::Symbol(value) | OcctArg::Text(value) => value.as_str(),
+        _ => {
+            return Err(AppError::validation(format!(
+                "{context} expects `min`, `center`, or `max` symbols."
+            )));
+        }
+    };
+    match symbol {
+        "min" => Ok(AxisAlign::Min),
+        "center" => Ok(AxisAlign::Center),
+        "max" => Ok(AxisAlign::Max),
+        other => Err(AppError::validation(format!(
+            "{context} expects `min`, `center`, or `max`, got `{other}`."
+        ))),
+    }
+}
+
+fn axis_align_offset(size: f64, align: AxisAlign) -> f64 {
+    match align {
+        AxisAlign::Min => 0.0,
+        AxisAlign::Center => -size * 0.5,
+        AxisAlign::Max => -size,
     }
 }
 
@@ -1621,9 +1761,9 @@ fn emit_edge_radius_operation(
     input_var: String,
     radius: f64,
     part_key: &str,
-    target_ids: Option<&[String]>,
+    selector: Option<&EdgeSelector>,
 ) {
-    if let Some(target_ids) = target_ids {
+    if let Some(EdgeSelector::TargetIds(target_ids)) = selector {
         let target_id_vector = if target_ids.is_empty() {
             "{}".to_string()
         } else {
@@ -1639,6 +1779,74 @@ fn emit_edge_radius_operation(
         body.push_str(&format!(
             "    {builder_type} {var}_{label}({input_var});\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<std::string> {var}_edge_target_ids;\n    std::vector<std::string> {var}_edge_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n        std::string {var}_target_id = direct_occt_edge_target_id({part_id}, {var}_edge_index, {var}_edge);\n        std::string {var}_stable_id = direct_occt_stable_edge_target_id({var}_target_id);\n        {var}_edge_target_ids.push_back({var}_target_id);\n        {var}_edge_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_edge_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_edge_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ return 7; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ return 4; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ return 7; }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n",
             part_id = cpp_string_literal(part_key)
+        ));
+    } else if let Some(EdgeSelector::Clauses(clauses)) = selector {
+        let clause_checks = clauses
+            .iter()
+            .map(|clause| match clause {
+                CoreEdgeSelectorClause::Axis(axis) => {
+                    let (span, other_a, other_b) = match axis {
+                        CoreEdgeAxis::X => (
+                            format!("{var}_edge_xmax - {var}_edge_xmin"),
+                            format!("{var}_edge_ymax - {var}_edge_ymin"),
+                            format!("{var}_edge_zmax - {var}_edge_zmin"),
+                        ),
+                        CoreEdgeAxis::Y => (
+                            format!("{var}_edge_ymax - {var}_edge_ymin"),
+                            format!("{var}_edge_xmax - {var}_edge_xmin"),
+                            format!("{var}_edge_zmax - {var}_edge_zmin"),
+                        ),
+                        CoreEdgeAxis::Z => (
+                            format!("{var}_edge_zmax - {var}_edge_zmin"),
+                            format!("{var}_edge_xmax - {var}_edge_xmin"),
+                            format!("{var}_edge_ymax - {var}_edge_ymin"),
+                        ),
+                    };
+                    format!(
+                        "        {var}_edge_matches = {var}_edge_matches && ({span}) > {var}_edge_tol && ({other_a}) <= {var}_edge_tol && ({other_b}) <= {var}_edge_tol;\n"
+                    )
+                }
+                CoreEdgeSelectorClause::Boundary { axis, bound } => {
+                    let (shape_bound, edge_min, edge_max) = match (axis, bound) {
+                        (CoreEdgeAxis::X, CoreEdgeBound::Min) => (
+                            format!("{var}_shape_xmin"),
+                            format!("{var}_edge_xmin"),
+                            format!("{var}_edge_xmax"),
+                        ),
+                        (CoreEdgeAxis::X, CoreEdgeBound::Max) => (
+                            format!("{var}_shape_xmax"),
+                            format!("{var}_edge_xmin"),
+                            format!("{var}_edge_xmax"),
+                        ),
+                        (CoreEdgeAxis::Y, CoreEdgeBound::Min) => (
+                            format!("{var}_shape_ymin"),
+                            format!("{var}_edge_ymin"),
+                            format!("{var}_edge_ymax"),
+                        ),
+                        (CoreEdgeAxis::Y, CoreEdgeBound::Max) => (
+                            format!("{var}_shape_ymax"),
+                            format!("{var}_edge_ymin"),
+                            format!("{var}_edge_ymax"),
+                        ),
+                        (CoreEdgeAxis::Z, CoreEdgeBound::Min) => (
+                            format!("{var}_shape_zmin"),
+                            format!("{var}_edge_zmin"),
+                            format!("{var}_edge_zmax"),
+                        ),
+                        (CoreEdgeAxis::Z, CoreEdgeBound::Max) => (
+                            format!("{var}_shape_zmax"),
+                            format!("{var}_edge_zmin"),
+                            format!("{var}_edge_zmax"),
+                        ),
+                    };
+                    format!(
+                        "        {var}_edge_matches = {var}_edge_matches && std::abs({edge_min} - {shape_bound}) <= {var}_edge_tol && std::abs({edge_max} - {shape_bound}) <= {var}_edge_tol;\n"
+                    )
+                }
+            })
+            .collect::<String>();
+        body.push_str(&format!(
+            "    {builder_type} {var}_{label}({input_var});\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax;\n    {var}_shape_box.Get({var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax);\n    Standard_Real {var}_edge_tol = std::max({var}_shape_xmax - {var}_shape_xmin, std::max({var}_shape_ymax - {var}_shape_ymin, std::max({var}_shape_zmax - {var}_shape_zmin, 1.0))) * 1.0e-6;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    std::vector<int> {var}_matched_edge_indexes;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n        Bnd_Box {var}_edge_box;\n        BRepBndLib::Add({var}_edge, {var}_edge_box);\n        Standard_Real {var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax;\n        {var}_edge_box.Get({var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax);\n        bool {var}_edge_matches = true;\n{clause_checks}        if ({var}_edge_matches) {{\n            {var}_matched_edge_indexes.push_back({var}_edge_index);\n        }}\n    }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
         ));
     } else {
         body.push_str(&format!(
@@ -1786,6 +1994,41 @@ fn emit_path_wire(body: &mut String, var: &str, points: &[[f64; 3]]) -> AppResul
     Ok(())
 }
 
+fn emit_helix_path_wire(
+    body: &mut String,
+    var: &str,
+    radius: f64,
+    pitch: f64,
+    height: f64,
+    lefthand: bool,
+) -> AppResult<()> {
+    if !(radius.is_finite() && radius > 0.0) {
+        return Err(AppError::validation(
+            "Direct OCCT executor `helix-path` radius must be positive and finite.",
+        ));
+    }
+    if !(pitch.is_finite() && pitch > 0.0) {
+        return Err(AppError::validation(
+            "Direct OCCT executor `helix-path` pitch must be positive and finite.",
+        ));
+    }
+    if !(height.is_finite() && height > 0.0) {
+        return Err(AppError::validation(
+            "Direct OCCT executor `helix-path` height must be positive and finite.",
+        ));
+    }
+    let turns = height / pitch;
+    let end_angle = if lefthand {
+        -2.0 * std::f64::consts::PI * turns
+    } else {
+        2.0 * std::f64::consts::PI * turns
+    };
+    body.push_str(&format!(
+        "    Handle(Geom_CylindricalSurface) {var}_surface = new Geom_CylindricalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), {radius});\n    Handle(Geom2d_TrimmedCurve) {var}_curve2d = GCE2d_MakeSegment(gp_Pnt2d(0, 0), gp_Pnt2d({end_angle}, {height})).Value();\n    TopoDS_Edge {var}_edge = BRepBuilderAPI_MakeEdge({var}_curve2d, {var}_surface).Edge();\n    TopoDS_Wire {var}_wire = BRepBuilderAPI_MakeWire({var}_edge).Wire();\n    TopoDS_Shape {var} = {var}_wire;\n"
+    ));
+    Ok(())
+}
+
 fn emit_bezier_path_wire(body: &mut String, var: &str, points: &[[f64; 3]]) -> AppResult<()> {
     if points.len() < 4 || (points.len() - 1) % 3 != 0 {
         return Err(AppError::validation(format!(
@@ -1862,6 +2105,29 @@ fn emit_plane_operation(
     let [normal_x, normal_y, normal_z] = normal;
     body.push_str(&format!(
         "    gp_Pnt {var}_origin({origin_x}, {origin_y}, {origin_z});\n    gp_Vec {var}_z({normal_x}, {normal_y}, {normal_z});\n    if ({var}_z.Magnitude() <= 1.0e-9) {{ return 22; }}\n    {var}_z.Normalize();\n    gp_Vec {var}_x_hint({x_hint_x}, {x_hint_y}, {x_hint_z});\n    if ({var}_x_hint.Magnitude() <= 1.0e-9) {{ return 23; }}\n    gp_Vec {var}_x = {var}_x_hint - {var}_z.Multiplied({var}_x_hint.Dot({var}_z));\n    if ({var}_x.Magnitude() <= 1.0e-9) {{ return 24; }}\n    {var}_x.Normalize();\n    gp_Vec {var}_y = {var}_z.Crossed({var}_x);\n    if ({var}_y.Magnitude() <= 1.0e-9) {{ return 25; }}\n    {var}_y.Normalize();\n    {var}_x = {var}_y.Crossed({var}_z);\n    {var}_x.Normalize();\n    gp_Trsf {var};\n    {var}.SetValues(\n        {var}_x.X(), {var}_y.X(), {var}_z.X(), {var}_origin.X(),\n        {var}_x.Y(), {var}_y.Y(), {var}_z.Y(), {var}_origin.Y(),\n        {var}_x.Z(), {var}_y.Z(), {var}_z.Z(), {var}_origin.Z());\n"
+    ));
+}
+
+fn emit_box_operation(
+    body: &mut String,
+    var: &str,
+    width: f64,
+    depth: f64,
+    height: f64,
+    align: [AxisAlign; 3],
+) {
+    let tx = axis_align_offset(width, align[0]);
+    let ty = axis_align_offset(depth, align[1]);
+    let tz = axis_align_offset(height, align[2]);
+    body.push_str(&format!(
+        "    TopoDS_Shape {var}_raw = BRepPrimAPI_MakeBox({width}, {depth}, {height}).Shape();\n"
+    ));
+    if tx == 0.0 && ty == 0.0 && tz == 0.0 {
+        body.push_str(&format!("    TopoDS_Shape {var} = {var}_raw;\n"));
+        return;
+    }
+    body.push_str(&format!(
+        "    gp_Trsf {var}_align_trsf;\n    {var}_align_trsf.SetTranslation(gp_Vec({tx}, {ty}, {tz}));\n    TopoDS_Shape {var} = BRepBuilderAPI_Transform({var}_raw, {var}_align_trsf, true).Shape();\n"
     ));
 }
 
@@ -2070,24 +2336,28 @@ fn emit_arc_array_operation(
 }
 
 fn emit_profile_face(body: &mut String, var: &str, profile: ProfileRefs) -> AppResult<()> {
-    if profile.outer.len() != 1 {
-        return Err(AppError::validation(format!(
-            "Direct OCCT executor `profile` expects exactly one outer loop, got {}.",
-            profile.outer.len()
-        )));
-    }
-    let outer_var = slot_var(profile.outer[0]);
-    body.push_str(&format!(
-        "    TopoDS_Wire {var}_outer_wire;\n    for (TopExp_Explorer {var}_outer_wire_explorer({outer_var}, TopAbs_WIRE); {var}_outer_wire_explorer.More(); {var}_outer_wire_explorer.Next()) {{\n        {var}_outer_wire = TopoDS::Wire({var}_outer_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_outer_wire.IsNull()) {{ return 12; }}\n    BRepBuilderAPI_MakeFace {var}_profile_face({var}_outer_wire);\n"
-    ));
-    for (index, hole) in profile.holes.iter().enumerate() {
-        let hole_var = slot_var(*hole);
-        body.push_str(&format!(
-            "    TopoDS_Wire {var}_hole_{index}_wire;\n    for (TopExp_Explorer {var}_hole_{index}_wire_explorer({hole_var}, TopAbs_WIRE); {var}_hole_{index}_wire_explorer.More(); {var}_hole_{index}_wire_explorer.Next()) {{\n        {var}_hole_{index}_wire = TopoDS::Wire({var}_hole_{index}_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_hole_{index}_wire.IsNull()) {{ return 13; }}\n    {var}_profile_face.Add({var}_hole_{index}_wire);\n"
+    if profile.outer.is_empty() {
+        return Err(AppError::validation(
+            "Direct OCCT executor `profile` needs at least one outer loop.",
         ));
     }
     body.push_str(&format!(
-        "    TopoDS_Shape {var} = {var}_profile_face.Shape();\n"
+        "    std::vector<TopoDS_Wire> {var}_outer_wires;\n    std::vector<TopoDS_Face> {var}_outer_faces;\n    std::vector<double> {var}_outer_areas;\n    std::vector<std::vector<TopoDS_Wire>> {var}_hole_wires;\n"
+    ));
+    for (index, outer) in profile.outer.iter().enumerate() {
+        let outer_var = slot_var(*outer);
+        body.push_str(&format!(
+            "    TopoDS_Wire {var}_outer_{index}_wire;\n    for (TopExp_Explorer {var}_outer_{index}_wire_explorer({outer_var}, TopAbs_WIRE); {var}_outer_{index}_wire_explorer.More(); {var}_outer_{index}_wire_explorer.Next()) {{\n        {var}_outer_{index}_wire = TopoDS::Wire({var}_outer_{index}_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_outer_{index}_wire.IsNull()) {{ return 12; }}\n    BRepBuilderAPI_MakeFace {var}_outer_{index}_face_builder({var}_outer_{index}_wire);\n    if (!{var}_outer_{index}_face_builder.IsDone()) {{ return 29; }}\n    TopoDS_Face {var}_outer_{index}_face = TopoDS::Face({var}_outer_{index}_face_builder.Shape());\n    GProp_GProps {var}_outer_{index}_props;\n    BRepGProp::SurfaceProperties({var}_outer_{index}_face, {var}_outer_{index}_props);\n    {var}_outer_wires.push_back({var}_outer_{index}_wire);\n    {var}_outer_faces.push_back({var}_outer_{index}_face);\n    {var}_outer_areas.push_back(std::abs({var}_outer_{index}_props.Mass()));\n    {var}_hole_wires.emplace_back();\n"
+        ));
+    }
+    for (index, hole) in profile.holes.iter().enumerate() {
+        let hole_var = slot_var(*hole);
+        body.push_str(&format!(
+            "    TopoDS_Wire {var}_hole_{index}_wire;\n    for (TopExp_Explorer {var}_hole_{index}_wire_explorer({hole_var}, TopAbs_WIRE); {var}_hole_{index}_wire_explorer.More(); {var}_hole_{index}_wire_explorer.Next()) {{\n        {var}_hole_{index}_wire = TopoDS::Wire({var}_hole_{index}_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_hole_{index}_wire.IsNull()) {{ return 13; }}\n    gp_Pnt {var}_hole_{index}_sample;\n    bool {var}_hole_{index}_sample_found = false;\n    for (TopExp_Explorer {var}_hole_{index}_edge_explorer({var}_hole_{index}_wire, TopAbs_EDGE); {var}_hole_{index}_edge_explorer.More(); {var}_hole_{index}_edge_explorer.Next()) {{\n        BRepAdaptor_Curve {var}_hole_{index}_curve(TopoDS::Edge({var}_hole_{index}_edge_explorer.Current()));\n        double {var}_hole_{index}_first = {var}_hole_{index}_curve.FirstParameter();\n        double {var}_hole_{index}_last = {var}_hole_{index}_curve.LastParameter();\n        if (!std::isfinite({var}_hole_{index}_first) || !std::isfinite({var}_hole_{index}_last)) {{\n            continue;\n        }}\n        {var}_hole_{index}_sample = {var}_hole_{index}_curve.Value(({var}_hole_{index}_first + {var}_hole_{index}_last) / 2.0);\n        {var}_hole_{index}_sample_found = true;\n        break;\n    }}\n    if (!{var}_hole_{index}_sample_found) {{ return 30; }}\n    bool {var}_hole_{index}_matched = false;\n    std::size_t {var}_hole_{index}_outer_index = 0;\n    double {var}_hole_{index}_outer_area = 0.0;\n    for (std::size_t {var}_hole_{index}_candidate = 0; {var}_hole_{index}_candidate < {var}_outer_faces.size(); ++{var}_hole_{index}_candidate) {{\n        BRepClass_FaceClassifier {var}_hole_{index}_classifier({var}_outer_faces[{var}_hole_{index}_candidate], {var}_hole_{index}_sample, 1.0e-7);\n        TopAbs_State {var}_hole_{index}_state = {var}_hole_{index}_classifier.State();\n        if ({var}_hole_{index}_state != TopAbs_IN && {var}_hole_{index}_state != TopAbs_ON) {{\n            continue;\n        }}\n        double {var}_hole_{index}_candidate_area = {var}_outer_areas[{var}_hole_{index}_candidate];\n        if (!{var}_hole_{index}_matched || {var}_hole_{index}_candidate_area < {var}_hole_{index}_outer_area) {{\n            {var}_hole_{index}_matched = true;\n            {var}_hole_{index}_outer_index = {var}_hole_{index}_candidate;\n            {var}_hole_{index}_outer_area = {var}_hole_{index}_candidate_area;\n        }}\n    }}\n    if (!{var}_hole_{index}_matched) {{ return 31; }}\n    {var}_hole_wires[{var}_hole_{index}_outer_index].push_back({var}_hole_{index}_wire);\n"
+        ));
+    }
+    body.push_str(&format!(
+        "    std::vector<TopoDS_Shape> {var}_faces;\n    for (std::size_t {var}_outer_index = 0; {var}_outer_index < {var}_outer_wires.size(); ++{var}_outer_index) {{\n        BRepBuilderAPI_MakeFace {var}_face_builder({var}_outer_wires[{var}_outer_index]);\n        if (!{var}_face_builder.IsDone()) {{ return 32; }}\n        for (const auto& {var}_hole_wire : {var}_hole_wires[{var}_outer_index]) {{\n            {var}_face_builder.Add({var}_hole_wire);\n        }}\n        {var}_faces.push_back({var}_face_builder.Shape());\n    }}\n    TopoDS_Shape {var};\n    if ({var}_faces.size() == 1) {{\n        {var} = {var}_faces.front();\n    }} else {{\n        BRep_Builder {var}_profile_builder;\n        TopoDS_Compound {var}_profile_compound;\n        {var}_profile_builder.MakeCompound({var}_profile_compound);\n        for (const auto& {var}_face : {var}_faces) {{\n            {var}_profile_builder.Add({var}_profile_compound, {var}_face);\n        }}\n        {var} = {var}_profile_compound;\n    }}\n"
     ));
     Ok(())
 }
@@ -2095,6 +2365,13 @@ fn emit_profile_face(body: &mut String, var: &str, profile: ProfileRefs) -> AppR
 fn emit_make_face_operation(body: &mut String, var: &str, input_var: String) {
     body.push_str(&format!(
         "    TopoDS_Wire {var}_make_face_wire;\n    for (TopExp_Explorer {var}_make_face_wire_explorer({input_var}, TopAbs_WIRE); {var}_make_face_wire_explorer.More(); {var}_make_face_wire_explorer.Next()) {{\n        {var}_make_face_wire = TopoDS::Wire({var}_make_face_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_make_face_wire.IsNull()) {{ return 14; }}\n    BRepBuilderAPI_MakeFace {var}_make_face_face({var}_make_face_wire);\n    TopoDS_Shape {var} = {var}_make_face_face.Shape();\n"
+    ));
+}
+
+fn emit_import_stl_operation(body: &mut String, var: &str, path: &str) {
+    let path = format!("{path:?}");
+    body.push_str(&format!(
+        "    StlAPI_Reader {var}_reader;\n    TopoDS_Shape {var};\n    if (!{var}_reader.Read({var}, {path}.c_str())) {{ return 17; }}\n"
     ));
 }
 
@@ -2381,6 +2658,7 @@ fn op_name(op: OcctOp) -> &'static str {
         OcctOp::Polygon => "polygon",
         OcctOp::Profile => "profile",
         OcctOp::MakeFace => "make-face",
+        OcctOp::ImportStl => "import-stl",
         OcctOp::Extrude => "extrude",
         OcctOp::Revolve => "revolve",
         OcctOp::Loft => "loft",
@@ -2389,6 +2667,7 @@ fn op_name(op: OcctOp) -> &'static str {
         OcctOp::Taper => "taper",
         OcctOp::Offset => "offset",
         OcctOp::Path => "path",
+        OcctOp::HelixPath => "helix-path",
         OcctOp::BezierPath => "bezier-path",
         OcctOp::Bspline => "bspline",
         OcctOp::Plane => "plane",
@@ -2420,6 +2699,23 @@ mod tests {
     use crate::ecky_cad_host::direct_occt_sdk::{
         bundled_build123d_runtime_root_from_repo, inspect_build123d_ocp_runtime,
     };
+    use crate::models::PathResolver;
+
+    struct TestResolver;
+
+    impl PathResolver for TestResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            temp_root("direct-occt-executor-config")
+        }
+
+        fn app_data_dir(&self) -> PathBuf {
+            temp_root("direct-occt-executor-data")
+        }
+
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
 
     fn compile(source: &str) -> CoreProgram {
         crate::ecky_scheme::compile_to_core_program(source).expect("compile")
@@ -2427,6 +2723,29 @@ mod tests {
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ecky-{label}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn text_font_fixture() -> Option<&'static str> {
+        [
+            "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+            "/System/Library/Fonts/Supplemental/Impact.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+    }
+
+    fn write_ascii_stl_fixture(path: &Path) {
+        std::fs::write(
+            path,
+            "solid fixture\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n      vertex 10 0 0\n      vertex 0 10 0\n    endloop\n  endfacet\nendsolid fixture\n",
+        )
+        .expect("write stl fixture");
     }
 
     #[test]
@@ -2448,6 +2767,48 @@ mod tests {
         assert!(source.contains("StlAPI_Writer"));
         assert!(source.contains("/tmp/model.step"));
         assert!(source.contains("/tmp/preview.stl"));
+    }
+
+    #[test]
+    fn emits_box_align_plan_as_native_occt_source() {
+        let plan = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![super::super::direct_occt::OcctPartPlan {
+                key: "body".to_string(),
+                label: "Body".to_string(),
+                root: OcctSlot(1),
+                commands: vec![OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Box,
+                    args: vec![
+                        OcctArg::Number(10.0),
+                        OcctArg::Number(20.0),
+                        OcctArg::Number(30.0),
+                    ],
+                    keywords: vec![OcctKeyword::arg(
+                        "align".to_string(),
+                        OcctArg::List(vec![
+                            OcctArg::Symbol("min".to_string()),
+                            OcctArg::Symbol("center".to_string()),
+                            OcctArg::Symbol("max".to_string()),
+                        ]),
+                    )],
+                }],
+            }],
+        };
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("BRepPrimAPI_MakeBox(10"), "{source}");
+        assert!(
+            source.contains("SetTranslation(gp_Vec(0, -10, -30))"),
+            "{source}"
+        );
     }
 
     #[test]
@@ -2781,6 +3142,59 @@ mod tests {
     }
 
     #[test]
+    fn emits_helical_ridge_as_native_occt_sweep() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (helical-ridge
+                  :radius 20
+                  :pitch 6
+                  :height 30
+                  :base-width 2
+                  :crest-width 1
+                  :depth 1.5)))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("BRepBuilderAPI_MakePolygon"), "{source}");
+        assert!(source.contains("gp_Pnt(20"), "{source}");
+        assert!(source.contains("BRepBuilderAPI_MakeFace"), "{source}");
+        assert!(source.contains("BRepOffsetAPI_MakePipeShell"), "{source}");
+    }
+
+    #[test]
+    fn emits_import_stl_as_native_occt_source() {
+        let stl_path =
+            std::env::temp_dir().join(format!("ecky-import-stl-{}.stl", uuid::Uuid::new_v4()));
+        write_ascii_stl_fixture(&stl_path);
+        let program = compile(&format!(
+            "(model (part body (import-stl {:?})))",
+            stl_path.to_string_lossy()
+        ));
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("StlAPI_Reader"), "{source}");
+        assert!(source.contains("import-stl"), "{source}");
+        let _ = std::fs::remove_file(stl_path);
+    }
+
+    #[test]
     fn emits_twist_as_native_occt_source() {
         let program = compile("(model (part body (twist 24 90 (circle 5))))");
         let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
@@ -2819,8 +3233,63 @@ mod tests {
         .expect("source");
 
         assert!(source.contains("BRepBuilderAPI_MakeFace"), "{source}");
-        assert!(source.contains("_profile_face.Add"), "{source}");
+        assert!(source.contains("_hole_wires["), "{source}");
         assert!(source.contains("BRepPrimAPI_MakePrism"), "{source}");
+    }
+
+    #[test]
+    fn emits_positional_multi_outer_profile_as_native_occt_compound() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (profile
+                    (polygon ((0 0) (24 0) (24 24) (0 24)))
+                    (translate 36 0 0 (polygon ((0 0) (12 0) (12 12) (0 12)))))
+                  4)))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("std::vector<TopoDS_Wire>"), "{source}");
+        assert!(source.contains("_profile_builder.MakeCompound"), "{source}");
+        assert!(source.contains("BRepPrimAPI_MakePrism"), "{source}");
+    }
+
+    #[test]
+    fn emits_multi_outer_profile_holes_as_native_occt_compound() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (profile
+                    :outer ((polygon ((0 0) (24 0) (24 24) (0 24)))
+                            (translate 40 0 0 (polygon ((0 0) (12 0) (12 12) (0 12)))))
+                    :holes ((polygon ((8 8) (16 8) (16 16) (8 16)))))
+                  4)))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("BRepClass_FaceClassifier"), "{source}");
+        assert!(source.contains("_hole_wires["), "{source}");
+        assert!(source.contains("_profile_builder.MakeCompound"), "{source}");
     }
 
     #[test]
@@ -3105,6 +3574,63 @@ mod tests {
     }
 
     #[test]
+    fn emits_stable_edge_target_id_selector_for_native_occt_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:edge:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("\"body:edge:0-0-0_0-0-10\""), "{source}");
+        assert!(
+            source.contains("direct_occt_stable_edge_target_id"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn emits_durable_edge_target_id_selector_for_native_occt_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fillet 0.5
+                  :edges "target-id:body:node:42:edge:0:0-0-0_0-0-10"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(
+            source.contains("\"body:node:42:edge:0:0-0-0_0-0-10\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("direct_occt_stable_edge_target_id"),
+            "{source}"
+        );
+    }
+
+    #[test]
     fn emits_exact_target_id_selector_for_native_occt_source_from_payload_when_value_is_bad() {
         let program = compile(
             r#"
@@ -3201,6 +3727,63 @@ mod tests {
     }
 
     #[test]
+    fn emits_stable_face_target_id_selector_for_native_occt_shell_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "target-id:body:face:0-0-10:400"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("\"body:face:0-0-10:400\""), "{source}");
+        assert!(
+            source.contains("direct_occt_stable_face_target_id"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn emits_durable_face_target_id_selector_for_native_occt_shell_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (shell 0.8
+                  :faces "target-id:body:node:42:face:0:0-0-10:400"
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(
+            source.contains("\"body:node:42:face:0:0-0-10:400\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("direct_occt_stable_face_target_id"),
+            "{source}"
+        );
+    }
+
+    #[test]
     fn emits_exact_face_target_id_selector_for_native_occt_shell_source_from_payload_when_value_is_bad(
     ) {
         let program = compile(
@@ -3266,33 +3849,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_coarse_edge_selector_for_native_occt_exact_path() {
+    fn emits_coarse_edge_selector_for_native_occt_exact_path() {
         let program = compile(
             r#"
             (model
-              (part body
+                (part body
                 (fillet 0.5 :edges "top" (box 10 10 10))))
             "#,
         );
         let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
 
-        let err = emit_plan_export_source(
+        let source = emit_plan_export_source(
             &plan,
             Path::new("/tmp/model.step"),
             Path::new("/tmp/preview.stl"),
         )
-        .expect_err("coarse selector should fail");
+        .expect("coarse selector should emit");
 
-        assert!(
-            err.message
-                .contains("supports exact `target-id:` / `target-ids:` selectors only"),
-            "unexpected error: {:?}",
-            err
-        );
+        assert!(source.contains("edge_tol"), "{source}");
+        assert!(source.contains("edge_matches"), "{source}");
     }
 
     #[test]
-    fn rejects_coarse_edge_selector_payload_for_native_occt_exact_path_when_value_is_bad() {
+    fn emits_coarse_edge_selector_payload_for_native_occt_exact_path_when_value_is_bad() {
         let program = compile(
             r#"
             (model
@@ -3309,19 +3888,15 @@ mod tests {
             .expect("fillet");
         *fillet.keywords[0].source_arg_mut() = OcctArg::Number(7.0);
 
-        let err = emit_plan_export_source(
+        let source = emit_plan_export_source(
             &plan,
             Path::new("/tmp/model.step"),
             Path::new("/tmp/preview.stl"),
         )
-        .expect_err("coarse selector should fail");
+        .expect("coarse selector should emit from payload");
 
-        assert!(
-            err.message
-                .contains("supports exact `target-id:` / `target-ids:` selectors only"),
-            "unexpected error: {:?}",
-            err
-        );
+        assert!(source.contains("edge_tol"), "{source}");
+        assert!(source.contains("edge_matches"), "{source}");
     }
 
     #[test]
@@ -3835,6 +4410,367 @@ mod tests {
             } = outcome
             else {
                 panic!("expected direct OCCT profile-hole export");
+            };
+            assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+            assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+            assert!(
+                std::fs::metadata(&step_path).expect("step metadata").len() > 1024,
+                "STEP export too small"
+            );
+            assert!(
+                std::fs::metadata(&stl_path).expect("stl metadata").len() > 512,
+                "STL export too small"
+            );
+        } else {
+            let NativeExportOutcome::Blocked { blockers } = outcome else {
+                panic!("expected blocked outcome without complete SDK");
+            };
+            assert!(!blockers.is_empty());
+        }
+    }
+
+    #[test]
+    fn live_executor_exports_multi_outer_profile_holes_when_runtime_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (profile
+                    :outer ((polygon ((0 0) (24 0) (24 24) (0 24)))
+                            (translate 40 0 0 (polygon ((0 0) (12 0) (12 12) (0 12)))))
+                    :holes ((polygon ((8 8) (16 8) (16 16) (8 16)))))
+                  5)))
+            "#,
+        );
+
+        let outcome = export_core_program_step_stl(
+            &program,
+            &layout,
+            temp_root("direct-occt-profile-multi-outer-hole"),
+        )
+        .expect("export");
+
+        if layout.can_compile_native_shim() {
+            let NativeExportOutcome::Exported {
+                step_path,
+                stl_path,
+            } = outcome
+            else {
+                panic!("expected direct OCCT multi-outer profile export");
+            };
+            assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+            assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+            assert!(
+                std::fs::metadata(&step_path).expect("step metadata").len() > 1024,
+                "STEP export too small"
+            );
+            assert!(
+                std::fs::metadata(&stl_path).expect("stl metadata").len() > 512,
+                "STL export too small"
+            );
+        } else {
+            let NativeExportOutcome::Blocked { blockers } = outcome else {
+                panic!("expected blocked outcome without complete SDK");
+            };
+            assert!(!blockers.is_empty());
+        }
+    }
+
+    #[test]
+    fn live_runner_first_exports_multi_outer_profile_holes_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (extrude
+                  (profile
+                    :outer ((polygon ((0 0) (24 0) (24 24) (0 24)))
+                            (translate 40 0 0 (polygon ((0 0) (12 0) (12 12) (0 12)))))
+                    :holes ((polygon ((8 8) (16 8) (16 16) (8 16)))))
+                  5)))
+            "#,
+        );
+        let output_dir = temp_root("direct-occt-runner-profile-multi-outer-hole");
+
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export");
+
+        let NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+        } = outcome
+        else {
+            panic!("expected direct OCCT runner-first export");
+        };
+        assert!(
+            output_dir.join("plan.json").is_file(),
+            "missing runner plan"
+        );
+        assert!(
+            output_dir.join("topology.json").is_file(),
+            "missing topology"
+        );
+        assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+        assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+        assert!(
+            std::fs::metadata(&step_path).expect("step metadata").len() > 1024,
+            "STEP export too small"
+        );
+        assert!(
+            std::fs::metadata(&stl_path).expect("stl metadata").len() > 512,
+            "STL export too small"
+        );
+    }
+
+    #[test]
+    fn live_runner_first_exports_text_profile_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let Some(font_path) = text_font_fixture() else {
+            return;
+        };
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(r#"(model (part body (extrude (text "II" 12) 4)))"#);
+        let output_dir = temp_root("direct-occt-runner-text-profile");
+        let previous_font = std::env::var_os("ECKYCAD_FONT_PATH");
+        unsafe {
+            std::env::set_var("ECKYCAD_FONT_PATH", font_path);
+        }
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        );
+        match previous_font {
+            Some(previous_font) => unsafe {
+                std::env::set_var("ECKYCAD_FONT_PATH", previous_font);
+            },
+            None => unsafe {
+                std::env::remove_var("ECKYCAD_FONT_PATH");
+            },
+        }
+        let outcome = outcome.expect("export");
+
+        let NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+        } = outcome
+        else {
+            panic!("expected direct OCCT runner-first text export");
+        };
+        assert!(
+            output_dir.join("plan.json").is_file(),
+            "missing runner plan"
+        );
+        assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+        assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+    }
+
+    #[test]
+    fn live_runner_first_exports_import_stl_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let stl_path = temp_root("direct-occt-import-stl-fixture").with_extension("stl");
+        write_ascii_stl_fixture(&stl_path);
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(&format!(
+            "(model (part body (import-stl {:?})))",
+            stl_path.to_string_lossy()
+        ));
+        let output_dir = temp_root("direct-occt-runner-import-stl");
+
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export");
+
+        let NativeExportOutcome::Exported {
+            step_path,
+            stl_path: preview_stl_path,
+        } = outcome
+        else {
+            panic!("expected direct OCCT runner-first import-stl export");
+        };
+        assert!(
+            output_dir.join("plan.json").is_file(),
+            "missing runner plan"
+        );
+        assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+        assert!(
+            preview_stl_path.is_file(),
+            "missing STL export: {preview_stl_path:?}"
+        );
+        let _ = std::fs::remove_file(stl_path);
+    }
+
+    #[test]
+    fn live_runner_first_exports_helical_ridge_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (helical-ridge
+                  :radius 20
+                  :pitch 6
+                  :height 30
+                  :base-width 2
+                  :crest-width 1
+                  :depth 1.5)))
+            "#,
+        );
+        let output_dir = temp_root("direct-occt-runner-helical-ridge");
+
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export");
+
+        let NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+        } = outcome
+        else {
+            panic!("expected direct OCCT runner-first helical-ridge export");
+        };
+        assert!(
+            output_dir.join("plan.json").is_file(),
+            "missing runner plan"
+        );
+        assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+        assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+    }
+
+    #[test]
+    fn live_executor_exports_svg_profile_when_runtime_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let svg_path = std::env::temp_dir().join(format!(
+            "ecky-direct-occt-live-svg-profile-{}.svg",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &svg_path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path fill="#000" d="M 1 1 L 9 1 L 9 9 L 1 9 Z"/></svg>"##,
+        )
+        .expect("write svg");
+        let program = compile(&format!(
+            r#"(model (part body (extrude (svg "{}" 10 10 "contain") 4)))"#,
+            svg_path.display()
+        ));
+
+        let outcome =
+            export_core_program_step_stl(&program, &layout, temp_root("direct-occt-svg-profile"))
+                .expect("export");
+        let _ = std::fs::remove_file(&svg_path);
+
+        if layout.can_compile_native_shim() {
+            let NativeExportOutcome::Exported {
+                step_path,
+                stl_path,
+            } = outcome
+            else {
+                panic!("expected direct OCCT SVG profile export");
             };
             assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
             assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");

@@ -345,6 +345,7 @@ fn parse_workspace_capture_data_url(data_url: &str) -> AppResult<(&'static str, 
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
+        "image/svg+xml" => "svg",
         other => {
             return Err(AppError::validation(format!(
                 "Unsupported workspace capture MIME type: {}",
@@ -1102,6 +1103,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
@@ -1537,6 +1539,27 @@ mod tests {
         assert_eq!(
             staged.data_url.as_deref(),
             Some("data:image/png;base64,Zm9v")
+        );
+        assert_eq!(staged.kind, crate::contracts::AttachmentKind::Image);
+    }
+
+    #[test]
+    fn stage_prompt_workspace_capture_to_dir_accepts_svg_images() {
+        let staged = stage_prompt_workspace_capture_to_dir(
+            &crate::contracts::PreparePromptWorkspaceCaptureInput {
+                data_url: "data:image/svg+xml;base64,PHN2Zy8+".to_string(),
+                thread_id: Some("thread-1".to_string()),
+                name: Some("overlay".to_string()),
+                explanation: None,
+            },
+        )
+        .expect("svg workspace capture");
+
+        assert_eq!(staged.path, "");
+        assert_eq!(staged.name, "overlay.svg");
+        assert_eq!(
+            staged.data_url.as_deref(),
+            Some("data:image/svg+xml;base64,PHN2Zy8+")
         );
         assert_eq!(staged.kind, crate::contracts::AttachmentKind::Image);
     }

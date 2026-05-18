@@ -199,10 +199,37 @@ pub fn render_model_with_sources(
     app: &dyn PathResolver,
     source_language: crate::models::SourceLanguage,
 ) -> AppResult<ArtifactBundle> {
+    render_model_with_sources_and_font_path(
+        executable_source,
+        authored_source,
+        parameters,
+        configured_freecad_cmd,
+        None,
+        app,
+        source_language,
+    )
+}
+
+pub fn render_model_with_sources_and_font_path(
+    executable_source: &str,
+    authored_source: Option<&str>,
+    parameters: &DesignParams,
+    configured_freecad_cmd: Option<&str>,
+    configured_cad_text_font_path: Option<&str>,
+    app: &dyn PathResolver,
+    source_language: crate::models::SourceLanguage,
+) -> AppResult<ArtifactBundle> {
     let params_json =
         serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
     let source_identity = authored_source.unwrap_or(executable_source);
-    let content_hash = digest_segments([source_identity.as_bytes(), b"|", params_json.as_bytes()]);
+    let font_identity = configured_cad_text_font_path.unwrap_or("").trim();
+    let content_hash = digest_segments([
+        source_identity.as_bytes(),
+        b"|",
+        params_json.as_bytes(),
+        b"|font:",
+        font_identity.as_bytes(),
+    ]);
     let short_hash = short_digest(&content_hash);
     let model_id = format!("generated-{}", short_hash);
     let bundle_dir = artifact_dir(app, ModelSourceKind::Generated, &model_id)?;
@@ -248,6 +275,7 @@ pub fn render_model_with_sources(
         &parts_dir,
         &runner_report_path,
         &params_json,
+        configured_cad_text_font_path,
     )?;
 
     let report =
@@ -2114,6 +2142,7 @@ fn run_generate_runner(
     parts_dir: &Path,
     runner_report_path: &Path,
     params_json: &str,
+    configured_cad_text_font_path: Option<&str>,
 ) -> AppResult<()> {
     let mut command = base_runner_command(app, configured_freecad_cmd)?;
     command
@@ -2133,6 +2162,12 @@ fn run_generate_runner(
             )?,
         )
         .env("ECKYCAD_PARAMS", params_json);
+    if let Some(font_path) = configured_cad_text_font_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        command.env("ECKYCAD_FONT_PATH", font_path);
+    }
     run_command(command)
 }
 

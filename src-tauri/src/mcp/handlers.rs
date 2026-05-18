@@ -17,7 +17,7 @@ use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch}
 use crate::services::{agent_dialogue, history, render};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex as StdMutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -87,6 +87,49 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+fn mcp_profile_target(
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+    model_id: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(thread_id) = thread_id {
+        parts.push(format!("thread={}", thread_id));
+    }
+    if let Some(message_id) = message_id {
+        parts.push(format!("message={}", message_id));
+    }
+    if let Some(model_id) = model_id {
+        parts.push(format!("model={}", model_id));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" "))
+    }
+}
+
+fn push_mcp_profile(
+    state: &AppState,
+    ctx: &AgentContext,
+    op: &str,
+    stage: &str,
+    started: Instant,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+    model_id: Option<&str>,
+) {
+    state.push_log(format!(
+        "[MCP_PROFILE] session={} agent={} op={} stage={} ms={}{}",
+        ctx.session_id,
+        ctx.agent_label,
+        op,
+        stage,
+        started.elapsed().as_millis(),
+        mcp_profile_target(thread_id, message_id, model_id),
+    ));
 }
 
 fn compact_message_content(content: &str) -> String {
@@ -3165,11 +3208,12 @@ pub struct SessionRenderPreview {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DraftFeedbackSeed {
     pub status: crate::models::AgentDraftFeedbackStatus,
     pub summary: String,
     pub items: Vec<crate::models::AgentDraftFeedbackItem>,
+    pub authoring_lints: Vec<crate::models::AgentDraftFeedbackAuthoringLint>,
     pub source: crate::models::AgentDraftFeedbackSource,
 }
 
@@ -3280,6 +3324,7 @@ fn draft_feedback_from_structural_verification(
         status,
         summary,
         items,
+        authoring_lints: Vec::new(),
         source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
     }
 }
@@ -3295,8 +3340,33 @@ fn hydrate_draft_feedback(
         status: seed.status,
         summary: seed.summary,
         items: seed.items,
+        authoring_lints: seed.authoring_lints,
         source: seed.source,
     })
+}
+
+fn draft_feedback_authoring_lints_for_design_output(
+    design_output: &DesignOutput,
+) -> Vec<crate::models::AgentDraftFeedbackAuthoringLint> {
+    if design_output.source_language != SourceLanguage::EckyIrV0 {
+        return Vec::new();
+    }
+    let Ok(program) = crate::ecky_scheme::compile_to_core_program(&design_output.macro_code) else {
+        return Vec::new();
+    };
+    collect_ecky_constraint_authoring_lints(&design_output.macro_code, &program)
+        .into_iter()
+        .map(|lint| crate::models::AgentDraftFeedbackAuthoringLint {
+            kind: lint.kind,
+            part_key: lint.part_key,
+            param_key: lint.param_key,
+            delta: lint.delta,
+            occurrence_count: lint.occurrence_count,
+            suggested_param_key: lint.suggested_param_key,
+            message: lint.message,
+            source_stable_node_keys: lint.source_stable_node_keys,
+        })
+        .collect()
 }
 
 pub async fn resolve_session_render_preview_for_request(
@@ -3346,8 +3416,24 @@ pub async fn store_session_render_preview(
     ctx: &AgentContext,
     req: StoreSessionRenderPreviewRequest,
 ) -> AppResult<SessionRenderPreview> {
+    let total_started = Instant::now();
+    let validate_started = Instant::now();
+    let thread_id_for_log = req.thread_id.clone();
+    let base_message_id_for_log = req.base_message_id.clone();
+    let model_id_for_log = req.artifact_bundle.model_id.clone();
     crate::models::validate_design_output(&req.design_output)?;
     crate::models::validate_model_runtime_bundle(&req.model_manifest, &req.artifact_bundle)?;
+    push_mcp_profile(
+        state,
+        ctx,
+        "preview_store",
+        "validate_contracts",
+        validate_started,
+        Some(&thread_id_for_log),
+        base_message_id_for_log.as_deref(),
+        Some(&model_id_for_log),
+    );
+    let feedback_started = Instant::now();
     let draft_feedback = req.draft_feedback.clone().or_else(|| {
         Some(draft_feedback_from_structural_verification(
             &crate::services::structural_verification::verify_structure(
@@ -3356,6 +3442,23 @@ pub async fn store_session_render_preview(
             ),
         ))
     });
+    let authoring_lints = draft_feedback_authoring_lints_for_design_output(&req.design_output);
+    let draft_feedback = draft_feedback.map(|mut feedback| {
+        if feedback.authoring_lints.is_empty() {
+            feedback.authoring_lints = authoring_lints;
+        }
+        feedback
+    });
+    push_mcp_profile(
+        state,
+        ctx,
+        "preview_store",
+        "feedback_and_lints",
+        feedback_started,
+        Some(&thread_id_for_log),
+        base_message_id_for_log.as_deref(),
+        Some(&model_id_for_log),
+    );
 
     let preview = SessionRenderPreview {
         session_id: ctx.session_id.clone(),
@@ -3379,6 +3482,7 @@ pub async fn store_session_render_preview(
         .insert(ctx.session_id.clone(), preview.clone());
 
     {
+        let db_started = Instant::now();
         let conn = state.db.lock().await;
         db::upsert_agent_draft(
             &conn,
@@ -3395,8 +3499,19 @@ pub async fn store_session_render_preview(
             },
         )
         .map_err(|e| AppError::persistence(e.to_string()))?;
+        push_mcp_profile(
+            state,
+            ctx,
+            "preview_store",
+            "db_upsert_draft",
+            db_started,
+            Some(&preview.thread_id),
+            preview.base_message_id.as_deref(),
+            Some(&preview.artifact_bundle.model_id),
+        );
     }
 
+    let snapshot_started = Instant::now();
     let snapshot = crate::services::session::build_runtime_snapshot(
         Some(preview.design_output.clone()),
         Some(preview.thread_id.clone()),
@@ -3410,7 +3525,18 @@ pub async fn store_session_render_preview(
         *last = Some(snapshot.clone());
     }
     crate::services::session::write_last_snapshot(app, Some(&snapshot));
+    push_mcp_profile(
+        state,
+        ctx,
+        "preview_store",
+        "snapshot_write",
+        snapshot_started,
+        Some(&preview.thread_id),
+        Some(&preview.preview_id),
+        Some(&preview.artifact_bundle.model_id),
+    );
 
+    let emit_started = Instant::now();
     state.emit_agent_draft_preview_updated(&crate::contracts::AgentDraftPreviewUpdatedEvent {
         session_id: preview.session_id.clone(),
         thread_id: preview.thread_id.clone(),
@@ -3422,6 +3548,26 @@ pub async fn store_session_render_preview(
         model_manifest: preview.model_manifest.clone(),
         feedback: preview.draft_feedback.clone(),
     });
+    push_mcp_profile(
+        state,
+        ctx,
+        "preview_store",
+        "emit_draft_event",
+        emit_started,
+        Some(&preview.thread_id),
+        Some(&preview.preview_id),
+        Some(&preview.artifact_bundle.model_id),
+    );
+    push_mcp_profile(
+        state,
+        ctx,
+        "preview_store",
+        "total",
+        total_started,
+        Some(&preview.thread_id),
+        Some(&preview.preview_id),
+        Some(&preview.artifact_bundle.model_id),
+    );
 
     Ok(preview)
 }
@@ -4686,6 +4832,291 @@ fn impact_labels_for_dependency(
     vec!["assembly-wide".to_string(), "export-affecting".to_string()]
 }
 
+const SHAPE_GRAPH_SECTION_MAX_ITEMS: usize = 64;
+
+fn shape_graph_section_enabled(
+    filters: &[ShapeGraphFilterSection],
+    section: ShapeGraphFilterSection,
+) -> bool {
+    filters.is_empty() || filters.iter().any(|candidate| *candidate == section)
+}
+
+fn shape_graph_payload<T>(items: Vec<T>) -> ShapeGraphSectionPayload<T> {
+    let truncated = items.len() > SHAPE_GRAPH_SECTION_MAX_ITEMS;
+    ShapeGraphSectionPayload {
+        truncated,
+        items: items
+            .into_iter()
+            .take(SHAPE_GRAPH_SECTION_MAX_ITEMS)
+            .collect(),
+    }
+}
+
+fn relation_operand_label(
+    program: &crate::ecky_core_ir::CoreProgram,
+    operand: &crate::ecky_core_ir::CoreRelationOperand,
+) -> String {
+    match operand {
+        crate::ecky_core_ir::CoreRelationOperand::Number(value) => {
+            if value.fract() == 0.0 {
+                format!("{}", *value as i64)
+            } else {
+                value.to_string()
+            }
+        }
+        crate::ecky_core_ir::CoreRelationOperand::Parameter(param_id) => program
+            .parameters
+            .iter()
+            .find(|param| param.id == *param_id)
+            .map(|param| param.key.clone())
+            .unwrap_or_else(|| format!("param#{}", param_id.raw())),
+    }
+}
+
+fn collect_relation_param_keys(
+    program: &crate::ecky_core_ir::CoreProgram,
+    relation: &crate::ecky_core_ir::CoreRelationConstraint,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    for operand in [&relation.left, &relation.right] {
+        if let crate::ecky_core_ir::CoreRelationOperand::Parameter(param_id) = operand {
+            if let Some(param_key) = program
+                .parameters
+                .iter()
+                .find(|param| param.id == *param_id)
+                .map(|param| param.key.clone())
+            {
+                if !keys.iter().any(|existing| existing == &param_key) {
+                    keys.push(param_key);
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn build_shape_graph_packet(
+    design_output: &DesignOutput,
+    model_manifest: Option<&ModelManifest>,
+    artifact_bundle: Option<&ArtifactBundle>,
+    filters: &[ShapeGraphFilterSection],
+) -> AppResult<ShapeGraphPacket> {
+    let source = design_output.macro_code.as_str();
+    let source_digest = crate::mcp::macro_buffer::source_digest(source);
+    let program = if design_output.source_language == crate::models::SourceLanguage::EckyIrV0 {
+        Some(
+            crate::ecky_scheme::compile_to_core_program(source).map_err(|err| {
+                compile_error_with_diagnostics(
+                    format!("Failed to compile Ecky source for shapeGraph: {err}"),
+                    source,
+                    err,
+                    None,
+                    None,
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let mut core_fingerprint = Vec::new();
+    let mut editable_stable_node_keys = Vec::new();
+    if let Some(program) = program.as_ref() {
+        for param in &program.parameters {
+            core_fingerprint.push(format!("param:{}", param.key));
+            let path = format!("/params/{}", path_segment(&param.key));
+            if let Some(stable_key) = stable_node_key_for_program_path(source, program, &path) {
+                if !stable_key.trim().is_empty()
+                    && !editable_stable_node_keys
+                        .iter()
+                        .any(|existing| existing == &stable_key)
+                {
+                    editable_stable_node_keys.push(stable_key);
+                }
+            }
+        }
+        for part in &program.parts {
+            core_fingerprint.push(format!("part:{}", part.key));
+            let path = format!("/parts/{}", path_segment(&part.key));
+            if let Some(stable_key) = stable_node_key_for_program_path(source, program, &path) {
+                if !stable_key.trim().is_empty()
+                    && !editable_stable_node_keys
+                        .iter()
+                        .any(|existing| existing == &stable_key)
+                {
+                    editable_stable_node_keys.push(stable_key);
+                }
+            }
+        }
+        for relation in &program.constraints.relations {
+            core_fingerprint.push(format!(
+                "relation:{}:{}:{}",
+                relation_operand_label(program, &relation.left),
+                relation.operator.as_str(),
+                relation_operand_label(program, &relation.right)
+            ));
+        }
+    }
+    let core_digest = crate::mcp::macro_buffer::source_digest(&core_fingerprint.join("|"));
+
+    let parts = shape_graph_section_enabled(filters, ShapeGraphFilterSection::Parts).then(|| {
+        let mut section_items = Vec::new();
+        if let Some(manifest) = model_manifest {
+            for part in &manifest.parts {
+                let stable_node_key = program.as_ref().and_then(|program| {
+                    let path = format!("/parts/{}", path_segment(&part.part_id));
+                    stable_node_key_for_program_path(source, program, &path)
+                });
+                section_items.push(ShapeGraphPart {
+                    part_id: part.part_id.clone(),
+                    label: part.label.clone(),
+                    kind: part.kind.clone(),
+                    editable: part.editable,
+                    stable_node_key,
+                });
+            }
+        } else if let Some(program) = program.as_ref() {
+            for part in &program.parts {
+                let path = format!("/parts/{}", path_segment(&part.key));
+                section_items.push(ShapeGraphPart {
+                    part_id: part.key.clone(),
+                    label: part.label.clone(),
+                    kind: "solid".to_string(),
+                    editable: true,
+                    stable_node_key: stable_node_key_for_program_path(source, program, &path),
+                });
+            }
+        }
+        shape_graph_payload(section_items)
+    });
+
+    let instances =
+        shape_graph_section_enabled(filters, ShapeGraphFilterSection::Instances).then(|| {
+            let mut section_items = Vec::new();
+            if let Some(graph) = model_manifest.and_then(|manifest| manifest.feature_graph.as_ref())
+            {
+                for node in &graph.nodes {
+                    let node_kind = node.kind.to_ascii_lowercase();
+                    if !(node_kind.contains("repeat") || node_kind.contains("instance")) {
+                        continue;
+                    }
+                    let target_ids = node
+                        .output_refs
+                        .iter()
+                        .flat_map(|output| output.target_ids.iter().cloned())
+                        .collect::<Vec<_>>();
+                    section_items.push(ShapeGraphInstance {
+                        instance_id: node.feature_id.clone(),
+                        prototype_feature_id: node.dependency_ids.first().cloned(),
+                        dependency_ids: node.dependency_ids.clone(),
+                        target_ids,
+                    });
+                }
+            }
+            shape_graph_payload(section_items)
+        });
+
+    let constraints = shape_graph_section_enabled(filters, ShapeGraphFilterSection::Constraints)
+        .then(|| {
+            let mut section_items = Vec::new();
+            if let Some(program) = program.as_ref() {
+                for (index, relation) in program.constraints.relations.iter().enumerate() {
+                    let path = format!("/params/:relations/{index}");
+                    let depends_on_param_keys = collect_relation_param_keys(program, relation);
+                    let mut affects_stable_node_keys = Vec::new();
+                    for param_key in &depends_on_param_keys {
+                        let Some(param_id) = program
+                            .parameters
+                            .iter()
+                            .find(|param| param.key == *param_key)
+                            .map(|param| param.id)
+                        else {
+                            continue;
+                        };
+                        for source_path in dependent_source_paths_for_param(program, param_id) {
+                            let Some(stable_key) =
+                                stable_node_key_for_program_path(source, program, &source_path)
+                            else {
+                                continue;
+                            };
+                            if stable_key.trim().is_empty()
+                                || affects_stable_node_keys
+                                    .iter()
+                                    .any(|existing| existing == &stable_key)
+                            {
+                                continue;
+                            }
+                            affects_stable_node_keys.push(stable_key);
+                        }
+                    }
+                    section_items.push(ShapeGraphConstraint {
+                        constraint_id: format!("relation:{index}"),
+                        label: format!(
+                            "{} {} {}",
+                            relation_operand_label(program, &relation.left),
+                            relation.operator.as_str(),
+                            relation_operand_label(program, &relation.right)
+                        ),
+                        kind: "relation".to_string(),
+                        depends_on_param_keys,
+                        affects_stable_node_keys,
+                        source_stable_node_key: stable_node_key_for_program_path(
+                            source, program, &path,
+                        ),
+                    });
+                }
+            }
+            shape_graph_payload(section_items)
+        });
+
+    let debug_overlays = shape_graph_section_enabled(filters, ShapeGraphFilterSection::Debug)
+        .then(|| shape_graph_payload(Vec::<ShapeGraphDebugOverlay>::new()));
+
+    let dependencies = shape_graph_section_enabled(filters, ShapeGraphFilterSection::Dependencies)
+        .then(|| {
+            let mut section_items = Vec::new();
+            if let Some(program) = program.as_ref() {
+                for param in &program.parameters {
+                    let dependent_source_paths =
+                        dependent_source_paths_for_param(program, param.id);
+                    section_items.push(ShapeGraphDependency {
+                        parameter_key: param.key.clone(),
+                        impacted_part_ids: impacted_part_ids_for_dependency_paths(
+                            &dependent_source_paths,
+                        ),
+                        dependent_source_paths,
+                    });
+                }
+            }
+            shape_graph_payload(section_items)
+        });
+
+    let topology_target_counts = if let Some(bundle) = artifact_bundle {
+        ShapeGraphTopologyCounts {
+            edge_target_count: bundle.edge_targets.len(),
+            face_target_count: bundle.face_targets.len(),
+        }
+    } else {
+        ShapeGraphTopologyCounts {
+            edge_target_count: 0,
+            face_target_count: 0,
+        }
+    };
+
+    Ok(ShapeGraphPacket {
+        source_digest,
+        core_digest,
+        artifact_digest: artifact_bundle.map(artifact_bundle_digest),
+        editable_stable_node_keys,
+        topology_target_counts,
+        parts,
+        instances,
+        constraints,
+        debug_overlays,
+        dependencies,
+    })
+}
+
 fn param_value_from_core(value: &crate::ecky_core_ir::CoreParameterValue) -> ParamValue {
     match value {
         crate::ecky_core_ir::CoreParameterValue::Number(value) => ParamValue::Number(*value),
@@ -4833,6 +5264,20 @@ fn validate_ecky_constraint_row(
     let source_stable_node_keys = stable_node_key_for_program_path(source, program, &path)
         .into_iter()
         .collect::<Vec<_>>();
+    let source_stable_node_key = source_stable_node_keys.first().cloned();
+    let mut affects_stable_node_keys = source_stable_node_keys.clone();
+    for dependency_path in dependent_source_paths_for_param(program, param.id) {
+        if let Some(stable_key) =
+            stable_node_key_for_program_path(source, program, &dependency_path)
+        {
+            if !affects_stable_node_keys
+                .iter()
+                .any(|existing| existing == &stable_key)
+            {
+                affects_stable_node_keys.push(stable_key);
+            }
+        }
+    }
     let raw_value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
     if failures.is_empty() {
         EckyConstraintValidationRow {
@@ -4841,6 +5286,12 @@ fn validate_ecky_constraint_row(
             severity: "info".to_string(),
             raw_value,
             message: "OK.".to_string(),
+            constraint_id: Some(format!("param_{}", param.key)),
+            label: Some(format!("Parameter `{}` constraints", param.label)),
+            kind: Some("parameter".to_string()),
+            source_stable_node_key,
+            depends_on_param_keys: involved_param_keys.clone(),
+            affects_stable_node_keys,
             involved_param_keys,
             source_stable_node_keys,
         }
@@ -4851,6 +5302,12 @@ fn validate_ecky_constraint_row(
             severity: "error".to_string(),
             raw_value,
             message: failures.join(" "),
+            constraint_id: Some(format!("param_{}", param.key)),
+            label: Some(format!("Parameter `{}` constraints", param.label)),
+            kind: Some("parameter".to_string()),
+            source_stable_node_key,
+            depends_on_param_keys: involved_param_keys.clone(),
+            affects_stable_node_keys,
             involved_param_keys,
             source_stable_node_keys,
         }
@@ -4929,6 +5386,26 @@ fn validate_ecky_relation_constraint_row(
 ) -> EckyConstraintValidationRow {
     let mut failures = Vec::new();
     let mut involved_param_keys = Vec::new();
+    let mut depends_on_param_keys = Vec::new();
+    for operand in [&relation.left, &relation.right] {
+        let crate::ecky_core_ir::CoreRelationOperand::Parameter(param_id) = operand else {
+            continue;
+        };
+        let Some(param_key) = program
+            .parameters
+            .iter()
+            .find(|param| param.id == *param_id)
+            .map(|param| param.key.clone())
+        else {
+            continue;
+        };
+        if !depends_on_param_keys
+            .iter()
+            .any(|candidate| candidate == &param_key)
+        {
+            depends_on_param_keys.push(param_key);
+        }
+    }
 
     let left = evaluate_relation_operand(program, params, &relation.left).map_err(|err| {
         failures.push(err);
@@ -4979,9 +5456,39 @@ fn validate_ecky_relation_constraint_row(
     }
 
     let path = format!("/params/:relations/{index}");
-    let source_stable_node_keys = stable_node_key_for_program_path(source, program, &path)
+    let mut source_stable_node_keys = stable_node_key_for_program_path(source, program, &path)
         .into_iter()
         .collect::<Vec<_>>();
+    let source_stable_node_key = source_stable_node_keys.first().cloned().or_else(|| {
+        Some(stable_ast_node_key(
+            source,
+            &path,
+            "RelationConstraint",
+            "RelationConstraint",
+            Some(relation.operator.as_str()),
+            None,
+        ))
+    });
+    if let Some(stable_key) = source_stable_node_key.clone() {
+        if !source_stable_node_keys
+            .iter()
+            .any(|existing| existing == &stable_key)
+        {
+            source_stable_node_keys.push(stable_key);
+        }
+    }
+    let mut affects_stable_node_keys = source_stable_node_keys.clone();
+    for key in &depends_on_param_keys {
+        let param_path = format!("/params/{}", path_segment(key));
+        if let Some(stable_key) = stable_node_key_for_program_path(source, program, &param_path) {
+            if !affects_stable_node_keys
+                .iter()
+                .any(|existing| existing == &stable_key)
+            {
+                affects_stable_node_keys.push(stable_key);
+            }
+        }
+    }
     let raw_value = serde_json::json!({
         "operator": relation.operator.as_str(),
         "left": left_value,
@@ -4995,6 +5502,12 @@ fn validate_ecky_relation_constraint_row(
             severity: "info".to_string(),
             raw_value,
             message: "OK.".to_string(),
+            constraint_id: Some(format!("relation_{index}")),
+            label: Some(format!("Relation #{}", index + 1)),
+            kind: Some("relation".to_string()),
+            source_stable_node_key,
+            depends_on_param_keys: depends_on_param_keys.clone(),
+            affects_stable_node_keys: affects_stable_node_keys.clone(),
             involved_param_keys,
             source_stable_node_keys,
         }
@@ -5005,10 +5518,203 @@ fn validate_ecky_relation_constraint_row(
             severity: "error".to_string(),
             raw_value,
             message: failures.join(" "),
+            constraint_id: Some(format!("relation_{index}")),
+            label: Some(format!("Relation #{}", index + 1)),
+            kind: Some("relation".to_string()),
+            source_stable_node_key,
+            depends_on_param_keys,
+            affects_stable_node_keys,
             involved_param_keys,
             source_stable_node_keys,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct AnonymousDeltaUse {
+    part_key: String,
+    param_key: String,
+    delta: f64,
+    path: String,
+}
+
+fn collect_anonymous_delta_uses(
+    node: &crate::ecky_core_ir::CoreNode,
+    path: &str,
+    part_key: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+    out: &mut Vec<AnonymousDeltaUse>,
+) {
+    let mut maybe_record_use = |param_id: crate::ecky_core_ir::ParamId, delta: f64| {
+        let Some(param_key) = program
+            .parameters
+            .iter()
+            .find(|param| param.id == param_id)
+            .map(|param| param.key.clone())
+        else {
+            return;
+        };
+        out.push(AnonymousDeltaUse {
+            part_key: part_key.to_string(),
+            param_key,
+            delta,
+            path: path.to_string(),
+        });
+    };
+
+    if let crate::ecky_core_ir::CoreNodeKind::Call { op, args, .. } = &node.kind {
+        if let crate::ecky_core_ir::CoreOperation::Custom(op_name) = op {
+            let param_id_from_node =
+                |candidate: &crate::ecky_core_ir::CoreNode| match &candidate.kind {
+                    crate::ecky_core_ir::CoreNodeKind::Reference(
+                        crate::ecky_core_ir::CoreReference::Parameter(param_id),
+                    ) => Some(*param_id),
+                    _ => None,
+                };
+            let number_from_node = |candidate: &crate::ecky_core_ir::CoreNode| match &candidate.kind
+            {
+                crate::ecky_core_ir::CoreNodeKind::Literal(
+                    crate::ecky_core_ir::CoreLiteral::Number(value),
+                ) => Some(*value),
+                _ => None,
+            };
+
+            if op_name == "+" && args.len() == 2 {
+                match (
+                    param_id_from_node(&args[0]),
+                    number_from_node(&args[1]),
+                    number_from_node(&args[0]),
+                    param_id_from_node(&args[1]),
+                ) {
+                    (Some(param_id), Some(delta), _, _) => maybe_record_use(param_id, delta),
+                    (_, _, Some(delta), Some(param_id)) => maybe_record_use(param_id, delta),
+                    _ => {}
+                }
+            }
+            if op_name == "-" && args.len() == 2 {
+                if let (Some(param_id), Some(delta)) =
+                    (param_id_from_node(&args[0]), number_from_node(&args[1]))
+                {
+                    maybe_record_use(param_id, -delta);
+                }
+            }
+        }
+    }
+
+    for (child_path, child) in core_node_child_paths(node, path) {
+        collect_anonymous_delta_uses(child, &child_path, part_key, program, out);
+    }
+}
+
+fn anonymous_delta_suffix_for_param_key(param_key: &str) -> Option<(&'static str, String)> {
+    let trimmed = param_key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(stem) = trimmed.strip_suffix("_w") {
+        return Some(("_margin_x", stem.trim_end_matches('_').to_string()));
+    }
+    if let Some(stem) = trimmed.strip_suffix("_h") {
+        return Some(("_margin_y", stem.trim_end_matches('_').to_string()));
+    }
+    if let Some(stem) = trimmed.strip_suffix("width") {
+        return Some(("_margin_x", stem.trim_end_matches('_').to_string()));
+    }
+    if let Some(stem) = trimmed.strip_suffix("height") {
+        return Some(("_margin_y", stem.trim_end_matches('_').to_string()));
+    }
+    None
+}
+
+fn anonymous_delta_numeric_token(value: f64) -> String {
+    if value.is_finite() && (value.fract().abs() < 1e-9) {
+        if value < 0.0 {
+            return format!("neg_{:.0}", value.abs());
+        }
+        return format!("{:.0}", value);
+    }
+    let base = value.to_string().replace('.', "_");
+    if value < 0.0 {
+        format!("neg_{}", base.trim_start_matches('-'))
+    } else {
+        base
+    }
+}
+
+fn anonymous_delta_suggested_param_key(param_key: &str, delta: f64) -> String {
+    if let Some((suffix, stem)) = anonymous_delta_suffix_for_param_key(param_key) {
+        if stem.is_empty() {
+            return format!("{param_key}{suffix}");
+        }
+        return format!("{stem}{suffix}");
+    }
+    let token = anonymous_delta_numeric_token(delta);
+    format!("delta_{param_key}_{token}")
+}
+
+fn collect_ecky_constraint_authoring_lints(
+    source: &str,
+    program: &crate::ecky_core_ir::CoreProgram,
+) -> Vec<EckyConstraintAuthoringLint> {
+    let mut uses = Vec::new();
+    for part in &program.parts {
+        let root_path = format!("/parts/{}/root", path_segment(&part.key));
+        collect_anonymous_delta_uses(&part.root, &root_path, &part.key, program, &mut uses);
+    }
+
+    let mut grouped: HashMap<(String, String, u64), Vec<&AnonymousDeltaUse>> = HashMap::new();
+    for usage in &uses {
+        grouped
+            .entry((
+                usage.part_key.clone(),
+                usage.param_key.clone(),
+                usage.delta.to_bits(),
+            ))
+            .or_default()
+            .push(usage);
+    }
+
+    let mut lints = Vec::new();
+    for ((part_key, param_key, delta_bits), group_uses) in grouped {
+        if group_uses.len() < 2 {
+            continue;
+        }
+        let delta = f64::from_bits(delta_bits);
+        let occurrence_count = group_uses.len();
+        let suggested_param_key = anonymous_delta_suggested_param_key(&param_key, delta);
+        let mut source_stable_node_keys = Vec::new();
+        for usage in group_uses {
+            if let Some(stable_key) = stable_node_key_for_program_path(source, program, &usage.path)
+            {
+                if !source_stable_node_keys
+                    .iter()
+                    .any(|existing| existing == &stable_key)
+                {
+                    source_stable_node_keys.push(stable_key);
+                }
+            }
+        }
+        lints.push(EckyConstraintAuthoringLint {
+            kind: "anonymousDelta".to_string(),
+            part_key: part_key.clone(),
+            param_key: param_key.clone(),
+            delta,
+            occurrence_count,
+            suggested_param_key: suggested_param_key.clone(),
+            message: format!(
+                "Repeated anonymous delta on `{param_key}` in part `{part_key}`. Extract `{suggested_param_key}` parameter and reuse."
+            ),
+            source_stable_node_keys,
+        });
+    }
+
+    lints.sort_by(|left, right| {
+        left.part_key
+            .cmp(&right.part_key)
+            .then(left.param_key.cmp(&right.param_key))
+            .then(left.suggested_param_key.cmp(&right.suggested_param_key))
+    });
+    lints
 }
 
 fn source_addressable_digest_for_path(
@@ -6947,6 +7653,7 @@ pub async fn handle_ecky_constraints_validate(
             req.parameters,
         );
         let rows = validate_ecky_constraints(&source, &program, &params);
+        let authoring_lints = collect_ecky_constraint_authoring_lints(&source, &program);
         let pass_count = rows.iter().filter(|row| row.status == "pass").count();
         let fail_count = rows.len().saturating_sub(pass_count);
         let authoring_context = crate::mcp::authoring::target_authoring_context(&design_output);
@@ -6963,6 +7670,7 @@ pub async fn handle_ecky_constraints_validate(
             pass_count,
             fail_count,
             rows,
+            authoring_lints,
             authoring_context,
             artifact_digest,
         })
@@ -7226,9 +7934,11 @@ pub async fn handle_target_detail_get(
             viewer_assets,
             export_artifacts,
             latest_draft,
+            shape_graph,
         ) = match req.section {
             TargetDetailSection::UiSpec => (
                 Some(target.design_output.ui_spec.clone()),
+                None,
                 None,
                 None,
                 None,
@@ -7244,10 +7954,11 @@ pub async fn handle_target_detail_get(
                 None,
                 None,
                 None,
+                None,
             ),
             TargetDetailSection::ArtifactBundle => {
                 let digest = target.artifact_bundle.as_ref().map(artifact_bundle_digest);
-                (None, None, Some(digest), None, None, None, None)
+                (None, None, Some(digest), None, None, None, None, None)
             }
             TargetDetailSection::ArtifactPaths => {
                 let paths = target.artifact_bundle.as_ref().map(|b| {
@@ -7260,7 +7971,7 @@ pub async fn handle_target_detail_get(
                     }
                     p
                 });
-                (None, None, None, paths, None, None, None)
+                (None, None, None, paths, None, None, None, None)
             }
             TargetDetailSection::ViewerAssets => (
                 None,
@@ -7271,6 +7982,7 @@ pub async fn handle_target_detail_get(
                     .artifact_bundle
                     .as_ref()
                     .map(|b| b.viewer_assets.clone()),
+                None,
                 None,
                 None,
             ),
@@ -7284,6 +7996,7 @@ pub async fn handle_target_detail_get(
                     .artifact_bundle
                     .as_ref()
                     .map(|b| b.export_artifacts.clone()),
+                None,
                 None,
             ),
             TargetDetailSection::LatestDraft => {
@@ -7304,8 +8017,23 @@ pub async fn handle_target_detail_get(
                         });
                     Some(draft)
                 };
-                (None, None, None, None, None, None, latest_draft)
+                (None, None, None, None, None, None, latest_draft, None)
             }
+            TargetDetailSection::ShapeGraph => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(build_shape_graph_packet(
+                    &target.design_output,
+                    target.model_manifest.as_ref(),
+                    target.artifact_bundle.as_ref(),
+                    req.shape_graph_filters.as_deref().unwrap_or(&[]),
+                )?),
+            ),
         };
 
         let authoring_context =
@@ -7326,6 +8054,7 @@ pub async fn handle_target_detail_get(
             viewer_assets,
             export_artifacts,
             latest_draft,
+            shape_graph,
         })
     })();
 
@@ -8034,6 +8763,7 @@ pub async fn handle_macro_preview_render(
     req: MacroReplaceRequest,
     ctx: &AgentContext,
 ) -> AppResult<MacroReplaceResponse> {
+    let total_started = Instant::now();
     let ctx = ctx.with_override(&req.identity);
     let ctx = &ctx;
     let mut tracked_thread_id = req.thread_id.clone();
@@ -8162,18 +8892,21 @@ pub async fn handle_macro_preview_render(
         } else {
             None
         };
-        let (mut ui_spec, mut initial_params, macro_dialect) = if let Some(parsed) = framework_parsed {
-            let current_params = req
-                .parameters
+        let macro_edit_parameter_source = if base_design.macro_code.trim().is_empty() {
+            req.parameters
                 .clone()
-                .unwrap_or_else(|| base_design.initial_params.clone());
+                .unwrap_or_else(|| base_design.initial_params.clone())
+        } else {
+            base_design.initial_params.clone()
+        };
+        let (mut ui_spec, mut initial_params, macro_dialect) = if let Some(parsed) = framework_parsed {
             (
                 UiSpec {
                     fields: parsed.fields.clone(),
                 },
                 crate::commands::design::reconcile_framework_params(
                     &parsed.fields,
-                    &current_params,
+                    &macro_edit_parameter_source,
                     &parsed.params,
                 ),
                 MacroDialect::CadFrameworkV1,
@@ -8182,19 +8915,11 @@ pub async fn handle_macro_preview_render(
             let parsed = parsed_legacy
                 .clone()
                 .expect("parse_macro_params should exist for IR path");
-            let params = if let Some(provided) = req.parameters.clone() {
-                crate::commands::design::reconcile_framework_params(
-                    &parsed.fields,
-                    &provided,
-                    &parsed.params,
-                )
-            } else {
-                crate::commands::design::reconcile_framework_params(
-                    &parsed.fields,
-                    &base_design.initial_params,
-                    &parsed.params,
-                )
-            };
+            let params = crate::commands::design::reconcile_framework_params(
+                &parsed.fields,
+                &macro_edit_parameter_source,
+                &parsed.params,
+            );
             (
                 req.ui_spec.clone().unwrap_or(UiSpec {
                     fields: parsed.fields,
@@ -8207,9 +8932,7 @@ pub async fn handle_macro_preview_render(
                 req.ui_spec
                     .clone()
                     .unwrap_or_else(|| base_design.ui_spec.clone()),
-                req.parameters
-                    .clone()
-                    .unwrap_or_else(|| base_design.initial_params.clone()),
+                macro_edit_parameter_source.clone(),
                 MacroDialect::Build123d,
             )
         } else {
@@ -8217,17 +8940,9 @@ pub async fn handle_macro_preview_render(
                 .clone()
                 .expect("legacy parser should exist when framework parse is absent");
             let mut reconciled_params = parsed_legacy.params.clone();
-            if let Some(provided) = req.parameters.clone() {
-                for (key, value) in provided {
-                    if reconciled_params.contains_key(&key) {
-                        reconciled_params.insert(key, value);
-                    }
-                }
-            } else {
-                for (key, value) in &base_design.initial_params {
-                    if reconciled_params.contains_key(key.as_str()) {
-                        reconciled_params.insert(key.clone(), value.clone());
-                    }
+            for (key, value) in &macro_edit_parameter_source {
+                if reconciled_params.contains_key(key.as_str()) {
+                    reconciled_params.insert(key.clone(), value.clone());
                 }
             }
             (
@@ -8345,6 +9060,7 @@ pub async fn handle_macro_preview_render(
             .clone()
             .or_else(|| base_design.post_processing.clone());
 
+        let render_started = Instant::now();
         let artifact_bundle = render::render_model(
             &req.macro_code,
             &initial_params,
@@ -8355,6 +9071,17 @@ pub async fn handle_macro_preview_render(
             app,
         )
         .await?;
+        push_mcp_profile(
+            state,
+            ctx,
+            "macro_preview_render",
+            "render_model",
+            render_started,
+            Some(&working_thread_id),
+            tracked_message_id.as_deref(),
+            Some(&artifact_bundle.model_id),
+        );
+        let manifest_started = Instant::now();
         let model_manifest =
             crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
         let model_manifest = carry_forward_semantic_manifest(
@@ -8368,6 +9095,16 @@ pub async fn handle_macro_preview_render(
             &model_manifest,
         )?;
         tracked_model_id = Some(artifact_bundle.model_id.clone());
+        push_mcp_profile(
+            state,
+            ctx,
+            "macro_preview_render",
+            "manifest_read_carry_write",
+            manifest_started,
+            Some(&working_thread_id),
+            tracked_message_id.as_deref(),
+            tracked_model_id.as_deref(),
+        );
 
         let engine_kind = authoring_context.source_language.to_engine_kind();
         let design_output = DesignOutput {
@@ -8389,6 +9126,7 @@ pub async fn handle_macro_preview_render(
             &artifact_bundle,
             &model_manifest,
         );
+        let store_started = Instant::now();
         let preview = store_session_render_preview(
             state,
             app,
@@ -8403,6 +9141,16 @@ pub async fn handle_macro_preview_render(
             },
         )
         .await?;
+        push_mcp_profile(
+            state,
+            ctx,
+            "macro_preview_render",
+            "store_preview",
+            store_started,
+            Some(&working_thread_id),
+            Some(&preview.preview_id),
+            Some(&artifact_bundle.model_id),
+        );
         tracked_message_id = Some(preview.preview_id.clone());
         Ok(MacroReplaceResponse {
             thread_id: working_thread_id,
@@ -8428,6 +9176,21 @@ pub async fn handle_macro_preview_render(
     )
     .await;
 
+    push_mcp_profile(
+        state,
+        ctx,
+        "macro_preview_render",
+        if result.is_ok() {
+            "total_ok"
+        } else {
+            "total_err"
+        },
+        total_started,
+        tracked_thread_id.as_deref(),
+        tracked_message_id.as_deref(),
+        tracked_model_id.as_deref(),
+    );
+
     if let Err(err) = &result {
         let conn = state.db.lock().await;
         try_record_agent_error(
@@ -8450,6 +9213,7 @@ pub async fn handle_commit_preview_version(
     req: VersionSaveRequest,
     ctx: &AgentContext,
 ) -> AppResult<VersionSaveResponse> {
+    let total_started = Instant::now();
     let ctx = ctx.with_override(&req.identity);
     let ctx = &ctx;
     let mut tracked_thread_id = req.thread_id.clone();
@@ -8457,6 +9221,7 @@ pub async fn handle_commit_preview_version(
     let mut tracked_model_id = None;
 
     let result = async {
+        let resolve_started = Instant::now();
         let preview = resolve_session_render_preview_for_request(
             state,
             ctx,
@@ -8469,6 +9234,16 @@ pub async fn handle_commit_preview_version(
                 "No preview draft is available for this MCP session. Render a preview before commit_preview_version.",
             )
         })?;
+        push_mcp_profile(
+            state,
+            ctx,
+            "commit_preview_version",
+            "resolve_preview",
+            resolve_started,
+            Some(&preview.thread_id),
+            Some(&preview.preview_id),
+            Some(&preview.artifact_bundle.model_id),
+        );
 
         tracked_thread_id = Some(preview.thread_id.clone());
         tracked_message_id = Some(preview.preview_id.clone());
@@ -8497,6 +9272,7 @@ pub async fn handle_commit_preview_version(
             design_output.version_name.clear();
         }
 
+        let save_started = Instant::now();
         let save_result = save_or_update_agent_version_for_session(
             state,
             app,
@@ -8518,8 +9294,29 @@ pub async fn handle_commit_preview_version(
             },
         )
         .await?;
+        push_mcp_profile(
+            state,
+            ctx,
+            "commit_preview_version",
+            "save_or_update_version",
+            save_started,
+            Some(&preview.thread_id),
+            Some(&save_result.message_id),
+            save_result.model_id.as_deref(),
+        );
 
+        let clear_started = Instant::now();
         clear_session_render_preview_durable(state, &ctx.session_id).await?;
+        push_mcp_profile(
+            state,
+            ctx,
+            "commit_preview_version",
+            "clear_preview_draft",
+            clear_started,
+            Some(&preview.thread_id),
+            Some(&save_result.message_id),
+            save_result.model_id.as_deref(),
+        );
         tracked_message_id = Some(save_result.message_id.clone());
         tracked_model_id = save_result.model_id.clone();
 
@@ -8530,6 +9327,21 @@ pub async fn handle_commit_preview_version(
         })
     }
     .await;
+
+    push_mcp_profile(
+        state,
+        ctx,
+        "commit_preview_version",
+        if result.is_ok() {
+            "total_ok"
+        } else {
+            "total_err"
+        },
+        total_started,
+        tracked_thread_id.as_deref(),
+        tracked_message_id.as_deref(),
+        tracked_model_id.as_deref(),
+    );
 
     if let Err(err) = &result {
         let conn = state.db.lock().await;
@@ -9829,7 +10641,10 @@ pub fn handle_verify_generated_model(
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let artifact_digest = artifact_bundle_digest(&bundle);
-    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
+    let result =
+        crate::services::author_verification_foundation::verify_structure_with_author_verification(
+            &bundle, &manifest,
+        );
     Ok(VerifyGeneratedModelResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
@@ -9849,7 +10664,10 @@ pub fn handle_structural_verification_summary(
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let artifact_digest = artifact_bundle_digest(&bundle);
-    let result = crate::services::structural_verification::verify_structure(&bundle, &manifest);
+    let result =
+        crate::services::author_verification_foundation::verify_structure_with_author_verification(
+            &bundle, &manifest,
+        );
     Ok(StructuralVerificationSummaryResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
@@ -10520,6 +11338,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
@@ -10866,6 +11685,65 @@ mod tests {
 
     async fn seed_target() -> (AppState, TestPathResolver) {
         seed_target_with_macro("Base Pot", "V-base", "base_macro()").await
+    }
+
+    async fn seed_ecky_verify_target(
+        source: &str,
+        model_id: &str,
+        preview_name: &str,
+        include_step_export: bool,
+    ) -> (AppState, TestPathResolver) {
+        let (state, resolver) = seed_target_with_macro("Verify Target", "V-verify", source).await;
+        let preview_stl_path = resolver.root.join(preview_name);
+        write_closed_tetra_binary_stl(&preview_stl_path);
+        let source_path = resolver.root.join(format!("{model_id}.ecky"));
+        fs::write(&source_path, source).expect("write ecky source");
+
+        let mut design = sample_design("Verify Target", "V-verify", source);
+        design.macro_dialect = MacroDialect::EckyIrV0;
+        design.engine_kind = crate::models::EngineKind::EckyIrV0;
+        design.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        design.source_language = crate::models::SourceLanguage::EckyIrV0;
+        design.post_processing = None;
+
+        let mut bundle = sample_bundle(model_id, preview_name);
+        bundle.engine_kind = crate::models::EngineKind::EckyIrV0;
+        bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        bundle.source_language = crate::models::SourceLanguage::EckyIrV0;
+        bundle.content_hash = format!("verify-{model_id}");
+        bundle.macro_path = Some(source_path.display().to_string());
+        bundle.preview_stl_path = preview_stl_path.display().to_string();
+        if include_step_export {
+            bundle.export_artifacts.push(crate::models::ExportArtifact {
+                label: "STEP".to_string(),
+                format: "step".to_string(),
+                path: format!("/tmp/{model_id}.step"),
+                role: "cad-exchange".to_string(),
+            });
+        }
+
+        let mut manifest = sample_manifest(model_id);
+        manifest.engine_kind = crate::models::EngineKind::EckyIrV0;
+        manifest.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
+        manifest.source_digest = Some(crate::mcp::macro_buffer::source_digest(source));
+
+        crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
+            .expect("runtime bundle");
+        {
+            let conn = state.db.lock().await;
+            conn.execute(
+                "UPDATE messages SET output = ?1, artifact_bundle = ?2, model_manifest = ?3 WHERE id = 'msg-1'",
+                rusqlite::params![
+                    serde_json::to_string(&design).expect("design json"),
+                    serde_json::to_string(&bundle).expect("bundle json"),
+                    serde_json::to_string(&manifest).expect("manifest json"),
+                ],
+            )
+            .expect("update verify target");
+        }
+
+        (state, resolver)
     }
 
     #[test]
@@ -13179,6 +14057,244 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn given_relation_row_when_ecky_constraints_validate_then_row_includes_relation_metadata()
+    {
+        let (state, resolver) = seed_target_with_macro(
+            "Relation metadata",
+            "V-relation-metadata",
+            "(model (params (number lens_bore_d 8) (number tunnel_aperture_h 10) :relations ((< lens_bore_d tunnel_aperture_h))) (part body (box lens_bore_d 2 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let relation = response
+            .rows
+            .iter()
+            .find(|row| row.path == "/params/:relations/0")
+            .expect("relation row");
+        let value = serde_json::to_value(relation).expect("row json");
+
+        assert_eq!(value["constraintId"], "relation_0");
+        assert_eq!(value["label"], "Relation #1");
+        assert_eq!(value["kind"], "relation");
+        assert!(value["sourceStableNodeKey"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty()));
+        assert_eq!(
+            value["dependsOnParamKeys"],
+            serde_json::json!(["lens_bore_d", "tunnel_aperture_h"])
+        );
+        assert!(value["affectsStableNodeKeys"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn given_repeated_anonymous_delta_when_ecky_constraints_validate_then_authoring_lint_suggests_holder_margin_x(
+    ) {
+        let (state, resolver) = seed_target_with_macro(
+            "Anonymous delta lint",
+            "V-anonymous-delta-lint",
+            "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) (+ holder_w 12) 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let value = serde_json::to_value(response).expect("response json");
+        let lints = value["authoringLints"]
+            .as_array()
+            .expect("authoring lints array");
+        assert!(
+            !lints.is_empty(),
+            "expected at least one authoring lint for repeated anonymous delta"
+        );
+        assert!(lints.iter().any(|lint| {
+            lint["kind"] == "anonymousDelta"
+                && lint["paramKey"] == "holder_w"
+                && lint["delta"] == 12.0
+                && lint["suggestedParamKey"] == "holder_margin_x"
+        }));
+    }
+
+    #[tokio::test]
+    async fn given_single_anonymous_delta_when_ecky_constraints_validate_then_no_authoring_lint() {
+        let (state, resolver) = seed_target_with_macro(
+            "Anonymous delta no lint",
+            "V-anonymous-delta-no-lint",
+            "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) 8 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let value = serde_json::to_value(response).expect("response json");
+        assert_eq!(value["authoringLints"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn given_repeated_anonymous_delta_when_preview_stored_then_draft_feedback_payload_includes_authoring_lints(
+    ) {
+        let (state, resolver) = seed_target_with_macro(
+            "Anonymous delta draft feedback lint",
+            "V-anonymous-delta-feedback-lint",
+            "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) (+ holder_w 12) 3)))",
+        )
+        .await;
+        let ctx = test_ctx();
+
+        let mut design_output = sample_design(
+            "Anonymous delta draft feedback lint",
+            "",
+            "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) (+ holder_w 12) 3)))",
+        );
+        design_output.macro_dialect = MacroDialect::EckyIrV0;
+        design_output.engine_kind = crate::models::EngineKind::EckyIrV0;
+        design_output.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        design_output.source_language = crate::models::SourceLanguage::EckyIrV0;
+
+        let preview = store_session_render_preview(
+            &state,
+            &resolver,
+            &ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: "thread-1".to_string(),
+                base_message_id: Some("msg-1".to_string()),
+                design_output: design_output.clone(),
+                artifact_bundle: sample_bundle("model-feedback-lint", "feedback-lint.stl"),
+                model_manifest: sample_manifest("model-feedback-lint"),
+                draft_feedback: Some(DraftFeedbackSeed {
+                    status: crate::models::AgentDraftFeedbackStatus::Warning,
+                    summary: "Draft warnings.".to_string(),
+                    items: Vec::new(),
+                    authoring_lints: Vec::new(),
+                    source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+                }),
+            },
+        )
+        .await
+        .expect("store preview");
+
+        let event = crate::contracts::AgentDraftPreviewUpdatedEvent {
+            session_id: preview.session_id.clone(),
+            thread_id: preview.thread_id.clone(),
+            preview_id: preview.preview_id.clone(),
+            base_message_id: preview.base_message_id.clone(),
+            model_id: Some(preview.artifact_bundle.model_id.clone()),
+            design: preview.design_output.clone(),
+            artifact_bundle: preview.artifact_bundle.clone(),
+            model_manifest: preview.model_manifest.clone(),
+            feedback: preview.draft_feedback.clone(),
+        };
+        let value = serde_json::to_value(&event).expect("event json");
+        let lints = value["feedback"]["authoringLints"]
+            .as_array()
+            .expect("authoring lints array");
+
+        assert!(lints.iter().any(|lint| {
+            lint["kind"] == "anonymousDelta"
+                && lint["paramKey"] == "holder_w"
+                && lint["delta"] == 12.0
+                && lint["suggestedParamKey"] == "holder_margin_x"
+        }));
+    }
+
+    #[tokio::test]
+    async fn given_no_repeated_anonymous_delta_when_preview_stored_then_draft_feedback_payload_has_empty_authoring_lints(
+    ) {
+        let (state, resolver) = seed_target_with_macro(
+            "Anonymous delta draft feedback no lint",
+            "V-anonymous-delta-feedback-no-lint",
+            "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) 8 3)))",
+        )
+        .await;
+        let ctx = test_ctx();
+
+        let mut design_output = sample_design(
+            "Anonymous delta draft feedback no lint",
+            "",
+            "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) 8 3)))",
+        );
+        design_output.macro_dialect = MacroDialect::EckyIrV0;
+        design_output.engine_kind = crate::models::EngineKind::EckyIrV0;
+        design_output.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        design_output.source_language = crate::models::SourceLanguage::EckyIrV0;
+
+        let preview = store_session_render_preview(
+            &state,
+            &resolver,
+            &ctx,
+            StoreSessionRenderPreviewRequest {
+                thread_id: "thread-1".to_string(),
+                base_message_id: Some("msg-1".to_string()),
+                design_output: design_output.clone(),
+                artifact_bundle: sample_bundle("model-feedback-no-lint", "feedback-no-lint.stl"),
+                model_manifest: sample_manifest("model-feedback-no-lint"),
+                draft_feedback: Some(DraftFeedbackSeed {
+                    status: crate::models::AgentDraftFeedbackStatus::Passed,
+                    summary: "Draft passed.".to_string(),
+                    items: Vec::new(),
+                    authoring_lints: Vec::new(),
+                    source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+                }),
+            },
+        )
+        .await
+        .expect("store preview");
+
+        let event = crate::contracts::AgentDraftPreviewUpdatedEvent {
+            session_id: preview.session_id.clone(),
+            thread_id: preview.thread_id.clone(),
+            preview_id: preview.preview_id.clone(),
+            base_message_id: preview.base_message_id.clone(),
+            model_id: Some(preview.artifact_bundle.model_id.clone()),
+            design: preview.design_output.clone(),
+            artifact_bundle: preview.artifact_bundle.clone(),
+            model_manifest: preview.model_manifest.clone(),
+            feedback: preview.draft_feedback.clone(),
+        };
+        let value = serde_json::to_value(&event).expect("event json");
+        assert_eq!(value["feedback"]["authoringLints"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
     async fn given_physical_decision_calibration_defaults_when_ecky_constraints_validate_then_relation_rows_pass(
     ) {
         let source =
@@ -14486,6 +15602,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn given_macro_preview_on_existing_target_when_agent_passes_parameters_then_current_values_win(
+    ) {
+        let source =
+            "(model (params (number width 10) (number height 3)) (part body (box width height 2)))";
+        let (state, resolver) =
+            seed_target_with_macro("Macro Params", "V-macro-params", source).await;
+        {
+            let conn = state.db.lock().await;
+            let mut messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
+            let mut message = messages.pop().expect("seed message");
+            let mut output = message.output.take().expect("output");
+            output
+                .initial_params
+                .insert("width".to_string(), ParamValue::Number(42.0));
+            output
+                .initial_params
+                .insert("height".to_string(), ParamValue::Number(9.0));
+            db::update_message_status_and_output(
+                &conn,
+                "msg-1",
+                db::MessageStatusUpdate {
+                    status: &MessageStatus::Success,
+                    output: Some(&output),
+                    usage: None,
+                    artifact_bundle: message.artifact_bundle.as_ref(),
+                    model_manifest: message.model_manifest.as_ref(),
+                    visual_kind: None,
+                    content: Some("Base version"),
+                },
+            )
+            .expect("update params");
+        }
+
+        let preview = handle_macro_preview_render(
+            &state,
+            &resolver,
+            MacroReplaceRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                macro_code:
+                    "(model (params (number width 10) (number height 3)) (part body (box width height 4)))"
+                        .to_string(),
+                macro_dialect: Some(MacroDialect::EckyIrV0),
+                ui_spec: None,
+                parameters: Some(BTreeMap::from([
+                    ("width".to_string(), ParamValue::Number(999.0)),
+                    ("height".to_string(), ParamValue::Number(888.0)),
+                ])),
+                post_processing: None,
+                geometry_backend: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("macro preview");
+
+        assert_eq!(
+            preview.initial_params.get("width"),
+            Some(&ParamValue::Number(42.0))
+        );
+        assert_eq!(
+            preview.initial_params.get("height"),
+            Some(&ParamValue::Number(9.0))
+        );
+    }
+
+    #[tokio::test]
+    async fn given_macro_preview_adds_first_params_to_existing_target_then_new_macro_defaults_win()
+    {
+        let source = "(model (part body (box 1 2 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("First Params", "V-first-params", source).await;
+        {
+            let conn = state.db.lock().await;
+            let mut messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
+            let mut message = messages.pop().expect("seed message");
+            let mut output = message.output.take().expect("output");
+            output.initial_params.clear();
+            db::update_message_status_and_output(
+                &conn,
+                "msg-1",
+                db::MessageStatusUpdate {
+                    status: &MessageStatus::Success,
+                    output: Some(&output),
+                    usage: None,
+                    artifact_bundle: message.artifact_bundle.as_ref(),
+                    model_manifest: message.model_manifest.as_ref(),
+                    visual_kind: None,
+                    content: Some("Base version"),
+                },
+            )
+            .expect("clear params");
+        }
+
+        let preview = handle_macro_preview_render(
+            &state,
+            &resolver,
+            MacroReplaceRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                macro_code:
+                    "(model (params (number width 100) (number height 7)) (part body (box width height 4)))"
+                        .to_string(),
+                macro_dialect: Some(MacroDialect::EckyIrV0),
+                ui_spec: None,
+                parameters: Some(BTreeMap::from([
+                    ("width".to_string(), ParamValue::Number(999.0)),
+                    ("height".to_string(), ParamValue::Number(888.0)),
+                ])),
+                post_processing: None,
+                geometry_backend: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("macro preview");
+
+        assert_eq!(
+            preview.initial_params.get("width"),
+            Some(&ParamValue::Number(100.0))
+        );
+        assert_eq!(
+            preview.initial_params.get("height"),
+            Some(&ParamValue::Number(7.0))
+        );
+    }
+
+    #[tokio::test]
     async fn given_lens_bore_patch_when_ecky_ast_patch_validate_then_dependency_scope_stays_on_bore_controls(
     ) {
         let source = "(model (params (number lens_bore_d 42) (number wall_t 3)) (part bore_carrier (cylinder lens_bore_d 6)) (part wall (box wall_t wall_t 4)))";
@@ -14950,6 +16196,7 @@ mod tests {
                 thread_id: Some("thread-1".to_string()),
                 message_id: Some("msg-1".to_string()),
                 section: TargetDetailSection::UiSpec,
+                shape_graph_filters: None,
             },
             &test_ctx(),
         )
@@ -14981,6 +16228,7 @@ mod tests {
                 thread_id: Some("thread-1".to_string()),
                 message_id: Some("msg-1".to_string()),
                 section: TargetDetailSection::InitialParams,
+                shape_graph_filters: None,
             },
             &test_ctx(),
         )
@@ -15006,6 +16254,7 @@ mod tests {
                 thread_id: Some("thread-1".to_string()),
                 message_id: Some("msg-1".to_string()),
                 section: TargetDetailSection::ArtifactBundle,
+                shape_graph_filters: None,
             },
             &test_ctx(),
         )
@@ -15030,6 +16279,195 @@ mod tests {
         assert!(value.get("uiSpec").is_none());
         assert!(value.get("initialParams").is_none());
         assert!(value.get("latestDraft").is_none());
+    }
+
+    #[tokio::test]
+    async fn target_detail_get_shape_graph_returns_compact_packet_without_source_text() {
+        let source = "(model (params (number holder_w 40) (number holder_h 20) :relations ((< holder_h holder_w))) (part body (box holder_w holder_h 3)))";
+        let (state, resolver) = seed_target_with_macro("ShapeGraph", "V-shape-graph", source).await;
+        let response = handle_target_detail_get(
+            &state,
+            &resolver,
+            TargetDetailRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                section: TargetDetailSection::ShapeGraph,
+                shape_graph_filters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("target shape graph detail");
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["section"], "shapeGraph");
+        assert!(value.get("macroCode").is_none());
+        assert!(value.get("uiSpec").is_none());
+        assert_eq!(value["shapeGraph"]["parts"]["items"][0]["partId"], "body");
+        assert_eq!(
+            value["shapeGraph"]["constraints"]["items"][0]["kind"],
+            "relation"
+        );
+        assert_eq!(
+            value["shapeGraph"]["dependencies"]["items"][0]["parameterKey"],
+            "holder_w"
+        );
+        assert!(value["shapeGraph"]["sourceDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(value["shapeGraph"]["coreDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn target_detail_get_shape_graph_honors_section_filters() {
+        let source = "(model (params (number holder_w 40) (number holder_h 20) :relations ((< holder_h holder_w))) (part body (box holder_w holder_h 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("ShapeGraphFilter", "V-shape-graph-filter", source).await;
+        let response = handle_target_detail_get(
+            &state,
+            &resolver,
+            TargetDetailRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                section: TargetDetailSection::ShapeGraph,
+                shape_graph_filters: Some(vec![ShapeGraphFilterSection::Constraints]),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("target filtered shape graph detail");
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["section"], "shapeGraph");
+        assert!(value["shapeGraph"].get("constraints").is_some());
+        assert!(value["shapeGraph"].get("parts").is_none());
+        assert!(value["shapeGraph"].get("instances").is_none());
+        assert!(value["shapeGraph"].get("dependencies").is_none());
+    }
+
+    #[tokio::test]
+    async fn given_agent_needs_intent_without_full_source_when_target_detail_get_section_shape_graph_then_returns_parts_constraints_dependencies_without_macro_or_source_payload(
+    ) {
+        let source = "(model (params (number holder_w 40) (number holder_h 20) :relations ((< holder_h holder_w))) (part body (box holder_w holder_h 3)))";
+        let (state, resolver) =
+            seed_target_with_macro("ShapeGraphIntent", "V-shape-graph-intent", source).await;
+        let response = handle_target_detail_get(
+            &state,
+            &resolver,
+            TargetDetailRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                section: TargetDetailSection::ShapeGraph,
+                shape_graph_filters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("target shape graph detail");
+
+        let value = serde_json::to_value(&response).expect("response json");
+        assert_eq!(value["section"], "shapeGraph");
+        assert!(value["shapeGraph"].get("parts").is_some());
+        assert!(value["shapeGraph"].get("constraints").is_some());
+        assert!(value["shapeGraph"].get("dependencies").is_some());
+        assert!(value.get("macroCode").is_none());
+        assert!(value.get("macro_code").is_none());
+        assert!(value["shapeGraph"]["parts"]["items"][0]
+            .get("source")
+            .is_none());
+        assert!(value["shapeGraph"]["constraints"]["items"][0]
+            .get("source")
+            .is_none());
+        assert!(value["shapeGraph"]["dependencies"]["items"][0]
+            .get("source")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn given_agent_validates_physical_edits_when_ecky_constraints_validate_with_repeated_anonymous_offsets_then_returns_actionable_authoring_lint_and_relation_metadata(
+    ) {
+        let (state, resolver) = seed_target_with_macro(
+            "Anonymous delta relation metadata",
+            "V-anonymous-delta-relation-metadata",
+            "(model (params (number holder_w 40) (number holder_h 20) :relations ((< holder_h holder_w))) (part holder (box (+ holder_w 12) (+ holder_w 12) 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        let relation = response
+            .rows
+            .iter()
+            .find(|row| row.path == "/params/:relations/0")
+            .expect("relation row");
+        assert_eq!(relation.constraint_id.as_deref(), Some("relation_0"));
+        assert_eq!(relation.kind.as_deref(), Some("relation"));
+        assert_eq!(
+            relation.depends_on_param_keys,
+            vec!["holder_h".to_string(), "holder_w".to_string()]
+        );
+        assert!(relation
+            .source_stable_node_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty()));
+        assert!(!relation.affects_stable_node_keys.is_empty());
+
+        let lint = response
+            .authoring_lints
+            .iter()
+            .find(|lint| {
+                lint.kind == "anonymousDelta" && lint.param_key == "holder_w" && lint.delta == 12.0
+            })
+            .expect("anonymous delta lint");
+        assert_eq!(lint.suggested_param_key, "holder_margin_x");
+        assert!(lint.message.contains("holder_margin_x"));
+        assert!(!lint.source_stable_node_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_no_repeated_offsets_when_ecky_constraints_validate_then_returns_no_authoring_lint_noise(
+    ) {
+        let (state, resolver) = seed_target_with_macro(
+            "No repeated anonymous delta",
+            "V-no-repeated-anonymous-delta",
+            "(model (params (number holder_w 40) (number holder_h 20) :relations ((< holder_h holder_w))) (part holder (box (+ holder_w 12) holder_h 3)))",
+        )
+        .await;
+
+        let response = handle_ecky_constraints_validate(
+            &state,
+            &resolver,
+            EckyConstraintsValidateRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                parameters: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("constraint validation");
+
+        assert!(response.authoring_lints.is_empty());
     }
 
     #[tokio::test]
@@ -15601,6 +17039,83 @@ mod tests {
             response.artifact_digest.step_export_path.as_deref(),
             Some("/tmp/generated-verify.step")
         );
+    }
+
+    #[tokio::test]
+    async fn verify_generated_model_merges_authored_verify_failure_into_structural_result() {
+        let source = r#"
+            (model
+              (verify
+                (tag body_shell)
+                (metric check (manifest has-step))
+                (expect check (= false)))
+              (part body (box 10 10 10)))
+        "#;
+        let model_id = "generated-authored-verify-fail";
+        let (state, resolver) =
+            seed_ecky_verify_target(source, model_id, "authored-verify-fail.stl", true).await;
+
+        let response =
+            handle_verify_generated_model(&state, &resolver, "thread-1", "msg-1", model_id, "")
+                .expect("verification response");
+
+        assert!(!response.result.passed);
+        assert!(response
+            .result
+            .issues
+            .iter()
+            .any(|issue| issue.code == "AUTHORED_VERIFY_FAILED"));
+        assert!(response.result.summary.contains("AUTHORED_VERIFY_FAILED"));
+    }
+
+    #[tokio::test]
+    async fn verify_generated_model_surfaces_authored_verify_errors() {
+        let source = r#"
+            (model
+              (verify
+                (tag body_shell)
+                (metric check (bogus has-step))
+                (expect check (= true)))
+              (part body (box 10 10 10)))
+        "#;
+        let model_id = "generated-authored-verify-error";
+        let (state, resolver) =
+            seed_ecky_verify_target(source, model_id, "authored-verify-error.stl", true).await;
+
+        let response =
+            handle_verify_generated_model(&state, &resolver, "thread-1", "msg-1", model_id, "")
+                .expect("verification response");
+
+        assert!(!response.result.passed);
+        assert!(response
+            .result
+            .issues
+            .iter()
+            .any(|issue| issue.code == "AUTHORED_VERIFY_ERROR"));
+    }
+
+    #[tokio::test]
+    async fn structural_verification_summary_reflects_authored_verify_failures() {
+        let source = r#"
+            (model
+              (verify
+                (tag body_shell)
+                (metric check (manifest has-step))
+                (expect check (= false)))
+              (part body (box 10 10 10)))
+        "#;
+        let model_id = "generated-authored-verify-summary";
+        let (state, resolver) =
+            seed_ecky_verify_target(source, model_id, "authored-verify-summary.stl", true).await;
+
+        let response = handle_structural_verification_summary(
+            &state, &resolver, "thread-1", "msg-1", model_id,
+        )
+        .expect("verification summary");
+
+        assert!(!response.passed);
+        assert_eq!(response.issue_count, 1);
+        assert!(response.summary.contains("AUTHORED_VERIFY_FAILED"));
     }
 
     #[tokio::test]
@@ -16443,6 +17958,7 @@ mod tests {
                 thread_id: Some("thread-1".to_string()),
                 message_id: Some("msg-1".to_string()),
                 section: TargetDetailSection::LatestDraft,
+                shape_graph_filters: None,
             },
             &test_ctx(),
         )
@@ -16474,6 +17990,7 @@ mod tests {
                 thread_id: Some("thread-1".to_string()),
                 message_id: Some("msg-1".to_string()),
                 section: TargetDetailSection::LatestDraft,
+                shape_graph_filters: None,
             },
             &test_ctx(),
         )
@@ -16597,6 +18114,7 @@ mod tests {
                         code: "non_manifold".to_string(),
                         message: "Mesh contains a non-manifold edge.".to_string(),
                     }],
+                    authoring_lints: Vec::new(),
                     source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
                 }),
             },

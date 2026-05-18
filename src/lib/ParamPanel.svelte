@@ -158,8 +158,8 @@
     onSelectPart?: (partId: string | null) => void;
     onSemanticChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
     onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
-    onchange?: (params: DesignParams) => Promise<void> | void;
-    oncommit?: (params: DesignParams) => Promise<void> | void;
+    onchange?: (params: DesignParams) => Promise<boolean | void> | boolean | void;
+    oncommit?: (params: DesignParams) => Promise<boolean | void> | boolean | void;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
     onpostprocessingchange?: (postProcessing: PostProcessingSpec | null) => void;
     onShowCode?: () => void;
@@ -1172,15 +1172,16 @@
     const paramsToApply = cloneParams(effectiveLocalParams);
     console.log('ParamPanel: applyChanges clicked', { localParams: paramsToApply, hasPendingChanges, live: $liveApply });
     if (onchange) {
-      if (!paramsEqual(paramsToApply, parameters)) {
-        pushParamHistory(parameters);
-      }
-      localParams = paramsToApply;
-      pendingParamDrafts = {};
       applying = true;
       session.setError(null);
       try {
-        await onchange(paramsToApply);
+        const applied = await onchange(paramsToApply);
+        if (applied === false) return;
+        if (!paramsEqual(paramsToApply, parameters)) {
+          pushParamHistory(parameters);
+        }
+        localParams = paramsToApply;
+        pendingParamDrafts = {};
       } catch (e: unknown) {
         console.error('ParamPanel: onchange failed', e);
         session.setError(`Apply Failed: ${formatBackendError(e)}`);
@@ -1223,13 +1224,14 @@
   async function commitChanges() {
     if (committing) return;
     const paramsToCommit = cloneParams(effectiveLocalParams);
-    localParams = paramsToCommit;
-    pendingParamDrafts = {};
     if (oncommit) {
       committing = true;
       session.setError(null);
       try {
-        await oncommit(paramsToCommit);
+        const committed = await oncommit(paramsToCommit);
+        if (committed === false) return;
+        localParams = paramsToCommit;
+        pendingParamDrafts = {};
       } catch (e: unknown) {
         console.error('ParamPanel: oncommit failed', e);
         session.setError(`Commit Failed: ${formatBackendError(e)}`);
@@ -2505,7 +2507,7 @@
                     onclick={async () => {
                       const file = await open({
                         multiple: false,
-                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
                       });
                       const selected = firstSelectedPath(file);
                       if (selected) setLithophaneImage(activeLitho.id, selected);
@@ -2983,7 +2985,7 @@
                     onPickImage={async () => {
                       const file = await open({
                         multiple: false,
-                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
                       });
                       const selected = firstSelectedPath(file);
                       if (selected) updateSemanticControl(control, selected);
@@ -3032,7 +3034,7 @@
                 onPickImage={async () => {
                   const file = await open({
                     multiple: false,
-                    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
                   });
                   const selected = firstSelectedPath(file);
                   if (selected) update(field.key, selected);
@@ -3071,7 +3073,7 @@
             onPickImage={async () => {
               const file = await open({
                 multiple: false,
-                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
               });
               const selected = firstSelectedPath(file);
               if (selected) update(field.key, selected);
@@ -3299,9 +3301,11 @@
 
   .context-strip-head {
     display: flex;
-    align-items: center;
+    flex-wrap: wrap;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 8px;
+    min-width: 0;
   }
 
   .context-strip-actions {
@@ -3309,17 +3313,22 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
+    min-width: 0;
   }
 
   .panel-mode-tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
-    overflow: hidden;
-    align-items: center;
+    overflow: visible;
+    align-items: stretch;
+    min-width: 0;
   }
 
   .panel-mode-tab {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
     padding: 5px 10px;
     border: 1px solid var(--bg-300);
     background: var(--bg-200);
@@ -3327,6 +3336,8 @@
     font-size: 0.62rem;
     font-weight: 700;
     letter-spacing: 0.08em;
+    line-height: 1.3;
+    text-align: left;
     cursor: pointer;
   }
 
@@ -3501,13 +3512,16 @@
     cursor: pointer;
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
   }
 
   .view-chip {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
     gap: 6px;
   }
 
@@ -3549,9 +3563,11 @@
 
   .controls-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     justify-content: space-between;
     gap: 8px;
+    min-width: 0;
   }
 
   .controls-head-secondary {
@@ -3580,7 +3596,7 @@
 
   .param-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
     gap: 12px;
     overflow: visible;
   }
@@ -3636,7 +3652,7 @@
   .field-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
   }
 
@@ -3666,9 +3682,11 @@
     color: var(--primary);
     text-transform: uppercase;
     font-weight: bold;
-    white-space: nowrap;
+    white-space: normal;
     overflow: hidden;
-    text-overflow: ellipsis;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
     letter-spacing: 0.01em;
   }
 

@@ -112,10 +112,14 @@ function findDirectIssuePrimitive(sketch: SketchDefinition, issue: SketchValidat
   const directPrimitive = (sketch.primitives ?? []).find((primitive) => primitive.primitiveId === issue.primitiveId);
   if (!directPrimitive) return null;
   if (issue.topology) {
-    return primitiveMatchesIssueTopology(directPrimitive, issue.topology) ? directPrimitive : null;
+    return directPrimitive.topology && !primitiveMatchesIssueTopology(directPrimitive, issue.topology)
+      ? null
+      : directPrimitive;
   }
   if (issue.edgeId) {
-    return primitiveMatchesIssueEdgeId(directPrimitive, issue.edgeId) ? directPrimitive : null;
+    return directPrimitive.topology?.edgeIds?.length && !primitiveMatchesIssueEdgeId(directPrimitive, issue.edgeId)
+      ? null
+      : directPrimitive;
   }
   return directPrimitive;
 }

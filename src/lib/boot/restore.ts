@@ -151,6 +151,17 @@ async function loadConfig() {
     needsSave = true;
   }
 
+  if (typeof loadedConfig.cadTextFontPath !== 'string') {
+    loadedConfig.cadTextFontPath = '';
+    needsSave = true;
+  } else {
+    const normalizedCadTextFontPath = loadedConfig.cadTextFontPath.trim();
+    if (normalizedCadTextFontPath !== loadedConfig.cadTextFontPath) {
+      loadedConfig.cadTextFontPath = normalizedCadTextFontPath;
+      needsSave = true;
+    }
+  }
+
   if (!Array.isArray(loadedConfig.freecadLibraryRoots)) {
     loadedConfig.freecadLibraryRoots = [];
     needsSave = true;
@@ -548,7 +559,6 @@ async function fetchDefaultMacro() {
       workingCopy.patch({ macroCode: code });
       paramPanelState.hydrate({
         versionId: null,
-        macroCode: code,
         uiSpec: { fields: [] },
         params: {}
       });

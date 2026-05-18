@@ -21,9 +21,12 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
     const now = Math.floor(Date.now() / 1000);
     const calls = { queue: 0, generate: 0 };
     const invokeCalls: Array<{ cmd: string; args: unknown }> = [];
-    const latestVersion: any = [...(mockOptions.messages ?? [])]
-      .reverse()
-      .find((message: any) => message?.role === 'assistant' && message?.status === 'success' && message?.artifactBundle) ?? null;
+    let mockMessages = [...(mockOptions.messages ?? [])];
+    const latestRenderableVersion = () =>
+      [...mockMessages]
+        .reverse()
+        .find((message: any) => message?.role === 'assistant' && message?.status === 'success' && message?.artifactBundle) ?? null;
+    const latestVersion: any = latestRenderableVersion();
     const rebuiltArtifactBundle = latestVersion?.artifactBundle
       ? {
           ...latestVersion.artifactBundle,
@@ -42,7 +45,7 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
       id: 'thread-1',
       title: 'Passive MCP Thread',
       summary: 'Thread controlled by external agent.',
-      messages: mockOptions.messages ?? [],
+      messages: mockMessages,
       updatedAt: now,
       versionCount: 0,
       pendingCount: 0,
@@ -64,6 +67,16 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
     (window as Window & typeof globalThis & {
       __MOCK_AGENT_INVOKE_CALLS__?: typeof invokeCalls;
     }).__MOCK_AGENT_INVOKE_CALLS__ = invokeCalls;
+
+    const currentThread = () => ({
+      ...thread,
+      messages: mockMessages,
+      versionCount: mockMessages.filter((message: any) =>
+        message?.role === 'assistant' &&
+        message?.status === 'success' &&
+        message?.artifactBundle
+      ).length,
+    });
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
@@ -107,23 +120,27 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
       }
       if (cmd === 'check_freecad') return false;
       if (cmd === 'get_default_macro') return '(model)';
-      if (cmd === 'get_history') return [thread];
+      if (cmd === 'get_history') return [currentThread()];
       if (cmd === 'get_last_design') return null;
-      if (cmd === 'get_thread') return thread;
+      if (cmd === 'get_thread') return currentThread();
       if (cmd === 'get_thread_latest_version') {
         if (mockOptions.latestVersionDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, mockOptions.latestVersionDelayMs));
         }
-        return latestVersion;
+        return latestRenderableVersion();
       }
       if (cmd === 'get_thread_message_version') {
-        return (mockOptions.messages ?? []).find((message: any) => message?.id === args?.messageId) ?? null;
+        return mockMessages.find((message: any) => message?.id === args?.messageId) ?? null;
       }
       if (cmd === 'get_thread_messages_page') {
         if (mockOptions.messagesPageDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, mockOptions.messagesPageDelayMs));
         }
-        return { messages: mockOptions.messages ?? [], nextBefore: null, hasMore: false };
+        return { messages: mockMessages, nextBefore: null, hasMore: false };
+      }
+      if (cmd === 'delete_version') {
+        mockMessages = mockMessages.filter((message: any) => message?.id !== args?.messageId);
+        return null;
       }
       if (cmd === 'get_active_agent_sessions') {
         return [
@@ -253,8 +270,8 @@ async function drawViewportAnnotation(page: Page) {
   if (!box) {
     throw new Error('Drawing canvas missing bounding box');
   }
-  const startX = box.x + box.width * 0.78;
-  const startY = box.y + box.height * 0.68;
+  const startX = box.x + box.width * 0.22;
+  const startY = box.y + box.height * 0.38;
   const endX = startX + 70;
   const endY = startY + 40;
   await page.mouse.move(startX, startY);
@@ -483,6 +500,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     });
 
     await installPassiveThreadAgentMock(page, {
+      latestVersionDelayMs: 1500,
       messages: [
         versionMessage('version-1', 'V-1', now - 2),
         versionMessage('version-2', 'V-2', now - 1),
@@ -632,6 +650,218 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
       };
     });
     expect(invokeCallCountsAfterUpdate).toEqual(invokeCallCounts);
+  });
+
+  test('Given live apply is pending When version switches Then stale params do not render on new source', async ({ page }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const versionMessage = (id: string, versionName: string, width: number, timestamp: number) => ({
+      id,
+      role: 'assistant',
+      content: `${versionName} ready.`,
+      status: 'success',
+      output: {
+        title: 'Live Apply Guard',
+        versionName,
+        interactionMode: 'design',
+        macroCode: `print("${versionName}")`,
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        uiSpec: { fields: [{ type: 'number', key: 'width', label: 'Width' }] },
+        initialParams: { width },
+        postProcessing: null,
+      },
+      usage: null,
+      artifactBundle: {
+        modelId: `model-${id}`,
+        sourceKind: 'generated',
+        engineKind: 'ecky',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        contentHash: `hash-${id}`,
+        artifactVersion: 1,
+        fcstdPath: '',
+        manifestPath: `/mock/${id}-manifest.json`,
+        macroPath: `/mock/${id}.ecky`,
+        previewStlPath: `/mock/live-${id}.stl`,
+        viewerAssets: [],
+      },
+      modelManifest: {
+        modelId: `model-${id}`,
+        sourceKind: 'generated',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        document: {
+          documentName: 'Live Apply Guard',
+          documentLabel: 'Live Apply Guard',
+          objectCount: 1,
+          warnings: [],
+        },
+        parts: [],
+        parameterGroups: [],
+        controlPrimitives: [],
+        controlRelations: [],
+        controlViews: [],
+        selectionTargets: [],
+        advisories: [],
+        measurementAnnotations: [],
+        warnings: [],
+        enrichmentState: { status: 'none', proposals: [] },
+      },
+      agentOrigin: null,
+      imageData: null,
+      visualKind: null,
+      attachmentImages: [],
+      timestamp,
+    });
+
+    await installMockStlRoutes(page);
+    await installPassiveThreadAgentMock(page, {
+      allowRuntimeRebuild: true,
+      messages: [
+        versionMessage('version-1', 'V-1', 10, now - 2),
+        versionMessage('version-2', 'V-2', 200, now - 1),
+      ],
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+    const versionOne = page.locator('.trail-item').filter({ hasText: 'V-1' });
+    const versionTwo = page.locator('.trail-item').filter({ hasText: 'V-2' });
+    const setCurrentVersionOne = versionOne.getByRole('button', { name: 'SET CURRENT' });
+    if (await setCurrentVersionOne.count()) {
+      await setCurrentVersionOne.click();
+    }
+    await expect(versionOne.getByRole('button', { name: 'CURRENT' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.locator('.live-toggle').click();
+
+    const width = page.locator('[data-param-key="width"] input[type="number"]').first();
+    await expect(width).toHaveValue('10');
+    await width.fill('42');
+    await versionTwo.getByRole('button', { name: 'SET CURRENT' }).click();
+    await expect(versionTwo.getByRole('button', { name: 'CURRENT' })).toBeVisible();
+    await expect(width).toHaveValue('200');
+
+    await page.waitForTimeout(350);
+    const staleRender = await page.evaluate(() => {
+      const calls =
+        (window as Window & typeof globalThis & {
+          __MOCK_AGENT_INVOKE_CALLS__?: Array<{ cmd: string; args: any }>;
+        }).__MOCK_AGENT_INVOKE_CALLS__ ?? [];
+      return calls.find(
+        (call) =>
+          call.cmd === 'render_model' &&
+          call.args?.macroCode === 'print("V-2")' &&
+          call.args?.parameters?.width === 42,
+      ) ?? null;
+    });
+    expect(staleRender).toBeNull();
+  });
+
+  test('Given current version is removed When previous version becomes current Then viewport loads previous version runtime', async ({ page }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const stlRequests: string[] = [];
+    page.on('request', (request) => {
+      const url = request.url();
+      if (url.includes('/mock/delete-switch-version-')) stlRequests.push(url);
+    });
+    const versionMessage = (id: string, versionName: string, timestamp: number) => ({
+      id,
+      role: 'assistant',
+      content: `${versionName} ready.`,
+      status: 'success',
+      output: {
+        title: 'Delete Switch Guard',
+        versionName,
+        interactionMode: 'design',
+        macroCode: '(model)',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        uiSpec: { fields: [] },
+        initialParams: {},
+        postProcessing: null,
+      },
+      usage: null,
+      artifactBundle: {
+        modelId: `model-${id}`,
+        sourceKind: 'generated',
+        engineKind: 'ecky',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        contentHash: `hash-${id}`,
+        artifactVersion: 1,
+        fcstdPath: '',
+        manifestPath: `/mock/${id}-manifest.json`,
+        macroPath: `/mock/${id}.ecky`,
+        previewStlPath: `/mock/delete-switch-${id}.stl`,
+        viewerAssets: [],
+      },
+      modelManifest: {
+        modelId: `model-${id}`,
+        sourceKind: 'generated',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        document: {
+          documentName: 'Delete Switch Guard',
+          documentLabel: 'Delete Switch Guard',
+          objectCount: 1,
+          warnings: [],
+        },
+        parts: [],
+        parameterGroups: [],
+        controlPrimitives: [],
+        controlRelations: [],
+        controlViews: [],
+        selectionTargets: [],
+        advisories: [],
+        measurementAnnotations: [],
+        warnings: [],
+        enrichmentState: { status: 'none', proposals: [] },
+      },
+      agentOrigin: null,
+      imageData: null,
+      visualKind: null,
+      attachmentImages: [],
+      timestamp,
+    });
+
+    await installPassiveThreadAgentMock(page, {
+      messages: [
+        versionMessage('version-1', 'V-1', now - 2),
+        versionMessage('version-2', 'V-2', now - 1),
+      ],
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    const visibleViewer = page.locator('.viewer-shell').first();
+    await expect(page.locator('.viewer-shell canvas')).toBeVisible();
+    await expect.poll(() => stlRequests.some((url) => url.includes('delete-switch-version-2.stl'))).toBe(true);
+    await expect(visibleViewer).toHaveAttribute('data-stl-url', /delete-switch-version-2\.stl/);
+
+    const versionOne = page.locator('.trail-item').filter({ hasText: 'V-1' });
+    const versionTwo = page.locator('.trail-item').filter({ hasText: 'V-2' });
+    await expect(versionTwo.getByRole('button', { name: 'CURRENT' })).toBeVisible();
+
+    await page.locator('.version-nav__actions .delete-btn').click();
+    await page.getByRole('dialog', { name: /Remove From Carousel/i }).getByRole('button', { name: 'REMOVE' }).click();
+
+    await expect(visibleViewer).not.toHaveAttribute('data-stl-url', /delete-switch-version-2\.stl/, { timeout: 500 });
+    await expect(versionOne.getByRole('button', { name: 'CURRENT' })).toBeVisible();
+    await expect.poll(() => stlRequests.some((url) => url.includes('delete-switch-version-1.stl'))).toBe(true);
+    await expect(visibleViewer).toHaveAttribute('data-stl-url', /delete-switch-version-1\.stl/);
   });
 
   test('Given version runtime is missing When view opens preview Then loupe rebuilds runtime instead of showing empty artifact state', async ({ page }) => {
@@ -850,7 +1080,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
   test('Given thread messages are still backfilling When project opens Then current version and viewport appear before history finishes', async ({ page }) => {
     const now = Math.floor(Date.now() / 1000);
     await installPassiveThreadAgentMock(page, {
-      messagesPageDelayMs: 2000,
+      messagesPageDelayMs: 8000,
       messages: [
         {
           id: 'version-current-fast-open',
@@ -922,12 +1152,12 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.getByRole('button', { name: 'OPEN' }).click();
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.thread-loading')).toContainText('LOADING THREAD MESSAGES');
 
     const versionItem = page.locator('.trail-item').filter({ hasText: 'Fast Open Thread' });
     await expect(versionItem.getByRole('button', { name: 'CURRENT' })).toBeVisible();
     await expect(versionItem.getByRole('button', { name: 'CODE' })).toBeVisible();
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
-    await expect(page.locator('.thread-loading')).toContainText('LOADING THREAD MESSAGES');
   });
 
   test('Given projects prefetched latest version When open thread has slow latest and page calls Then dialogue still boots from cache', async ({ page }) => {

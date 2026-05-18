@@ -70,7 +70,7 @@ test('buildExportChooserOptions reports direct OCCT blocker for mesh STEP export
   assert.equal(step?.disabled, true);
   assert.equal(
     step?.disabledReason,
-    'STEP unavailable for mesh/EckyRust render: Direct OCCT unavailable: missing TKDESTEP',
+    'STEP unavailable for Ecky Native render: Direct OCCT unavailable: missing TKDESTEP',
   );
 });
 
@@ -87,7 +87,7 @@ test('buildExportChooserOptions reports mesh-only bundle when direct OCCT is ava
   assert.equal(step?.disabled, true);
   assert.equal(
     step?.disabledReason,
-    'STEP unavailable for mesh/EckyRust render: no BRep STEP artifact was produced.',
+    'STEP unavailable for Ecky Native render: no BRep STEP artifact was produced.',
   );
 });
 

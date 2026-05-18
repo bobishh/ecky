@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::fs;
 
+use crate::ecky_cad_host::svg_profile::{parse_svg_profile, SvgFitMode};
+use crate::ecky_cad_host::text_profile::parse_text_profile;
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp,
     CoreNode, CoreNodeKind, CoreOperation, CoreParameterKind, CorePart, CorePathOp, CorePrimitive,
@@ -64,6 +67,7 @@ pub enum OcctOp {
     Polygon,
     Profile,
     MakeFace,
+    ImportStl,
     Extrude,
     Revolve,
     Loft,
@@ -72,6 +76,7 @@ pub enum OcctOp {
     Taper,
     Offset,
     Path,
+    HelixPath,
     BezierPath,
     Bspline,
     Plane,
@@ -186,8 +191,9 @@ pub fn plan_core_program_with_params(
     program: &CoreProgram,
     parameters: &DesignParams,
 ) -> AppResult<OcctPlan> {
-    let expanded = expand_core_program_for_direct_occt(program, parameters)?;
-    plan_expanded_core_program(&expanded)
+    let normalized =
+        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)?;
+    plan_expanded_core_program(&normalized)
 }
 
 fn plan_expanded_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
@@ -374,6 +380,31 @@ fn expand_node_for_direct_occt(
                 next_node_id,
             )
         }
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(CoreBooleanOp::Xor),
+            args,
+            keywords,
+        } if keywords.is_empty() => expand_xor_node(node, args, param_names, env, next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Text),
+            args,
+            keywords,
+        } => expand_text_node(node, args, keywords, param_names, env, next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Svg),
+            args,
+            keywords,
+        } if !keywords.is_empty() => Err(AppError::validation(
+            "`svg` does not support keyword arguments yet in Direct OCCT adapter.",
+        )),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Svg),
+            args,
+            ..
+        } => expand_svg_node(node, args, param_names, env, next_node_id),
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "helical-ridge") => {
+            expand_helical_ridge_node(node, args, keywords, param_names, env, next_node_id)
+        }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "sampled-radial-loft") => {
             expand_sampled_radial_loft_node(node, args, keywords, param_names, env, next_node_id)
         }
@@ -480,6 +511,384 @@ fn expand_node_for_direct_occt(
             ),
         )),
     }
+}
+
+fn expand_xor_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.len() < 2 {
+        return Err(AppError::validation("`xor` expects at least two operands."));
+    }
+
+    let normalized_args = args
+        .iter()
+        .map(|arg| expand_node_for_direct_occt(arg, param_names, env, next_node_id))
+        .collect::<AppResult<Vec<_>>>()?;
+
+    let union_node = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(CoreBooleanOp::Union),
+            args: normalized_args.clone(),
+            keywords: Vec::new(),
+        },
+        node.value_kind,
+    );
+    let intersection_node = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(CoreBooleanOp::Intersection),
+            args: normalized_args,
+            keywords: Vec::new(),
+        },
+        node.value_kind,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(CoreBooleanOp::Difference),
+            args: vec![union_node, intersection_node],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_svg_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.is_empty() || args.len() > 4 {
+        return Err(AppError::validation(
+            "`svg` expects a file path, optional target width/height, and optional fit mode.",
+        ));
+    }
+
+    let source = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
+    let svg_text = if fs::metadata(&source).is_ok() {
+        fs::read_to_string(&source).map_err(|err| {
+            AppError::validation(format!(
+                "Direct OCCT adapter could not read SVG file `{source}`: {err}",
+            ))
+        })?
+    } else if source.trim_start().starts_with('<') {
+        source
+    } else {
+        return Err(AppError::validation(format!(
+            "Direct OCCT adapter could not read SVG source at `{source}`.",
+        )));
+    };
+
+    let target_width = args
+        .get(1)
+        .map(|arg| {
+            crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
+                AppError::validation(format!(
+                    "Direct OCCT adapter could not evaluate `svg` width: {err}",
+                ))
+            })
+        })
+        .transpose()?;
+
+    let target_height = args
+        .get(2)
+        .map(|arg| {
+            crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
+                AppError::validation(format!(
+                    "Direct OCCT adapter could not evaluate `svg` height: {err}",
+                ))
+            })
+        })
+        .transpose()?;
+
+    let fit_mode = args
+        .get(3)
+        .map(|arg| {
+            let value = crate::ecky_ir::eval_core_stringish_with_locals(arg, param_names, env)?;
+            SvgFitMode::from_str(&value).ok_or_else(|| {
+                AppError::validation(format!(
+                    "`svg` fit mode must be `contain`, `cover`, or `stretch`, got {value}",
+                ))
+            })
+        })
+        .transpose()?;
+
+    let profile = parse_svg_profile(
+        &svg_text,
+        target_width,
+        target_height,
+        fit_mode.unwrap_or(SvgFitMode::Contain),
+        true,
+    )?;
+
+    let outer = profile_polygon_node(&profile.outer_loop, next_node_id);
+    let holes = profile
+        .hole_loops
+        .iter()
+        .map(|points| profile_polygon_node(points, next_node_id))
+        .collect::<Vec<_>>();
+    let keywords = if holes.is_empty() {
+        Vec::new()
+    } else {
+        vec![CoreKeywordArg::expr(
+            "holes".to_string(),
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::List(holes),
+                CoreValueKind::List,
+            ),
+        )]
+    };
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Profile),
+            args: vec![outer],
+            keywords,
+        },
+    ))
+}
+
+fn expand_text_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    _keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.len() < 2 {
+        return Err(AppError::validation("`text` expects text value and size."));
+    }
+
+    let value = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
+    let size = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
+    let components = parse_text_profile(&value, size, None)?;
+    let outer_nodes = components
+        .iter()
+        .map(|component| profile_polygon_node(&component.outer_loop, next_node_id))
+        .collect::<Vec<_>>();
+    let hole_nodes = components
+        .iter()
+        .flat_map(|component| component.hole_loops.iter())
+        .map(|points| profile_polygon_node(points, next_node_id))
+        .collect::<Vec<_>>();
+    let (profile_args, profile_keywords) =
+        profile_components(outer_nodes, hole_nodes, next_node_id);
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Profile),
+            args: profile_args,
+            keywords: profile_keywords,
+        },
+    ))
+}
+
+fn expand_helical_ridge_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if !args.is_empty() {
+        return Err(AppError::validation(
+            "`helical-ridge` expects keyword options only.",
+        ));
+    }
+    reject_unknown_keywords(
+        keywords,
+        &[
+            "radius",
+            "pitch",
+            "height",
+            "base-width",
+            "crest-width",
+            "depth",
+            "female",
+            "clearance",
+            "lefthand",
+        ],
+        "helical-ridge",
+    )?;
+
+    let radius = positive_keyword_number(keywords, "radius", "helical-ridge", param_names, env)?;
+    let pitch = positive_keyword_number(keywords, "pitch", "helical-ridge", param_names, env)?;
+    let height = positive_keyword_number(keywords, "height", "helical-ridge", param_names, env)?;
+    let base_width =
+        positive_keyword_number(keywords, "base-width", "helical-ridge", param_names, env)?;
+    let crest_width =
+        positive_keyword_number(keywords, "crest-width", "helical-ridge", param_names, env)?;
+    let depth = positive_keyword_number(keywords, "depth", "helical-ridge", param_names, env)?;
+    let female =
+        optional_keyword_bool(keywords, "female", false, "helical-ridge", param_names, env)?;
+    let lefthand = optional_keyword_bool(
+        keywords,
+        "lefthand",
+        false,
+        "helical-ridge",
+        param_names,
+        env,
+    )?;
+    let clearance = optional_keyword_number(
+        keywords,
+        "clearance",
+        0.0,
+        "helical-ridge",
+        param_names,
+        env,
+    )?
+    .max(0.0);
+
+    let envelope_clearance = if female { clearance } else { 0.0 };
+    let base_half = (base_width + 2.0 * envelope_clearance) * 0.5;
+    let crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5;
+    let ridge_depth = depth + envelope_clearance;
+    let profile_wire = path3_node(
+        &[
+            [radius, 0.0, -base_half],
+            [radius + ridge_depth, 0.0, -crest_half],
+            [radius + ridge_depth, 0.0, crest_half],
+            [radius, 0.0, crest_half],
+            [radius, 0.0, -base_half],
+        ],
+        next_node_id,
+    );
+    let profile = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::MakeFace),
+            args: vec![profile_wire],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Sketch,
+    );
+    let path = path3_node(
+        &sampled_helix_points(radius, pitch, height, lefthand),
+        next_node_id,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Surface(CoreSurfaceOp::Sweep),
+            args: vec![profile, path],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn profile_polygon_node(points: &[[f64; 2]], next_node_id: &mut u64) -> CoreNode {
+    let point_nodes = points
+        .iter()
+        .map(|point| {
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::Literal(CoreLiteral::Point2(*point)),
+                CoreValueKind::Point2,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let list = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::List(point_nodes),
+        CoreValueKind::List,
+    );
+
+    CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Polygon),
+            args: vec![list],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Sketch,
+    )
+}
+
+fn profile_components(
+    outer_nodes: Vec<CoreNode>,
+    hole_nodes: Vec<CoreNode>,
+    next_node_id: &mut u64,
+) -> (Vec<CoreNode>, Vec<CoreKeywordArg>) {
+    if hole_nodes.is_empty() && outer_nodes.len() == 1 {
+        return (outer_nodes, Vec::new());
+    }
+
+    let mut keywords = vec![CoreKeywordArg::expr(
+        "outer".to_string(),
+        CoreNode::new(
+            next_id(next_node_id),
+            CoreNodeKind::List(outer_nodes),
+            CoreValueKind::List,
+        ),
+    )];
+    if !hole_nodes.is_empty() {
+        keywords.push(CoreKeywordArg::expr(
+            "holes".to_string(),
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::List(hole_nodes),
+                CoreValueKind::List,
+            ),
+        ));
+    }
+    (Vec::new(), keywords)
+}
+
+fn path3_node(points: &[[f64; 3]], next_node_id: &mut u64) -> CoreNode {
+    let point_nodes = points
+        .iter()
+        .map(|point| {
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::Literal(CoreLiteral::Point3(*point)),
+                CoreValueKind::Point3,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let list = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::List(point_nodes),
+        CoreValueKind::List,
+    );
+
+    CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Path(CorePathOp::Polyline),
+            args: vec![list],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Path,
+    )
+}
+
+fn sampled_helix_points(radius: f64, pitch: f64, height: f64, lefthand: bool) -> Vec<[f64; 3]> {
+    let turns = (height / pitch).abs();
+    let segments = (turns * 48.0).ceil().max(48.0) as usize;
+    let angle_sign = if lefthand { -1.0 } else { 1.0 };
+
+    (0..=segments)
+        .map(|index| {
+            let t = index as f64 / segments as f64;
+            let angle = angle_sign * 2.0 * std::f64::consts::PI * turns * t;
+            [radius * angle.cos(), radius * angle.sin(), height * t]
+        })
+        .collect()
 }
 
 fn expand_sampled_radial_loft_node(
@@ -808,6 +1217,96 @@ fn number_node(next_node_id: &mut u64, value: f64) -> CoreNode {
     )
 }
 
+fn required_keyword_node<'a>(
+    keywords: &'a [CoreKeywordArg],
+    name: &str,
+    op: &str,
+) -> AppResult<&'a CoreNode> {
+    keywords
+        .iter()
+        .find(|keyword| keyword.name == name)
+        .map(|keyword| keyword.source_node())
+        .ok_or_else(|| AppError::validation(format!("`{op}` requires `:{name}`.")))
+}
+
+fn positive_keyword_number(
+    keywords: &[CoreKeywordArg],
+    name: &str,
+    op: &str,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<f64> {
+    let value = crate::ecky_ir::eval_core_number_with_locals(
+        required_keyword_node(keywords, name, op)?,
+        param_names,
+        env,
+    )?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(AppError::validation(format!(
+            "`{op}` {name} must be positive and finite."
+        )));
+    }
+    Ok(value)
+}
+
+fn optional_keyword_number(
+    keywords: &[CoreKeywordArg],
+    name: &str,
+    default: f64,
+    op: &str,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<f64> {
+    let Some(node) = keywords
+        .iter()
+        .find(|keyword| keyword.name == name)
+        .map(|keyword| keyword.source_node())
+    else {
+        return Ok(default);
+    };
+    crate::ecky_ir::eval_core_number_with_locals(node, param_names, env)
+        .map_err(|err| AppError::validation(format!("`{op}` could not evaluate `:{name}`: {err}")))
+}
+
+fn optional_keyword_bool(
+    keywords: &[CoreKeywordArg],
+    name: &str,
+    default: bool,
+    op: &str,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<bool> {
+    let Some(node) = keywords
+        .iter()
+        .find(|keyword| keyword.name == name)
+        .map(|keyword| keyword.source_node())
+    else {
+        return Ok(default);
+    };
+    crate::ecky_ir::eval_core_bool_with_locals(node, param_names, env)
+        .map_err(|err| AppError::validation(format!("`{op}` could not evaluate `:{name}`: {err}")))
+}
+
+fn reject_unknown_keywords(
+    keywords: &[CoreKeywordArg],
+    allowed: &[&str],
+    op: &str,
+) -> AppResult<()> {
+    for keyword in keywords {
+        if allowed
+            .iter()
+            .any(|allowed_name| *allowed_name == keyword.name)
+        {
+            continue;
+        }
+        return Err(AppError::validation(format!(
+            "`{op}` does not recognize `:{}`.",
+            keyword.name
+        )));
+    }
+    Ok(())
+}
+
 fn next_program_node_id(program: &CoreProgram) -> u64 {
     program
         .parts
@@ -1067,6 +1566,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Primitive(CorePrimitive::Polygon) => Ok(OcctOp::Polygon),
         CoreOperation::Primitive(CorePrimitive::Profile) => Ok(OcctOp::Profile),
         CoreOperation::Primitive(CorePrimitive::MakeFace) => Ok(OcctOp::MakeFace),
+        CoreOperation::Primitive(CorePrimitive::Stl) => Ok(OcctOp::ImportStl),
         CoreOperation::Surface(CoreSurfaceOp::Extrude) => Ok(OcctOp::Extrude),
         CoreOperation::Surface(CoreSurfaceOp::Revolve) => Ok(OcctOp::Revolve),
         CoreOperation::Surface(CoreSurfaceOp::Loft) => Ok(OcctOp::Loft),
@@ -1079,6 +1579,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => Ok(OcctOp::Chamfer),
         CoreOperation::Surface(CoreSurfaceOp::Shell) => Ok(OcctOp::Shell),
         CoreOperation::Path(CorePathOp::Polyline) => Ok(OcctOp::Path),
+        CoreOperation::Custom(name) if name == "helix-path" => Ok(OcctOp::HelixPath),
         CoreOperation::Path(CorePathOp::BezierPath) => Ok(OcctOp::BezierPath),
         CoreOperation::Path(CorePathOp::Bspline) => Ok(OcctOp::Bspline),
         CoreOperation::Frame(CoreFrameOp::Plane) => Ok(OcctOp::Plane),
@@ -1210,6 +1711,7 @@ mod tests {
         CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive, CoreProgram,
         CoreSelectorPayload, CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
     };
+    use std::io::Write;
 
     fn compile(source: &str) -> CoreProgram {
         crate::ecky_scheme::compile_to_core_program(source).expect("compile")
@@ -1683,6 +2185,71 @@ mod tests {
     }
 
     #[test]
+    fn plans_svg_profile_for_direct_occt_extrusion() {
+        let svg_path = std::path::Path::new("/tmp/ecky-direct-occt-svg-profile.svg");
+        {
+            let mut file = std::fs::File::create(&svg_path).expect("create svg");
+            file.write_all(
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">\n  <path d=\"M2 2h6v6h-6z\"/>\n</svg>\n",
+            )
+            .expect("write svg");
+        }
+
+        let program = compile(
+            r#"(model (part body (extrude (svg "/tmp/ecky-direct-occt-svg-profile.svg" 10 10 "contain") 4)))"#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Polygon, OcctOp::Profile, OcctOp::Extrude]
+        );
+
+        assert!(std::fs::remove_file(svg_path).is_ok());
+    }
+
+    #[test]
+    fn plans_import_stl_for_direct_occt() {
+        let program = compile(r#"(model (part body (import-stl "/tmp/sample.stl")))"#);
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::ImportStl]
+        );
+    }
+
+    #[test]
+    fn plans_text_profile_for_direct_occt_extrusion() {
+        let program = compile(r#"(model (part body (extrude (text "II" 12) 4)))"#);
+
+        let plan = plan_core_program(&program).expect("plan");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+
+        assert!(ops.len() >= 4, "{ops:?}");
+        assert_eq!(ops.last(), Some(&OcctOp::Extrude));
+        assert_eq!(ops[ops.len() - 2], OcctOp::Profile);
+        assert!(
+            ops[..ops.len() - 2].iter().all(|op| *op == OcctOp::Polygon),
+            "{ops:?}"
+        );
+    }
+
+    #[test]
     fn plans_make_face_for_direct_occt() {
         let program = compile(
             "(model (part body (extrude (make-face (polygon ((0 0) (8 0) (8 6) (0 6)))) 4)))",
@@ -1798,6 +2365,31 @@ mod tests {
     }
 
     #[test]
+    fn plans_box_align_tuple_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (box 4 6 8 :align '(center center min))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("box align planned");
+        assert_eq!(plan.parts[0].commands.len(), 1);
+        assert_eq!(plan.parts[0].commands[0].op, OcctOp::Box);
+        assert_eq!(plan.parts[0].commands[0].keywords.len(), 1);
+        assert_eq!(plan.parts[0].commands[0].keywords[0].name, "align");
+        assert_eq!(
+            plan.parts[0].commands[0].keywords[0].source_arg(),
+            &OcctArg::List(vec![
+                OcctArg::Symbol("center".into()),
+                OcctArg::Symbol("center".into()),
+                OcctArg::Symbol("min".into()),
+            ])
+        );
+    }
+
+    #[test]
     fn plans_plane_location_place_clip_box_for_direct_occt() {
         let program = compile(
             r#"
@@ -1871,7 +2463,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_first_surface_ops_by_name() {
+    fn plans_xor_by_rewriting_into_supported_boolean_ops() {
         let program = compile(
             r#"
             (model
@@ -1880,12 +2472,42 @@ mod tests {
             "#,
         );
 
-        let err = plan_core_program(&program).expect_err("xor unsupported");
-        let message = err.to_string();
+        let plan = plan_core_program(&program).expect("xor planned");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
 
-        assert!(message.contains("Direct OCCT adapter"), "{message}");
-        assert!(message.contains("xor"), "{message}");
-        assert!(message.contains("first surface"), "{message}");
+        assert_eq!(
+            ops,
+            vec![
+                OcctOp::Box,
+                OcctOp::Sphere,
+                OcctOp::Union,
+                OcctOp::Intersection,
+                OcctOp::Difference,
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_finite_map_apply_range_for_direct_occt() {
+        let program = compile(include_str!(
+            "../../tests/fixtures/cad/surface/voronoi_perforated_panel.ecky"
+        ));
+
+        let plan = plan_core_program(&program).expect("finite map/apply/range planned");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ops.first(), Some(&OcctOp::Box));
+        assert_eq!(ops.last(), Some(&OcctOp::Difference));
+        assert!(ops.iter().filter(|op| **op == OcctOp::Cylinder).count() >= 12);
+        assert!(ops.iter().any(|op| *op == OcctOp::Union));
     }
 
     #[test]
@@ -1906,6 +2528,35 @@ mod tests {
         assert!(message.contains("Typed hole"), "{message}");
         assert!(message.contains("threaded insert cavity"), "{message}");
         assert!(message.contains("before direct OCCT planning"), "{message}");
+    }
+
+    #[test]
+    fn plans_helical_ridge_for_direct_occt_sweep() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (helical-ridge
+                  :radius 20
+                  :pitch 6
+                  :height 30
+                  :base-width 2
+                  :crest-width 1
+                  :depth 1.5)))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("helical-ridge planned");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ops,
+            vec![OcctOp::Path, OcctOp::MakeFace, OcctOp::Path, OcctOp::Sweep]
+        );
     }
 
     #[test]

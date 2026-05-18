@@ -162,7 +162,7 @@ fn load_manifest_for_bundle(bundle: &ArtifactBundle) -> AppResult<Option<ModelMa
             return Err(AppError::internal(format!(
                 "Failed to read model manifest '{}': {}",
                 path, err
-            )))
+            )));
         }
     };
     let parsed: ModelManifest = serde_json::from_str(&raw).map_err(|e| {
@@ -302,6 +302,16 @@ pub fn configured_freecad_cmd(state: &AppState) -> Option<String> {
     }
 }
 
+pub fn configured_cad_text_font_path(state: &AppState) -> Option<String> {
+    let config = state.config.lock().unwrap();
+    let path = config.cad_text_font_path.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
 pub fn is_freecad_available(state: &AppState) -> bool {
     freecad::resolve_freecad_path(configured_freecad_cmd(state).as_deref()).is_ok()
 }
@@ -364,23 +374,66 @@ fn try_render_direct_occt_ecky_ir(
     macro_code: &str,
     parameters: &DesignParams,
     effective_dialect: &MacroDialect,
+    state: &AppState,
     app: &dyn PathResolver,
-) -> Option<ArtifactBundle> {
+) -> AppResult<Option<ArtifactBundle>> {
     if *effective_dialect != MacroDialect::EckyIrV0 {
-        return None;
+        return Ok(None);
     }
-    let program = crate::ecky_scheme::compile_to_core_program(macro_code).ok()?;
-    let runtime_root = crate::runtime_capabilities::resolve_direct_occt_runtime_root(app).ok()?;
+    let program = match crate::ecky_scheme::compile_to_core_program(macro_code) {
+        Ok(program) => program,
+        Err(_) => return Ok(None),
+    };
+    let runtime_root = match crate::runtime_capabilities::resolve_direct_occt_runtime_root(app) {
+        Ok(runtime_root) => runtime_root,
+        Err(_) => return Ok(None),
+    };
     let layout =
         crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
-    if !layout.can_compile_native_shim() {
-        return None;
-    }
-    crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle(
-        &program, macro_code, parameters, &layout, app,
+    let (bundle, _manifest) =
+        crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
+            &program,
+            macro_code,
+            parameters,
+            &layout,
+            app,
+            configured_cad_text_font_path(state).as_deref(),
+        )?;
+    Ok(Some(bundle))
+}
+
+fn source_plans_for_direct_occt(macro_code: &str, parameters: &DesignParams) -> bool {
+    let Some(program) = crate::ecky_scheme::try_compile_to_core_program(macro_code) else {
+        return false;
+    };
+    let Ok(program) = program else {
+        return false;
+    };
+    crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, parameters).is_ok()
+}
+
+fn unsupported_exact_only_direct_occt_error(details: String) -> AppError {
+    AppError::with_details(
+        crate::models::AppErrorCode::Validation,
+        "Unsupported on current geometry backend. Switch backend and rerender.",
+        details,
     )
-    .ok()
-    .map(|(bundle, _manifest)| bundle)
+}
+
+fn unsupported_required_direct_occt_error(details: String) -> AppError {
+    AppError::with_details(
+        crate::models::AppErrorCode::Validation,
+        "Direct OCCT required for this Ecky Native model. Native render unavailable.",
+        details,
+    )
+}
+
+fn blocked_direct_occt_mesh_fallback_error(details: String) -> AppError {
+    AppError::with_details(
+        crate::models::AppErrorCode::Validation,
+        "Ecky Native direct OCCT render failed. Mesh fallback blocked.",
+        details,
+    )
 }
 
 pub async fn render_stl(
@@ -461,30 +514,110 @@ fn render_model_unlocked(
         _ => None,
     };
     let dispatch_source = lowered.as_deref().unwrap_or(macro_code);
+    let direct_occt_capability = if dispatch_backend == GeometryBackend::EckyRust
+        && effective_dialect == MacroDialect::EckyIrV0
+    {
+        Some(crate::runtime_capabilities::probe_direct_occt_runtime(app))
+    } else {
+        None
+    };
     let result = match dispatch_backend {
         GeometryBackend::EckyRust => {
-            try_render_direct_occt_ecky_ir(macro_code, parameters, &effective_dialect, app)
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    if effective_dialect == MacroDialect::EckyIrV0
-                        && crate::ecky_ir::source_uses_exact_backend_only_cad_ops(macro_code)
-                    {
-                        let lowered = lower_ecky_with_large_stack(
-                            "build123d",
-                            macro_code,
-                            crate::ecky_ir::lower_to_build123d,
-                        )?;
-                        crate::build123d::render_model_with_sources(
-                            &lowered,
-                            Some(macro_code),
-                            parameters,
-                            app,
-                            crate::models::SourceLanguage::EckyIrV0,
-                        )
+            let uses_exact_only = effective_dialect == MacroDialect::EckyIrV0
+                && crate::ecky_ir::source_uses_exact_backend_only_cad_ops(macro_code);
+            let uses_direct_occt_required = effective_dialect == MacroDialect::EckyIrV0
+                && crate::ecky_ir::source_uses_direct_occt_required_cad_ops(macro_code);
+            let direct_occt_plannable = effective_dialect == MacroDialect::EckyIrV0
+                && source_plans_for_direct_occt(macro_code, parameters);
+            let direct_occt_ready = direct_occt_capability
+                .as_ref()
+                .is_some_and(|capability| capability.available);
+            let direct_attempt = if direct_occt_capability
+                .as_ref()
+                .is_some_and(|capability| capability.available)
+            {
+                try_render_direct_occt_ecky_ir(
+                    macro_code,
+                    parameters,
+                    &effective_dialect,
+                    state,
+                    app,
+                )
+            } else {
+                Ok(None)
+            };
+            match direct_attempt {
+                Ok(Some(bundle)) => Ok(bundle),
+                Ok(None) => {
+                    if uses_exact_only {
+                        Err(unsupported_exact_only_direct_occt_error(
+                            "EckyRust/direct OCCT cannot fall back from exact-backend-only CAD ops."
+                                .to_string(),
+                        ))
+                    } else if uses_direct_occt_required {
+                        Err(unsupported_required_direct_occt_error(format!(
+                            "EckyRust/direct OCCT cannot fall back for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`. {}",
+                            direct_occt_capability
+                                .as_ref()
+                                .map(|capability| capability.detail.as_str())
+                                .unwrap_or("Direct OCCT availability not probed.")
+                        )))
+                    } else if direct_occt_ready && direct_occt_plannable {
+                        Err(blocked_direct_occt_mesh_fallback_error(format!(
+                            "Direct OCCT runtime reported ready and planned this model, but native export returned no bundle. {}",
+                            direct_occt_capability
+                                .as_ref()
+                                .map(|capability| capability.detail.as_str())
+                                .unwrap_or("Direct OCCT availability not probed.")
+                        )))
                     } else {
                         crate::ecky_ir::render_model(macro_code, parameters, app)
                     }
-                })
+                }
+                Err(err) => {
+                    if uses_exact_only {
+                        let mut details = String::from(
+                            "EckyRust/direct OCCT failed on exact-backend-only CAD ops.",
+                        );
+                        details.push(' ');
+                        details.push_str(&err.to_string());
+                        if let Some(extra) = err.details.as_deref() {
+                            if !extra.is_empty() {
+                                details.push(' ');
+                                details.push_str(extra);
+                            }
+                        }
+                        Err(unsupported_exact_only_direct_occt_error(details))
+                    } else if uses_direct_occt_required {
+                        let mut details =
+                            String::from("EckyRust/direct OCCT failed on native-required CAD ops.");
+                        details.push(' ');
+                        details.push_str(&err.to_string());
+                        if let Some(extra) = err.details.as_deref() {
+                            if !extra.is_empty() {
+                                details.push(' ');
+                                details.push_str(extra);
+                            }
+                        }
+                        Err(unsupported_required_direct_occt_error(details))
+                    } else if direct_occt_ready && direct_occt_plannable {
+                        let mut details = String::from(
+                            "Direct OCCT runtime reported ready and planned this model, but native export failed.",
+                        );
+                        details.push(' ');
+                        details.push_str(&err.to_string());
+                        if let Some(extra) = err.details.as_deref() {
+                            if !extra.is_empty() {
+                                details.push(' ');
+                                details.push_str(extra);
+                            }
+                        }
+                        Err(blocked_direct_occt_mesh_fallback_error(details))
+                    } else {
+                        crate::ecky_ir::render_model(macro_code, parameters, app)
+                    }
+                }
+            }
         }
         GeometryBackend::Build123d => {
             let source_language = if effective_dialect == MacroDialect::EckyIrV0 {
@@ -510,7 +643,7 @@ fn render_model_unlocked(
             } else {
                 crate::models::SourceLanguage::LegacyPython
             };
-            freecad::render_model_with_sources(
+            freecad::render_model_with_sources_and_font_path(
                 dispatch_source,
                 if effective_dialect == MacroDialect::EckyIrV0 {
                     Some(macro_code)
@@ -519,6 +652,7 @@ fn render_model_unlocked(
                 },
                 parameters,
                 configured_freecad_cmd(state).as_deref(),
+                configured_cad_text_font_path(state).as_deref(),
                 app,
                 source_language,
             )
@@ -675,8 +809,8 @@ mod tests {
             self.root.join("data")
         }
 
-        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
-            None
+        fn resource_path(&self, path: &str) -> Option<PathBuf> {
+            Some(self.root.join("resources").join(path))
         }
     }
 
@@ -687,11 +821,82 @@ mod tests {
         root
     }
 
+    fn write_ascii_stl_fixture(path: &std::path::Path) {
+        let stl = r#"solid sample
+facet normal 0 0 1
+  outer loop
+    vertex 0 0 0
+    vertex 1 0 0
+    vertex 0 1 0
+  endloop
+endfacet
+endsolid sample
+"#;
+        std::fs::write(path, stl).expect("write stl fixture");
+    }
+
+    fn create_direct_occt_runtime_layout(root: &std::path::Path) {
+        let ocp_root = root
+            .join("resources")
+            .join("runtime")
+            .join("occt")
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join("OCP");
+        let include_dir = ocp_root.join("include").join("opencascade");
+        let dylib_dir = ocp_root.join(".dylibs");
+        std::fs::create_dir_all(&include_dir).expect("create include dir");
+        std::fs::create_dir_all(&dylib_dir).expect("create dylib dir");
+        for header in crate::ecky_cad_host::direct_occt_sdk::REQUIRED_OCCT_HEADERS {
+            std::fs::write(include_dir.join(header), "// header\n").expect("write header");
+        }
+        for lib in crate::ecky_cad_host::direct_occt_sdk::REQUIRED_OCCT_LIBS {
+            let filename = if cfg!(target_os = "macos") {
+                format!("lib{lib}.dylib")
+            } else if cfg!(target_os = "windows") {
+                format!("{lib}.dll")
+            } else {
+                format!("lib{lib}.so")
+            };
+            std::fs::write(dylib_dir.join(filename), "").expect("write dylib");
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create executable dir");
+        }
+        std::fs::write(path, body).expect("write executable");
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod executable");
+    }
+
+    fn text_font_fixture() -> Option<&'static str> {
+        [
+            "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+            "/System/Library/Fonts/Supplemental/Impact.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+    }
+
     fn test_config() -> Config {
         Config {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
@@ -1365,8 +1570,63 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn ecky_rust_request_falls_forward_to_build123d_for_sampled_radial_loft() {
+    async fn ecky_rust_request_does_not_silently_mesh_fallback_when_direct_occt_ready_but_export_fails(
+    ) {
+        let root = temp_root("eckyrust-direct-occt-fail-closed");
+        let resolver = TestResolver { root: root.clone() };
+        create_direct_occt_runtime_layout(&root);
+        let runner = root
+            .join("resources")
+            .join("runtime")
+            .join("occt")
+            .join("bin")
+            .join("direct-occt-runner");
+        write_executable(
+            &runner,
+            r#"#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "direct-occt-runner 0.1.0"
+  exit 0
+fi
+echo '{"class":"runtime_error","code":"runner_failed","message":"forced test failure","details":"boom"}' >&2
+exit 5
+"#,
+        );
+
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        assert!(
+            direct_capability.available,
+            "expected fake Direct OCCT runtime ready, got {:?}",
+            direct_capability
+        );
+
+        let state = test_state(&root);
+        let err = render_model(
+            r#"(model (part body (box 10 20 30)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("covered direct OCCT source must not silently fall back to mesh");
+
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("Direct OCCT runner failed")
+                || diagnostic.contains("forced test failure"),
+            "unexpected error: {err:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_does_not_silently_build123d_fallback_for_sampled_radial_loft() {
         let root = temp_root("eckyrust-sampled-radial-loft");
         let resolver = TestResolver { root: root.clone() };
         let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
@@ -1374,14 +1634,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(&root);
             return;
         }
-        let capability = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
-        if !capability.available {
-            let _ = std::fs::remove_dir_all(&root);
-            return;
-        }
         let state = test_state(&root);
 
-        let bundle = render_model(
+        let err = render_model(
             r#"(model
                 (part body
                   (sampled-radial-loft
@@ -1399,29 +1654,346 @@ mod tests {
             &resolver,
         )
         .await
-        .expect("build123d exact fallback render");
+        .expect_err("EckyRust must not silently build123d fallback");
 
-        assert_eq!(bundle.geometry_backend, GeometryBackend::Build123d);
-        assert_eq!(
-            bundle.source_language,
-            crate::models::SourceLanguage::EckyIrV0
+        assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("sampled-radial-loft")
+                || diagnostic.contains("exact-backend-only CAD ops"),
+            "unexpected error: {err:?}"
         );
-        assert!(bundle.model_id.starts_with("generated-b123d-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
-        assert!(!bundle.edge_targets.is_empty());
-        assert!(!bundle.face_targets.is_empty());
 
-        let manifest = load_manifest_for_bundle(&bundle)
-            .expect("load manifest")
-            .expect("runtime manifest");
-        assert!(manifest
-            .selection_targets
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_renders_helical_ridge_without_build123d_fallback() {
+        let root = temp_root("eckyrust-helical-ridge-no-build123d-fallback");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+
+        let bundle = render_model(
+            r#"(model
+                (part body
+                  (helical-ridge
+                    :radius 20
+                    :pitch 6
+                    :height 30
+                    :base-width 2
+                    :crest-width 1
+                    :depth 1.5)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("EckyRust must render helical-ridge through Direct OCCT");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
             .iter()
-            .any(|target| target.kind == crate::models::SelectionTargetKind::Edge));
-        assert!(manifest
-            .selection_targets
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_fails_closed_for_helical_ridge_when_direct_occt_unavailable() {
+        let root = temp_root("eckyrust-helical-ridge-direct-occt-required");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+
+        let err = render_model(
+            r#"(model
+                (part body
+                  (helical-ridge
+                    :radius 20
+                    :pitch 6
+                    :height 30
+                    :base-width 2
+                    :crest-width 1
+                    :depth 1.5)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("helical-ridge must fail closed without direct OCCT");
+
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("Direct OCCT required")
+                || diagnostic.contains("native-required CAD ops"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !diagnostic.contains("not supported by current `.ecky` runtime"),
+            "must not fall through to mesh runtime: {err:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_fails_closed_for_text_when_direct_occt_unavailable() {
+        let root = temp_root("eckyrust-text-direct-occt-required");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+
+        let err = render_model(
+            r#"(model (part body (extrude (text "A" 12) 2)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("text must fail closed without direct OCCT");
+
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("Direct OCCT required")
+                || diagnostic.contains("native-required CAD ops"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !diagnostic.contains("Switch to FreeCAD or build123d"),
+            "must not fall through to mesh runtime: {err:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_fails_closed_for_import_stl_when_direct_occt_unavailable() {
+        let root = temp_root("eckyrust-import-stl-direct-occt-required");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+        let stl_path = root.join("fixture.stl");
+        write_ascii_stl_fixture(&stl_path);
+
+        let err = render_model(
+            &format!(
+                r#"(model (part body (import-stl {:?})))"#,
+                stl_path.to_string_lossy()
+            ),
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("import-stl must fail closed without direct OCCT");
+
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("Direct OCCT required")
+                || diagnostic.contains("native-required CAD ops"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !diagnostic.contains("Switch to FreeCAD or build123d"),
+            "must not fall through to mesh runtime: {err:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_fails_closed_for_svg_when_direct_occt_unavailable() {
+        let root = temp_root("eckyrust-svg-direct-occt-required");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+
+        let err = render_model(
+            r#"(model (part body (extrude (svg "/tmp/sample.svg") 2)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("svg must fail closed without direct OCCT");
+
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("Direct OCCT required")
+                || diagnostic.contains("native-required CAD ops"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !diagnostic.contains("Switch to FreeCAD or build123d"),
+            "must not fall through to mesh runtime: {err:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_renders_import_stl_without_build123d_fallback() {
+        let root = temp_root("eckyrust-import-stl-no-build123d-fallback");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+        let stl_path = root.join("fixture.stl");
+        write_ascii_stl_fixture(&stl_path);
+
+        let bundle = render_model(
+            &format!(
+                r#"(model (part body (import-stl {:?})))"#,
+                stl_path.to_string_lossy()
+            ),
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("EckyRust must render import-stl through Direct OCCT");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
             .iter()
-            .any(|target| target.kind == crate::models::SelectionTargetKind::Face));
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_renders_text_without_build123d_fallback() {
+        let root = temp_root("eckyrust-text-no-build123d-fallback");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let Some(font_path) = text_font_fixture() else {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        };
+        let state = test_state(&root);
+        {
+            let mut config = state.config.lock().unwrap();
+            config.cad_text_font_path = font_path.to_string();
+        }
+
+        let bundle = render_model(
+            r#"(model (part body (extrude (text "II" 12) 4)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("EckyRust must render text through Direct OCCT");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_renders_svg_without_build123d_fallback() {
+        let root = temp_root("eckyrust-svg-no-build123d-fallback");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+        let svg_path = root.join("fixture.svg");
+        std::fs::write(
+            &svg_path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path fill="#000" d="M 1 1 L 9 1 L 9 9 L 1 9 Z"/></svg>"##,
+        )
+        .expect("write svg");
+
+        let bundle = render_model(
+            &format!(
+                r#"(model (part body (extrude (svg "{}" 10 10 "contain") 4)))"#,
+                svg_path.display()
+            ),
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("EckyRust must render svg through Direct OCCT");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1675,7 +2247,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ecky_rust_request_falls_forward_to_build123d_for_shell_sampled_radial_loft() {
+    async fn ecky_rust_request_does_not_silently_build123d_fallback_for_shell_sampled_radial_loft()
+    {
         let root = temp_root("eckyrust-shell-sampled-radial-loft");
         let resolver = TestResolver { root: root.clone() };
         let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
@@ -1683,14 +2256,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(&root);
             return;
         }
-        let capability = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
-        if !capability.available {
-            let _ = std::fs::remove_dir_all(&root);
-            return;
-        }
         let state = test_state(&root);
 
-        let bundle = render_model(
+        let err = render_model(
             r#"(model
                 (part body
                   (shell 2
@@ -1709,35 +2277,21 @@ mod tests {
             &resolver,
         )
         .await
-        .expect("build123d exact shell fallback render");
+        .expect_err("EckyRust must not silently build123d fallback");
 
-        assert_eq!(bundle.geometry_backend, GeometryBackend::Build123d);
-        assert_eq!(
-            bundle.source_language,
-            crate::models::SourceLanguage::EckyIrV0
+        assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("sampled-radial-loft")
+                || diagnostic.contains("exact-backend-only CAD ops"),
+            "unexpected error: {err:?}"
         );
-        assert!(bundle.model_id.starts_with("generated-b123d-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
-        assert!(!bundle.edge_targets.is_empty());
-        assert!(!bundle.face_targets.is_empty());
-
-        let manifest = load_manifest_for_bundle(&bundle)
-            .expect("load manifest")
-            .expect("runtime manifest");
-        assert!(manifest
-            .selection_targets
-            .iter()
-            .any(|target| target.kind == crate::models::SelectionTargetKind::Edge));
-        assert!(manifest
-            .selection_targets
-            .iter()
-            .any(|target| target.kind == crate::models::SelectionTargetKind::Face));
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
-    async fn ecky_rust_request_renders_dome_style_exact_stack_via_build123d() {
+    async fn ecky_rust_request_does_not_silently_build123d_fallback_for_dome_style_exact_stack() {
         let root = temp_root("eckyrust-dome-style-radial-loft");
         let resolver = TestResolver { root: root.clone() };
         let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
@@ -1745,14 +2299,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(&root);
             return;
         }
-        let capability = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
-        if !capability.available {
-            let _ = std::fs::remove_dir_all(&root);
-            return;
-        }
         let state = test_state(&root);
 
-        let bundle = render_model(
+        let err = render_model(
             r#"(model
                 (part body
                   (translate 0 0 8
@@ -1774,29 +2323,15 @@ mod tests {
             &resolver,
         )
         .await
-        .expect("build123d dome-style exact render");
+        .expect_err("EckyRust must not silently build123d fallback");
 
-        assert_eq!(bundle.geometry_backend, GeometryBackend::Build123d);
-        assert_eq!(
-            bundle.source_language,
-            crate::models::SourceLanguage::EckyIrV0
+        assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("sampled-radial-loft")
+                || diagnostic.contains("exact-backend-only CAD ops"),
+            "unexpected error: {err:?}"
         );
-        assert!(bundle.model_id.starts_with("generated-b123d-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
-        assert!(!bundle.edge_targets.is_empty());
-        assert!(!bundle.face_targets.is_empty());
-
-        let manifest = load_manifest_for_bundle(&bundle)
-            .expect("load manifest")
-            .expect("runtime manifest");
-        assert!(manifest
-            .selection_targets
-            .iter()
-            .any(|target| target.kind == crate::models::SelectionTargetKind::Edge));
-        assert!(manifest
-            .selection_targets
-            .iter()
-            .any(|target| target.kind == crate::models::SelectionTargetKind::Face));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1855,6 +2390,49 @@ mod tests {
             vec!["body"]
         );
         assert!(!manifest.selection_targets.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_dispatch_uses_direct_occt_for_helical_ridge_when_sdk_ready() {
+        let root = temp_root("direct-helical-ridge-reject");
+        let resolver = TestResolver { root: root.clone() };
+        let capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let state = test_state(&root);
+        let bundle = render_model(
+            r#"(model
+                (part body
+                  (helical-ridge
+                    :radius 18
+                    :pitch 3
+                    :height 24
+                    :base-width 1.2
+                    :crest-width 0.35
+                    :depth 0.6)))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("helical-ridge should route through Direct OCCT");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"
+                && std::path::Path::new(&artifact.path).is_file()));
 
         std::fs::remove_dir_all(root).unwrap();
     }

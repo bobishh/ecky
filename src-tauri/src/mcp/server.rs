@@ -2103,14 +2103,21 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "target_detail_get",
-            "description": "Fetch one exact chunk of the active editable target plus authoringContext by section. Use this instead of target_get when you only need uiSpec, params, or artifact metadata. artifactBundle returns digest fields geometryBackend, edgeTargetCount, faceTargetCount, exportFormats, hasStepExport, and stepExportPath. Do not promise STEP unless artifactBundle hasStepExport=true or exportArtifacts contains format=step. Use exportArtifacts for STEP path/detail.",
+            "description": "Fetch one exact chunk of the active editable target plus authoringContext by section. Use this instead of target_get when you only need uiSpec, params, artifact metadata, or compact shapeGraph slices. artifactBundle returns digest fields geometryBackend, edgeTargetCount, faceTargetCount, exportFormats, hasStepExport, and stepExportPath. shapeGraph returns compact parts/instances/constraints/debug/dependencies packets without full source text and includes sourceDigest/coreDigest for guarded follow-up patch flow. Do not promise STEP unless artifactBundle hasStepExport=true or exportArtifacts contains format=step. Use exportArtifacts for STEP path/detail.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" })),
                     ("section", json!({
                         "type": "string",
-                        "enum": ["uiSpec", "initialParams", "artifactBundle", "artifactPaths", "viewerAssets", "exportArtifacts", "latestDraft"]
+                        "enum": ["uiSpec", "initialParams", "artifactBundle", "artifactPaths", "viewerAssets", "exportArtifacts", "latestDraft", "shapeGraph"]
+                    })),
+                    ("shapeGraphFilters", json!({
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["parts", "instances", "constraints", "debug", "dependencies"]
+                        }
                     }))
                 ],
                 &["section"],
@@ -2183,7 +2190,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "ecky_constraints_validate",
-            "description": "Read-only constraint validation for sourceLanguage=ecky targets. Compiles source and checks CoreParameter min/max/step/choices and params-level :relations (<, <=, >, >=) against provided parameters, or target initial/default parameters. Rows include status/message plus severity, involvedParamKeys, and best-effort sourceStableNodeKeys. Does not edit source or render.",
+            "description": "Read-only constraint validation for sourceLanguage=ecky targets. Compiles source and checks CoreParameter min/max/step/choices and params-level :relations (<, <=, >, >=) against provided parameters, or target initial/default parameters. Rows include status/message plus severity, involvedParamKeys, sourceStableNodeKeys, and relation/constraint metadata fields (constraintId, label, kind, sourceStableNodeKey, dependsOnParamKeys, affectsStableNodeKeys). Response also includes authoringLints for repeated anonymous geometry deltas like (+ param N) and (- param N) with suggested parameter names. Does not edit source or render.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -2254,7 +2261,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                 "Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. ",
                 "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses build123d or freecad lowering; source extension does not. ",
                 "Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. ",
-                "When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block; you may omit them or pass them for overrides. ",
+                "When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. ",
                 "uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). ",
                 "For numeric parameters, prefer number; range only when explicitly needed. range/number: min, max, step (numbers). ",
                 "select: options array of {label, value} objects — MUST have at least one option. ",
@@ -5627,6 +5634,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
@@ -5668,6 +5676,7 @@ mod tests {
             }],
             selected_engine_id: "engine-1".to_string(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
@@ -5698,6 +5707,7 @@ mod tests {
                 }],
                 selected_engine_id: "engine-1".to_string(),
                 freecad_cmd: String::new(),
+                cad_text_font_path: String::new(),
                 freecad_library_roots: Vec::new(),
                 assets: Vec::new(),
                 microwave: None,

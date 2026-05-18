@@ -410,6 +410,10 @@ export async function exportFile(sourcePath: string, targetPath: string): Promis
   unwrapResult(await commands.exportFile(sourcePath, targetPath));
 }
 
+export async function exportEckyMcpSkillZip(targetPath: string): Promise<void> {
+  unwrapResult(await commands.exportEckyMcpSkillZip(targetPath));
+}
+
 export async function readComponentPackageManifest(
   projectDir: string,
 ): Promise<ComponentPackage> {

@@ -1470,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn render_model_from_model_helicoid_thread_coupon_fixture_keeps_clearance_variants() {
+    fn raw_ecky_runtime_rejects_helicoid_thread_coupon_without_direct_occt_bridge() {
         let root = render_root();
         std::fs::create_dir_all(&root).expect("root");
         let resolver = TestResolver { root };
@@ -1495,7 +1495,7 @@ mod tests {
             ]
         );
         let err = render_model_from_model(&model, &source, &DesignParams::new(), &resolver)
-            .expect_err("ecky runtime should reject helical-ridge");
+            .expect_err("raw ecky runtime should reject helical-ridge without direct OCCT bridge");
         assert!(
             err.message
                 .contains("Unsupported on current geometry backend"),

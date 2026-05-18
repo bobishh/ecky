@@ -132,32 +132,78 @@ pub fn probe_build123d_runtime(app: &dyn PathResolver) -> RuntimeBackendCapabili
 }
 
 pub fn probe_direct_occt_runtime(app: &dyn PathResolver) -> RuntimeBackendCapability {
+    if let Some(runner) =
+        crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(app, true)
+    {
+        let runtime_root = match resolve_direct_occt_runtime_root(app) {
+            Ok(path) => path,
+            Err(err) => {
+                return unavailable_capability(format!(
+                    "Direct OCCT unavailable: runner present but runtime root unresolved: {}",
+                    err
+                ))
+            }
+        };
+        let layout =
+            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+        let blockers = layout.blocker_summary();
+        if !blockers.is_empty() {
+            return unavailable_capability(format!(
+                "Direct OCCT unavailable: runner present but runtime blocked; {}",
+                blockers.join("; ")
+            ));
+        }
+        let output = Command::new(&runner).arg("--version").output();
+        return match output {
+            Ok(output) if output.status.success() => available_capability(
+                format!(
+                    "Runner ready at {}; native-required op support is verified at render time.",
+                    runner.display()
+                ),
+                Some(runner.display().to_string()),
+            ),
+            Ok(output) => unavailable_capability(format!(
+                "Direct OCCT unavailable: runner failed: {}\nstdout: {}\nstderr: {}",
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "terminated by signal".to_string()),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(err) => unavailable_capability(format!(
+                "Direct OCCT unavailable: runner start failed at '{}': {}",
+                runner.display(),
+                err
+            )),
+        };
+    }
+
     let runtime_root = match resolve_direct_occt_runtime_root(app) {
         Ok(path) => path,
-        Err(err) => return unavailable_capability(err.to_string()),
+        Err(err) => {
+            return unavailable_capability(format!(
+                "Direct OCCT unavailable: runner missing and runtime root unresolved: {}",
+                err
+            ))
+        }
     };
     let layout =
         crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
 
-    if layout.can_compile_native_shim() {
-        available_capability(
-            format!("Ready at {}", runtime_root.display()),
-            layout
-                .include_dir
-                .as_ref()
-                .map(|path| path.display().to_string()),
-        )
-    } else {
-        let blockers = layout.blocker_summary();
-        unavailable_capability(format!(
-            "Direct OCCT unavailable: {}",
-            if blockers.is_empty() {
-                "unknown runtime blocker".to_string()
-            } else {
-                blockers.join("; ")
-            }
-        ))
-    }
+    let blockers = layout.blocker_summary();
+    unavailable_capability(format!(
+        "Direct OCCT unavailable: runner missing; {}",
+        if blockers.is_empty() {
+            format!(
+                "checked runtime root '{}'; build precompiled runner with `bash scripts/build_direct_occt_runner.sh`",
+                runtime_root.display()
+            )
+        } else {
+            blockers.join("; ")
+        }
+    ))
 }
 
 fn available_capability(detail: String, path: Option<String>) -> RuntimeBackendCapability {
@@ -177,6 +223,19 @@ fn unavailable_capability(detail: String) -> RuntimeBackendCapability {
 }
 
 pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
+    if let Ok(path) = std::env::var("ECKY_OCCT_ROOT") {
+        let runtime_root = PathBuf::from(path.trim()).join("runtime").join("occt");
+        if runtime_root.is_dir() {
+            return Ok(runtime_root);
+        }
+    }
+
+    if let Some(path) = app.resource_path("runtime/occt") {
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+
     if let Ok(path) = std::env::var("BUILD123D_RUNTIME_DIR") {
         let path = PathBuf::from(path.trim());
         if path.is_dir() {
@@ -199,6 +258,15 @@ pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppRes
                 return Ok(root);
             }
         }
+    }
+
+    let repo_runtime = crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
+    );
+    if repo_runtime.is_dir() {
+        return Ok(repo_runtime);
     }
 
     let repo_runtime =
@@ -394,6 +462,34 @@ mod tests {
         }
     }
 
+    fn create_direct_occt_runtime_layout(root: &Path) {
+        let ocp_root = root
+            .join("resources")
+            .join("runtime")
+            .join("occt")
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join("OCP");
+        let include_dir = ocp_root.join("include").join("opencascade");
+        let dylib_dir = ocp_root.join(".dylibs");
+        fs::create_dir_all(&include_dir).unwrap();
+        fs::create_dir_all(&dylib_dir).unwrap();
+        for header in crate::ecky_cad_host::direct_occt_sdk::REQUIRED_OCCT_HEADERS {
+            fs::write(include_dir.join(header), "// header\n").unwrap();
+        }
+        for lib in crate::ecky_cad_host::direct_occt_sdk::REQUIRED_OCCT_LIBS {
+            let filename = if cfg!(target_os = "macos") {
+                format!("lib{lib}.dylib")
+            } else if cfg!(target_os = "windows") {
+                format!("{lib}.dll")
+            } else {
+                format!("lib{lib}.so")
+            };
+            fs::write(dylib_dir.join(filename), "").unwrap();
+        }
+    }
+
     #[test]
     fn recommended_authoring_context_prefers_ecky_source_over_raw_freecad() {
         let build123d = recommended_authoring_context(true, true);
@@ -553,16 +649,110 @@ mod tests {
     }
 
     #[test]
-    fn probe_direct_occt_runtime_reports_blocker_without_changing_recommendation() {
-        let root = temp_root("direct-occt-blocked");
-        let resolver = TestResolver { root };
+    fn resolve_direct_occt_runtime_root_prefers_bundled_occt_resource() {
+        let root = temp_root("direct-occt-resource");
+        let resolver = TestResolver { root: root.clone() };
+        let occt_root = root.join("resources").join("runtime").join("occt");
+        fs::create_dir_all(&occt_root).unwrap();
+
+        let resolved = resolve_direct_occt_runtime_root(&resolver).expect("runtime root");
+
+        assert_eq!(resolved, occt_root);
+    }
+
+    #[test]
+    fn probe_direct_occt_runtime_prefers_runner_when_available() {
+        let root = temp_root("direct-occt-runner-ready");
+        let resolver = TestResolver { root: root.clone() };
+        create_direct_occt_runtime_layout(&root);
+        let runner = root
+            .join("resources")
+            .join("runtime")
+            .join("occt")
+            .join("bin")
+            .join("direct-occt-runner");
+        write_file(&runner, "#!/bin/sh\necho 'direct-occt-runner 0.1.0'\n");
 
         let capability = probe_direct_occt_runtime(&resolver);
+
+        assert!(capability.available, "{capability:?}");
+        assert!(capability.detail.contains("Runner ready"), "{capability:?}");
+        assert!(
+            capability.detail.contains("verified at render time"),
+            "{capability:?}"
+        );
+        assert_eq!(
+            capability.path.as_deref(),
+            Some(runner.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn probe_direct_occt_runtime_reports_runner_failure() {
+        let root = temp_root("direct-occt-runner-fail");
+        let resolver = TestResolver { root: root.clone() };
+        create_direct_occt_runtime_layout(&root);
+        let runner = root
+            .join("resources")
+            .join("runtime")
+            .join("occt")
+            .join("bin")
+            .join("direct-occt-runner");
+        write_file(&runner, "#!/bin/sh\necho boom >&2\nexit 7\n");
+
+        let capability = probe_direct_occt_runtime(&resolver);
+
+        assert!(!capability.available, "{capability:?}");
+        assert!(
+            capability.detail.contains("runner failed"),
+            "{capability:?}"
+        );
+        assert!(capability.detail.contains("boom"), "{capability:?}");
+    }
+
+    #[test]
+    fn probe_direct_occt_runtime_reports_runtime_blocker_even_with_runner_present() {
+        let root = temp_root("direct-occt-runner-blocked");
+        let resolver = TestResolver { root: root.clone() };
+        let runner = root
+            .join("resources")
+            .join("runtime")
+            .join("occt")
+            .join("bin")
+            .join("direct-occt-runner");
+        write_file(&runner, "#!/bin/sh\necho 'direct-occt-runner 0.1.0'\n");
+
+        let capability = probe_direct_occt_runtime(&resolver);
+
+        assert!(!capability.available, "{capability:?}");
+        assert!(
+            capability
+                .detail
+                .contains("runner present but runtime blocked"),
+            "{capability:?}"
+        );
+    }
+
+    #[test]
+    fn probe_direct_occt_runtime_reports_blocker_without_changing_recommendation() {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("lock");
+        let root = temp_root("direct-occt-blocked");
+        let resolver = TestResolver { root };
+        let cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&resolver.root).expect("chdir");
+
+        let capability = probe_direct_occt_runtime(&resolver);
+
+        std::env::set_current_dir(cwd).expect("restore cwd");
 
         assert!(!capability.available);
         assert!(capability.detail.contains("Direct OCCT"), "{capability:?}");
         assert!(
-            capability.detail.contains("npm run build123d:prepare"),
+            capability.detail.contains("runner missing"),
             "{capability:?}"
         );
         assert!(

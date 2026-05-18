@@ -118,6 +118,14 @@ fn ecky_backend_guide_text(
          - {}.\n\
          - Keywords are not callable nodes. Example: `:align` belongs on primitives; do not call `(align ...)`.\n\
          {wall_patterns}\n\
+         Decorative text/logo/relief primitives:\n\
+         - Use `text` for raised or engraved lettering: `(text \"LABEL\" size)`; use `extrude` for relief height and `difference` for engraving.\n\
+         - Use `svg` for logo/profile artwork: `(svg path-or-data)`; prefer absolute attachment/artifact paths or literal SVG data.\n\
+         - Use `import-stl` only when reusing a provided mesh asset: `(import-stl path)`; do not invent local asset paths.\n\
+         - Drive decorative size from named dimensions such as `logo-width`, `logo-height`, `text-size`, `relief-height`, and `engrave-depth`.\n\
+         - Place top-face decoration at `(+ base-height relief-height)` or named equivalent, with base solids aligned `:align '(center center min)` so Z math is explicit.\n\
+         - For vertical wall decoration, rotate/translate onto the wall plane; keep relief normal pointing outward and bind wall side/orientation names.\n\
+         - Name fit-critical bindings before geometry, e.g. `wall-thickness`, `top-z`, `logo-x`, `logo-y`, `relief-height`; no anonymous offsets for placement or clearance.\n\n\
          Param types:\n\
          - `(number key default :label \"...\" :min n :max n)`.\n\
          - `(select key \"default\" :label \"...\" :options ((\"Label\" \"value\") ...))`.\n\
@@ -317,10 +325,11 @@ fn attachment_image_data_url(attachment: &Attachment) -> Option<String> {
         .next_back()
         .unwrap_or("png")
         .to_lowercase();
-    let mime = if ext == "jpg" || ext == "jpeg" {
-        "image/jpeg"
-    } else {
-        "image/png"
+    let mime = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
     };
     Some(format!("data:{};base64,{}", mime, b64))
 }
@@ -352,6 +361,24 @@ mod attachment_image_tests {
             attachment_image_data_url(&attachment).as_deref(),
             Some("data:image/png;base64,Zm9v")
         );
+    }
+
+    #[test]
+    fn attachment_image_data_url_preserves_svg_mime_type() {
+        let path = std::env::temp_dir().join(format!("ecky-svg-{}.svg", Uuid::new_v4()));
+        fs::write(&path, b"<svg/>").expect("svg fixture");
+        let attachment = Attachment {
+            path: path.to_string_lossy().to_string(),
+            name: "overlay.svg".to_string(),
+            explanation: String::new(),
+            data_url: None,
+            kind: AttachmentKind::Image,
+        };
+
+        let data_url = attachment_image_data_url(&attachment).expect("svg data url");
+
+        assert!(data_url.starts_with("data:image/svg+xml;base64,"));
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -972,10 +999,11 @@ pub async fn verify_render(
             let bytes = fs::read(path).ok()?;
             let b64 = general_purpose::STANDARD.encode(bytes);
             let ext = path.split('.').next_back().unwrap_or("png").to_lowercase();
-            let mime = if ext == "jpg" || ext == "jpeg" {
-                "image/jpeg"
-            } else {
-                "image/png"
+            let mime = match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                "svg" => "image/svg+xml",
+                _ => "image/png",
             };
             Some(format!("data:{};base64,{}", mime, b64))
         })
@@ -1008,9 +1036,11 @@ pub async fn verify_generated_model(
 ) -> AppResult<crate::contracts::StructuralVerificationResult> {
     let bundle = crate::model_runtime::read_artifact_bundle(&app, &model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(&app, &model_id)?;
-    Ok(crate::services::structural_verification::verify_structure(
-        &bundle, &manifest,
-    ))
+    Ok(
+        crate::services::author_verification_foundation::verify_structure_with_author_verification(
+            &bundle, &manifest,
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -1038,6 +1068,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
@@ -1138,6 +1169,15 @@ mod tests {
         assert!(build123d.contains("wrapper bodies splice model clauses"));
         assert!(build123d.contains("Use `map`/`range` inside `part` geometry/list expressions"));
         assert!(build123d.contains("Static tuple destructuring is supported only for `zip`"));
+        assert!(build123d.contains("Decorative text/logo/relief primitives"));
+        assert!(build123d.contains("Use `text` for raised or engraved lettering"));
+        assert!(build123d.contains("Use `svg` for logo/profile artwork"));
+        assert!(build123d.contains("Use `import-stl` only when reusing a provided mesh asset"));
+        assert!(build123d.contains("Drive decorative size from named dimensions"));
+        assert!(build123d.contains("Place top-face decoration at `(+ base-height relief-height)`"));
+        assert!(build123d
+            .contains("For vertical wall decoration, rotate/translate onto the wall plane"));
+        assert!(build123d.contains("Name fit-critical bindings"));
         assert!(build123d.contains("Zip destructuring"));
         assert!(build123d.contains("Deterministic point/list helpers"));
         assert!(build123d.contains("`organic-loop`"));
@@ -1203,6 +1243,16 @@ mod tests {
         assert!(freecad.contains("Direct clauses: `params`, `part`, `meta`."));
         assert!(freecad.contains("Use `map`/`range` inside `part` geometry/list expressions"));
         assert!(freecad.contains("Static tuple destructuring is supported only for `zip`"));
+        assert!(freecad.contains("Decorative text/logo/relief primitives"));
+        assert!(freecad.contains("Use `text` for raised or engraved lettering"));
+        assert!(freecad.contains("Use `svg` for logo/profile artwork"));
+        assert!(freecad.contains("Use `import-stl` only when reusing a provided mesh asset"));
+        assert!(freecad.contains("Drive decorative size from named dimensions"));
+        assert!(freecad.contains("Place top-face decoration at `(+ base-height relief-height)`"));
+        assert!(
+            freecad.contains("For vertical wall decoration, rotate/translate onto the wall plane")
+        );
+        assert!(freecad.contains("Name fit-critical bindings"));
         assert!(freecad.contains("Zip destructuring"));
         assert!(freecad.contains("`grid-array`"));
         assert!(freecad.contains("`arc-array`"));

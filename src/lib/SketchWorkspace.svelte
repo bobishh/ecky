@@ -2634,6 +2634,7 @@
               </button>
             {/if}
           {/if}
+          <div class="sketch-token">{draftModeSummary.label}</div>
           <div class="sketch-token">{draftModeSummary.detail}</div>
         </div>
       </SketchInspectorSection>

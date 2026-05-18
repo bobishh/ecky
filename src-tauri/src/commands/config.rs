@@ -1,4 +1,8 @@
-use std::fs;
+use std::{
+    env, fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, Manager, State};
 
 use crate::models::{AppResult, AppState, Config};
@@ -68,4 +72,235 @@ pub async fn get_app_logs(
 ) -> AppResult<Vec<crate::contracts::AppLogEntry>> {
     let logs = state.app_logs.lock().unwrap();
     Ok(logs.iter().cloned().collect())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn export_ecky_mcp_skill_zip(target_path: String) -> AppResult<()> {
+    let skill_dir = resolve_ecky_mcp_skill_dir()?;
+    export_ecky_mcp_skill_zip_impl(&skill_dir, Path::new(&target_path))
+}
+
+fn resolve_ecky_mcp_skill_dir() -> AppResult<PathBuf> {
+    if let Some(path) = env::var_os("ECKY_MCP_SKILL_DIR").map(PathBuf::from) {
+        if is_ecky_mcp_skill_dir(&path) {
+            return Ok(path);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(codex_home) = env::var_os("CODEX_HOME").map(PathBuf::from) {
+        candidates.push(codex_home.join("skills").join("ecky-mcp"));
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(home.join(".codex-personal").join("skills").join("ecky-mcp"));
+        candidates.push(home.join(".codex").join("skills").join("ecky-mcp"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| is_ecky_mcp_skill_dir(candidate))
+        .ok_or_else(|| {
+            crate::models::AppError::validation(
+                "Ecky MCP skill is not installed. Install it under CODEX_HOME/skills/ecky-mcp or ~/.codex-personal/skills/ecky-mcp.",
+            )
+        })
+}
+
+fn is_ecky_mcp_skill_dir(path: &Path) -> bool {
+    path.join("SKILL.md").is_file()
+        && fs::read_to_string(path.join("SKILL.md"))
+            .map(|content| content.contains("name: ecky-mcp"))
+            .unwrap_or(false)
+}
+
+fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppResult<()> {
+    if target_path.as_os_str().is_empty() {
+        return Err(crate::models::AppError::validation(
+            "Export path is required for Ecky MCP skill zip.",
+        ));
+    }
+    if !is_ecky_mcp_skill_dir(skill_dir) {
+        return Err(crate::models::AppError::validation(format!(
+            "Ecky MCP skill directory is invalid: {}",
+            skill_dir.display()
+        )));
+    }
+    if let Some(parent) = target_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to create export directory '{}': {}",
+                parent.display(),
+                err
+            ))
+        })?;
+    }
+
+    let file = fs::File::create(target_path).map_err(|err| {
+        crate::models::AppError::persistence(format!(
+            "Failed to create Ecky MCP skill zip '{}': {}",
+            target_path.display(),
+            err
+        ))
+    })?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let skill_root_name = skill_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ecky-mcp");
+
+    for path in collect_skill_files(skill_dir)? {
+        let rel = path.strip_prefix(skill_dir).map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to resolve skill archive path '{}': {}",
+                path.display(),
+                err
+            ))
+        })?;
+        let archive_name = Path::new(skill_root_name).join(rel);
+        let archive_name = archive_name.to_string_lossy().replace('\\', "/");
+        zip.start_file(&archive_name, options).map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to write skill archive entry '{}': {}",
+                archive_name, err
+            ))
+        })?;
+        let mut source = fs::File::open(&path).map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to open skill file '{}': {}",
+                path.display(),
+                err
+            ))
+        })?;
+        let mut bytes = Vec::new();
+        source.read_to_end(&mut bytes).map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to read skill file '{}': {}",
+                path.display(),
+                err
+            ))
+        })?;
+        zip.write_all(&bytes).map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to write skill file '{}': {}",
+                archive_name, err
+            ))
+        })?;
+    }
+
+    zip.finish().map_err(|err| {
+        crate::models::AppError::persistence(format!(
+            "Failed to finalize Ecky MCP skill zip '{}': {}",
+            target_path.display(),
+            err
+        ))
+    })?;
+    Ok(())
+}
+
+fn collect_skill_files(skill_dir: &Path) -> AppResult<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_skill_files_inner(skill_dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_skill_files_inner(dir: &Path, files: &mut Vec<PathBuf>) -> AppResult<()> {
+    let entries = fs::read_dir(dir).map_err(|err| {
+        crate::models::AppError::persistence(format!(
+            "Failed to read skill directory '{}': {}",
+            dir.display(),
+            err
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to read skill directory entry '{}': {}",
+                dir.display(),
+                err
+            ))
+        })?;
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if file_name == "__pycache__" || file_name == ".DS_Store" {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|err| {
+            crate::models::AppError::persistence(format!(
+                "Failed to inspect skill path '{}': {}",
+                path.display(),
+                err
+            ))
+        })?;
+        if metadata.is_dir() {
+            collect_skill_files_inner(&path, files)?;
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use zip::ZipArchive;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("ecky-skill-export-{name}-{unique}"))
+    }
+
+    #[test]
+    fn export_ecky_mcp_skill_zip_packages_skill_root() {
+        let root = temp_dir("ok");
+        let skill_dir = root.join("ecky-mcp");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: ecky-mcp\ndescription: test\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("references").join("tool-catalog.md"),
+            "tools",
+        )
+        .unwrap();
+        let archive_path = root.join("export").join("ecky-mcp.zip");
+
+        export_ecky_mcp_skill_zip_impl(&skill_dir, &archive_path).unwrap();
+
+        let file = fs::File::open(&archive_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert!(archive.by_name("ecky-mcp/SKILL.md").is_ok());
+        assert!(archive
+            .by_name("ecky-mcp/references/tool-catalog.md")
+            .is_ok());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_ecky_mcp_skill_zip_rejects_missing_skill() {
+        let root = temp_dir("missing");
+        fs::create_dir_all(&root).unwrap();
+        let err = export_ecky_mcp_skill_zip_impl(&root, &root.join("out.zip")).unwrap_err();
+
+        assert!(err.message.contains("invalid"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

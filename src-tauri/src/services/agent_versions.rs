@@ -5,8 +5,49 @@ use crate::models::{
     McpTargetRef, Message, MessageRole, MessageStatus, ModelManifest, PathResolver,
     TargetLeaseInfo,
 };
+use std::time::Instant;
 
 const AGENT_TARGET_LEASE_TTL_SECS: u64 = 45;
+
+fn profile_target(
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+    model_id: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(thread_id) = thread_id {
+        parts.push(format!("thread={}", thread_id));
+    }
+    if let Some(message_id) = message_id {
+        parts.push(format!("message={}", message_id));
+    }
+    if let Some(model_id) = model_id {
+        parts.push(format!("model={}", model_id));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" "))
+    }
+}
+
+fn push_save_profile(
+    state: &AppState,
+    session_id: &str,
+    stage: &str,
+    started: Instant,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+    model_id: Option<&str>,
+) {
+    state.push_log(format!(
+        "[MCP_PROFILE] session={} op=save_or_update_agent_version stage={} ms={}{}",
+        session_id,
+        stage,
+        started.elapsed().as_millis(),
+        profile_target(thread_id, message_id, model_id),
+    ));
+}
 
 #[derive(Debug, Clone)]
 pub struct SaveOrUpdateAgentVersionRequest {
@@ -149,6 +190,8 @@ pub async fn save_or_update_agent_version_for_session(
         announce_created_working_version,
     } = request;
 
+    let total_started = Instant::now();
+    let load_started = Instant::now();
     let (stored_session, existing_agent_message) = {
         let conn = state.db.lock().await;
         let stored_session = db::get_sessions_by_ids(&conn, std::slice::from_ref(&session_id))
@@ -167,8 +210,31 @@ pub async fn save_or_update_agent_version_for_session(
         };
         (stored_session, existing_agent_message)
     };
+    push_save_profile(
+        state,
+        &session_id,
+        "load_session_and_existing_message",
+        load_started,
+        Some(&thread_id),
+        existing_agent_message
+            .as_ref()
+            .map(|message| message.id.as_str()),
+        model_id.as_deref(),
+    );
 
+    let live_session_started = Instant::now();
     let live_session = state.mcp_sessions.lock().await.get(&session_id).cloned();
+    push_save_profile(
+        state,
+        &session_id,
+        "load_live_session",
+        live_session_started,
+        Some(&thread_id),
+        existing_agent_message
+            .as_ref()
+            .map(|message| message.id.as_str()),
+        model_id.as_deref(),
+    );
     let now = now_secs();
     let existing_origin = existing_agent_message
         .as_ref()
@@ -195,6 +261,7 @@ pub async fn save_or_update_agent_version_for_session(
     } else if design_output.version_name.trim().is_empty() {
         design_output.version_name = default_agent_version_name();
     }
+    let validate_started = Instant::now();
     let (next_ui_spec, next_params) = crate::models::reconcile_post_processing_controls(
         &design_output.ui_spec,
         &design_output.initial_params,
@@ -203,6 +270,17 @@ pub async fn save_or_update_agent_version_for_session(
     design_output.ui_spec = next_ui_spec;
     design_output.initial_params = next_params;
     crate::models::validate_design_output(&design_output)?;
+    push_save_profile(
+        state,
+        &session_id,
+        "reconcile_validate_design",
+        validate_started,
+        Some(&thread_id),
+        existing_agent_message
+            .as_ref()
+            .map(|message| message.id.as_str()),
+        model_id.as_deref(),
+    );
 
     let agent_label = agent_origin.agent_label.clone();
     let resolved_model_id = model_id
@@ -218,6 +296,7 @@ pub async fn save_or_update_agent_version_for_session(
                 .map(|bundle| bundle.model_id.clone())
         });
 
+    let db_write_started = Instant::now();
     let (message_id, created) = {
         let conn = state.db.lock().await;
         let thread_missing = db::get_thread_title(&conn, &thread_id)
@@ -318,12 +397,22 @@ pub async fn save_or_update_agent_version_for_session(
 
         (message_id, existing_agent_message.is_none())
     };
+    push_save_profile(
+        state,
+        &session_id,
+        "db_write_message_lease_session",
+        db_write_started,
+        Some(&thread_id),
+        Some(&message_id),
+        resolved_model_id.as_deref(),
+    );
 
     let next_target = McpTargetRef {
         thread_id: thread_id.clone(),
         message_id: message_id.clone(),
         model_id: resolved_model_id.clone(),
     };
+    let state_update_started = Instant::now();
     {
         let mut sessions = state.mcp_sessions.lock().await;
         if let Some(session) = sessions.get_mut(&session_id) {
@@ -362,15 +451,44 @@ pub async fn save_or_update_agent_version_for_session(
             Some(trace_summary),
         );
     }
+    push_save_profile(
+        state,
+        &session_id,
+        "state_runtime_logs",
+        state_update_started,
+        Some(&thread_id),
+        Some(&message_id),
+        resolved_model_id.as_deref(),
+    );
 
     if created && announce_created_working_version {
+        let emit_started = Instant::now();
         state.emit_agent_working_version_created(&crate::contracts::AgentWorkingVersionEvent {
             session_id: session_id.clone(),
             thread_id: thread_id.clone(),
             message_id: message_id.clone(),
             model_id: resolved_model_id.clone(),
         });
+        push_save_profile(
+            state,
+            &session_id,
+            "emit_working_version_created",
+            emit_started,
+            Some(&thread_id),
+            Some(&message_id),
+            resolved_model_id.as_deref(),
+        );
     }
+
+    push_save_profile(
+        state,
+        &session_id,
+        "total",
+        total_started,
+        Some(&thread_id),
+        Some(&message_id),
+        resolved_model_id.as_deref(),
+    );
 
     Ok(SaveOrUpdateAgentVersionResult {
         thread_id,
@@ -420,6 +538,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,

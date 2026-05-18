@@ -54,20 +54,31 @@ function versionMessage(imageData: string | null): Message {
   };
 }
 
-test('shouldPersistVersionPreview allows refreshing an existing preview for the matching artifact', () => {
+test('shouldPersistVersionPreview skips existing previews for the matching artifact', () => {
   assert.equal(
     shouldPersistVersionPreview(
       versionMessage('data:image/png;base64,abc'),
       bundle(),
       'asset:/tmp/model.stl',
     ),
-    true,
+    false,
   );
 });
 
 test('shouldPersistVersionPreview backfills missing preview for the matching artifact', () => {
   assert.equal(
     shouldPersistVersionPreview(versionMessage(null), bundle(), 'asset:/tmp/model.stl'),
+    true,
+  );
+});
+
+test('shouldPersistVersionPreview tolerates rebuilt preview paths for the same artifact', () => {
+  assert.equal(
+    shouldPersistVersionPreview(
+      versionMessage(null),
+      { ...bundle(), previewStlPath: '/tmp/rebuilt/model.stl' },
+      'asset:/tmp/rebuilt/model.stl',
+    ),
     true,
   );
 });

@@ -36,12 +36,12 @@ export function stepExportDisabledReason(
   if (bundle.geometryBackend === 'mesh') {
     const directOcct = runtimeCapabilities?.directOcct ?? null;
     if (!directOcct) {
-      return 'STEP unavailable for mesh/EckyRust render: Direct OCCT capability was not probed.';
+      return 'STEP unavailable for Ecky Native render: Direct OCCT capability was not probed.';
     }
     if (!directOcct.available) {
-      return `STEP unavailable for mesh/EckyRust render: ${directOcct.detail || 'Direct OCCT unavailable.'}`;
+      return `STEP unavailable for Ecky Native render: ${directOcct.detail || 'Direct OCCT unavailable.'}`;
     }
-    return 'STEP unavailable for mesh/EckyRust render: no BRep STEP artifact was produced.';
+    return 'STEP unavailable for Ecky Native render: no BRep STEP artifact was produced.';
   }
 
   return 'STEP artifact is not present in this model bundle.';

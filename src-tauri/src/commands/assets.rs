@@ -6,7 +6,7 @@ use tauri::AppHandle;
 use uuid::Uuid;
 
 fn is_supported_image_extension(ext: &str) -> bool {
-    matches!(ext, "png" | "jpg" | "jpeg" | "webp")
+    matches!(ext, "png" | "jpg" | "jpeg" | "webp" | "svg")
 }
 
 fn image_format_for_path(path: &Path) -> Option<String> {
@@ -203,6 +203,7 @@ mod tests {
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
@@ -226,26 +227,27 @@ mod tests {
         fs::write(assets_dir.join("z-last.webp"), b"fake").unwrap();
         fs::write(assets_dir.join("alpha_one.PNG"), b"fake").unwrap();
         fs::write(assets_dir.join("note.jpeg"), b"fake").unwrap();
+        fs::write(assets_dir.join("vector.svg"), b"<svg/>").unwrap();
         fs::write(assets_dir.join("ignore.webm"), b"fake").unwrap();
         fs::create_dir_all(assets_dir.join("nested")).unwrap();
         fs::write(assets_dir.join("nested").join("inside.png"), b"fake").unwrap();
 
         let assets = collect_image_assets(&resolver).unwrap();
 
-        assert_eq!(assets.len(), 3);
+        assert_eq!(assets.len(), 4);
         assert_eq!(
             assets
                 .iter()
                 .map(|asset| asset.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["alpha one", "note", "z last"]
+            vec!["alpha one", "note", "vector", "z last"]
         );
         assert_eq!(
             assets
                 .iter()
                 .map(|asset| asset.format.as_str())
                 .collect::<Vec<_>>(),
-            vec!["PNG", "JPEG", "WEBP"]
+            vec!["PNG", "JPEG", "SVG", "WEBP"]
         );
         assert!(assets.iter().all(|asset| asset.id.starts_with("asset-")));
     }

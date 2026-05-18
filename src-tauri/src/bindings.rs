@@ -8,6 +8,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::config::list_agent_models,
         crate::commands::config::get_design_system_prompt,
         crate::commands::config::get_app_logs,
+        crate::commands::config::export_ecky_mcp_skill_zip,
         crate::commands::component_package::read_component_package_manifest,
         crate::commands::component_package::write_component_package_manifest,
         crate::commands::component_package::write_artifact_bundle_component_package_project,

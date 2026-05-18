@@ -114,3 +114,31 @@ test('modelEngineLabel falls back to canonical ecky extension for native source'
     'Ecky (.ecky)',
   );
 });
+
+test('modelEngineLabel renames mesh backend to native', () => {
+  assert.equal(
+    modelEngineLabel(
+      message({
+        modelManifest: {
+          modelId: 'model',
+          sourceKind: 'generated',
+          sourceLanguage: 'ecky',
+          geometryBackend: 'mesh',
+          engineKind: 'ecky',
+          document: { documentName: 'model', documentLabel: 'model' },
+          parts: [],
+          parameterGroups: [],
+          controlPrimitives: [],
+          controlRelations: [],
+          controlViews: [],
+          advisories: [],
+          selectionTargets: [],
+          measurementAnnotations: [],
+          warnings: [],
+          enrichmentState: { status: 'none', proposals: [] },
+        },
+      }),
+    ),
+    'Ecky Native (.ecky)',
+  );
+});

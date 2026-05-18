@@ -11,13 +11,20 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- Valid basics: `(box 40 20 10 :align '(min center min))`, `(extrude (polygon ((0 0) (100 0) (100 20) (0 20))) 8)`, `(place (location (plane :origin '(80 0 6)) :rotate '(0 90 0)) (cylinder 4 18))`.\n",
     "- `let` is parallel; use `let*` when later bindings depend on earlier bindings.\n",
     "- Guide routing is dynamic. For `sourceLanguage=ecky`, read `ecky://guides/ecky-source` as the primary language guide. Read backend manifests only when checking a specific op/support question. Read prose backend guides only after a lowerer/render error or artifact/export claim.\n",
+    "- For repeated structures in new CAD models, prefer `repeat` or `instance`; avoid copy-paste duplicate geometry blocks.\n",
+    "- Physical fit relations need explicit names. Do not leave anonymous offsets like `(+ holder_w 12)` in fit-critical placement/dimension expressions; introduce named bindings or named constraints.\n",
+    "- Debug overlays are preview-only diagnostics. They are forbidden in production export geometry.\n",
     "- Fillet/chamfer are topology-sensitive. If a selector matches no edges after one smaller-radius retry and one selector retry, stop retrying fillet/chamfer; rebuild the shape with rounded source geometry (`rounded-rect`, `rounded-polygon`, `offset-rounded`, `loft`, `taper`, `cone`, or explicit profiles).\n",
     "- Do not promise STEP unless current artifact truth says `hasStepExport=true` or exportArtifacts contains `format=step`; direct OCCT is internal, not a selectable user backend.\n",
+    "- MCP-first workflow: inspect with `target_detail_get(section=\"shapeGraph\")`, patch with `ecky_ast_*` when possible, validate with `ecky_constraints_validate`, preview via render, then commit.\n",
+    "- Prefer AST patches over full macro rewrites when an `ecky_ast_*` operation can express the edit.\n",
+    "- For geometry with explicit topology/printability requirements, add top-level `(verify ...)` clauses before preview when shipped manifest/STL metrics can express the requirement; example metrics: `(stl non-manifold-edge-count)`, `(stl connected-component-count)`, `(stl overhang-face-count)`, and `(manifest has-step)`.\n",
+    "- After preview/render, call `verify_generated_model` before commit. This runs authored `(verify ...)` clauses plus structural verification. Use `get_structural_verification_summary` only for summary/readback, not as the primary gate.\n",
     "- For an existing design target, call `thread_borrow`; for a brand-new design, call `thread_create`, then render the first version with `macro_preview_render`.\n",
     "- Render with `macro_preview_render`. If validation fails, surface exact raw error, fix source properly, and render again.\n",
     "- Persist successful previews with `commit_preview_version`; include returned `threadId`, `messageId`, and `modelId` in agent evidence.\n",
     "- Never write `history.sqlite` directly from scripts or agents. Version updates must flow through MCP tools only.\n",
-    "- Verify geometry with `get_model_screenshot` after successful render.\n"
+    "- Verify geometry visually with `get_model_screenshot` after `verify_generated_model` passes; authored verify covers measurable structure, not visual/mechanical intent.\n"
 );
 
 pub(crate) fn authoring_card_text() -> &'static str {
@@ -114,5 +121,24 @@ mod tests {
         assert!(card.contains("selector matches no edges"));
         assert!(card.contains("stop retrying fillet/chamfer"));
         assert!(card.contains("rounded source geometry"));
+    }
+
+    #[test]
+    fn authoring_card_enforces_shapegraph_ast_validate_flow() {
+        let card = authoring_card_text();
+
+        assert!(card.contains("target_detail_get(section=\"shapeGraph\")"));
+        assert!(card.contains("ecky_ast_*"));
+        assert!(card.contains("ecky_constraints_validate"));
+        assert!(card.contains("Prefer AST patches over full macro rewrites"));
+    }
+
+    #[test]
+    fn authoring_card_requires_named_fit_offsets() {
+        let card = authoring_card_text();
+
+        assert!(card.contains("Physical fit relations need explicit names"));
+        assert!(card.contains("Do not leave anonymous offsets"));
+        assert!(card.contains("(+ holder_w 12)"));
     }
 }

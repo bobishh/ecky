@@ -31,6 +31,9 @@
     contextLabel = null,
     question = '',
     onDismiss = null,
+    onBubbleClick = null,
+    bubbleAriaLabel = 'Open session activity',
+    bubbleTestId = undefined,
     actions = null,
     traits = {},
     intensity = 1.0,
@@ -46,6 +49,9 @@
     contextLabel?: string | null;
     question?: string;
     onDismiss?: (() => void) | null;
+    onBubbleClick?: (() => void) | null;
+    bubbleAriaLabel?: string;
+    bubbleTestId?: string;
     actions?: Array<{ label: string; onclick: () => void }> | null;
     traits?: Partial<GenieTraits> | null;
     intensity?: number;
@@ -117,7 +123,8 @@
     return Math.max(min, Math.min(max, value));
   }
 
-  async function copyBubbleText() {
+  async function copyBubbleText(event?: MouseEvent) {
+    event?.stopPropagation();
     if (!cleanBubble) return;
     try {
       await navigator.clipboard.writeText(cleanBubble);
@@ -129,6 +136,27 @@
     copyFeedbackTimer = window.setTimeout(() => {
       copyFeedback = '';
     }, 1400);
+  }
+
+  function openBubble() {
+    onBubbleClick?.();
+  }
+
+  function handleBubbleKeydown(event: KeyboardEvent) {
+    if (!onBubbleClick) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openBubble();
+  }
+
+  function dismissBubble(event: MouseEvent) {
+    event.stopPropagation();
+    onDismiss?.();
+  }
+
+  function runBubbleAction(event: MouseEvent, action: { label: string; onclick: () => void }) {
+    event.stopPropagation();
+    action.onclick();
   }
 
   function pokeGenie(event: MouseEvent) {
@@ -593,11 +621,23 @@
 	    ></canvas>
 	  </button>
   {#if cleanBubble}
-    <div class="genie-bubble" class:genie-bubble--compact={compact} data-bubble-layout={compact ? 'compact' : 'full'}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="genie-bubble"
+      class:genie-bubble--compact={compact}
+      class:genie-bubble--clickable={Boolean(onBubbleClick)}
+      data-bubble-layout={compact ? 'compact' : 'full'}
+      data-testid={bubbleTestId}
+      role="button"
+      tabindex="0"
+      aria-label={bubbleAriaLabel}
+      onclick={openBubble}
+      onkeydown={handleBubbleKeydown}
+    >
       <button class="bubble-copy" type="button" onclick={copyBubbleText} aria-label="Copy advisor response">
         {copyFeedback || 'COPY'}
       </button>
-      <button class="bubble-close" type="button" onclick={() => onDismiss?.()} aria-label="Dismiss advisor bubble"></button>
+      <button class="bubble-close" type="button" onclick={dismissBubble} aria-label="Dismiss advisor bubble"></button>
       <div class="bubble-header">
         {#if compact}
           <div class="bubble-meta">
@@ -622,7 +662,7 @@
       {#if actions?.length}
         <div class="bubble-actions">
           {#each actions as action}
-            <button class="bubble-action-btn" type="button" onclick={action.onclick}>{action.label}</button>
+            <button class="bubble-action-btn" type="button" onclick={(event) => runBubbleAction(event, action)}>{action.label}</button>
           {/each}
         </div>
       {/if}
@@ -690,6 +730,15 @@
     -webkit-user-select: text !important;
     user-select: text !important;
     overflow-y: auto;
+  }
+
+  .genie-bubble--clickable {
+    cursor: pointer;
+  }
+
+  .genie-bubble--clickable:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--secondary) 74%, var(--text));
+    outline-offset: 3px;
   }
 
   .genie-bubble--compact {

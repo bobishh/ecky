@@ -263,6 +263,28 @@ pub struct CoreRelationConstraint {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CoreProgramConstraints {
     pub relations: Vec<CoreRelationConstraint>,
+    pub verify_clauses: Vec<CoreVerifyClause>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreVerifyClause {
+    pub tag: CoreVerifySection,
+    pub metric: CoreVerifySection,
+    pub expect: CoreVerifySection,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CoreVerifySection {
+    pub items: Vec<CoreVerifyValue>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreVerifyValue {
+    Symbol(String),
+    Number(f64),
+    Boolean(bool),
+    Text(String),
+    List(Vec<CoreVerifyValue>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -623,7 +645,28 @@ mod tests {
                 label: "Body".into(),
                 root: node,
             }],
-        );
+        )
+        .with_constraints(CoreProgramConstraints {
+            relations: vec![],
+            verify_clauses: vec![CoreVerifyClause {
+                tag: CoreVerifySection {
+                    items: vec![CoreVerifyValue::Symbol("body".into())],
+                },
+                metric: CoreVerifySection {
+                    items: vec![
+                        CoreVerifyValue::Symbol("clearance".into()),
+                        CoreVerifyValue::Number(0.2),
+                    ],
+                },
+                expect: CoreVerifySection {
+                    items: vec![CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol(">=".into()),
+                        CoreVerifyValue::Symbol("value".into()),
+                        CoreVerifyValue::Number(0.2),
+                    ])],
+                },
+            }],
+        });
         let clone = program.clone();
         assert_eq!(program, clone);
     }

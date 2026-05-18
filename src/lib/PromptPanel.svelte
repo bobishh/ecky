@@ -286,6 +286,7 @@
     const ext = (name.split('.').pop() || '').toLowerCase();
     if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
     if (ext === 'webp') return 'image/webp';
+    if (ext === 'svg') return 'image/svg+xml';
     return 'image/png';
   }
 
@@ -315,7 +316,7 @@
     const newAttachments = await Promise.all(paths.map(async (path) => {
       const name = path.split(/[\/\\]/).pop() || path;
       const ext = (name.split('.').pop() || '').toLowerCase();
-      if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+      if (['png', 'jpg', 'jpeg', 'webp', 'svg'].includes(ext)) {
         try {
           return await inlineImageAttachmentFromPath(path);
         } catch {
@@ -450,7 +451,7 @@
       const selected = await open({
         multiple: true,
         filters: [
-          { name: 'Images, CAD & Macros', extensions: ['png', 'jpg', 'jpeg', 'stl', 'step', 'stp', 'py', 'fcmacro'] }
+          { name: 'Images, CAD & Macros', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg', 'stl', 'step', 'stp', 'py', 'fcmacro'] }
         ]
       });
 
@@ -1062,7 +1063,7 @@
     {#if voiceStatus}
       <div class="voice-status" class:voice-status--error={voiceState === 'error'}>{voiceStatus}</div>
     {/if}
-    {#if workspaceCaptureHint && dialogueState.mode !== 'generate'}
+    {#if workspaceCaptureHint}
       <div class="workspace-capture-hint">{workspaceCaptureHint}</div>
     {/if}
   </div>

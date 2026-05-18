@@ -9,7 +9,6 @@ import {
 
 type ParamPanelStateSnapshot = {
   versionId: string | null;
-  macroCode: string;
   uiSpec: UiSpec;
   params: DesignParams;
 };
@@ -20,7 +19,6 @@ function emptyUiSpec(): UiSpec {
 
 const initialState: ParamPanelStateSnapshot = {
   versionId: null,
-  macroCode: '',
   uiSpec: emptyUiSpec(),
   params: {}
 };
@@ -37,13 +35,11 @@ function createParamPanelState() {
 
     hydrate(payload: {
       versionId?: string | null;
-      macroCode?: string;
       uiSpec?: UiSpec;
       params?: DesignParams;
     }) {
       set({
         versionId: payload.versionId ?? null,
-        macroCode: payload.macroCode ?? '',
         uiSpec: normalizeUiSpec(payload.uiSpec),
         params: normalizeDesignParams(payload.params)
       });
@@ -52,7 +48,6 @@ function createParamPanelState() {
     hydrateFromVersion(design: DesignOutput | null | undefined, versionId: string | null) {
       set({
         versionId: versionId ?? null,
-        macroCode: design?.macroCode ?? '',
         uiSpec: normalizeUiSpec(design?.uiSpec),
         params: normalizeDesignParams(design?.initialParams)
       });
@@ -60,10 +55,6 @@ function createParamPanelState() {
 
     setVersionId(versionId: string | null) {
       update(s => ({ ...s, versionId }));
-    },
-
-    setMacroCode(macroCode: string) {
-      update(s => ({ ...s, macroCode: macroCode ?? '' }));
     },
 
     setUiSpec(uiSpec: UiSpec) {

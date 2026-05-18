@@ -3035,12 +3035,32 @@ impl FreecadLowerer {
                 });
             }
             "svg" => {
-                if args.len() != 1 {
-                    return Err(validation("`svg` expects a file path."));
+                if args.is_empty() || args.len() > 4 {
+                    return Err(validation(
+                        "`svg` expects a file path, optional target width/height, and optional fit mode.",
+                    ));
                 }
                 let path = self.lower_stringish_expr(&args[0], scope)?;
+                let target_width = args
+                    .get(1)
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "None".to_string());
+                let target_height = args
+                    .get(2)
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "None".to_string());
+                let fit_mode = args
+                    .get(3)
+                    .map(|value| self.lower_stringish_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "'contain'".to_string());
                 let result = self.next_var();
-                self.emit(format!("{result} = _ecky_svg({})", path));
+                self.emit(format!(
+                    "{result} = _ecky_svg({}, {}, {}, {})",
+                    path, target_width, target_height, fit_mode
+                ));
                 return Ok(LoweredNode {
                     expr: result,
                     kind: GeomKind::Sketch2d,
@@ -3562,7 +3582,7 @@ fn freecad_preamble() -> Vec<String> {
         String::new(),
         "def _ecky_bspline(points, closed=False, tangents=None, tangent_scalars=None):\n    pts = list(points)\n    curve = Part.BSplineCurve()\n    kwargs = {}\n    if tangents and len(tangents) >= 2:\n        start = [float(v) for v in tangents[0]]\n        end = [float(v) for v in tangents[-1]]\n        if tangent_scalars and len(tangent_scalars) >= 2:\n            start_scale = float(tangent_scalars[0])\n            end_scale = float(tangent_scalars[-1])\n            start = [value * start_scale for value in start]\n            end = [value * end_scale for value in end]\n        kwargs['InitialTangent'] = App.Vector(*start)\n        kwargs['FinalTangent'] = App.Vector(*end)\n    try:\n        if kwargs:\n            curve.interpolate(pts, **kwargs)\n        else:\n            curve.interpolate(pts)\n    except TypeError:\n        curve.interpolate(pts)\n    if closed and pts:\n        try:\n            curve.setPeriodic()\n        except Exception:\n            try:\n                curve.closed = True\n            except Exception:\n                pass\n    return Part.Wire(curve.toShape())".into(),
         String::new(),
-        "def _ecky_default_font_path():\n    explicit = os.environ.get('ECKYCAD_FONT_PATH')\n    candidates = [explicit] if explicit else []\n    candidates.extend([\n        '/System/Library/Fonts/Supplemental/Arial.ttf',\n        '/Library/Fonts/Arial.ttf',\n        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',\n        'C:/Windows/Fonts/arial.ttf',\n    ])\n    for path in candidates:\n        if path and os.path.exists(path):\n            return path\n    raise RuntimeError('No usable font found for `text`. Set ECKYCAD_FONT_PATH to a .ttf file.')".into(),
+        "def _ecky_default_font_path():\n    explicit = os.environ.get('ECKYCAD_FONT_PATH')\n    candidates = [explicit] if explicit else []\n    candidates.extend([\n        '/System/Library/Fonts/Supplemental/Arial Black.ttf',\n        '/System/Library/Fonts/Supplemental/Impact.ttf',\n        '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',\n        '/System/Library/Fonts/Supplemental/Arial.ttf',\n        '/Library/Fonts/Arial.ttf',\n        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',\n        'C:/Windows/Fonts/arial.ttf',\n    ])\n    for path in candidates:\n        if path and os.path.exists(path):\n            return path\n    raise RuntimeError('No usable font found for `text`. Set ECKYCAD_FONT_PATH to a .ttf file.')".into(),
         String::new(),
         "def _ecky_as_wire(shape):\n    if getattr(shape, \"ShapeType\", \"\") == \"Wire\":\n        return shape\n    if hasattr(shape, \"Wires\") and getattr(shape, \"Wires\", None):\n        return shape.Wires[0]\n    try:\n        return Part.Wire(shape.Edges)\n    except Exception:\n        return shape".into(),
         String::new(),
@@ -3570,9 +3590,9 @@ fn freecad_preamble() -> Vec<String> {
         String::new(),
         "def _ecky_face_with_holes(outer, holes):\n    loops = [_ecky_as_wire(outer)]\n    loops.extend(_ecky_as_wire(hole) for hole in list(holes or []))\n    return Part.Face(loops)".into(),
         String::new(),
-        "def _ecky_text(value, size):\n    glyphs = Part.makeWireString(str(value), _ecky_default_font_path(), float(size))\n    faces = [Part.Face(glyph) for glyph in glyphs]\n    if not faces:\n        raise ValueError('text produced no glyph faces')\n    return faces[0] if len(faces) == 1 else Part.makeCompound(faces)".into(),
+        "def _ecky_text(value, size):\n    glyphs = Part.makeWireString(str(value), _ecky_default_font_path(), float(size))\n    faces = [_ecky_face(glyph) for glyph in glyphs]\n    if not faces:\n        raise ValueError('text produced no glyph faces')\n    return faces[0] if len(faces) == 1 else Part.makeCompound(faces)".into(),
         String::new(),
-        "def _ecky_svg(path):\n    import importSVG\n    doc = App.ActiveDocument or App.newDocument('EckyCAD')\n    before = {obj.Name for obj in doc.Objects}\n    importSVG.insert(str(path), doc.Name)\n    doc.recompute()\n    imported = [obj for obj in doc.Objects if obj.Name not in before]\n    shapes = []\n    try:\n        for obj in imported:\n            shape = getattr(obj, 'Shape', None)\n            if shape is None:\n                continue\n            try:\n                if shape.isNull():\n                    continue\n            except Exception:\n                pass\n            try:\n                shapes.append(Part.Face(shape))\n            except Exception:\n                shapes.append(shape.copy())\n    finally:\n        for obj in imported:\n            try:\n                doc.removeObject(obj.Name)\n            except Exception:\n                pass\n        doc.recompute()\n    if not shapes:\n        raise ValueError(f'SVG import produced no shapes for {path}')\n    return shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)".into(),
+        "def _ecky_svg(path, target_width=None, target_height=None, fit_mode='contain'):\n    import importSVG\n    doc = App.ActiveDocument or App.newDocument('EckyCAD')\n    before = {obj.Name for obj in doc.Objects}\n    importSVG.insert(str(path), doc.Name)\n    doc.recompute()\n    imported = [obj for obj in doc.Objects if obj.Name not in before]\n    shapes = []\n    try:\n        for obj in imported:\n            shape = getattr(obj, 'Shape', None)\n            if shape is None:\n                continue\n            try:\n                if shape.isNull():\n                    continue\n            except Exception:\n                pass\n            try:\n                shapes.append(Part.Face(shape))\n            except Exception:\n                shapes.append(shape.copy())\n    finally:\n        for obj in imported:\n            try:\n                doc.removeObject(obj.Name)\n            except Exception:\n                pass\n        doc.recompute()\n    if not shapes:\n        raise ValueError(f'SVG import produced no shapes for {path}')\n    result = shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)\n    if target_width is None and target_height is None:\n        return result\n    bb = result.BoundBox\n    width = float(bb.XLength)\n    height = float(bb.YLength)\n    mode = str(fit_mode or 'contain').strip().lower()\n    if width <= 1e-9 or height <= 1e-9:\n        raise ValueError(f'SVG import has degenerate bounds for {path}')\n    sx = (float(target_width) / width) if target_width is not None else None\n    sy = (float(target_height) / height) if target_height is not None else None\n    fitted = result.copy()\n    fitted.translate(App.Vector(-((bb.XMin + bb.XMax) / 2.0), -((bb.YMin + bb.YMax) / 2.0), -bb.ZMin))\n    if mode in ('contain', 'fit'):\n        factor = min([scale for scale in (sx, sy) if scale is not None])\n        fitted.scale(factor)\n        return fitted\n    if mode == 'cover':\n        factor = max([scale for scale in (sx, sy) if scale is not None])\n        fitted.scale(factor)\n        return fitted\n    if mode in ('stretch', 'fill'):\n        matrix = App.Matrix()\n        matrix.A11 = sx if sx is not None else sy\n        matrix.A22 = sy if sy is not None else sx\n        matrix.A33 = 1.0\n        return fitted.transformGeometry(matrix)\n    raise ValueError(f'Unsupported SVG fit mode {fit_mode!r}; expected contain, cover, or stretch.')".into(),
         String::new(),
         "def _ecky_import_stl(path, tolerance=0.1):\n    import Mesh\n    mesh = Mesh.Mesh(str(path))\n    shape = Part.Shape()\n    shape.makeShapeFromMesh(mesh.Topology, float(tolerance))\n    solids = []\n    for shell in list(getattr(shape, 'Shells', []) or []):\n        try:\n            solids.append(Part.makeSolid(shell))\n        except Exception:\n            pass\n    if solids:\n        return solids[0] if len(solids) == 1 else Part.makeCompound(solids)\n    existing_solids = list(getattr(shape, 'Solids', []) or [])\n    if existing_solids:\n        return existing_solids[0] if len(existing_solids) == 1 else Part.makeCompound(existing_solids)\n    return shape".into(),
         String::new(),
@@ -4291,11 +4311,40 @@ mod tests {
             "font helper: {}",
             text
         );
+        assert!(
+            text.contains("faces = [_ecky_face(glyph) for glyph in glyphs]"),
+            "text helper should normalize glyph wires/faces: {}",
+            text
+        );
 
         let svg = lower_to_freecad(r#"(model (part body (extrude (svg "/tmp/logo.svg") 2)))"#)
             .expect("svg lower");
         assert!(svg.contains("_ecky_svg"), "svg helper: {}", svg);
         assert!(svg.contains("import importSVG"), "svg import: {}", svg);
+        assert!(
+            svg.contains("fit_mode='contain'"),
+            "svg helper should support fit modes: {}",
+            svg
+        );
+        assert!(svg.contains("mode == 'cover'"), "svg cover mode: {}", svg);
+        assert!(
+            svg.contains("mode in ('stretch', 'fill')"),
+            "svg stretch mode: {}",
+            svg
+        );
+
+        let fitted_svg = lower_to_freecad(
+            r#"(model (part body (extrude (svg "/tmp/logo.svg" 8 5 "contain") 2)))"#,
+        )
+        .expect("fitted svg lower");
+        assert!(
+            fitted_svg.contains("_ecky_svg")
+                && fitted_svg.contains("/tmp/logo.svg")
+                && fitted_svg.contains("8.0, 5.0")
+                && fitted_svg.contains("contain"),
+            "fitted svg call: {}",
+            fitted_svg
+        );
 
         let stl = lower_to_freecad(r#"(model (part body (import-stl "/tmp/sample.stl")))"#)
             .expect("stl lower");

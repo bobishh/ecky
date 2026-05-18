@@ -39,6 +39,7 @@
       "../templates/cache_pot_default.FCMacro": "templates/cache_pot_default.FCMacro",
       "../templates/mess.stl": "templates/mess.stl",
       "../.dist/build123d-runtime": "runtime/build123d",
+      "../.dist/runtime/occt": "runtime/occt",
       "../.dist/speech-runtime": "runtime/speech"
     },
     "icon": [

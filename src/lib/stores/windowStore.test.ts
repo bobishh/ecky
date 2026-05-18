@@ -4,8 +4,10 @@ import test from 'node:test';
 import { get } from 'svelte/store';
 
 import {
+  ALL_WINDOW_IDS,
   _resetWindowStoreForTest,
   showWindow,
+  windowRegistry,
   windowStore,
 } from './windowStore';
 
@@ -29,6 +31,36 @@ test('showWindow opens hidden window, clears minimized state, and raises z order
   assert.equal(state.dialogue.visible, true);
   assert.equal(state.dialogue.minimized, false);
   assert.ok(state.dialogue.z > paramsZ);
+
+  _resetWindowStoreForTest();
+});
+
+test('activity window is registered and can be opened', () => {
+  _resetWindowStoreForTest();
+
+  assert.ok(ALL_WINDOW_IDS.includes('activity'));
+  assert.equal(windowRegistry.activity.title, 'Session Activity');
+
+  showWindow('activity');
+  const state = get(windowStore);
+  assert.equal(state.activity.visible, true);
+  assert.equal(state.activity.minimized, false);
+  assert.ok(state.activity.width >= windowRegistry.activity.minSize.width);
+
+  _resetWindowStoreForTest();
+});
+
+test('docs window is registered and can be opened', () => {
+  _resetWindowStoreForTest();
+
+  assert.ok(ALL_WINDOW_IDS.includes('docs'));
+  assert.equal(windowRegistry.docs.title, 'Ecky IR Docs');
+
+  showWindow('docs');
+  const state = get(windowStore);
+  assert.equal(state.docs.visible, true);
+  assert.equal(state.docs.minimized, false);
+  assert.ok(state.docs.width >= windowRegistry.docs.minSize.width);
 
   _resetWindowStoreForTest();
 });

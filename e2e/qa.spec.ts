@@ -852,6 +852,25 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(paramsWindow).toBeVisible();
   }
 
+  async function openProjects(page: Page) {
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    if (!(await projectsWindow.isVisible().catch(() => false))) {
+      await page.getByRole('button', { name: 'PROJECTS' }).click();
+    }
+    await expect(projectsWindow).toBeVisible();
+  }
+
+  async function openNewProjectChooser(page: Page) {
+    const chooser = page.locator('.modal-backdrop');
+    if (await chooser.isVisible().catch(() => false)) {
+      await expect(chooser).toContainText('Start New Project');
+      return;
+    }
+    await openProjects(page);
+    await page.locator('[data-window-id="projects"]').getByRole('button', { name: /\+ NEW/i }).click();
+    await expect(chooser).toContainText('Start New Project');
+  }
+
   async function numericZIndex(target: Locator) {
     return target.evaluate((element) => Number.parseInt(window.getComputedStyle(element).zIndex || '0', 10));
   }
@@ -1264,7 +1283,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(status).toContainText('output.step');
   });
 
-  test('selected parts expose editable controls in the main viewer overlay', async ({ page }) => {
+  test('selected parts expose editable controls in Params while viewer overlay stays disabled', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
@@ -1278,9 +1297,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
     await expect(page.locator('.part-chip.part-chip-active')).toContainText('Shell');
 
-    const overlay = page.locator('.viewer-part-overlay');
-    await expect(overlay).toContainText('Size');
-    await expect(overlay).toContainText('Height');
+    await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
+    await expect(page.locator('.param-field', { hasText: 'Size' })).toBeVisible();
+    await expect(page.locator('.param-field', { hasText: 'Height' })).toBeVisible();
 
     await page.locator('.live-toggle').click();
 
@@ -1288,7 +1307,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
     );
 
-    await overlay.locator('input[type="range"]').first().evaluate((input) => {
+    await page.locator('.param-field input[type="range"]').first().evaluate((input) => {
       const element = input as HTMLInputElement;
       element.value = '12';
       element.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1303,7 +1322,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       .toBeGreaterThan(beforeRenderCount);
   });
 
-  test('viewer overlay edits stage values when live is disabled', async ({ page }) => {
+  test('Params edits stage values when live is disabled and viewer overlay stays disabled', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
@@ -1316,19 +1335,19 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
 
-    const overlay = page.locator('.viewer-part-overlay');
+    await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
     const beforeRenderCount = await page.evaluate(
       () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
     );
 
-    await overlay.locator('input[type="range"]').first().evaluate((input) => {
+    await page.locator('.param-field input[type="range"]').first().evaluate((input) => {
       const element = input as HTMLInputElement;
       element.value = '16';
       element.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
     await page.waitForTimeout(150);
-    await expect(page.locator('.viewer-overlay-readout').first()).toHaveValue('16');
+    await expect(page.locator('.param-field input[type="number"]').first()).toHaveValue('16');
     await expect(page.locator('.apply-btn')).toBeEnabled();
 
     const stagedRenderCount = await page.evaluate(
@@ -1404,7 +1423,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
     );
 
-    await page.locator('.viewer-part-overlay input[type="range"]').first().evaluate((input) => {
+    await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
+    await page.locator('.param-field input[type="range"]').first().evaluate((input) => {
       const element = input as HTMLInputElement;
       element.value = '18';
       element.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1426,7 +1446,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     expect(lastRenderCall?.args?.parameters?.height).toBe(18);
   });
 
-  test('clicking the model selects a part and opens the in-view overlay', async ({ page }) => {
+  test('clicking the model selects a part while in-view overlay stays disabled', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
@@ -1445,19 +1465,19 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.waitForTimeout(250);
     for (const ratio of [0.18, 0.24, 0.3]) {
       await page.mouse.click(bounds.x + bounds.width * ratio, bounds.y + bounds.height * 0.54);
-      const overlayText = (await page.locator('.viewer-part-overlay').allTextContents())[0] ?? null;
-      if (overlayText?.includes('Size')) break;
+      const activePartText = (await page.locator('.part-chip.part-chip-active').allTextContents())[0] ?? null;
+      if (activePartText?.includes('Shell')) break;
     }
 
     await expect(page.locator('.part-chip.part-chip-active')).toContainText('Shell');
-    await expect(page.locator('.viewer-part-overlay')).toContainText('Size');
+    await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
   });
 
   test('importing a macro should create a manual version via the manual commit path', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.locator('button[title="New project"]').click();
+    await openNewProjectChooser(page);
     await page.getByRole('button', { name: /Import Macro/i }).click();
     await page.getByPlaceholder('Paste FreeCAD macro (Python) here...').fill('print(\"manual\")');
     await page.getByRole('button', { name: /CREATE THREAD/i }).click();
@@ -1474,12 +1494,12 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.locator('button[title="New project"]').click();
+    await openNewProjectChooser(page);
     await expect(page.getByRole('button', { name: /Canonical Cup/i })).toHaveCount(0);
     await page.keyboard.press('Escape');
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: /\+ NEW/i }).click();
+    await openProjects(page);
+    await page.locator('[data-window-id="projects"]').getByRole('button', { name: /\+ NEW/i }).click();
     await expect(page.getByRole('button', { name: /Canonical Cup/i })).toHaveCount(0);
   });
 
@@ -1487,9 +1507,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await openProjects(page);
     const projectsWindow = page.locator('[data-window-id="projects"]');
-    await expect(projectsWindow).toBeVisible();
 
     const assertChooserAboveProjects = async () => {
       const modalBackdrop = page.locator('.modal-backdrop');
@@ -1500,11 +1519,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       await expect(modalBackdrop).toHaveCount(0);
     };
 
-    await page.locator('button[title="New project"]').click();
+    await openNewProjectChooser(page);
     await assertChooserAboveProjects();
 
     await projectsWindow.click({ position: { x: 20, y: 20 } });
-    await page.getByRole('button', { name: /\+ NEW/i }).click();
+    await projectsWindow.getByRole('button', { name: /\+ NEW/i }).click();
     await assertChooserAboveProjects();
   });
 
@@ -1512,7 +1531,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.locator('button[title="New project"]').click();
+    await openNewProjectChooser(page);
     await page.getByRole('button', { name: /Import FreeCAD|Import FCStd/i }).click();
 
     await expect
@@ -1552,7 +1571,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
-    await page.locator('button[title="New project"]').click();
+    await openNewProjectChooser(page);
     await page.getByRole('button', { name: /Import FreeCAD|Import FCStd/i }).click();
     const importDialog = page.getByRole('dialog');
     await expect(importDialog.locator('.proposal-card').last()).toContainText('Expose Outer Shell dimensions');
@@ -1564,20 +1583,16 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await openParams(page);
     await page.locator('.part-chip', { hasText: 'Outer Shell' }).click();
     await expect(page.locator('.param-field', { hasText: 'Outer Shell Width' })).toBeVisible();
-    await expect(page.locator('.viewer-part-overlay')).toContainText('Outer Shell');
-    await expect(page.locator('.viewer-part-overlay')).toContainText('Outer Shell Width');
-    await expect(page.getByPlaceholder('Filter controls...')).toBeVisible();
+    await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
 
     await page.locator('.param-field', { hasText: 'Outer Shell Width' }).hover();
-    await expect(page.locator('.viewer-dimension-layer')).toContainText('Outer Shell');
-
-    await page.locator('.viewer-part-overlay input[type="number"]').first().evaluate((element) => {
+    await page.locator('.param-field input[type="number"]').first().evaluate((element) => {
       const input = element as HTMLInputElement;
       input.value = '48';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
-    await expect(page.locator('.viewer-part-overlay input[type="number"]').first()).toHaveValue('48');
+    await expect(page.locator('.param-field input[type="number"]').first()).toHaveValue('48');
     await expect(page.locator('.apply-btn')).toBeEnabled();
     await page.locator('.apply-btn').click();
 
@@ -1592,6 +1607,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.locator('.project-card', { hasText: 'Imported Shell' }).getByRole('button', { name: 'OPEN' }).click();
     await openParams(page);
     await page.locator('.part-chip', { hasText: 'Outer Shell' }).click();
-    await expect(page.locator('.viewer-part-overlay input[type="number"]').first()).toHaveValue('48');
+    await expect(page.locator('.param-field input[type="number"]').first()).toHaveValue('48');
   });
 });

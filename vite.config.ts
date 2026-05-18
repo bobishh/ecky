@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
@@ -12,6 +13,10 @@ export default defineConfig({
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     sourcemap: Boolean(process.env.TAURI_DEBUG),
     rollupOptions: {
+      input: {
+        app: resolve(__dirname, 'index.html'),
+        eckyIr: resolve(__dirname, 'ecky-ir/index.html'),
+      },
       output: {
         manualChunks: {
           three: ['three'],

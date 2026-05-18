@@ -9,7 +9,7 @@ function backendLabel(backend: string | undefined): string | null {
     case 'freecad':
       return 'freecad';
     case 'mesh':
-      return 'mesh';
+      return 'native';
     default:
       return null;
   }
@@ -26,6 +26,7 @@ export function authoringFileExtension(
 
 function formatEckyBackendLabel(backend: string | undefined): string {
   const backendName = backendLabel(backend);
+  if (backendName === 'native') return 'Ecky Native (.ecky)';
   return backendName ? `Ecky + ${backendName} (.ecky)` : 'Ecky (.ecky)';
 }
 

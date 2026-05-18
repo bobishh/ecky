@@ -3350,6 +3350,7 @@ mod tests {
                     code: "PREVIEW_STL_MISSING".to_string(),
                     message: "Preview STL file not found.".to_string(),
                 }],
+                authoring_lints: Vec::new(),
                 source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
             }),
             updated_at: 123,

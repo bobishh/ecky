@@ -8,8 +8,7 @@ export function sameArtifactVersion(
   return (
     versionBundle.modelId === runtimeBundle.modelId &&
     versionBundle.contentHash === runtimeBundle.contentHash &&
-    (versionBundle.artifactVersion ?? null) === (runtimeBundle.artifactVersion ?? null) &&
-    versionBundle.previewStlPath === runtimeBundle.previewStlPath
+    (versionBundle.artifactVersion ?? null) === (runtimeBundle.artifactVersion ?? null)
   );
 }
 
@@ -21,5 +20,6 @@ export function shouldPersistVersionPreview(
   if (!activeVersionMessage) return false;
   if (!artifactBundle) return false;
   if (!stlUrl?.trim()) return false;
+  if (activeVersionMessage.imageData?.trim()) return false;
   return sameArtifactVersion(activeVersionMessage.artifactBundle, artifactBundle);
 }

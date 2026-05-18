@@ -39,6 +39,20 @@ if [[ ! -x "$RUNTIME_DIR/bin/python" && -x "$RUNTIME_DIR/bin/python3" ]]; then
   ln -sf python3 "$RUNTIME_DIR/bin/python"
 fi
 
+while IFS= read -r symlink_path; do
+  resolved_path="$("$SEED_PYTHON" - "$symlink_path" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).resolve())
+PY
+)"
+  if [[ -f "$resolved_path" ]]; then
+    rm "$symlink_path"
+    cp -a "$resolved_path" "$symlink_path"
+  fi
+done < <(find "$RUNTIME_DIR" -type l)
+chmod -R u+rwX,go+rX "$RUNTIME_DIR"
+
 BUNDLED_PYTHON="$RUNTIME_DIR/bin/python3"
 if [[ ! -x "$BUNDLED_PYTHON" ]]; then
   echo "Bundled python missing at $BUNDLED_PYTHON" >&2

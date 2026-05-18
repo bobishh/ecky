@@ -249,6 +249,7 @@ export interface AppConfig {
   engines: EngineConfig[];
   selectedEngineId: string;
   freecadCmd: string;
+  cadTextFontPath: string;
   freecadLibraryRoots: string[];
   assets: AssetConfig[];
   microwave: MicrowaveConfig | null;
@@ -1047,6 +1048,12 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
     selectedEngineId:
       config.selectedEngineId ?? (legacy.selected_engine_id as string | undefined) ?? '',
     freecadCmd: typeof config.freecadCmd === 'string' ? config.freecadCmd : '',
+    cadTextFontPath:
+      typeof (config as AppConfig).cadTextFontPath === 'string'
+        ? (config as AppConfig).cadTextFontPath
+        : typeof legacy.cad_text_font_path === 'string'
+          ? legacy.cad_text_font_path
+          : '',
     freecadLibraryRoots: Array.isArray((config as AppConfig).freecadLibraryRoots)
       ? [...(config as AppConfig).freecadLibraryRoots]
       : Array.isArray((legacy as any).freecad_library_roots)

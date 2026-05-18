@@ -33,6 +33,10 @@ rustpython-parser = "0.4.0"
 rustpython-ast = { version = "0.4.0", features = ["visitor"] }
 steel_core = { package = "steel-core", version = "0.8.2" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+usvg = "0.40"
+fontdb = "0.16.2"
+rustybuzz = "0.12.1"
+ttf-parser = "0.20.0"
 portable-pty = "0.9.0"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 lexpr = "0.2.7"

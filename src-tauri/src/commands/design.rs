@@ -1208,7 +1208,6 @@ fn same_artifact_version(stored: Option<&ArtifactBundle>, expected: &ArtifactBun
     stored.model_id == expected.model_id
         && stored.content_hash == expected.content_hash
         && stored.artifact_version == expected.artifact_version
-        && stored.preview_stl_path == expected.preview_stl_path
 }
 
 #[cfg(test)]
@@ -1243,6 +1242,15 @@ mod tests {
     fn same_artifact_version_accepts_matching_runtime_identity() {
         let stored = sample_artifact_bundle("model-1");
         let expected = sample_artifact_bundle("model-1");
+
+        assert!(same_artifact_version(Some(&stored), &expected));
+    }
+
+    #[test]
+    fn same_artifact_version_accepts_rebuilt_preview_path() {
+        let stored = sample_artifact_bundle("model-1");
+        let mut expected = sample_artifact_bundle("model-1");
+        expected.preview_stl_path = "/tmp/rebuilt/model.stl".to_string();
 
         assert!(same_artifact_version(Some(&stored), &expected));
     }

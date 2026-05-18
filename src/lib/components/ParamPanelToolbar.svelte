@@ -193,9 +193,11 @@
 
   .panel-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
+    min-width: 0;
   }
 
   .live-apply-group {
@@ -203,6 +205,7 @@
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
+    min-width: 0;
   }
 
   .edit-toolbar-left {
@@ -210,6 +213,7 @@
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
+    min-width: 0;
   }
 
   .live-toggle {

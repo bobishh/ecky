@@ -3,8 +3,12 @@ use std::marker::PhantomData;
 
 pub mod direct_occt;
 pub mod direct_occt_executor;
+pub mod direct_occt_normalize;
+pub mod direct_occt_runner;
 pub mod direct_occt_runtime;
 pub mod direct_occt_sdk;
+pub mod svg_profile;
+pub mod text_profile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OpaqueHandle<Tag> {

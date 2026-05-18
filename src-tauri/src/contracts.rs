@@ -74,7 +74,7 @@ pub enum AgentDraftFeedbackSource {
     VisualRepair,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDraftFeedback {
     pub session_id: String,
@@ -83,6 +83,8 @@ pub struct AgentDraftFeedback {
     pub status: AgentDraftFeedbackStatus,
     pub summary: String,
     pub items: Vec<AgentDraftFeedbackItem>,
+    #[serde(default)]
+    pub authoring_lints: Vec<AgentDraftFeedbackAuthoringLint>,
     pub source: AgentDraftFeedbackSource,
 }
 
@@ -91,6 +93,20 @@ pub struct AgentDraftFeedback {
 pub struct AgentDraftFeedbackItem {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraftFeedbackAuthoringLint {
+    pub kind: String,
+    pub part_key: String,
+    pub param_key: String,
+    pub delta: f64,
+    pub occurrence_count: usize,
+    pub suggested_param_key: String,
+    pub message: String,
+    #[serde(default)]
+    pub source_stable_node_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -581,6 +597,8 @@ pub struct Config {
     pub selected_engine_id: String,
     #[serde(default, alias = "freecad_cmd")]
     pub freecad_cmd: String,
+    #[serde(default, alias = "cad_text_font_path")]
+    pub cad_text_font_path: String,
     #[serde(default)]
     pub freecad_library_roots: Vec<String>,
     #[serde(default)]
@@ -7159,6 +7177,7 @@ mod tests {
                     code: "PREVIEW_STL_MISSING".to_string(),
                     message: "Preview STL file not found.".to_string(),
                 }],
+                authoring_lints: Vec::new(),
                 source: AgentDraftFeedbackSource::StructuralVerification,
             }),
         };

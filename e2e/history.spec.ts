@@ -1,17 +1,23 @@
 import { test, expect } from '@playwright/test';
 
 function installProjectSwitcherMocks(options?: {
+  history?: Array<Record<string, unknown>>;
   inventory?: Array<Record<string, unknown>>;
   inventoryError?: { message: string; details?: string };
+  latestVersions?: Record<string, Record<string, unknown> | null>;
+  messagePages?: Record<string, Array<Record<string, unknown>>>;
   latestVersionDelayMs?: number;
 }) {
+  const history = options?.history ?? [];
   const inventory = options?.inventory ?? [];
   const inventoryError = options?.inventoryError ?? null;
+  const latestVersions = options?.latestVersions ?? {};
+  const messagePages = options?.messagePages ?? {};
   const latestVersionDelayMs = options?.latestVersionDelayMs ?? 0;
 
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.addInitScript(
-      ({ inventory, inventoryError, latestVersionDelayMs }) => {
+      ({ history, inventory, inventoryError, latestVersions, messagePages, latestVersionDelayMs }) => {
         const mockWindow = window as any;
         localStorage.clear();
         mockWindow.__PROJECTS_CALLS__ = [];
@@ -56,7 +62,7 @@ function installProjectSwitcherMocks(options?: {
               },
             };
           }
-          if (cmd === 'get_history') return [];
+          if (cmd === 'get_history') return structuredClone(history);
           if (cmd === 'get_inventory') {
             if (inventoryError) {
               throw { code: 'persistence', message: inventoryError.message, details: inventoryError.details };
@@ -74,9 +80,17 @@ function installProjectSwitcherMocks(options?: {
             if (latestVersionDelayMs > 0) {
               await new Promise((resolve) => setTimeout(resolve, latestVersionDelayMs));
             }
-            return null;
+            return structuredClone(latestVersions[String(args?.threadId ?? '')] ?? null);
           }
           if (cmd === 'get_thread_messages_page') {
+            const threadMessages = messagePages[String(args?.threadId ?? '')];
+            if (threadMessages) {
+              return {
+                messages: structuredClone(threadMessages),
+                hasMore: false,
+                nextBefore: null,
+              };
+            }
             return {
               messages: [],
               hasMore: false,
@@ -86,7 +100,7 @@ function installProjectSwitcherMocks(options?: {
           return null;
         };
       },
-      { inventory, inventoryError, latestVersionDelayMs },
+      { history, inventory, inventoryError, latestVersions, messagePages, latestVersionDelayMs },
     );
   };
 }
@@ -115,7 +129,7 @@ test.describe('History Panel', () => {
     await page.locator('[data-window-id="projects"]').getByRole('button', { name: '+ NEW' }).click();
     await page.getByRole('button', { name: 'Blank Project' }).click();
 
-    const viewportCodeButton = page.locator('.export-actions').getByRole('button', { name: /CODE/i });
+    const viewportCodeButton = page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i });
     await expect(viewportCodeButton).toBeVisible();
     await expect(viewportCodeButton).toBeEnabled();
 
@@ -129,6 +143,144 @@ test.describe('History Panel', () => {
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await expect(page.locator('[data-window-id="projects"] .project-card')).toHaveCount(0);
+  });
+
+  test('Given more than six projects When projects opens Then thumbnail fetch warms every card', async ({ page }) => {
+    await installProjectSwitcherMocks({
+      history: Array.from({ length: 8 }, (_, index) => ({
+        id: `thread-${index + 1}`,
+        title: `Preview thread ${index + 1}`,
+        summary: '',
+        updatedAt: Date.UTC(2026, 5, index + 1),
+        messages: [],
+        genieTraits: null,
+        versionCount: 1,
+        pendingCount: 0,
+        queuedCount: 0,
+        errorCount: 0,
+        status: 'ready',
+        finalizedAt: null,
+        pendingConfirm: null,
+      })),
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await expect(projectsWindow.locator('.project-card')).toHaveCount(8);
+    await expect
+      .poll(async () =>
+        page.evaluate(() =>
+          ((window as any).__PROJECTS_CALLS__ as Array<{ cmd: string }>).filter(
+            (entry) => entry.cmd === 'get_thread_latest_version',
+          ).length,
+        ),
+      )
+      .toBe(8);
+  });
+
+  test('Given latest version lacks thumbnail When older page has preview Then project card displays preview image', async ({ page }) => {
+    const previewImage = `data:image/png;base64,${btoa('older-preview')}`;
+    await installProjectSwitcherMocks({
+      history: [
+        {
+          id: 'thread-preview',
+          title: 'Paged Preview Thread',
+          summary: '',
+          updatedAt: Date.UTC(2026, 5, 1),
+          messages: [],
+          genieTraits: null,
+          versionCount: 2,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'ready',
+          finalizedAt: null,
+          pendingConfirm: null,
+        },
+      ],
+      latestVersions: {
+        'thread-preview': {
+          id: 'latest-no-image',
+          role: 'assistant',
+          status: 'success',
+          artifactBundle: { previewStlPath: '/mock/latest.stl' },
+          imageData: null,
+        },
+      },
+      messagePages: {
+        'thread-preview': [
+          {
+            id: 'older-with-image',
+            role: 'assistant',
+            status: 'success',
+            artifactBundle: { previewStlPath: '/mock/older.stl' },
+            imageData: previewImage,
+          },
+        ],
+      },
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const card = page.locator('[data-window-id="projects"] .project-card').filter({ hasText: 'Paged Preview Thread' });
+    await expect(card.locator('.card-thumb img')).toHaveAttribute('src', previewImage);
+    await expect(card.getByText('NO PREVIEW')).toHaveCount(0);
+  });
+
+  test('Given a project starts without preview When preview event arrives Then card replaces NO PREVIEW', async ({ page }) => {
+    const previewImage = `data:image/png;base64,${btoa('fresh-preview')}`;
+    await installProjectSwitcherMocks({
+      history: [
+        {
+          id: 'thread-preview',
+          title: 'Event Preview Thread',
+          summary: '',
+          updatedAt: Date.UTC(2026, 5, 2),
+          messages: [],
+          genieTraits: null,
+          versionCount: 1,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'ready',
+          finalizedAt: null,
+          pendingConfirm: null,
+        },
+      ],
+      latestVersions: {
+        'thread-preview': {
+          id: 'version-1',
+          role: 'assistant',
+          status: 'success',
+          artifactBundle: { previewStlPath: '/mock/version-1.stl' },
+          imageData: null,
+        },
+      },
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const card = page.locator('[data-window-id="projects"] .project-card').filter({ hasText: 'Event Preview Thread' });
+    await expect(card.getByText('NO PREVIEW')).toBeVisible();
+
+    await page.evaluate(({ previewImage }) => {
+      window.dispatchEvent(
+        new CustomEvent('ecky:version-preview-updated', {
+          detail: {
+            threadId: 'thread-preview',
+            messageId: 'version-1',
+            imageData: previewImage,
+          },
+        }),
+      );
+    }, { previewImage });
+
+    await expect(card.locator('.card-thumb img')).toHaveAttribute('src', previewImage);
+    await expect(card.getByText('NO PREVIEW')).toHaveCount(0);
   });
 
   test.describe('Archived projects', () => {

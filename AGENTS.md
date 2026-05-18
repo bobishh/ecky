@@ -13,6 +13,12 @@
 - **Persistence**: Any configuration changes made in the UI must be persisted to `app_config_dir/config.json` via the `save_config` command.
 - **Tauri Invoke**: Reminder: Tauri expects `camelCase` in JS arguments, which maps to `snake_case` in Rust.
 - **Agent UX**: Do not introduce a separate agent status bar or dump live auto-agent terminal output into app logs. Agent state belongs in Ecky bubble copy, and interactive agent stdout/stderr belongs in the dedicated terminal modal.
+- **Repeated CAD Structures**: New repeated shelves/ribs/clips/doors/corridors must be authored with `repeat` or `instance`, not copy-paste shape blocks.
+- **Physical Fit Relations**: Any new physical fit relation must be represented by a named constraint or named binding. No anonymous geometry offsets for fit-critical dimensions.
+- **Debug Overlay Boundary**: Debug overlays are preview-only diagnostics. Never emit debug overlay primitives into production export geometry (STL/STEP).
+- **MCP-First Authoring Order**: Follow `inspect -> validate -> preview -> commit` through MCP tools before claiming completion.
+- **No SQLite Writes**: Never write SQLite files directly (`history.sqlite` or any app DB). All updates must flow through MCP commands.
+- **AST Patch Preference**: Prefer AST patch operations over full macro rewrites when an `ecky_ast_*` patch can express the change.
 
 ## Development Approach
 
@@ -74,6 +80,72 @@ adjust your understanding, then proceed.
 ## Clarity
 
 Work with persistence, clarity, and evidence.
+
+## Documentation Hard Gate
+
+If user asks for documentation, language reference, tutorial, guide, docs site, or
+teaching material:
+
+1. Before any implementation, agent MUST state:
+   - content source format
+   - file locations
+   - serving path
+   - frontend shell responsibility
+   - test/proof path
+
+2. Agent MUST NOT place substantive documentation content inside Svelte/React/Vue
+components. Components may contain shell, nav, index, search, article loader, and
+interaction wiring only.
+
+3. Agent MUST build docs in this order:
+   - information architecture
+   - content storage format
+   - file layout
+   - serving path
+   - index/manifest
+   - frontend shell
+   - interactive extras
+
+4. Agent MUST treat mockup-shaped docs as failure unless user explicitly asked for a
+mockup.
+
+5. Agent MUST prefer file-backed docs such as `docs/**/*.html`, markdown, or JSON
+content plus a manifest/index file.
+
+6. If agent starts from layout before content model, that is a protocol violation.
+
+## Variable Dump Rule
+
+If task has more than 3 architectural or product-shape variables, agent MUST enumerate
+them before coding.
+
+Required format:
+
+- Goal
+- Artifact model
+- Variables
+- Decision
+- Rejected paths
+- Proof plan
+
+`Variables` MUST list major moving parts explicitly, such as content format, storage
+location, routing path, backend ownership, frontend ownership, editing model, testing
+surface, export format, and runtime constraints.
+
+Agent MUST NOT hide these decisions inside implementation.
+
+## No Invisible Product Decisions
+
+If agent is making product-shape decisions not explicitly requested, agent MUST list
+them first.
+
+Never silently invent:
+
+- UI-first architecture
+- mockups
+- embedded content blobs
+- temporary formats
+- fake interaction
 
 ### Rules
 

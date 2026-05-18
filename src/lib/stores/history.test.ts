@@ -8,6 +8,8 @@ import {
   activeThreadVersionLoading,
   beginThreadSwitchForTests,
   createNewThread,
+  detachActiveVersionRuntimeForTests,
+  effectiveActiveVersionIdForTests,
   mergeActiveThreadMessagesForTests,
   rememberVersionRuntimePayloadForTests,
   mergeCommittedVersionMessageForTests,
@@ -118,6 +120,27 @@ test('resolveVersionRuntimePayload prefers remembered rebuilt runtime for same m
   assert.equal(resolved.modelManifest?.modelId, manifest.modelId);
 });
 
+test('resolveVersionRuntimePayload uses target artifact instead of previous current session when switching versions', () => {
+  resetVersionRuntimePayloadCacheForTests();
+
+  const currentBundle = sampleBundle('model-current', '/tmp/current-preview.stl');
+  const currentManifest = sampleManifest('model-current');
+  const targetBundle = sampleBundle('model-target', '/tmp/target-preview.stl');
+  const targetManifest = sampleManifest('model-target');
+  const targetMessage = sampleMessage('msg-target', targetBundle, targetManifest);
+
+  activeThreadIdStore.set('thread-1');
+  activeVersionId.set(targetMessage.id);
+  session.setStlUrl('/tmp/current-preview.stl');
+  session.setModelRuntime(currentBundle, currentManifest);
+
+  const resolved = resolveVersionRuntimePayloadForTests(targetMessage);
+
+  assert.equal(resolved.artifactBundle?.modelId, 'model-target');
+  assert.equal(resolved.artifactBundle?.previewStlPath, '/tmp/target-preview.stl');
+  assert.equal(resolved.modelManifest?.modelId, 'model-target');
+});
+
 test('persistVersionRuntimePayload skips inconsistent runtime payloads', async () => {
   const calls: Array<{ messageId: string; modelId: string }> = [];
   const persisted = await persistVersionRuntimePayloadForTests(
@@ -192,6 +215,26 @@ test('mergeActiveThreadMessages hydrates skinny page payload from seeded active 
   assert.equal(merged[0]?.modelManifest?.modelId, 'model-active');
 });
 
+test('effectiveActiveVersionId falls back to displayed latest version when active id is a draft preview', () => {
+  const older = sampleMessage(
+    'msg-older',
+    sampleBundle('model-older', '/tmp/older.stl'),
+    sampleManifest('model-older'),
+  );
+  const latest = {
+    ...sampleMessage(
+      'msg-latest',
+      sampleBundle('model-latest', '/tmp/latest.stl'),
+      sampleManifest('model-latest'),
+    ),
+    timestamp: older.timestamp + 1,
+  };
+
+  const effective = effectiveActiveVersionIdForTests([older, latest], 'draft-preview-id');
+
+  assert.equal(effective, 'msg-latest');
+});
+
 test('Given thread switch starts When previous model is still loaded Then stale version runtime is detached before new thread becomes active', () => {
   const oldBundle = sampleBundle('model-old', '/tmp/old.stl');
   const oldManifest = sampleManifest('model-old');
@@ -204,6 +247,23 @@ test('Given thread switch starts When previous model is still loaded Then stale 
   beginThreadSwitchForTests('thread-new');
 
   assert.equal(get(activeThreadIdStore), 'thread-new');
+  assert.equal(get(activeVersionId), null);
+  assert.equal(get(session).stlUrl, null);
+  assert.equal(get(session).artifactBundle, null);
+  assert.equal(get(session).modelManifest, null);
+});
+
+test('Given active version is removed When fallback version is still resolving Then stale viewport runtime is detached', () => {
+  const oldBundle = sampleBundle('model-old', '/tmp/old.stl');
+  const oldManifest = sampleManifest('model-old');
+
+  activeThreadIdStore.set('thread-1');
+  activeVersionId.set('message-old');
+  session.setStlUrl('/tmp/old.stl');
+  session.setModelRuntime(oldBundle, oldManifest);
+
+  detachActiveVersionRuntimeForTests();
+
   assert.equal(get(activeVersionId), null);
   assert.equal(get(session).stlUrl, null);
   assert.equal(get(session).artifactBundle, null);

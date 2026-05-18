@@ -3231,6 +3231,7 @@ mod tests {
             engines: vec![],
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: vec![],
             microwave: None,

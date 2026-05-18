@@ -15,7 +15,8 @@ use crate::ecky_core_ir::{
     CorePathOp, CorePrimitive, CoreProgram, CoreProgramConstraints, CoreReference,
     CoreRelationConstraint, CoreRelationOperand, CoreRelationOperator, CoreResult,
     CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
-    CoreValueKind, NodeId, ParamId, PartId, ProgramId, SourceFileId, SourceSpan,
+    CoreValueKind, CoreVerifyClause, CoreVerifySection, CoreVerifyValue, NodeId, ParamId, PartId,
+    ProgramId, SourceFileId, SourceSpan,
 };
 use crate::ecky_deterministic;
 use crate::ecky_ir::edge_ops::{
@@ -301,6 +302,7 @@ fn rewrite_runtime_model_clause_group_source(expr: &ExprKind) -> String {
     };
 
     match head.as_str() {
+        "verify" => format!("(list (quote {}))", expr),
         "begin" => append_runtime_clause_groups(
             items
                 .iter()
@@ -399,7 +401,7 @@ fn model_level_sequence_form_error(name: &str) -> CompilerError {
     CompilerError::new(
         CompilerErrorKind::UnsupportedFeature,
         format!(
-            "Model children are clauses, not sequence expressions. Supported direct clauses: `params`, `part`, `feature`, `meta`. Supported wrappers: `begin`, `let`, `let*`. `{}` belongs inside `(part ...)` geometry/list expressions.",
+            "Model children are clauses, not sequence expressions. Supported direct clauses: `params`, `verify`, `part`, `feature`, `meta`. Supported wrappers: `begin`, `let`, `let*`. `{}` belongs inside `(part ...)` geometry/list expressions.",
             name
         ),
     )
@@ -907,6 +909,7 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let mut next_part = 1u64;
     let mut next_node = 1u64;
     let mut feature_decls = BTreeMap::new();
+    let mut verify_clauses = Vec::new();
 
     let clauses = collect_expanded_model_clauses(&forms[1..], helpers)?;
     let mut raw_parts = Vec::new();
@@ -924,6 +927,7 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
                 params.append(&mut parsed_params);
                 pending_relations.append(&mut parsed_relations);
             }
+            "verify" => verify_clauses.push(parse_expanded_verify_clause(&items)?),
             "part" | "feature" => raw_parts.push(ExpandedModelClause {
                 items,
                 helpers: clause_form.helpers,
@@ -950,7 +954,8 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
         .iter()
         .map(|param| (param.key.clone(), param.id))
         .collect::<BTreeMap<_, _>>();
-    let constraints = resolve_relation_constraints(&mut params, pending_relations)?;
+    let mut constraints = resolve_relation_constraints(&mut params, pending_relations)?;
+    constraints.verify_clauses = verify_clauses;
     let mut parts = Vec::new();
     for part_clause in &raw_parts {
         let clause_name =
@@ -995,6 +1000,88 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
         .with_feature_decls(feature_decls)
         .with_constraints(constraints))
+}
+
+fn parse_expanded_verify_clause(items: &[ExprKind]) -> CoreResult<CoreVerifyClause> {
+    if items.len() != 4 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Verify clause expects `(tag ...)`, `(metric ...)`, and `(expect ...)`.",
+        ));
+    }
+
+    Ok(CoreVerifyClause {
+        tag: parse_expanded_verify_section(&items[1], "tag")?,
+        metric: parse_expanded_verify_section(&items[2], "metric")?,
+        expect: parse_expanded_verify_section(&items[3], "expect")?,
+    })
+}
+
+fn parse_expanded_verify_section(
+    value: &ExprKind,
+    expected: &str,
+) -> CoreResult<CoreVerifySection> {
+    let items = expr_list_items(value, "verify section")?;
+    let name = expr_name(items.first().ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("Verify `{expected}` section is empty."),
+        )
+    })?)?;
+    if name != expected {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("Verify clause expected `({expected} ...)`, found `({name} ...)`."),
+        ));
+    }
+
+    Ok(CoreVerifySection {
+        items: items[1..]
+            .iter()
+            .map(parse_expanded_verify_value)
+            .collect::<CoreResult<Vec<_>>>()?,
+    })
+}
+
+fn parse_expanded_verify_value(value: &ExprKind) -> CoreResult<CoreVerifyValue> {
+    match value {
+        ExprKind::List(_) | ExprKind::Vector(_) => Ok(CoreVerifyValue::List(
+            expr_list_items(value, "verify list")?
+                .iter()
+                .map(parse_expanded_verify_value)
+                .collect::<CoreResult<Vec<_>>>()?,
+        )),
+        ExprKind::Atom(atom) => match &atom.syn.ty {
+            TokenType::Identifier(name) | TokenType::Keyword(name) => {
+                Ok(CoreVerifyValue::Symbol(name.to_string()))
+            }
+            TokenType::StringLiteral(text) => Ok(CoreVerifyValue::Text(text.to_string())),
+            TokenType::Number(number) => number.resolve().to_string().parse::<f64>().map_or_else(
+                |_| {
+                    Err(CompilerError::new(
+                        CompilerErrorKind::TypeMismatch,
+                        format!("verify value expected a number, received {:?}", atom.syn.ty),
+                    ))
+                },
+                |parsed| Ok(CoreVerifyValue::Number(parsed)),
+            ),
+            TokenType::BooleanLiteral(flag) => Ok(CoreVerifyValue::Boolean(*flag)),
+            other => Err(CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                format!(
+                    "verify value expected literal or list, received {:?}",
+                    other
+                ),
+            )),
+        },
+        other => Err(CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!(
+                "verify value expected literal or list, received {:?}",
+                other
+            ),
+        )),
+    }
 }
 
 fn parse_expanded_params_clause(
@@ -1107,7 +1194,10 @@ fn resolve_relation_constraints(
         relations.push(relation);
     }
 
-    Ok(CoreProgramConstraints { relations })
+    Ok(CoreProgramConstraints {
+        relations,
+        verify_clauses: Vec::new(),
+    })
 }
 
 fn resolve_relation_operand(
@@ -1696,6 +1786,11 @@ fn parse_expanded_node(
                         (build, CoreValueKind::Solid)
                     } else if op_name == "hole" {
                         parse_expanded_typed_hole_call(&items[1..], next_node)?
+                    } else if op_name == "verify" {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::UnsupportedFeature,
+                            "`verify` is top-level only in this slice.",
+                        ));
                     } else if op_name == "list" {
                         parse_expanded_list_node(
                             &items[1..],
@@ -5567,6 +5662,7 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     let mut next_part = 1u64;
     let mut next_node = 1u64;
     let mut feature_decls = BTreeMap::new();
+    let mut verify_clauses = Vec::new();
 
     for form in forms.into_iter().skip(1) {
         let items = list_items(&form, "model clause")?;
@@ -5581,6 +5677,7 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
                 params.append(&mut parsed_params);
                 pending_relations.append(&mut parsed_relations);
             }
+            "verify" => verify_clauses.push(parse_verify_clause(&items)?),
             "part" | "feature" => raw_parts.push(items),
             "meta" => {}
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
@@ -5604,7 +5701,8 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
         .iter()
         .map(|param| (param.key.clone(), param.id))
         .collect::<BTreeMap<_, _>>();
-    let constraints = resolve_relation_constraints(&mut params, pending_relations)?;
+    let mut constraints = resolve_relation_constraints(&mut params, pending_relations)?;
+    constraints.verify_clauses = verify_clauses;
     let mut parts = Vec::new();
     for part_clause in &raw_parts {
         let clause_name =
@@ -5645,6 +5743,67 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
         .with_feature_decls(feature_decls)
         .with_constraints(constraints))
+}
+
+fn parse_verify_clause(items: &[SteelVal]) -> CoreResult<CoreVerifyClause> {
+    if items.len() != 4 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Verify clause expects `(tag ...)`, `(metric ...)`, and `(expect ...)`.",
+        ));
+    }
+
+    Ok(CoreVerifyClause {
+        tag: parse_verify_section(&items[1], "tag")?,
+        metric: parse_verify_section(&items[2], "metric")?,
+        expect: parse_verify_section(&items[3], "expect")?,
+    })
+}
+
+fn parse_verify_section(value: &SteelVal, expected: &str) -> CoreResult<CoreVerifySection> {
+    let items = list_items(value, "verify section")?;
+    let name = symbol_name(items.first().ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("Verify `{expected}` section is empty."),
+        )
+    })?)?;
+    if name != expected {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("Verify clause expected `({expected} ...)`, found `({name} ...)`."),
+        ));
+    }
+
+    Ok(CoreVerifySection {
+        items: items[1..]
+            .iter()
+            .map(parse_verify_value)
+            .collect::<CoreResult<Vec<_>>>()?,
+    })
+}
+
+fn parse_verify_value(value: &SteelVal) -> CoreResult<CoreVerifyValue> {
+    match value {
+        SteelVal::SymbolV(symbol) => Ok(CoreVerifyValue::Symbol(symbol.to_string())),
+        SteelVal::StringV(text) => Ok(CoreVerifyValue::Text(text.to_string())),
+        SteelVal::IntV(number) => Ok(CoreVerifyValue::Number(*number as f64)),
+        SteelVal::NumV(number) => Ok(CoreVerifyValue::Number(*number)),
+        SteelVal::BoolV(flag) => Ok(CoreVerifyValue::Boolean(*flag)),
+        SteelVal::ListV(_) | SteelVal::VectorV(_) => Ok(CoreVerifyValue::List(
+            list_items(value, "verify list")?
+                .iter()
+                .map(parse_verify_value)
+                .collect::<CoreResult<Vec<_>>>()?,
+        )),
+        other => Err(CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!(
+                "verify value expected literal or list, received {:?}",
+                other
+            ),
+        )),
+    }
 }
 
 fn parse_params_clause(
@@ -6131,6 +6290,11 @@ fn parse_node(
                         (build, CoreValueKind::Solid)
                     } else if op_name == "hole" {
                         parse_typed_hole_call(&items[1..], next_node)?
+                    } else if op_name == "verify" {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::UnsupportedFeature,
+                            "`verify` is top-level only in this slice.",
+                        ));
                     } else if op_name == "if" && items.len() == 4 {
                         (
                             CoreNodeKind::If {
@@ -6677,6 +6841,10 @@ fn emit_program(program: &CoreProgram) -> String {
         }
         out.push(')');
     }
+    for verify_clause in &program.constraints.verify_clauses {
+        out.push_str("\n  ");
+        out.push_str(&emit_verify_clause(verify_clause));
+    }
     for part in &program.parts {
         if let Some(feature_decl) = program.feature_decls.get(&part.key) {
             out.push_str("\n  (feature ");
@@ -6706,6 +6874,55 @@ fn emit_program(program: &CoreProgram) -> String {
     }
     out.push_str("\n)");
     out
+}
+
+fn emit_verify_clause(clause: &CoreVerifyClause) -> String {
+    format!(
+        "(verify {} {} {})",
+        emit_verify_section("tag", &clause.tag),
+        emit_verify_section("metric", &clause.metric),
+        emit_verify_section("expect", &clause.expect)
+    )
+}
+
+fn emit_verify_section(name: &str, section: &CoreVerifySection) -> String {
+    if section.items.is_empty() {
+        return format!("({name})");
+    }
+
+    format!(
+        "({} {})",
+        name,
+        section
+            .items
+            .iter()
+            .map(emit_verify_value)
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn emit_verify_value(value: &CoreVerifyValue) -> String {
+    match value {
+        CoreVerifyValue::Symbol(symbol) => symbol.clone(),
+        CoreVerifyValue::Number(number) => emit_number(*number),
+        CoreVerifyValue::Boolean(flag) => {
+            if *flag {
+                "#t".to_string()
+            } else {
+                "#f".to_string()
+            }
+        }
+        CoreVerifyValue::Text(text) => emit_string(text),
+        CoreVerifyValue::List(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(emit_verify_value)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    }
 }
 
 fn emit_param(param: &CoreParameter) -> String {
@@ -7367,7 +7584,9 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("Model children are clauses"), "{message}");
         assert!(
-            message.contains("Supported direct clauses: `params`, `part`, `feature`, `meta`."),
+            message.contains(
+                "Supported direct clauses: `params`, `verify`, `part`, `feature`, `meta`."
+            ),
             "{message}"
         );
         assert!(
@@ -7393,7 +7612,9 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("Model children are clauses"), "{message}");
         assert!(
-            message.contains("Supported direct clauses: `params`, `part`, `feature`, `meta`."),
+            message.contains(
+                "Supported direct clauses: `params`, `verify`, `part`, `feature`, `meta`."
+            ),
             "{message}"
         );
         assert!(
@@ -8047,6 +8268,116 @@ mod tests {
     }
 
     #[test]
+    fn parses_verify_clause_metadata() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (verify
+                (tag body_shell)
+                (metric min_wall_thickness "body")
+                (expect (>= value 2)))
+              (part body (box 10 10 10)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.constraints.verify_clauses.len(), 1);
+        assert_eq!(
+            program.constraints.verify_clauses[0],
+            CoreVerifyClause {
+                tag: CoreVerifySection {
+                    items: vec![CoreVerifyValue::Symbol("body_shell".into())],
+                },
+                metric: CoreVerifySection {
+                    items: vec![
+                        CoreVerifyValue::Symbol("min_wall_thickness".into()),
+                        CoreVerifyValue::Text("body".into()),
+                    ],
+                },
+                expect: CoreVerifySection {
+                    items: vec![CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol(">=".into()),
+                        CoreVerifyValue::Symbol("value".into()),
+                        CoreVerifyValue::Number(2.0),
+                    ])],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_runtime_verify_clause_metadata() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (verify
+                (tag body_shell)
+                (metric min_wall_thickness "body")
+                (expect (>= value 2)))
+              (part body (box 10 10 10)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.constraints.verify_clauses.len(), 1);
+        assert_eq!(
+            program.constraints.verify_clauses[0].metric.items,
+            vec![
+                CoreVerifyValue::Symbol("min_wall_thickness".into()),
+                CoreVerifyValue::Text("body".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn emits_verify_clause_metadata() {
+        let source = compile_to_legacy_source(
+            r#"
+            (model
+              (verify
+                (tag body_shell)
+                (metric min_wall_thickness "body")
+                (expect (>= value 2)))
+              (part body (box 10 10 10)))
+            "#,
+        )
+        .expect("compile");
+
+        assert!(
+            source.contains(
+                "(verify (tag body_shell) (metric min_wall_thickness \"body\") (expect (>= value 2)))"
+            ),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn roundtrips_verify_clause_metadata() {
+        let source = compile_to_legacy_source(
+            r#"
+            (model
+              (verify
+                (tag body_shell)
+                (metric min_wall_thickness "body")
+                (expect (>= value 2)))
+              (part body (box 10 10 10)))
+            "#,
+        )
+        .expect("compile");
+
+        let reparsed = compile_to_core_program(&source).expect("reparse emitted verify");
+        assert_eq!(reparsed.constraints.verify_clauses.len(), 1);
+        assert_eq!(
+            reparsed.constraints.verify_clauses[0].expect.items,
+            vec![CoreVerifyValue::List(vec![
+                CoreVerifyValue::Symbol(">=".into()),
+                CoreVerifyValue::Symbol("value".into()),
+                CoreVerifyValue::Number(2.0),
+            ])]
+        );
+    }
+
+    #[test]
     fn parses_feature_metadata() {
         let program = compile_to_core_program(
             r#"
@@ -8095,6 +8426,131 @@ mod tests {
             source.contains("(feature body :role \"shell\" :params (width)"),
             "{source}"
         );
+    }
+
+    #[test]
+    fn parses_verify_metadata() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (verify
+                (tag front_entrance body.front_window_1)
+                (metric front_overlap (projection-overlap lid.front_skirt body.front_window_1 :axis x))
+                (expect front_overlap (> 3)))
+              (part body (box 10 8 6)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.constraints.verify_clauses.len(), 1);
+        let clause = &program.constraints.verify_clauses[0];
+        assert_eq!(
+            clause.tag.items,
+            vec![
+                CoreVerifyValue::Symbol("front_entrance".into()),
+                CoreVerifyValue::Symbol("body.front_window_1".into()),
+            ]
+        );
+        assert_eq!(
+            clause.metric.items,
+            vec![
+                CoreVerifyValue::Symbol("front_overlap".into()),
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol("projection-overlap".into()),
+                    CoreVerifyValue::Symbol("lid.front_skirt".into()),
+                    CoreVerifyValue::Symbol("body.front_window_1".into()),
+                    CoreVerifyValue::Symbol("#:axis".into()),
+                    CoreVerifyValue::Symbol("x".into()),
+                ]),
+            ]
+        );
+        assert_eq!(
+            clause.expect.items,
+            vec![
+                CoreVerifyValue::Symbol("front_overlap".into()),
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol(">".into()),
+                    CoreVerifyValue::Number(3.0),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_runtime_verify_metadata() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (verify
+                (tag front_entrance body.front_window_1)
+                (metric front_overlap (projection-overlap lid.front_skirt body.front_window_1 :axis x))
+                (expect front_overlap (> 3)))
+              (part body (box 10 8 6)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.constraints.verify_clauses.len(), 1);
+    }
+
+    #[test]
+    fn emits_verify_metadata() {
+        let source = compile_to_legacy_source(
+            r#"
+            (model
+              (verify
+                (tag front_entrance body.front_window_1)
+                (metric front_overlap (projection-overlap lid.front_skirt body.front_window_1 :axis x))
+                (expect front_overlap (> 3)))
+              (part body (box 10 8 6)))
+            "#,
+        )
+        .expect("compile");
+
+        assert!(
+            source.contains(
+                "(verify (tag front_entrance body.front_window_1) (metric front_overlap (projection-overlap lid.front_skirt body.front_window_1 #:axis x)) (expect front_overlap (> 3)))"
+            ),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_verify_metadata() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (verify)
+              (part body (box 10 8 6)))
+            "#,
+        )
+        .expect_err("empty verify rejected");
+
+        assert!(err
+            .to_string()
+            .contains("Verify clause expects `(tag ...)`, `(metric ...)`, and `(expect ...)`."));
+    }
+
+    #[test]
+    fn rejects_nested_verify_metadata() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (union
+                  (verify
+                    (tag front_entrance body.front_window_1)
+                    (metric front_overlap (projection-overlap lid.front_skirt body.front_window_1 :axis x))
+                    (expect front_overlap (> 3)))
+                  (box 10 8 6))))
+            "#,
+        )
+        .expect_err("nested verify rejected");
+
+        assert!(matches!(
+            err.kind,
+            CompilerErrorKind::UnsupportedFeature | CompilerErrorKind::Parse
+        ));
     }
 
     #[test]

@@ -13,10 +13,12 @@
   import { buildGenieTraitsFromSeed, buildModelGenieTraits } from './lib/genie/traits';
 
   import CodeModal from './lib/CodeModal.svelte';
+  import SessionActivityWindow from './lib/SessionActivityWindow.svelte';
   import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
   import ManualImportModal from './lib/ManualImportModal.svelte';
   import AgentTerminalSurface from './lib/AgentTerminalSurface.svelte';
   import SketchWorkspace from './lib/SketchWorkspace.svelte';
+  import DocsSite from './lib/DocsSite.svelte';
   import Modal from './lib/Modal.svelte';
   import Window from './lib/Window.svelte';
   import ProjectSwitcher from './lib/ProjectSwitcher.svelte';
@@ -78,6 +80,7 @@
   import { persistLastSessionSnapshot } from './lib/modelRuntime/sessionSnapshot';
   import { getRenderableRuntimeBundle, inspectRuntimeBundle } from './lib/modelRuntime/runtimeBundle';
   import { sameArtifactVersion, shouldPersistVersionPreview } from './lib/versionPreviewPersistence';
+  import { resolveDraftPreviewDesign } from './lib/agents/draftPreviewParams';
   import {
     deriveThreadAttentionIds,
     deriveMascotStateForThreadAgent,
@@ -108,8 +111,9 @@
     buildAgentTerminalLineInput,
   } from './lib/agents/terminal';
   import {
+    composeAgentDraftFeedbackBubbleText,
     isVisibleAgentDraftFeedback,
-    summarizeAgentDraftFeedback,
+    type AgentAuthoringLint,
     type AgentDraftFeedback,
   } from './lib/agents/draftFeedback';
   import {
@@ -120,6 +124,7 @@
   } from './lib/agents/workspaceCapture';
   import { codeInspectorTitle } from './lib/modelEngineLabel';
   import { buildFailedDraftSeed } from './lib/manualDraftSeed';
+  import { getDefaultMacro } from './lib/tauri/client';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
@@ -177,6 +182,16 @@
   import { deriveAgentOpsState, type PendingViewportScreenshotChoice } from './lib/composables/agentOps';
   import { deriveExportState } from './lib/composables/exportOps';
   import {
+    composeBubbleEvent,
+    composeCodeDiffView,
+    composeSessionActivity,
+    type SessionEvent,
+  } from './lib/sessionActivity';
+  import {
+    recordSessionActivityEvent,
+    sessionActivityEvents as sessionActivityEventStore,
+  } from './lib/stores/sessionActivityStore';
+  import {
     capabilityForAuthoringContext,
     resolveActiveAuthoringContext,
   } from './lib/runtimeCapabilities';
@@ -231,10 +246,12 @@
     ParamValue,
     Request,
     RuntimeBackendCapability,
+    SourceLanguage,
     UiField,
     UiSpec,
     ViewerAsset,
     ViewportCameraState,
+    GeometryBackend,
   } from './lib/types/domain';
   import type { MaterializedSemanticView } from './lib/modelRuntime/semanticControls';
 
@@ -300,7 +317,18 @@
       summary: string;
       items: Array<string | { code: string; message: string }>;
       source: 'structuralVerification' | 'renderError' | 'toolError' | 'visualRepair';
+      authoringLints?: Array<{
+        kind?: string | null;
+        partKey?: string | null;
+        paramKey?: string | null;
+        suggestedParamKey?: string | null;
+        occurrenceCount?: number | null;
+        message: string;
+      }>;
     } | null;
+  };
+  type ThreadAgentStateWithAuthoringLints = ThreadAgentState & {
+    authoringLints?: AgentAuthoringLint[];
   };
 
   type DrawingOverlayHandle = {
@@ -430,6 +458,72 @@
     return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
   }
 
+  async function openVersionCodeModal(seed?: {
+    code?: string;
+    title?: string;
+    sourceLanguage?: SourceLanguage | null;
+    geometryBackend?: GeometryBackend | null;
+  }) {
+    const shouldReopenDocs = $windowStore.docs.visible;
+    if (!$activeThreadId) {
+      createNewThread({ mode: 'blank' });
+      await tick();
+      if (shouldReopenDocs) {
+        showWindow('docs');
+        await tick();
+      }
+    }
+
+    const current = get(workingCopy);
+    const nextCode = seed?.code ?? (current.macroCode.trim() || await getDefaultMacro());
+    const nextTitle = seed?.title ?? (current.title || 'Manual Edit');
+    const nextSourceLanguage = seed?.sourceLanguage ?? current.sourceLanguage ?? 'legacyPython';
+    const nextGeometryBackend = seed?.geometryBackend ?? current.geometryBackend ?? 'freecad';
+
+    if (
+      nextCode !== current.macroCode ||
+      nextTitle !== current.title ||
+      nextSourceLanguage !== current.sourceLanguage ||
+      nextGeometryBackend !== current.geometryBackend
+    ) {
+      workingCopy.patch({
+        title: nextTitle,
+        macroCode: nextCode,
+        sourceLanguage: nextSourceLanguage,
+        geometryBackend: nextGeometryBackend,
+        dirty: false,
+      });
+      paramPanelState.hydrate({
+        versionId: current.sourceVersionId,
+        uiSpec: current.uiSpec,
+        params: current.params,
+      });
+    }
+
+    codeModalMode = 'version';
+    codeModalSourceLanguage = nextSourceLanguage;
+    selectedCode.set(nextCode);
+    selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
+    showCodeModal.set(true);
+  }
+
+  function openDocsSnippetInCode(snippet: string, title: string) {
+    void openVersionCodeModal({
+      code: snippet,
+      title,
+      sourceLanguage: 'ecky',
+      geometryBackend: 'build123d',
+    });
+  }
+
+  function handleDockCodeToggle() {
+    if ($showCodeModal) {
+      showCodeModal.set(false);
+      return;
+    }
+    void openVersionCodeModal();
+  }
+
   // Local reactive aliases for templates
   const phase = $derived($session.phase);
   const status = $derived($session.status);
@@ -450,11 +544,14 @@
   let showNewProjectChooser = $state(false);
   let showNewProjectImport = $state(false);
   let sketchPreview = $state<SketchPreviewState | null>(null);
-  let codeModalMode = $state<'version' | 'sketch-preview'>('version');
+  let codeModalMode = $state<'version' | 'sketch-preview' | 'docs-snippet'>('version');
+  let codeModalSourceLanguage = $state<SourceLanguage | null>(null);
+  const enableViewportContextOverlay = false;
   let activeDraftFeedback = $state<AgentDraftFeedback | null>(null);
   const LIVE_APPLY_DEBOUNCE_MS = 250;
   let liveApplyTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingLiveApplyParams: DesignParams = {};
+  let pendingLiveApplySourceKey: string | null = null;
 
   const isBooting = $derived(phase === 'booting');
   const isQuestionFlow = $derived(phase === 'answering');
@@ -699,10 +796,18 @@
   const activeMcpBubbleSummary = $derived.by(() => agentOpsState.activeMcpBubbleSummary);
   const activeAgentTerminalMetaSummary = $derived.by(() => agentOpsState.activeAgentTerminalMetaSummary);
   const activeDraftFeedbackSummary = $derived.by(() => {
-    if (!isVisibleAgentDraftFeedback(activeDraftFeedback, $activeThreadId, $activeVersionId)) {
-      return '';
-    }
-    return summarizeAgentDraftFeedback(activeDraftFeedback);
+    const visibleFeedback = isVisibleAgentDraftFeedback(
+      activeDraftFeedback,
+      $activeThreadId,
+      $activeVersionId,
+    )
+      ? activeDraftFeedback
+      : null;
+    return composeAgentDraftFeedbackBubbleText({
+      feedback: visibleFeedback,
+      fallbackAuthoringLints:
+        (threadAgentState as ThreadAgentStateWithAuthoringLints | null)?.authoringLints ?? [],
+    });
   });
   const hasLiveMcpSession = $derived.by(() => agentOpsState.hasLiveMcpSession);
   const isAudioMuted = $derived(Boolean($config?.microwave?.muted));
@@ -728,10 +833,13 @@
   const directOcctStepStatus = $derived.by(() =>
     buildDirectOcctStepStatus(activeArtifactBundle, $runtimeCapabilities),
   );
-  const canOpenViewportCode = $derived.by(
-    () => Boolean(activeVersionMessage?.output?.macroCode || $workingCopy.macroCode),
+  const viewportCodeWorkingCopyAligned = $derived.by(
+    () =>
+      Boolean(
+        $workingCopy.macroCode &&
+          (!activeVersionMessage || $workingCopy.sourceVersionId === activeVersionMessage.id),
+      ),
   );
-
   let viewerComponent = $state<ViewerHandle | null>(null);
   let hiddenViewerComponent = $state<ViewerHandle | null>(null);
   let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
@@ -780,23 +888,26 @@
   let lastAgentPresenceConnected = false;
   let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
   const terminalWindowState = $derived($windowStore.terminal);
+  const sketchWindowState = $derived($windowStore.sketch);
   const projectsWindowState = $derived($windowStore.projects);
   const paramsWindowState = $derived($windowStore.params);
   const dialogueWindowState = $derived($windowStore.dialogue);
+  const docsWindowState = $derived($windowStore.docs);
   const settingsWindowState = $derived($windowStore.settings);
+  const activityWindowState = $derived($windowStore.activity);
   let mountedWindows = $state<Record<WindowId, boolean>>({
     projects: false,
     params: false,
     dialogue: false,
+    docs: false,
     settings: false,
     terminal: false,
     sketch: false,
+    activity: false,
   });
-  let sketchModeMounted = $state(false);
-
   $effect(() => {
     const s = $windowStore;
-    for (const id of ['projects', 'params', 'dialogue', 'settings', 'terminal'] as WindowId[]) {
+    for (const id of ['projects', 'params', 'dialogue', 'docs', 'settings', 'terminal', 'activity', 'sketch'] as WindowId[]) {
       if (s[id].visible) {
         mountedWindows[id] = true;
       }
@@ -815,12 +926,6 @@
     }
     const timerId = setTimeout(mountParams, 600);
     return () => clearTimeout(timerId);
-  });
-
-  $effect(() => {
-    if ($currentView === 'sketch') {
-      sketchModeMounted = true;
-    }
   });
 
   let agentTerminalInput = $state('');
@@ -1008,6 +1113,7 @@
       workingCopy.loadVersion(seededDraft, null);
       paramPanelState.hydrateFromVersion(seededDraft, null);
       codeModalMode = 'version';
+      codeModalSourceLanguage = seededDraft.sourceLanguage;
       selectedCode.set(seededDraft.macroCode);
       selectedTitle.set(
         codeInspectorTitle(
@@ -1151,7 +1257,17 @@
       session.setError(null);
       session.setStatus('Runtime artifact missing. Re-rendering cached model...');
       try {
-        await handleParamChange(panel.params, wc.macroCode || null, false);
+        const recoverySource =
+          activeVersionMessage?.id === messageId
+            ? activeVersionMessage.output?.macroCode
+            : wc.sourceVersionId === messageId
+              ? wc.macroCode
+              : '';
+        const recoveryParams =
+          activeVersionMessage?.id === messageId
+            ? activeVersionMessage.output?.initialParams || {}
+            : panel.params;
+        await handleParamChange(recoveryParams, recoverySource || null, false);
         const repairedSession = get(session);
         const repairedBundle = repairedSession.artifactBundle;
         const repairedManifest = repairedSession.modelManifest;
@@ -1224,6 +1340,26 @@
     try {
       await updateVersionPreview(messageId, imageData, bundle);
       patchThreadMessagePreview(threadId, messageId, imageData);
+      recordSessionActivityEvent({
+        threadId,
+        versionId: messageId,
+        kind: 'preview_updated',
+        title: 'Preview updated',
+        summary: 'Viewport preview thumbnail persisted.',
+        severity: 'success',
+        artifacts: [
+          {
+            kind: 'preview_image',
+            label: 'Viewport preview',
+            value: imageData,
+            mimeType: 'image/png',
+          },
+        ],
+        raw: {
+          modelId: bundle.modelId,
+          artifactVersion: bundle.artifactVersion,
+        },
+      });
       window.dispatchEvent(
         new CustomEvent('ecky:version-preview-updated', {
           detail: { threadId, messageId, imageData },
@@ -1263,10 +1399,10 @@
     isWorkspaceCaptureEnabled(workspaceCapturePrefs, $activeThreadId),
   );
   const workspaceCaptureHint = $derived.by<string | null>(() => {
-    if (dialogueState.mode === 'generate') return null;
     if (drawingOverlayDirty) {
       return 'Enabled automatically because the current viewport has drawn annotations.';
     }
+    if (dialogueState.mode === 'generate') return null;
     if (sendWorkspaceCaptureForActiveThread) {
       return 'The current visible workspace will be attached as a reference image for this thread.';
     }
@@ -1337,9 +1473,7 @@
   }
 
   function handleSketchManualPreviewResult(preview: SketchPreviewState | null) {
-    if (preview?.artifactBundle) {
-      currentView.set('workbench');
-    }
+    return preview;
   }
 
   function rememberVisibleViewportCapture(capture: ViewportScreenshotCapture) {
@@ -2033,6 +2167,13 @@
       'agent-draft-preview-updated',
       (event) => {
         const preview = event.payload;
+        const previousThreadId = get(activeThreadId);
+        const previewDesign = resolveDraftPreviewDesign({
+          design: preview.design,
+          previewThreadId: preview.threadId,
+          activeThreadId: previousThreadId,
+          currentParams: get(paramPanelState).params,
+        });
         activeThreadId.set(preview.threadId);
         activeVersionId.set(preview.previewId);
         activeDraftFeedback = preview.feedback
@@ -2043,18 +2184,45 @@
                   ? { code: `feedback-${index + 1}`, message: item }
                   : item,
               ),
+              authoringLints: preview.feedback.authoringLints ?? [],
               threadId: preview.threadId,
               previewId: preview.previewId,
               sessionId: preview.sessionId,
             }
           : null;
-        workingCopy.loadVersion(preview.design, preview.previewId);
-        paramPanelState.hydrateFromVersion(preview.design, preview.previewId);
+        workingCopy.loadVersion(previewDesign, preview.previewId);
+        paramPanelState.hydrateFromVersion(previewDesign, preview.previewId);
         session.setStlUrl(toAssetUrl(preview.artifactBundle.previewStlPath));
         session.setModelRuntime(preview.artifactBundle, preview.modelManifest);
+        recordSessionActivityEvent({
+          threadId: preview.threadId,
+          versionId: preview.previewId,
+          sessionId: preview.sessionId ?? 'local-session',
+          actor: {
+            kind: 'agent',
+            id: preview.sessionId ?? 'agent',
+            label: threadAgentState?.agentLabel ?? 'Agent',
+          },
+          kind: preview.feedback ? 'validation_reported' : 'preview_updated',
+          title: preview.feedback ? 'Preview validation reported' : 'Draft preview updated',
+          summary: preview.feedback?.summary || 'Draft preview rendered.',
+          severity: preview.feedback?.status === 'failed' ? 'error' : preview.feedback ? 'warning' : 'success',
+          artifacts: [
+            {
+              kind: 'preview_file',
+              label: 'Draft preview STL',
+              value: preview.artifactBundle.previewStlPath ?? preview.artifactBundle.modelId,
+              raw: {
+                modelId: preview.artifactBundle.modelId,
+                artifactVersion: preview.artifactBundle.artifactVersion,
+              },
+            },
+          ],
+          raw: preview.feedback ?? null,
+        });
         session.setStatus(preview.feedback?.summary || 'Preview rendered.');
         void persistLastSessionSnapshot({
-          design: preview.design,
+          design: previewDesign,
           threadId: preview.threadId,
           messageId: preview.previewId,
           artifactBundle: preview.artifactBundle,
@@ -2345,6 +2513,90 @@
     }),
   );
   const genieBubble = $derived(genieBubbleState.text);
+  let selectedSessionActivityEventId = $state<string | null>(null);
+  let lastBubbleActivityKey = $state('');
+  let bubbleActivityTimestamp = $state(0);
+  const bubbleActivityKey = $derived(
+    `${$activeThreadId ?? 'threadless'}:${$activeVersionId ?? 'versionless'}:${genieBubbleState.badge ?? ''}:${genieBubble}`,
+  );
+
+  $effect(() => {
+    if (!genieBubble || bubbleActivityKey === lastBubbleActivityKey) return;
+    lastBubbleActivityKey = bubbleActivityKey;
+    bubbleActivityTimestamp = Date.now();
+  });
+
+  const bubbleSessionEvent = $derived.by<SessionEvent | null>(() => {
+    if (!genieBubble) return null;
+    const severity: SessionEvent['severity'] =
+      activeThreadHighestPhase === 'error'
+        ? 'error'
+        : activeDraftFeedbackSummary || genieBubbleState.badge === 'PREVIEW CHECK'
+          ? 'warning'
+          : 'info';
+    const kind: SessionEvent['kind'] =
+      activeThreadHighestPhase === 'error'
+        ? 'render_failed'
+        : activeDraftFeedbackSummary
+          ? 'validation_reported'
+          : 'agent_action_finished';
+    const actor: SessionEvent['actor'] = threadAgentState?.agentLabel
+      ? {
+          kind: 'agent',
+          id: threadAgentState.sessionId ?? 'agent',
+          label: threadAgentState.agentLabel,
+        }
+      : { kind: 'system', id: 'ecky' };
+
+    return {
+      id: `bubble:${bubbleActivityKey}`,
+      sessionId: threadAgentState?.sessionId ?? 'local-session',
+      threadId: $activeThreadId ?? null,
+      versionId: $activeVersionId ?? null,
+      actor,
+      kind,
+      title: genieBubbleState.badge || genieBubbleState.contextLabel || 'Ecky update',
+      summary: genieBubble,
+      timestamp: bubbleActivityTimestamp || Date.now(),
+      severity,
+      artifacts: hasPreviewArtifact && previewArtifactName
+        ? [
+            {
+              kind: 'preview_file',
+              label: 'Preview artifact',
+              value: previewArtifactName,
+            },
+          ]
+        : undefined,
+      raw: {
+        contextLabel: genieBubbleState.contextLabel,
+        threadPhase: activeThreadHighestPhase,
+        error: activeThreadErrorText || null,
+      },
+    };
+  });
+  const sessionActivityEvents = $derived.by<SessionEvent[]>(() => {
+    const recordedEvents = $sessionActivityEventStore;
+    if (!bubbleSessionEvent) return recordedEvents;
+    if (recordedEvents.some((event) => event.id === bubbleSessionEvent.id)) return recordedEvents;
+    return [...recordedEvents, bubbleSessionEvent];
+  });
+  const sessionActivity = $derived.by(() =>
+    composeSessionActivity(sessionActivityEvents, $activeThreadId ?? null, $activeVersionId ?? null),
+  );
+  const sessionBubbleEvent = $derived.by(() => composeBubbleEvent(sessionActivity));
+  const sessionCodeDiffView = $derived.by(() => composeCodeDiffView(sessionActivity, $selectedCode));
+
+  function openSessionActivityFromBubble() {
+    const event = sessionBubbleEvent.event ?? bubbleSessionEvent;
+    if (event) selectedSessionActivityEventId = event.id;
+    mountedWindows.activity = true;
+    showWindow('activity');
+  }
+
+  function selectSessionActivityEvent(id: string) {
+    selectedSessionActivityEventId = id;
+  }
 
   $effect(() => {
     const speechCue = resolveGenieSpeechCue({
@@ -2772,13 +3024,37 @@
     handleTargetSelect(nextTarget);
   }
 
+  function liveParamSourceKey(): string {
+    const wc = get(workingCopy);
+    return [
+      get(activeThreadId) ?? '',
+      wc.sourceVersionId ?? get(activeVersionId) ?? '',
+      wc.macroCode,
+    ].join('\u0000');
+  }
+
   function scheduleLiveParamChange(nextParams: DesignParams) {
+    const sourceKey = liveParamSourceKey();
+    if (pendingLiveApplySourceKey && pendingLiveApplySourceKey !== sourceKey) {
+      pendingLiveApplyParams = {};
+    }
+    pendingLiveApplySourceKey = sourceKey;
     pendingLiveApplyParams = { ...pendingLiveApplyParams, ...nextParams };
     if (liveApplyTimer) clearTimeout(liveApplyTimer);
     liveApplyTimer = setTimeout(() => {
       const params = pendingLiveApplyParams;
+      const expectedSourceKey = pendingLiveApplySourceKey;
       pendingLiveApplyParams = {};
+      pendingLiveApplySourceKey = null;
       liveApplyTimer = null;
+      const currentSourceKey = liveParamSourceKey();
+      if (expectedSourceKey !== currentSourceKey) {
+        console.warn('[App] Dropping stale live parameter apply', {
+          expectedSourceKey,
+          currentSourceKey,
+        });
+        return;
+      }
       void handleParamChange(params, null, false);
     }, LIVE_APPLY_DEBOUNCE_MS);
   }
@@ -2921,7 +3197,12 @@
   {#if $onboarding.isActive}
     <div class="onboarding-backdrop"></div>
   {/if}
-  <div class="app-overlay-actions" bind:this={overlayActionsEl}>
+  <div
+    class="app-overlay-actions"
+    class:app-overlay-actions--dock={$currentView === 'workbench'}
+    data-testid="workbench-bottom-dock"
+    bind:this={overlayActionsEl}
+  >
     {#if $currentView === 'workbench'}
       <div class="dock-group dock-group--primary">
         <button
@@ -2929,66 +3210,131 @@
           class:dock-btn--active={$windowStore.projects.visible}
           class:onboarding-highlight={$onboarding.highlightTarget === 'projects'}
           data-onboarding-target="projects"
+          data-dock-label="PROJECTS"
           onclick={() => toggleWindow('projects')}
+          aria-label="PROJECTS"
           title="Projects"
         >
-          PROJECTS
+          <svg class="dock-svg dock-svg--projects" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4 7h6l2 2h8v10H4V7Z" />
+            <path d="M4 11h16" />
+            <path d="M7 15h10" />
+          </svg>
         </button>
         <button
           class="dock-btn"
           class:dock-btn--active={$windowStore.params.visible}
           class:onboarding-highlight={$onboarding.highlightTarget === 'params'}
           data-onboarding-target="params"
+          data-dock-label="PARAMS"
           onclick={() => toggleWindow('params')}
+          aria-label="PARAMS"
           title="Parameters"
         >
-          PARAMS
+          <svg class="dock-svg dock-svg--params" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4 7h16" />
+            <path d="M4 12h16" />
+            <path d="M4 17h16" />
+            <path d="M8 5v4" />
+            <path d="M15 10v4" />
+            <path d="M11 15v4" />
+          </svg>
         </button>
         <button
           class="dock-btn"
           class:dock-btn--active={$windowStore.dialogue.visible}
           class:onboarding-highlight={$onboarding.highlightTarget === 'dialogue'}
           data-onboarding-target="dialogue"
+          data-dock-label="DIALOGUE"
           onclick={() => toggleWindow('dialogue')}
+          aria-label="DIALOGUE"
           title="Dialogue"
         >
-          DIALOGUE
+          <svg class="dock-svg dock-svg--dialogue" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 6h14v10H10l-5 4V6Z" />
+            <path d="M8 10h8" />
+            <path d="M8 13h5" />
+          </svg>
         </button>
         <button
           class="dock-btn"
-          onclick={() => {
-            closeWindowStore('sketch');
-            currentView.set('sketch');
-          }}
-          title="Sketch Workspace"
+          class:dock-btn--active={$windowStore.docs.visible}
+          data-dock-label="DOCS"
+          onclick={() => toggleWindow('docs')}
+          aria-label="DOCS"
+          title="Ecky IR docs"
         >
-          SKETCH
+          <svg class="dock-svg dock-svg--docs" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M7 4h8l4 4v12H7V4Z" />
+            <path d="M15 4v5h5" />
+            <path d="M10 13h7" />
+            <path d="M10 17h5" />
+          </svg>
         </button>
         <button
-          class="dock-btn dock-btn--accent"
-          onclick={() => showNewProjectChooser = true}
-          title="New project"
+          class="dock-btn"
+          class:dock-btn--active={$showCodeModal}
+          data-dock-label="CODE"
+          onclick={handleDockCodeToggle}
+          aria-label="CODE"
+          title="Code inspector"
         >
-          +
+          <svg class="dock-svg dock-svg--code" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="m9 7-5 5 5 5" />
+            <path d="m15 7 5 5-5 5" />
+            <path d="m13 4-2 16" />
+          </svg>
+        </button>
+        <button
+          class="dock-btn"
+          class:dock-btn--active={sketchWindowState.visible}
+          data-dock-label="SKETCH"
+          onclick={() => toggleWindow('sketch')}
+          aria-label="SKETCH"
+          title="Sketch Workspace"
+        >
+          <svg class="dock-svg dock-svg--sketch" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 17 10 8l5 5 4-7" />
+            <path d="M4 17h2v2H4Z" />
+            <path d="M9 7h2v2H9Z" />
+            <path d="M14 12h2v2h-2Z" />
+            <path d="M18 5h2v2h-2Z" />
+          </svg>
         </button>
       </div>
       <div class="dock-group dock-group--utility">
         <button
-          class="overlay-icon-btn"
+          class="dock-btn dock-btn--utility"
           onclick={toggleMicrowaveMute}
+          data-dock-label={isAudioMuted ? 'MUTED' : 'AUDIO'}
           title={audioMuteLabel}
           aria-label={audioMuteLabel}
           aria-pressed={isAudioMuted}
         >
-          {isAudioMuted ? '🔇' : '🔊'}
+          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4 10h4l5-4v12l-5-4H4v-4Z" />
+            {#if isAudioMuted}
+              <path d="m17 9 4 6" />
+              <path d="m21 9-4 6" />
+            {:else}
+              <path d="M17 9c1 1 1 5 0 6" />
+              <path d="M20 7c2 3 2 7 0 10" />
+            {/if}
+          </svg>
         </button>
         {#if visibleAgentTerminal}
           <button
-            class="overlay-icon-btn terminal-overlay-btn"
+            class="dock-btn dock-btn--utility terminal-overlay-btn"
             class:terminal-overlay-btn-attention={visibleAgentTerminal.attentionRequired}
+            data-dock-label="TERMINAL"
             onclick={() => {
               if (!terminalWindowState.visible) toggleWindow('terminal');
             }}
+            aria-label={
+              visibleAgentTerminal.attentionRequired
+                ? `${visibleAgentTerminal.agentLabel} needs terminal input`
+                : `Open ${visibleAgentTerminal.agentLabel} terminal`
+            }
             title={
               visibleAgentTerminal.attentionRequired
                 ? `${visibleAgentTerminal.agentLabel} needs terminal input`
@@ -2998,12 +3344,41 @@
             >_
           </button>
         {/if}
-        <button class="overlay-icon-btn" class:draw-active={drawMode} onclick={() => drawMode = !drawMode} title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}>
-          ✏️
+        <button
+          class="dock-btn dock-btn--utility"
+          class:draw-active={drawMode}
+          data-dock-label="DRAW"
+          onclick={() => drawMode = !drawMode}
+          aria-label={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
+          title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
+        >
+          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="m6 17 1-4 9-9 4 4-9 9-4 1Z" />
+            <path d="m14 6 4 4" />
+            <path d="M5 21h14" />
+          </svg>
         </button>
-        <button class="settings-overlay-btn" onclick={() => toggleWindow('settings')} title="Settings">⚙️</button>
+        <button
+          class="dock-btn dock-btn--utility"
+          data-dock-label="SETTINGS"
+          onclick={() => toggleWindow('settings')}
+          aria-label="Settings"
+          title="Settings"
+        >
+          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 4v3" />
+            <path d="M12 17v3" />
+            <path d="M4 12h3" />
+            <path d="M17 12h3" />
+            <path d="m6.3 6.3 2.1 2.1" />
+            <path d="m15.6 15.6 2.1 2.1" />
+            <path d="m17.7 6.3-2.1 2.1" />
+            <path d="m8.4 15.6-2.1 2.1" />
+            <path d="M9 12a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z" />
+          </svg>
+        </button>
       </div>
-    {:else if $currentView !== 'sketch'}
+    {:else}
       <button
         class="settings-overlay-btn"
         onclick={() => currentView.set('workbench')}
@@ -3015,15 +3390,6 @@
   </div>
 
   <div class="app-container">
-    {#if sketchModeMounted}
-      <section class="sketch-mode-workspace" hidden={$currentView !== 'sketch'} aria-label="Sketch mode">
-        <SketchWorkspace
-          onPreviewResult={handleSketchPreviewChange}
-          onManualPreviewResult={handleSketchManualPreviewResult}
-          onClose={() => currentView.set('workbench')}
-        />
-      </section>
-    {/if}
     {#if $currentView === 'workbench' || $currentView === 'inventory-model'}
       <div class="workbench">
         <div class="main-workbench">
@@ -3034,7 +3400,11 @@
             class:onboarding-highlight={$onboarding.highlightTarget === 'viewport'}
             data-onboarding-target="viewport"
           >
-            <div class="viewer-shell">
+            <div
+              class="viewer-shell"
+              data-model-key={effectiveViewerModelKey ?? ''}
+              data-stl-url={effectiveViewerStlUrl ?? ''}
+            >
               <Viewer
                 bind:this={viewerComponent}
                 modelKey={effectiveViewerModelKey}
@@ -3052,7 +3422,7 @@
                 overlayPartLabel={hasSketchPreview ? null : selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
                 overlayPartEditable={hasSketchPreview ? false : selectedTarget?.editable ?? overlaySelectedPart?.editable ?? false}
                 overlayPreviewOnly={hasSketchPreview ? false : overlayPreviewOnly}
-                showContextOverlay={false}
+                showContextOverlay={enableViewportContextOverlay}
                 overlayControls={hasSketchPreview ? [] : overlayControls}
                 overlayAdvisories={hasSketchPreview ? [] : overlayAdvisories}
                 activeMeasurementCallout={hasSketchPreview ? null : activeMeasurementCallout}
@@ -3134,6 +3504,8 @@
                 badge={genieBubbleState.badge}
                 contextLabel={genieBubbleState.contextLabel}
                 safeRightInset={genieSafeRightInset}
+                onBubbleClick={openSessionActivityFromBubble}
+                bubbleTestId="genie-session-bubble"
                 onDismiss={dismissGenie} 
                 actions={genieActions} 
                 traits={eckyTraits} 
@@ -3257,29 +3629,6 @@
                   </div>
                 {/if}
                 <div class="export-actions">
-                  <button class="btn btn-xs btn-secondary" onclick={() => {
-                    const sourceCode =
-                      activeVersionMessage?.output?.macroCode ??
-                      $workingCopy.macroCode;
-                    if (sourceCode) {
-                      codeModalMode = 'version';
-                      selectedCode.set(sourceCode);
-                      selectedTitle.set(
-                        codeInspectorTitle(
-                          activeVersionMessage?.output?.title || $workingCopy.title || 'design',
-                          activeVersionMessage?.artifactBundle?.sourceLanguage ??
-                            activeVersionMessage?.modelManifest?.sourceLanguage ??
-                            activeVersionMessage?.output?.sourceLanguage,
-                          activeVersionMessage?.artifactBundle?.geometryBackend ??
-                            activeVersionMessage?.modelManifest?.geometryBackend ??
-                            activeVersionMessage?.output?.geometryBackend,
-                        ),
-                      );
-                      showCodeModal.set(true);
-                    }
-                  }} disabled={!canOpenViewportCode || showViewerBusyMask} title="View source code">
-                    📄 CODE
-                  </button>
                   <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
                   {#if activeArtifactBundle}
                     <button
@@ -3352,6 +3701,7 @@
       <ProjectSwitcher
         onImportFcstd={handleImportFcstd}
         onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
+        onOpenNewProjectChooser={() => showNewProjectChooser = true}
         freecadUnavailableReason={freecadUnavailableReason}
       />
     </Window>
@@ -3403,7 +3753,9 @@
           }}
           activeVersionId={$paramPanelState.versionId}
           messageId={$activeVersionId}
-          macroCode={$workingCopy.macroCode}
+          macroCode={viewportCodeWorkingCopyAligned
+            ? $workingCopy.macroCode
+            : activeVersionMessage?.output?.macroCode ?? ''}
           outlineEnabled={viewerOutlineEnabled}
           topologyMode={viewerTopologyMode}
           selectionMode={viewerMode}
@@ -3415,16 +3767,12 @@
             viewerMode = mode;
           }}
           onShowCode={() => {
-            codeModalMode = 'version';
-            selectedCode.set($workingCopy.macroCode);
-            selectedTitle.set(
-              codeInspectorTitle(
-                $workingCopy.title,
-                $workingCopy.sourceLanguage,
-                $workingCopy.geometryBackend,
-              ),
-            );
-            showCodeModal.set(true);
+            void openVersionCodeModal({
+              code: $workingCopy.macroCode,
+              title: $workingCopy.title,
+              sourceLanguage: $workingCopy.sourceLanguage,
+              geometryBackend: $workingCopy.geometryBackend,
+            });
           }}
         />
 
@@ -3458,6 +3806,53 @@
           onRerollEcky={rerollEckySeed}
           onfetch={fetchModels}
           onsave={saveConfig}
+        />
+      </div>
+    </Window>
+  {/if}
+
+  {#if mountedWindows.activity}
+    <Window
+      windowId="activity"
+      x={activityWindowState.x}
+      y={activityWindowState.y}
+      width={activityWindowState.width}
+      height={activityWindowState.height}
+      z={activityWindowState.z}
+      minWidth={440}
+      minHeight={320}
+      title="Session Activity"
+      hidden={!activityWindowState.visible}
+      highlighted={false}
+      onclose={() => closeWindowStore('activity')}
+    >
+      <SessionActivityWindow
+        events={sessionActivity.visibleEvents}
+        selectedEventId={selectedSessionActivityEventId}
+        onSelectEvent={selectSessionActivityEvent}
+      />
+    </Window>
+  {/if}
+
+  {#if mountedWindows.sketch}
+    <Window
+      windowId="sketch"
+      x={sketchWindowState.x}
+      y={sketchWindowState.y}
+      width={sketchWindowState.width}
+      height={sketchWindowState.height}
+      z={sketchWindowState.z}
+      minWidth={520}
+      minHeight={360}
+      title="Sketch Workspace"
+      hidden={!sketchWindowState.visible}
+      highlighted={false}
+      onclose={() => closeWindowStore('sketch')}
+    >
+      <div class="sketch-window-shell">
+        <SketchWorkspace
+          onPreviewResult={handleSketchPreviewChange}
+          onManualPreviewResult={handleSketchManualPreviewResult}
         />
       </div>
     </Window>
@@ -3507,16 +3902,14 @@
             sttLanguageCode={$config.voice?.sttLanguageCode ?? 'en-US'}
             onToggleWorkspaceCapture={setWorkspaceCaptureForActiveThread}
             onShowCode={(m) => {
-              codeModalMode = 'version';
-              selectedCode.set(m.output.macroCode);
-              selectedTitle.set(
-                codeInspectorTitle(
-                  m.output.title,
-                  m.artifactBundle?.sourceLanguage ?? m.modelManifest?.sourceLanguage ?? m.output.sourceLanguage,
-                  m.artifactBundle?.geometryBackend ?? m.modelManifest?.geometryBackend ?? m.output.geometryBackend,
-                ),
-              );
-              showCodeModal.set(true);
+              void openVersionCodeModal({
+                code: m.output.macroCode,
+                title: m.output.title,
+                sourceLanguage:
+                  m.artifactBundle?.sourceLanguage ?? m.modelManifest?.sourceLanguage ?? m.output.sourceLanguage ?? null,
+                geometryBackend:
+                  m.artifactBundle?.geometryBackend ?? m.modelManifest?.geometryBackend ?? m.output.geometryBackend ?? null,
+              });
             }}
             onDeleteVersion={deleteVersion}
             onRestoreVersion={restoreVersion}
@@ -3525,6 +3918,25 @@
           />
         {/key}
       </div>
+    </Window>
+  {/if}
+
+  {#if mountedWindows.docs}
+    <Window
+      windowId="docs"
+      x={docsWindowState.x}
+      y={docsWindowState.y}
+      width={docsWindowState.width}
+      height={docsWindowState.height}
+      z={docsWindowState.z}
+      minWidth={760}
+      minHeight={480}
+      title="Ecky IR Docs"
+      hidden={!docsWindowState.visible}
+      highlighted={false}
+      onclose={() => closeWindowStore('docs')}
+    >
+      <DocsSite showHead={false} onOpenSnippet={openDocsSnippetInCode} />
     </Window>
   {/if}
 
@@ -3657,12 +4069,18 @@
   {#if $showCodeModal}
     <CodeModal
       bind:code={$selectedCode}
+      mode={codeModalMode}
+      sourceLanguage={codeModalSourceLanguage}
       title={$selectedTitle}
       defaultTitle={$workingCopy.title}
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
-      onApply={codeModalMode === 'sketch-preview' ? undefined : applyManualCodeDraft}
-      onCommit={codeModalMode === 'sketch-preview' ? undefined : commitManualVersion}
-      onFork={codeModalMode === 'sketch-preview' ? undefined : forkManualVersion}
+      diffBefore={sessionCodeDiffView.hasDiff ? sessionCodeDiffView.previousCode : null}
+      diffAfter={sessionCodeDiffView.hasDiff ? sessionCodeDiffView.nextCode : null}
+      diffTitle={sessionCodeDiffView.title || 'LAST MACRO DIFF'}
+      diffSummary={sessionCodeDiffView.summary}
+      onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
+      onCommit={codeModalMode === 'version' ? commitManualVersion : undefined}
+      onFork={codeModalMode === 'version' ? forkManualVersion : undefined}
       onclose={() => showCodeModal.set(false)}
     />
   {/if}
@@ -3684,15 +4102,10 @@
 <style>
   .app-page { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
   .app-container { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  .sketch-mode-workspace {
-    flex: 1;
+  .sketch-window-shell {
+    height: 100%;
     min-height: 0;
-    width: 100%;
-    display: flex;
     overflow: hidden;
-  }
-  .sketch-mode-workspace[hidden] {
-    display: none;
   }
   .workbench { display: flex; height: 100%; width: 100%; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
@@ -3773,16 +4186,60 @@
     color: var(--text-dim);
     font-family: var(--font-mono);
   }
-  .app-overlay-actions { position: absolute; top: 10px; right: 10px; z-index: 150; display: flex; gap: 12px; align-items: flex-start; }
-  .dock-group { display: flex; gap: 2px; }
+  .app-overlay-actions {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5001;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .app-overlay-actions--dock {
+    top: auto;
+    right: auto;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    max-width: calc(100vw - 24px);
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-100) 94%, transparent);
+    box-shadow: 0 10px 22px color-mix(in srgb, #000 42%, transparent);
+    backdrop-filter: blur(10px);
+    overflow: visible;
+  }
+  .dock-group { display: flex; gap: 4px; min-width: 0; }
+  .dock-group--primary,
+  .dock-group--utility {
+    overflow: visible;
+  }
+  .dock-group--utility {
+    position: relative;
+    padding-left: 10px;
+  }
+  .dock-group--utility::before {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 5px;
+    bottom: 5px;
+    width: 1px;
+    background: linear-gradient(180deg, transparent, var(--secondary), transparent);
+  }
   .dock-btn {
-    height: 30px;
-    padding: 0 12px;
-    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
+    position: relative;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    background: color-mix(in srgb, var(--bg-200) 86%, transparent);
     border: 1px solid var(--bg-300);
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 0.6rem;
+    font-size: 0.72rem;
     font-weight: bold;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -3791,15 +4248,59 @@
     align-items: center;
     justify-content: center;
     backdrop-filter: blur(6px);
-    box-shadow: var(--shadow);
+    box-shadow: none;
+    overflow: visible;
   }
-  .dock-btn:hover { border-color: var(--primary); color: var(--primary); }
-  .dock-btn--active { border-color: var(--primary); color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, var(--bg-100)); }
-  .dock-btn--accent { color: var(--secondary); font-size: 0.85rem; min-width: 30px; padding: 0 8px; }
-  .dock-btn--accent:hover { color: var(--primary); }
-  .overlay-icon-btn, .settings-overlay-btn { width: 34px; height: 34px; background: color-mix(in srgb, var(--bg-100) 90%, transparent); border: 1px solid var(--bg-300); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); }
-  .overlay-icon-btn:hover, .settings-overlay-btn:hover { border-color: var(--primary); color: var(--primary); }
-  .overlay-icon-btn.draw-active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 25%, var(--bg-100)); box-shadow: 0 0 8px var(--primary); }
+  .dock-btn:hover,
+  .dock-btn:focus-visible {
+    border-color: var(--primary);
+    color: var(--primary);
+    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--primary) 72%, transparent);
+  }
+  .dock-btn--active {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 16%, var(--bg-100));
+  }
+  .dock-btn[data-dock-label]::after {
+    content: attr(data-dock-label);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 10px);
+    transform: translateX(-50%) translateY(4px);
+    min-width: max-content;
+    padding: 4px 8px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-100) 96%, transparent);
+    color: var(--text-dim);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease, transform 120ms ease;
+  }
+  .dock-btn:hover::after,
+  .dock-btn:focus-visible::after {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+  .dock-svg {
+    width: 25px;
+    height: 25px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.9;
+    stroke-linecap: square;
+    stroke-linejoin: miter;
+  }
+  .dock-btn--utility {
+    width: 38px;
+    height: 38px;
+    color: color-mix(in srgb, var(--text) 78%, var(--primary) 22%);
+  }
+  .settings-overlay-btn { width: 34px; height: 34px; background: color-mix(in srgb, var(--bg-100) 90%, transparent); border: 1px solid var(--bg-300); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); }
+  .settings-overlay-btn:hover { border-color: var(--primary); color: var(--primary); }
+  .dock-btn.draw-active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 25%, var(--bg-100)); box-shadow: 0 0 8px var(--primary); }
   .new-project-chooser {
     display: flex;
     flex-direction: column;
@@ -3827,9 +4328,9 @@
   .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 120; pointer-events: auto; max-width: min(56vw, 380px); }
   .error-banner {
     position: absolute;
-    top: 12px;
+    top: 56px;
     right: 12px;
-    z-index: 4200;
+    z-index: 1800;
     max-width: min(52vw, 760px);
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto auto;

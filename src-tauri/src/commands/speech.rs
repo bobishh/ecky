@@ -360,6 +360,7 @@ mod tests {
             engines,
             selected_engine_id: selected_engine_id.to_string(),
             freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
             freecad_library_roots: Vec::new(),
             assets: vec![],
             microwave: None,

@@ -516,6 +516,7 @@ pub fn run() {
         }],
         selected_engine_id: "default-gemini".to_string(),
         freecad_cmd: String::new(),
+        cad_text_font_path: String::new(),
         freecad_library_roots: Vec::new(),
         assets: vec![],
         microwave: None,

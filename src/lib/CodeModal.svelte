@@ -1,6 +1,12 @@
 <script lang="ts">
   import Window from './Window.svelte';
   import CodePanel from './CodePanel.svelte';
+  import {
+    canInsertVerifyTemplate,
+    hasVerifyClause,
+    insertVerifyTemplate,
+    looksLikeEckyModelSource,
+  } from './verifyTemplate';
 
   type CodeModalCommitPayload = {
     code: string;
@@ -8,20 +14,34 @@
     versionName: string;
   };
 
+  type CodeModalMode = 'version' | 'sketch-preview' | 'docs-snippet';
+
   let {
     code = $bindable(''),
+    mode = 'version',
+    sourceLanguage = null,
     title,
     defaultTitle = '',
     defaultVersionName = '',
+    diffBefore = null,
+    diffAfter = null,
+    diffTitle = 'LAST MACRO DIFF',
+    diffSummary = '',
     onclose,
     onApply,
     onCommit,
     onFork,
   }: {
     code?: string;
+    mode?: CodeModalMode;
+    sourceLanguage?: string | null;
     title: string;
     defaultTitle?: string;
     defaultVersionName?: string;
+    diffBefore?: string | null;
+    diffAfter?: string | null;
+    diffTitle?: string;
+    diffSummary?: string;
     onclose: () => void;
     onApply?: (code: string) => Promise<unknown> | unknown;
     onCommit?: (payload: CodeModalCommitPayload) => Promise<void> | void;
@@ -34,11 +54,13 @@
   let height = $state(620);
 
   let copyState = $state<'idle' | 'copied'>('idle');
+  let verifyState = $state<'idle' | 'inserted' | 'exists'>('idle');
   let commitState = $state<'idle' | 'applying' | 'committing' | 'forking'>('idle');
   let commitError = $state('');
   let draftTitle = $state('');
   let draftVersionName = $state('');
   let initializedDraftFields = $state(false);
+  const canMutateVersion = $derived(mode === 'version');
 
   $effect(() => {
     if (commitState !== 'idle') return;
@@ -122,6 +144,18 @@
 
   function handleCodeChange(nextCode: string) {
     code = nextCode;
+    verifyState = 'idle';
+  }
+
+  function handleInsertVerify() {
+    if (canInsertVerifyTemplate(code)) {
+      code = insertVerifyTemplate(code);
+      verifyState = 'inserted';
+      return;
+    }
+    if (hasVerifyClause(code)) {
+      verifyState = 'exists';
+    }
   }
 </script>
 
@@ -135,70 +169,98 @@
 >
   <div class="code-modal-content">
     <div class="code-editor-area">
-      <CodePanel code={code} onchange={handleCodeChange} />
+      <CodePanel
+        code={code}
+        {sourceLanguage}
+        onchange={handleCodeChange}
+        {diffBefore}
+        {diffAfter}
+        {diffTitle}
+        {diffSummary}
+      />
     </div>
     <div class="code-modal-footer">
       <div class="footer-left">
         <button class="btn btn-secondary" onclick={copyCode}>
           {copyState === 'copied' ? 'COPIED!' : 'COPY CODE'}
         </button>
+        {#if canMutateVersion && looksLikeEckyModelSource(code)}
+          <button
+            class="btn btn-secondary"
+            onclick={handleInsertVerify}
+            disabled={hasVerifyClause(code)}
+            title={hasVerifyClause(code) ? 'This source already contains a verify clause.' : 'Append a top-level verify template to this Ecky model.'}
+          >
+            {#if verifyState === 'inserted'}
+              VERIFY INSERTED
+            {:else if hasVerifyClause(code)}
+              VERIFY EXISTS
+            {:else}
+              INSERT VERIFY
+            {/if}
+          </button>
+        {/if}
         {#if commitError}
           <div class="commit-error" title={commitError}>{commitError}</div>
         {/if}
       </div>
       <div class="footer-actions">
-        <div class="commit-fields">
-          <input
-            class="commit-input"
-            aria-label="Version title"
-            bind:value={draftTitle}
-            placeholder="Title"
-            disabled={commitState !== 'idle'}
-          />
-          <input
-            class="commit-input commit-input-version"
-            aria-label="Version name"
-            bind:value={draftVersionName}
-            placeholder="Version"
-            disabled={commitState !== 'idle'}
-          />
-        </div>
-        <button
-          class="btn btn-secondary"
-          onclick={handleApply}
-          disabled={!onApply || commitState !== 'idle'}
-          title="Render code changes without creating a history version"
-        >
-          {#if commitState === 'applying'}
-            APPLYING...
-          {:else}
-            APPLY
-          {/if}
-        </button>
-        <button
-          class="btn btn-secondary"
-          onclick={handleFork}
-          disabled={!onFork || commitState !== 'idle'}
-          title="Fork these code changes into a new thread"
-        >
-          {#if commitState === 'forking'}
-            FORKING...
-          {:else}
-            FORK TO NEW THREAD
-          {/if}
-        </button>
-        <button
-          class="btn btn-primary"
-          onclick={handleCommit}
-          disabled={!onCommit || commitState !== 'idle'}
-          title="Save changes as a new version in history"
-        >
-          {#if commitState === 'committing'}
-            COMMITTING...
-          {:else}
-            COMMIT VERSION
-          {/if}
-        </button>
+        {#if canMutateVersion}
+          <div class="commit-fields">
+            <input
+              class="commit-input"
+              aria-label="Version title"
+              bind:value={draftTitle}
+              placeholder="Title"
+              disabled={commitState !== 'idle'}
+            />
+            <input
+              class="commit-input commit-input-version"
+              aria-label="Version name"
+              bind:value={draftVersionName}
+              placeholder="Version"
+              disabled={commitState !== 'idle'}
+            />
+          </div>
+        {/if}
+        {#if canMutateVersion}
+          <button
+            class="btn btn-secondary"
+            onclick={handleApply}
+            disabled={!onApply || commitState !== 'idle'}
+            title="Render code changes without creating a history version"
+          >
+            {#if commitState === 'applying'}
+              APPLYING...
+            {:else}
+              APPLY
+            {/if}
+          </button>
+          <button
+            class="btn btn-secondary"
+            onclick={handleFork}
+            disabled={!onFork || commitState !== 'idle'}
+            title="Fork these code changes into a new thread"
+          >
+            {#if commitState === 'forking'}
+              FORKING...
+            {:else}
+              FORK TO NEW THREAD
+            {/if}
+          </button>
+          <button
+            class="btn btn-primary"
+            onclick={handleCommit}
+            disabled={!onCommit || commitState !== 'idle'}
+            title="Save changes as a new version in history"
+          >
+            {#if commitState === 'committing'}
+              COMMITTING...
+            {:else}
+              COMMIT VERSION
+            {/if}
+          </button>
+        {/if}
       </div>
     </div>
   </div>

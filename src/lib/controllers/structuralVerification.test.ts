@@ -146,6 +146,28 @@ test('repair prompt includes parsed STL topology metrics', async () => {
   assert.match(result.repairPrompt, /overhang ratio: 0\.141/);
 });
 
+test('repair prompt preserves authored verify guidance when authored checks fail', async () => {
+  const result = await runStructuralCheck(baseOpts({
+    verify: async () => ({
+      ...FAIL_RESULT,
+      summary: 'Structural verification failed: AUTHORED_VERIFY_FAILED',
+      issues: [
+        {
+          code: 'AUTHORED_VERIFY_FAILED',
+          message: 'Expected manifest has-step to equal false, got true.',
+          partId: null,
+          numericPayload: null,
+        },
+      ],
+    }),
+  }));
+  assert.equal(result.kind, 'repair_needed');
+  assert.ok('repairPrompt' in result);
+  assert.match(result.repairPrompt, /Authored verify requirements failed\./);
+  assert.match(result.repairPrompt, /Do not remove or weaken `\(verify \.\.\.\)` clauses\./);
+  assert.match(result.repairPrompt, /AUTHORED_VERIFY_FAILED/);
+});
+
 // ── terminal failure ────────────────────────────────────────────────────────
 
 test('returns failed_terminal when structural check fails on last attempt', async () => {
@@ -157,6 +179,29 @@ test('returns failed_terminal when structural check fails on last attempt', asyn
   assert.equal(result.kind, 'failed_terminal');
   assert.ok('issues' in result);
   assert.match(result.issues, /PREVIEW_STL_MISSING/);
+});
+
+test('failed_terminal prefixes authored verify failures with explicit copy', async () => {
+  const result = await runStructuralCheck(baseOpts({
+    verify: async () => ({
+      ...FAIL_RESULT,
+      summary: 'Structural verification failed: AUTHORED_VERIFY_FAILED',
+      issues: [
+        {
+          code: 'AUTHORED_VERIFY_FAILED',
+          message: 'Expected manifest has-step to equal false, got true.',
+          partId: null,
+          numericPayload: null,
+        },
+      ],
+    }),
+    currentGenerationAttempt: 3,
+    maxGenerationAttempts: 3,
+  }));
+  assert.equal(result.kind, 'failed_terminal');
+  assert.ok('issues' in result);
+  assert.match(result.issues, /^Authored verify requirements failed\./);
+  assert.match(result.issues, /AUTHORED_VERIFY_FAILED/);
 });
 
 // ── skipped ─────────────────────────────────────────────────────────────────

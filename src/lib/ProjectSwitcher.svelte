@@ -18,6 +18,7 @@
     getDeletedMessages,
     hideDeletedMessage,
     getThreadLatestVersion,
+    getThreadMessagesPage,
     formatBackendError,
     getConfig,
     listInstalledComponentPackageHeaders,
@@ -37,10 +38,12 @@
   let {
     onImportFcstd,
     onImportFreecadLibraryPart,
+    onOpenNewProjectChooser,
     freecadUnavailableReason = null,
   }: {
     onImportFcstd?: (sourcePath: string) => void;
     onImportFreecadLibraryPart?: (item: FreecadLibraryItem) => Promise<void> | void;
+    onOpenNewProjectChooser?: () => void;
     freecadUnavailableReason?: string | null;
   } = $props();
 
@@ -60,6 +63,7 @@
   let importingFreecadLibraryItemId = $state<string | null>(null);
   let latestVersions = $state<Record<string, Message | null>>({});
   let previewImages = $state<Record<string, ProjectPreviewImage | null>>({});
+  let previewFetchVersionIds = $state<Record<string, string | null>>({});
   let archivedLoaded = $state(false);
   let trashLoaded = $state(false);
   let packagesLoaded = $state(false);
@@ -81,6 +85,10 @@
         previewImages = {
           ...previewImages,
           [detail.threadId]: { messageId: detail.messageId, imageData: detail.imageData },
+        };
+        previewFetchVersionIds = {
+          ...previewFetchVersionIds,
+          [detail.threadId]: detail.messageId,
         };
       }
       const latest = latestVersions[detail.threadId];
@@ -107,7 +115,17 @@
   }
 
   function threadPreviewImage(thread: Thread): string | null {
-    return previewSrc(selectThreadPreviewImage(thread, latestVersions[thread.id], previewImages[thread.id]));
+    const latest = latestVersions[thread.id];
+    return previewSrc(selectThreadPreviewImage(thread, latest, previewImages[thread.id]));
+  }
+
+  function newestPreviewImage(messages: Message[]): ProjectPreviewImage | null {
+    for (const message of [...messages].reverse()) {
+      if (message.role !== 'assistant' || message.status !== 'success' || !message.artifactBundle) continue;
+      const imageData = message.imageData?.trim();
+      if (imageData) return { messageId: message.id, imageData };
+    }
+    return null;
   }
 
   async function loadData() {
@@ -156,28 +174,83 @@
   });
 
   async function fetchLatestVersion(threadId: string) {
-    if (latestVersions[threadId] !== undefined) return;
-    try {
-      const version = await getThreadLatestVersion(threadId);
-      latestVersions = { ...latestVersions, [threadId]: version };
-      if (version) {
-        rememberLatestThreadVersion(threadId, version);
+    let version = latestVersions[threadId];
+    if (version === undefined) {
+      try {
+        version = await getThreadLatestVersion(threadId);
+        latestVersions = { ...latestVersions, [threadId]: version };
+        if (version) {
+          rememberLatestThreadVersion(threadId, version);
+        }
+        if (version?.imageData) {
+          previewImages = {
+            ...previewImages,
+            [threadId]: { messageId: version.id, imageData: version.imageData },
+          };
+          previewFetchVersionIds = {
+            ...previewFetchVersionIds,
+            [threadId]: version.id,
+          };
+          return;
+        }
+      } catch (e) {
+        console.error(`Failed to fetch latest version for ${threadId}:`, e);
+        latestVersions = { ...latestVersions, [threadId]: null };
       }
-      if (version?.imageData) {
-        previewImages = {
-          ...previewImages,
-          [threadId]: { messageId: version.id, imageData: version.imageData },
-        };
+    }
+    const latestMessageId = version?.id ?? null;
+    if (
+      version !== undefined &&
+      previewImages[threadId] !== undefined &&
+      previewFetchVersionIds[threadId] === latestMessageId
+    ) {
+      return;
+    }
+
+    try {
+      let before: number | null = null;
+      let preview: ProjectPreviewImage | null = null;
+      let hasMore = true;
+      while (!preview && hasMore) {
+        const page = await getThreadMessagesPage(threadId, before, 24, true);
+        preview = newestPreviewImage(page.messages);
+        before = page.nextBefore;
+        hasMore = page.hasMore && before !== null;
+      }
+      if ((latestVersions[threadId]?.id ?? null) !== latestMessageId) return;
+      if (
+        latestMessageId &&
+        previewFetchVersionIds[threadId] === latestMessageId &&
+        previewImages[threadId]?.messageId === latestMessageId
+      ) {
         return;
       }
+      previewImages = {
+        ...previewImages,
+        [threadId]: preview,
+      };
+      previewFetchVersionIds = {
+        ...previewFetchVersionIds,
+        [threadId]: latestMessageId,
+      };
     } catch (e) {
-      console.error(`Failed to fetch latest version for ${threadId}:`, e);
-      latestVersions = { ...latestVersions, [threadId]: null };
+      console.error(`Failed to fetch preview history for ${threadId}:`, e);
+      previewImages = {
+        ...previewImages,
+        [threadId]: null,
+      };
     }
   }
 
   function queuePreviewFetch(threadId: string) {
-    if (latestVersions[threadId] !== undefined || queuedPreviewThreadIds.has(threadId)) return;
+    if (
+      latestVersions[threadId] !== undefined &&
+      previewImages[threadId] !== undefined &&
+      previewFetchVersionIds[threadId] === (latestVersions[threadId]?.id ?? null)
+    ) {
+      return;
+    }
+    if (queuedPreviewThreadIds.has(threadId)) return;
     queuedPreviewThreadIds.add(threadId);
     if (previewPumpActive) return;
     previewPumpActive = true;
@@ -197,18 +270,52 @@
 
   async function warmVisibleCardPreviews(threads: Thread[]) {
     for (const thread of threads) {
+      if ((thread.versionCount ?? 0) <= 0) continue;
       queuePreviewFetch(thread.id);
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
   }
 
-  // Warm a few cards after first paint. Avoid N+1 storm on project open.
+  function previewCard(node: HTMLElement, thread: Thread) {
+    let currentThread = thread;
+    const fetch = () => {
+      if ((currentThread.versionCount ?? 0) > 0) queuePreviewFetch(currentThread.id);
+    };
+
+    if (typeof IntersectionObserver === 'undefined') {
+      fetch();
+      return {
+        update(nextThread: Thread) {
+          currentThread = nextThread;
+          fetch();
+        },
+      };
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) fetch();
+      },
+      { root: node.closest('.scrollable'), rootMargin: '320px 0px' },
+    );
+    observer.observe(node);
+
+    return {
+      update(nextThread: Thread) {
+        currentThread = nextThread;
+      },
+      destroy() {
+        observer.disconnect();
+      },
+    };
+  }
+
+  // Queue all project thumbnails after first paint; pump keeps requests serialized.
   $effect(() => {
-    const previewLimit = 6;
     if (activeTab === 'in-work') {
-      void warmVisibleCardPreviews(filteredInWork.slice(0, previewLimit));
+      void warmVisibleCardPreviews(filteredInWork);
     } else if (activeTab === 'archived') {
-      void warmVisibleCardPreviews(filteredArchived.slice(0, previewLimit));
+      void warmVisibleCardPreviews(filteredArchived);
     }
   });
 
@@ -499,7 +606,7 @@
           {packageImportBusy ? 'IMPORTING...' : 'IMPORT PACKAGE'}
         </button>
       {/if}
-      <button class="new-btn" onclick={() => showNewChooser = true}>+ NEW</button>
+      <button class="new-btn" onclick={() => onOpenNewProjectChooser ? onOpenNewProjectChooser() : showNewChooser = true}>+ NEW</button>
     </div>
   </div>
 
@@ -519,7 +626,7 @@
         {#if activeTab === 'in-work'}
           {#each filteredInWork as thread (thread.id)}
             {@const badges = deriveProjectThreadBadges(thread)}
-            <div class="project-card" class:active={$activeThreadId === thread.id}>
+            <div class="project-card" class:active={$activeThreadId === thread.id} use:previewCard={thread}>
               <div class="card-thumb">
                 {#if threadPreviewImage(thread)}
                   <img src={threadPreviewImage(thread) ?? ''} alt="Preview" />
@@ -561,7 +668,7 @@
           {/each}
         {:else if activeTab === 'archived'}
           {#each filteredArchived as thread (thread.id)}
-            <div class="project-card">
+            <div class="project-card" use:previewCard={thread}>
               <div class="card-thumb">
                 {#if threadPreviewImage(thread)}
                   <img src={threadPreviewImage(thread) ?? ''} alt="Preview" />
@@ -738,7 +845,7 @@
     {/if}
   </div>
 
-  {#if showNewChooser}
+  {#if !onOpenNewProjectChooser && showNewChooser}
     <Modal title="Start New Project" onclose={() => showNewChooser = false}>
       <div class="new-chooser">
         <button onclick={() => { createNewThread({ mode: 'blank' }); showNewChooser = false; }}>Blank Project</button>
@@ -754,7 +861,7 @@
     </Modal>
   {/if}
 
-  {#if showImport}
+  {#if !onOpenNewProjectChooser && showImport}
     <ManualImportModal bind:show={showImport} onImport={(data) => { createNewThread({ mode: 'macro', ...data }); showImport = false; }} />
   {/if}
 
@@ -798,15 +905,16 @@
     padding: 12px;
     border-bottom: 1px solid var(--bg-300);
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
     overflow: hidden;
   }
 
   .tabs {
     display: flex;
     gap: 4px;
+    flex-wrap: wrap;
   }
 
   .tab-btn {
@@ -829,12 +937,14 @@
   .header-actions {
     display: flex;
     gap: 8px;
-    flex: 1;
     justify-content: flex-end;
+    min-width: 0;
   }
 
   .search-input {
-    max-width: 200px;
+    flex: 1;
+    min-width: 140px;
+    max-width: 320px;
     padding: 6px 10px;
     background: var(--bg-200);
     border: 1px solid var(--bg-300);

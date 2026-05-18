@@ -1,5 +1,6 @@
 pub mod agent_dialogue;
 pub mod agent_versions;
+pub(crate) mod author_verification_foundation;
 pub mod design;
 pub mod history;
 pub mod printability;

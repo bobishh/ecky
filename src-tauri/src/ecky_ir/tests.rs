@@ -163,6 +163,42 @@ mod tests {
     }
 
     #[test]
+    fn source_uses_direct_occt_required_cad_ops_detects_native_only_heads() {
+        assert!(source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (part body
+                  (text "A" 12)))"#
+        ));
+        assert!(source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (part body
+                  (import-stl "/tmp/part.stl")))"#
+        ));
+        assert!(source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (part body
+                  (helical-ridge
+                    :radius 20
+                    :pitch 6
+                    :height 30
+                    :base-width 2
+                    :crest-width 1
+                    :depth 1.5)))"#
+        ));
+    }
+
+    #[test]
+    fn source_uses_direct_occt_required_cad_ops_ignores_strings() {
+        assert!(!source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (params
+                  (image decal "helical-ridge"))
+                (part body
+                  (box 1 1 1)))"#
+        ));
+    }
+
+    #[test]
     fn lower_build123d_from_core_program_matches_public_entrypoint() {
         let source = r#"
             (define base-radius 14)

@@ -187,7 +187,12 @@ test.describe('VertexGenie', () => {
     await expect(page.locator('.genie-layer [aria-label="Reroll Ecky seed"]')).toHaveCount(0);
     const before = await mascot.getAttribute('data-seed');
 
-    await page.getByTitle('Settings').click();
+    await page.locator('button[title="Settings"], button[title="Configuration"]').click();
+    const settingsWindow = page.locator('[data-window-id="settings"]');
+    await expect(settingsWindow).toBeVisible();
+    const appTab = settingsWindow.getByRole('button', { name: 'APP' });
+    await expect(appTab).toBeVisible();
+    await appTab.click();
     const reroll = page.getByRole('button', { name: 'Reroll Ecky seed' });
     await expect(page.getByTestId('settings-ecky-preview')).toBeVisible();
     await expect(reroll).toBeVisible();
@@ -243,6 +248,58 @@ test.describe('VertexGenie', () => {
 
     expect(overlaps).toBe(false);
     expect(bubbleBox.width).toBeLessThanOrEqual(360);
+  });
+
+  test('Given preview validation feedback When user opens bubble Then session activity shows full text', async ({ page }) => {
+    await installGenieMocks(page);
+    await page.goto('/');
+
+    const bubble = page.getByTestId('genie-session-bubble');
+    await expect(bubble).toBeVisible();
+
+    await bubble.getByRole('button', { name: 'Copy advisor response' }).click();
+    await expect(page.locator('[data-window-id="activity"]')).toHaveCount(0);
+
+    await bubble.click();
+    const activityWindow = page.locator('[data-window-id="activity"]');
+    await expect(activityWindow).toBeVisible();
+    await expect(activityWindow.getByTestId('activity-event-list')).toBeVisible();
+    await expect(activityWindow.getByTestId('activity-event-detail')).toContainText(
+      'Preview validation found a containment mismatch on front profile.',
+    );
+    await expect(activityWindow.getByTestId('session-preview-detail')).toContainText('preview-feedback.stl');
+  });
+
+  test('Given preview draft feedback with authoring lint When workbench opens Then bubble mentions lint suggestion', async ({ page }) => {
+    await installGenieMocks(page, {
+      authoringLints: [
+        {
+          message:
+            'Repeated anonymous delta on slotWidth in part holder. Extract slot_margin_x parameter and reuse.',
+        },
+      ],
+    });
+    await page.goto('/');
+
+    const bubble = page.locator('.genie-bubble');
+    await expect(bubble).toBeVisible();
+    await expect(bubble).toContainText('Authoring lint:');
+    await expect(bubble).toContainText('slot_margin_x');
+  });
+
+  test('Given preview draft feedback is pending without lints When workbench opens Then bubble omits lint suggestion text', async ({ page }) => {
+    await installGenieMocks(page, {
+      phase: 'rendering',
+      statusText: 'Draft preview pending while source updates apply.',
+      activityLabel: 'Draft preview pending while source updates apply.',
+      authoringLints: [],
+    });
+    await page.goto('/');
+
+    const bubble = page.locator('.genie-bubble');
+    await expect(bubble).toBeVisible();
+    await expect(bubble).toContainText('Draft preview pending while source updates apply.');
+    await expect(bubble).not.toContainText('Authoring lint:');
   });
 
   test('Given preview validation feedback When agent is repairing Then Ecky uses active Three state styling', async ({ page }) => {

@@ -88,9 +88,11 @@
 
   .context-strip-head {
     display: flex;
-    align-items: center;
+    flex-wrap: wrap;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 8px;
+    min-width: 0;
   }
 
   .context-strip-actions {
@@ -98,6 +100,7 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
+    min-width: 0;
   }
 
   .part-strip-list {
@@ -108,7 +111,8 @@
 
   .view-chip {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
     gap: 6px;
     padding: 4px 8px;
     border: 1px solid var(--bg-300);
@@ -119,8 +123,10 @@
     cursor: pointer;
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
   }
 
   .view-chip-active {

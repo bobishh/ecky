@@ -53,6 +53,14 @@ async getAppLogs() : Promise<Result<AppLogEntry[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async exportEckyMcpSkillZip(targetPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_ecky_mcp_skill_zip", { targetPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async readComponentPackageManifest(projectDir: string) : Promise<Result<ComponentPackage, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("read_component_package_manifest", { projectDir }) };
@@ -857,7 +865,7 @@ vtStream?: string;
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
-export type AppError = { code: AppErrorCode; message: string; details?: string | null }
+export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
@@ -900,7 +908,7 @@ export type ComponentPackageHeader = { schemaVersion: number; packageId: string;
 export type ComponentParam = { key: string; label: string; kind: ComponentParamKind; unit?: string | null }
 export type ComponentParamKind = "number" | "text" | "boolean" | "choice"
 export type ComponentPort = { portId: string; typeId: string; targetIds?: string[]; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
 export type ControlRelation = { relationId: string; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number; enabled?: boolean }

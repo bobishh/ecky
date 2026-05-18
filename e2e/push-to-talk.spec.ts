@@ -141,10 +141,10 @@ test.describe('Push to talk', () => {
     await expect(page.locator('.voice-status')).toContainText('401 Unauthorized: invalid API key from provider');
   });
 
-  test('Given Sounds STT language, saving routes push-to-talk through that language', async ({ page }) => {
+  test('Given App STT language, saving routes push-to-talk through that language', async ({ page }) => {
     await page.goto('/');
     await page.locator('button[title="Settings"]').click();
-    await page.getByRole('button', { name: 'SOUNDS' }).click();
+    await page.getByRole('button', { name: 'APP' }).click();
 
     const languageInput = page.getByLabel('STT LANGUAGE CODE');
     await expect(languageInput).toBeVisible();

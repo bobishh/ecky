@@ -52,17 +52,26 @@ export async function runStructuralCheck(
     return { kind: 'structural_passed', metrics: result.metrics };
   }
 
+  const authoredVerifyFailed = hasAuthoredVerifyIssues(result);
+
   // Build a compact summary of structural issues for repair/terminal
   const issueLines = result.issues
     .map((i) => `- [${i.code}] ${i.message}`)
     .join('\n');
-  const issuesSummary = `${result.summary}\n\nIssues:\n${issueLines}`;
+  const issuesSummary = [
+    ...(authoredVerifyFailed ? ['Authored verify requirements failed.'] : []),
+    result.summary,
+    '',
+    'Issues:',
+    issueLines,
+  ].join('\n');
 
   const hasMoreAttempts = opts.currentGenerationAttempt < opts.maxGenerationAttempts;
 
   if (hasMoreAttempts) {
     const metricsBlock = formatMetricsBlock(result.metrics);
     const repairPrompt = [
+      ...(authoredVerifyFailed ? ['Authored verify requirements failed.'] : []),
       `Structural verification failed (source: ${result.verifierSource ?? 'unknown'}):`,
       result.summary,
       ``,
@@ -73,6 +82,14 @@ export async function runStructuralCheck(
         return `- [${i.code}] ${i.message}${partRef}${metric}`;
       }),
       ``,
+      ...(authoredVerifyFailed
+        ? [
+            'Authored verify guidance:',
+            '- Do not remove or weaken `(verify ...)` clauses.',
+            '- Change geometry, topology, or required exports so authored checks pass.',
+            '',
+          ]
+        : []),
       ...(metricsBlock ? [`Metrics:`, metricsBlock, ``] : []),
       `Original request: ${opts.originalPrompt}`,
       ``,
@@ -103,4 +120,8 @@ function formatMetricsBlock(metrics: StructuralMetrics): string | null {
   if (metrics.previewStlOverhangRatio != null)
     lines.push(`  overhang ratio: ${metrics.previewStlOverhangRatio.toFixed(3)}`);
   return lines.length > 1 ? lines.join('\n') : null;
+}
+
+function hasAuthoredVerifyIssues(result: StructuralVerificationResult): boolean {
+  return result.issues.some((issue) => issue.code.startsWith('AUTHORED_VERIFY_'));
 }

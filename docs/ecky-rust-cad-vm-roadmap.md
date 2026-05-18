@@ -197,11 +197,11 @@ Current status:
 - EckyRust render dispatch has a hidden direct-OCCT fast path for `.ecky` Core IR when the bundled SDK is complete. It falls back to the mesh renderer on direct-OCCT blockers or unsupported surface.
 - Planner supports ordered commands for first-surface primitives, sketches, polyline paths, frames, clipping, arrays, booleans, transforms including mirror, shell, fillet, chamfer, taper, and rounded offset.
 - Planner rejects typed holes and unsupported ops before any future OCCT runtime adapter can execute. Executor resolves Core parameter defaults plus runtime overrides before C++ generation.
-- Bundled build123d runtime includes OCP OCCT 7.8.1 dylibs, including STEP/STL libraries.
-- `npm run build123d:prepare` prepares the build123d runtime, then runs `scripts/prepare_occt_headers.sh`.
-- `scripts/prepare_occt_headers.sh` fetches OCCT 7.8.1 source headers into `.dist/build123d-runtime/include/opencascade`.
-- If UI reports `Direct OCCT unavailable: OCCT include directory missing`, the local runtime was prepared without headers or rebuilt by an old command. Run `npm run build123d:prepare`; order matters because `prepare_build123d_runtime.sh` recreates `.dist/build123d-runtime`.
-- Native probes and executor fixtures compile against bundled headers/OCP dylibs and export real STEP/STL when the SDK is complete. Production executor fixtures also write face topology reports used by runtime manifests/bundles.
+- Bundled build123d runtime includes OCP OCCT 7.8.1 dylibs, including STEP/STL libraries, as a burn-in fallback.
+- `npm run occt:prepare` prepares standalone `.dist/runtime/occt` from an installed OCCT SDK.
+- Standalone OCCT runtime contains `manifest.json`, required headers, copied OCCT libraries, and copied non-system dylib dependencies.
+- If UI reports `Direct OCCT unavailable: OCCT include directory missing`, run `npm run occt:prepare` from the repo root.
+- Native probes and executor fixtures prefer standalone `.dist/runtime/occt`, then fall back to bundled build123d/OCP during burn-in. Production executor fixtures also write face topology reports used by runtime manifests/bundles.
 - OCP dylibs use `/DLC/OCP/.dylibs/...` install names. Shared native export runner rewrites executable load commands to actual bundled dylib paths for both probe and production executor binaries.
 - Do not list direct OCCT in source/backend settings, MCP schemas, or language manifests until render dispatch coverage and UX are ready.
 

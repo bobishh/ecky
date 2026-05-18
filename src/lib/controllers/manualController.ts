@@ -7,6 +7,8 @@ import { showCodeModal } from '../stores/viewState';
 import { session, setManualRenderActive } from '../stores/sessionStore';
 import { startMicrowaveHum, stopMicrowaveHum, ensureContext } from '../audio/microwave';
 import { paramPanelState } from '../stores/paramPanelState';
+import { resolveParamApplySource } from './paramApplySource';
+import { recordSessionActivityEvent } from '../stores/sessionActivityStore';
 import { persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
 import { buildImportedSyntheticDesign } from '../modelRuntime/importedRuntime';
 import { getRenderableRuntimeBundle, inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
@@ -20,6 +22,8 @@ import type {
   ModelManifest,
   ParamValue,
   PostProcessingSpec,
+  SourceLanguage,
+  GeometryBackend,
   UiField,
   UiSpec,
 } from '../types/domain';
@@ -32,6 +36,7 @@ import {
   renderModel,
   saveModelManifest,
 } from '../tauri/client';
+import type { WorkingCopyState } from '../stores/workingCopy';
 
 let latestParamRenderSeq = 0;
 let latestAppliedParamDraft: AppliedParamDraft | null = null;
@@ -55,6 +60,66 @@ type AppliedParamDraft = {
   modelManifest: ModelManifest | null;
   skippedOversizedPreview: boolean;
 };
+
+export function shouldPreserveWorkingCopyMacroDraft(
+  workingCopyState: Pick<WorkingCopyState, 'macroCode' | 'dirty'>,
+  committedMacroCode: string,
+): boolean {
+  return workingCopyState.dirty && workingCopyState.macroCode !== committedMacroCode;
+}
+
+function restoreWorkingCopyMacroDraftIfNeeded(
+  previousWorkingCopy: Pick<WorkingCopyState, 'macroCode' | 'dirty'>,
+  committedMacroCode: string,
+) {
+  if (!shouldPreserveWorkingCopyMacroDraft(previousWorkingCopy, committedMacroCode)) return;
+  workingCopy.patch({
+    macroCode: previousWorkingCopy.macroCode,
+    dirty: true,
+  });
+}
+
+function changedParamKeys(before: DesignParams, after: DesignParams): string[] {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...keys].filter((key) => stableJson(before[key]) !== stableJson(after[key])).sort();
+}
+
+function recordParamsChanged(input: {
+  threadId: string | null;
+  versionId: string | null;
+  before: DesignParams;
+  after: DesignParams;
+  persist: boolean;
+}) {
+  const keys = changedParamKeys(input.before, input.after);
+  if (keys.length === 0) return;
+  recordSessionActivityEvent({
+    threadId: input.threadId,
+    versionId: input.versionId,
+    kind: 'params_changed',
+    title: input.persist ? 'Parameter commit requested' : 'Parameters applied',
+    summary: `${keys.length} parameter${keys.length === 1 ? '' : 's'} changed: ${keys.join(', ')}`,
+    severity: 'info',
+    diffs: keys.map((key) => ({
+      kind: 'params',
+      key,
+      before: stableJson(input.before[key]),
+      after: stableJson(input.after[key]),
+    })),
+  });
+}
+
+function recordRenderEvent(input: {
+  threadId: string | null;
+  versionId: string | null;
+  kind: 'render_started' | 'render_succeeded' | 'render_failed';
+  title: string;
+  summary: string;
+  severity: 'info' | 'success' | 'error';
+  raw?: unknown;
+}) {
+  recordSessionActivityEvent(input);
+}
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) {
@@ -98,8 +163,8 @@ async function commitRenderedParamDraft(input: {
   title: string;
   versionName: string;
   workingMacroDialect: MacroDialect | null | undefined;
-  workingSourceLanguage: string | null | undefined;
-  workingGeometryBackend: string | null | undefined;
+  workingSourceLanguage: SourceLanguage | null | undefined;
+  workingGeometryBackend: GeometryBackend | null | undefined;
   draft: AppliedParamDraft;
 }) {
   const committedDesign = buildManualDesign({
@@ -144,7 +209,9 @@ async function commitRenderedParamDraft(input: {
   });
 
   activeVersionId.set(newMsgId);
+  const previousWorkingCopy = get(workingCopy);
   workingCopy.loadVersion(committedDesign, newMsgId);
+  restoreWorkingCopyMacroDraftIfNeeded(previousWorkingCopy, committedDesign.macroCode);
   paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
   await persistLastSessionSnapshot({
     design: committedDesign,
@@ -155,6 +222,14 @@ async function commitRenderedParamDraft(input: {
     selectedPartId: null,
   });
   await refreshHistory();
+  recordSessionActivityEvent({
+    threadId: input.snapshotThreadId,
+    versionId: newMsgId,
+    kind: 'version_committed',
+    title: 'Parameter version committed',
+    summary: 'Parameter version committed from applied draft.',
+    severity: 'success',
+  });
   session.setStatus(
     input.draft.skippedOversizedPreview
       ? 'Parameter version committed. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
@@ -333,21 +408,48 @@ export async function handleParamChange(
   newParams: DesignParams,
   forcedCode: string | null = null,
   persist: boolean = false
-) {
+): Promise<boolean> {
   console.log('[ManualController] handleParamChange start', { newParams, persist });
   session.setError(null);
   const wc = get(workingCopy);
   const panel = get(paramPanelState);
   const snapshotThreadId = get(activeThreadId);
-  const targetVersionId = panel.versionId || wc.sourceVersionId || get(activeVersionId);
-  const currentParams = { ...panel.params, ...newParams };
+  const applySource = resolveParamApplySource({
+    forcedCode,
+    workingMacroCode: wc.macroCode,
+    panelVersionId: panel.versionId,
+    sourceVersionId: wc.sourceVersionId,
+    activeVersionId: get(activeVersionId),
+  });
+  const targetVersionId =
+    applySource.ok || applySource.reason === 'missing-macro-code'
+      ? applySource.targetVersionId
+      : wc.sourceVersionId || get(activeVersionId) || panel.versionId;
+  if (!applySource.ok && applySource.reason === 'stale-panel-source-version-mismatch') {
+    console.warn('[ManualController] Stale parameter panel source mismatch', applySource);
+    if (get(activeThreadId) === snapshotThreadId) {
+      session.setError(
+        `Apply Failed: parameter panel is stale for active source (${applySource.panelVersionId} != ${applySource.sourceVersionId}). Reload the active version.`,
+      );
+    }
+    return false;
+  }
+
+  const currentParams = forcedCode ? { ...newParams } : { ...panel.params, ...newParams };
   const renderSeq = ++latestParamRenderSeq;
+  recordParamsChanged({
+    threadId: snapshotThreadId,
+    versionId: targetVersionId,
+    before: panel.params,
+    after: currentParams,
+    persist,
+  });
   
   // 1. Update workingCopy immediately for UI responsiveness
   paramPanelState.setParams(currentParams);
   workingCopy.patch({ params: currentParams });
 
-  const codeToUse = forcedCode || panel.macroCode || wc.macroCode;
+  const codeToUse = applySource.ok ? applySource.code : '';
   if (!codeToUse) {
     const currentSession = get(session);
     const importedDesign = buildImportedSyntheticDesign(
@@ -377,7 +479,7 @@ export async function handleParamChange(
           });
         }
         session.setStatus('Imported model controls updated.');
-        return;
+        return true;
       }
 
       try {
@@ -388,6 +490,14 @@ export async function handleParamChange(
         const currentConfig = get(config);
         startMicrowaveHum('__manual__', currentConfig, snapshotThreadId);
         session.setStatus('Applying imported FCStd bindings...');
+        recordRenderEvent({
+          threadId: snapshotThreadId,
+          versionId: targetVersionId,
+          kind: 'render_started',
+          title: 'Imported model apply started',
+          summary: 'Applying imported FCStd bindings.',
+          severity: 'info',
+        });
 
         const nextBundle = await applyImportedModel(
           sourceBundle,
@@ -409,12 +519,21 @@ export async function handleParamChange(
         }
 
         if (renderSeq !== latestParamRenderSeq) {
-          return;
+          return false;
         }
 
         if (get(activeThreadId) === snapshotThreadId) {
           session.setStlUrl(toAssetUrl(nextBundle.previewStlPath));
           session.setModelRuntime(nextBundle, nextManifest);
+          recordRenderEvent({
+            threadId: snapshotThreadId,
+            versionId: targetVersionId,
+            kind: 'render_succeeded',
+            title: 'Imported model apply succeeded',
+            summary: 'Imported FCStd bindings applied.',
+            severity: 'success',
+            raw: { modelId: nextBundle.modelId, previewStlPath: nextBundle.previewStlPath },
+          });
         }
 
         if (persist && snapshotThreadId && get(activeThreadId) === snapshotThreadId) {
@@ -456,7 +575,9 @@ export async function handleParamChange(
             timestamp: Date.now() / 1000,
           });
           activeVersionId.set(newMsgId);
+          const previousWorkingCopy = get(workingCopy);
           workingCopy.loadVersion(importedDesign, newMsgId);
+          restoreWorkingCopyMacroDraftIfNeeded(previousWorkingCopy, importedDesign.macroCode);
           paramPanelState.hydrateFromVersion(importedDesign, newMsgId);
           await persistLastSessionSnapshot({
             design: importedDesign,
@@ -467,6 +588,14 @@ export async function handleParamChange(
             selectedPartId: null,
           });
           await refreshHistory();
+          recordSessionActivityEvent({
+            threadId: snapshotThreadId,
+            versionId: newMsgId,
+            kind: 'version_committed',
+            title: 'Imported version committed',
+            summary: 'Imported model committed as new version.',
+            severity: 'success',
+          });
           session.setStatus('Imported model committed as new version.');
         } else if (get(activeThreadId) === snapshotThreadId) {
           await persistLastSessionSnapshot({
@@ -483,22 +612,32 @@ export async function handleParamChange(
           e,
         );
         if (get(activeThreadId) === snapshotThreadId) {
+          recordRenderEvent({
+            threadId: snapshotThreadId,
+            versionId: targetVersionId,
+            kind: 'render_failed',
+            title: 'Imported model apply failed',
+            summary: formatBackendError(e),
+            severity: 'error',
+            raw: e,
+          });
           session.setError(`Imported Apply Failed: ${formatBackendError(e)}`);
         }
+        return false;
       } finally {
         if (renderSeq === latestParamRenderSeq) {
           stopMicrowaveHum('__manual__');
           setManualRenderActive(false);
         }
       }
-      return;
+      return true;
     }
 
     console.warn('[ManualController] No macroCode to execute');
     if (get(activeThreadId) === snapshotThreadId) {
       session.setError('Apply Failed: no macro or imported model is available for this version.');
     }
-    return;
+    return false;
   }
 
   const currentDraftSignature = paramDraftSignature({
@@ -536,8 +675,9 @@ export async function handleParamChange(
       if (get(activeThreadId) === snapshotThreadId) {
         session.setError(`Commit Failed: ${formatBackendError(e)}`);
       }
+      return false;
     }
-    return;
+    return true;
   }
 
   ensureContext();
@@ -552,6 +692,14 @@ export async function handleParamChange(
     startMicrowaveHum('__manual__', currentConfig, snapshotThreadId);
 
     console.log('[ManualController] Invoking render_model with', { parameters: currentParams });
+    recordRenderEvent({
+      threadId: snapshotThreadId,
+      versionId: targetVersionId,
+      kind: 'render_started',
+      title: 'Parameter render started',
+      summary: `Rendering ${workingCopyBackendLabel(wc)} parameter draft.`,
+      severity: 'info',
+    });
     const bundle = await renderModel(
       codeToUse,
       currentParams,
@@ -581,12 +729,21 @@ export async function handleParamChange(
     }
 
     if (renderSeq !== latestParamRenderSeq) {
-      return;
+      return false;
     }
 
     if (get(activeThreadId) === snapshotThreadId) {
       session.setStlUrl(toAssetUrl(renderableBundle.previewStlPath));
       session.setModelRuntime(renderableBundle, manifest);
+      recordRenderEvent({
+        threadId: snapshotThreadId,
+        versionId: targetVersionId,
+        kind: 'render_succeeded',
+        title: 'Parameter render succeeded',
+        summary: 'Parameter draft rendered.',
+        severity: 'success',
+        raw: { modelId: renderableBundle.modelId, previewStlPath: renderableBundle.previewStlPath },
+      });
       if (runtime.skippedOversizedPreview) {
         session.setStatus(
           'Rendered safely. Lithophane preview was skipped in the viewer; base part meshes are shown instead.',
@@ -675,6 +832,7 @@ export async function handleParamChange(
       if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
         activeVersionId.set(newMsgId);
         workingCopy.loadVersion(committedDesign, newMsgId);
+        restoreWorkingCopyMacroDraftIfNeeded(wc, committedDesign.macroCode);
         paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
         await persistLastSessionSnapshot({
           design: committedDesign,
@@ -685,6 +843,14 @@ export async function handleParamChange(
           selectedPartId: null,
         });
         await refreshHistory();
+        recordSessionActivityEvent({
+          threadId: snapshotThreadId,
+          versionId: newMsgId,
+          kind: 'version_committed',
+          title: 'Parameter version committed',
+          summary: 'Parameter version committed.',
+          severity: 'success',
+        });
         session.setStatus(
           runtime.skippedOversizedPreview
             ? 'Parameter version committed. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
@@ -701,14 +867,25 @@ export async function handleParamChange(
   } catch (e) {
     console.error('[ManualController] render_model error:', formatBackendError(e), e);
     if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
+      recordRenderEvent({
+        threadId: snapshotThreadId,
+        versionId: targetVersionId,
+        kind: 'render_failed',
+        title: 'Parameter render failed',
+        summary: formatBackendError(e),
+        severity: 'error',
+        raw: e,
+      });
       session.setError(`Render Error: ${formatBackendError(e)}`);
     }
+    return false;
   } finally {
     if (renderSeq === latestParamRenderSeq) {
       stopMicrowaveHum('__manual__');
       setManualRenderActive(false);
     }
   }
+  return true;
 }
 
 export function stageParamChange(newParams: DesignParams) {
@@ -774,6 +951,14 @@ export async function applyManualCodeDraft(editedCode: string) {
       wc.sourceLanguage === 'build123d' || wc.macroDialect === 'build123d' ? wc.macroDialect ?? 'build123d' : null;
     const manualGeometryBackend =
       wc.sourceLanguage === 'build123d' || wc.geometryBackend === 'build123d' ? 'build123d' : null;
+    recordRenderEvent({
+      threadId: snapshotThreadId,
+      versionId: targetVersionId,
+      kind: 'render_started',
+      title: 'Code draft render started',
+      summary: 'Rendering edited macro draft.',
+      severity: 'info',
+    });
     const bundle = await renderModel(
       editedCode,
       nextParams,
@@ -816,6 +1001,34 @@ export async function applyManualCodeDraft(editedCode: string) {
     if (get(activeThreadId) === snapshotThreadId) {
       session.setStlUrl(toAssetUrl(renderableBundle.previewStlPath));
       session.setModelRuntime(renderableBundle, manifest);
+      recordSessionActivityEvent({
+        threadId: snapshotThreadId,
+        versionId: targetVersionId,
+        kind: 'macro_patch_applied',
+        title: 'Code draft applied',
+        summary: reconciled.parserMatched
+          ? 'Code draft applied. Controls resynced from macro.'
+          : 'Code draft applied.',
+        severity: 'success',
+        diffs: [
+          {
+            kind: 'text',
+            label: 'Macro source',
+            path: 'macro',
+            before: wc.macroCode,
+            after: editedCode,
+          },
+        ],
+      });
+      recordRenderEvent({
+        threadId: snapshotThreadId,
+        versionId: targetVersionId,
+        kind: 'render_succeeded',
+        title: 'Code draft render succeeded',
+        summary: 'Edited macro draft rendered.',
+        severity: 'success',
+        raw: { modelId: renderableBundle.modelId, previewStlPath: renderableBundle.previewStlPath },
+      });
       workingCopy.patch({
         macroCode: editedCode,
         macroDialect: draftDesign.macroDialect ?? wc.macroDialect,
@@ -827,7 +1040,6 @@ export async function applyManualCodeDraft(editedCode: string) {
       });
       paramPanelState.hydrate({
         versionId: targetVersionId,
-        macroCode: editedCode,
         uiSpec: nextUiSpec,
         params: nextParams,
       });
@@ -855,6 +1067,15 @@ export async function applyManualCodeDraft(editedCode: string) {
   } catch (e) {
     console.error('[ManualController] applyManualCodeDraft error:', formatBackendError(e), e);
     if (get(activeThreadId) === snapshotThreadId) {
+      recordRenderEvent({
+        threadId: snapshotThreadId,
+        versionId: targetVersionId,
+        kind: 'render_failed',
+        title: 'Code draft render failed',
+        summary: formatBackendError(e),
+        severity: 'error',
+        raw: e,
+      });
       session.setError(`Apply Failed: ${formatBackendError(e)}`);
     }
     throw e;
@@ -896,6 +1117,14 @@ export async function commitManualVersion(
       wc.sourceLanguage === 'build123d' || wc.macroDialect === 'build123d' ? wc.macroDialect ?? 'build123d' : null;
     const manualGeometryBackend =
       wc.sourceLanguage === 'build123d' || wc.geometryBackend === 'build123d' ? 'build123d' : null;
+    recordRenderEvent({
+      threadId: snapshotThreadId,
+      versionId: panel.versionId || wc.sourceVersionId || get(activeVersionId),
+      kind: 'render_started',
+      title: 'Manual version render started',
+      summary: 'Rendering manual edit before commit.',
+      severity: 'info',
+    });
     const bundle = await renderModel(
       editedCode,
       nextParams,
@@ -980,10 +1209,38 @@ export async function commitManualVersion(
     if (get(activeThreadId) === snapshotThreadId) {
       session.setStlUrl(toAssetUrl(renderableBundle.previewStlPath));
       session.setModelRuntime(renderableBundle, manifest);
+      const previousWorkingCopy = get(workingCopy);
       workingCopy.loadVersion(committedDesign, newMsgId);
+      restoreWorkingCopyMacroDraftIfNeeded(previousWorkingCopy, committedDesign.macroCode);
       paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
       activeVersionId.set(newMsgId);
       showCodeModal.set(false);
+      recordRenderEvent({
+        threadId: snapshotThreadId,
+        versionId: newMsgId,
+        kind: 'render_succeeded',
+        title: 'Manual version render succeeded',
+        summary: 'Manual edit rendered before commit.',
+        severity: 'success',
+        raw: { modelId: renderableBundle.modelId, previewStlPath: renderableBundle.previewStlPath },
+      });
+      recordSessionActivityEvent({
+        threadId: snapshotThreadId,
+        versionId: newMsgId,
+        kind: 'version_committed',
+        title: 'Manual version committed',
+        summary: committedDesign.response,
+        severity: 'success',
+        diffs: [
+          {
+            kind: 'text',
+            label: 'Macro source',
+            path: 'macro',
+            before: wc.macroCode,
+            after: editedCode,
+          },
+        ],
+      });
       session.setStatus(
         runtime.skippedOversizedPreview
           ? 'Manual version committed. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
@@ -1011,6 +1268,15 @@ export async function commitManualVersion(
     });
   } catch (e) {
     console.error('[ManualController] commitManualVersion error:', formatBackendError(e), e);
+    recordRenderEvent({
+      threadId: snapshotThreadId,
+      versionId: panel.versionId || wc.sourceVersionId || get(activeVersionId),
+      kind: 'render_failed',
+      title: 'Manual version render failed',
+      summary: formatBackendError(e),
+      severity: 'error',
+      raw: e,
+    });
     session.setError(`Manual Commit Failed: ${formatBackendError(e)}`);
     stopMicrowaveHum('__manual__');
     setManualRenderActive(false);

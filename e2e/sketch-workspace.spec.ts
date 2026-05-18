@@ -2317,7 +2317,7 @@ test.describe('Sketch workspace', () => {
     expect(points[2][1]).toBeCloseTo(42, 0);
   });
 
-  test('Given Sketch Workspace opens When header actions render Then close control is part of the header menu and does not cover replay', async ({
+  test('Given Sketch Workspace opens When header actions render Then replay stays visible and close sketch action is not rendered inside the workspace', async ({
     page,
   }) => {
     await installSketchMocks(page, 'ok');
@@ -2325,28 +2325,14 @@ test.describe('Sketch workspace', () => {
 
     const workspace = page.locator('.sketch-workspace');
     const actions = workspace.locator('.sketch-workspace__actions');
-    const closeSketch = actions.getByRole('button', { name: /^CLOSE SKETCH$/i });
     const replay = actions.getByRole('button', { name: /^REPLAY IR$/i });
 
     await expect(page.locator('.app-overlay-actions .settings-overlay-btn[title="Close"]')).toHaveCount(0);
-    await expect(closeSketch).toBeVisible();
+    await expect(actions.getByRole('button', { name: /^CLOSE SKETCH$/i })).toHaveCount(0);
     await expect(replay).toBeVisible();
 
-    const closeBox = await closeSketch.boundingBox();
-    const replayBox = await replay.boundingBox();
-    expect(closeBox).not.toBeNull();
-    expect(replayBox).not.toBeNull();
-    if (!closeBox || !replayBox) return;
-
-    const overlaps =
-      closeBox.x < replayBox.x + replayBox.width &&
-      closeBox.x + closeBox.width > replayBox.x &&
-      closeBox.y < replayBox.y + replayBox.height &&
-      closeBox.y + closeBox.height > replayBox.y;
-    expect(overlaps).toBe(false);
-
-    await closeSketch.click();
-    await expect(page.getByRole('heading', { name: 'SKETCH WORKSPACE' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'SKETCH', exact: true }).click();
+    await expect(page.locator('[data-window-id="sketch"]')).toBeHidden();
     await expect(mainModelViewport(page)).toBeVisible();
   });
 
@@ -6567,9 +6553,9 @@ test.describe('Sketch workspace', () => {
     await installSketchMocks(page, 'ok');
     await openSketchWorkspace(page);
 
-    await expect(page.getByText('FRONT')).toBeVisible();
-    await expect(page.getByText('TOP')).toBeVisible();
-    await expect(page.getByText('SIDE')).toBeVisible();
+    await expect(page.locator('[aria-label="Front sketch pane"]').locator('.sketch-pane__label')).toContainText('FRONT');
+    await expect(page.locator('[aria-label="Top sketch pane"]').locator('.sketch-pane__label')).toContainText('TOP');
+    await expect(page.locator('[aria-label="Side sketch pane"]').locator('.sketch-pane__label')).toContainText('SIDE');
 
     await generateSketchPreview(page);
 

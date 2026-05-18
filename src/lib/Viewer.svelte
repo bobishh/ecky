@@ -207,8 +207,8 @@
   );
   const showEditableCallouts = $derived(false);
   const selectionMode = $derived.by(() => viewerMode === 'select');
-  const showViewportControlList = $derived.by(
-    () => shouldDisplayViewportControlList(selectedTarget),
+  const showPartOverlay = $derived.by(
+    () => selectedTarget?.kind === 'part' && shouldDisplayViewportControlList(selectedTarget),
   );
 
   const raycaster = new THREE.Raycaster();
@@ -446,7 +446,7 @@
       const selected = firstSelectedPath(
         await open({
           multiple: false,
-          filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+          filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }],
         }),
       );
       if (selected) {
@@ -500,11 +500,11 @@
 
   onDestroy(() => {
     if (animationFrameId) cancelAnimationFrame(animationFrameId);
-    if (renderer) {
-      renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
-      renderer.domElement.removeEventListener('pointermove', handlePointerMove);
-      renderer.domElement.removeEventListener('pointerleave', handlePointerLeave);
-      renderer.domElement.removeEventListener('pointerup', handlePointerUp);
+    if (viewerHost) {
+      viewerHost.removeEventListener('pointerdown', handlePointerDown);
+      viewerHost.removeEventListener('pointermove', handlePointerMove);
+      viewerHost.removeEventListener('pointerleave', handlePointerLeave);
+      viewerHost.removeEventListener('pointerup', handlePointerUp);
     }
     controls?.removeEventListener?.('start', handleOrbitStart);
     controls?.removeEventListener?.('end', handleOrbitEnd);
@@ -593,10 +593,10 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     viewerHost.appendChild(renderer.domElement);
-    renderer.domElement.addEventListener('pointerdown', handlePointerDown);
-    renderer.domElement.addEventListener('pointermove', handlePointerMove);
-    renderer.domElement.addEventListener('pointerleave', handlePointerLeave);
-    renderer.domElement.addEventListener('pointerup', handlePointerUp);
+    viewerHost.addEventListener('pointerdown', handlePointerDown);
+    viewerHost.addEventListener('pointermove', handlePointerMove);
+    viewerHost.addEventListener('pointerleave', handlePointerLeave);
+    viewerHost.addEventListener('pointerup', handlePointerUp);
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -1434,7 +1434,7 @@
   }
 
   function updateOverlayAnchor() {
-    if (!overlayPartLabel) {
+    if (!overlayPartLabel || !showPartOverlay) {
       overlayVisible = false;
       overlayFallback = true;
       dimensionFrame = null;
@@ -1517,13 +1517,17 @@
 
   function handlePointerDown(event: PointerEvent) {
     if (hideModelWhileBusy) return;
+    if (isInteractiveViewerControl(event.target)) return;
     pointerDownAt = { x: event.clientX, y: event.clientY };
     orbitDraggedSincePointerDown = false;
   }
 
+  function isInteractiveViewerControl(target: EventTarget | null) {
+    return target instanceof HTMLElement && Boolean(target.closest('button, input, textarea, select, label, a'));
+  }
+
   function handleOrbitStart() {
     isOrbitDragging = true;
-    orbitDraggedSincePointerDown = true;
     if (hoveredPartId !== null || hoveredTargetId !== null) {
       hoveredPartId = null;
       hoveredTargetId = null;
@@ -1639,6 +1643,10 @@
   function inspectPartFromEvent(event: PointerEvent): string | null {
     if (hideModelWhileBusy || !renderer || !camera || !modelRoot || runtimeMeshes.length === 0) return null;
     const rect = renderer.domElement.getBoundingClientRect();
+    const localPoint = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
@@ -1646,10 +1654,62 @@
     const meshHit = raycaster
       .intersectObjects(runtimeMeshes.map((entry) => entry.mesh), true)
       .find((entry) => typeof entry.object.userData.partId === 'string');
-    return (meshHit?.object.userData.partId as string | undefined) ?? null;
+    const hitPartId = (meshHit?.object.userData.partId as string | undefined) ?? null;
+    if (hitPartId) return hitPartId;
+
+    let nearestPartId: string | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (const entry of runtimeMeshes) {
+      if (!entry.partId) continue;
+      const frame = projectMeshFrame(entry.mesh);
+      if (frame) {
+        const padding = Math.max(8, Math.min(32, Math.max(frame.width, frame.height) * 0.2));
+        if (
+          localPoint.x >= frame.left - padding &&
+          localPoint.x <= frame.right + padding &&
+          localPoint.y >= frame.top - padding &&
+          localPoint.y <= frame.bottom + padding
+        ) {
+          return entry.partId;
+        }
+      }
+      const center = projectMeshPoint(entry.mesh, 'center');
+      if (!center) continue;
+      const distance = Math.hypot(center.x - localPoint.x, center.y - localPoint.y);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestPartId = entry.partId;
+      }
+    }
+
+    const pickRadius = Math.max(96, Math.min(260, Math.min(rect.width, rect.height) * 0.35));
+    return nearestDistance <= pickRadius ? nearestPartId : null;
   }
 
-  function handlePointerMove(_event: PointerEvent) {
+  function selectionTargetFromPartId(partId: string): ContextSelectionTarget {
+    const existing = selectionTargets.find((target) => target.kind === 'part' && target.partId === partId) ??
+      selectionTargets.find((target) => target.partId === partId);
+    if (existing) return existing;
+    const manifestPart = manifestParts.find((part) => part.partId === partId);
+    return {
+      targetId: `part:${partId}`,
+      aliasIds: [],
+      kind: 'part',
+      partId,
+      label: manifestPart?.label?.trim() || partId,
+      editable: manifestPart?.editable ?? true,
+      viewerNodeId: null,
+      parameterKeys: [],
+      primitiveIds: [],
+      viewIds: [],
+    };
+  }
+
+  function handlePointerMove(event: PointerEvent) {
+    if (pointerDownAt) {
+      const moved = Math.hypot(event.clientX - pointerDownAt.x, event.clientY - pointerDownAt.y);
+      if (moved > 4) orbitDraggedSincePointerDown = true;
+    }
     if (hideModelWhileBusy) {
       if (hoveredPartId !== null) {
         hoveredPartId = null;
@@ -1693,6 +1753,11 @@
 
   function handlePointerUp(event: PointerEvent) {
     if (hideModelWhileBusy || !renderer || !camera || !modelRoot || runtimeMeshes.length === 0) return;
+    if (isInteractiveViewerControl(event.target)) {
+      pointerDownAt = null;
+      orbitDraggedSincePointerDown = false;
+      return;
+    }
     if (orbitDraggedSincePointerDown) {
       pointerDownAt = null;
       orbitDraggedSincePointerDown = false;
@@ -1730,6 +1795,9 @@
     }
     pointerDownAt = null;
     inspectedPartId = inspectPartFromEvent(event);
+    if (inspectedPartId) {
+      onSelectTarget?.(selectionTargetFromPartId(inspectedPartId));
+    }
     applySelectionStyles();
   }
 </script>
@@ -1896,7 +1964,7 @@
             {/each}
           </div>
         </div>
-      {:else}
+      {:else if showPartOverlay}
         <div
           class="viewer-part-overlay"
           class:viewer-part-overlay-docked={overlayFallback}
@@ -1916,7 +1984,7 @@
             <div class="viewer-part-overlay__advisory">{overlayAdvisories[0].label}</div>
           {/if}
 
-          {#if showViewportControlList && overlayControls.length > 0}
+          {#if overlayControls.length > 0}
             <div class="viewer-part-overlay__controls">
               {#each overlayControls as control}
                 {@const field = control.rawField}
@@ -1998,7 +2066,7 @@
                 </label>
               {/each}
             </div>
-          {:else if showViewportControlList}
+          {:else}
             <div class="viewer-part-overlay__empty">
               {overlayPartEditable
                 ? overlayPreviewOnly

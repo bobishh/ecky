@@ -451,4 +451,53 @@ test.describe('API dialogue mode', () => {
       errorMessage: expect.stringContaining('PREVIEW_STL_DISCONNECTED_COMPONENTS'),
     }));
   });
+
+  test('Given final authored verify failure When prompt submits Then failure copy names authored verify and bad model is not committed', async ({ page }) => {
+    await installApiDialogueMocks(page, 'design', {
+      maxGenerationAttempts: 1,
+      structuralResult: {
+        passed: false,
+        summary: 'Structural verification failed: AUTHORED_VERIFY_FAILED',
+        issues: [
+          {
+            code: 'AUTHORED_VERIFY_FAILED',
+            message: 'Expected manifest has-step to equal false, got true.',
+            partId: null,
+            numericPayload: null,
+          },
+        ],
+        metrics: {
+          partCount: 1,
+          previewStlSizeBytes: 1024,
+          previewStlTriangleCount: 32,
+          previewStlComponentCount: 1,
+          previewStlNonManifoldEdgeCount: 0,
+          previewStlOverhangTriangleCount: 0,
+          previewStlOverhangRatio: 0,
+          totalVolume: 250,
+          totalArea: 140,
+          bbox: null,
+        },
+        verifierStatus: 'ok',
+        verifierSource: 'rustStructural',
+      },
+    });
+
+    await openDialogue(page);
+
+    const promptInput = page.getByPlaceholder(/Type a question or design change/i);
+    await promptInput.fill('make box without step export');
+    await promptInput.press('Meta+Enter');
+
+    await expect(page.locator('.trail-assistant').last()).toContainText('Authored verify requirements failed.', {
+      timeout: 10000,
+    });
+    await expect(page.locator('.trail-assistant').last()).toContainText('AUTHORED_VERIFY_FAILED');
+
+    const finalizeCalls = await page.evaluate(() => (window as any).__MOCK_FINALIZE_CALLS__);
+    expect(finalizeCalls.at(-1)).toEqual(expect.objectContaining({
+      status: 'error',
+      errorMessage: expect.stringContaining('Authored verify requirements failed.'),
+    }));
+  });
 });

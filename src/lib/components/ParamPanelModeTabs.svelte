@@ -96,13 +96,17 @@
 <style>
   .panel-mode-tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
-    overflow: hidden;
-    align-items: center;
+    overflow: visible;
+    align-items: stretch;
+    min-width: 0;
   }
 
   .panel-mode-tab {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
     padding: 5px 10px;
     border: 1px solid var(--bg-300);
     background: var(--bg-200);
@@ -110,6 +114,8 @@
     font-size: 0.62rem;
     font-weight: 700;
     letter-spacing: 0.08em;
+    line-height: 1.3;
+    text-align: left;
     cursor: pointer;
   }
 
@@ -120,7 +126,8 @@
   }
 
   .panel-mode-tab-compact {
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .panel-code-btn {

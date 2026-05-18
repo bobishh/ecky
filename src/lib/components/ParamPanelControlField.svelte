@@ -244,6 +244,7 @@
     position: relative;
     padding: 6px;
     overflow: hidden;
+    min-width: 0;
     background:
       linear-gradient(
         180deg,
@@ -297,17 +298,18 @@
   .field-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
   }
 
   .field-title {
     display: flex;
     flex-direction: row;
-    align-items: center;
+    align-items: flex-start;
     gap: 6px;
     min-width: 0;
     flex-wrap: wrap;
+    flex: 1 1 auto;
   }
 
   .semantic-source-badge {
@@ -327,9 +329,11 @@
     color: var(--primary);
     text-transform: uppercase;
     font-weight: bold;
-    white-space: nowrap;
+    white-space: normal;
     overflow: hidden;
-    text-overflow: ellipsis;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
     letter-spacing: 0.01em;
   }
 
@@ -354,6 +358,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    min-width: 0;
   }
 
   .param-input {

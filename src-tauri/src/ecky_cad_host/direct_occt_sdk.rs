@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use serde::Deserialize;
 
 use crate::models::{AppError, AppResult};
 
@@ -9,6 +12,9 @@ const PYTHON_SITE_PACKAGES: &str = "lib/python3.12/site-packages";
 const OCP_PACKAGE: &str = "OCP";
 const OCP_DYLIBS: &str = ".dylibs";
 const OCP_INSTALL_NAME_PREFIX: &str = "/DLC/OCP/.dylibs";
+const ECKY_OCCT_ROOT: &str = "ECKY_OCCT_ROOT";
+const OCCT_RUNTIME_SUBDIR: &str = "runtime/occt";
+const OCCT_MANIFEST_FILE: &str = "manifest.json";
 
 pub const REQUIRED_OCCT_HEADERS: &[&str] = &[
     "BRepAlgoAPI_Common.hxx",
@@ -88,9 +94,35 @@ pub const REQUIRED_OCCT_LIBS: &[&str] = &[
     "TKOffset",
     "TKFillet",
     "TKMesh",
+    "TKDE",
     "TKDESTEP",
     "TKDESTL",
 ];
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcctManifest {
+    schema_version: Option<String>,
+    platform: Option<String>,
+    arch: Option<String>,
+    occt_version: Option<String>,
+    abi_tag: Option<String>,
+    include_dir: Option<String>,
+    lib_dir: Option<String>,
+    required_headers: Option<Vec<String>>,
+    required_libraries: Option<Vec<String>>,
+    library_hashes: Option<HashMap<String, String>>,
+}
+
+impl OcctManifest {
+    fn required_headers(&self) -> Option<&[String]> {
+        self.required_headers.as_deref()
+    }
+
+    fn required_libraries(&self) -> Option<&[String]> {
+        self.required_libraries.as_deref()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectOcctSdkLayout {
@@ -110,9 +142,34 @@ impl DirectOcctSdkLayout {
             && self.include_dir.is_some()
             && self.missing_headers.is_empty()
             && self.missing_libs.is_empty()
+            && self.manifest_blockers().is_empty()
     }
 
     pub fn blocker_summary(&self) -> Vec<String> {
+        let mut blockers = self.manifest_blockers();
+        if !blockers.is_empty() {
+            blockers.extend(self.legacy_blockers());
+            return blockers;
+        }
+        let mut legacy = self.legacy_blockers();
+        blockers.append(&mut legacy);
+        blockers
+    }
+
+    fn manifest_blockers(&self) -> Vec<String> {
+        let Some(manifest_path) = manifest_path(&self.runtime_root) else {
+            return Vec::new();
+        };
+        if !manifest_path.is_file() {
+            return Vec::new();
+        }
+        match load_manifest(&manifest_path) {
+            Ok(manifest) => manifest_blockers_with_layout(&manifest_path, &manifest, self),
+            Err(err) => vec![err.to_string()],
+        }
+    }
+
+    fn legacy_blockers(&self) -> Vec<String> {
         let mut blockers = Vec::new();
         if self.ocp_root.is_none() {
             blockers.push(format!(
@@ -140,7 +197,7 @@ impl DirectOcctSdkLayout {
         }
         if self.include_dir.is_none() {
             blockers.push(format!(
-                "OCCT include directory missing or empty; runtime root: '{}'; checked include candidates: {}; run `npm run build123d:prepare` from the repo root",
+                "OCCT include directory missing or empty; runtime root: '{}'; checked include candidates: {}; run `npm run occt:prepare` from the repo root",
                 self.runtime_root.display(),
                 self.describe_include_dir_candidates()
             ));
@@ -237,6 +294,19 @@ pub enum NativeExportOutcome {
 
 pub fn inspect_build123d_ocp_runtime(runtime_root: impl AsRef<Path>) -> DirectOcctSdkLayout {
     let runtime_root = runtime_root.as_ref().to_path_buf();
+    if let Some(occt_root) = ecky_occt_root_from_env() {
+        let manifest_root = occt_root.join(OCCT_RUNTIME_SUBDIR);
+        if let Some(layout) = inspect_occt_manifest_runtime(manifest_root, true) {
+            return layout;
+        }
+    }
+
+    if let Some(manifest_root) = discover_runtime_occt_root(&runtime_root) {
+        if let Some(layout) = inspect_occt_manifest_runtime(manifest_root, false) {
+            return layout;
+        }
+    }
+
     let ocp_root = find_ocp_root(&runtime_root);
     let dylib_dir = ocp_root
         .as_ref()
@@ -258,7 +328,7 @@ pub fn inspect_build123d_ocp_runtime(runtime_root: impl AsRef<Path>) -> DirectOc
         .filter(|lib| {
             dylib_dir
                 .as_ref()
-                .map(|dir| find_versioned_dylib(dir, lib).is_none())
+                .map(|dir| find_versioned_library_path(dir, lib).is_none())
                 .unwrap_or(true)
         })
         .map(|lib| (*lib).to_string())
@@ -277,6 +347,14 @@ pub fn inspect_build123d_ocp_runtime(runtime_root: impl AsRef<Path>) -> DirectOc
 
 pub fn bundled_build123d_runtime_root_from_repo(repo_root: impl AsRef<Path>) -> PathBuf {
     repo_root.as_ref().join(".dist").join("build123d-runtime")
+}
+
+pub fn bundled_occt_runtime_root_from_repo(repo_root: impl AsRef<Path>) -> PathBuf {
+    repo_root
+        .as_ref()
+        .join(".dist")
+        .join("runtime")
+        .join("occt")
 }
 
 pub fn run_native_box_export_probe(
@@ -333,11 +411,14 @@ pub fn run_native_export_source(
     let dylib_paths = required_dylib_paths(layout.dylib_dir()?)?;
     command
         .arg("-std=c++17")
-        .arg("-Wl,-headerpad_max_install_names")
         .arg("-I")
         .arg(layout.include_dir()?)
         .arg(&source_path)
         .args(&dylib_paths);
+    #[cfg(not(target_os = "windows"))]
+    {
+        command.arg("-Wl,-headerpad_max_install_names");
+    }
     for rpath in runtime_rpath_dirs(layout) {
         command.arg("-Wl,-rpath");
         command.arg("-Wl,".to_string() + &rpath.to_string_lossy());
@@ -391,6 +472,338 @@ pub fn run_native_export_source(
 
 fn existing_dir(path: PathBuf) -> Option<PathBuf> {
     path.is_dir().then_some(path)
+}
+
+fn ecky_occt_root_from_env() -> Option<PathBuf> {
+    std::env::var_os(ECKY_OCCT_ROOT)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+fn discover_runtime_occt_root(runtime_root: &Path) -> Option<PathBuf> {
+    let candidate = runtime_root.join(OCCT_RUNTIME_SUBDIR);
+    candidate
+        .join(OCCT_MANIFEST_FILE)
+        .is_file()
+        .then_some(candidate)
+        .or_else(|| {
+            runtime_root
+                .parent()
+                .map(|parent| parent.join("runtime").join("occt"))
+                .filter(|candidate| candidate.join(OCCT_MANIFEST_FILE).is_file())
+        })
+}
+
+fn manifest_path(runtime_root: &Path) -> Option<PathBuf> {
+    let manifest_file = runtime_root.join(OCCT_MANIFEST_FILE);
+    manifest_file.is_file().then_some(manifest_file)
+}
+
+fn load_manifest(path: &Path) -> AppResult<OcctManifest> {
+    let raw = fs::read_to_string(path).map_err(|err| {
+        AppError::validation(format!(
+            "Could not read OCCT manifest '{}': {}",
+            path.display(),
+            err
+        ))
+    })?;
+    let manifest: OcctManifest = serde_json::from_str(&raw).map_err(|err| {
+        AppError::validation(format!(
+            "Invalid OCCT manifest '{}': {}",
+            path.display(),
+            err
+        ))
+    })?;
+    Ok(manifest)
+}
+
+fn inspect_occt_manifest_runtime(
+    manifest_root: PathBuf,
+    strict: bool,
+) -> Option<DirectOcctSdkLayout> {
+    let manifest_path = manifest_root.join(OCCT_MANIFEST_FILE);
+    let manifest = match load_manifest(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(_err) => {
+            if strict {
+                return Some(DirectOcctSdkLayout {
+                    runtime_root: manifest_root.clone(),
+                    ocp_root: Some(manifest_root),
+                    dylib_dir: None,
+                    include_dir: None,
+                    missing_headers: Vec::new(),
+                    missing_libs: Vec::new(),
+                    install_name_prefix: OCP_INSTALL_NAME_PREFIX,
+                });
+            }
+            return None;
+        }
+    };
+
+    let include_dir = manifest
+        .include_dir
+        .as_deref()
+        .map(|dir| resolve_relative_path(&manifest_root, dir))
+        .filter(|dir| dir.is_dir());
+    let dylib_dir = manifest
+        .lib_dir
+        .as_deref()
+        .map(|dir| resolve_relative_path(&manifest_root, dir))
+        .filter(|dir| dir.is_dir());
+    let required_headers: Vec<&str> = manifest
+        .required_headers()
+        .map(|values| values.iter().map(String::as_str).collect())
+        .unwrap_or_else(|| REQUIRED_OCCT_HEADERS.to_vec());
+    let required_libs: Vec<&str> = manifest
+        .required_libraries()
+        .map(|values| values.iter().map(String::as_str).collect())
+        .unwrap_or_else(|| REQUIRED_OCCT_LIBS.to_vec());
+
+    let missing_headers = required_headers
+        .iter()
+        .filter(|header| {
+            include_dir
+                .as_ref()
+                .map(|dir| !dir.join(header).is_file())
+                .unwrap_or(true)
+        })
+        .map(|header| (*header).to_string())
+        .collect::<Vec<_>>();
+    let missing_libs = required_libs
+        .iter()
+        .filter(|lib| {
+            dylib_dir
+                .as_ref()
+                .map(|dir| find_versioned_library_path(dir, lib).is_none())
+                .unwrap_or(true)
+        })
+        .map(|lib| (*lib).to_string())
+        .collect::<Vec<_>>();
+
+    let layout = DirectOcctSdkLayout {
+        runtime_root: manifest_root.clone(),
+        ocp_root: Some(manifest_root),
+        include_dir,
+        dylib_dir,
+        missing_headers,
+        missing_libs,
+        install_name_prefix: OCP_INSTALL_NAME_PREFIX,
+    };
+
+    if strict || layout.can_compile_native_shim() {
+        Some(layout)
+    } else if manifest_blockers(&manifest_path, &manifest).is_empty() {
+        Some(layout)
+    } else {
+        None
+    }
+}
+
+fn resolve_relative_path(root: &Path, value: &str) -> PathBuf {
+    let value = Path::new(value);
+    if value.is_absolute() {
+        value.to_path_buf()
+    } else {
+        root.join(value)
+    }
+}
+
+fn manifest_blockers(manifest_path: &Path, manifest: &OcctManifest) -> Vec<String> {
+    manifest_blockers_with_layout(
+        manifest_path,
+        manifest,
+        &DirectOcctSdkLayout {
+            runtime_root: manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            ocp_root: Some(
+                manifest_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
+            ),
+            dylib_dir: None,
+            include_dir: None,
+            missing_headers: Vec::new(),
+            missing_libs: Vec::new(),
+            install_name_prefix: OCP_INSTALL_NAME_PREFIX,
+        },
+    )
+}
+
+fn manifest_blockers_with_layout(
+    manifest_path: &Path,
+    manifest: &OcctManifest,
+    layout: &DirectOcctSdkLayout,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+
+    let missing_fields: Vec<&str> = [
+        ("schemaVersion", manifest.schema_version.as_ref().is_some()),
+        ("platform", manifest.platform.as_ref().is_some()),
+        ("arch", manifest.arch.as_ref().is_some()),
+        ("occtVersion", manifest.occt_version.as_ref().is_some()),
+        ("abiTag", manifest.abi_tag.as_ref().is_some()),
+        ("includeDir", manifest.include_dir.as_ref().is_some()),
+        ("libDir", manifest.lib_dir.as_ref().is_some()),
+        (
+            "requiredHeaders",
+            manifest
+                .required_headers
+                .as_ref()
+                .is_some_and(|required_headers| !required_headers.is_empty()),
+        ),
+        (
+            "requiredLibraries",
+            manifest
+                .required_libraries
+                .as_ref()
+                .is_some_and(|required_libraries| !required_libraries.is_empty()),
+        ),
+        ("libraryHashes", manifest.library_hashes.as_ref().is_some()),
+    ]
+    .iter()
+    .filter_map(|(name, present)| (!*present).then_some(*name))
+    .collect();
+
+    if !missing_fields.is_empty() {
+        blockers.push(
+            serde_json::json!({
+                "kind": "manifestMissingFields",
+                "manifest": manifest_path.display().to_string(),
+                "missingFields": missing_fields,
+            })
+            .to_string(),
+        );
+    }
+
+    if let (Some(platform), Some(arch)) = (manifest.platform.as_deref(), manifest.arch.as_deref()) {
+        if platform != current_runtime_platform() || arch != std::env::consts::ARCH {
+            blockers.push(
+                serde_json::json!({
+                    "kind": "platformMismatch",
+                    "manifest": manifest_path.display().to_string(),
+                    "manifestPlatform": platform,
+                    "manifestArch": arch,
+                    "runtimePlatform": current_runtime_platform(),
+                    "runtimeArch": std::env::consts::ARCH,
+                })
+                .to_string(),
+            );
+        }
+    }
+
+    if let Some(manifest_abi) = manifest.abi_tag.as_deref() {
+        let runtime_abi = current_runtime_abi_tag();
+        if manifest_abi != runtime_abi {
+            blockers.push(
+                serde_json::json!({
+                    "kind": "abiMismatch",
+                    "manifest": manifest_path.display().to_string(),
+                    "manifestAbiTag": manifest_abi,
+                    "runtimeAbiTag": runtime_abi,
+                })
+                .to_string(),
+            );
+        }
+    }
+
+    if !layout.missing_headers.is_empty() {
+        blockers.push(
+            serde_json::json!({
+                "kind": "missingHeaders",
+                "manifest": manifest_path.display().to_string(),
+                "required": required_manifest_headers(manifest),
+                "missing": layout.missing_headers,
+            })
+            .to_string(),
+        );
+    }
+    if !layout.missing_libs.is_empty() {
+        blockers.push(
+            serde_json::json!({
+                "kind": "missingLibraries",
+                "manifest": manifest_path.display().to_string(),
+                "required": required_manifest_libraries(manifest),
+                "missing": layout.missing_libs,
+            })
+            .to_string(),
+        );
+    }
+
+    blockers
+}
+
+fn required_manifest_headers(manifest: &OcctManifest) -> Vec<String> {
+    manifest
+        .required_headers()
+        .map(|headers| headers.iter().map(|header| header.to_string()).collect())
+        .unwrap_or_else(|| {
+            REQUIRED_OCCT_HEADERS
+                .iter()
+                .map(|header| (*header).to_string())
+                .collect()
+        })
+}
+
+fn required_manifest_libraries(manifest: &OcctManifest) -> Vec<String> {
+    manifest
+        .required_libraries()
+        .map(|libraries| libraries.iter().map(|lib| lib.to_string()).collect())
+        .unwrap_or_else(|| {
+            REQUIRED_OCCT_LIBS
+                .iter()
+                .map(|lib| (*lib).to_string())
+                .collect()
+        })
+}
+
+fn current_runtime_platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "linux"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        std::env::consts::OS
+    }
+}
+
+fn current_runtime_abi_tag() -> &'static str {
+    #[cfg(all(target_os = "windows", target_env = "gnu"))]
+    {
+        "windows-gnu"
+    }
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    {
+        "windows-msvc"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if cfg!(target_env = "musl") {
+            "linux-musl"
+        } else {
+            "linux-gnu"
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        "unknown"
+    }
 }
 
 fn include_dir_candidates(runtime_root: &Path, ocp_root: Option<&Path>) -> Vec<PathBuf> {
@@ -473,25 +886,69 @@ fn find_include_dir(candidates: &[PathBuf]) -> Option<PathBuf> {
     best_candidate
 }
 
-fn find_versioned_dylib(dir: &Path, lib: &str) -> Option<PathBuf> {
-    let prefix = format!("lib{}.", lib);
+fn library_file_extensions() -> &'static [&'static str] {
+    #[cfg(target_os = "macos")]
+    {
+        &["dylib"]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        &["so"]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        &["lib", "dll"]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        &["dylib", "so"]
+    }
+}
+
+fn find_versioned_library_path(dir: &Path, lib: &str) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| {
+        .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .map(|name| name.starts_with(&prefix) && name.ends_with(".dylib"))
-                .unwrap_or(false)
+                .is_some_and(|name| is_library_candidate(name, lib))
         })
+        .min_by_key(|path| {
+            if cfg!(windows) {
+                let is_import_lib = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".lib"));
+                usize::from(!is_import_lib)
+            } else {
+                0
+            }
+        })
+}
+
+fn is_library_candidate(file_name: &str, lib: &str) -> bool {
+    let prefixes = ["", "lib"];
+    let extensions = library_file_extensions();
+    prefixes.iter().any(|prefix| {
+        extensions.iter().any(|ext| {
+            let primary = format!("{prefix}{lib}.{ext}");
+            let versioned_prefix = format!("{prefix}{lib}.");
+            file_name == primary
+                || file_name.starts_with(&format!("{primary}."))
+                    && file_name.ends_with(&format!(".{ext}"))
+                || file_name.starts_with(&versioned_prefix)
+                    && file_name.ends_with(&format!(".{ext}"))
+        })
+    })
 }
 
 fn required_dylib_paths(dir: &Path) -> AppResult<Vec<PathBuf>> {
     REQUIRED_OCCT_LIBS
         .iter()
         .map(|lib| {
-            find_versioned_dylib(dir, lib).ok_or_else(|| {
+            find_versioned_library_path(dir, lib).ok_or_else(|| {
                 AppError::validation(format!(
                     "Direct OCCT native shim missing OCP dylib for `{}` in '{}'.",
                     lib,
@@ -504,16 +961,19 @@ fn required_dylib_paths(dir: &Path) -> AppResult<Vec<PathBuf>> {
 
 fn runtime_rpath_dirs(layout: &DirectOcctSdkLayout) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(dylib_dir) = &layout.dylib_dir {
-        dirs.push(dylib_dir.clone());
-    }
-    let vtk_dir = layout
-        .runtime_root
-        .join(PYTHON_SITE_PACKAGES)
-        .join("vtkmodules")
-        .join(OCP_DYLIBS);
-    if vtk_dir.is_dir() {
-        dirs.push(vtk_dir);
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(dylib_dir) = &layout.dylib_dir {
+            dirs.push(dylib_dir.clone());
+        }
+        let vtk_dir = layout
+            .runtime_root
+            .join(PYTHON_SITE_PACKAGES)
+            .join("vtkmodules")
+            .join(OCP_DYLIBS);
+        if vtk_dir.is_dir() {
+            dirs.push(vtk_dir);
+        }
     }
     dirs
 }
@@ -591,6 +1051,9 @@ int main() {{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{self, json};
+    use std::env;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ecky-{label}-{}", uuid::Uuid::new_v4()))
@@ -603,8 +1066,97 @@ mod tests {
         fs::write(path, "").expect("write");
     }
 
+    fn sdk_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let value = value.to_string();
+            let previous = env::var(key).ok();
+            env::set_var(key, &value);
+            Self {
+                key,
+                value: previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.value.take() {
+                env::set_var(self.key, previous);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn touch_library_file(dir: &Path, lib: &str) {
+        let ext = library_file_extensions().first().copied().unwrap_or("so");
+        touch(&dir.join(format!("lib{lib}.{ext}")));
+    }
+
+    fn write_manifest(
+        runtime_root: &Path,
+        include_dir: &str,
+        lib_dir: &str,
+        platform: &str,
+        arch: &str,
+        abi_tag: &str,
+        required_headers: &[&str],
+        required_libraries: &[&str],
+    ) {
+        let manifest = json!({
+            "schemaVersion": "1",
+            "platform": platform,
+            "arch": arch,
+            "occtVersion": "7.8.1",
+            "abiTag": abi_tag,
+            "includeDir": include_dir,
+            "libDir": lib_dir,
+            "requiredHeaders": required_headers,
+            "requiredLibraries": required_libraries,
+            "libraryHashes": { "TKernel": "dummy" },
+        });
+        let manifest_path = runtime_root.join(OCCT_MANIFEST_FILE);
+        fs::create_dir_all(runtime_root).expect("mkdir manifest root");
+        fs::write(
+            manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .expect("write manifest");
+    }
+
+    fn write_headers(target: &Path, headers: &[&str]) {
+        for header in headers {
+            touch(&target.join(header));
+        }
+    }
+
+    fn write_executable_script(path: &Path, contents: &str) {
+        touch(path);
+        fs::write(path, contents).expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path).expect("script metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("script permissions");
+        }
+    }
+
     #[test]
     fn inspect_runtime_reports_ocp_libs_without_headers() {
+        let _lock = sdk_env_lock();
         let root = temp_root("ocp-no-headers");
         let empty_include_dir = root.join("include").join("opencascade");
         fs::create_dir_all(&empty_include_dir).expect("mkdir empty include");
@@ -613,7 +1165,7 @@ mod tests {
             .join(OCP_PACKAGE)
             .join(OCP_DYLIBS);
         for lib in REQUIRED_OCCT_LIBS {
-            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+            touch_library_file(&dylib_dir, lib);
         }
 
         let layout = inspect_build123d_ocp_runtime(&root);
@@ -635,7 +1187,7 @@ mod tests {
         assert!(include_blocker.contains("checked include candidates"));
         assert!(blockers
             .iter()
-            .any(|blocker| blocker.contains("npm run build123d:prepare")));
+            .any(|blocker| blocker.contains("npm run occt:prepare")));
         assert!(!blockers
             .iter()
             .any(|blocker| blocker.contains("OCCT headers missing")));
@@ -643,6 +1195,7 @@ mod tests {
 
     #[test]
     fn inspect_runtime_accepts_matching_headers_and_dylibs() {
+        let _lock = sdk_env_lock();
         let root = temp_root("ocp-ready");
         let include_dir = root.join("include").join("opencascade");
         let dylib_dir = root
@@ -653,7 +1206,7 @@ mod tests {
             touch(&include_dir.join(header));
         }
         for lib in REQUIRED_OCCT_LIBS {
-            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+            touch_library_file(&dylib_dir, lib);
         }
 
         let layout = inspect_build123d_ocp_runtime(&root);
@@ -666,6 +1219,7 @@ mod tests {
 
     #[test]
     fn inspect_runtime_reports_specific_headers_when_include_dir_exists() {
+        let _lock = sdk_env_lock();
         let root = temp_root("ocp-partial-headers");
         let include_dir = root.join("include").join("opencascade");
         let dylib_dir = root
@@ -676,7 +1230,7 @@ mod tests {
             touch(&include_dir.join(header));
         }
         for lib in REQUIRED_OCCT_LIBS {
-            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+            touch_library_file(&dylib_dir, lib);
         }
 
         let layout = inspect_build123d_ocp_runtime(&root);
@@ -697,6 +1251,7 @@ mod tests {
 
     #[test]
     fn inspect_runtime_prefers_full_header_dir_over_partial_earlier_candidate() {
+        let _lock = sdk_env_lock();
         let root = temp_root("ocp-full-later");
         let partial_include_dir = root.join("include").join("opencascade");
         let ocp_root = root
@@ -712,7 +1267,7 @@ mod tests {
             touch(&full_include_dir.join(header));
         }
         for lib in REQUIRED_OCCT_LIBS {
-            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+            touch_library_file(&dylib_dir, lib);
         }
 
         let layout = inspect_build123d_ocp_runtime(&root);
@@ -728,6 +1283,7 @@ mod tests {
 
     #[test]
     fn inspect_runtime_discovers_non_default_python_minor_site_packages() {
+        let _lock = sdk_env_lock();
         let root = temp_root("ocp-python313");
         let ocp_root = root
             .join("lib")
@@ -740,7 +1296,7 @@ mod tests {
             touch(&include_dir.join(header));
         }
         for lib in REQUIRED_OCCT_LIBS {
-            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+            touch_library_file(&dylib_dir, lib);
         }
 
         let layout = inspect_build123d_ocp_runtime(&root);
@@ -754,13 +1310,14 @@ mod tests {
 
     #[test]
     fn native_box_probe_blocks_before_compile_when_headers_missing() {
+        let _lock = sdk_env_lock();
         let root = temp_root("ocp-blocked-probe");
         let dylib_dir = root
             .join(PYTHON_SITE_PACKAGES)
             .join(OCP_PACKAGE)
             .join(OCP_DYLIBS);
         for lib in REQUIRED_OCCT_LIBS {
-            touch(&dylib_dir.join(format!("lib{lib}.7.8.1.dylib")));
+            touch_library_file(&dylib_dir, lib);
         }
         let layout = inspect_build123d_ocp_runtime(&root);
 
@@ -791,7 +1348,236 @@ mod tests {
     }
 
     #[test]
+    fn native_export_compile_failure_preserves_raw_stdout_and_stderr_details() {
+        let _lock = sdk_env_lock();
+        let root = temp_root("native-compile-raw-error");
+        let include_dir = root.join("include");
+        let dylib_dir = root.join("lib");
+        write_headers(&include_dir, REQUIRED_OCCT_HEADERS);
+        for lib in REQUIRED_OCCT_LIBS {
+            touch_library_file(&dylib_dir, lib);
+        }
+        let compiler_path = root.join("fake-cxx");
+        write_executable_script(
+            &compiler_path,
+            "#!/bin/sh\necho raw compiler stdout\necho raw compiler stderr >&2\nexit 42\n",
+        );
+        let _guard = EnvVarGuard::set("CXX", compiler_path.to_string_lossy().as_ref());
+        let layout = DirectOcctSdkLayout {
+            runtime_root: root.clone(),
+            ocp_root: Some(root.clone()),
+            dylib_dir: Some(dylib_dir),
+            include_dir: Some(include_dir),
+            missing_headers: Vec::new(),
+            missing_libs: Vec::new(),
+            install_name_prefix: OCP_INSTALL_NAME_PREFIX,
+        };
+
+        let err = run_native_export_source(
+            &layout,
+            root.join("out"),
+            "broken.cpp",
+            "broken",
+            root.join("model.step"),
+            root.join("preview.stl"),
+            "int main(){return 0;}".to_string(),
+        )
+        .expect_err("compiler failure should surface raw details");
+
+        assert_eq!(err.message, "Direct OCCT native shim compile failed.");
+        let details = err.details.as_deref().expect("raw details");
+        assert!(details.contains("raw compiler stdout"), "{details}");
+        assert!(details.contains("raw compiler stderr"), "{details}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspect_runtime_prefers_occt_manifest_from_env() {
+        let _lock = sdk_env_lock();
+        let env_root = temp_root("manifest-env");
+        let manifest_root = env_root.join(OCCT_RUNTIME_SUBDIR);
+        let include_dir = manifest_root.join("include");
+        let lib_dir = manifest_root.join("lib");
+        write_headers(&include_dir, REQUIRED_OCCT_HEADERS);
+        for lib in REQUIRED_OCCT_LIBS {
+            touch_library_file(&lib_dir, lib);
+        }
+        write_manifest(
+            &manifest_root,
+            "include",
+            "lib",
+            current_runtime_platform(),
+            std::env::consts::ARCH,
+            current_runtime_abi_tag(),
+            REQUIRED_OCCT_HEADERS,
+            REQUIRED_OCCT_LIBS,
+        );
+        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+
+        let layout = inspect_build123d_ocp_runtime(&temp_root("ignored"));
+
+        assert_eq!(layout.ocp_root.as_deref(), Some(manifest_root.as_path()));
+        assert_eq!(layout.include_dir.as_deref(), Some(include_dir.as_path()));
+        assert_eq!(layout.dylib_dir.as_deref(), Some(lib_dir.as_path()));
+        assert!(layout.can_compile_native_shim());
+    }
+
+    #[test]
+    fn inspect_runtime_manifest_blocks_missing_library() {
+        let _lock = sdk_env_lock();
+        let env_root = temp_root("manifest-missing-lib");
+        let manifest_root = env_root.join(OCCT_RUNTIME_SUBDIR);
+        let include_dir = manifest_root.join("include");
+        let lib_dir = manifest_root.join("lib");
+        write_headers(&include_dir, REQUIRED_OCCT_HEADERS);
+        for lib in REQUIRED_OCCT_LIBS.iter().skip(1) {
+            touch_library_file(&lib_dir, lib);
+        }
+        write_manifest(
+            &manifest_root,
+            "include",
+            "lib",
+            current_runtime_platform(),
+            std::env::consts::ARCH,
+            current_runtime_abi_tag(),
+            REQUIRED_OCCT_HEADERS,
+            REQUIRED_OCCT_LIBS,
+        );
+        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+
+        let layout = inspect_build123d_ocp_runtime(&temp_root("ignored"));
+        assert_eq!(layout.missing_libs, vec![REQUIRED_OCCT_LIBS[0].to_string()]);
+        let blocker = layout
+            .blocker_summary()
+            .into_iter()
+            .find_map(|blocker| serde_json::from_str::<serde_json::Value>(&blocker).ok())
+            .expect("invalid blocker payload");
+        assert_eq!(blocker["kind"], "missingLibraries");
+        assert_eq!(blocker["missing"][0].as_str(), Some(REQUIRED_OCCT_LIBS[0]));
+    }
+
+    #[test]
+    fn inspect_runtime_manifest_platform_mismatch_reports_blocker() {
+        let _lock = sdk_env_lock();
+        let env_root = temp_root("manifest-platform-mismatch");
+        let manifest_root = env_root.join(OCCT_RUNTIME_SUBDIR);
+        let include_dir = manifest_root.join("include");
+        let lib_dir = manifest_root.join("lib");
+        write_headers(&include_dir, REQUIRED_OCCT_HEADERS);
+        for lib in REQUIRED_OCCT_LIBS {
+            touch_library_file(&lib_dir, lib);
+        }
+        write_manifest(
+            &manifest_root,
+            "include",
+            "lib",
+            "unsupported-platform",
+            std::env::consts::ARCH,
+            current_runtime_abi_tag(),
+            REQUIRED_OCCT_HEADERS,
+            REQUIRED_OCCT_LIBS,
+        );
+        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+
+        let blockers = inspect_build123d_ocp_runtime(&temp_root("ignored")).blocker_summary();
+        let blocker = blockers
+            .into_iter()
+            .find_map(|blocker| serde_json::from_str::<serde_json::Value>(&blocker).ok())
+            .expect("invalid blocker payload");
+        assert_eq!(blocker["kind"], "platformMismatch");
+        assert_eq!(blocker["manifestPlatform"], "unsupported-platform");
+        assert_eq!(blocker["runtimePlatform"], current_runtime_platform());
+    }
+
+    #[test]
+    fn inspect_runtime_manifest_missing_required_fields_report_blocker_payload() {
+        let _lock = sdk_env_lock();
+        let env_root = temp_root("manifest-missing-fields");
+        let manifest_root = env_root.join(OCCT_RUNTIME_SUBDIR);
+        fs::create_dir_all(&manifest_root).expect("mkdir manifest root");
+        fs::write(manifest_root.join(OCCT_MANIFEST_FILE), "{}").expect("write blank manifest");
+        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+
+        let blockers = inspect_build123d_ocp_runtime(&temp_root("ignored"))
+            .blocker_summary()
+            .into_iter()
+            .filter_map(|blocker| serde_json::from_str::<serde_json::Value>(&blocker).ok())
+            .filter(|json| {
+                json.get("kind").and_then(|kind| kind.as_str()) == Some("manifestMissingFields")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(blockers.len(), 1);
+        let blocker = &blockers[0];
+        assert_eq!(
+            blocker
+                .get("missingFields")
+                .and_then(|fields| fields.as_array())
+                .expect("missingFields")
+                .iter()
+                .map(|value| value.as_str().expect("field must be string").to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "schemaVersion".to_string(),
+                "platform".to_string(),
+                "arch".to_string(),
+                "occtVersion".to_string(),
+                "abiTag".to_string(),
+                "includeDir".to_string(),
+                "libDir".to_string(),
+                "requiredHeaders".to_string(),
+                "requiredLibraries".to_string(),
+                "libraryHashes".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn inspect_runtime_falls_back_to_ocp_when_manifest_blocked() {
+        let _lock = sdk_env_lock();
+        let root = temp_root("manifest-fallback");
+        let manifest_root = root.join(OCCT_RUNTIME_SUBDIR);
+        let manifest_include_dir = manifest_root.join("include");
+        let manifest_lib_dir = manifest_root.join("lib");
+        write_headers(&manifest_include_dir, REQUIRED_OCCT_HEADERS);
+        for lib in REQUIRED_OCCT_LIBS {
+            touch_library_file(&manifest_lib_dir, lib);
+        }
+        write_manifest(
+            &manifest_root,
+            "include",
+            "lib",
+            "unsupported-platform",
+            std::env::consts::ARCH,
+            current_runtime_abi_tag(),
+            REQUIRED_OCCT_HEADERS,
+            REQUIRED_OCCT_LIBS,
+        );
+
+        let ocp_root = root
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join(OCP_PACKAGE);
+        let include_dir = ocp_root.join("include").join("opencascade");
+        let dylib_dir = ocp_root.join(OCP_DYLIBS);
+        write_headers(&include_dir, REQUIRED_OCCT_HEADERS);
+        for lib in REQUIRED_OCCT_LIBS {
+            touch_library_file(&dylib_dir, lib);
+        }
+
+        let layout = inspect_build123d_ocp_runtime(&root);
+
+        assert_eq!(layout.ocp_root.as_deref(), Some(ocp_root.as_path()));
+        assert_eq!(layout.include_dir.as_deref(), Some(include_dir.as_path()));
+        assert!(layout.can_compile_native_shim());
+        assert!(layout.missing_headers.is_empty());
+        assert!(layout.missing_libs.is_empty());
+    }
+
+    #[test]
     fn live_bundled_build123d_runtime_can_export_when_headers_are_available() {
+        let _lock = sdk_env_lock();
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");

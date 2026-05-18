@@ -266,6 +266,23 @@ test.describe('Runtime capability boot repair', () => {
     await expect(authoringField.getByRole('button', { name: 'FREECAD', exact: true })).toBeVisible();
   });
 
+  test('Given Ecky native default When settings open Then backend button says NATIVE and mesh label stays hidden', async ({ page }) => {
+    await installCapabilityMock(page, {
+      defaultEngineKind: 'ecky',
+      defaultSourceLanguage: 'ecky',
+      defaultGeometryBackend: 'mesh',
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+    await page.locator('button[title="Settings"]').click();
+
+    const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
+    await expect(authoringField.getByRole('button', { name: 'NATIVE', exact: true })).toBeVisible();
+    await expect(authoringField.getByRole('button', { name: 'MESH', exact: true })).toHaveCount(0);
+  });
+
   test('Given FreeCAD absent When user opens import and settings Then FreeCAD actions stay visible but disabled with reason', async ({ page }) => {
     await installCapabilityMock(page);
 

@@ -14,6 +14,7 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     engines: [],
     selectedEngineId: '',
     freecadCmd: '',
+    cadTextFontPath: '',
     freecadLibraryRoots: [],
     assets: [],
     microwave: null,
@@ -41,7 +42,7 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 }
 
 function sampleCapabilities(overrides: Partial<RuntimeCapabilities> = {}): RuntimeCapabilities {
-  const mesh = { available: true, detail: 'MESH ready', path: null };
+  const mesh = { available: true, detail: 'NATIVE ready', path: null };
   return {
     freecad: { available: false, detail: 'FreeCAD missing', path: null },
     build123d: { available: true, detail: 'BUILD123D ready', path: '/tmp/python3' },
@@ -84,11 +85,11 @@ test('capabilityForAuthoringContext routes legacy/freecad and ecky mesh correctl
   );
   assert.equal(
     capabilityForAuthoringContext(capabilities, 'ecky', 'mesh')?.detail,
-    'MESH ready',
+    'NATIVE ready',
   );
   assert.equal(
     capabilityForAuthoringContext(capabilities, 'ecky', 'mesh')?.detail,
-    'MESH ready',
+    'NATIVE ready',
   );
 });
 

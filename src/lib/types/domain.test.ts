@@ -208,7 +208,7 @@ test('normalizeRuntimeCapabilities accepts legacy mesh alias and returns mesh on
     freecad: { available: true, detail: 'FreeCAD ready', path: '/tmp/freecadcmd' },
     build123d: { available: true, detail: 'BUILD123D ready', path: '/tmp/python3' },
     directOcct: { available: true, detail: 'Direct OCCT ready', path: '/tmp/include' },
-    eckyRust: { available: true, detail: 'MESH ready', path: '/tmp/mesh' },
+    eckyRust: { available: true, detail: 'NATIVE ready', path: '/tmp/mesh' },
     recommendedAuthoringContext: {
       engineKind: 'ecky',
       sourceLanguage: 'ecky',
@@ -217,7 +217,7 @@ test('normalizeRuntimeCapabilities accepts legacy mesh alias and returns mesh on
   } as any);
 
   assert.equal(normalized.directOcct.detail, 'Direct OCCT ready');
-  assert.equal(normalized.mesh.detail, 'MESH ready');
+  assert.equal(normalized.mesh.detail, 'NATIVE ready');
   assert.equal(normalized.recommendedAuthoringContext.engineKind, 'ecky');
   assert.equal(normalized.recommendedAuthoringContext.sourceLanguage, 'ecky');
   assert.equal(normalized.recommendedAuthoringContext.geometryBackend, 'mesh');
@@ -310,4 +310,14 @@ test('normalizeConfig preserves configured STT language code', () => {
   } as any);
 
   assert.equal(config.voice.sttLanguageCode, 'ru-RU');
+});
+
+test('normalizeConfig preserves CAD text font path', () => {
+  const config = normalizeConfig({
+    engines: [],
+    selectedEngineId: '',
+    cadTextFontPath: '/System/Library/Fonts/Supplemental/Arial Black.ttf',
+  } as any);
+
+  assert.equal(config.cadTextFontPath, '/System/Library/Fonts/Supplemental/Arial Black.ttf');
 });

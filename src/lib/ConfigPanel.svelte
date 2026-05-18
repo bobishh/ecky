@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import Dropdown from './Dropdown.svelte';
   import VertexGenie from './VertexGenie.svelte';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { open, save } from '@tauri-apps/plugin-dialog';
   import { derivePrimaryAgentId, normalizeMcpMode } from './agents/state';
   import { inferModelCapabilities } from './modelRuntime/modelCapabilities';
   import {
@@ -10,6 +10,7 @@
     getAppLogs,
     getDesignSystemPrompt,
     getMcpServerStatus,
+    exportEckyMcpSkillZip,
     listAgentModels,
     saveRecordedAudio,
     uploadAsset,
@@ -23,7 +24,7 @@
     GenieTraits,
   } from './types/domain';
 
-  type ActiveSection = 'agents' | 'engines' | 'freecad' | 'sounds' | 'logs';
+  type ActiveSection = 'app' | 'agents' | 'engines';
   type ConnectionType = 'api_key' | 'mcp' | null;
   type McpMode = 'passive' | 'active';
   type RecordingTarget = 'hum' | 'ding';
@@ -131,6 +132,7 @@
   let mcpStatusMessage = $state('');
   let appLogs = $state<AppLogEntry[]>([]);
   let logsLoading = $state(false);
+  let skillExporting = $state(false);
   let designSystemPrompt = $state('');
   let designSystemPromptError = $state('');
 
@@ -331,6 +333,10 @@
     config.freecadCmd = '';
   }
 
+  if (typeof config.cadTextFontPath !== 'string') {
+    config.cadTextFontPath = '';
+  }
+
   function getMcpConfig(): NonNullable<AppConfig['mcp']> {
     return config.mcp!;
   }
@@ -347,7 +353,7 @@
   }
 
   $effect(() => {
-    if (activeSection === 'logs') {
+    if (activeSection === 'app') {
       void fetchLogs();
     }
   });
@@ -532,6 +538,27 @@
       mcpStatusMessage = `Copied ${label} MCP snippet.`;
     } catch (e: unknown) {
       mcpStatusMessage = `Copy failed: ${formatBackendError(e)}`;
+    }
+  }
+
+  async function handleExportEckyMcpSkillZip() {
+    skillExporting = true;
+    message = 'Exporting Ecky MCP skill...';
+    try {
+      const targetPath = await save({
+        defaultPath: 'ecky-mcp-skill.zip',
+        filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+      });
+      if (!targetPath) {
+        message = 'Skill export cancelled.';
+        return;
+      }
+      await exportEckyMcpSkillZip(targetPath);
+      message = 'Ecky MCP skill exported.';
+    } catch (e: unknown) {
+      message = `Skill export failed: ${formatBackendError(e)}`;
+    } finally {
+      skillExporting = false;
     }
   }
 
@@ -765,7 +792,7 @@
       const selected = await open({
         multiple: false,
         filters: [
-          { name: 'All Assets', extensions: ['stl', 'step', 'stp', 'png', 'jpg', 'jpeg', 'json'] }
+          { name: 'All Assets', extensions: ['stl', 'step', 'stp', 'png', 'jpg', 'jpeg', 'webp', 'svg', 'json'] }
         ]
       });
 
@@ -786,6 +813,22 @@
       }
     } catch (e: unknown) {
       message = `Upload failed: ${formatBackendError(e)}`;
+    }
+  }
+
+  async function pickCadTextFont() {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          { name: 'Font Files', extensions: ['ttf', 'otf', 'ttc'] }
+        ]
+      });
+      if (typeof selected === 'string') {
+        config.cadTextFontPath = selected;
+      }
+    } catch (e: unknown) {
+      message = `Font picker failed: ${formatBackendError(e)}`;
     }
   }
 
@@ -816,42 +859,39 @@
 
 <div class="config-container">
   <aside class="config-sidebar">
-    <button class="nav-item {activeSection === 'freecad' ? 'active' : ''}" onclick={() => activeSection = 'freecad'}>FREECAD</button>
-    <button class="nav-item {activeSection === 'sounds' ? 'active' : ''}" onclick={() => activeSection = 'sounds'}>SOUNDS</button>
+    <button class="nav-item {activeSection === 'app' ? 'active' : ''}" onclick={() => activeSection = 'app'}>APP</button>
     <button class="nav-item {activeSection === 'agents' || activeSection === 'engines' ? 'active' : ''}" onclick={() => activeSection = 'agents'}>AGENTS</button>
-    <button class="nav-item {activeSection === 'logs' ? 'active' : ''}" onclick={() => activeSection = 'logs'}>LOGS</button>
   </aside>
 
   <main class="engine-details">
     <div class="details-scrollable">
       <div class="details-content">
-      <section class="ecky-settings-card" aria-label="Ecky settings preview">
-        <div class="ecky-settings-card__copy">
-          <div class="field-title">ECKY PREVIEW</div>
-          <div class="field-help">Seed override lives here now. Workbench corner stays clean.</div>
-          <div class="ecky-settings-card__actions">
-            <button
-              class="btn btn-xs"
-              type="button"
-              aria-label="Reroll Ecky seed"
-              onclick={() => onRerollEcky?.()}
-            >
-              REROLL
-            </button>
+      {#if activeSection === 'app'}
+        <section class="ecky-settings-card" aria-label="Ecky settings preview">
+          <div class="ecky-settings-card__copy">
+            <div class="field-title">ECKY PREVIEW</div>
+            <div class="field-help">Seed override lives here now. Workbench corner stays clean.</div>
+            <div class="ecky-settings-card__actions">
+              <button
+                class="btn btn-xs"
+                type="button"
+                aria-label="Reroll Ecky seed"
+                onclick={() => onRerollEcky?.()}
+              >
+                REROLL
+              </button>
+            </div>
           </div>
-        </div>
-        <div class="ecky-settings-card__preview" data-testid="settings-ecky-preview">
-          <VertexGenie mode="idle" bubble="" traits={eckyTraits} safeRightInset={0} />
-        </div>
-      </section>
-
-      {#if activeSection === 'freecad'}
+          <div class="ecky-settings-card__preview" data-testid="settings-ecky-preview">
+            <VertexGenie mode="idle" bubble="" traits={eckyTraits} safeRightInset={0} />
+          </div>
+        </section>
         {#if runtimeCapabilities}
           <div class="field">
             <div class="field-title">RUNTIME STATUS</div>
             <div class="field-help">BUILD123D: {runtimeCapabilities.build123d.detail}</div>
             <div class="field-help">FREECAD: {runtimeCapabilities.freecad.detail}</div>
-            <div class="field-help">MESH: {runtimeCapabilities.mesh.detail}</div>
+            <div class="field-help">NATIVE: {runtimeCapabilities.mesh.detail}</div>
           </div>
         {/if}
 
@@ -869,6 +909,26 @@
           />
           <div class="field-help">
             Leave blank to auto-detect via `FREECAD_CMD`, PATH, or standard macOS FreeCAD locations.
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="prompt-header">
+            <label for="cad-text-font-path">CAD TEXT FONT</label>
+            <div class="button-row">
+              <button class="btn btn-xs btn-ghost" type="button" onclick={pickCadTextFont}>CHOOSE</button>
+              <button class="btn btn-xs btn-ghost" type="button" onclick={() => config.cadTextFontPath = ''}>AUTO</button>
+            </div>
+          </div>
+          <input
+            id="cad-text-font-path"
+            type="text"
+            class="input-mono"
+            placeholder="/System/Library/Fonts/Supplemental/Arial Black.ttf"
+            bind:value={config.cadTextFontPath}
+          />
+          <div class="field-help">
+            Used for Ecky <code>text</code> geometry in FreeCAD renders. Blank uses the built-in bold fallback list.
           </div>
         </div>
 
@@ -902,7 +962,6 @@
           </div>
         </div>
 
-      {:else if activeSection === 'sounds'}
         <div class="field">
           <div class="field-title">MIC INPUT</div>
           <div class="mic-device-block">
@@ -1011,6 +1070,28 @@
           </div>
         </div>
 
+        <div class="field">
+          <div class="prompt-header">
+            <div class="field-title">SUPERVISOR LOGS</div>
+            <button class="btn btn-xs btn-ghost" onclick={fetchLogs} disabled={logsLoading}>
+              {logsLoading ? '…' : '↻ REFRESH'}
+            </button>
+          </div>
+          <div class="field-help">Runtime logs from agent supervisor. Shows last 200 entries.</div>
+          {#if appLogs.length === 0}
+            <div class="field-note">{logsLoading ? 'Loading...' : 'No log entries.'}</div>
+          {:else}
+            <div class="log-list">
+              {#each [...appLogs].reverse() as entry}
+                <div class="log-entry">
+                  <span class="log-ts">{new Date(entry.tsMs).toLocaleTimeString()}</span>
+                  <span class="log-msg">{entry.message}</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
       {:else if activeSection === 'agents'}
         <div class="field">
           <div class="field-title">CONNECTION TYPE</div>
@@ -1065,7 +1146,7 @@
               <button
                 class="conn-type-btn {config.defaultGeometryBackend === 'mesh' ? 'active' : ''}"
                 onclick={() => { config.defaultGeometryBackend = 'mesh'; }}
-              >MESH</button>
+              >NATIVE</button>
             </div>
             {#if directOcctCapability}
               <div class="direct-occt-fastpath" aria-label="Direct OCCT STEP fast path">
@@ -1211,7 +1292,12 @@
             <div class="field">
               <div class="prompt-header">
                 <div class="field-title">CONNECT YOUR AGENT</div>
-                <button class="btn btn-xs" onclick={() => copyMcpSnippet(genericMcpSnippet, 'generic JSON')}>COPY GENERIC JSON</button>
+                <div class="prompt-actions">
+                  <button class="btn btn-xs" onclick={() => copyMcpSnippet(genericMcpSnippet, 'generic JSON')}>COPY GENERIC JSON</button>
+                  <button class="btn btn-xs btn-ghost" onclick={handleExportEckyMcpSkillZip} disabled={skillExporting}>
+                    {skillExporting ? 'EXPORTING...' : 'EXPORT SKILL ZIP'}
+                  </button>
+                </div>
               </div>
               <div class="mcp-status-row">
                 <span class:mcp-running={mcpStatus?.running} class:mcp-stopped={!mcpStatus?.running}>
@@ -1483,28 +1569,6 @@
           <button class="btn btn-primary" onclick={addEngine}>ADD FIRST ENGINE</button>
         </div>
 
-      {:else if activeSection === 'logs'}
-        <div class="field">
-          <div class="prompt-header">
-            <div class="field-title">SUPERVISOR LOGS</div>
-            <button class="btn btn-xs btn-ghost" onclick={fetchLogs} disabled={logsLoading}>
-              {logsLoading ? '…' : '↻ REFRESH'}
-            </button>
-          </div>
-          <div class="field-help">Runtime logs from agent supervisor. Shows last 200 entries.</div>
-          {#if appLogs.length === 0}
-            <div class="field-note">{logsLoading ? 'Loading...' : 'No log entries.'}</div>
-          {:else}
-            <div class="log-list">
-              {#each [...appLogs].reverse() as entry}
-                <div class="log-entry">
-                  <span class="log-ts">{new Date(entry.tsMs).toLocaleTimeString()}</span>
-                  <span class="log-msg">{entry.message}</span>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
       {/if}
       </div>
     </div>
@@ -1826,7 +1890,27 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 10px;
     margin-bottom: 6px;
+    overflow: hidden;
+  }
+
+  .prompt-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .button-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .mcp-status-row {

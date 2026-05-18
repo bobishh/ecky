@@ -1,0 +1,2999 @@
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepGProp.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <GCE2d_MakeSegment.hxx>
+#include <GeomAbs_JoinType.hxx>
+#include <GeomAbs_Shape.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <GeomAPI_PointsToBSpline.hxx>
+#include <GProp_GProps.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <StlAPI_Reader.hxx>
+#include <STEPControl_Writer.hxx>
+#include <Standard_Failure.hxx>
+#include <StlAPI_Writer.hxx>
+#include <StdFail_NotDone.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopAbs_State.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Shape.hxx>
+#include <TopoDS_Wire.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <variant>
+#include <vector>
+#include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Dir.hxx>
+#include <gp_GTrsf.hxx>
+#include <gp_Pnt2d.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+#include "vendor/yyjson/yyjson.h"
+
+namespace fs = std::filesystem;
+
+namespace {
+
+struct Arg {
+    enum class Kind { Number, Boolean, Text, Symbol, Point2, Point3, List, Param, Ref };
+
+    Kind kind = Kind::Number;
+    double number_value = 0.0;
+    bool bool_value = false;
+    std::string text_value;
+    std::array<double, 2> point2_value{0.0, 0.0};
+    std::array<double, 3> point3_value{0.0, 0.0, 0.0};
+    std::vector<Arg> list_value;
+    std::string param_value;
+    std::uint64_t ref_value = 0;
+};
+
+struct Command {
+    std::uint64_t output = 0;
+    std::string op;
+    std::vector<Arg> args;
+    std::vector<struct Keyword> keywords;
+};
+
+enum class SelectorKind { Edge, Face };
+
+enum class SelectorPayloadType { TargetIds, Clauses };
+
+enum class SelectorClauseType { Axis, Boundary, Planar, Normal, Area };
+
+enum class SelectorAxis { X, Y, Z };
+
+enum class SelectorBound { Min, Max };
+
+enum class SelectorAreaRank { Min, Max };
+
+struct SelectorClause {
+    SelectorClauseType type = SelectorClauseType::Planar;
+    std::optional<SelectorAxis> axis;
+    std::optional<SelectorBound> bound;
+    std::optional<SelectorAreaRank> rank;
+};
+
+struct SelectorPayload {
+    SelectorPayloadType type = SelectorPayloadType::TargetIds;
+    SelectorKind kind = SelectorKind::Edge;
+    std::vector<std::string> target_ids;
+    std::vector<SelectorClause> clauses;
+};
+
+struct Keyword {
+    enum class Kind { Arg, Selector };
+
+    std::string name;
+    Kind kind = Kind::Arg;
+    Arg value;
+    std::optional<SelectorPayload> selector_payload;
+};
+
+struct Part {
+    std::string part_id;
+    std::string label;
+    std::uint64_t root = 0;
+    std::vector<Command> commands;
+};
+
+struct Plan {
+    std::uint32_t schema_version = 0;
+    std::string plan_id;
+    std::vector<Part> parts;
+};
+
+struct ShapeRecord {
+    std::string part_id;
+    std::string label;
+    TopoDS_Shape shape;
+};
+
+struct SlotValue {
+    enum class Kind { Shape, Frame };
+
+    Kind kind = Kind::Shape;
+    TopoDS_Shape shape;
+    gp_Trsf frame;
+
+    SlotValue() = default;
+
+    SlotValue(const TopoDS_Shape& value) : kind(Kind::Shape), shape(value) {}
+
+    SlotValue(const gp_Trsf& value) : kind(Kind::Frame), frame(value) {}
+
+    static SlotValue shape_value(const TopoDS_Shape& value) {
+        SlotValue slot;
+        slot.kind = Kind::Shape;
+        slot.shape = value;
+        return slot;
+    }
+
+    static SlotValue frame_value(const gp_Trsf& value) {
+        SlotValue slot;
+        slot.kind = Kind::Frame;
+        slot.frame = value;
+        return slot;
+    }
+};
+
+struct ParseError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+struct SchemaError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+struct EvalError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+struct IoError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+yyjson_val* json_require(yyjson_val* value, const char* key) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected object while reading `" + std::string(key) + "`");
+    }
+    yyjson_val* found = yyjson_obj_get(value, key);
+    if (found == nullptr) {
+        throw SchemaError("missing field `" + std::string(key) + "`");
+    }
+    return found;
+}
+
+std::string json_string(yyjson_val* value, const std::string& label) {
+    if (!value || !yyjson_is_str(value)) {
+        throw SchemaError("expected string for `" + label + "`");
+    }
+    const char* text = yyjson_get_str(value);
+    return text ? text : "";
+}
+
+double json_number(yyjson_val* value, const std::string& label) {
+    if (!value || !yyjson_is_num(value)) {
+        throw SchemaError("expected number for `" + label + "`");
+    }
+    return yyjson_get_num(value);
+}
+
+bool json_bool(yyjson_val* value, const std::string& label) {
+    if (!value || !yyjson_is_bool(value)) {
+        throw SchemaError("expected boolean for `" + label + "`");
+    }
+    return yyjson_get_bool(value);
+}
+
+yyjson_val* json_array(yyjson_val* value, const std::string& label) {
+    if (!value || !yyjson_is_arr(value)) {
+        throw SchemaError("expected array for `" + label + "`");
+    }
+    return value;
+}
+
+Arg parse_arg(yyjson_val* value);
+
+SelectorAxis parse_selector_axis(const std::string& axis) {
+    if (axis == "x") {
+        return SelectorAxis::X;
+    }
+    if (axis == "y") {
+        return SelectorAxis::Y;
+    }
+    if (axis == "z") {
+        return SelectorAxis::Z;
+    }
+    throw SchemaError("unsupported selector axis `" + axis + "`");
+}
+
+SelectorBound parse_selector_bound(const std::string& bound) {
+    if (bound == "min") {
+        return SelectorBound::Min;
+    }
+    if (bound == "max") {
+        return SelectorBound::Max;
+    }
+    throw SchemaError("unsupported selector bound `" + bound + "`");
+}
+
+SelectorAreaRank parse_selector_area_rank(const std::string& rank) {
+    if (rank == "min") {
+        return SelectorAreaRank::Min;
+    }
+    if (rank == "max") {
+        return SelectorAreaRank::Max;
+    }
+    throw SchemaError("unsupported selector area rank `" + rank + "`");
+}
+
+SelectorKind parse_selector_kind(const std::string& kind) {
+    if (kind == "edge") {
+        return SelectorKind::Edge;
+    }
+    if (kind == "face") {
+        return SelectorKind::Face;
+    }
+    throw SchemaError("unsupported selector kind `" + kind + "`");
+}
+
+SelectorClause parse_selector_clause(yyjson_val* value) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected object for `selector clause`");
+    }
+    SelectorClause clause;
+    const std::string type = json_string(json_require(value, "type"), "selector clause type");
+    if (type == "axis") {
+        clause.type = SelectorClauseType::Axis;
+        clause.axis = parse_selector_axis(json_string(json_require(value, "axis"), "selector axis"));
+        return clause;
+    }
+    if (type == "boundary") {
+        clause.type = SelectorClauseType::Boundary;
+        clause.axis = parse_selector_axis(json_string(json_require(value, "axis"), "selector axis"));
+        clause.bound = parse_selector_bound(json_string(json_require(value, "bound"), "selector bound"));
+        return clause;
+    }
+    if (type == "planar") {
+        clause.type = SelectorClauseType::Planar;
+        return clause;
+    }
+    if (type == "normal") {
+        clause.type = SelectorClauseType::Normal;
+        clause.axis = parse_selector_axis(json_string(json_require(value, "axis"), "selector axis"));
+        return clause;
+    }
+    if (type == "area") {
+        clause.type = SelectorClauseType::Area;
+        clause.rank = parse_selector_area_rank(json_string(json_require(value, "rank"), "selector rank"));
+        return clause;
+    }
+    throw SchemaError("unsupported selector clause type `" + type + "`");
+}
+
+SelectorPayload parse_selector_payload(yyjson_val* value) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected object for `selector payload`");
+    }
+    SelectorPayload payload;
+    payload.type = [&]() {
+        const std::string type = json_string(json_require(value, "type"), "selector payload type");
+        if (type == "targetIds") {
+            return SelectorPayloadType::TargetIds;
+        }
+        if (type == "clauses") {
+            return SelectorPayloadType::Clauses;
+        }
+        throw SchemaError("unsupported selector payload type `" + type + "`");
+    }();
+    payload.kind =
+        parse_selector_kind(json_string(json_require(value, "kind"), "selector payload kind"));
+    if (payload.type == SelectorPayloadType::TargetIds) {
+        yyjson_val* target_ids = json_array(json_require(value, "targetIds"), "targetIds");
+        size_t index;
+        size_t max;
+        yyjson_val* item;
+        yyjson_arr_foreach(target_ids, index, max, item) {
+            payload.target_ids.push_back(json_string(item, "targetId"));
+        }
+        return payload;
+    }
+    yyjson_val* clauses = json_array(json_require(value, "clauses"), "clauses");
+    size_t index;
+    size_t max;
+    yyjson_val* item;
+    yyjson_arr_foreach(clauses, index, max, item) {
+        payload.clauses.push_back(parse_selector_clause(item));
+    }
+    return payload;
+}
+
+Keyword parse_keyword(yyjson_val* value) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected object for `keyword`");
+    }
+    Keyword keyword;
+    keyword.name = json_string(json_require(value, "name"), "keyword name");
+    const std::string kind = json_string(json_require(value, "kind"), "keyword kind");
+    if (kind == "arg") {
+        keyword.kind = Keyword::Kind::Arg;
+        keyword.value = parse_arg(json_require(value, "value"));
+        return keyword;
+    }
+    if (kind == "selector") {
+        keyword.kind = Keyword::Kind::Selector;
+        keyword.value = parse_arg(json_require(value, "value"));
+        keyword.selector_payload = parse_selector_payload(json_require(value, "payload"));
+        return keyword;
+    }
+    throw SchemaError("unsupported keyword kind `" + kind + "`");
+}
+
+std::array<double, 2> parse_point2(yyjson_val* value) {
+    yyjson_val* items = json_array(value, "point2");
+    if (yyjson_arr_size(items) != 2) {
+        throw SchemaError("expected 2 values for point2");
+    }
+    return {
+        json_number(yyjson_arr_get(items, 0), "point2[0]"),
+        json_number(yyjson_arr_get(items, 1), "point2[1]"),
+    };
+}
+
+std::array<double, 3> parse_point3(yyjson_val* value) {
+    yyjson_val* items = json_array(value, "point3");
+    if (yyjson_arr_size(items) != 3) {
+        throw SchemaError("expected 3 values for point3");
+    }
+    return {
+        json_number(yyjson_arr_get(items, 0), "point3[0]"),
+        json_number(yyjson_arr_get(items, 1), "point3[1]"),
+        json_number(yyjson_arr_get(items, 2), "point3[2]"),
+    };
+}
+
+Arg parse_arg(yyjson_val* value) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected object for `arg`");
+    }
+    const std::string kind = json_string(json_require(value, "kind"), "kind");
+    yyjson_val* raw_value = json_require(value, "value");
+
+    Arg arg;
+    if (kind == "number") {
+        arg.kind = Arg::Kind::Number;
+        arg.number_value = json_number(raw_value, "value");
+        return arg;
+    }
+    if (kind == "boolean") {
+        arg.kind = Arg::Kind::Boolean;
+        arg.bool_value = json_bool(raw_value, "value");
+        return arg;
+    }
+    if (kind == "text") {
+        arg.kind = Arg::Kind::Text;
+        arg.text_value = json_string(raw_value, "value");
+        return arg;
+    }
+    if (kind == "symbol") {
+        arg.kind = Arg::Kind::Symbol;
+        arg.text_value = json_string(raw_value, "value");
+        return arg;
+    }
+    if (kind == "point2") {
+        arg.kind = Arg::Kind::Point2;
+        arg.point2_value = parse_point2(raw_value);
+        return arg;
+    }
+    if (kind == "point3") {
+        arg.kind = Arg::Kind::Point3;
+        arg.point3_value = parse_point3(raw_value);
+        return arg;
+    }
+    if (kind == "list") {
+        arg.kind = Arg::Kind::List;
+        yyjson_val* items = json_array(raw_value, "value");
+        size_t index;
+        size_t max;
+        yyjson_val* item;
+        yyjson_arr_foreach(items, index, max, item) {
+            arg.list_value.push_back(parse_arg(item));
+        }
+        return arg;
+    }
+    if (kind == "param") {
+        throw SchemaError("runner plan requires resolved args; `param` values are not allowed");
+    }
+    if (kind == "ref") {
+        arg.kind = Arg::Kind::Ref;
+        arg.ref_value = static_cast<std::uint64_t>(json_number(raw_value, "value"));
+        return arg;
+    }
+    throw SchemaError("unsupported arg kind `" + kind + "`");
+}
+
+Command parse_command(yyjson_val* value) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected object for `command`");
+    }
+    Command command;
+    command.output =
+        static_cast<std::uint64_t>(json_number(json_require(value, "output"), "output"));
+    command.op = json_string(json_require(value, "op"), "op");
+    yyjson_val* args = json_array(json_require(value, "args"), "args");
+    size_t arg_index;
+    size_t arg_max;
+    yyjson_val* arg;
+    yyjson_arr_foreach(args, arg_index, arg_max, arg) {
+        command.args.push_back(parse_arg(arg));
+    }
+    yyjson_val* keywords = json_array(json_require(value, "keywords"), "keywords");
+    size_t keyword_index;
+    size_t keyword_max;
+    yyjson_val* keyword;
+    yyjson_arr_foreach(keywords, keyword_index, keyword_max, keyword) {
+        command.keywords.push_back(parse_keyword(keyword));
+    }
+    return command;
+}
+
+Part parse_part(yyjson_val* value) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected object for `part`");
+    }
+    Part part;
+    part.part_id = json_string(json_require(value, "key"), "key");
+    part.label = json_string(json_require(value, "label"), "label");
+    part.root = static_cast<std::uint64_t>(json_number(json_require(value, "root"), "root"));
+    yyjson_val* commands = json_array(json_require(value, "commands"), "commands");
+    size_t command_index;
+    size_t command_max;
+    yyjson_val* command;
+    yyjson_arr_foreach(commands, command_index, command_max, command) {
+        part.commands.push_back(parse_command(command));
+    }
+    return part;
+}
+
+Plan parse_plan(yyjson_val* value) {
+    if (!value || !yyjson_is_obj(value)) {
+        throw SchemaError("expected root plan object");
+    }
+    Plan plan;
+    plan.schema_version =
+        static_cast<std::uint32_t>(json_number(json_require(value, "schemaVersion"), "schemaVersion"));
+    plan.plan_id = json_string(json_require(value, "planId"), "planId");
+    if (plan.schema_version != 1) {
+        throw SchemaError("unsupported plan schema version");
+    }
+    yyjson_val* parts = json_array(json_require(value, "parts"), "parts");
+    size_t part_index;
+    size_t part_max;
+    yyjson_val* part;
+    yyjson_arr_foreach(parts, part_index, part_max, part) {
+        plan.parts.push_back(parse_part(part));
+    }
+    return plan;
+}
+
+std::string quote_json_string(const std::string& value) {
+    std::ostringstream out;
+    out << '"';
+    for (char ch : value) {
+        switch (ch) {
+            case '\\': out << "\\\\"; break;
+            case '"': out << "\\\""; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default: out << ch; break;
+        }
+    }
+    out << '"';
+    return out.str();
+}
+
+void write_json_number(std::ostream& out, double value) {
+    if (!std::isfinite(value)) {
+        out << 0;
+        return;
+    }
+    out << std::setprecision(17) << value;
+}
+
+std::string format_coordinate(double value) {
+    if (!std::isfinite(value) || std::abs(value) < 0.0005) {
+        return "0";
+    }
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3) << value;
+    std::string text = out.str();
+    while (!text.empty() && text.back() == '0') {
+        text.pop_back();
+    }
+    if (!text.empty() && text.back() == '.') {
+        text.pop_back();
+    }
+    if (text.empty() || text == "-0") {
+        return "0";
+    }
+    return text;
+}
+
+std::string point_signature(const gp_Pnt& point) {
+    return format_coordinate(point.X()) + "-" + format_coordinate(point.Y()) + "-" +
+           format_coordinate(point.Z());
+}
+
+std::string edge_signature(const gp_Pnt& start, const gp_Pnt& end) {
+    std::string first = point_signature(start);
+    std::string second = point_signature(end);
+    if (second < first) {
+        std::swap(first, second);
+    }
+    return first + "_" + second;
+}
+
+std::string edge_target_id(const std::string& part_id, int edge_index, const TopoDS_Edge& edge) {
+    try {
+        BRepAdaptor_Curve curve(edge);
+        double first_param = curve.FirstParameter();
+        double last_param = curve.LastParameter();
+        if (std::isfinite(first_param) && std::isfinite(last_param)) {
+            gp_Pnt start = curve.Value(first_param);
+            gp_Pnt end = curve.Value(last_param);
+            return part_id + ":edge:" + std::to_string(edge_index) + ":" +
+                   edge_signature(start, end);
+        }
+    } catch (...) {
+    }
+    return part_id + ":edge:" + std::to_string(edge_index);
+}
+
+std::string face_target_id(const std::string& part_id, int face_index, const TopoDS_Face& face) {
+    try {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        gp_Pnt center = props.CentreOfMass();
+        double area = props.Mass();
+        return part_id + ":face:" + std::to_string(face_index) + ":" +
+               point_signature(center) + ":" + format_coordinate(area);
+    } catch (...) {
+    }
+    return part_id + ":face:" + std::to_string(face_index);
+}
+
+std::string stable_target_suffix(const std::string& payload) {
+    std::size_t first_colon = payload.find(':');
+    if (first_colon == std::string::npos) {
+        return payload;
+    }
+    bool numeric_prefix = first_colon > 0 &&
+        std::all_of(payload.begin(), payload.begin() + static_cast<long>(first_colon), [](char ch) {
+            return ch >= '0' && ch <= '9';
+        });
+    if (!numeric_prefix) {
+        return payload;
+    }
+    return payload.substr(first_colon + 1);
+}
+
+std::string stable_edge_target_id(const std::string& target_id) {
+    const std::string marker = ":edge:";
+    std::size_t marker_pos = target_id.find(marker);
+    if (marker_pos == std::string::npos) {
+        return target_id;
+    }
+    std::string prefix = target_id.substr(0, marker_pos);
+    std::size_t node_marker_pos = prefix.find(":node:");
+    std::size_t stable_node_marker_pos = prefix.find(":stable-node-key:");
+    if (node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, node_marker_pos);
+    } else if (stable_node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, stable_node_marker_pos);
+    }
+    std::string payload = target_id.substr(marker_pos + marker.size());
+    return prefix + marker + stable_target_suffix(payload);
+}
+
+std::string stable_face_target_id(const std::string& target_id) {
+    const std::string marker = ":face:";
+    std::size_t marker_pos = target_id.find(marker);
+    if (marker_pos == std::string::npos) {
+        return target_id;
+    }
+    std::string prefix = target_id.substr(0, marker_pos);
+    std::size_t node_marker_pos = prefix.find(":node:");
+    std::size_t stable_node_marker_pos = prefix.find(":stable-node-key:");
+    if (node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, node_marker_pos);
+    } else if (stable_node_marker_pos != std::string::npos) {
+        prefix = prefix.substr(0, stable_node_marker_pos);
+    }
+    std::string payload = target_id.substr(marker_pos + marker.size());
+    return prefix + marker + stable_target_suffix(payload);
+}
+
+void write_topology_point(std::ostream& out, const gp_Pnt& point) {
+    out << "{\"x\":";
+    write_json_number(out, point.X());
+    out << ",\"y\":";
+    write_json_number(out, point.Y());
+    out << ",\"z\":";
+    write_json_number(out, point.Z());
+    out << "}";
+}
+
+void write_part_topology(
+    std::ostream& out,
+    const std::string& part_id,
+    const std::string& label,
+    const TopoDS_Shape& shape,
+    bool& first_part
+) {
+    if (!first_part) {
+        out << ",";
+    }
+    first_part = false;
+
+    out << "{\"partId\":";
+    out << quote_json_string(part_id);
+    out << ",\"label\":";
+    out << quote_json_string(label);
+    out << ",\"edges\":[";
+
+    bool first_edge = true;
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+    for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
+        try {
+            TopoDS_Edge edge = TopoDS::Edge(edge_map.FindKey(edge_ordinal));
+            BRepAdaptor_Curve curve(edge);
+            double first_param = curve.FirstParameter();
+            double last_param = curve.LastParameter();
+            if (!std::isfinite(first_param) || !std::isfinite(last_param)) {
+                continue;
+            }
+            gp_Pnt start = curve.Value(first_param);
+            gp_Pnt end = curve.Value(last_param);
+            if (!first_edge) {
+                out << ",";
+            }
+            first_edge = false;
+            int edge_index = edge_ordinal - 1;
+            out << "{\"targetId\":";
+            out << quote_json_string(edge_target_id(part_id, edge_index, edge));
+            out << ",\"edgeIndex\":" << edge_index;
+            out << ",\"label\":";
+            out << quote_json_string(label + ".Edge" + std::to_string(edge_ordinal));
+            out << ",\"start\":";
+            write_topology_point(out, start);
+            out << ",\"end\":";
+            write_topology_point(out, end);
+            out << "}";
+        } catch (...) {
+        }
+    }
+
+    out << "],\"faces\":[";
+    bool first_face = true;
+    int face_index = 0;
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next(), ++face_index) {
+        try {
+            TopoDS_Face face = TopoDS::Face(explorer.Current());
+            GProp_GProps props;
+            BRepGProp::SurfaceProperties(face, props);
+            gp_Pnt center = props.CentreOfMass();
+            double area = props.Mass();
+
+            double normal_x = 0.0;
+            double normal_y = 0.0;
+            double normal_z = 0.0;
+            try {
+                double u_min = 0.0;
+                double u_max = 0.0;
+                double v_min = 0.0;
+                double v_max = 0.0;
+                BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+                if (std::isfinite(u_min) && std::isfinite(u_max) && std::isfinite(v_min) &&
+                    std::isfinite(v_max)) {
+                    BRepAdaptor_Surface surface(face);
+                    gp_Pnt surface_point;
+                    gp_Vec du;
+                    gp_Vec dv;
+                    surface.D1((u_min + u_max) / 2.0, (v_min + v_max) / 2.0, surface_point, du, dv);
+                    gp_Vec normal = du.Crossed(dv);
+                    if (normal.Magnitude() > 1.0e-9) {
+                        normal.Normalize();
+                        normal_x = normal.X();
+                        normal_y = normal.Y();
+                        normal_z = normal.Z();
+                    }
+                }
+            } catch (...) {
+            }
+
+            if (!first_face) {
+                out << ",";
+            }
+            first_face = false;
+            out << "{\"targetId\":";
+            out << quote_json_string(face_target_id(part_id, face_index, face));
+            out << ",\"faceIndex\":" << face_index;
+            out << ",\"label\":";
+            out << quote_json_string(label + ".Face" + std::to_string(face_index + 1));
+            out << ",\"center\":";
+            write_topology_point(out, center);
+            out << ",\"normal\":[";
+            write_json_number(out, normal_x);
+            out << ",";
+            write_json_number(out, normal_y);
+            out << ",";
+            write_json_number(out, normal_z);
+            out << "],\"area\":";
+            write_json_number(out, area);
+            out << "}";
+        } catch (...) {
+        }
+    }
+
+    out << "]}";
+}
+
+void write_topology_report(const fs::path& topology_path, const std::vector<ShapeRecord>& parts) {
+    std::ofstream out(topology_path);
+    if (!out) {
+        throw IoError("failed to open topology file");
+    }
+    out << "{\"parts\":[";
+    bool first_part = true;
+    for (const auto& part : parts) {
+        write_part_topology(out, part.part_id, part.label, part.shape, first_part);
+    }
+    out << "]}";
+    if (!out.good()) {
+        throw IoError("failed to write topology file");
+    }
+}
+
+Arg require_ref_arg(const std::vector<Arg>& args, std::size_t index, const std::string& op) {
+    if (index >= args.size()) {
+        throw EvalError(op + " expects a shape reference");
+    }
+    const Arg& arg = args[index];
+    if (arg.kind != Arg::Kind::Ref) {
+        throw EvalError(op + " expects a shape reference");
+    }
+    return arg;
+}
+
+double require_number_arg(const std::vector<Arg>& args, std::size_t index, const std::string& op) {
+    if (index >= args.size()) {
+        throw EvalError(op + " expects a number");
+    }
+    const Arg& arg = args[index];
+    if (arg.kind != Arg::Kind::Number) {
+        throw EvalError(op + " expects a number");
+    }
+    return arg.number_value;
+}
+
+bool require_bool_arg(const std::vector<Arg>& args, std::size_t index, const std::string& op) {
+    if (index >= args.size()) {
+        throw EvalError(op + " expects a boolean");
+    }
+    const Arg& arg = args[index];
+    if (arg.kind != Arg::Kind::Boolean) {
+        throw EvalError(op + " expects a boolean");
+    }
+    return arg.bool_value;
+}
+
+std::size_t require_count_arg(const std::vector<Arg>& args, std::size_t index, const std::string& op) {
+    double value = require_number_arg(args, index, op);
+    if (!std::isfinite(value)) {
+        throw EvalError(op + " expects a finite count");
+    }
+    return static_cast<std::size_t>(std::max(1.0, std::round(value)));
+}
+
+std::vector<Arg> require_ref_list(const std::vector<Arg>& args, const std::string& op) {
+    std::vector<Arg> refs;
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        const Arg& arg = args[index];
+        if (arg.kind != Arg::Kind::Ref) {
+            throw EvalError(op + " expects shape references");
+        }
+        refs.push_back(arg);
+    }
+    if (refs.empty()) {
+        throw EvalError(op + " expects at least one shape reference");
+    }
+    return refs;
+}
+
+std::vector<std::uint64_t> require_ref_collection_arg(const Arg& arg, const std::string& label) {
+    if (arg.kind == Arg::Kind::Ref) {
+        return {arg.ref_value};
+    }
+    if (arg.kind == Arg::Kind::List) {
+        std::vector<std::uint64_t> refs;
+        refs.reserve(arg.list_value.size());
+        for (std::size_t index = 0; index < arg.list_value.size(); ++index) {
+            if (arg.list_value[index].kind != Arg::Kind::Ref) {
+                throw EvalError(label + " expects shape reference at index " + std::to_string(index));
+            }
+            refs.push_back(arg.list_value[index].ref_value);
+        }
+        return refs;
+    }
+    throw EvalError(label + " expects shape reference or reference list");
+}
+
+std::array<double, 2> require_range_arg(const Arg& arg, const std::string& label) {
+    double first = 0.0;
+    double second = 0.0;
+    if (arg.kind == Arg::Kind::Point2) {
+        first = arg.point2_value[0];
+        second = arg.point2_value[1];
+    } else if (arg.kind == Arg::Kind::List && arg.list_value.size() == 2 &&
+               arg.list_value[0].kind == Arg::Kind::Number &&
+               arg.list_value[1].kind == Arg::Kind::Number) {
+        first = arg.list_value[0].number_value;
+        second = arg.list_value[1].number_value;
+    } else {
+        throw EvalError(label + " expects numeric 2D range");
+    }
+    if (std::abs(first - second) <= 1.0e-12) {
+        throw EvalError(label + " must not be zero width");
+    }
+    return {std::min(first, second), std::max(first, second)};
+}
+
+struct ProfileRefs {
+    std::vector<std::uint64_t> outer;
+    std::vector<std::uint64_t> holes;
+};
+
+ProfileRefs profile_refs(const Command& command) {
+    ProfileRefs refs;
+    if (command.keywords.empty()) {
+        if (command.args.empty()) {
+            throw EvalError("profile needs at least one outer loop");
+        }
+        for (const auto& arg : command.args) {
+            if (arg.kind != Arg::Kind::Ref) {
+                throw EvalError("profile positional outer loops expect shape references");
+            }
+            refs.outer.push_back(arg.ref_value);
+        }
+        return refs;
+    }
+    if (!command.args.empty()) {
+        throw EvalError("profile does not mix positional loops with keyword loops");
+    }
+    for (const auto& keyword : command.keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError("profile keywords expect arg values only");
+        }
+        if (keyword.name == "outer") {
+            std::vector<std::uint64_t> outer =
+                require_ref_collection_arg(keyword.value, "profile :outer");
+            refs.outer.insert(refs.outer.end(), outer.begin(), outer.end());
+            continue;
+        }
+        if (keyword.name == "holes") {
+            std::vector<std::uint64_t> holes =
+                require_ref_collection_arg(keyword.value, "profile :holes");
+            refs.holes.insert(refs.holes.end(), holes.begin(), holes.end());
+            continue;
+        }
+        throw EvalError("profile does not recognize `:" + keyword.name + "`");
+    }
+    if (refs.outer.empty()) {
+        throw EvalError("profile needs at least one outer loop");
+    }
+    return refs;
+}
+
+struct ClipBoxArgs {
+    std::uint64_t shape_ref = 0;
+    std::array<double, 2> x{0.0, 0.0};
+    std::array<double, 2> y{0.0, 0.0};
+    std::array<double, 2> z{0.0, 0.0};
+};
+
+ClipBoxArgs clip_box_args(const Command& command) {
+    if (command.args.size() != 1 || command.args[0].kind != Arg::Kind::Ref) {
+        throw EvalError("clip-box expects one shape reference");
+    }
+    ClipBoxArgs args;
+    args.shape_ref = command.args[0].ref_value;
+    bool has_x = false;
+    bool has_y = false;
+    bool has_z = false;
+    for (const auto& keyword : command.keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError("clip-box keywords expect arg values only");
+        }
+        if (keyword.name == "x") {
+            args.x = require_range_arg(keyword.value, "clip-box :x");
+            has_x = true;
+            continue;
+        }
+        if (keyword.name == "y") {
+            args.y = require_range_arg(keyword.value, "clip-box :y");
+            has_y = true;
+            continue;
+        }
+        if (keyword.name == "z") {
+            args.z = require_range_arg(keyword.value, "clip-box :z");
+            has_z = true;
+            continue;
+        }
+        throw EvalError("clip-box does not recognize `:" + keyword.name + "`");
+    }
+    if (!has_x) {
+        throw EvalError("clip-box requires `:x`");
+    }
+    if (!has_y) {
+        throw EvalError("clip-box requires `:y`");
+    }
+    if (!has_z) {
+        throw EvalError("clip-box requires `:z`");
+    }
+    return args;
+}
+
+enum class AlignMode {
+    Min,
+    Center,
+    Max,
+};
+
+struct BoxArgs {
+    double width = 0.0;
+    double depth = 0.0;
+    double height = 0.0;
+    std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Min};
+};
+
+AlignMode require_align_mode(const Arg& arg, const std::string& label) {
+    if (arg.kind != Arg::Kind::Symbol && arg.kind != Arg::Kind::Text) {
+        throw EvalError(label + " expects `min`, `center`, or `max` symbols");
+    }
+    const std::string& value = arg.text_value;
+    if (value == "min") {
+        return AlignMode::Min;
+    }
+    if (value == "center") {
+        return AlignMode::Center;
+    }
+    if (value == "max") {
+        return AlignMode::Max;
+    }
+    throw EvalError(label + " expects `min`, `center`, or `max`, got `" + value + "`");
+}
+
+std::array<AlignMode, 3> require_align_tuple(const Arg& arg, const std::string& label) {
+    if (arg.kind != Arg::Kind::List || arg.list_value.size() != 3) {
+        throw EvalError(label + " expects `(x y z)` axis symbols");
+    }
+    return {
+        require_align_mode(arg.list_value[0], label),
+        require_align_mode(arg.list_value[1], label),
+        require_align_mode(arg.list_value[2], label),
+    };
+}
+
+double align_offset(double size, AlignMode align) {
+    switch (align) {
+        case AlignMode::Min:
+            return 0.0;
+        case AlignMode::Center:
+            return -size * 0.5;
+        case AlignMode::Max:
+            return -size;
+    }
+    return 0.0;
+}
+
+BoxArgs box_args(const Command& command) {
+    if (command.args.size() != 3) {
+        throw EvalError("box expects width, depth, and height");
+    }
+    BoxArgs args;
+    args.width = require_number_arg(command.args, 0, "box");
+    args.depth = require_number_arg(command.args, 1, "box");
+    args.height = require_number_arg(command.args, 2, "box");
+    for (const auto& keyword : command.keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError("box keywords expect arg values only");
+        }
+        if (keyword.name == "align") {
+            args.align = require_align_tuple(keyword.value, "box :align");
+            continue;
+        }
+        throw EvalError("box does not recognize `:" + keyword.name + "`");
+    }
+    return args;
+}
+
+struct PlaneArgs {
+    std::array<double, 3> origin{0.0, 0.0, 0.0};
+    std::array<double, 3> x_axis{1.0, 0.0, 0.0};
+    std::array<double, 3> normal{0.0, 0.0, 1.0};
+};
+
+std::array<double, 3> require_point3_arg(const Arg& arg, const std::string& label);
+
+PlaneArgs plane_args(const Command& command) {
+    if (!command.args.empty()) {
+        throw EvalError("plane expects no positional arguments");
+    }
+    PlaneArgs args;
+    for (const auto& keyword : command.keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError("plane keywords expect arg values only");
+        }
+        if (keyword.name == "origin") {
+            args.origin = require_point3_arg(keyword.value, "plane :origin");
+            continue;
+        }
+        if (keyword.name == "x") {
+            args.x_axis = require_point3_arg(keyword.value, "plane :x");
+            continue;
+        }
+        if (keyword.name == "normal") {
+            args.normal = require_point3_arg(keyword.value, "plane :normal");
+            continue;
+        }
+        throw EvalError("plane does not recognize `:" + keyword.name + "`");
+    }
+    return args;
+}
+
+std::optional<SelectorPayload> exact_edge_selector(const Command& command, const std::string& op) {
+    if (command.keywords.empty()) {
+        return std::nullopt;
+    }
+    if (command.keywords.size() != 1) {
+        throw EvalError(op + " supports only one `:edges` selector keyword");
+    }
+    const Keyword& keyword = command.keywords.front();
+    if (keyword.name != "edges") {
+        throw EvalError(op + " does not recognize `:" + keyword.name + "`");
+    }
+    if (keyword.kind != Keyword::Kind::Selector || !keyword.selector_payload.has_value()) {
+        throw EvalError(op + " `:edges` requires typed selector payload");
+    }
+    const SelectorPayload& payload = *keyword.selector_payload;
+    if (payload.kind != SelectorKind::Edge) {
+        throw EvalError(op + " `:edges` got non-edge selector payload");
+    }
+    if (payload.type != SelectorPayloadType::TargetIds &&
+        payload.type != SelectorPayloadType::Clauses) {
+        throw EvalError(op + " `:edges` got unsupported selector payload");
+    }
+    return payload;
+}
+
+std::optional<SelectorPayload> exact_face_selector(const Command& command, const std::string& op) {
+    if (command.keywords.empty()) {
+        return std::nullopt;
+    }
+    if (command.keywords.size() != 1) {
+        throw EvalError(op + " supports only one `:faces` selector keyword");
+    }
+    const Keyword& keyword = command.keywords.front();
+    if (keyword.name != "faces") {
+        throw EvalError(op + " does not recognize `:" + keyword.name + "`");
+    }
+    if (keyword.kind != Keyword::Kind::Selector || !keyword.selector_payload.has_value()) {
+        throw EvalError(op + " `:faces` requires typed selector payload");
+    }
+    const SelectorPayload& payload = *keyword.selector_payload;
+    if (payload.kind != SelectorKind::Face) {
+        throw EvalError(op + " `:faces` got non-face selector payload");
+    }
+    if (payload.type != SelectorPayloadType::TargetIds &&
+        payload.type != SelectorPayloadType::Clauses) {
+        throw EvalError(op + " `:faces` got unsupported selector payload");
+    }
+    return payload;
+}
+
+std::vector<std::array<double, 2>> require_point2_list(
+    const std::vector<Arg>& args,
+    std::size_t index,
+    const std::string& op
+) {
+    if (index >= args.size() || args[index].kind != Arg::Kind::List) {
+        throw EvalError(op + " expects a list of 2D points");
+    }
+    std::vector<std::array<double, 2>> points;
+    for (const Arg& arg : args[index].list_value) {
+        if (arg.kind != Arg::Kind::Point2) {
+            throw EvalError(op + " expects point2 values");
+        }
+        points.push_back(arg.point2_value);
+    }
+    if (points.size() < 3) {
+        throw EvalError(op + " expects at least three points");
+    }
+    return points;
+}
+
+std::array<double, 3> require_point3_arg(const Arg& arg, const std::string& label) {
+    if (arg.kind != Arg::Kind::Point3) {
+        throw EvalError(label + " expects point3 value");
+    }
+    return arg.point3_value;
+}
+
+std::vector<std::array<double, 3>> require_point3_sequence(
+    const std::vector<Arg>& args,
+    const std::string& op
+) {
+    const std::vector<Arg>* items = &args;
+    if (args.size() == 1 && args[0].kind == Arg::Kind::List) {
+        items = &args[0].list_value;
+    }
+    std::vector<std::array<double, 3>> points;
+    for (const Arg& arg : *items) {
+        if (arg.kind != Arg::Kind::Point3) {
+            throw EvalError(op + " expects point3 values");
+        }
+        points.push_back(arg.point3_value);
+    }
+    if (points.size() < 2) {
+        throw EvalError(op + " expects at least two points");
+    }
+    return points;
+}
+
+double selector_axis_min(
+    SelectorAxis axis,
+    double xmin,
+    double ymin,
+    double zmin
+);
+
+double selector_axis_max(
+    SelectorAxis axis,
+    double xmax,
+    double ymax,
+    double zmax
+);
+
+double distance2(const std::array<double, 2>& left, const std::array<double, 2>& right) {
+    double dx = left[0] - right[0];
+    double dy = left[1] - right[1];
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+std::array<double, 2> add2(const std::array<double, 2>& left, const std::array<double, 2>& right) {
+    return {left[0] + right[0], left[1] + right[1]};
+}
+
+std::array<double, 2> sub2(const std::array<double, 2>& left, const std::array<double, 2>& right) {
+    return {left[0] - right[0], left[1] - right[1]};
+}
+
+std::array<double, 2> mul2(const std::array<double, 2>& point, double scalar) {
+    return {point[0] * scalar, point[1] * scalar};
+}
+
+double dot2(const std::array<double, 2>& left, const std::array<double, 2>& right) {
+    return left[0] * right[0] + left[1] * right[1];
+}
+
+double length2(const std::array<double, 2>& point) {
+    return std::sqrt(point[0] * point[0] + point[1] * point[1]);
+}
+
+TopoDS_Shape make_polygon_face(const std::vector<std::array<double, 2>>& points) {
+    if (points.size() < 3) {
+        throw EvalError("polygon expects at least three points");
+    }
+    BRepBuilderAPI_MakePolygon polygon;
+    for (const auto& point : points) {
+        polygon.Add(gp_Pnt(point[0], point[1], 0.0));
+    }
+    polygon.Close();
+    return BRepBuilderAPI_MakeFace(polygon.Wire()).Shape();
+}
+
+TopoDS_Wire first_wire(const TopoDS_Shape& shape, const std::string& op) {
+    for (TopExp_Explorer explorer(shape, TopAbs_WIRE); explorer.More(); explorer.Next()) {
+        return TopoDS::Wire(explorer.Current());
+    }
+    throw EvalError(op + " expects a wire/profile shape");
+}
+
+TopoDS_Shape make_face_from_shape(const TopoDS_Shape& shape, const std::string& op) {
+    BRepBuilderAPI_MakeFace face(first_wire(shape, op));
+    return face.Shape();
+}
+
+gp_Pnt wire_sample_point(const TopoDS_Wire& wire, const std::string& op) {
+    for (TopExp_Explorer explorer(wire, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(explorer.Current()));
+        double first_param = curve.FirstParameter();
+        double last_param = curve.LastParameter();
+        if (!std::isfinite(first_param) || !std::isfinite(last_param)) {
+            continue;
+        }
+        return curve.Value((first_param + last_param) / 2.0);
+    }
+    throw EvalError(op + " expects wire with at least one edge");
+}
+
+double face_area(const TopoDS_Face& face) {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(face, props);
+    return std::abs(props.Mass());
+}
+
+TopoDS_Shape make_profile_face(
+    const std::vector<TopoDS_Shape>& outer_shapes,
+    const std::vector<TopoDS_Shape>& hole_shapes
+) {
+    if (outer_shapes.empty()) {
+        throw EvalError("profile needs at least one outer loop");
+    }
+    std::vector<TopoDS_Wire> outer_wires;
+    std::vector<TopoDS_Face> outer_faces;
+    std::vector<double> outer_areas;
+    std::vector<std::vector<TopoDS_Wire>> hole_wires_by_outer;
+    outer_wires.reserve(outer_shapes.size());
+    outer_faces.reserve(outer_shapes.size());
+    outer_areas.reserve(outer_shapes.size());
+    hole_wires_by_outer.resize(outer_shapes.size());
+    for (const auto& outer_shape : outer_shapes) {
+        TopoDS_Wire outer_wire = first_wire(outer_shape, "profile");
+        BRepBuilderAPI_MakeFace outer_face_builder(outer_wire);
+        if (!outer_face_builder.IsDone()) {
+            throw EvalError("profile could not build outer face");
+        }
+        TopoDS_Face outer_face = TopoDS::Face(outer_face_builder.Shape());
+        outer_wires.push_back(outer_wire);
+        outer_faces.push_back(outer_face);
+        outer_areas.push_back(face_area(outer_face));
+    }
+    for (const auto& hole_shape : hole_shapes) {
+        TopoDS_Wire hole_wire = first_wire(hole_shape, "profile");
+        gp_Pnt sample = wire_sample_point(hole_wire, "profile");
+        std::optional<std::size_t> matched_outer;
+        double matched_area = 0.0;
+        for (std::size_t index = 0; index < outer_faces.size(); ++index) {
+            BRepClass_FaceClassifier classifier(outer_faces[index], sample, 1.0e-7);
+            TopAbs_State state = classifier.State();
+            if (state != TopAbs_IN && state != TopAbs_ON) {
+                continue;
+            }
+            if (!matched_outer.has_value() || outer_areas[index] < matched_area) {
+                matched_outer = index;
+                matched_area = outer_areas[index];
+            }
+        }
+        if (!matched_outer.has_value()) {
+            throw EvalError("profile hole does not lie inside any outer loop");
+        }
+        hole_wires_by_outer[*matched_outer].push_back(hole_wire);
+    }
+
+    std::vector<TopoDS_Shape> faces;
+    faces.reserve(outer_wires.size());
+    for (std::size_t index = 0; index < outer_wires.size(); ++index) {
+        BRepBuilderAPI_MakeFace face_builder(outer_wires[index]);
+        if (!face_builder.IsDone()) {
+            throw EvalError("profile could not build outer face");
+        }
+        for (const auto& hole_wire : hole_wires_by_outer[index]) {
+            face_builder.Add(hole_wire);
+        }
+        faces.push_back(face_builder.Shape());
+    }
+    if (faces.size() == 1) {
+        return faces.front();
+    }
+
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const auto& face : faces) {
+        builder.Add(compound, face);
+    }
+    return compound;
+}
+
+TopoDS_Shape make_circle_face(double radius) {
+    gp_Circ circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), radius);
+    TopoDS_Wire wire = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circle).Edge()).Wire();
+    return BRepBuilderAPI_MakeFace(wire).Shape();
+}
+
+TopoDS_Shape make_rounded_rect_face(double width, double height, double radius) {
+    double r = std::min(std::abs(radius), std::min(std::abs(width) / 2.0, std::abs(height) / 2.0));
+    double x0 = -width / 2.0;
+    double y0 = -height / 2.0;
+    double x1 = width / 2.0;
+    double y1 = height / 2.0;
+    if (r <= 1.0e-12) {
+        return make_polygon_face({{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}});
+    }
+    BRepBuilderAPI_MakeWire wire_builder;
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x0 + r, y0, 0), gp_Pnt(x1 - r, y0, 0)).Edge());
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(
+                         GC_MakeArcOfCircle(gp_Pnt(x1 - r, y0, 0), gp_Pnt(x1, y0, 0),
+                                            gp_Pnt(x1, y0 + r, 0))
+                             .Value())
+                         .Edge());
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x1, y0 + r, 0), gp_Pnt(x1, y1 - r, 0)).Edge());
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(
+                         GC_MakeArcOfCircle(gp_Pnt(x1, y1 - r, 0), gp_Pnt(x1, y1, 0),
+                                            gp_Pnt(x1 - r, y1, 0))
+                             .Value())
+                         .Edge());
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x1 - r, y1, 0), gp_Pnt(x0 + r, y1, 0)).Edge());
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(
+                         GC_MakeArcOfCircle(gp_Pnt(x0 + r, y1, 0), gp_Pnt(x0, y1, 0),
+                                            gp_Pnt(x0, y1 - r, 0))
+                             .Value())
+                         .Edge());
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x0, y1 - r, 0), gp_Pnt(x0, y0 + r, 0)).Edge());
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(
+                         GC_MakeArcOfCircle(gp_Pnt(x0, y0 + r, 0), gp_Pnt(x0, y0, 0),
+                                            gp_Pnt(x0 + r, y0, 0))
+                             .Value())
+                         .Edge());
+    return BRepBuilderAPI_MakeFace(wire_builder.Wire()).Shape();
+}
+
+struct RoundedCorner {
+    std::array<double, 2> p_in{0.0, 0.0};
+    std::array<double, 2> p_out{0.0, 0.0};
+    std::array<double, 2> mid{0.0, 0.0};
+    bool rounded = false;
+};
+
+std::vector<std::array<double, 2>> normalize_closed_points(
+    const std::vector<std::array<double, 2>>& points,
+    const std::string& op
+) {
+    if (points.size() < 3) {
+        throw EvalError(op + " expects at least three points");
+    }
+    std::vector<std::array<double, 2>> normalized = points;
+    if (normalized.size() >= 2 && distance2(normalized.front(), normalized.back()) <= 1.0e-12) {
+        normalized.pop_back();
+    }
+    if (normalized.size() < 3) {
+        throw EvalError(op + " expects at least three points");
+    }
+    return normalized;
+}
+
+std::vector<RoundedCorner> rounded_polygon_corners(
+    const std::vector<std::array<double, 2>>& raw_points,
+    double radius,
+    const std::string& op
+) {
+    std::vector<std::array<double, 2>> points = normalize_closed_points(raw_points, op);
+    double requested_radius = std::abs(radius);
+    std::vector<RoundedCorner> corners;
+    corners.reserve(points.size());
+    if (requested_radius <= 1.0e-12) {
+        for (const auto& point : points) {
+            corners.push_back({point, point, point, false});
+        }
+        return corners;
+    }
+
+    std::size_t count = points.size();
+    for (std::size_t index = 0; index < count; ++index) {
+        auto prev = points[(index + count - 1) % count];
+        auto curr = points[index];
+        auto next = points[(index + 1) % count];
+        auto in_vec = sub2(prev, curr);
+        auto out_vec = sub2(next, curr);
+        double len_in = length2(in_vec);
+        double len_out = length2(out_vec);
+        if (len_in <= 1.0e-12 || len_out <= 1.0e-12) {
+            throw EvalError(op + " got a zero-length edge");
+        }
+        auto in_dir = mul2(in_vec, 1.0 / len_in);
+        auto out_dir = mul2(out_vec, 1.0 / len_out);
+        double dot = std::clamp(dot2(in_dir, out_dir), -1.0, 1.0);
+        double theta = std::acos(dot);
+        double tan_half = theta > 1.0e-12 ? std::tan(theta / 2.0) : 0.0;
+        auto bisector = add2(in_dir, out_dir);
+        double bisector_len = length2(bisector);
+        if (tan_half <= 1.0e-12 || bisector_len <= 1.0e-12) {
+            corners.push_back({curr, curr, curr, false});
+            continue;
+        }
+        double corner_radius = std::min(requested_radius, std::min(len_in, len_out) * tan_half);
+        if (corner_radius <= 1.0e-12) {
+            corners.push_back({curr, curr, curr, false});
+            continue;
+        }
+        double tangent = corner_radius / tan_half;
+        bisector = mul2(bisector, 1.0 / bisector_len);
+        double center_dist = corner_radius / std::sin(theta / 2.0);
+        auto p_in = add2(curr, mul2(in_dir, tangent));
+        auto p_out = add2(curr, mul2(out_dir, tangent));
+        auto center = add2(curr, mul2(bisector, center_dist));
+        auto mid_dir = sub2(curr, center);
+        double mid_len = length2(mid_dir);
+        if (mid_len <= 1.0e-12) {
+            corners.push_back({curr, curr, curr, false});
+            continue;
+        }
+        auto mid = add2(center, mul2(mid_dir, corner_radius / mid_len));
+        corners.push_back({p_in, p_out, mid, true});
+    }
+    return corners;
+}
+
+TopoDS_Shape make_rounded_polygon_face(const std::vector<std::array<double, 2>>& points, double radius) {
+    std::vector<RoundedCorner> corners = rounded_polygon_corners(points, radius, "rounded-polygon");
+    bool any_rounded = false;
+    for (const auto& corner : corners) {
+        any_rounded = any_rounded || corner.rounded;
+    }
+    if (!any_rounded) {
+        return make_polygon_face(normalize_closed_points(points, "rounded-polygon"));
+    }
+    BRepBuilderAPI_MakeWire wire_builder;
+    for (std::size_t index = 0; index < corners.size(); ++index) {
+        const RoundedCorner& current = corners[index];
+        const RoundedCorner& next = corners[(index + 1) % corners.size()];
+        if (distance2(current.p_out, next.p_in) > 1.0e-9) {
+            wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(current.p_out[0], current.p_out[1], 0),
+                                                     gp_Pnt(next.p_in[0], next.p_in[1], 0))
+                                 .Edge());
+        }
+        if (next.rounded) {
+            wire_builder.Add(BRepBuilderAPI_MakeEdge(
+                                 GC_MakeArcOfCircle(gp_Pnt(next.p_in[0], next.p_in[1], 0),
+                                                    gp_Pnt(next.mid[0], next.mid[1], 0),
+                                                    gp_Pnt(next.p_out[0], next.p_out[1], 0))
+                                     .Value())
+                                 .Edge());
+        }
+    }
+    return BRepBuilderAPI_MakeFace(wire_builder.Wire()).Shape();
+}
+
+TopoDS_Shape make_box(double width, double depth, double height, const std::array<AlignMode, 3>& align) {
+    TopoDS_Shape shape = BRepPrimAPI_MakeBox(width, depth, height).Shape();
+    double tx = align_offset(width, align[0]);
+    double ty = align_offset(depth, align[1]);
+    double tz = align_offset(height, align[2]);
+    if (std::abs(tx) <= 1.0e-12 && std::abs(ty) <= 1.0e-12 && std::abs(tz) <= 1.0e-12) {
+        return shape;
+    }
+    gp_Trsf trsf;
+    trsf.SetTranslation(gp_Vec(tx, ty, tz));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
+}
+
+TopoDS_Shape make_sphere(double radius) {
+    return BRepPrimAPI_MakeSphere(radius).Shape();
+}
+
+TopoDS_Shape make_cylinder(double radius, double height) {
+    return BRepPrimAPI_MakeCylinder(radius, height).Shape();
+}
+
+TopoDS_Shape make_cone(double radius1, double radius2, double height) {
+    return BRepPrimAPI_MakeCone(radius1, radius2, height).Shape();
+}
+
+TopoDS_Shape extrude_shape(const TopoDS_Shape& shape, double height) {
+    return BRepPrimAPI_MakePrism(shape, gp_Vec(0, 0, height)).Shape();
+}
+
+TopoDS_Shape revolve_shape(const TopoDS_Shape& shape, double angle_degrees) {
+    gp_Trsf profile_trsf;
+    profile_trsf.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)), 1.5707963267948966);
+    TopoDS_Shape profile = BRepBuilderAPI_Transform(shape, profile_trsf, true).Shape();
+    return BRepPrimAPI_MakeRevol(profile, gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)),
+                                 angle_degrees * M_PI / 180.0)
+        .Shape();
+}
+
+TopoDS_Shape loft_shapes(double distance, const std::vector<TopoDS_Shape>& profiles) {
+    if (profiles.size() < 2) {
+        throw EvalError("loft requires at least two profiles");
+    }
+    double denominator = static_cast<double>(profiles.size() - 1);
+    BRepOffsetAPI_ThruSections loft(true, false, 1.0e-6);
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        gp_Trsf trsf;
+        trsf.SetTranslation(gp_Vec(0, 0, distance * static_cast<double>(index) / denominator));
+        TopoDS_Shape section_shape = BRepBuilderAPI_Transform(profiles[index], trsf, true).Shape();
+        loft.AddWire(first_wire(section_shape, "loft"));
+    }
+    loft.Build();
+    if (!loft.IsDone()) {
+        throw EvalError("loft failed to build");
+    }
+    return loft.Shape();
+}
+
+TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path) {
+    BRepOffsetAPI_MakePipeShell pipe(first_wire(path, "sweep"));
+    pipe.Add(first_wire(profile, "sweep"));
+    pipe.Build();
+    if (!pipe.IsDone()) {
+        throw EvalError("sweep failed to build");
+    }
+    pipe.MakeSolid();
+    return pipe.Shape();
+}
+
+TopoDS_Shape offset_shape(const TopoDS_Shape& profile, double amount) {
+    BRepOffsetAPI_MakeOffset offset(first_wire(profile, "offset"), GeomAbs_Arc, false);
+    offset.Perform(amount);
+    TopoDS_Shape offset_result = offset.Shape();
+    return BRepBuilderAPI_MakeFace(first_wire(offset_result, "offset")).Shape();
+}
+
+TopoDS_Shape twist_shape(const TopoDS_Shape& profile, double height, double angle_degrees) {
+    constexpr std::size_t segments = 12;
+    BRepOffsetAPI_ThruSections twist(true, false, 1.0e-6);
+    for (std::size_t index = 0; index <= segments; ++index) {
+        double ratio = static_cast<double>(index) / static_cast<double>(segments);
+        gp_Trsf rotate;
+        rotate.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)),
+                           angle_degrees * ratio * M_PI / 180.0);
+        TopoDS_Shape rotated = BRepBuilderAPI_Transform(profile, rotate, true).Shape();
+        gp_Trsf translate;
+        translate.SetTranslation(gp_Vec(0, 0, height * ratio));
+        TopoDS_Shape section = BRepBuilderAPI_Transform(rotated, translate, true).Shape();
+        twist.AddWire(first_wire(section, "twist"));
+    }
+    twist.Build();
+    if (!twist.IsDone()) {
+        throw EvalError("twist failed to build");
+    }
+    return twist.Shape();
+}
+
+TopoDS_Shape taper_shape(const TopoDS_Shape& profile, double height, double scale_x, double scale_y) {
+    TopoDS_Wire base_wire = first_wire(profile, "taper");
+    gp_GTrsf top_scale;
+    top_scale.SetValue(1, 1, scale_x);
+    top_scale.SetValue(2, 2, scale_y);
+    top_scale.SetValue(3, 3, 1.0);
+    TopoDS_Shape top_scaled = BRepBuilderAPI_GTransform(profile, top_scale, true).Shape();
+    gp_Trsf top_translate;
+    top_translate.SetTranslation(gp_Vec(0, 0, height));
+    TopoDS_Shape top_shape = BRepBuilderAPI_Transform(top_scaled, top_translate, true).Shape();
+    BRepOffsetAPI_ThruSections taper(true, false, 1.0e-6);
+    taper.AddWire(base_wire);
+    taper.AddWire(first_wire(top_shape, "taper"));
+    taper.Build();
+    if (!taper.IsDone()) {
+        throw EvalError("taper failed to build");
+    }
+    return taper.Shape();
+}
+
+TopoDS_Shape fuse_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
+    return BRepAlgoAPI_Fuse(lhs, rhs).Shape();
+}
+
+TopoDS_Shape cut_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
+    return BRepAlgoAPI_Cut(lhs, rhs).Shape();
+}
+
+TopoDS_Shape common_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
+    return BRepAlgoAPI_Common(lhs, rhs).Shape();
+}
+
+TopoDS_Shape clip_box_shape(
+    const TopoDS_Shape& shape,
+    const std::array<double, 2>& x,
+    const std::array<double, 2>& y,
+    const std::array<double, 2>& z
+) {
+    TopoDS_Shape clip_box =
+        BRepPrimAPI_MakeBox(gp_Pnt(x[0], y[0], z[0]), gp_Pnt(x[1], y[1], z[1])).Shape();
+    return BRepAlgoAPI_Common(shape, clip_box).Shape();
+}
+
+std::vector<int> resolve_edge_target_indexes(
+    const std::string& part_id,
+    const TopoDS_Shape& shape,
+    const std::vector<std::string>& requested_target_ids
+) {
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+    std::vector<std::string> edge_target_ids;
+    std::vector<std::string> edge_stable_ids;
+    std::map<std::string, int> stable_counts;
+    edge_target_ids.reserve(edge_map.Extent());
+    edge_stable_ids.reserve(edge_map.Extent());
+    for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
+        int edge_index = edge_ordinal - 1;
+        TopoDS_Edge edge = TopoDS::Edge(edge_map.FindKey(edge_ordinal));
+        std::string target_id = edge_target_id(part_id, edge_index, edge);
+        std::string stable_id = stable_edge_target_id(target_id);
+        edge_target_ids.push_back(target_id);
+        edge_stable_ids.push_back(stable_id);
+        stable_counts[stable_id] += 1;
+    }
+
+    std::vector<int> matched_indexes;
+    std::vector<std::string> matched_target_ids;
+    for (const std::string& requested_target_id : requested_target_ids) {
+        bool matched = false;
+        for (std::size_t candidate_index = 0; candidate_index < edge_target_ids.size(); ++candidate_index) {
+            if (edge_target_ids[candidate_index] != requested_target_id) {
+                continue;
+            }
+            if (std::find(matched_indexes.begin(), matched_indexes.end(), static_cast<int>(candidate_index)) ==
+                matched_indexes.end()) {
+                matched_indexes.push_back(static_cast<int>(candidate_index));
+            }
+            matched_target_ids.push_back(requested_target_id);
+            matched = true;
+            break;
+        }
+        if (matched) {
+            continue;
+        }
+        std::string requested_stable_id = stable_edge_target_id(requested_target_id);
+        if (stable_counts[requested_stable_id] > 1) {
+            throw EvalError("edge selector is ambiguous");
+        }
+        for (std::size_t candidate_index = 0; candidate_index < edge_stable_ids.size(); ++candidate_index) {
+            if (edge_stable_ids[candidate_index] != requested_stable_id) {
+                continue;
+            }
+            if (std::find(matched_indexes.begin(), matched_indexes.end(), static_cast<int>(candidate_index)) ==
+                matched_indexes.end()) {
+                matched_indexes.push_back(static_cast<int>(candidate_index));
+            }
+            matched_target_ids.push_back(requested_target_id);
+            matched = true;
+            break;
+        }
+        if (!matched) {
+            throw EvalError("edge selector target id not found");
+        }
+    }
+    if (matched_target_ids.size() != requested_target_ids.size()) {
+        throw EvalError("edge selector is ambiguous");
+    }
+    if (matched_indexes.empty()) {
+        throw EvalError("edge selector target id not found");
+    }
+    return matched_indexes;
+}
+
+std::vector<int> resolve_edge_clauses(
+    const TopoDS_Shape& shape,
+    const std::vector<SelectorClause>& clauses
+) {
+    if (clauses.empty()) {
+        throw EvalError("edge selector clauses cannot be empty");
+    }
+
+    Bnd_Box shape_box;
+    BRepBndLib::Add(shape, shape_box);
+    double xmin = 0.0;
+    double ymin = 0.0;
+    double zmin = 0.0;
+    double xmax = 0.0;
+    double ymax = 0.0;
+    double zmax = 0.0;
+    shape_box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    double tol = std::max(
+        xmax - xmin,
+        std::max(ymax - ymin, std::max(zmax - zmin, 1.0))
+    ) * 1.0e-6;
+
+    std::vector<int> matched_indexes;
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+    for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
+        int edge_index = edge_ordinal - 1;
+        TopoDS_Edge edge = TopoDS::Edge(edge_map.FindKey(edge_ordinal));
+        Bnd_Box edge_box;
+        BRepBndLib::Add(edge, edge_box);
+        double edge_xmin = 0.0;
+        double edge_ymin = 0.0;
+        double edge_zmin = 0.0;
+        double edge_xmax = 0.0;
+        double edge_ymax = 0.0;
+        double edge_zmax = 0.0;
+        edge_box.Get(edge_xmin, edge_ymin, edge_zmin, edge_xmax, edge_ymax, edge_zmax);
+
+        bool matches = true;
+        for (const SelectorClause& clause : clauses) {
+            switch (clause.type) {
+                case SelectorClauseType::Axis: {
+                    if (!clause.axis.has_value()) {
+                        throw EvalError("edge axis selector missing axis");
+                    }
+                    double x_span = edge_xmax - edge_xmin;
+                    double y_span = edge_ymax - edge_ymin;
+                    double z_span = edge_zmax - edge_zmin;
+                    if (*clause.axis == SelectorAxis::X) {
+                        matches = matches && x_span > tol && y_span <= tol && z_span <= tol;
+                    } else if (*clause.axis == SelectorAxis::Y) {
+                        matches = matches && y_span > tol && x_span <= tol && z_span <= tol;
+                    } else {
+                        matches = matches && z_span > tol && x_span <= tol && y_span <= tol;
+                    }
+                    break;
+                }
+                case SelectorClauseType::Boundary: {
+                    if (!clause.axis.has_value() || !clause.bound.has_value()) {
+                        throw EvalError("edge boundary selector missing axis or bound");
+                    }
+                    double shape_min = selector_axis_min(*clause.axis, xmin, ymin, zmin);
+                    double shape_max = selector_axis_max(*clause.axis, xmax, ymax, zmax);
+                    double edge_min = selector_axis_min(*clause.axis, edge_xmin, edge_ymin, edge_zmin);
+                    double edge_max = selector_axis_max(*clause.axis, edge_xmax, edge_ymax, edge_zmax);
+                    double shape_bound = *clause.bound == SelectorBound::Min ? shape_min : shape_max;
+                    matches = matches &&
+                        std::abs(edge_min - shape_bound) <= tol &&
+                        std::abs(edge_max - shape_bound) <= tol;
+                    break;
+                }
+                default:
+                    throw EvalError("unsupported edge selector clause for fillet/chamfer");
+            }
+            if (!matches) {
+                break;
+            }
+        }
+        if (matches) {
+            matched_indexes.push_back(edge_index);
+        }
+    }
+
+    if (matched_indexes.empty()) {
+        throw EvalError("edge selector matched no edges");
+    }
+    return matched_indexes;
+}
+
+std::vector<TopoDS_Face> resolve_face_targets(
+    const std::string& part_id,
+    const TopoDS_Shape& shape,
+    const std::vector<std::string>& requested_target_ids
+) {
+    std::vector<TopoDS_Face> faces;
+    std::vector<std::string> face_target_ids;
+    std::vector<std::string> face_stable_ids;
+    std::map<std::string, int> stable_counts;
+    int face_index = 0;
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next(), ++face_index) {
+        TopoDS_Face face = TopoDS::Face(explorer.Current());
+        std::string target_id = face_target_id(part_id, face_index, face);
+        std::string stable_id = stable_face_target_id(target_id);
+        faces.push_back(face);
+        face_target_ids.push_back(target_id);
+        face_stable_ids.push_back(stable_id);
+        stable_counts[stable_id] += 1;
+    }
+
+    std::vector<TopoDS_Face> matched_faces;
+    std::vector<int> matched_indexes;
+    std::vector<std::string> matched_target_ids;
+    for (const std::string& requested_target_id : requested_target_ids) {
+        bool matched = false;
+        for (std::size_t candidate_index = 0; candidate_index < face_target_ids.size(); ++candidate_index) {
+            if (face_target_ids[candidate_index] != requested_target_id) {
+                continue;
+            }
+            if (std::find(matched_indexes.begin(), matched_indexes.end(), static_cast<int>(candidate_index)) ==
+                matched_indexes.end()) {
+                matched_faces.push_back(faces[candidate_index]);
+                matched_indexes.push_back(static_cast<int>(candidate_index));
+            }
+            matched_target_ids.push_back(requested_target_id);
+            matched = true;
+            break;
+        }
+        if (matched) {
+            continue;
+        }
+        std::string requested_stable_id = stable_face_target_id(requested_target_id);
+        if (stable_counts[requested_stable_id] > 1) {
+            throw EvalError("face selector is ambiguous");
+        }
+        for (std::size_t candidate_index = 0; candidate_index < face_stable_ids.size(); ++candidate_index) {
+            if (face_stable_ids[candidate_index] != requested_stable_id) {
+                continue;
+            }
+            if (std::find(matched_indexes.begin(), matched_indexes.end(), static_cast<int>(candidate_index)) ==
+                matched_indexes.end()) {
+                matched_faces.push_back(faces[candidate_index]);
+                matched_indexes.push_back(static_cast<int>(candidate_index));
+            }
+            matched_target_ids.push_back(requested_target_id);
+            matched = true;
+            break;
+        }
+        if (!matched) {
+            throw EvalError("face selector target id not found");
+        }
+    }
+    if (matched_target_ids.size() != requested_target_ids.size()) {
+        throw EvalError("face selector is ambiguous");
+    }
+    if (matched_faces.empty()) {
+        throw EvalError("face selector target id not found");
+    }
+    return matched_faces;
+}
+
+double selector_axis_min(
+    SelectorAxis axis,
+    double xmin,
+    double ymin,
+    double zmin
+) {
+    switch (axis) {
+        case SelectorAxis::X:
+            return xmin;
+        case SelectorAxis::Y:
+            return ymin;
+        case SelectorAxis::Z:
+            return zmin;
+    }
+    return 0.0;
+}
+
+double selector_axis_max(
+    SelectorAxis axis,
+    double xmax,
+    double ymax,
+    double zmax
+) {
+    switch (axis) {
+        case SelectorAxis::X:
+            return xmax;
+        case SelectorAxis::Y:
+            return ymax;
+        case SelectorAxis::Z:
+            return zmax;
+    }
+    return 0.0;
+}
+
+std::vector<TopoDS_Face> resolve_face_clauses(
+    const TopoDS_Shape& shape,
+    const std::vector<SelectorClause>& clauses
+) {
+    if (clauses.empty()) {
+        throw EvalError("face selector clauses cannot be empty");
+    }
+
+    Bnd_Box shape_box;
+    BRepBndLib::Add(shape, shape_box);
+    double xmin = 0.0;
+    double ymin = 0.0;
+    double zmin = 0.0;
+    double xmax = 0.0;
+    double ymax = 0.0;
+    double zmax = 0.0;
+    shape_box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    double tol = std::max(
+        xmax - xmin,
+        std::max(ymax - ymin, std::max(zmax - zmin, 1.0))
+    ) * 1.0e-6;
+    constexpr double area_tol = 1.0e-6;
+
+    std::vector<TopoDS_Face> faces;
+    std::vector<double> face_areas;
+    std::vector<int> candidate_indexes;
+
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        TopoDS_Face face = TopoDS::Face(explorer.Current());
+        BRepAdaptor_Surface surface(face);
+        bool is_planar = surface.GetType() == GeomAbs_Plane;
+
+        Bnd_Box face_box;
+        BRepBndLib::Add(face, face_box);
+        double face_xmin = 0.0;
+        double face_ymin = 0.0;
+        double face_zmin = 0.0;
+        double face_xmax = 0.0;
+        double face_ymax = 0.0;
+        double face_zmax = 0.0;
+        face_box.Get(face_xmin, face_ymin, face_zmin, face_xmax, face_ymax, face_zmax);
+
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        double area = props.Mass();
+
+        bool matches = true;
+        for (const SelectorClause& clause : clauses) {
+            switch (clause.type) {
+                case SelectorClauseType::Boundary: {
+                    if (!clause.axis.has_value() || !clause.bound.has_value()) {
+                        throw EvalError("face boundary selector missing axis or bound");
+                    }
+                    double shape_min = selector_axis_min(*clause.axis, xmin, ymin, zmin);
+                    double shape_max = selector_axis_max(*clause.axis, xmax, ymax, zmax);
+                    double face_min = selector_axis_min(*clause.axis, face_xmin, face_ymin, face_zmin);
+                    double face_max = selector_axis_max(*clause.axis, face_xmax, face_ymax, face_zmax);
+                    double shape_bound = *clause.bound == SelectorBound::Min ? shape_min : shape_max;
+                    matches = matches &&
+                        std::abs(face_min - shape_bound) <= tol &&
+                        std::abs(face_max - shape_bound) <= tol;
+                    break;
+                }
+                case SelectorClauseType::Planar:
+                    matches = matches && is_planar;
+                    break;
+                case SelectorClauseType::Normal: {
+                    if (!clause.axis.has_value()) {
+                        throw EvalError("face normal selector missing axis");
+                    }
+                    double face_min = selector_axis_min(*clause.axis, face_xmin, face_ymin, face_zmin);
+                    double face_max = selector_axis_max(*clause.axis, face_xmax, face_ymax, face_zmax);
+                    matches = matches && is_planar && (face_max - face_min) <= tol;
+                    break;
+                }
+                case SelectorClauseType::Area:
+                    break;
+                default:
+                    throw EvalError("unsupported face selector clause for shell");
+            }
+            if (!matches) {
+                break;
+            }
+        }
+
+        if (matches) {
+            faces.push_back(face);
+            face_areas.push_back(area);
+            candidate_indexes.push_back(static_cast<int>(faces.size()) - 1);
+        }
+    }
+
+    if (candidate_indexes.empty()) {
+        throw EvalError("face selector matched no faces");
+    }
+
+    for (const SelectorClause& clause : clauses) {
+        if (clause.type != SelectorClauseType::Area) {
+            continue;
+        }
+        if (!clause.rank.has_value()) {
+            throw EvalError("face area selector missing rank");
+        }
+        double target_area = face_areas[static_cast<std::size_t>(candidate_indexes.front())];
+        for (int candidate_index : candidate_indexes) {
+            double area = face_areas[static_cast<std::size_t>(candidate_index)];
+            if (*clause.rank == SelectorAreaRank::Min) {
+                target_area = std::min(target_area, area);
+            } else {
+                target_area = std::max(target_area, area);
+            }
+        }
+        std::vector<int> filtered_indexes;
+        for (int candidate_index : candidate_indexes) {
+            double area = face_areas[static_cast<std::size_t>(candidate_index)];
+            if (std::abs(area - target_area) <= area_tol) {
+                filtered_indexes.push_back(candidate_index);
+            }
+        }
+        candidate_indexes = std::move(filtered_indexes);
+        if (candidate_indexes.empty()) {
+            throw EvalError("face selector matched no faces");
+        }
+    }
+
+    std::vector<TopoDS_Face> matched_faces;
+    matched_faces.reserve(candidate_indexes.size());
+    for (int candidate_index : candidate_indexes) {
+        matched_faces.push_back(faces[static_cast<std::size_t>(candidate_index)]);
+    }
+    return matched_faces;
+}
+
+TopoDS_Shape fillet_shape(
+    const std::string& part_id,
+    const TopoDS_Shape& shape,
+    double radius,
+    const std::optional<SelectorPayload>& selector
+) {
+    BRepFilletAPI_MakeFillet fillet(shape);
+    if (!selector.has_value()) {
+        TopTools_IndexedMapOfShape edge_map;
+        TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+        int edge_count = 0;
+        for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
+            fillet.Add(radius, TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
+            ++edge_count;
+        }
+        if (edge_count == 0) {
+            throw EvalError("fillet found no edges");
+        }
+    } else {
+        std::vector<int> matched_indexes;
+        if (selector->type == SelectorPayloadType::TargetIds) {
+            matched_indexes = resolve_edge_target_indexes(part_id, shape, selector->target_ids);
+        } else if (selector->type == SelectorPayloadType::Clauses) {
+            matched_indexes = resolve_edge_clauses(shape, selector->clauses);
+        } else {
+            throw EvalError("fillet `:edges` selector payload unsupported");
+        }
+        TopTools_IndexedMapOfShape edge_map;
+        TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+        for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
+            int edge_index = edge_ordinal - 1;
+            if (std::find(matched_indexes.begin(), matched_indexes.end(), edge_index) == matched_indexes.end()) {
+                continue;
+            }
+            fillet.Add(radius, TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
+        }
+    }
+    return fillet.Shape();
+}
+
+TopoDS_Shape chamfer_shape(
+    const std::string& part_id,
+    const TopoDS_Shape& shape,
+    double distance,
+    const std::optional<SelectorPayload>& selector
+) {
+    BRepFilletAPI_MakeChamfer chamfer(shape);
+    if (!selector.has_value()) {
+        TopTools_IndexedMapOfShape edge_map;
+        TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+        int edge_count = 0;
+        for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
+            chamfer.Add(distance, TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
+            ++edge_count;
+        }
+        if (edge_count == 0) {
+            throw EvalError("chamfer found no edges");
+        }
+    } else {
+        std::vector<int> matched_indexes;
+        if (selector->type == SelectorPayloadType::TargetIds) {
+            matched_indexes = resolve_edge_target_indexes(part_id, shape, selector->target_ids);
+        } else if (selector->type == SelectorPayloadType::Clauses) {
+            matched_indexes = resolve_edge_clauses(shape, selector->clauses);
+        } else {
+            throw EvalError("chamfer `:edges` selector payload unsupported");
+        }
+        TopTools_IndexedMapOfShape edge_map;
+        TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+        for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
+            int edge_index = edge_ordinal - 1;
+            if (std::find(matched_indexes.begin(), matched_indexes.end(), edge_index) == matched_indexes.end()) {
+                continue;
+            }
+            chamfer.Add(distance, TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
+        }
+    }
+    return chamfer.Shape();
+}
+
+TopoDS_Shape shell_shape(
+    const std::string& part_id,
+    const TopoDS_Shape& shape,
+    double thickness,
+    const std::optional<SelectorPayload>& selector
+) {
+    double offset = -std::abs(thickness);
+    if (!selector.has_value()) {
+        TopTools_ListOfShape closing_faces;
+        double top_z = -1.0e100;
+        for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
+            TopoDS_Face face = TopoDS::Face(face_explorer.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane) {
+                continue;
+            }
+            Bnd_Box face_box;
+            BRepBndLib::Add(face, face_box);
+            Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+            face_box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+            if (zmax > top_z + 1.0e-7) {
+                closing_faces.Clear();
+                top_z = zmax;
+            }
+            if (std::abs(zmax - top_z) <= 1.0e-7) {
+                closing_faces.Append(face);
+            }
+        }
+        if (closing_faces.IsEmpty()) {
+            BRepOffsetAPI_MakeOffsetShape inner_offset;
+            inner_offset.PerformByJoin(
+                shape,
+                offset,
+                0.05,
+                BRepOffset_Skin,
+                false,
+                false,
+                GeomAbs_Intersection,
+                true
+            );
+            return BRepAlgoAPI_Cut(shape, inner_offset.Shape()).Shape();
+        }
+        BRepOffsetAPI_MakeThickSolid shell;
+        shell.MakeThickSolidByJoin(
+            shape,
+            closing_faces,
+            offset,
+            0.05,
+            BRepOffset_Skin,
+            false,
+            false,
+            GeomAbs_Intersection,
+            true
+        );
+        return shell.Shape();
+    }
+    std::vector<TopoDS_Face> matched_faces;
+    if (selector->type == SelectorPayloadType::TargetIds) {
+        if (selector->target_ids.empty()) {
+            throw EvalError("shell `:faces` target ids cannot be empty");
+        }
+        matched_faces = resolve_face_targets(part_id, shape, selector->target_ids);
+    } else if (selector->type == SelectorPayloadType::Clauses) {
+        matched_faces = resolve_face_clauses(shape, selector->clauses);
+    } else {
+        throw EvalError("shell `:faces` selector payload unsupported");
+    }
+    TopTools_ListOfShape closing_faces;
+    for (const auto& face : matched_faces) {
+        closing_faces.Append(face);
+    }
+    BRepOffsetAPI_MakeThickSolid shell;
+    shell.MakeThickSolidByJoin(
+        shape,
+        closing_faces,
+        offset,
+        0.05,
+        BRepOffset_Skin,
+        false,
+        false,
+        GeomAbs_Intersection,
+        true
+    );
+    return shell.Shape();
+}
+
+TopoDS_Shape compound_shapes(const std::vector<TopoDS_Shape>& shapes) {
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const auto& shape : shapes) {
+        builder.Add(compound, shape);
+    }
+    return compound;
+}
+
+TopoDS_Shape translate_shape(const TopoDS_Shape& shape, double x, double y, double z) {
+    gp_Trsf trsf;
+    trsf.SetTranslation(gp_Vec(x, y, z));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
+}
+
+TopoDS_Shape rotate_shape(const TopoDS_Shape& shape, double x_degrees, double y_degrees, double z_degrees) {
+    gp_Trsf trsf_x;
+    trsf_x.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)), x_degrees * M_PI / 180.0);
+    TopoDS_Shape after_x = BRepBuilderAPI_Transform(shape, trsf_x, true).Shape();
+    gp_Trsf trsf_y;
+    trsf_y.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0)), y_degrees * M_PI / 180.0);
+    TopoDS_Shape after_y = BRepBuilderAPI_Transform(after_x, trsf_y, true).Shape();
+    gp_Trsf trsf_z;
+    trsf_z.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), z_degrees * M_PI / 180.0);
+    return BRepBuilderAPI_Transform(after_y, trsf_z, true).Shape();
+}
+
+TopoDS_Shape scale_shape(const TopoDS_Shape& shape, double x, double y, double z) {
+    gp_GTrsf gtrsf;
+    gtrsf.SetValue(1, 1, x);
+    gtrsf.SetValue(2, 2, y);
+    gtrsf.SetValue(3, 3, z);
+    return BRepBuilderAPI_GTransform(shape, gtrsf, true).Shape();
+}
+
+TopoDS_Shape mirror_shape(const TopoDS_Shape& shape, const std::string& axis, double offset) {
+    gp_Pnt point;
+    gp_Dir normal;
+    std::string lowered = axis;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (lowered == "x") {
+        point = gp_Pnt(offset, 0, 0);
+        normal = gp_Dir(1, 0, 0);
+    } else if (lowered == "y") {
+        point = gp_Pnt(0, offset, 0);
+        normal = gp_Dir(0, 1, 0);
+    } else if (lowered == "z") {
+        point = gp_Pnt(0, 0, offset);
+        normal = gp_Dir(0, 0, 1);
+    } else {
+        throw EvalError("mirror unsupported axis `" + axis + "`");
+    }
+    gp_Trsf trsf;
+    trsf.SetMirror(gp_Ax2(point, normal));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
+}
+
+TopoDS_Shape make_path_wire(const std::vector<std::array<double, 3>>& points) {
+    BRepBuilderAPI_MakePolygon path;
+    for (const auto& point : points) {
+        path.Add(gp_Pnt(point[0], point[1], point[2]));
+    }
+    return path.Wire();
+}
+
+TopoDS_Shape make_helix_path_wire(double radius, double pitch, double height, bool lefthand) {
+    if (!std::isfinite(radius) || radius <= 0.0) {
+        throw EvalError("helix-path radius must be positive");
+    }
+    if (!std::isfinite(pitch) || pitch <= 0.0) {
+        throw EvalError("helix-path pitch must be positive");
+    }
+    if (!std::isfinite(height) || height <= 0.0) {
+        throw EvalError("helix-path height must be positive");
+    }
+    const double turns = height / pitch;
+    const double end_angle = (lefthand ? -1.0 : 1.0) * 6.28318530717958647692 * turns;
+    Handle(Geom_CylindricalSurface) surface =
+        new Geom_CylindricalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), radius);
+    Handle(Geom2d_TrimmedCurve) curve2d =
+        GCE2d_MakeSegment(gp_Pnt2d(0, 0), gp_Pnt2d(end_angle, height)).Value();
+    TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(curve2d, surface).Edge();
+    return BRepBuilderAPI_MakeWire(edge).Wire();
+}
+
+TopoDS_Shape make_bezier_path_wire(const std::vector<std::array<double, 3>>& points) {
+    if (points.size() < 4 || (points.size() - 1) % 3 != 0) {
+        throw EvalError("bezier-path expects 3n+1 control points");
+    }
+    BRepBuilderAPI_MakeWire wire_builder;
+    for (std::size_t start = 0; start < points.size() - 1; start += 3) {
+        TColgp_Array1OfPnt poles(1, 4);
+        for (int local_index = 0; local_index < 4; ++local_index) {
+            const auto& point = points[start + static_cast<std::size_t>(local_index)];
+            poles.SetValue(local_index + 1, gp_Pnt(point[0], point[1], point[2]));
+        }
+        Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(poles);
+        wire_builder.Add(BRepBuilderAPI_MakeEdge(curve).Edge());
+    }
+    return wire_builder.Wire();
+}
+
+TopoDS_Shape make_bspline_face(const std::vector<std::array<double, 2>>& points) {
+    if (points.size() < 3) {
+        throw EvalError("bspline requires at least three points");
+    }
+    TColgp_Array1OfPnt poles(1, static_cast<Standard_Integer>(points.size()));
+    for (std::size_t index = 0; index < points.size(); ++index) {
+        poles.SetValue(static_cast<Standard_Integer>(index + 1), gp_Pnt(points[index][0], points[index][1], 0));
+    }
+    GeomAPI_PointsToBSpline bspline_builder(poles, 3, 8, GeomAbs_C2, 1.0e-4);
+    Handle(Geom_BSplineCurve) curve = bspline_builder.Curve();
+    BRepBuilderAPI_MakeWire wire_builder;
+    wire_builder.Add(BRepBuilderAPI_MakeEdge(curve).Edge());
+    const auto& first = points.front();
+    const auto& last = points.back();
+    if (distance2(first, last) > 1.0e-9) {
+        wire_builder.Add(
+            BRepBuilderAPI_MakeEdge(gp_Pnt(last[0], last[1], 0), gp_Pnt(first[0], first[1], 0)).Edge());
+    }
+    return BRepBuilderAPI_MakeFace(wire_builder.Wire()).Shape();
+}
+
+TopoDS_Shape linear_array_shape(const TopoDS_Shape& shape, std::size_t count, double dx, double dy, double dz) {
+    std::vector<TopoDS_Shape> items;
+    items.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        items.push_back(translate_shape(shape, dx * static_cast<double>(index), dy * static_cast<double>(index),
+                                        dz * static_cast<double>(index)));
+    }
+    return compound_shapes(items);
+}
+
+TopoDS_Shape radial_array_shape(const TopoDS_Shape& shape, std::size_t count, double step_degrees, double radius) {
+    std::vector<TopoDS_Shape> items;
+    items.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        gp_Trsf translate;
+        translate.SetTranslation(gp_Vec(radius, 0, 0));
+        gp_Trsf rotate;
+        rotate.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)),
+                           step_degrees * static_cast<double>(index) * M_PI / 180.0);
+        rotate.Multiply(translate);
+        items.push_back(BRepBuilderAPI_Transform(shape, rotate, true).Shape());
+    }
+    return compound_shapes(items);
+}
+
+TopoDS_Shape grid_array_shape(const TopoDS_Shape& shape, std::size_t rows, std::size_t cols, double dx, double dy) {
+    std::vector<TopoDS_Shape> items;
+    items.reserve(rows * cols);
+    for (std::size_t row = 0; row < rows; ++row) {
+        for (std::size_t col = 0; col < cols; ++col) {
+            items.push_back(translate_shape(shape, dx * static_cast<double>(col), dy * static_cast<double>(row), 0));
+        }
+    }
+    return compound_shapes(items);
+}
+
+TopoDS_Shape arc_array_shape(
+    const TopoDS_Shape& shape,
+    std::size_t count,
+    double radius,
+    double start_degrees,
+    double end_degrees
+) {
+    std::vector<TopoDS_Shape> items;
+    items.reserve(count);
+    double denominator = static_cast<double>(std::max<std::size_t>(1, count - 1));
+    for (std::size_t index = 0; index < count; ++index) {
+        double angle = (start_degrees + (end_degrees - start_degrees) * static_cast<double>(index) / denominator) *
+                       M_PI / 180.0;
+        gp_Trsf translate;
+        translate.SetTranslation(gp_Vec(radius, 0, 0));
+        gp_Trsf rotate;
+        rotate.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), angle);
+        rotate.Multiply(translate);
+        items.push_back(BRepBuilderAPI_Transform(shape, rotate, true).Shape());
+    }
+    return compound_shapes(items);
+}
+
+gp_Trsf make_frame_transform(const gp_Pnt& origin, const gp_Vec& x_hint, const gp_Vec& normal, const std::string& op) {
+    gp_Vec z = normal;
+    if (z.Magnitude() <= 1.0e-9) {
+        throw EvalError(op + " expects a non-zero normal/tangent");
+    }
+    z.Normalize();
+    if (x_hint.Magnitude() <= 1.0e-9) {
+        throw EvalError(op + " expects a non-zero x/up vector");
+    }
+    gp_Vec x = x_hint - z.Multiplied(x_hint.Dot(z));
+    if (x.Magnitude() <= 1.0e-9) {
+        throw EvalError(op + " expects x/up vector not parallel to normal/tangent");
+    }
+    x.Normalize();
+    gp_Vec y = z.Crossed(x);
+    if (y.Magnitude() <= 1.0e-9) {
+        throw EvalError(op + " failed to build frame basis");
+    }
+    y.Normalize();
+    x = y.Crossed(z);
+    x.Normalize();
+
+    gp_Trsf frame;
+    frame.SetValues(
+        x.X(), y.X(), z.X(), origin.X(),
+        x.Y(), y.Y(), z.Y(), origin.Y(),
+        x.Z(), y.Z(), z.Z(), origin.Z()
+    );
+    return frame;
+}
+
+gp_Trsf make_plane_frame(const PlaneArgs& args) {
+    return make_frame_transform(
+        gp_Pnt(args.origin[0], args.origin[1], args.origin[2]),
+        gp_Vec(args.x_axis[0], args.x_axis[1], args.x_axis[2]),
+        gp_Vec(args.normal[0], args.normal[1], args.normal[2]),
+        "plane"
+    );
+}
+
+gp_Trsf make_location_frame(const gp_Trsf* base) {
+    if (base) {
+        return *base;
+    }
+    return gp_Trsf();
+}
+
+gp_Trsf make_path_frame(const TopoDS_Shape& path) {
+    std::vector<TopoDS_Edge> edges;
+    for (TopExp_Explorer explorer(path, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        edges.push_back(TopoDS::Edge(explorer.Current()));
+    }
+    if (edges.empty()) {
+        throw EvalError("path-frame expects a path with at least one edge");
+    }
+
+    TopoDS_Edge edge = edges.back();
+    BRepAdaptor_Curve curve(edge);
+    gp_Pnt origin;
+    gp_Vec derivative;
+    curve.D1(curve.LastParameter(), origin, derivative);
+    if (derivative.Magnitude() <= 1.0e-9) {
+        throw EvalError("path-frame got a zero-length tangent");
+    }
+
+    gp_Vec tangent = derivative;
+    tangent.Normalize();
+    gp_Vec up(0, 0, 1);
+    gp_Vec x_hint = up - tangent.Multiplied(up.Dot(tangent));
+    if (x_hint.Magnitude() <= 1.0e-9) {
+        gp_Vec fallback(0, 1, 0);
+        x_hint = fallback - tangent.Multiplied(fallback.Dot(tangent));
+    }
+    return make_frame_transform(origin, x_hint, tangent, "path-frame");
+}
+
+TopoDS_Shape place_shape(const gp_Trsf& frame, const TopoDS_Shape& shape) {
+    return BRepBuilderAPI_Transform(shape, frame, true).Shape();
+}
+
+const TopoDS_Shape& lookup_shape(
+    const std::map<std::uint64_t, SlotValue>& slots,
+    std::uint64_t slot,
+    const std::string& op
+) {
+    auto it = slots.find(slot);
+    if (it == slots.end()) {
+        throw EvalError(op + " references unknown slot");
+    }
+    if (it->second.kind != SlotValue::Kind::Shape) {
+        throw EvalError(op + " expects a shape slot");
+    }
+    return it->second.shape;
+}
+
+const gp_Trsf& lookup_frame(
+    const std::map<std::uint64_t, SlotValue>& slots,
+    std::uint64_t slot,
+    const std::string& op
+) {
+    auto it = slots.find(slot);
+    if (it == slots.end()) {
+        throw EvalError(op + " references unknown slot");
+    }
+    if (it->second.kind != SlotValue::Kind::Frame) {
+        throw EvalError(op + " expects a frame slot");
+    }
+    return it->second.frame;
+}
+
+SlotValue evaluate_command(
+    const Command& command,
+    const std::map<std::uint64_t, SlotValue>& slots,
+    const std::string& part_id
+) {
+    const std::string op = command.op;
+    auto get_ref_shape = [&](std::size_t index) -> const TopoDS_Shape& {
+        if (index >= command.args.size()) {
+            throw EvalError(op + " missing shape reference");
+        }
+        const Arg& arg = command.args[index];
+        if (arg.kind != Arg::Kind::Ref) {
+            throw EvalError(op + " expects shape reference");
+        }
+        return lookup_shape(slots, arg.ref_value, op);
+    };
+    auto get_ref_frame = [&](std::size_t index) -> const gp_Trsf& {
+        if (index >= command.args.size()) {
+            throw EvalError(op + " missing frame reference");
+        }
+        const Arg& arg = command.args[index];
+        if (arg.kind != Arg::Kind::Ref) {
+            throw EvalError(op + " expects frame reference");
+        }
+        return lookup_frame(slots, arg.ref_value, op);
+    };
+
+    if (!command.keywords.empty() && op != "box" && op != "profile" && op != "plane" &&
+        op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell") {
+        throw EvalError(op + " keywords unsupported yet");
+    }
+
+    if (op == "box") {
+        BoxArgs args = box_args(command);
+        return SlotValue::shape_value(make_box(args.width, args.depth, args.height, args.align));
+    }
+    if (op == "sphere") {
+        return make_sphere(require_number_arg(command.args, 0, op));
+    }
+    if (op == "cylinder") {
+        return make_cylinder(require_number_arg(command.args, 0, op),
+                             require_number_arg(command.args, 1, op));
+    }
+    if (op == "cone") {
+        return make_cone(require_number_arg(command.args, 0, op), require_number_arg(command.args, 1, op),
+                         require_number_arg(command.args, 2, op));
+    }
+    if (op == "rectangle") {
+        const double width = require_number_arg(command.args, 0, op);
+        const double height = require_number_arg(command.args, 1, op);
+        return make_polygon_face({
+            {-width / 2.0, -height / 2.0},
+            {width / 2.0, -height / 2.0},
+            {width / 2.0, height / 2.0},
+            {-width / 2.0, height / 2.0},
+        });
+    }
+    if (op == "circle") {
+        return make_circle_face(require_number_arg(command.args, 0, op));
+    }
+    if (op == "rounded-rect") {
+        return make_rounded_rect_face(require_number_arg(command.args, 0, op),
+                                      require_number_arg(command.args, 1, op),
+                                      require_number_arg(command.args, 2, op));
+    }
+    if (op == "rounded-polygon") {
+        return make_rounded_polygon_face(require_point2_list(command.args, 0, op),
+                                         require_number_arg(command.args, 1, op));
+    }
+    if (op == "polygon") {
+        if (command.args.empty() || command.args[0].kind != Arg::Kind::List) {
+            throw EvalError(op + " expects a list of points");
+        }
+        std::vector<std::array<double, 2>> points;
+        for (const Arg& arg : command.args[0].list_value) {
+            if (arg.kind != Arg::Kind::Point2) {
+                throw EvalError(op + " expects point2 values");
+            }
+            points.push_back(arg.point2_value);
+        }
+        return make_polygon_face(points);
+    }
+    if (op == "profile") {
+        ProfileRefs refs = profile_refs(command);
+        std::vector<TopoDS_Shape> outer_shapes;
+        outer_shapes.reserve(refs.outer.size());
+        for (std::uint64_t ref : refs.outer) {
+            outer_shapes.push_back(lookup_shape(slots, ref, op));
+        }
+        std::vector<TopoDS_Shape> hole_shapes;
+        hole_shapes.reserve(refs.holes.size());
+        for (std::uint64_t ref : refs.holes) {
+            hole_shapes.push_back(lookup_shape(slots, ref, op));
+        }
+        return make_profile_face(outer_shapes, hole_shapes);
+    }
+    if (op == "make-face") {
+        if (command.args.size() != 1) {
+            throw EvalError(op + " expects exactly one wire reference");
+        }
+        return make_face_from_shape(get_ref_shape(0), op);
+    }
+    if (op == "import-stl") {
+        if (command.args.size() != 1 ||
+            (command.args[0].kind != Arg::Kind::Text && command.args[0].kind != Arg::Kind::Symbol)) {
+            throw EvalError(op + " expects a file path");
+        }
+        TopoDS_Shape shape;
+        StlAPI_Reader reader;
+        if (!reader.Read(shape, command.args[0].text_value.c_str())) {
+            throw EvalError(op + " could not read STL file");
+        }
+        return shape;
+    }
+    if (op == "extrude") {
+        return extrude_shape(get_ref_shape(0), require_number_arg(command.args, 1, op));
+    }
+    if (op == "revolve") {
+        return revolve_shape(get_ref_shape(0), require_number_arg(command.args, 1, op));
+    }
+    if (op == "loft") {
+        if (command.args.size() < 3) {
+            throw EvalError(op + " expects distance and at least two profile references");
+        }
+        std::vector<TopoDS_Shape> profiles;
+        for (std::size_t index = 1; index < command.args.size(); ++index) {
+            profiles.push_back(get_ref_shape(index));
+        }
+        return loft_shapes(require_number_arg(command.args, 0, op), profiles);
+    }
+    if (op == "sweep") {
+        return sweep_shape(get_ref_shape(0), get_ref_shape(1));
+    }
+    if (op == "twist") {
+        return twist_shape(get_ref_shape(2), require_number_arg(command.args, 0, op),
+                           require_number_arg(command.args, 1, op));
+    }
+    if (op == "taper") {
+        if (command.args.size() == 3) {
+            double scale = require_number_arg(command.args, 1, op);
+            return taper_shape(get_ref_shape(2), require_number_arg(command.args, 0, op), scale, scale);
+        }
+        if (command.args.size() == 4) {
+            return taper_shape(get_ref_shape(3), require_number_arg(command.args, 0, op),
+                               require_number_arg(command.args, 1, op),
+                               require_number_arg(command.args, 2, op));
+        }
+        throw EvalError(op + " expects height, scale, profile or height, scale-x, scale-y, profile");
+    }
+    if (op == "path") {
+        return make_path_wire(require_point3_sequence(command.args, op));
+    }
+    if (op == "helix-path") {
+        return make_helix_path_wire(require_number_arg(command.args, 0, op),
+                                    require_number_arg(command.args, 1, op),
+                                    require_number_arg(command.args, 2, op),
+                                    require_bool_arg(command.args, 3, op));
+    }
+    if (op == "bezier-path") {
+        return make_bezier_path_wire(require_point3_sequence(command.args, op));
+    }
+    if (op == "plane") {
+        return make_plane_frame(plane_args(command));
+    }
+    if (op == "location") {
+        if (command.args.empty()) {
+            return make_location_frame(nullptr);
+        }
+        if (command.args.size() == 1) {
+            const gp_Trsf& frame = get_ref_frame(0);
+            return make_location_frame(&frame);
+        }
+        throw EvalError(op + " expects zero or one frame reference");
+    }
+    if (op == "path-frame") {
+        if (command.args.size() != 1) {
+            throw EvalError(op + " expects one path reference");
+        }
+        return make_path_frame(get_ref_shape(0));
+    }
+    if (op == "place") {
+        if (command.args.size() != 2) {
+            throw EvalError(op + " expects frame and shape references");
+        }
+        return place_shape(get_ref_frame(0), get_ref_shape(1));
+    }
+    if (op == "bspline") {
+        return make_bspline_face(require_point2_list(command.args, 0, op));
+    }
+    if (op == "union" || op == "difference" || op == "intersection" || op == "compound") {
+        std::vector<Arg> refs = require_ref_list(command.args, op);
+        if (op == "compound") {
+            std::vector<TopoDS_Shape> shapes_to_compound;
+            for (const Arg& arg : refs) {
+                shapes_to_compound.push_back(lookup_shape(slots, arg.ref_value, op));
+            }
+            return compound_shapes(shapes_to_compound);
+        }
+        TopoDS_Shape result = lookup_shape(slots, refs.front().ref_value, op);
+        for (std::size_t index = 1; index < refs.size(); ++index) {
+            const TopoDS_Shape& next = lookup_shape(slots, refs[index].ref_value, op);
+            if (op == "union") {
+                result = fuse_shapes(result, next);
+            } else if (op == "difference") {
+                result = cut_shapes(result, next);
+            } else {
+                result = common_shapes(result, next);
+            }
+        }
+        return result;
+    }
+    if (op == "translate") {
+        return translate_shape(get_ref_shape(3), require_number_arg(command.args, 0, op),
+                               require_number_arg(command.args, 1, op),
+                               require_number_arg(command.args, 2, op));
+    }
+    if (op == "rotate") {
+        return rotate_shape(get_ref_shape(3), require_number_arg(command.args, 0, op),
+                            require_number_arg(command.args, 1, op),
+                            require_number_arg(command.args, 2, op));
+    }
+    if (op == "scale") {
+        if (command.args.size() == 2) {
+            double factor = require_number_arg(command.args, 0, op);
+            return scale_shape(get_ref_shape(1), factor, factor, factor);
+        }
+        if (command.args.size() == 3) {
+            return scale_shape(get_ref_shape(2), require_number_arg(command.args, 0, op),
+                               require_number_arg(command.args, 1, op), 1.0);
+        }
+        if (command.args.size() == 4) {
+            return scale_shape(get_ref_shape(3), require_number_arg(command.args, 0, op),
+                               require_number_arg(command.args, 1, op),
+                               require_number_arg(command.args, 2, op));
+        }
+        throw EvalError(op + " expects one to three factors and a shape");
+    }
+    if (op == "mirror") {
+        if (command.args.size() != 3 || command.args[0].kind == Arg::Kind::Number) {
+            throw EvalError(op + " expects axis, offset, shape");
+        }
+        const Arg& axis = command.args[0];
+        if (axis.kind != Arg::Kind::Text && axis.kind != Arg::Kind::Symbol) {
+            throw EvalError(op + " expects text/symbol axis");
+        }
+        return mirror_shape(get_ref_shape(2), axis.text_value, require_number_arg(command.args, 1, op));
+    }
+    if (op == "linear-array") {
+        return linear_array_shape(get_ref_shape(4), require_count_arg(command.args, 0, op),
+                                  require_number_arg(command.args, 1, op),
+                                  require_number_arg(command.args, 2, op),
+                                  require_number_arg(command.args, 3, op));
+    }
+    if (op == "radial-array") {
+        return radial_array_shape(get_ref_shape(3), require_count_arg(command.args, 0, op),
+                                  require_number_arg(command.args, 1, op),
+                                  require_number_arg(command.args, 2, op));
+    }
+    if (op == "grid-array") {
+        return grid_array_shape(get_ref_shape(4), require_count_arg(command.args, 0, op),
+                                require_count_arg(command.args, 1, op),
+                                require_number_arg(command.args, 2, op),
+                                require_number_arg(command.args, 3, op));
+    }
+    if (op == "arc-array") {
+        return arc_array_shape(get_ref_shape(4), require_count_arg(command.args, 0, op),
+                               require_number_arg(command.args, 1, op),
+                               require_number_arg(command.args, 2, op),
+                               require_number_arg(command.args, 3, op));
+    }
+    if (op == "offset") {
+        return offset_shape(get_ref_shape(1), require_number_arg(command.args, 0, op));
+    }
+    if (op == "clip-box") {
+        ClipBoxArgs args = clip_box_args(command);
+        return clip_box_shape(lookup_shape(slots, args.shape_ref, op), args.x, args.y, args.z);
+    }
+    if (op == "fillet") {
+        return fillet_shape(
+            part_id,
+            get_ref_shape(1),
+            require_number_arg(command.args, 0, op),
+            exact_edge_selector(command, op)
+        );
+    }
+    if (op == "chamfer") {
+        return chamfer_shape(
+            part_id,
+            get_ref_shape(1),
+            require_number_arg(command.args, 0, op),
+            exact_edge_selector(command, op)
+        );
+    }
+    if (op == "shell") {
+        return shell_shape(
+            part_id,
+            get_ref_shape(1),
+            require_number_arg(command.args, 0, op),
+            exact_face_selector(command, op)
+        );
+    }
+
+    throw EvalError("unsupported direct OCCT op `" + op + "`");
+}
+
+std::vector<ShapeRecord> evaluate_plan(const Plan& plan) {
+    if (plan.parts.empty()) {
+        throw EvalError("plan needs at least one part");
+    }
+
+    std::vector<ShapeRecord> parts;
+    for (const Part& part : plan.parts) {
+        std::map<std::uint64_t, SlotValue> slots;
+        for (const Command& command : part.commands) {
+            SlotValue value = evaluate_command(command, slots, part.part_id);
+            slots[command.output] = value;
+        }
+        auto root = slots.find(part.root);
+        if (root == slots.end()) {
+            throw EvalError("missing root shape for part `" + part.part_id + "`");
+        }
+        if (root->second.kind != SlotValue::Kind::Shape) {
+            throw EvalError("root slot for part `" + part.part_id + "` is not a shape");
+        }
+        parts.push_back(ShapeRecord{part.part_id, part.label, root->second.shape});
+    }
+    return parts;
+}
+
+void write_step_file(const fs::path& path, const TopoDS_Shape& shape) {
+    STEPControl_Writer writer;
+    writer.Transfer(shape, STEPControl_AsIs);
+    if (writer.Write(path.string().c_str()) != IFSelect_RetDone) {
+        throw IoError("failed to write STEP");
+    }
+}
+
+void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
+    BRepMesh_IncrementalMesh mesh(shape, 0.2);
+    StlAPI_Writer writer;
+    if (!writer.Write(shape, path.string().c_str())) {
+        throw IoError("failed to write STL");
+    }
+}
+
+std::string read_text_file(const fs::path& path) {
+    std::ifstream input(path);
+    if (!input) {
+        throw ParseError("failed to open plan file");
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+void write_error_json(
+    const std::string& klass,
+    const std::string& code,
+    const std::string& message,
+    const std::string& details
+) {
+    std::cerr << "{\"class\":";
+    std::cerr << quote_json_string(klass);
+    std::cerr << ",\"code\":";
+    std::cerr << quote_json_string(code);
+    std::cerr << ",\"message\":";
+    std::cerr << quote_json_string(message);
+    std::cerr << ",\"details\":";
+    std::cerr << quote_json_string(details);
+    std::cerr << "}" << std::endl;
+}
+
+int run(int argc, char** argv) {
+    fs::path plan_path;
+    fs::path out_dir;
+    for (int index = 1; index < argc; ++index) {
+        std::string arg = argv[index];
+        if (arg == "--help") {
+            std::cout << "direct-occt-runner --plan PLAN --out DIR\n";
+            return 0;
+        }
+        if (arg == "--version") {
+            std::cout << "direct-occt-runner 0.1.0\n";
+            return 0;
+        }
+        if (arg == "--plan" && index + 1 < argc) {
+            plan_path = argv[++index];
+            continue;
+        }
+        if (arg == "--out" && index + 1 < argc) {
+            out_dir = argv[++index];
+            continue;
+        }
+        throw ParseError("usage: direct-occt-runner --plan PLAN --out DIR");
+    }
+
+    if (plan_path.empty() || out_dir.empty()) {
+        throw ParseError("usage: direct-occt-runner --plan PLAN --out DIR");
+    }
+
+    std::string plan_text = read_text_file(plan_path);
+    yyjson_read_err json_error;
+    std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> document(
+        yyjson_read_opts(plan_text.data(), plan_text.size(), YYJSON_READ_NOFLAG, nullptr, &json_error),
+        yyjson_doc_free
+    );
+    if (!document) {
+        throw ParseError(
+            "plan JSON parse failed at byte " + std::to_string(json_error.pos) + ": " +
+            std::string(json_error.msg ? json_error.msg : "unknown parse error")
+        );
+    }
+    const Plan plan = parse_plan(yyjson_doc_get_root(document.get()));
+    const std::vector<ShapeRecord> parts = evaluate_plan(plan);
+
+    fs::create_directories(out_dir);
+    const fs::path step_path = out_dir / "model.step";
+    const fs::path stl_path = out_dir / "preview.stl";
+    const fs::path topology_path = out_dir / "topology.json";
+
+    TopoDS_Shape export_shape = parts.size() == 1 ? parts.front().shape : compound_shapes([&]() {
+        std::vector<TopoDS_Shape> shapes;
+        shapes.reserve(parts.size());
+        for (const auto& part : parts) {
+            shapes.push_back(part.shape);
+        }
+        return shapes;
+    }());
+
+    write_step_file(step_path, export_shape);
+    write_stl_file(stl_path, export_shape);
+    write_topology_report(topology_path, parts);
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const ParseError& error) {
+        write_error_json("parse_error", "parse_failed", error.what(), error.what());
+        return 1;
+    } catch (const SchemaError& error) {
+        write_error_json("schema_error", "schema_mismatch", error.what(), error.what());
+        return 2;
+    } catch (const EvalError& error) {
+        std::string message = error.what();
+        std::string code = "validation_failed";
+        if (message.find("unsupported direct OCCT op `") != std::string::npos) {
+            code = "unsupported_op";
+        } else if (message.find("supports exact `target-id:` / `target-ids:` selectors only") !=
+                       std::string::npos ||
+                   message.find("got unsupported selector payload") != std::string::npos ||
+                   message.find("does not recognize `:") != std::string::npos ||
+                   message.find("keywords unsupported yet") != std::string::npos) {
+            code = "unsupported_selector_form";
+        }
+        write_error_json("validation_error", code, message, message);
+        return 3;
+    } catch (const IoError& error) {
+        write_error_json("io_error", "io_failed", error.what(), error.what());
+        return 4;
+    } catch (const StdFail_NotDone& error) {
+        std::string message = error.GetMessageString();
+        write_error_json("runtime_error", "occt_not_done", message, message);
+        return 5;
+    } catch (const Standard_Failure& error) {
+        std::string message = error.GetMessageString();
+        write_error_json("runtime_error", "occt_failure", message, message);
+        return 5;
+    } catch (const std::exception& error) {
+        write_error_json("internal_error", "internal_failure", error.what(), error.what());
+        return 10;
+    }
+}
