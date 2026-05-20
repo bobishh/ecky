@@ -2179,22 +2179,35 @@ echo "fake runner plan: $plan"
         let model_id = model_id_from_hash(&hash);
         let program = compile(source);
 
-        let err = render_core_program_runtime_bundle(
+        let result = render_core_program_runtime_bundle(
             &program,
             source,
             &DesignParams::new(),
             &blocked_layout(root.clone()),
             &resolver,
-        )
-        .expect_err("blocked runtime");
-
-        assert!(
-            err.to_string().contains("Direct OCCT runtime blocked"),
-            "{err}"
         );
-        let bundle_dir =
-            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
-        assert!(!bundle_dir.exists());
+
+        // Runner-first export legitimately bypasses a blocked SDK when a
+        // precompiled runner is discoverable (dev machines with a built
+        // `.dist/runtime/occt`). Only without a runner must the blocked SDK
+        // surface as an error with no bundle left behind.
+        let runner_available =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &resolver, true,
+            )
+            .is_some();
+        if runner_available {
+            result.expect("runner-first export bypasses blocked SDK");
+        } else {
+            let err = result.expect_err("blocked runtime");
+            assert!(
+                err.to_string().contains("Direct OCCT runtime blocked"),
+                "{err}"
+            );
+            let bundle_dir =
+                crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+            assert!(!bundle_dir.exists());
+        }
 
         let _ = fs::remove_dir_all(root);
     }

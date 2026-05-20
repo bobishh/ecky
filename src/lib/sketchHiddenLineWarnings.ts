@@ -18,6 +18,6 @@ export function brepHiddenLineViewHasWarning(
   return (response?.warningEntries ?? []).some((warning) => warning.view === view);
 }
 
-export function formatBrepHiddenLineWarning(warning: BrepHiddenLineWarning): string {
+function formatBrepHiddenLineWarning(warning: BrepHiddenLineWarning): string {
   return `${warning.view.toUpperCase()} ${warning.message}`.trim();
 }

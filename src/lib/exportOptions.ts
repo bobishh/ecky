@@ -26,7 +26,7 @@ export function getStepExportPath(bundle: ArtifactBundle | null | undefined): st
   return bundle?.exportArtifacts?.find((a) => a.format === 'step')?.path;
 }
 
-export function stepExportDisabledReason(
+function stepExportDisabledReason(
   bundle: ArtifactBundle | null | undefined,
   runtimeCapabilities?: RuntimeCapabilities | null,
 ): string | undefined {

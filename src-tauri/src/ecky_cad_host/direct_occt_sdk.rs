@@ -13,6 +13,58 @@ const OCP_PACKAGE: &str = "OCP";
 const OCP_DYLIBS: &str = ".dylibs";
 const OCP_INSTALL_NAME_PREFIX: &str = "/DLC/OCP/.dylibs";
 const ECKY_OCCT_ROOT: &str = "ECKY_OCCT_ROOT";
+
+/// Env reads that tests need to fake go through this helper: tests inject a
+/// thread-local override instead of mutating process env, so parallel tests
+/// never see each other's fake compilers or OCCT roots.
+pub(crate) fn scoped_env_var_os(key: &str) -> Option<std::ffi::OsString> {
+    #[cfg(test)]
+    if let Some(overridden) = test_env::override_for(key) {
+        return overridden;
+    }
+    std::env::var_os(key)
+}
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    thread_local! {
+        static OVERRIDES: RefCell<HashMap<String, Option<OsString>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    pub(crate) fn override_for(key: &str) -> Option<Option<OsString>> {
+        OVERRIDES.with(|overrides| overrides.borrow().get(key).cloned())
+    }
+
+    pub(crate) struct ThreadEnvGuard {
+        key: String,
+    }
+
+    impl ThreadEnvGuard {
+        pub(crate) fn set(key: &str, value: &str) -> Self {
+            OVERRIDES.with(|overrides| {
+                overrides
+                    .borrow_mut()
+                    .insert(key.to_string(), Some(OsString::from(value)))
+            });
+            Self {
+                key: key.to_string(),
+            }
+        }
+    }
+
+    impl Drop for ThreadEnvGuard {
+        fn drop(&mut self) {
+            OVERRIDES.with(|overrides| {
+                overrides.borrow_mut().remove(&self.key);
+            });
+        }
+    }
+}
 const OCCT_RUNTIME_SUBDIR: &str = "runtime/occt";
 const OCCT_MANIFEST_FILE: &str = "manifest.json";
 
@@ -406,7 +458,7 @@ pub fn run_native_export_source(
         ))
     })?;
 
-    let compiler = std::env::var_os("CXX").unwrap_or_else(|| OsString::from("c++"));
+    let compiler = scoped_env_var_os("CXX").unwrap_or_else(|| OsString::from("c++"));
     let mut command = Command::new(compiler);
     let dylib_paths = required_dylib_paths(layout.dylib_dir()?)?;
     command
@@ -475,13 +527,17 @@ fn existing_dir(path: PathBuf) -> Option<PathBuf> {
 }
 
 fn ecky_occt_root_from_env() -> Option<PathBuf> {
-    std::env::var_os(ECKY_OCCT_ROOT)
+    scoped_env_var_os(ECKY_OCCT_ROOT)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
 }
 
 fn discover_runtime_occt_root(runtime_root: &Path) -> Option<PathBuf> {
+    if runtime_root.join(OCCT_MANIFEST_FILE).is_file() {
+        return Some(runtime_root.to_path_buf());
+    }
+
     let candidate = runtime_root.join(OCCT_RUNTIME_SUBDIR);
     candidate
         .join(OCCT_MANIFEST_FILE)
@@ -680,7 +736,9 @@ fn manifest_blockers_with_layout(
     }
 
     if let (Some(platform), Some(arch)) = (manifest.platform.as_deref(), manifest.arch.as_deref()) {
-        if platform != current_runtime_platform() || arch != std::env::consts::ARCH {
+        if platform != current_runtime_platform()
+            || !runtime_arch_matches_manifest(arch, std::env::consts::ARCH)
+        {
             blockers.push(
                 serde_json::json!({
                     "kind": "platformMismatch",
@@ -734,6 +792,18 @@ fn manifest_blockers_with_layout(
     }
 
     blockers
+}
+
+fn runtime_arch_matches_manifest(manifest_arch: &str, runtime_arch: &str) -> bool {
+    normalize_arch(manifest_arch) == normalize_arch(runtime_arch)
+}
+
+fn normalize_arch(arch: &str) -> &str {
+    match arch {
+        "arm64" | "aarch64" => "arm64",
+        "x86_64" | "amd64" => "x86_64",
+        other => other,
+    }
 }
 
 fn required_manifest_headers(manifest: &OcctManifest) -> Vec<String> {
@@ -1073,33 +1143,6 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    struct EnvVarGuard {
-        key: &'static str,
-        value: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let value = value.to_string();
-            let previous = env::var(key).ok();
-            env::set_var(key, &value);
-            Self {
-                key,
-                value: previous,
-            }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = self.value.take() {
-                env::set_var(self.key, previous);
-            } else {
-                env::remove_var(self.key);
-            }
-        }
-    }
-
     fn touch_library_file(dir: &Path, lib: &str) {
         let ext = library_file_extensions().first().copied().unwrap_or("so");
         touch(&dir.join(format!("lib{lib}.{ext}")));
@@ -1362,7 +1405,7 @@ mod tests {
             &compiler_path,
             "#!/bin/sh\necho raw compiler stdout\necho raw compiler stderr >&2\nexit 42\n",
         );
-        let _guard = EnvVarGuard::set("CXX", compiler_path.to_string_lossy().as_ref());
+        let _guard = test_env::ThreadEnvGuard::set("CXX", compiler_path.to_string_lossy().as_ref());
         let layout = DirectOcctSdkLayout {
             runtime_root: root.clone(),
             ocp_root: Some(root.clone()),
@@ -1412,7 +1455,8 @@ mod tests {
             REQUIRED_OCCT_HEADERS,
             REQUIRED_OCCT_LIBS,
         );
-        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+        let _guard =
+            test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
         let layout = inspect_build123d_ocp_runtime(&temp_root("ignored"));
 
@@ -1420,6 +1464,45 @@ mod tests {
         assert_eq!(layout.include_dir.as_deref(), Some(include_dir.as_path()));
         assert_eq!(layout.dylib_dir.as_deref(), Some(lib_dir.as_path()));
         assert!(layout.can_compile_native_shim());
+    }
+
+    #[test]
+    fn inspect_runtime_accepts_direct_occt_manifest_root_without_ocp_layout() {
+        let _lock = sdk_env_lock();
+        let manifest_root = temp_root("manifest-root-direct");
+        let include_dir = manifest_root.join("include").join("opencascade");
+        let lib_dir = manifest_root.join("lib");
+        write_headers(&include_dir, REQUIRED_OCCT_HEADERS);
+        for lib in REQUIRED_OCCT_LIBS {
+            touch_library_file(&lib_dir, lib);
+        }
+        write_manifest(
+            &manifest_root,
+            "include/opencascade",
+            "lib",
+            current_runtime_platform(),
+            std::env::consts::ARCH,
+            current_runtime_abi_tag(),
+            REQUIRED_OCCT_HEADERS,
+            REQUIRED_OCCT_LIBS,
+        );
+
+        let layout = inspect_build123d_ocp_runtime(&manifest_root);
+
+        assert_eq!(layout.runtime_root, manifest_root);
+        assert_eq!(layout.include_dir.as_deref(), Some(include_dir.as_path()));
+        assert_eq!(layout.dylib_dir.as_deref(), Some(lib_dir.as_path()));
+        assert!(layout.can_compile_native_shim(), "{layout:?}");
+        assert!(layout.blocker_summary().is_empty(), "{layout:?}");
+    }
+
+    #[test]
+    fn runtime_arch_matching_accepts_common_aliases() {
+        assert!(runtime_arch_matches_manifest("arm64", "aarch64"));
+        assert!(runtime_arch_matches_manifest("aarch64", "arm64"));
+        assert!(runtime_arch_matches_manifest("x86_64", "amd64"));
+        assert!(runtime_arch_matches_manifest("amd64", "x86_64"));
+        assert!(!runtime_arch_matches_manifest("arm64", "x86_64"));
     }
 
     #[test]
@@ -1443,7 +1526,8 @@ mod tests {
             REQUIRED_OCCT_HEADERS,
             REQUIRED_OCCT_LIBS,
         );
-        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+        let _guard =
+            test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
         let layout = inspect_build123d_ocp_runtime(&temp_root("ignored"));
         assert_eq!(layout.missing_libs, vec![REQUIRED_OCCT_LIBS[0].to_string()]);
@@ -1477,7 +1561,8 @@ mod tests {
             REQUIRED_OCCT_HEADERS,
             REQUIRED_OCCT_LIBS,
         );
-        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+        let _guard =
+            test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
         let blockers = inspect_build123d_ocp_runtime(&temp_root("ignored")).blocker_summary();
         let blocker = blockers
@@ -1496,7 +1581,8 @@ mod tests {
         let manifest_root = env_root.join(OCCT_RUNTIME_SUBDIR);
         fs::create_dir_all(&manifest_root).expect("mkdir manifest root");
         fs::write(manifest_root.join(OCCT_MANIFEST_FILE), "{}").expect("write blank manifest");
-        let _guard = EnvVarGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
+        let _guard =
+            test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
         let blockers = inspect_build123d_ocp_runtime(&temp_root("ignored"))
             .blocker_summary()

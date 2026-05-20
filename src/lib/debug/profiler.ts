@@ -31,7 +31,7 @@ function getHeapStats(): HeapStats {
   }
 }
 
-export function isProfilerEnabled(): boolean {
+function isProfilerEnabled(): boolean {
   if (!import.meta.env.DEV) return false;
   try {
     return localStorage.getItem(PROFILER_FLAG_KEY) === '1';

@@ -1346,6 +1346,18 @@ mod tests {
     use super::*;
     use crate::build123d;
     use crate::ecky_ir::lower_to_build123d;
+
+    /// Production lowers on a 32 MiB guarded thread (`lower_ecky_with_large_stack`);
+    /// default test threads are too small for the thomas fixture's recursion depth.
+    fn lower_on_guarded_stack(macro_code: &str) -> String {
+        let code = macro_code.to_string();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || lower_to_build123d(&code).expect("lower"))
+            .expect("spawn lowering thread")
+            .join()
+            .expect("join lowering thread")
+    }
     use crate::freecad;
     use crate::models::PathResolver;
     use std::fs;
@@ -1466,7 +1478,7 @@ mod tests {
     fn translated_thomas_fixture_lowers_to_smooth_build123d_code() {
         let source = fs::read_to_string(fixture_reference()).expect("fixture");
         let result = translate_legacy_python_to_ecky_ir(&source).expect("translate");
-        let code = lower_to_build123d(&result.macro_code).expect("lower");
+        let code = lower_on_guarded_stack(&result.macro_code);
         assert!(code.contains("Polyline("), "{}", code);
         assert!(
             code.contains("Rectangle(")
@@ -1522,7 +1534,7 @@ mod tests {
     fn render_translated_thomas_fixture_on_build123d() {
         let source = fs::read_to_string(fixture_reference()).expect("fixture");
         let result = translate_legacy_python_to_ecky_ir(&source).expect("translate");
-        let lowered = lower_to_build123d(&result.macro_code).expect("lower");
+        let lowered = lower_on_guarded_stack(&result.macro_code);
         let root = test_root();
         fs::create_dir_all(&root).expect("root");
         let resolver = TestResolver { root };

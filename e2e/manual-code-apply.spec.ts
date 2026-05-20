@@ -335,6 +335,25 @@ test.describe('Manual code apply/version coverage', () => {
       });
   });
 
+  test('Given ecky workbench code with two parts When verify template inserts Then clearance template is used', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.__manualCodeApplyMockConfig = {
+        sourceLanguage: 'ecky',
+        macroCode: '(model\n  (part body (box 1 1 1))\n  (part lid (box 1 1 1)))',
+      };
+    });
+    await bootManualCodeFlow(page);
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal).toBeVisible();
+    await modal.getByRole('button', { name: 'INSERT VERIFY' }).click();
+    await expect(modal.locator('.cm-content')).toContainText('clearance min-distance body lid');
+    await expect(modal.locator('.cm-content')).toContainText('body_lid_gap');
+  });
+
   test('Given ecky workbench code When code modal opens Then ecky syntax tokens are highlighted', async ({ page }) => {
     await page.addInitScript(() => {
       window.__manualCodeApplyMockConfig = {

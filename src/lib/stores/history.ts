@@ -212,23 +212,6 @@ export function rememberLatestThreadVersion(threadId: string, message: Message) 
   );
 }
 
-export function mergeCommittedVersionMessageForTests(
-  threads: Thread[],
-  threadId: string,
-  title: string,
-  message: Message,
-) {
-  return mergeCommittedVersionMessage(threads, threadId, title, message);
-}
-
-export function mergeActiveThreadMessagesForTests(
-  existingMessages: Message[],
-  incomingMessages: Message[],
-  activeMessageId: string | null,
-) {
-  return mergeActiveThreadMessages(existingMessages, incomingMessages, activeMessageId);
-}
-
 function beginThreadSwitch(targetThreadId: string) {
   activeVersionId.set(null);
   workingCopy.reset();
@@ -237,10 +220,6 @@ function beginThreadSwitch(targetThreadId: string) {
   session.setStlUrl(null);
   session.clearModelRuntime();
   activeThreadId.set(targetThreadId);
-}
-
-export function beginThreadSwitchForTests(targetThreadId: string) {
-  beginThreadSwitch(targetThreadId);
 }
 
 function detachActiveVersionRuntime() {
@@ -252,21 +231,10 @@ function detachActiveVersionRuntime() {
   session.clearModelRuntime();
 }
 
-export function detachActiveVersionRuntimeForTests() {
-  detachActiveVersionRuntime();
-}
-
 function effectiveActiveVersionId(messages: Message[], currentVersionId: string | null): string | null {
   const versions = versionTimelineMessages(messages);
   const index = activeVersionTimelineIndex(versions, currentVersionId);
   return index >= 0 ? versions[index]?.id ?? null : null;
-}
-
-export function effectiveActiveVersionIdForTests(
-  messages: Message[],
-  currentVersionId: string | null,
-) {
-  return effectiveActiveVersionId(messages, currentVersionId);
 }
 
 function toAssetUrl(path: string | null | undefined): string {
@@ -346,22 +314,6 @@ function resolveVersionRuntimePayload(message: Message): {
   };
 }
 
-export function resetVersionRuntimePayloadCacheForTests() {
-  versionRuntimePayloadCache.clear();
-}
-
-export function rememberVersionRuntimePayloadForTests(
-  messageId: string,
-  artifactBundle: Message['artifactBundle'] | null | undefined,
-  modelManifest: Message['modelManifest'] | null | undefined,
-) {
-  rememberVersionRuntimePayload(messageId, artifactBundle, modelManifest);
-}
-
-export function resolveVersionRuntimePayloadForTests(message: Message) {
-  return resolveVersionRuntimePayload(message);
-}
-
 async function persistVersionRuntimePayload(
   messageId: string,
   artifactBundle: Message['artifactBundle'] | null | undefined,
@@ -371,15 +323,6 @@ async function persistVersionRuntimePayload(
   if (!hasConsistentRuntimePayload(artifactBundle, modelManifest)) return false;
   await persistRuntime(messageId, artifactBundle!, modelManifest!);
   return true;
-}
-
-export async function persistVersionRuntimePayloadForTests(
-  messageId: string,
-  artifactBundle: Message['artifactBundle'] | null | undefined,
-  modelManifest: Message['modelManifest'] | null | undefined,
-  persistRuntime?: typeof updateVersionRuntime,
-) {
-  return persistVersionRuntimePayload(messageId, artifactBundle, modelManifest, persistRuntime);
 }
 
 async function resolveForkRuntimePayload(message: Message): Promise<{

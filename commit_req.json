@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "commit_preview_version",
+    "arguments": {
+      "threadId": "60c3fcd4-31d7-4255-b8a2-bd72fc084f25",
+      "messageId": "2053f5de-5962-41e1-a05e-55ff5008af05",
+      "versionName": "knuckle-hinge-v1",
+      "title": "Printable Knuckle Hinge"
+    }
+  }
+}

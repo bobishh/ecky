@@ -18,6 +18,7 @@
     highlighted = false,
     cadTone = 'neutral',
     liveApply = false,
+    compact = false,
     semanticSource = undefined,
     showSemanticSource = false,
     canEdit = false,
@@ -41,6 +42,7 @@
     highlighted?: boolean;
     cadTone?: CadTone;
     liveApply?: boolean;
+    compact?: boolean;
     semanticSource?: ControlViewSource;
     showSemanticSource?: boolean;
     canEdit?: boolean;
@@ -137,6 +139,7 @@
   class:auto-field={autoField}
   class:param-freezed={frozen}
   class:param-field-focus={focused}
+  class:param-field-compact={compact}
   class:field-select={field.type === 'select'}
   class:field-checkbox={field.type === 'checkbox'}
   class:highlight-pulse={highlighted}
@@ -147,21 +150,23 @@
   onfocusin={(event) => onFocusIn?.(event)}
   onfocusout={(event) => onFocusOut?.(event)}
 >
-  <div class="field-header">
-    <div class="field-title">
-      <label class="param-label" for={elementId}>
-        {field.label}
-      </label>
-      {#if showSemanticSource && semanticSource}
-        <span class="semantic-source-badge">{semanticSource.toUpperCase()}</span>
+  {#if !compact}
+    <div class="field-header">
+      <div class="field-title">
+        <label class="param-label" for={elementId}>
+          {field.label}
+        </label>
+        {#if showSemanticSource && semanticSource}
+          <span class="semantic-source-badge">{semanticSource.toUpperCase()}</span>
+        {/if}
+      </div>
+      {#if canEdit}
+        <button class="btn btn-xs btn-ghost field-action-btn" onclick={() => onEdit?.()}>
+          EDIT
+        </button>
       {/if}
     </div>
-    {#if canEdit}
-      <button class="btn btn-xs btn-ghost field-action-btn" onclick={() => onEdit?.()}>
-        EDIT
-      </button>
-    {/if}
-  </div>
+  {/if}
 
   <div class="field-control">
     {#if field.type === 'range'}
@@ -293,6 +298,15 @@
         color-mix(in srgb, var(--cad-tone-color) 10%, var(--bg-100)) 0%,
         color-mix(in srgb, var(--primary) 12%, var(--bg-200)) 100%
       );
+  }
+
+  .param-field-compact {
+    gap: 2px;
+    padding: 5px 6px;
+  }
+
+  .param-field-compact .field-control {
+    gap: 4px;
   }
 
   .field-header {

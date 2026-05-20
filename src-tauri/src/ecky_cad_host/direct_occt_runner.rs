@@ -12,6 +12,37 @@ const PLAN_FILE_NAME: &str = "plan.json";
 const RUNNER_RESOURCE_PATH: &str = "runtime/occt/bin/direct-occt-runner";
 const LEGACY_RUNNER_RESOURCE_PATH: &str = "bin/direct-occt-runner";
 const RUNNER_DISABLED_ENV: &str = "ECKY_DIRECT_OCCT_RUNNER_DISABLED";
+
+/// Tests that need a machine-independent "no runner anywhere" environment
+/// disable the CWD-relative fallback paths through a thread-local guard
+/// instead of chdir, which would poison every concurrently running test.
+#[cfg(test)]
+pub(crate) mod test_discovery {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DISABLE_CWD_FALLBACKS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn cwd_fallbacks_disabled() -> bool {
+        DISABLE_CWD_FALLBACKS.with(Cell::get)
+    }
+
+    pub(crate) struct CwdFallbackGuard;
+
+    impl CwdFallbackGuard {
+        pub(crate) fn disable() -> Self {
+            DISABLE_CWD_FALLBACKS.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for CwdFallbackGuard {
+        fn drop(&mut self) {
+            DISABLE_CWD_FALLBACKS.with(|flag| flag.set(false));
+        }
+    }
+}
 const MODEL_STEP_FILE_NAME: &str = "model.step";
 const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
 
@@ -126,6 +157,14 @@ pub(crate) fn run_plan_step_stl_with_mode(
         })?;
 
     if !output.status.success() && runner_reported_unsupported(&output) {
+        // Exit 11 means the runner build itself claims an op our support gate
+        // accepted is unsupported — version skew between gate and runner is a
+        // bug and must surface loudly. Any other structured unsupported exit
+        // is a graceful "this runner cannot take the plan": skip the runner
+        // tier and let the caller fall through to the next backend.
+        if output.status.code() != Some(11) {
+            return Ok(None);
+        }
         return Err(AppError::with_details(
             crate::models::AppErrorCode::Validation,
             "Direct OCCT runner rejected a plan that runner support gate accepted.",
@@ -185,8 +224,14 @@ pub(crate) fn discover_direct_occt_runner_with_mode(
         candidates.push(path);
     }
 
-    for fallback in runner_fallback_paths() {
-        candidates.push(PathBuf::from(fallback));
+    #[cfg(test)]
+    let skip_cwd_fallbacks = test_discovery::cwd_fallbacks_disabled();
+    #[cfg(not(test))]
+    let skip_cwd_fallbacks = false;
+    if !skip_cwd_fallbacks {
+        for fallback in runner_fallback_paths() {
+            candidates.push(PathBuf::from(fallback));
+        }
     }
 
     candidates.into_iter().find(|candidate| candidate.exists())
@@ -1540,9 +1585,9 @@ mod tests {
                     args: vec![OcctArg::Number(1.5), OcctArg::Ref(OcctSlot(1))],
                     keywords: vec![OcctKeyword::selector(
                         "edges".to_string(),
-                        OcctArg::Text("target-id:body:edge:0-0-0_20-0-0".to_string()),
+                        OcctArg::Text("target-id:body:edge:-10--10-0_10--10-0".to_string()),
                         CoreSelectorPayload::EdgeTargetIds(vec![
-                            "body:edge:0-0-0_20-0-0".to_string()
+                            "body:edge:-10--10-0_10--10-0".to_string()
                         ]),
                     )],
                 },
@@ -1570,9 +1615,9 @@ mod tests {
                     args: vec![OcctArg::Number(1.25), OcctArg::Ref(OcctSlot(1))],
                     keywords: vec![OcctKeyword::selector(
                         "edges".to_string(),
-                        OcctArg::Text("target-id:body:edge:0-0-0_20-0-0".to_string()),
+                        OcctArg::Text("target-id:body:edge:-10--10-0_10--10-0".to_string()),
                         CoreSelectorPayload::EdgeTargetIds(vec![
-                            "body:edge:0-0-0_20-0-0".to_string()
+                            "body:edge:-10--10-0_10--10-0".to_string()
                         ]),
                     )],
                 },
@@ -1728,10 +1773,10 @@ mod tests {
                     args: vec![OcctArg::Number(1.0), OcctArg::Ref(OcctSlot(1))],
                     keywords: vec![OcctKeyword::selector(
                         "faces".to_string(),
-                        OcctArg::Text("target-id:body:face:10-10-10:400".to_string()),
-                        CoreSelectorPayload::FaceTargetIds(vec![
-                            "body:face:10-10-10:400".to_string()
-                        ]),
+                        OcctArg::Text("target-id:body:face:0-0-10:400".to_string()),
+                        CoreSelectorPayload::FaceTargetIds(
+                            vec!["body:face:0-0-10:400".to_string()],
+                        ),
                     )],
                 },
             ],

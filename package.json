@@ -8,6 +8,7 @@
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
     "build": "vite build",
+    "build:book": "tsx scripts/build_ecky_ir_book.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "runtimes:prepare": "npm run build123d:prepare && npm run occt:prepare && npm run speech:prepare",

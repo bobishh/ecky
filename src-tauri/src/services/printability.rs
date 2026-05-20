@@ -1795,7 +1795,13 @@ mod tests {
 
     #[test]
     fn supportless_fdm_recipes_empty_for_no_risk_mesh() {
-        let result = analyze_stl_triangles(&closed_tetra_triangles(0.0));
+        // A unit tetra reads as a 1.00 mm thin wall (below the 1.20 mm
+        // advisory), so scale it up to make the mesh genuinely risk-free.
+        let triangles = closed_tetra_triangles(0.0)
+            .into_iter()
+            .map(|tri| tri.map(|vertex| vertex.map(|coordinate| coordinate * 10.0)))
+            .collect::<Vec<_>>();
+        let result = analyze_stl_triangles(&triangles);
 
         let recipes = supportless_fdm_transform_recipes(&result);
 

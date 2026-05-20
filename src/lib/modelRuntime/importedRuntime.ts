@@ -13,7 +13,7 @@ export type ImportedPreviewTransform = {
   };
 };
 
-export function humanizeParameterKey(key: string): string {
+function humanizeParameterKey(key: string): string {
   return key
     .split(/[_\-.]+/)
     .filter(Boolean)
@@ -21,7 +21,7 @@ export function humanizeParameterKey(key: string): string {
     .join(' ');
 }
 
-export function inferImportedDimensionValue(
+function inferImportedDimensionValue(
   key: string,
   bounds: ManifestBounds | null | undefined,
 ): number {

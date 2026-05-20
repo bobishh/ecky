@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
 };
 
@@ -588,134 +588,120 @@ fn resolve_distance_selector_anchors(
     manifest: &ModelManifest,
 ) -> Result<Vec<DistanceAnchor>, String> {
     let mut anchors = Vec::new();
-    let mut visited_outputs = HashMap::new();
-    resolve_distance_selector_anchors_inner(
-        selector,
-        bundle,
-        manifest,
-        &mut visited_outputs,
-        &mut anchors,
-    )?;
-    if anchors.is_empty() {
-        return Err(format!(
-            "Unsupported verify selector `{selector}`: no manifest, correspondence, or mesh evidence matched."
-        ));
-    }
-    Ok(anchors)
-}
+    let mut visited_selectors = HashSet::new();
+    let mut queue = VecDeque::from([selector.to_string()]);
 
-fn resolve_distance_selector_anchors_inner(
-    selector: &str,
-    bundle: &ArtifactBundle,
-    manifest: &ModelManifest,
-    visited_outputs: &mut HashMap<String, ()>,
-    anchors: &mut Vec<DistanceAnchor>,
-) -> Result<(), String> {
-    for part in &manifest.parts {
-        if selector_matches_token(selector, &part.part_id) {
-            if let Some(bounds) = &part.bounds {
-                if bounds_are_finite(bounds) {
-                    anchors.push(DistanceAnchor::Bounds {
-                        label: part.label.clone(),
-                        bounds: bounds.clone(),
-                    });
+    while let Some(current) = queue.pop_front() {
+        if !visited_selectors.insert(current.clone()) {
+            continue;
+        }
+
+        for part in &manifest.parts {
+            if selector_matches_token(&current, &part.part_id) {
+                if let Some(bounds) = &part.bounds {
+                    if bounds_are_finite(bounds) {
+                        anchors.push(DistanceAnchor::Bounds {
+                            label: part.label.clone(),
+                            bounds: bounds.clone(),
+                        });
+                    } else {
+                        return Err(format!(
+                            "Verify selector `{current}` matched part '{}' but its bounds are not finite.",
+                            part.part_id
+                        ));
+                    }
                 } else {
                     return Err(format!(
-                        "Verify selector `{selector}` matched part '{}' but its bounds are not finite.",
+                        "Verify selector `{current}` matched part '{}' but bounds evidence is missing.",
                         part.part_id
                     ));
                 }
-            } else {
-                return Err(format!(
-                    "Verify selector `{selector}` matched part '{}' but bounds evidence is missing.",
-                    part.part_id
-                ));
             }
         }
-    }
 
-    for target in &manifest.selection_targets {
-        if selector_matches_distance_target(selector, target) {
-            collect_selection_target_geometry(selector, target, bundle, manifest, anchors)?;
+        for target in &manifest.selection_targets {
+            if selector_matches_distance_target(&current, target) {
+                collect_selection_target_geometry(
+                    &current,
+                    target,
+                    bundle,
+                    manifest,
+                    &mut anchors,
+                )?;
+            }
         }
-    }
 
-    for edge in &bundle.edge_targets {
-        if selector_matches_token(selector, &edge.target_id)
-            || edge
-                .durable_target_id
-                .as_deref()
-                .is_some_and(|value| selector_matches_token(selector, value))
-            || edge
-                .canonical_target_id
-                .as_deref()
-                .is_some_and(|value| selector_matches_token(selector, value))
-            || edge
-                .alias_ids
-                .iter()
-                .any(|alias| selector_matches_token(selector, alias))
-        {
-            anchors.push(DistanceAnchor::Segment {
-                label: edge.label.clone(),
-                start: [edge.start.x, edge.start.y, edge.start.z],
-                end: [edge.end.x, edge.end.y, edge.end.z],
-            });
+        for edge in &bundle.edge_targets {
+            if selector_matches_token(&current, &edge.target_id)
+                || edge
+                    .durable_target_id
+                    .as_deref()
+                    .is_some_and(|value| selector_matches_token(&current, value))
+                || edge
+                    .canonical_target_id
+                    .as_deref()
+                    .is_some_and(|value| selector_matches_token(&current, value))
+                || edge
+                    .alias_ids
+                    .iter()
+                    .any(|alias| selector_matches_token(&current, alias))
+            {
+                anchors.push(DistanceAnchor::Segment {
+                    label: edge.label.clone(),
+                    start: [edge.start.x, edge.start.y, edge.start.z],
+                    end: [edge.end.x, edge.end.y, edge.end.z],
+                });
+            }
         }
-    }
 
-    for face in &bundle.face_targets {
-        if selector_matches_token(selector, &face.target_id)
-            || face
-                .durable_target_id
-                .as_deref()
-                .is_some_and(|value| selector_matches_token(selector, value))
-            || face
-                .canonical_target_id
-                .as_deref()
-                .is_some_and(|value| selector_matches_token(selector, value))
-            || face
-                .alias_ids
-                .iter()
-                .any(|alias| selector_matches_token(selector, alias))
-        {
-            anchors.push(DistanceAnchor::Point {
-                label: face.label.clone(),
-                point: [face.center.x, face.center.y, face.center.z],
-            });
+        for face in &bundle.face_targets {
+            if selector_matches_token(&current, &face.target_id)
+                || face
+                    .durable_target_id
+                    .as_deref()
+                    .is_some_and(|value| selector_matches_token(&current, value))
+                || face
+                    .canonical_target_id
+                    .as_deref()
+                    .is_some_and(|value| selector_matches_token(&current, value))
+                || face
+                    .alias_ids
+                    .iter()
+                    .any(|alias| selector_matches_token(&current, alias))
+            {
+                anchors.push(DistanceAnchor::Point {
+                    label: face.label.clone(),
+                    point: [face.center.x, face.center.y, face.center.z],
+                });
+            }
         }
-    }
 
-    if let Some((feature_id, output_id)) = selector.split_once('.') {
-        let output_key = format!("{feature_id}.{output_id}");
-        if visited_outputs.contains_key(&output_key) {
-            return Ok(());
-        }
-        visited_outputs.insert(output_key.clone(), ());
-        if let Some(correspondence_graph) = manifest.correspondence_graph.as_ref() {
-            for edge in &correspondence_graph.edges {
-                if feature_output_matches(&edge.source, feature_id, output_id)
-                    || feature_output_matches(&edge.target, feature_id, output_id)
-                {
-                    for target_id in edge
-                        .source
-                        .target_ids
-                        .iter()
-                        .chain(edge.target.target_ids.iter())
+        if let Some((feature_id, output_id)) = current.split_once('.') {
+            if let Some(correspondence_graph) = manifest.correspondence_graph.as_ref() {
+                for edge in &correspondence_graph.edges {
+                    if feature_output_matches(&edge.source, feature_id, output_id)
+                        || feature_output_matches(&edge.target, feature_id, output_id)
                     {
-                        resolve_distance_selector_anchors_inner(
-                            target_id,
-                            bundle,
-                            manifest,
-                            visited_outputs,
-                            anchors,
-                        )?;
+                        for target_id in edge
+                            .source
+                            .target_ids
+                            .iter()
+                            .chain(edge.target.target_ids.iter())
+                        {
+                            queue.push_back(target_id.clone());
+                        }
                     }
                 }
             }
         }
     }
 
-    Ok(())
+    if anchors.is_empty() {
+        return Err(format!(
+            "Unsupported verify selector `{selector}`: no manifest, correspondence, or mesh evidence matched."
+        ));
+    }
+    Ok(anchors)
 }
 
 fn collect_selection_target_geometry(
@@ -1764,6 +1750,66 @@ mod tests {
                 relation: "feeds".to_string(),
                 source_ref: None,
             }],
+        });
+
+        let result = evaluate_author_verify_clauses(
+            &[verify_clause(
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol("clearance".to_string()),
+                    CoreVerifyValue::Symbol("min-distance".to_string()),
+                    CoreVerifyValue::Symbol("fitA.out".to_string()),
+                    CoreVerifyValue::Symbol("edge-1".to_string()),
+                ]),
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol(">".to_string()),
+                    CoreVerifyValue::Number(1.0),
+                ]),
+            )],
+            &sample_bundle(),
+            &manifest,
+            Some(&sample_structural_result(true)),
+        );
+
+        assert!(result.passed);
+        assert_eq!(result.checks[0].status, AuthorVerifyCheckStatus::Passed);
+    }
+
+    #[test]
+    fn authored_verify_handles_correspondence_cycles_without_recursing_forever() {
+        let mut manifest = sample_manifest();
+        manifest.correspondence_graph = Some(CorrespondenceGraph {
+            edges: vec![
+                CorrespondenceEdge {
+                    edge_id: "edge-1".to_string(),
+                    source: FeatureOutputRef {
+                        feature_id: "fitA".to_string(),
+                        output_id: "out".to_string(),
+                        target_ids: vec!["face-1".to_string()],
+                    },
+                    target: FeatureOutputRef {
+                        feature_id: "fitB".to_string(),
+                        output_id: "out".to_string(),
+                        target_ids: vec!["fitB.out".to_string()],
+                    },
+                    relation: "feeds".to_string(),
+                    source_ref: None,
+                },
+                CorrespondenceEdge {
+                    edge_id: "edge-2".to_string(),
+                    source: FeatureOutputRef {
+                        feature_id: "fitB".to_string(),
+                        output_id: "out".to_string(),
+                        target_ids: vec!["fitA.out".to_string()],
+                    },
+                    target: FeatureOutputRef {
+                        feature_id: "fitA".to_string(),
+                        output_id: "out".to_string(),
+                        target_ids: vec![],
+                    },
+                    relation: "feeds".to_string(),
+                    source_ref: None,
+                },
+            ],
         });
 
         let result = evaluate_author_verify_clauses(

@@ -117,6 +117,84 @@ Read it as:
 
 - final value returned by `build`
 
+## Components
+
+A component is a named, parameterized, closed geometry unit. Define once,
+instantiate anywhere, override knobs at the call site. `model` and `part`
+stay valid forever; components add reuse on top without changing them.
+
+### `define-component`
+
+```scheme
+(define-component knuckle
+  ((number pin_d 8 :label "Pin diameter" :min 4 :max 12 :step 0.5)
+   (number clearance 0.3))
+  (difference
+    (cylinder (* 2 pin_d) 10 96)
+    (cylinder (+ pin_d clearance) 12 96)))
+```
+
+- positional 1: component name symbol
+- positional 2: signature list; entries use the same grammar as `params`
+  entries (kind, key, optional default, keyword metadata)
+- final positional: one geometry expression
+- optional `(verify ...)` clauses may sit alongside the geometry expression
+- valid at top level or as a direct `model` clause
+
+### Instantiation
+
+```scheme
+(part hinge_a (knuckle :pin_d 6))   ; override pin_d, clearance defaults
+(part hinge_b (knuckle))            ; all defaults apply
+```
+
+- arguments are keywords only: `(name :key value ...)`
+- omitted keys take their signature defaults
+- a signature entry without a default is required at every call site
+- unknown keyword or missing required key fails compile with the component
+  name and its signature listed
+- components instantiate other components; cycles are rejected and nesting
+  is capped at depth 32
+
+### Closedness
+
+A component body sees its signature keys plus bindings made inside the body
+(`let`, `let*`, lambda parameters, `repeat` indices, `build` shapes) and
+nothing else. Referencing a model param or outer binding is a compile error
+naming the variable and the component. Closedness is what makes a component
+copy-inlineable: paste the `define-component` into any model and it works.
+
+### Verify travel
+
+`verify` clauses inside a component expand once per instantiation, with the
+tag namespaced by the instantiating part key:
+
+```scheme
+(define-component pin ((number d 2))
+  (verify (tag pin_ok) (metric min_wall_thickness "body") (expect (>= value 1)))
+  (cylinder d 10 48))
+
+(part left (pin :d 3))   ; verify tag becomes left/pin_ok
+```
+
+A pasted component therefore carries its own checks — reuse includes proof.
+
+### Component Library Workflow (MCP)
+
+Agents lift proven parts into the shared library and reuse them by source:
+
+1. `component_extract` — pass the model source and a `partKey`. Referenced
+   model params become the signature with metadata preserved; scalar outer
+   `let`/`let*` bindings become plain defaults; non-scalar free references
+   are reported as blockers. Set `save: true` to store the component.
+2. `component_search` — compact headers only (name, one-liner, param keys,
+   tags). Bodies are never returned by search.
+3. `component_get` — full copy-inline `define-component` source for one
+   component by name. Paste it into the model and instantiate it.
+
+Extraction is copy-inline only: the returned source is self-contained and
+no registry reference is created implicitly.
+
 ## Verify Clauses
 
 Use `verify` when source should declare structural expectations explicitly.
@@ -124,10 +202,11 @@ Use `verify` when source should declare structural expectations explicitly.
 ```scheme
 (model
   (verify
-    (tag body_shell)
-    (metric check (manifest has-step))
-    (expect check (= true)))
-  (part body (box 10 10 10)))
+    (tag front_gap body.front_window_1)
+    (metric gap (clearance min-distance body lid))
+    (expect gap (>= 3)))
+  (part body (box 10 10 10))
+  (part lid (box 10 10 10)))
 ```
 
 - `verify` is top-level only under `model`

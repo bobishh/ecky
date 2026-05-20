@@ -18,11 +18,37 @@ test('Given app opens When workbench loads Then bottom icon dock controls are av
   await expect(dock.getByRole('button', { name: 'DOCS' })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'CODE' })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'SKETCH' })).toBeVisible();
-  await expect(dock.getByRole('button', { name: /audio/i })).toBeVisible();
+  await expect(dock.getByRole('button', { name: /AUDIO ON|AUDIO OFF/i })).toHaveCount(0);
   await expect(dock.getByRole('button', { name: /Draw Annotations|Exit Draw Mode/ })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'Settings' })).toBeVisible();
   await expect(dock.getByRole('button', { name: '+' })).toHaveCount(0);
   await expect(dock.getByRole('button', { name: 'New project' })).toHaveCount(0);
+});
+
+test('Given workbench dock When layout and audio settings are checked Then audio mute lives in settings and projects/docs sit after the separator', async ({
+  page,
+}) => {
+  await page.goto('/');
+
+  const dock = page.getByTestId('workbench-bottom-dock');
+  const primary = dock.locator('.dock-group--primary');
+  const utility = dock.locator('.dock-group--utility');
+
+  await expect(primary.getByRole('button', { name: /Draw Annotations|Exit Draw Mode/ })).toBeVisible();
+  await expect(primary.getByRole('button', { name: 'PROJECTS' })).toHaveCount(0);
+  await expect(primary.getByRole('button', { name: 'DOCS' })).toHaveCount(0);
+  await expect(primary.getByRole('button', { name: /AUDIO ON|AUDIO OFF/i })).toHaveCount(0);
+  await expect(utility.getByRole('button', { name: 'PROJECTS' })).toBeVisible();
+  await expect(utility.getByRole('button', { name: 'DOCS' })).toBeVisible();
+
+  await dock.getByRole('button', { name: 'Settings' }).click();
+  const settingsWindow = page.locator('[data-window-id="settings"]');
+  await expect(settingsWindow).toBeVisible();
+  await settingsWindow.getByRole('button', { name: 'APP' }).click();
+  const audioBtn = settingsWindow.getByRole('button', { name: /AUDIO ON|AUDIO OFF/i });
+  await expect(audioBtn).toBeVisible();
+  await audioBtn.click();
+  await expect(audioBtn).toHaveText('AUDIO OFF');
 });
 
 test('Given workbench dock When settings opens and closes Then workbench controls remain available', async ({ page }) => {
@@ -127,7 +153,7 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await docsWindow.getByRole('button', { name: 'OPEN IN CODE' }).click();
   const verifyModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Verify Clauses' });
   await expect(verifyModal).toBeVisible();
-  await expect(verifyModal.locator('.cm-content')).toContainText('(verify');
+  await expect(verifyModal.locator('.cm-content')).toContainText('clearance min-distance');
   await expect(verifyModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
   await expect(verifyModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toBeVisible();
   await expect(verifyModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();

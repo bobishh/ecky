@@ -11,11 +11,13 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- Valid basics: `(box 40 20 10 :align '(min center min))`, `(extrude (polygon ((0 0) (100 0) (100 20) (0 20))) 8)`, `(place (location (plane :origin '(80 0 6)) :rotate '(0 90 0)) (cylinder 4 18))`.\n",
     "- `let` is parallel; use `let*` when later bindings depend on earlier bindings.\n",
     "- Guide routing is dynamic. For `sourceLanguage=ecky`, read `ecky://guides/ecky-source` as the primary language guide. Read backend manifests only when checking a specific op/support question. Read prose backend guides only after a lowerer/render error or artifact/export claim.\n",
-    "- For repeated structures in new CAD models, prefer `repeat` or `instance`; avoid copy-paste duplicate geometry blocks.\n",
+    "- For repeated structures in new CAD models, prefer `repeat`, `instance`, or a named `define-component`; avoid copy-paste duplicate geometry blocks.\n",
+    "- Components: `(define-component name ((number key default :label ...) ...) body)` defines a closed, parameterized geometry unit; instantiate with keywords `(name :key value)`. Bodies may only reference signature keys and local bindings; pasted components carry their own `(verify ...)` clauses, tag-namespaced per instantiating part (`partkey/tag`).\n",
+    "- Component library workflow: lift a proven part with `component_extract` (pass the part key and source; `save=true` stores it), discover reusable components with `component_search` (compact headers only), fetch full copy-inline source with `component_get`, then paste the `define-component` into the model and instantiate it.\n",
     "- Physical fit relations need explicit names. Do not leave anonymous offsets like `(+ holder_w 12)` in fit-critical placement/dimension expressions; introduce named bindings or named constraints.\n",
     "- Debug overlays are preview-only diagnostics. They are forbidden in production export geometry.\n",
     "- Fillet/chamfer are topology-sensitive. If a selector matches no edges after one smaller-radius retry and one selector retry, stop retrying fillet/chamfer; rebuild the shape with rounded source geometry (`rounded-rect`, `rounded-polygon`, `offset-rounded`, `loft`, `taper`, `cone`, or explicit profiles).\n",
-    "- Do not promise STEP unless current artifact truth says `hasStepExport=true` or exportArtifacts contains `format=step`; direct OCCT is internal, not a selectable user backend.\n",
+    "- Do not promise STEP unless current artifact truth says `hasStepExport=true` or exportArtifacts contains `format=step`; `mesh`/`native` selects Ecky native lowering, not an automatic STEP guarantee.\n",
     "- MCP-first workflow: inspect with `target_detail_get(section=\"shapeGraph\")`, patch with `ecky_ast_*` when possible, validate with `ecky_constraints_validate`, preview via render, then commit.\n",
     "- Prefer AST patches over full macro rewrites when an `ecky_ast_*` operation can express the edit.\n",
     "- For geometry with explicit topology/printability requirements, add top-level `(verify ...)` clauses before preview when shipped manifest/STL metrics can express the requirement; example metrics: `(stl non-manifold-edge-count)`, `(stl connected-component-count)`, `(stl overhang-face-count)`, and `(manifest has-step)`.\n",
@@ -110,7 +112,8 @@ mod tests {
         assert!(card.contains("Do not promise STEP"));
         assert!(card.contains("hasStepExport=true"));
         assert!(card.contains("exportArtifacts contains `format=step`"));
-        assert!(card.contains("direct OCCT is internal"));
+        assert!(card.contains("`mesh`/`native` selects Ecky native lowering"));
+        assert!(card.contains("not an automatic STEP guarantee"));
     }
 
     #[test]

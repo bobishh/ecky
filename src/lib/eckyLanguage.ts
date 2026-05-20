@@ -45,7 +45,7 @@ function isSymbolChar(ch: string): boolean {
   return /[A-Za-z0-9_?!+\-*/<>=.$]/.test(ch);
 }
 
-export function readEckyToken(stream: StringStream): string | null {
+function readEckyToken(stream: StringStream): string | null {
   if (stream.eatSpace()) return null;
 
   const next = stream.peek();
@@ -120,7 +120,7 @@ export const eckyLanguage = StreamLanguage.define({
   },
 });
 
-export const eckyHighlightStyle = HighlightStyle.define([
+const eckyHighlightStyle = HighlightStyle.define([
   { tag: tags.keyword, class: 'cm-ecky-keyword' },
   { tag: tags.comment, class: 'cm-ecky-comment' },
   { tag: tags.string, class: 'cm-ecky-string' },

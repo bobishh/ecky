@@ -30,6 +30,32 @@ const ECKY_SOURCE_MAX_BYTES: usize = 512 * 1024;
 const ECKY_SOURCE_MAX_LIST_FORMS: usize = 20_000;
 const ECKY_SOURCE_MAX_PAREN_DEPTH: usize = 256;
 
+/// Internal representation of a component clause in the compiler's AST.
+/// Tracks the role of a component (root for model, output for part/feature, library for define-component)
+/// and the original spelling for emit and compatibility.
+///
+/// Spelling is carried per-clause (see `ExpandedModelClause::component`) and never stored
+/// globally: compilations can run concurrently, and emit derives part/feature spelling
+/// from `CoreProgram::feature_decls`, which is per-program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Library role and clause tagging are consumed by define-component (T2).
+struct ComponentClause {
+    role: ComponentRole,
+    spelling: String,
+}
+
+/// Role of a component in the AST:
+/// - Root: the model itself, from `(model ...)`
+/// - Output: a part or feature, from `(part ...)` or `(feature ...)`
+/// - Library: a reusable component definition, from `(define-component ...)` (T2)
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ComponentRole {
+    Root,
+    Output,
+    Library,
+}
+
 fn selector_payload_for_keyword(name: &str, value: &CoreNode) -> Option<CoreSelectorPayload> {
     let selector = match &value.kind {
         CoreNodeKind::Literal(CoreLiteral::Text(text)) => text.as_str(),
@@ -104,6 +130,7 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
         .map_err(|err| CompilerError::new(CompilerErrorKind::Parse, err))?;
     let source = rewrite_sequence_destructuring_source(source)?;
     reject_model_level_sequence_forms(&source)?;
+    let source = lower_component_definitions_source(&source)?;
 
     if can_use_expanded_ast(&source) {
         if let Ok(program) = compile_to_core_program_from_expanded_ast(&source) {
@@ -213,8 +240,9 @@ fn can_use_expanded_ast(source: &str) -> bool {
 }
 
 fn compile_to_core_program_via_runtime(source: &str) -> CoreResult<CoreProgram> {
+    let source = lower_component_definitions_source(source)?;
     let mut engine = bootstrap::new_engine();
-    let runtime_source = rewrite_runtime_model_clause_wrappers(source)?;
+    let runtime_source = rewrite_runtime_model_clause_wrappers(&source)?;
     seed_symbol_bindings(&mut engine, &runtime_source);
     let wrapped = bootstrap::wrap_user_source(&runtime_source);
     let values = engine
@@ -410,6 +438,7 @@ fn model_level_sequence_form_error(name: &str) -> CompilerError {
 fn compile_to_core_program_from_expanded_ast(source: &str) -> CoreResult<CoreProgram> {
     validate_source_budget_before_steel(source)?;
     let source = rewrite_sequence_destructuring_source(source)?;
+    let source = lower_component_definitions_source(&source)?;
     let mut engine = bootstrap::new_engine();
     let wrapped = wrap_expanded_ast_source(&source);
     let forms = engine
@@ -610,6 +639,923 @@ fn static_sequence_length(expr: &ExprKind) -> Option<i64> {
     }
 }
 
+const COMPONENT_MAX_NESTING_DEPTH: usize = 32;
+
+#[derive(Clone, Debug)]
+struct ComponentSignatureEntry {
+    key: String,
+    default_source: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentDefinition {
+    name: String,
+    entries: Vec<ComponentSignatureEntry>,
+    body: ExprKind,
+    verify_clauses: Vec<ExprKind>,
+}
+
+/// Lowers `define-component` definitions and keyword instantiations into plain
+/// `define` + positional calls, shared by both compile paths: the expanded-AST
+/// path inlines the resulting helper functions (fresh node ids, call-site span
+/// on the expansion root) and the Steel runtime path evaluates them as plain
+/// lambdas. Sources without `define-component` pass through byte-identical.
+fn lower_component_definitions_source(source: &str) -> CoreResult<String> {
+    if !source.contains("(define-component") {
+        return Ok(source.to_string());
+    }
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+
+    let mut definitions: Vec<ComponentDefinition> = Vec::new();
+    for form in &forms {
+        collect_component_definitions(form, &mut definitions)?;
+    }
+    let mut registry: BTreeMap<String, ComponentDefinition> = BTreeMap::new();
+    for definition in &definitions {
+        if registry
+            .insert(definition.name.clone(), definition.clone())
+            .is_some()
+        {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Component `{}` is defined more than once.", definition.name),
+            ));
+        }
+    }
+
+    for definition in &definitions {
+        check_component_closedness(definition, &registry)?;
+    }
+    check_component_graph(&definitions, &registry)?;
+
+    let mut out = String::new();
+    for definition in &definitions {
+        let keys = definition
+            .entries
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = rewrite_component_calls(&definition.body, &registry)?;
+        out.push_str(&format!(
+            "(define ({} {}) {})\n",
+            definition.name, keys, body
+        ));
+    }
+    for form in &forms {
+        if component_definition_items(form).is_some() {
+            continue;
+        }
+        out.push_str(&rewrite_component_calls_without_definitions(
+            form, &registry,
+        )?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn component_definition_items(form: &ExprKind) -> Option<Vec<ExprKind>> {
+    let items = expr_list_items(form, "form").ok()?;
+    if items.first().and_then(expr_identifier).as_deref() == Some("define-component") {
+        Some(items)
+    } else {
+        None
+    }
+}
+
+fn collect_component_definitions(
+    form: &ExprKind,
+    definitions: &mut Vec<ComponentDefinition>,
+) -> CoreResult<()> {
+    if let Some(items) = component_definition_items(form) {
+        definitions.push(parse_component_definition(&items)?);
+        return Ok(());
+    }
+    // Also lift definitions written as direct model clauses.
+    if let Ok(items) = expr_list_items(form, "form") {
+        if items.first().and_then(expr_head_name).as_deref() == Some("model") {
+            for clause in items.iter().skip(1) {
+                if let Some(clause_items) = component_definition_items(clause) {
+                    definitions.push(parse_component_definition(&clause_items)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_component_definition(items: &[ExprKind]) -> CoreResult<ComponentDefinition> {
+    if items.len() < 4 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`define-component` needs a name, a signature list, and a geometry body.",
+        ));
+    }
+    let name = expr_identifier(&items[1]).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`define-component` name must be a symbol.",
+        )
+    })?;
+    let signature_items = expr_list_items(&items[2], "component signature")?;
+    let mut entries = Vec::new();
+    for entry in &signature_items {
+        entries.push(parse_component_signature_entry(&name, entry)?);
+    }
+    let mut verify_clauses = Vec::new();
+    let mut geometry = Vec::new();
+    for form in items.iter().skip(3) {
+        let head = expr_list_items(form, "component body form")
+            .ok()
+            .and_then(|body_items| body_items.first().and_then(expr_identifier));
+        if head.as_deref() == Some("verify") {
+            verify_clauses.push(form.clone());
+        } else {
+            geometry.push(form.clone());
+        }
+    }
+    if geometry.len() != 1 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!(
+                "Component `{}` body must be a single geometry expression (plus optional `(verify ...)` clauses); found {} geometry forms.",
+                name,
+                geometry.len()
+            ),
+        ));
+    }
+    Ok(ComponentDefinition {
+        name,
+        entries,
+        body: geometry.remove(0),
+        verify_clauses,
+    })
+}
+
+fn parse_component_signature_entry(
+    component: &str,
+    entry: &ExprKind,
+) -> CoreResult<ComponentSignatureEntry> {
+    let items = expr_list_items(entry, "component signature entry")?;
+    if items.len() < 2 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!(
+                "Component `{}` signature entries are `(kind key [default] [:keyword value ...])`.",
+                component
+            ),
+        ));
+    }
+    let key = expr_identifier(&items[1]).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!(
+                "Component `{}` signature entry key must be a symbol.",
+                component
+            ),
+        )
+    })?;
+    let mut default_source = None;
+    let mut index = 2usize;
+    while index < items.len() {
+        if let Some(keyword) = instantiation_keyword_name(&items[index]) {
+            if index + 1 >= items.len() {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Parse,
+                    format!(
+                        "Component `{}` signature entry `{}` has keyword `:{}` without a value.",
+                        component, key, keyword
+                    ),
+                ));
+            }
+            index += 2;
+            continue;
+        }
+        if default_source.is_some() {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!(
+                    "Component `{}` signature entry `{}` has more than one default value.",
+                    component, key
+                ),
+            ));
+        }
+        default_source = Some(items[index].to_string());
+        index += 1;
+    }
+    Ok(ComponentSignatureEntry {
+        key,
+        default_source,
+    })
+}
+
+fn instantiation_keyword_name(expr: &ExprKind) -> Option<String> {
+    if let ExprKind::Atom(atom) = expr {
+        match &atom.syn.ty {
+            TokenType::Keyword(name) => {
+                let normalized = normalize_keyword(&name.to_string());
+                return normalized.strip_prefix(':').map(str::to_string);
+            }
+            TokenType::Identifier(name) => {
+                let text = name.to_string();
+                return text.strip_prefix(':').map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn component_builtin_names() -> &'static BTreeSet<String> {
+    use std::sync::OnceLock;
+    static NAMES: OnceLock<BTreeSet<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = BTreeSet::new();
+        for export in super::cad::MODULE.exports {
+            names.insert((*export).to_string());
+        }
+        for export in super::core::MODULE.exports {
+            names.insert((*export).to_string());
+        }
+        for export in super::params::MODULE.exports {
+            names.insert((*export).to_string());
+        }
+        for builtin in [
+            "+",
+            "-",
+            "*",
+            "/",
+            "=",
+            "<",
+            "<=",
+            ">",
+            ">=",
+            "abs",
+            "min",
+            "max",
+            "sqrt",
+            "sin",
+            "cos",
+            "tan",
+            "asin",
+            "acos",
+            "atan",
+            "atan2",
+            "floor",
+            "ceiling",
+            "round",
+            "expt",
+            "exp",
+            "log",
+            "modulo",
+            "remainder",
+            "quotient",
+            "not",
+            "and",
+            "or",
+            "if",
+            "cond",
+            "else",
+            "when",
+            "unless",
+            "begin",
+            "let",
+            "let*",
+            "lambda",
+            "quote",
+            "list",
+            "cons",
+            "car",
+            "cdr",
+            "cadr",
+            "first",
+            "second",
+            "third",
+            "list-ref",
+            "length",
+            "append",
+            "reverse",
+            "map",
+            "filter",
+            "fold",
+            "foldl",
+            "foldr",
+            "reduce",
+            "range",
+            "apply",
+            "take",
+            "drop",
+            "null?",
+            "empty?",
+            "list?",
+            "even?",
+            "odd?",
+            "zero?",
+            "signed-pow",
+            "point",
+            "verify",
+            "tag",
+            "metric",
+            "expect",
+        ] {
+            names.insert(builtin.to_string());
+        }
+        names
+    })
+}
+
+fn check_component_closedness(
+    definition: &ComponentDefinition,
+    registry: &BTreeMap<String, ComponentDefinition>,
+) -> CoreResult<()> {
+    let mut bound: BTreeSet<String> = definition
+        .entries
+        .iter()
+        .map(|entry| entry.key.clone())
+        .collect();
+    let mut free = BTreeSet::new();
+    collect_component_free_vars(&definition.body, &mut bound, registry, &mut free);
+    if let Some(variable) = free.iter().next() {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Resolve,
+            format!(
+                "Component `{}` references free variable `{}`. Components are closed: add `{}` to the signature or bind it inside the body.",
+                definition.name, variable, variable
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Free-variable analysis over an authored expression using the compiler's
+/// binding resolution (let/let*/lambda/repeat/build scopes, builtin table).
+/// Used by component closedness checks and by component extraction.
+pub(crate) fn collect_free_variables(
+    expr: &ExprKind,
+    bound: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let registry = BTreeMap::new();
+    let mut scope = bound.clone();
+    let mut free = BTreeSet::new();
+    collect_component_free_vars(expr, &mut scope, &registry, &mut free);
+    free
+}
+
+fn collect_component_free_vars(
+    expr: &ExprKind,
+    bound: &mut BTreeSet<String>,
+    registry: &BTreeMap<String, ComponentDefinition>,
+    free: &mut BTreeSet<String>,
+) {
+    match expr {
+        ExprKind::Atom(_) => {
+            if instantiation_keyword_name(expr).is_some() {
+                return;
+            }
+            if let Some(name) = expr_identifier(expr) {
+                if !bound.contains(&name)
+                    && !component_builtin_names().contains(&name)
+                    && !registry.contains_key(&name)
+                {
+                    free.insert(name);
+                }
+            }
+        }
+        ExprKind::Quote(_) => {}
+        ExprKind::If(if_expr) => {
+            collect_component_free_vars(&if_expr.test_expr, bound, registry, free);
+            collect_component_free_vars(&if_expr.then_expr, bound, registry, free);
+            collect_component_free_vars(&if_expr.else_expr, bound, registry, free);
+        }
+        ExprKind::Begin(begin) => {
+            for item in &begin.exprs {
+                collect_component_free_vars(item, bound, registry, free);
+            }
+        }
+        ExprKind::Let(let_expr) => {
+            let mut scope = bound.clone();
+            for (name_expr, value_expr) in &let_expr.bindings {
+                collect_component_free_vars(value_expr, bound, registry, free);
+                if let Some(name) = expr_identifier(name_expr) {
+                    scope.insert(name);
+                }
+            }
+            collect_component_free_vars(&let_expr.body_expr, &mut scope, registry, free);
+        }
+        ExprKind::LambdaFunction(lambda) => {
+            let mut scope = bound.clone();
+            for arg in &lambda.args {
+                bind_pattern_names(arg, &mut scope);
+            }
+            collect_component_free_vars(&lambda.body, &mut scope, registry, free);
+        }
+        ExprKind::List(_) | ExprKind::Vector(_) => {
+            let Ok(items) = expr_list_items(expr, "component body form") else {
+                return;
+            };
+            let head = items.first().and_then(expr_identifier);
+            match head.as_deref() {
+                Some("quote") => {}
+                Some("let") | Some("let*") if items.len() >= 3 => {
+                    let sequential = head.as_deref() == Some("let*");
+                    let mut scope = bound.clone();
+                    if let Ok(bindings) = expr_list_items(&items[1], "let bindings") {
+                        for binding in &bindings {
+                            if let Ok(pair) = expr_list_items(binding, "let binding") {
+                                if pair.len() == 2 {
+                                    if sequential {
+                                        collect_component_free_vars(
+                                            &pair[1], &mut scope, registry, free,
+                                        );
+                                    } else {
+                                        collect_component_free_vars(
+                                            &pair[1], bound, registry, free,
+                                        );
+                                    }
+                                    if let Some(name) = expr_identifier(&pair[0]) {
+                                        scope.insert(name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        collect_component_free_vars(item, &mut scope, registry, free);
+                    }
+                }
+                Some("lambda") if items.len() >= 3 => {
+                    let mut scope = bound.clone();
+                    if let Ok(params) = expr_list_items(&items[1], "lambda params") {
+                        for param in &params {
+                            bind_pattern_names(param, &mut scope);
+                        }
+                    } else {
+                        bind_pattern_names(&items[1], &mut scope);
+                    }
+                    for item in items.iter().skip(2) {
+                        collect_component_free_vars(item, &mut scope, registry, free);
+                    }
+                }
+                Some("repeat")
+                | Some("repeat-union")
+                | Some("repeat-compound")
+                | Some("repeat-pick")
+                    if items.len() >= 3 =>
+                {
+                    let mut scope = bound.clone();
+                    if let Some(index_name) = items.get(1).and_then(expr_identifier) {
+                        scope.insert(index_name);
+                    }
+                    for item in items.iter().skip(2) {
+                        collect_component_free_vars(item, &mut scope, registry, free);
+                    }
+                }
+                Some("build") => {
+                    let mut scope = bound.clone();
+                    for item in items.iter().skip(1) {
+                        if let Ok(clause) = expr_list_items(item, "build clause") {
+                            let clause_head = clause.first().and_then(expr_identifier);
+                            if clause_head.as_deref() == Some("shape") && clause.len() == 3 {
+                                collect_component_free_vars(&clause[2], &mut scope, registry, free);
+                                if let Some(name) = expr_identifier(&clause[1]) {
+                                    scope.insert(name);
+                                }
+                                continue;
+                            }
+                        }
+                        collect_component_free_vars(item, &mut scope, registry, free);
+                    }
+                }
+                _ => {
+                    let mut iter = items.iter();
+                    if head.is_some() {
+                        // Skip the operator position; it is either a builtin,
+                        // a component (checked via registry), or reported when
+                        // unknown below.
+                        if let Some(op) = iter.next().and_then(expr_identifier) {
+                            if !component_builtin_names().contains(&op)
+                                && !registry.contains_key(&op)
+                                && !bound.contains(&op)
+                            {
+                                free.insert(op);
+                            }
+                        }
+                    }
+                    for item in iter {
+                        collect_component_free_vars(item, bound, registry, free);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bind_pattern_names(pattern: &ExprKind, scope: &mut BTreeSet<String>) {
+    if let Some(name) = expr_identifier(pattern) {
+        scope.insert(name);
+        return;
+    }
+    if let Ok(items) = expr_list_items(pattern, "binding pattern") {
+        for item in &items {
+            bind_pattern_names(item, scope);
+        }
+    }
+}
+
+fn check_component_graph(
+    definitions: &[ComponentDefinition],
+    registry: &BTreeMap<String, ComponentDefinition>,
+) -> CoreResult<()> {
+    fn depth_of(
+        name: &str,
+        registry: &BTreeMap<String, ComponentDefinition>,
+        stack: &mut Vec<String>,
+        memo: &mut BTreeMap<String, usize>,
+    ) -> CoreResult<usize> {
+        if let Some(depth) = memo.get(name) {
+            return Ok(*depth);
+        }
+        if stack.iter().any(|entry| entry == name) {
+            let mut chain = stack.clone();
+            chain.push(name.to_string());
+            return Err(CompilerError::new(
+                CompilerErrorKind::UnsupportedFeature,
+                format!(
+                    "Component instantiation cycle detected: {}.",
+                    chain.join(" -> ")
+                ),
+            ));
+        }
+        let Some(definition) = registry.get(name) else {
+            return Ok(0);
+        };
+        stack.push(name.to_string());
+        let mut dependencies = BTreeSet::new();
+        collect_component_dependencies(&definition.body, registry, &mut dependencies);
+        let mut depth = 1usize;
+        for dependency in &dependencies {
+            depth = depth.max(1 + depth_of(dependency, registry, stack, memo)?);
+        }
+        stack.pop();
+        if depth > COMPONENT_MAX_NESTING_DEPTH {
+            return Err(CompilerError::new(
+                CompilerErrorKind::UnsupportedFeature,
+                format!(
+                    "Component `{}` exceeds the maximum component nesting depth of {}.",
+                    name, COMPONENT_MAX_NESTING_DEPTH
+                ),
+            ));
+        }
+        memo.insert(name.to_string(), depth);
+        Ok(depth)
+    }
+
+    let mut memo = BTreeMap::new();
+    for definition in definitions {
+        let mut stack = Vec::new();
+        depth_of(&definition.name, registry, &mut stack, &mut memo)?;
+    }
+    Ok(())
+}
+
+fn collect_component_dependencies(
+    expr: &ExprKind,
+    registry: &BTreeMap<String, ComponentDefinition>,
+    dependencies: &mut BTreeSet<String>,
+) {
+    match expr {
+        ExprKind::Quote(_) => {}
+        ExprKind::List(_) | ExprKind::Vector(_) => {
+            let Ok(items) = expr_list_items(expr, "component body form") else {
+                return;
+            };
+            if let Some(head) = items.first().and_then(expr_identifier) {
+                if head == "quote" {
+                    return;
+                }
+                if registry.contains_key(&head) {
+                    dependencies.insert(head);
+                }
+            }
+            for item in &items {
+                collect_component_dependencies(item, registry, dependencies);
+            }
+        }
+        ExprKind::If(if_expr) => {
+            collect_component_dependencies(&if_expr.test_expr, registry, dependencies);
+            collect_component_dependencies(&if_expr.then_expr, registry, dependencies);
+            collect_component_dependencies(&if_expr.else_expr, registry, dependencies);
+        }
+        ExprKind::Let(let_expr) => {
+            for (_, value_expr) in &let_expr.bindings {
+                collect_component_dependencies(value_expr, registry, dependencies);
+            }
+            collect_component_dependencies(&let_expr.body_expr, registry, dependencies);
+        }
+        ExprKind::LambdaFunction(lambda) => {
+            collect_component_dependencies(&lambda.body, registry, dependencies);
+        }
+        ExprKind::Begin(begin) => {
+            for item in &begin.exprs {
+                collect_component_dependencies(item, registry, dependencies);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_component_calls_without_definitions(
+    expr: &ExprKind,
+    registry: &BTreeMap<String, ComponentDefinition>,
+) -> CoreResult<String> {
+    if let Ok(items) = expr_list_items(expr, "form") {
+        if items.first().and_then(expr_head_name).as_deref() == Some("model") {
+            let mut rendered = vec!["model".to_string()];
+            for clause in items.iter().skip(1) {
+                if component_definition_items(clause).is_some() {
+                    continue;
+                }
+                rendered.push(rewrite_component_calls(clause, registry)?);
+                rendered.extend(component_verify_clauses_for_model_clause(clause, registry)?);
+            }
+            return Ok(format!("({})", rendered.join(" ")));
+        }
+    }
+    rewrite_component_calls(expr, registry)
+}
+
+/// Verify clauses authored inside `define-component` travel with each
+/// instantiation: every `(part ...)`/`(feature ...)` clause that instantiates
+/// components gains those components' verify clauses (transitively), with the
+/// tag namespaced as `partkey/tag`. Identical clauses are emitted once.
+fn component_verify_clauses_for_model_clause(
+    clause: &ExprKind,
+    registry: &BTreeMap<String, ComponentDefinition>,
+) -> CoreResult<Vec<String>> {
+    let Ok(items) = expr_list_items(clause, "model clause") else {
+        return Ok(Vec::new());
+    };
+    let head = items.first().and_then(expr_head_name);
+    if !matches!(head.as_deref(), Some("part") | Some("feature")) {
+        return Ok(Vec::new());
+    }
+    let Some(part_key) = items.get(1).and_then(expr_identifier) else {
+        return Ok(Vec::new());
+    };
+
+    let mut dependencies = BTreeSet::new();
+    collect_component_dependencies(clause, registry, &mut dependencies);
+    let mut rendered = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for dependency in &dependencies {
+        append_transitive_component_verifies(
+            dependency,
+            &part_key,
+            registry,
+            &mut visited,
+            &mut seen,
+            &mut rendered,
+        )?;
+    }
+    Ok(rendered)
+}
+
+fn append_transitive_component_verifies(
+    component: &str,
+    part_key: &str,
+    registry: &BTreeMap<String, ComponentDefinition>,
+    visited: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<String>,
+    rendered: &mut Vec<String>,
+) -> CoreResult<()> {
+    if !visited.insert(component.to_string()) {
+        return Ok(());
+    }
+    let Some(definition) = registry.get(component) else {
+        return Ok(());
+    };
+    for clause in &definition.verify_clauses {
+        let namespaced = render_namespaced_verify_clause(clause, part_key, &definition.name)?;
+        if seen.insert(namespaced.clone()) {
+            rendered.push(namespaced);
+        }
+    }
+    let mut nested = BTreeSet::new();
+    collect_component_dependencies(&definition.body, registry, &mut nested);
+    for dependency in &nested {
+        append_transitive_component_verifies(
+            dependency, part_key, registry, visited, seen, rendered,
+        )?;
+    }
+    Ok(())
+}
+
+fn render_namespaced_verify_clause(
+    clause: &ExprKind,
+    part_key: &str,
+    component: &str,
+) -> CoreResult<String> {
+    let items = expr_list_items(clause, "verify clause")?;
+    let mut rendered = vec!["verify".to_string()];
+    let mut saw_tag = false;
+    for section in items.iter().skip(1) {
+        let section_items = expr_list_items(section, "verify section")?;
+        if section_items.first().and_then(expr_identifier).as_deref() == Some("tag") {
+            let Some(tag) = section_items.get(1).and_then(expr_identifier) else {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Parse,
+                    format!(
+                        "Component `{}` verify clause needs `(tag symbol)` to namespace per instance.",
+                        component
+                    ),
+                ));
+            };
+            rendered.push(format!("(tag {}/{})", part_key, tag));
+            saw_tag = true;
+        } else {
+            rendered.push(section.to_string());
+        }
+    }
+    if !saw_tag {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!(
+                "Component `{}` verify clause needs a `(tag ...)` section to namespace per instance.",
+                component
+            ),
+        ));
+    }
+    Ok(format!("({})", rendered.join(" ")))
+}
+
+fn rewrite_component_calls(
+    expr: &ExprKind,
+    registry: &BTreeMap<String, ComponentDefinition>,
+) -> CoreResult<String> {
+    match expr {
+        ExprKind::Atom(_) => Ok(expr.to_string()),
+        ExprKind::Quote(_) => Ok(expr.to_string()),
+        ExprKind::Define(def) => Ok(format!(
+            "(define {} {})",
+            def.name,
+            rewrite_component_calls(&def.body, registry)?
+        )),
+        ExprKind::Begin(begin) => {
+            let rendered = begin
+                .exprs
+                .iter()
+                .map(|item| rewrite_component_calls(item, registry))
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok(format!("(begin {})", rendered.join(" ")))
+        }
+        ExprKind::If(if_expr) => Ok(format!(
+            "(if {} {} {})",
+            rewrite_component_calls(&if_expr.test_expr, registry)?,
+            rewrite_component_calls(&if_expr.then_expr, registry)?,
+            rewrite_component_calls(&if_expr.else_expr, registry)?
+        )),
+        ExprKind::Let(let_expr) => {
+            let bindings = let_expr
+                .bindings
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!(
+                        "({} {})",
+                        name,
+                        rewrite_component_calls(value, registry)?
+                    ))
+                })
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok(format!(
+                "(let ({}) {})",
+                bindings.join(" "),
+                rewrite_component_calls(&let_expr.body_expr, registry)?
+            ))
+        }
+        ExprKind::LambdaFunction(lambda) => {
+            let args = lambda
+                .args
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Ok(format!(
+                "(lambda ({}) {})",
+                args,
+                rewrite_component_calls(&lambda.body, registry)?
+            ))
+        }
+        ExprKind::List(_) | ExprKind::Vector(_) => {
+            let items = expr_list_items(expr, "form")?;
+            if let Some(head) = items.first().and_then(expr_identifier) {
+                if head == "quote" {
+                    return Ok(expr.to_string());
+                }
+                if let Some(definition) = registry.get(&head) {
+                    return rewrite_component_instantiation(definition, &items[1..], registry);
+                }
+            }
+            let rendered = items
+                .iter()
+                .map(|item| rewrite_component_calls(item, registry))
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok(format!("({})", rendered.join(" ")))
+        }
+        other => Ok(other.to_string()),
+    }
+}
+
+fn rewrite_component_instantiation(
+    definition: &ComponentDefinition,
+    args: &[ExprKind],
+    registry: &BTreeMap<String, ComponentDefinition>,
+) -> CoreResult<String> {
+    let signature_keys = definition
+        .entries
+        .iter()
+        .map(|entry| entry.key.clone())
+        .collect::<Vec<_>>();
+    let mut overrides: BTreeMap<String, String> = BTreeMap::new();
+    let mut index = 0usize;
+    while index < args.len() {
+        let Some(keyword) = instantiation_keyword_name(&args[index]) else {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` must be instantiated with keyword arguments, e.g. `({} :{} ...)`. Signature: ({}).",
+                    definition.name,
+                    definition.name,
+                    signature_keys.first().map(String::as_str).unwrap_or("key"),
+                    signature_keys.join(" ")
+                ),
+            ));
+        };
+        if !signature_keys.iter().any(|key| key == &keyword) {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` has no parameter `:{}`. Signature: ({}).",
+                    definition.name,
+                    keyword,
+                    signature_keys.join(" ")
+                ),
+            ));
+        }
+        let Some(value_expr) = args.get(index + 1) else {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` keyword `:{}` is missing a value.",
+                    definition.name, keyword
+                ),
+            ));
+        };
+        if overrides
+            .insert(
+                keyword.clone(),
+                rewrite_component_calls(value_expr, registry)?,
+            )
+            .is_some()
+        {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` keyword `:{}` is given more than once.",
+                    definition.name, keyword
+                ),
+            ));
+        }
+        index += 2;
+    }
+
+    let mut positional = Vec::new();
+    for entry in &definition.entries {
+        if let Some(value) = overrides.remove(&entry.key) {
+            positional.push(value);
+        } else if let Some(default_source) = &entry.default_source {
+            positional.push(default_source.clone());
+        } else {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` requires `:{}` (no default). Signature: ({}).",
+                    definition.name,
+                    entry.key,
+                    signature_keys.join(" ")
+                ),
+            ));
+        }
+    }
+    if positional.is_empty() {
+        Ok(format!("({})", definition.name))
+    } else {
+        Ok(format!("({} {})", definition.name, positional.join(" ")))
+    }
+}
+
 fn wrap_expanded_ast_source(source: &str) -> String {
     let keyword_re = Regex::new(r#"(^|[\s(])\:([A-Za-z][A-Za-z0-9_-]*)"#).expect("keyword regex");
     let normalized = keyword_re.replace_all(source, "$1#:$2");
@@ -720,6 +1666,15 @@ type ExpandedHelperMap = BTreeMap<String, ExpandedHelper>;
 struct ExpandedModelClause {
     items: Vec<ExprKind>,
     helpers: ExpandedHelperMap,
+    component: Option<ComponentClause>,
+}
+
+impl ExpandedModelClause {
+    #[allow(dead_code)] // consumed by define-component parsing in T2
+    fn with_component(mut self, component: ComponentClause) -> Self {
+        self.component = Some(component);
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -869,7 +1824,7 @@ fn expr_list_head_is(items: &[ExprKind], expected: &str) -> bool {
     items.first().and_then(expr_head_name).as_deref() == Some(expected)
 }
 
-fn expr_head_name(value: &ExprKind) -> Option<String> {
+pub(crate) fn expr_head_name(value: &ExprKind) -> Option<String> {
     match value {
         ExprKind::Atom(atom) => match &atom.syn.ty {
             TokenType::Begin => Some("begin".to_string()),
@@ -915,23 +1870,22 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let mut raw_parts = Vec::new();
 
     for clause_form in clauses {
-        let items = clause_form.items;
         let clause =
-            expr_name(items.first().ok_or_else(|| {
+            expr_name(clause_form.items.first().ok_or_else(|| {
                 CompilerError::new(CompilerErrorKind::Parse, "Empty model clause.")
             })?)?;
         match clause.as_str() {
             "params" => {
-                let (mut parsed_params, mut parsed_relations) =
-                    parse_expanded_params_clause(&items, &mut next_param, &clause_form.helpers)?;
+                let (mut parsed_params, mut parsed_relations) = parse_expanded_params_clause(
+                    &clause_form.items,
+                    &mut next_param,
+                    &clause_form.helpers,
+                )?;
                 params.append(&mut parsed_params);
                 pending_relations.append(&mut parsed_relations);
             }
-            "verify" => verify_clauses.push(parse_expanded_verify_clause(&items)?),
-            "part" | "feature" => raw_parts.push(ExpandedModelClause {
-                items,
-                helpers: clause_form.helpers,
-            }),
+            "verify" => verify_clauses.push(parse_expanded_verify_clause(&clause_form.items)?),
+            "part" | "feature" => raw_parts.push(clause_form),
             "meta" => {}
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
             other => {
@@ -957,19 +1911,26 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let mut constraints = resolve_relation_constraints(&mut params, pending_relations)?;
     constraints.verify_clauses = verify_clauses;
     let mut parts = Vec::new();
+    let mut part_components: BTreeMap<String, ComponentClause> = BTreeMap::new();
     for part_clause in &raw_parts {
         let clause_name =
             expr_name(part_clause.items.first().ok_or_else(|| {
                 CompilerError::new(CompilerErrorKind::Parse, "Empty model clause.")
             })?)?;
         match clause_name.as_str() {
-            "part" => parts.push(parse_expanded_part_decl(
-                &part_clause.items,
-                &mut next_part,
-                &mut next_node,
-                &param_ids,
-                &part_clause.helpers,
-            )?),
+            "part" => {
+                let part = parse_expanded_part_decl(
+                    &part_clause.items,
+                    &mut next_part,
+                    &mut next_node,
+                    &param_ids,
+                    &part_clause.helpers,
+                )?;
+                if let Some(component) = &part_clause.component {
+                    part_components.insert(part.key.clone(), component.clone());
+                }
+                parts.push(part);
+            }
             "feature" => {
                 let (part, decl) = parse_expanded_feature_decl(
                     &part_clause.items,
@@ -978,6 +1939,9 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
                     &param_ids,
                     &part_clause.helpers,
                 )?;
+                if let Some(component) = &part_clause.component {
+                    part_components.insert(part.key.clone(), component.clone());
+                }
                 feature_decls.insert(part.key.clone(), decl);
                 parts.push(part);
             }
@@ -996,6 +1960,10 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
             "Steel model needs at least one `(part ...)` clause.",
         ));
     }
+
+    // Component clause tagging (role + spelling) stays on the parse-layer clauses;
+    // emit derives part/feature spelling from per-program feature_decls. No global state.
+    let _ = part_components;
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
         .with_feature_decls(feature_decls)
@@ -1269,18 +2237,42 @@ fn push_expanded_model_clauses(
                         }
                         return Ok(());
                     }
+                    "part" => {
+                        clauses.push(ExpandedModelClause {
+                            items,
+                            helpers: helpers.clone(),
+                            component: Some(ComponentClause {
+                                role: ComponentRole::Output,
+                                spelling: "part".to_string(),
+                            }),
+                        });
+                        return Ok(());
+                    }
+                    "feature" => {
+                        clauses.push(ExpandedModelClause {
+                            items,
+                            helpers: helpers.clone(),
+                            component: Some(ComponentClause {
+                                role: ComponentRole::Output,
+                                spelling: "feature".to_string(),
+                            }),
+                        });
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }
             clauses.push(ExpandedModelClause {
                 items,
                 helpers: helpers.clone(),
+                component: None,
             });
         }
         _ => {
             clauses.push(ExpandedModelClause {
                 items: expr_list_items(form, "model clause")?,
                 helpers: helpers.clone(),
+                component: None,
             });
         }
     }
@@ -5491,7 +6483,7 @@ fn parse_expanded_build_node(
     Ok(CoreNodeKind::Build { bindings, result })
 }
 
-fn expr_list_items(value: &ExprKind, context: &str) -> CoreResult<Vec<ExprKind>> {
+pub(crate) fn expr_list_items(value: &ExprKind, context: &str) -> CoreResult<Vec<ExprKind>> {
     match value {
         ExprKind::List(list) => Ok(list.args.iter().cloned().collect()),
         ExprKind::Vector(vector) => Ok(vector.args.iter().cloned().collect()),
@@ -5523,7 +6515,7 @@ fn normalize_hygienic_op_name(name: &str) -> String {
     name.rsplit("__%#__").next().unwrap_or(name).to_string()
 }
 
-fn expr_identifier(value: &ExprKind) -> Option<String> {
+pub(crate) fn expr_identifier(value: &ExprKind) -> Option<String> {
     match value {
         ExprKind::Atom(atom) => match &atom.syn.ty {
             TokenType::Identifier(name) => Some(name.to_string()),
@@ -5658,6 +6650,7 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     let mut params = Vec::new();
     let mut pending_relations = Vec::new();
     let mut raw_parts = Vec::new();
+    let mut part_spellings: BTreeMap<usize, String> = BTreeMap::new();
     let mut next_param = 1u64;
     let mut next_part = 1u64;
     let mut next_node = 1u64;
@@ -5678,7 +6671,10 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
                 pending_relations.append(&mut parsed_relations);
             }
             "verify" => verify_clauses.push(parse_verify_clause(&items)?),
-            "part" | "feature" => raw_parts.push(items),
+            "part" | "feature" => {
+                part_spellings.insert(raw_parts.len(), clause.to_string());
+                raw_parts.push(items);
+            }
             "meta" => {}
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
             other => {
@@ -5704,23 +6700,39 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     let mut constraints = resolve_relation_constraints(&mut params, pending_relations)?;
     constraints.verify_clauses = verify_clauses;
     let mut parts = Vec::new();
-    for part_clause in &raw_parts {
+    let mut part_components: BTreeMap<String, ComponentClause> = BTreeMap::new();
+    for (clause_idx, part_clause) in raw_parts.iter().enumerate() {
         let clause_name =
             symbol_name(part_clause.first().ok_or_else(|| {
                 CompilerError::new(CompilerErrorKind::Parse, "Empty model clause.")
             })?)?;
+        let spelling = part_spellings
+            .get(&clause_idx)
+            .map(|s| s.as_str())
+            .unwrap_or(clause_name.as_str());
         match clause_name.as_str() {
             "part" => {
-                parts.push(parse_part_decl(
-                    part_clause,
-                    &mut next_part,
-                    &mut next_node,
-                    &param_ids,
-                )?);
+                let part =
+                    parse_part_decl(part_clause, &mut next_part, &mut next_node, &param_ids)?;
+                part_components.insert(
+                    part.key.clone(),
+                    ComponentClause {
+                        role: ComponentRole::Output,
+                        spelling: spelling.to_string(),
+                    },
+                );
+                parts.push(part);
             }
             "feature" => {
                 let (part, decl) =
                     parse_feature_decl(part_clause, &mut next_part, &mut next_node, &param_ids)?;
+                part_components.insert(
+                    part.key.clone(),
+                    ComponentClause {
+                        role: ComponentRole::Output,
+                        spelling: spelling.to_string(),
+                    },
+                );
                 feature_decls.insert(part.key.clone(), decl);
                 parts.push(part);
             }
@@ -5739,6 +6751,10 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
             "Steel model needs at least one `(part ...)` clause.",
         ));
     }
+
+    // Component clause tagging (role + spelling) stays on the parse-layer clauses;
+    // emit derives part/feature spelling from per-program feature_decls. No global state.
+    let _ = part_components;
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
         .with_feature_decls(feature_decls)
@@ -9300,6 +10316,576 @@ mod tests {
         assert!(message.contains("solid"), "{message}");
     }
 
+    #[test]
+    fn component_clause_roles_cover_model_part_feature() {
+        // T1 representation: model -> Root, part/feature -> Output, define-component -> Library (T2).
+        let root = ComponentClause {
+            role: ComponentRole::Root,
+            spelling: "model".to_string(),
+        };
+        let part = ComponentClause {
+            role: ComponentRole::Output,
+            spelling: "part".to_string(),
+        };
+        let feature = ComponentClause {
+            role: ComponentRole::Output,
+            spelling: "feature".to_string(),
+        };
+        assert_eq!(root.role, ComponentRole::Root);
+        assert_eq!(part.role, ComponentRole::Output);
+        assert_eq!(feature.role, ComponentRole::Output);
+        assert_ne!(ComponentRole::Library, ComponentRole::Output);
+    }
+
+    #[test]
+    fn component_emit_preserves_part_spelling() {
+        let source = "(model (part my_part (box 1 1 1)))";
+        let program = compile_to_core_program(source).expect("compile");
+        let emitted = emit_program(&program);
+
+        assert!(
+            emitted.contains("(part my_part"),
+            "emitted should preserve 'part' spelling: {emitted}"
+        );
+        assert!(
+            !emitted.contains("(feature my_part"),
+            "should not emit as feature"
+        );
+    }
+
+    #[test]
+    fn component_emit_preserves_feature_spelling() {
+        let source = r#"
+            (model
+              (part body (box 1 1 1))
+              (feature my_feature :role "chamfer" (box 1 1 1)))
+        "#;
+        let program = compile_to_core_program(source).expect("compile");
+        let emitted = emit_program(&program);
+
+        assert!(
+            emitted.contains("(feature my_feature"),
+            "emitted should preserve 'feature' spelling: {emitted}"
+        );
+    }
+
+    #[test]
+    fn component_roundtrip_preserves_spellings() {
+        let source = r#"
+            (model
+              (part shell (box 2 2 2))
+              (part core (box 1 1 1))
+              (feature trim :role "finish" (box 1 1 1)))
+        "#;
+        let program = compile_to_core_program(source).expect("compile");
+        let emitted = emit_program(&program);
+        let program2 = compile_to_core_program(&emitted).expect("recompile");
+
+        // Core structure must be identical
+        assert_eq!(
+            program.parts.len(),
+            program2.parts.len(),
+            "part count must match"
+        );
+        assert_eq!(
+            program.parts[0].key, program2.parts[0].key,
+            "part 0 key must match"
+        );
+        assert_eq!(
+            program.parts[1].key, program2.parts[1].key,
+            "part 1 key must match"
+        );
+        assert_eq!(
+            program.parts[2].key, program2.parts[2].key,
+            "part 2 key must match"
+        );
+
+        // Emitted source must preserve spellings
+        let emitted2 = emit_program(&program2);
+        assert!(
+            emitted.contains("(part shell"),
+            "first emit should have 'part shell'"
+        );
+        assert!(
+            emitted2.contains("(part shell"),
+            "second emit should preserve 'part shell'"
+        );
+        assert!(
+            emitted.contains("(feature trim"),
+            "first emit should have 'feature trim'"
+        );
+        assert!(
+            emitted2.contains("(feature trim"),
+            "second emit should preserve 'feature trim'"
+        );
+    }
+
+    // --- T2: define-component and instantiation ---
+
+    fn component_let_bindings(node: &CoreNode) -> &[CoreBinding] {
+        let CoreNodeKind::Let { bindings, .. } = &node.kind else {
+            panic!("expected component expansion let, got {:?}", node.kind);
+        };
+        bindings
+    }
+
+    fn binding_number(bindings: &[CoreBinding], name: &str) -> f64 {
+        let demangle = |raw: &str| -> String {
+            let raw = normalize_hygienic_op_name(raw);
+            raw.trim_start_matches('#')
+                .trim_end_matches(|c: char| c.is_ascii_digit())
+                .to_string()
+        };
+        let binding = bindings
+            .iter()
+            .find(|binding| demangle(&binding.name) == name)
+            .unwrap_or_else(|| panic!("missing binding `{name}` in {bindings:?}"));
+        match &binding.value.kind {
+            CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(value)) => *value,
+            other => panic!("binding `{name}` is not a number literal: {other:?}"),
+        }
+    }
+
+    fn collect_node_ids(node: &CoreNode, seen: &mut Vec<u64>) {
+        seen.push(node.id.raw());
+        match &node.kind {
+            CoreNodeKind::Call { args, .. } => {
+                for arg in args {
+                    collect_node_ids(arg, seen);
+                }
+            }
+            CoreNodeKind::Let { bindings, body } => {
+                for binding in bindings {
+                    collect_node_ids(&binding.value, seen);
+                }
+                collect_node_ids(body, seen);
+            }
+            CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+                for item in items {
+                    collect_node_ids(item, seen);
+                }
+            }
+            CoreNodeKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_node_ids(condition, seen);
+                collect_node_ids(then_branch, seen);
+                collect_node_ids(else_branch, seen);
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn define_component_instantiation_applies_defaults_and_overrides() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component knuckle
+              ((number pin_d 8) (number clearance 0.3))
+              (difference
+                (cylinder (* 2 pin_d) 10 96)
+                (cylinder (+ pin_d clearance) 12 96)))
+            (model
+              (part hinge_a (knuckle :pin_d 6))
+              (part hinge_b (knuckle)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parts.len(), 2);
+        assert_eq!(program.parts[0].key, "hinge_a");
+        assert_eq!(program.parts[1].key, "hinge_b");
+
+        let a_bindings = component_let_bindings(&program.parts[0].root);
+        assert_eq!(binding_number(a_bindings, "pin_d"), 6.0);
+        assert_eq!(binding_number(a_bindings, "clearance"), 0.3);
+
+        let b_bindings = component_let_bindings(&program.parts[1].root);
+        assert_eq!(binding_number(b_bindings, "pin_d"), 8.0);
+        assert_eq!(binding_number(b_bindings, "clearance"), 0.3);
+    }
+
+    #[test]
+    fn define_component_inside_model_is_supported() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (define-component stub ((number size 4)) (box size size size))
+              (part body (stub :size 2)))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.parts.len(), 1);
+        let bindings = component_let_bindings(&program.parts[0].root);
+        assert_eq!(binding_number(bindings, "size"), 2.0);
+    }
+
+    #[test]
+    fn define_component_signature_accepts_param_metadata() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component knob
+              ((number d 10 :label "Diameter" :min 4 :max 20 :step 0.5))
+              (cylinder d 5 64))
+            (model (part body (knob :d 12)))
+            "#,
+        )
+        .expect("compile");
+        let bindings = component_let_bindings(&program.parts[0].root);
+        assert_eq!(binding_number(bindings, "d"), 12.0);
+    }
+
+    #[test]
+    fn component_instantiation_rejects_unknown_keyword() {
+        let err = compile_to_core_program(
+            r#"
+            (define-component knuckle ((number pin_d 8)) (cylinder pin_d 10 96))
+            (model (part a (knuckle :bogus 1)))
+            "#,
+        )
+        .expect_err("unknown keyword rejected");
+        let message = err.to_string();
+        assert!(message.contains("knuckle"), "{message}");
+        assert!(message.contains("bogus"), "{message}");
+        assert!(
+            message.contains("pin_d"),
+            "signature must be named: {message}"
+        );
+    }
+
+    #[test]
+    fn component_instantiation_rejects_missing_required_argument() {
+        let err = compile_to_core_program(
+            r#"
+            (define-component knuckle ((number pin_d)) (cylinder pin_d 10 96))
+            (model (part a (knuckle)))
+            "#,
+        )
+        .expect_err("missing required rejected");
+        let message = err.to_string();
+        assert!(message.contains("knuckle"), "{message}");
+        assert!(message.contains("pin_d"), "{message}");
+    }
+
+    #[test]
+    fn component_instantiation_rejects_positional_arguments() {
+        let err = compile_to_core_program(
+            r#"
+            (define-component knuckle ((number pin_d 8)) (cylinder pin_d 10 96))
+            (model (part a (knuckle 6)))
+            "#,
+        )
+        .expect_err("positional args rejected");
+        let message = err.to_string();
+        assert!(message.contains("knuckle"), "{message}");
+        assert!(message.contains("keyword"), "{message}");
+    }
+
+    #[test]
+    fn component_body_rejects_free_variables() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (params (number width 12))
+              (define-component leak ((number d 2)) (box d d width))
+              (part a (leak)))
+            "#,
+        )
+        .expect_err("free variable rejected");
+        let message = err.to_string();
+        assert!(message.contains("leak"), "{message}");
+        assert!(message.contains("width"), "{message}");
+    }
+
+    #[test]
+    fn component_body_allows_local_bindings_and_builtins() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component lug ((number d 4))
+              (let* ((r (/ d 2))
+                     (h (* r 3)))
+                (translate 0 0 (max r 1) (cylinder r h 48))))
+            (model (part body (lug :d 6)))
+            "#,
+        )
+        .expect("locals and builtins are not free variables");
+        assert_eq!(program.parts.len(), 1);
+    }
+
+    #[test]
+    fn components_nest_and_allocate_fresh_node_ids() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component pin ((number d 2)) (cylinder d 10 48))
+            (define-component pair ((number d 2))
+              (union
+                (pin :d d)
+                (translate 5 0 0 (pin :d d))))
+            (model
+              (part left (pair :d 3))
+              (part right (pair)))
+            "#,
+        )
+        .expect("nested components compile");
+
+        assert_eq!(program.parts.len(), 2);
+        let mut ids = Vec::new();
+        collect_node_ids(&program.parts[0].root, &mut ids);
+        collect_node_ids(&program.parts[1].root, &mut ids);
+        let unique: BTreeSet<u64> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "expanded node ids must be fresh per instance"
+        );
+    }
+
+    #[test]
+    fn component_expansion_anchors_at_call_site() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component pin ((number d 2)) (cylinder d 10 48))
+            (model (part a (pin :d 3)) (part b (pin)))
+            "#,
+        )
+        .expect("compile");
+        assert!(
+            program.parts[0].root.span.is_some(),
+            "expansion root must carry the call-site span"
+        );
+        assert!(program.parts[1].root.span.is_some());
+        assert_ne!(
+            program.parts[0].root.id, program.parts[1].root.id,
+            "each instantiation expands with its own nodes"
+        );
+    }
+
+    #[test]
+    fn component_self_recursion_errors_deterministically() {
+        let err = compile_to_core_program(
+            r#"
+            (define-component loop ((number d 2)) (union (loop :d d)))
+            (model (part a (loop)))
+            "#,
+        )
+        .expect_err("self recursion rejected");
+        let message = err.to_string();
+        assert!(message.contains("loop"), "{message}");
+        assert!(
+            message.contains("cycle") || message.contains("recursi"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn component_mutual_recursion_errors_deterministically() {
+        let err = compile_to_core_program(
+            r#"
+            (define-component ping ((number d 2)) (union (pong :d d)))
+            (define-component pong ((number d 2)) (union (ping :d d)))
+            (model (part a (ping)))
+            "#,
+        )
+        .expect_err("mutual recursion rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("cycle") || message.contains("recursi"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn component_nesting_depth_is_capped() {
+        let mut source = String::new();
+        source.push_str("(define-component c0 ((number d 2)) (box d d d))\n");
+        for level in 1..=33 {
+            source.push_str(&format!(
+                "(define-component c{} ((number d 2)) (union (c{} :d d)))\n",
+                level,
+                level - 1
+            ));
+        }
+        source.push_str("(model (part a (c33)))");
+        let err = compile_to_core_program(&source).expect_err("depth cap enforced");
+        let message = err.to_string();
+        assert!(message.contains("depth"), "{message}");
+    }
+
+    fn parity_fold_node(node: &CoreNode, env: &BTreeMap<String, CoreNode>) -> CoreNode {
+        if let Ok(value) = evaluate_core_number("parity", node, env) {
+            return CoreNode::new(
+                NodeId::new(0),
+                CoreNodeKind::Literal(crate::ecky_core_ir::CoreLiteral::Number(value)),
+                CoreValueKind::Number,
+            );
+        }
+        let kind = match &node.kind {
+            CoreNodeKind::Let { bindings, body } => {
+                let mut nested = env.clone();
+                for binding in bindings {
+                    nested.insert(binding.name.clone(), binding.value.clone());
+                }
+                return parity_fold_node(body, &nested);
+            }
+            CoreNodeKind::Reference(CoreReference::Local(name)) if env.contains_key(name) => {
+                return parity_fold_node(&env[name].clone(), env);
+            }
+            CoreNodeKind::Call { op, args, keywords } => CoreNodeKind::Call {
+                op: op.clone(),
+                args: args.iter().map(|arg| parity_fold_node(arg, env)).collect(),
+                keywords: keywords.clone(),
+            },
+            CoreNodeKind::List(items) => CoreNodeKind::List(
+                items
+                    .iter()
+                    .map(|item| parity_fold_node(item, env))
+                    .collect(),
+            ),
+            other => other.clone(),
+        };
+        let value_kind = node.value_kind;
+        CoreNode::new(NodeId::new(0), kind, value_kind)
+    }
+
+    // --- T3: verify clause travel ---
+
+    fn verify_tags(program: &CoreProgram) -> Vec<String> {
+        program
+            .constraints
+            .verify_clauses
+            .iter()
+            .filter_map(|clause| match clause.tag.items.first() {
+                Some(CoreVerifyValue::Symbol(tag)) => Some(tag.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn component_verify_clauses_travel_with_each_instantiation() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component knuckle
+              ((number pin_d 8) (number clearance 0.3))
+              (verify
+                (tag clearance_check)
+                (metric min_wall_thickness "body")
+                (expect (>= value 1)))
+              (cylinder (+ pin_d clearance) 10 96))
+            (model
+              (part hinge_a (knuckle :pin_d 6))
+              (part hinge_b (knuckle)))
+            "#,
+        )
+        .expect("compile");
+
+        let tags = verify_tags(&program);
+        assert!(
+            tags.contains(&"hinge_a/clearance_check".to_string()),
+            "expected namespaced tag for hinge_a, got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"hinge_b/clearance_check".to_string()),
+            "expected namespaced tag for hinge_b, got {tags:?}"
+        );
+        assert_eq!(program.constraints.verify_clauses.len(), 2);
+    }
+
+    #[test]
+    fn nested_component_verify_clauses_travel_to_instantiating_part() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component pin ((number d 2))
+              (verify (tag pin_ok) (metric min_wall_thickness "body") (expect (>= value 1)))
+              (cylinder d 10 48))
+            (define-component pair ((number d 2))
+              (union (pin :d d) (translate 5 0 0 (pin :d d))))
+            (model (part left (pair :d 3)))
+            "#,
+        )
+        .expect("compile");
+
+        let tags = verify_tags(&program);
+        assert_eq!(
+            tags,
+            vec!["left/pin_ok".to_string()],
+            "nested verify must namespace by the instantiating part and dedupe identical clauses"
+        );
+    }
+
+    #[test]
+    fn component_verify_clauses_match_on_both_compile_paths() {
+        let source = r#"
+            (define-component pin ((number d 2))
+              (verify (tag pin_ok) (metric min_wall_thickness "body") (expect (>= value 1)))
+              (cylinder d 10 48))
+            (model (part a (pin :d 3)))
+        "#;
+        let lowered = lower_component_definitions_source(source).expect("lowering");
+        let expanded = compile_to_core_program_from_expanded_ast(&lowered).expect("expanded");
+        let runtime = compile_to_core_program_via_runtime(&lowered).expect("runtime");
+        assert_eq!(
+            expanded.constraints.verify_clauses,
+            runtime.constraints.verify_clauses
+        );
+        assert_eq!(verify_tags(&expanded), vec!["a/pin_ok".to_string()]);
+    }
+
+    #[test]
+    fn top_level_verify_clauses_are_unchanged_by_component_lowering() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component stub ((number size 4)) (box size size size))
+            (model
+              (verify
+                (tag body_shell)
+                (metric min_wall_thickness "body")
+                (expect (>= value 2)))
+              (part body (stub :size 2)))
+            "#,
+        )
+        .expect("compile");
+        assert_eq!(verify_tags(&program), vec!["body_shell".to_string()]);
+    }
+
+    #[test]
+    fn component_compile_paths_agree_after_static_fold() {
+        let source = r#"
+            (define-component knuckle
+              ((number pin_d 8) (number clearance 0.3))
+              (difference
+                (cylinder (* 2 pin_d) 10 96)
+                (cylinder (+ pin_d clearance) 12 96)))
+            (model
+              (part hinge_a (knuckle :pin_d 6))
+              (part hinge_b (knuckle)))
+        "#;
+        let lowered = lower_component_definitions_source(source).expect("lowering");
+        let expanded = compile_to_core_program_from_expanded_ast(&lowered).expect("expanded path");
+        let runtime = compile_to_core_program_via_runtime(&lowered).expect("runtime path");
+
+        assert_eq!(expanded.parts.len(), runtime.parts.len());
+        assert_eq!(
+            format!("{:?}", expanded.parameters),
+            format!("{:?}", runtime.parameters)
+        );
+        for (left, right) in expanded.parts.iter().zip(runtime.parts.iter()) {
+            assert_eq!(left.key, right.key);
+            let env = BTreeMap::new();
+            let folded_left = parity_fold_node(&left.root, &env);
+            let folded_right = parity_fold_node(&right.root, &env);
+            assert_eq!(
+                format!("{:#?}", folded_left),
+                format!("{:#?}", folded_right),
+                "part `{}` must fold to the same structure on both paths",
+                left.key
+            );
+        }
+    }
+
     fn assert_point_list(node: &CoreNode, len: usize, kind: CoreValueKind, label: &str) {
         let CoreNodeKind::List(points) = &node.kind else {
             panic!("expected {label} point list, got {:?}", node.kind);
@@ -9360,6 +10946,242 @@ mod tests {
                 args.iter().chain(std::iter::once(list.as_ref())).collect()
             }
             CoreNodeKind::List(items) | CoreNodeKind::Group(items) => items.iter().collect(),
+        }
+    }
+
+    // T0: Compatibility lock tests — freeze current behavior before component work
+
+    #[test]
+    fn fixture_lock_captures_stable_node_keys_for_all_parts() {
+        let snapshot_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/component-unification/fixture-lock.snap");
+        let fixtures_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../model-runtime/examples");
+
+        let mut entries: Vec<_> = std::fs::read_dir(&fixtures_dir)
+            .expect("fixture dir exists")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "ecky")
+                    .unwrap_or(false)
+            })
+            .collect();
+        entries.sort_by_key(|e| e.path());
+
+        let mut snapshot_content = String::new();
+        for entry in entries {
+            let path = entry.path();
+            let fixture_name = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            let source = std::fs::read_to_string(&path).expect("read fixture");
+
+            match compile_to_core_program(&source) {
+                Ok(program) => {
+                    snapshot_content.push_str(&format!("fixture: {}\n", fixture_name));
+                    for part in &program.parts {
+                        if let Some(span) = part.root.span {
+                            let start = span.start as usize;
+                            let end = span.end as usize;
+                            if start < end && end <= source.len() {
+                                if source.is_char_boundary(start) && source.is_char_boundary(end) {
+                                    use sha2::{Digest, Sha256};
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(b"freecad-part-root|");
+                                    hasher.update(part.key.as_bytes());
+                                    hasher.update(b"|");
+                                    hasher.update(&source.as_bytes()[start..end]);
+                                    let stable_key = format!("sha256:{:x}", hasher.finalize());
+                                    snapshot_content.push_str(&format!(
+                                        "  part: {} key: {}\n",
+                                        part.key, stable_key
+                                    ));
+                                } else {
+                                    snapshot_content.push_str(&format!(
+                                        "  part: {} key: invalid-boundary\n",
+                                        part.key
+                                    ));
+                                }
+                            } else {
+                                snapshot_content
+                                    .push_str(&format!("  part: {} key: invalid-span\n", part.key));
+                            }
+                        } else {
+                            snapshot_content
+                                .push_str(&format!("  part: {} key: no-span\n", part.key));
+                        }
+                    }
+                }
+                Err(_) => {
+                    snapshot_content.push_str(&format!("skip: {}\n", fixture_name));
+                }
+            }
+        }
+
+        if !snapshot_path.exists() {
+            std::fs::create_dir_all(snapshot_path.parent().unwrap()).expect("create snapshot dir");
+            std::fs::write(&snapshot_path, &snapshot_content).expect("write snapshot");
+            panic!(
+                "snapshot materialized at {} — rerun test",
+                snapshot_path.display()
+            );
+        }
+
+        let expected = std::fs::read_to_string(&snapshot_path).expect("read snapshot");
+        if snapshot_content != expected {
+            panic!(
+                "fixture-lock snapshot mismatch:\n\nExpected:\n{}\n\nGot:\n{}",
+                expected, snapshot_content
+            );
+        }
+    }
+
+    #[test]
+    fn emit_spelling_lock_preserves_clause_heads_in_roundtrip() {
+        let fixtures_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../model-runtime/examples");
+
+        let mut entries: Vec<_> = std::fs::read_dir(&fixtures_dir)
+            .expect("fixture dir exists")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "ecky")
+                    .unwrap_or(false)
+            })
+            .collect();
+        entries.sort_by_key(|e| e.path());
+
+        for entry in entries {
+            let path = entry.path();
+            let fixture_name = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            let source = std::fs::read_to_string(&path).expect("read fixture");
+
+            if let Ok(program) = compile_to_core_program(&source) {
+                let re_emitted = emit_program(&program);
+
+                // Extract top-level clause heads from both source and re-emitted
+                let extract_clause_heads = |text: &str| -> Vec<String> {
+                    let mut heads = Vec::new();
+                    let mut depth = 0;
+                    let mut current_word = String::new();
+                    let mut in_word = false;
+
+                    for ch in text.chars() {
+                        match ch {
+                            '(' => {
+                                depth += 1;
+                                in_word = false;
+                                current_word.clear();
+                            }
+                            ')' => {
+                                if depth == 2 && !current_word.is_empty() {
+                                    heads.push(current_word.clone());
+                                }
+                                depth -= 1;
+                                current_word.clear();
+                                in_word = false;
+                            }
+                            ' ' | '\t' | '\n' | '\r' => {
+                                in_word = false;
+                            }
+                            _ => {
+                                if depth == 2 {
+                                    if !in_word {
+                                        in_word = true;
+                                        current_word.clear();
+                                    }
+                                    current_word.push(ch);
+                                }
+                            }
+                        }
+                    }
+                    heads
+                };
+
+                let source_heads = extract_clause_heads(&source);
+                let re_emitted_heads = extract_clause_heads(&re_emitted);
+
+                assert_eq!(
+                    source_heads, re_emitted_heads,
+                    "fixture {} clause head mismatch (model/part/feature/params/verify must be preserved)",
+                    fixture_name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn core_program_digest_lock_captures_structural_stability() {
+        let snapshot_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/component-unification/core-digest.snap");
+        let fixtures_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../model-runtime/examples");
+
+        let mut entries: Vec<_> = std::fs::read_dir(&fixtures_dir)
+            .expect("fixture dir exists")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "ecky")
+                    .unwrap_or(false)
+            })
+            .collect();
+        entries.sort_by_key(|e| e.path());
+
+        let mut snapshot_content = String::new();
+        for entry in entries {
+            let path = entry.path();
+            let fixture_name = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            let source = std::fs::read_to_string(&path).expect("read fixture");
+
+            match compile_to_core_program(&source) {
+                Ok(program) => {
+                    // SourceFileId comes from Steel's process-global source registry and
+                    // depends on how many sources other tests parsed first; mask it so the
+                    // digest only locks program structure.
+                    let debug_repr = Regex::new(r"SourceFileId\(\s*\d+,?\s*\)")
+                        .unwrap()
+                        .replace_all(&format!("{:#?}", program), "SourceFileId(_)")
+                        .into_owned();
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(debug_repr.as_bytes());
+                    let digest = format!("{:x}", hasher.finalize());
+                    snapshot_content.push_str(&format!("{}: {}\n", fixture_name, digest));
+                }
+                Err(_) => {
+                    snapshot_content.push_str(&format!("{}: skip\n", fixture_name));
+                }
+            }
+        }
+
+        if !snapshot_path.exists() {
+            std::fs::create_dir_all(snapshot_path.parent().unwrap()).expect("create snapshot dir");
+            std::fs::write(&snapshot_path, &snapshot_content).expect("write snapshot");
+            panic!(
+                "snapshot materialized at {} — rerun test",
+                snapshot_path.display()
+            );
+        }
+
+        let expected = std::fs::read_to_string(&snapshot_path).expect("read snapshot");
+        if snapshot_content != expected {
+            panic!(
+                "core-digest snapshot mismatch:\n\nExpected:\n{}\n\nGot:\n{}",
+                expected, snapshot_content
+            );
         }
     }
 }

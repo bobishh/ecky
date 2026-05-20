@@ -43,5 +43,6 @@ test('parseDocsDocument marks pending sections and extracts snippets', () => {
   assert.match(forms?.snippet ?? '', /\(model/);
   assert.match(forms?.bodyHtml ?? '', /top-level authoring grammar/i);
   assert.match(verify?.snippet ?? '', /\(verify/);
-  assert.match(verify?.bodyHtml ?? '', /manifest has-step/i);
+  assert.match(verify?.snippet ?? '', /clearance min-distance/i);
+  assert.match(verify?.bodyHtml ?? '', /clearance min-distance/i);
 });

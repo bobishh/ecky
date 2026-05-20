@@ -3,7 +3,7 @@ export type PointerPoint = {
   y: number;
 };
 
-export const VIEWER_DRAG_SELECT_THRESHOLD_PX = 4;
+const VIEWER_DRAG_SELECT_THRESHOLD_PX = 4;
 
 export function pointerMovedBeyondClickThreshold(
   start: PointerPoint | null,

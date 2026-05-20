@@ -63,9 +63,10 @@
         <button
           class="view-chip"
           class:view-chip-active={view.viewId === activeControlViewId}
+          aria-label={view.label}
           onclick={() => onSelectControlView?.(view.viewId)}
         >
-          <span>{view.label}</span>
+          <span>{view.label.toLowerCase()}</span>
           {#if shouldShowSemanticSource?.(view.source)}
             <span class="semantic-source-badge">{semanticSourceLabel?.(view.source)}</span>
           {/if}

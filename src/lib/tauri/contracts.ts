@@ -541,6 +541,30 @@ async generateSketchPreviewHull(request: SketchPreviewHullRequest) : Promise<Res
     else return { status: "error", error: e  as any };
 }
 },
+async saveSketchPreviewDraft(request: SaveSketchPreviewDraftRequest) : Promise<Result<SketchPreviewDraft, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_sketch_preview_draft", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async loadSketchPreviewDraft(request: LoadSketchPreviewDraftRequest) : Promise<Result<SketchPreviewDraft | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("load_sketch_preview_draft", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async clearSketchPreviewDraft(request: ClearSketchPreviewDraftRequest) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_sketch_preview_draft", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async analyzeSketchBrepCandidates(request: SketchBrepCandidateRequest) : Promise<Result<SketchBrepCandidateResponse, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("analyze_sketch_brep_candidates", { request }) };
@@ -898,6 +922,7 @@ export type BrepProjectedEdge2d = { edgeId: string; points?: ([number, number])[
 export type BrepProjectedLoop2d = { loopId: string; edgeIds?: string[]; points?: ([number, number])[]; role?: BrepProjectedLoopRole; sourceClass: string }
 export type BrepProjectedLoopRole = "outer" | "hole" | "unknown"
 export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
+export type ClearSketchPreviewDraftRequest = { scopeId?: string | null }
 export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null; macroDialect?: MacroDialect | null; sketches?: SketchDefinition[]; keepouts?: ComponentKeepoutVolume[]; fusionZones?: ComponentFusionZone[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type ComponentFusionZone = { zoneId: string; surfaceRef: string; allowedOps?: OperationKind[]; maxBlendRadius?: number | null; keepoutIds?: string[] }
 export type ComponentHeader = { componentId: string; version: string; displayName: string; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
@@ -967,6 +992,7 @@ export type LithophanePlacement = { mode?: LithophanePlacementMode; side?: Litho
 export type LithophanePlacementMode = "partSidePatch"
 export type LithophaneRelief = { depthMm?: number; invert?: boolean }
 export type LithophaneSide = "front" | "back" | "left" | "right" | "top" | "bottom"
+export type LoadSketchPreviewDraftRequest = { scopeId?: string | null }
 export type MacroDialect = "legacy" | "cadFrameworkV1" | "ecky" | "build123d"
 export type ManifestBounds = { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number }
 export type ManifestEnrichmentState = { status: EnrichmentStatus; proposals?: EnrichmentProposal[] }
@@ -1039,6 +1065,7 @@ export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: strin
 export type RuntimeAuthoringContext = { engineKind: EngineKind; sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend }
 export type RuntimeBackendCapability = { available: boolean; detail: string; path?: string | null }
 export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; directOcct: RuntimeBackendCapability; mesh: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }
+export type SaveSketchPreviewDraftRequest = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle }
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds?: string[]; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
@@ -1064,6 +1091,7 @@ export type SketchDraftOperationKind = "extrude" | "revolve"
 export type SketchDraftRequest = { partId: string; sketch: SketchDefinition; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean }
 export type SketchDraftSource = { sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend; macroDialect: MacroDialect; source: string; warnings?: string[] }
 export type SketchFeatureSuggestion = { suggestionId: string; sketchId: string; primitiveId?: string | null; partId: string; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean; confidence: number; reason: string; warnings?: string[] }
+export type SketchPreviewDraft = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; updatedAt: number }
 export type SketchPreviewHullRequest = { partId: string; document: SketchDocument; fallbackDepth: number }
 export type SketchPrimitive = { primitiveId: string; kind: SketchPrimitiveKind; points?: ([number, number])[]; closed?: boolean; radius?: number | null; topology?: SketchPrimitiveTopology | null }
 export type SketchPrimitiveKind = "point" | "line" | "polyline" | "spline" | "arc" | "circle"

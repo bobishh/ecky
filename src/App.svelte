@@ -47,7 +47,7 @@
   import { onboarding } from './lib/stores/onboarding';
   import { session } from './lib/stores/sessionStore';
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
-  import { handleGenerate, initOrchestrator, isQuestionIntent } from './lib/controllers/requestOrchestrator';
+  import { handleGenerate, isQuestionIntent } from './lib/controllers/requestOrchestrator';
   import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange, applyManualCodeDraft } from './lib/controllers/manualController';
   import {
     loadFromHistory,
@@ -71,6 +71,10 @@
     isLoadingModels,
     runtimeCapabilities,
   } from './lib/stores/domainState';
+  import {
+    createSketchPreviewDraftScopeId,
+    normalizeSketchPreviewDraftScopeId,
+  } from './lib/sketchPreviewDraftStore';
   import { showCodeModal, selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
   import { boot, saveConfig, fetchModels } from './lib/boot/restore';
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
@@ -124,7 +128,7 @@
   } from './lib/agents/workspaceCapture';
   import { codeInspectorTitle } from './lib/modelEngineLabel';
   import { buildFailedDraftSeed } from './lib/manualDraftSeed';
-  import { getDefaultMacro } from './lib/tauri/client';
+  import { getDefaultMacro, loadSketchPreviewDraft } from './lib/tauri/client';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
@@ -197,6 +201,8 @@
   } from './lib/runtimeCapabilities';
   import { isRenderableVersionTimelineMessage } from './lib/threadTimeline';
   import {
+    clearSketchPreviewDraft,
+    saveSketchPreviewDraft,
     addImportedModelVersion,
     exportFile,
     exportMultipart3mf,
@@ -369,6 +375,10 @@
   type SketchPreviewState = {
     draft: SketchDraftSource;
     artifactBundle: ArtifactBundle;
+  };
+  type SketchPreviewDraftState = {
+    scopeId: string | null;
+    savedAt: number | null;
   };
   type SketchViewportStatus = {
     title: string;
@@ -544,6 +554,7 @@
   let showNewProjectChooser = $state(false);
   let showNewProjectImport = $state(false);
   let sketchPreview = $state<SketchPreviewState | null>(null);
+  let sketchPreviewDraft = $state<SketchPreviewDraftState | null>(null);
   let codeModalMode = $state<'version' | 'sketch-preview' | 'docs-snippet'>('version');
   let codeModalSourceLanguage = $state<SourceLanguage | null>(null);
   const enableViewportContextOverlay = false;
@@ -739,6 +750,10 @@
       artifactName: fileBasename(sketchPreview.artifactBundle.previewStlPath) || 'preview.stl',
     };
   });
+  const sketchPreviewDraftLabel = $derived.by<string | null>(() => {
+    if (!sketchPreviewDraft) return null;
+    return sketchPreviewDraft.savedAt ? 'DRAFT SAVED' : 'DRAFT ACTIVE';
+  });
   const effectiveViewerStlUrl = $derived.by<string | null>(() =>
     sketchPreview?.artifactBundle ? sketchPreviewStlUrl : ($activeThreadId ? stlUrl : null),
   );
@@ -811,7 +826,6 @@
   });
   const hasLiveMcpSession = $derived.by(() => agentOpsState.hasLiveMcpSession);
   const isAudioMuted = $derived(Boolean($config?.microwave?.muted));
-  const audioMuteLabel = $derived(isAudioMuted ? 'Unmute Ecky audio' : 'Mute Ecky audio');
   const dialogueState = $derived.by<DialogueState>(() => {
     return deriveDialogueState(activePendingAgentPrompt, usesQueuedAgentDialogue);
   });
@@ -1105,10 +1119,9 @@
   // Wake animation fires when the selected active agent asks for a prompt.
   // No startup pre-waking — genie should be idle until the primary agent actually greets.
 
-  // Initialize async design orchestrator
-  initOrchestrator({
+  const requestOrchestratorUiDeps = {
     get viewerComponent() { return viewerComponent; },
-    openCodeModalManual: (data) => {
+    openCodeModalManual: (data: DesignOutput) => {
       const seededDraft = buildFailedDraftSeed(data, $workingCopy);
       workingCopy.loadVersion(seededDraft, null);
       paramPanelState.hydrateFromVersion(seededDraft, null);
@@ -1126,7 +1139,7 @@
     },
     getDrawingCanvas: () => drawingOverlay?.hasDrawing() ? drawingOverlay.getCanvas() : null,
     clearDrawing: () => { drawingOverlay?.clear(); drawMode = false; },
-  });
+  };
 
   type ViewerLoadWaiter = {
     targetNonce: number;
@@ -1400,7 +1413,7 @@
   );
   const workspaceCaptureHint = $derived.by<string | null>(() => {
     if (drawingOverlayDirty) {
-      return 'Enabled automatically because the current viewport has drawn annotations.';
+      return 'Enabled automatically because the current viewport has annotated content.';
     }
     if (dialogueState.mode === 'generate') return null;
     if (sendWorkspaceCaptureForActiveThread) {
@@ -1448,7 +1461,7 @@
           threadId: targetThreadId,
           name: hadDrawing ? 'workspace-annotated.png' : 'workspace-view.png',
           explanation: hadDrawing
-            ? 'Current workspace view with hand-drawn annotations.'
+            ? 'Current workspace view with annotated content.'
             : 'Current workspace view.',
         });
         nextAttachments = [...attachments, workspaceAttachment];
@@ -1469,11 +1482,70 @@
   }
 
   function handleSketchPreviewChange(preview: SketchPreviewState | null) {
+    if (preview) {
+      sketchPreview = preview;
+      const scopeId = sketchPreviewDraft?.scopeId ?? null;
+      if (!sketchPreviewDraft || sketchPreviewDraft.scopeId !== scopeId) {
+        sketchPreviewDraft = { scopeId, savedAt: null };
+      }
+      void persistSketchPreviewDraft(scopeId, preview);
+      return;
+    }
+
     sketchPreview = preview;
   }
 
   function handleSketchManualPreviewResult(preview: SketchPreviewState | null) {
     return preview;
+  }
+
+  async function persistSketchPreviewDraft(scopeId: string | null, preview: SketchPreviewState) {
+    try {
+      await saveSketchPreviewDraft({
+        draftScopeId: scopeId,
+        draftSource: preview.draft,
+        artifactBundle: preview.artifactBundle,
+      });
+    } catch (error) {
+      console.warn('[Sketch] Failed to persist preview draft:', error);
+    }
+  }
+
+  async function saveSketchPreviewDraftAsCurrentScope() {
+    if (!sketchPreview) return;
+
+    const scopeId = normalizeSketchPreviewDraftScopeId(sketchPreviewDraft?.scopeId ?? null);
+    sketchPreviewDraft = { scopeId, savedAt: Date.now() };
+    await persistSketchPreviewDraft(scopeId, sketchPreview);
+    session.setStatus('Sketch draft saved.');
+  }
+
+  async function saveSketchPreviewDraftAsNewScope() {
+    if (!sketchPreview) return;
+    const scopeId = createSketchPreviewDraftScopeId();
+    sketchPreviewDraft = { scopeId, savedAt: Date.now() };
+    await persistSketchPreviewDraft(scopeId, sketchPreview);
+    session.setStatus('Sketch draft saved.');
+  }
+
+  async function handleSketchSaveDraft(input: { newScope: boolean }) {
+    if (input.newScope) {
+      await saveSketchPreviewDraftAsNewScope();
+      return;
+    }
+    await saveSketchPreviewDraftAsCurrentScope();
+  }
+
+  async function discardSketchPreviewDraft() {
+    const scopeId = normalizeSketchPreviewDraftScopeId(sketchPreviewDraft?.scopeId ?? null);
+    sketchPreview = null;
+    sketchPreviewDraft = null;
+    try {
+      await clearSketchPreviewDraft({ draftScopeId: scopeId });
+    } catch (error) {
+      console.warn('[Sketch] Failed to clear preview draft:', error);
+    }
+    session.setStatus('Sketch draft discarded.');
   }
 
   function rememberVisibleViewportCapture(capture: ViewportScreenshotCapture) {
@@ -1976,7 +2048,7 @@
   async function handleDialogueSubmit(prompt: string, attachments: Attachment[]) {
     switch (dialogueState.mode) {
       case 'agent-reply': await answerAgentPrompt(dialogueState.requestId, prompt, attachments); break;
-      case 'generate':    await handleGenerate(prompt, attachments); break;
+      case 'generate':    await handleGenerate(prompt, attachments, { uiDeps: requestOrchestratorUiDeps }); break;
       case 'mcp-idle': {
         let preparedAttachments: Attachment[] = attachments;
         let clearDrawingAfterSend = false;
@@ -2072,7 +2144,7 @@
       session.setError(`Render Error: ${generationUnavailableReason}`);
       return;
     }
-    await handleGenerate(prompt, attachments);
+    await handleGenerate(prompt, attachments, { uiDeps: requestOrchestratorUiDeps });
   }
 
   function startBlankProject() {
@@ -2106,7 +2178,20 @@
   }
 
   onMount(() => {
-    void boot();
+    void (async () => {
+      await boot();
+      const snapshot = await loadSketchPreviewDraft({});
+      if (snapshot) {
+        sketchPreviewDraft = {
+          scopeId: normalizeSketchPreviewDraftScopeId(snapshot.scopeId ?? null),
+          savedAt: snapshot.updatedAt,
+        };
+        sketchPreview = {
+          draft: snapshot.draftSource,
+          artifactBundle: snapshot.artifactBundle,
+        };
+      }
+    })();
     // Initial fetch of agent sessions (push events only fire on changes, not on load)
     void getActiveAgentSessions().then(sessions => { activeAgentSessions = sessions; }).catch(() => {});
     void getAgentTerminalSnapshots()
@@ -2421,6 +2506,10 @@
 
   $effect(() => {
     setSpeechMuted(isAudioMuted);
+  });
+
+  $effect(() => {
+    setMuted(isAudioMuted, $config);
   });
 
   const activeThreadHighestPhase = $derived.by<ThreadPhase>(() => {
@@ -2762,22 +2851,6 @@
     }
   }
 
-  async function toggleMicrowaveMute() {
-    const currentConfig = get(config);
-    const newMuted = !(currentConfig?.microwave?.muted);
-    const nextConfig = {
-      ...currentConfig,
-      microwave: {
-        ...(currentConfig?.microwave || { humId: null, dingId: null }),
-        muted: newMuted,
-      },
-    };
-    config.set(nextConfig);
-    setMuted(newMuted, nextConfig);
-    setSpeechMuted(newMuted);
-    await saveConfig();
-  }
-
   async function applyCompletedRequest(req: Request) {
     if (!req?.result) return;
     const { design, threadId, messageId, stlUrl: reqStlUrl, artifactBundle, modelManifest } =
@@ -2830,7 +2903,7 @@
   }
 
   function retryRequest(req: Request) {
-    void handleGenerate(req.prompt, req.attachments);
+    void handleGenerate(req.prompt, req.attachments, { uiDeps: requestOrchestratorUiDeps });
     requestQueue.remove(req.id);
   }
 
@@ -3207,22 +3280,6 @@
       <div class="dock-group dock-group--primary">
         <button
           class="dock-btn"
-          class:dock-btn--active={$windowStore.projects.visible}
-          class:onboarding-highlight={$onboarding.highlightTarget === 'projects'}
-          data-onboarding-target="projects"
-          data-dock-label="PROJECTS"
-          onclick={() => toggleWindow('projects')}
-          aria-label="PROJECTS"
-          title="Projects"
-        >
-          <svg class="dock-svg dock-svg--projects" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M4 7h6l2 2h8v10H4V7Z" />
-            <path d="M4 11h16" />
-            <path d="M7 15h10" />
-          </svg>
-        </button>
-        <button
-          class="dock-btn"
           class:dock-btn--active={$windowStore.params.visible}
           class:onboarding-highlight={$onboarding.highlightTarget === 'params'}
           data-onboarding-target="params"
@@ -3258,17 +3315,16 @@
         </button>
         <button
           class="dock-btn"
-          class:dock-btn--active={$windowStore.docs.visible}
-          data-dock-label="DOCS"
-          onclick={() => toggleWindow('docs')}
-          aria-label="DOCS"
-          title="Ecky IR docs"
+          class:draw-active={drawMode}
+          data-dock-label="DRAW"
+          onclick={() => drawMode = !drawMode}
+          aria-label={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
+          title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
         >
-          <svg class="dock-svg dock-svg--docs" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M7 4h8l4 4v12H7V4Z" />
-            <path d="M15 4v5h5" />
-            <path d="M10 13h7" />
-            <path d="M10 17h5" />
+          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="m6 17 1-4 9-9 4 4-9 9-4 1Z" />
+            <path d="m14 6 4 4" />
+            <path d="M5 21h14" />
           </svg>
         </button>
         <button
@@ -3285,41 +3341,37 @@
             <path d="m13 4-2 16" />
           </svg>
         </button>
-        <button
-          class="dock-btn"
-          class:dock-btn--active={sketchWindowState.visible}
-          data-dock-label="SKETCH"
-          onclick={() => toggleWindow('sketch')}
-          aria-label="SKETCH"
-          title="Sketch Workspace"
-        >
-          <svg class="dock-svg dock-svg--sketch" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M5 17 10 8l5 5 4-7" />
-            <path d="M4 17h2v2H4Z" />
-            <path d="M9 7h2v2H9Z" />
-            <path d="M14 12h2v2h-2Z" />
-            <path d="M18 5h2v2h-2Z" />
-          </svg>
-        </button>
       </div>
       <div class="dock-group dock-group--utility">
         <button
-          class="dock-btn dock-btn--utility"
-          onclick={toggleMicrowaveMute}
-          data-dock-label={isAudioMuted ? 'MUTED' : 'AUDIO'}
-          title={audioMuteLabel}
-          aria-label={audioMuteLabel}
-          aria-pressed={isAudioMuted}
+          class="dock-btn"
+          class:dock-btn--active={$windowStore.projects.visible}
+          class:onboarding-highlight={$onboarding.highlightTarget === 'projects'}
+          data-onboarding-target="projects"
+          data-dock-label="PROJECTS"
+          onclick={() => toggleWindow('projects')}
+          aria-label="PROJECTS"
+          title="Projects"
         >
-          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M4 10h4l5-4v12l-5-4H4v-4Z" />
-            {#if isAudioMuted}
-              <path d="m17 9 4 6" />
-              <path d="m21 9-4 6" />
-            {:else}
-              <path d="M17 9c1 1 1 5 0 6" />
-              <path d="M20 7c2 3 2 7 0 10" />
-            {/if}
+          <svg class="dock-svg dock-svg--projects" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4 7h6l2 2h8v10H4V7Z" />
+            <path d="M4 11h16" />
+            <path d="M7 15h10" />
+          </svg>
+        </button>
+        <button
+          class="dock-btn"
+          class:dock-btn--active={$windowStore.docs.visible}
+          data-dock-label="DOCS"
+          onclick={() => toggleWindow('docs')}
+          aria-label="DOCS"
+          title="Ecky IR docs"
+        >
+          <svg class="dock-svg dock-svg--docs" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M7 4h8l4 4v12H7V4Z" />
+            <path d="M15 4v5h5" />
+            <path d="M10 13h7" />
+            <path d="M10 17h5" />
           </svg>
         </button>
         {#if visibleAgentTerminal}
@@ -3340,26 +3392,28 @@
                 ? `${visibleAgentTerminal.agentLabel} needs terminal input`
                 : `Open ${visibleAgentTerminal.agentLabel} terminal`
             }
-          >
+            >
             >_
           </button>
         {/if}
         <button
-          class="dock-btn dock-btn--utility"
-          class:draw-active={drawMode}
-          data-dock-label="DRAW"
-          onclick={() => drawMode = !drawMode}
-          aria-label={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
-          title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
+          class="dock-btn"
+          class:dock-btn--active={sketchWindowState.visible}
+          data-dock-label="SKETCH"
+          onclick={() => toggleWindow('sketch')}
+          aria-label="SKETCH"
+          title="Sketch Workspace"
         >
-          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="m6 17 1-4 9-9 4 4-9 9-4 1Z" />
-            <path d="m14 6 4 4" />
-            <path d="M5 21h14" />
+          <svg class="dock-svg dock-svg--sketch" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 17 10 8l5 5 4-7" />
+            <path d="M4 17h2v2H4Z" />
+            <path d="M9 7h2v2H9Z" />
+            <path d="M14 12h2v2h-2Z" />
+            <path d="M18 5h2v2h-2Z" />
           </svg>
         </button>
         <button
-          class="dock-btn dock-btn--utility"
+          class="dock-btn dock-btn--utility dock-btn--settings"
           data-dock-label="SETTINGS"
           onclick={() => toggleWindow('settings')}
           aria-label="Settings"
@@ -3449,6 +3503,9 @@
                   </div>
                   <div class="sketch-preview-status__detail">{sketchPreviewStatus.detail}</div>
                   <div class="sketch-preview-status__meta">
+                    {#if sketchPreviewDraftLabel}
+                      <span>{sketchPreviewDraftLabel}</span>
+                    {/if}
                     <span>{sketchPreviewStatus.backend}</span>
                     <span>EXPORT LOCKED</span>
                     <span>{sketchPreviewStatus.artifactName}</span>
@@ -3851,8 +3908,11 @@
     >
       <div class="sketch-window-shell">
         <SketchWorkspace
+          restoredPreview={sketchPreview}
           onPreviewResult={handleSketchPreviewChange}
           onManualPreviewResult={handleSketchManualPreviewResult}
+          onSaveDraft={handleSketchSaveDraft}
+          onDiscardDraft={discardSketchPreviewDraft}
         />
       </div>
     </Window>
@@ -4297,6 +4357,10 @@
     width: 38px;
     height: 38px;
     color: color-mix(in srgb, var(--text) 78%, var(--primary) 22%);
+  }
+  .dock-btn--settings {
+    width: 44px;
+    height: 44px;
   }
   .settings-overlay-btn { width: 34px; height: 34px; background: color-mix(in srgb, var(--bg-100) 90%, transparent); border: 1px solid var(--bg-300); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); }
   .settings-overlay-btn:hover { border-color: var(--primary); color: var(--primary); }

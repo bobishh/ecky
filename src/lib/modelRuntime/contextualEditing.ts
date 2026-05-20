@@ -476,7 +476,7 @@ export function filterFieldsBySearch<T extends { key: string; label: string }>(
   });
 }
 
-export function buildContextMetrics(
+function buildContextMetrics(
   manifest: ModelManifest | null,
   target: ContextSelectionTarget | null,
   params: DesignParams,

@@ -276,6 +276,27 @@ mod tests {
         assert_eq!(bundle.viewer_assets.len(), 1);
     }
 
+    #[test]
+    fn render_model_resolves_scalar_build_bindings_in_mesh_pipeline() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = TestResolver { root };
+        let bundle = render_model(
+            r#"(model
+                (part body
+                  (build
+                    (shape width (/ 10 2))
+                    (shape block (box width 2 2))
+                    (result block))))"#,
+            &DesignParams::new(),
+            &resolver,
+        )
+        .expect("render");
+
+        assert_eq!(bundle.engine_kind, EngineKind::EckyIrV0);
+        assert!(Path::new(&bundle.preview_stl_path).exists());
+    }
+
     #[allow(dead_code)]
     fn render_model_reports_unsupported_nodes_explicitly() {
         let root = render_root();

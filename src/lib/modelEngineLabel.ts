@@ -15,7 +15,7 @@ function backendLabel(backend: string | undefined): string | null {
   }
 }
 
-export function authoringFileExtension(
+function authoringFileExtension(
   sourceLanguage: string | undefined,
   _geometryBackend: string | undefined,
 ): string {

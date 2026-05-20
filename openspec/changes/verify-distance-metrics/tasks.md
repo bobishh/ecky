@@ -14,3 +14,4 @@
 - [x] 3.1 Add Rust tests for pass, fail, and unresolved selector error cases.
 - [x] 3.2 Add e2e proof for a real authored clearance check in the docs path.
 - [x] 3.3 Run cargo check and relevant e2e after the metric path is green.
+- [x] 3.4 Keep the workbench `INSERT VERIFY` starter contextual so two-part Ecky models seed a clearance example while single-part models keep the safe manifest starter.

@@ -941,10 +941,24 @@ fn viewer_assets_from_manifest(
     Ok(assets)
 }
 
+/// Viewer edge/face targets surface UI affordances: they are editable when
+/// their parent part is editable, even though the manifest-level topology
+/// selection targets stay non-editable (no parameter binds to topology
+/// directly).
+fn editable_part_ids_from_manifest(manifest: &ModelManifest) -> HashSet<String> {
+    manifest
+        .parts
+        .iter()
+        .filter(|part| part.editable)
+        .map(|part| part.part_id.clone())
+        .collect()
+}
+
 fn edge_targets_from_report(
     report: &RunnerReport,
     manifest: &ModelManifest,
 ) -> Vec<ViewerEdgeTarget> {
+    let editable_parts = editable_part_ids_from_manifest(manifest);
     let selection_targets_by_id = manifest
         .selection_targets
         .iter()
@@ -983,7 +997,7 @@ fn edge_targets_from_report(
                 part_id: selection_target.part_id.clone(),
                 viewer_node_id: selection_target.viewer_node_id.clone(),
                 label: runner_edge_label(&object.object_name, edge),
-                editable: selection_target.editable,
+                editable: editable_parts.contains(&selection_target.part_id),
                 start: runner_point_to_viewer(start),
                 end: runner_point_to_viewer(end),
             });
@@ -997,6 +1011,7 @@ fn face_targets_from_report(
     report: &RunnerReport,
     manifest: &ModelManifest,
 ) -> Vec<ViewerFaceTarget> {
+    let editable_parts = editable_part_ids_from_manifest(manifest);
     let selection_targets_by_id = manifest
         .selection_targets
         .iter()
@@ -1032,7 +1047,7 @@ fn face_targets_from_report(
                 part_id: selection_target.part_id.clone(),
                 viewer_node_id: selection_target.viewer_node_id.clone(),
                 label: runner_face_label(&object.object_name, face),
-                editable: selection_target.editable,
+                editable: editable_parts.contains(&selection_target.part_id),
                 center: runner_point_to_viewer(center),
                 normal: face.normal.as_ref().map(runner_point_to_array),
                 area: face.area,

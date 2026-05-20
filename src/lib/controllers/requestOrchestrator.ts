@@ -392,22 +392,12 @@ type ViewerRef = {
 
 type OpenCodeModalManual = (data: DesignOutput) => void;
 
-let viewerRef: ViewerRef | null = null;
-let openCodeModalManual: OpenCodeModalManual | null = null;
-let getDrawingCanvas: (() => HTMLCanvasElement | null) | null = null;
-let clearDrawing: (() => void) | null = null;
-
-export function initOrchestrator(deps: {
-  viewerComponent: ViewerRef | null;
-  openCodeModalManual: OpenCodeModalManual;
-  getDrawingCanvas?: () => HTMLCanvasElement | null;
-  clearDrawing?: () => void;
-}) {
-  viewerRef = deps.viewerComponent;
-  openCodeModalManual = deps.openCodeModalManual;
-  getDrawingCanvas = deps.getDrawingCanvas || null;
-  clearDrawing = deps.clearDrawing || null;
-}
+type OrchestratorUiDeps = {
+  viewerComponent?: ViewerRef | null;
+  openCodeModalManual?: OpenCodeModalManual | null;
+  getDrawingCanvas?: (() => HTMLCanvasElement | null) | null;
+  clearDrawing?: (() => void) | null;
+};
 
 // ---------------------------------------------------------------------------
 // Orchestration Logic
@@ -466,6 +456,7 @@ function currentAuthoringContext(currentConfig: AppConfig): RuntimeAuthoringCont
 
 type GenerateSubmissionOptions = {
   imageDataOverride?: string | null;
+  uiDeps?: OrchestratorUiDeps;
 };
 
 export async function handleGenerate(
@@ -473,6 +464,7 @@ export async function handleGenerate(
   attachments: Attachment[] = [],
   options: GenerateSubmissionOptions = {},
 ): Promise<string> {
+  const uiDeps = options.uiDeps ?? {};
   session.setError(null);
 
   // Keep backend AppState config in sync with current UI config before generation.
@@ -484,12 +476,12 @@ export async function handleGenerate(
   let preCapture: string | null = modelCapabilities.supportsVision
     ? options.imageDataOverride ?? null
     : null;
-  if (!preCapture && modelCapabilities.supportsVision && viewerRef && get(session).stlUrl) {
-    const overlay = getDrawingCanvas?.() ?? null;
-    preCapture = viewerRef.captureScreenshot(overlay);
+  if (!preCapture && modelCapabilities.supportsVision && uiDeps.viewerComponent && get(session).stlUrl) {
+    const overlay = uiDeps.getDrawingCanvas?.() ?? null;
+    preCapture = uiDeps.viewerComponent.captureScreenshot(overlay);
   }
   // Clear drawing immediately so the user sees it disappear on send
-  clearDrawing?.();
+  uiDeps.clearDrawing?.();
 
   const currentThreadId = get(activeThreadId);
   const currentVersionId = get(activeVersionId);
@@ -530,7 +522,7 @@ export async function handleGenerate(
 
   ensureContext();
 
-  const pipeline = new GenerationPipeline(requestId);
+  const pipeline = new GenerationPipeline(requestId, uiDeps);
   pipeline.preCapture = preCapture;
   pipeline.modelCapabilities = modelCapabilities;
   pipeline.modelFacingAttachments = filterModelFacingAttachments(
@@ -570,9 +562,11 @@ class GenerationPipeline {
   routeReason: string = 'unclassified';
   followUpQuestion: string | null = null;
   followUpMessageId: string | null = null;
+  uiDeps: OrchestratorUiDeps;
 
-  constructor(requestId: string) {
+  constructor(requestId: string, uiDeps: OrchestratorUiDeps = {}) {
     this.requestId = requestId;
+    this.uiDeps = uiDeps;
     const q = get(requestQueue);
     this.req = q.byId[requestId];
     
@@ -636,8 +630,8 @@ class GenerationPipeline {
     if (this.modelCapabilities.supportsVision) {
       if (this.preCapture) {
         this.currentScreenshot = this.preCapture;
-      } else if (viewerRef && get(session).stlUrl) {
-        this.currentScreenshot = viewerRef.captureScreenshot();
+      } else if (this.uiDeps.viewerComponent && get(session).stlUrl) {
+        this.currentScreenshot = this.uiDeps.viewerComponent.captureScreenshot();
       }
     } else {
       this.currentScreenshot = null;
@@ -869,8 +863,8 @@ class GenerationPipeline {
           }
 
           // ── Stage 2: Screenshot/VLM verification (gated by config) ───────
-          if (maxVerifyAttempts > 0 && (viewerRef || visionVerificationSkipReason)) {
-            if (viewerRef && !visionVerificationSkipReason) {
+          if (maxVerifyAttempts > 0 && (this.uiDeps.viewerComponent || visionVerificationSkipReason)) {
+            if (this.uiDeps.viewerComponent && !visionVerificationSkipReason) {
               // Give Three.js one frame to render the new STL before capturing
               await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
             }
@@ -893,7 +887,7 @@ class GenerationPipeline {
                 currentGenerationAttempt: attempt,
                 maxGenerationAttempts: this.req.maxAttempts,
                 skipReason: visionVerificationSkipReason,
-                capture: () => viewerRef?.captureMultiAngleScreenshots() ?? [],
+                capture: () => this.uiDeps.viewerComponent?.captureMultiAngleScreenshots() ?? [],
                 verify: (prompt, screenshots, refImages, structSummary) =>
                   verifyRender(prompt, screenshots, refImages, structSummary),
                 referenceImages: referenceImagePaths,
@@ -1303,7 +1297,7 @@ class GenerationPipeline {
     }
 
     await this.finalizeAttempt('error', data, `Render Error: ${renderError}`);
-    openCodeModalManual?.(data);
+    this.uiDeps.openCodeModalManual?.(data);
     requestQueue.patch(this.requestId, { phase: 'error', error: `Render Error: ${renderError}` });
     this.stopMicrowave(false);
     syncSessionPhaseFromQueue();
@@ -1322,7 +1316,7 @@ class GenerationPipeline {
     }
 
     await this.finalizeAttempt('error', data, verificationError);
-    openCodeModalManual?.(data);
+    this.uiDeps.openCodeModalManual?.(data);
     requestQueue.patch(this.requestId, { phase: 'error', error: verificationError });
     this.stopMicrowave(false);
     syncSessionPhaseFromQueue();

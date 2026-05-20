@@ -37,6 +37,15 @@ test('inserts verify template before closing model paren', () => {
   );
 });
 
+test('inserts clearance verify template when model already has two parts', () => {
+  const source = '(model\n  (part body (box 1 1 1))\n  (part lid (box 1 1 1)))\n';
+  const inserted = insertVerifyTemplate(source);
+
+  assert.match(inserted, /\(tag body_lid_gap\)/);
+  assert.match(inserted, /\(metric gap \(clearance min-distance body lid\)\)/);
+  assert.match(inserted, /\(expect gap \(>= 3\)\)/);
+});
+
 test('does not insert duplicate verify template', () => {
   const source = '(model\n  (verify\n    (tag body_shell)\n    (metric check (manifest has-step))\n    (expect check (= true)))\n  (part body (box 1 1 1)))\n';
   assert.equal(canInsertVerifyTemplate(source), false);

@@ -179,10 +179,11 @@ fn write_artifact_bundle_component_package_project_impl(
     let packaged_source = resolve_packaged_component_source(&request)?;
     let derived_component_contract =
         resolve_packaged_component_contract(&request, &packaged_source)?;
-    let ports = normalize_packaged_component_ports(
+    let ports = normalize_packaged_component_ports_with_portability(
         &request.ports,
         &request.artifact_bundle,
         should_normalize_packaged_topology_ids(&packaged_source, &request.artifact_bundle),
+        step_packaged_component_source(&packaged_source),
     )?;
     let runtime_target_ids = artifact_bundle_target_ids(&request.artifact_bundle)?;
     let known_port_type_ids = request
@@ -272,6 +273,20 @@ fn normalize_packaged_component_ports(
     artifact_bundle: &ArtifactBundle,
     prefer_stable_topology_ids: bool,
 ) -> AppResult<Vec<ComponentPort>> {
+    normalize_packaged_component_ports_with_portability(
+        ports,
+        artifact_bundle,
+        prefer_stable_topology_ids,
+        false,
+    )
+}
+
+fn normalize_packaged_component_ports_with_portability(
+    ports: &[ComponentPort],
+    artifact_bundle: &ArtifactBundle,
+    prefer_stable_topology_ids: bool,
+    prefer_portable_ids: bool,
+) -> AppResult<Vec<ComponentPort>> {
     if !prefer_stable_topology_ids {
         return Ok(ports.to_vec());
     }
@@ -281,7 +296,7 @@ fn normalize_packaged_component_ports(
         .selection_targets
         .iter()
         .flat_map(|target| {
-            let Some(preferred) = preferred_packaged_target_id(target) else {
+            let Some(preferred) = preferred_packaged_target_id(target, prefer_portable_ids) else {
                 return Vec::new();
             };
             target
@@ -338,7 +353,7 @@ fn normalize_packaged_component_ports(
         .collect::<HashMap<_, _>>();
 
     for target in &manifest.selection_targets {
-        let Some(preferred) = preferred_packaged_target_id(target) else {
+        let Some(preferred) = preferred_packaged_target_id(target, prefer_portable_ids) else {
             continue;
         };
         let manifest_portable_ids = target
@@ -396,6 +411,11 @@ fn normalize_packaged_component_ports(
         .collect())
 }
 
+fn step_packaged_component_source(packaged_source: &PackagedComponentSource) -> bool {
+    let source_ref = packaged_source.source_ref.to_ascii_lowercase();
+    source_ref.ends_with(".step") || source_ref.ends_with(".stp")
+}
+
 fn should_normalize_packaged_topology_ids(
     packaged_source: &PackagedComponentSource,
     artifact_bundle: &ArtifactBundle,
@@ -414,19 +434,35 @@ fn should_normalize_packaged_topology_ids(
             .any(|target| target.durable_target_id.is_some())
 }
 
-fn preferred_packaged_target_id(target: &crate::models::SelectionTarget) -> Option<String> {
-    target
-        .durable_target_id
-        .clone()
-        .or_else(|| {
-            target
-                .alias_ids
-                .iter()
-                .filter(|alias_id| is_stable_topology_target_id(alias_id))
-                .min_by_key(|alias_id| alias_id.len())
-                .cloned()
-        })
-        .or_else(|| target.target_id.clone())
+fn preferred_packaged_target_id(
+    target: &crate::models::SelectionTarget,
+    prefer_portable_ids: bool,
+) -> Option<String> {
+    let stable_alias = || {
+        target
+            .alias_ids
+            .iter()
+            .filter(|alias_id| is_stable_topology_target_id(alias_id))
+            .min_by_key(|alias_id| alias_id.len())
+            .cloned()
+    };
+    if prefer_portable_ids {
+        // STEP-packaged components lose node identity on import: prefer the
+        // public portable id over node-scoped durable ids.
+        target
+            .target_id
+            .clone()
+            .or_else(stable_alias)
+            .or_else(|| target.durable_target_id.clone())
+    } else {
+        // Source-preserving packages re-render natively, where node-scoped
+        // durable ids stay stable across edits.
+        target
+            .durable_target_id
+            .clone()
+            .or_else(stable_alias)
+            .or_else(|| target.target_id.clone())
+    }
 }
 
 fn read_model_manifest_from_path(path: &Path) -> AppResult<ModelManifest> {
@@ -702,26 +738,13 @@ pub async fn extract_component_package_archive(
     )
 }
 
-pub async fn install_component_package_archive_for_app(
-    app: &dyn PathResolver,
-    archive_path: String,
-) -> AppResult<InstalledComponentPackage> {
-    component_package_runtime::install_component_package_archive(app, Path::new(&archive_path))
-}
-
 #[tauri::command]
 #[specta::specta]
 pub async fn install_component_package_archive(
     archive_path: String,
     app: AppHandle,
 ) -> AppResult<InstalledComponentPackage> {
-    install_component_package_archive_for_app(&app, archive_path).await
-}
-
-pub async fn list_installed_component_package_headers_for_app(
-    app: &dyn PathResolver,
-) -> AppResult<Vec<ComponentPackageHeader>> {
-    component_package_runtime::list_installed_component_package_headers(app)
+    component_package_runtime::install_component_package_archive(&app, Path::new(&archive_path))
 }
 
 #[tauri::command]
@@ -729,21 +752,7 @@ pub async fn list_installed_component_package_headers_for_app(
 pub async fn list_installed_component_package_headers(
     app: AppHandle,
 ) -> AppResult<Vec<ComponentPackageHeader>> {
-    list_installed_component_package_headers_for_app(&app).await
-}
-
-pub async fn resolve_installed_component_source_for_app(
-    app: &dyn PathResolver,
-    package_id: String,
-    version: String,
-    component_id: String,
-) -> AppResult<InstalledComponentSource> {
-    component_package_runtime::resolve_installed_component_source(
-        app,
-        &package_id,
-        &version,
-        &component_id,
-    )
+    component_package_runtime::list_installed_component_package_headers(&app)
 }
 
 #[tauri::command]
@@ -754,10 +763,28 @@ pub async fn resolve_installed_component_source(
     component_id: String,
     app: AppHandle,
 ) -> AppResult<InstalledComponentSource> {
-    resolve_installed_component_source_for_app(&app, package_id, version, component_id).await
+    component_package_runtime::resolve_installed_component_source(
+        &app,
+        &package_id,
+        &version,
+        &component_id,
+    )
 }
 
-pub async fn resolve_installed_component_controls_for_app(
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_installed_component_controls(
+    package_id: String,
+    version: String,
+    component_id: String,
+    parameters: DesignParams,
+    app: AppHandle,
+) -> AppResult<InstalledComponentControls> {
+    resolve_installed_component_controls_common(&app, package_id, version, component_id, parameters)
+        .await
+}
+
+pub async fn resolve_installed_component_controls_common(
     app: &dyn PathResolver,
     package_id: String,
     version: String,
@@ -770,34 +797,13 @@ pub async fn resolve_installed_component_controls_for_app(
         &version,
         &component_id,
     )?;
-    let merged_parameters =
-        merge_component_render_parameters(&installed_source.component, &parameters);
-    Ok(InstalledComponentControls {
+    Ok(build_installed_component_controls(
         installed_source,
-        parameters: merged_parameters,
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn resolve_installed_component_controls(
-    package_id: String,
-    version: String,
-    component_id: String,
-    parameters: DesignParams,
-    app: AppHandle,
-) -> AppResult<InstalledComponentControls> {
-    resolve_installed_component_controls_for_app(
-        &app,
-        package_id,
-        version,
-        component_id,
         parameters,
-    )
-    .await
+    ))
 }
 
-pub async fn resolve_installed_component_assembly_for_app(
+pub async fn resolve_installed_component_assembly_common(
     app: &dyn PathResolver,
     package_id: String,
     version: String,
@@ -825,10 +831,10 @@ pub async fn resolve_installed_component_assembly(
     assembly_id: String,
     app: AppHandle,
 ) -> AppResult<InstalledAssemblySource> {
-    resolve_installed_component_assembly_for_app(&app, package_id, version, assembly_id).await
+    resolve_installed_component_assembly_common(&app, package_id, version, assembly_id).await
 }
 
-pub async fn resolve_installed_component_assembly_controls_for_app(
+pub async fn resolve_installed_component_assembly_controls_common(
     app: &dyn PathResolver,
     package_id: String,
     version: String,
@@ -836,45 +842,11 @@ pub async fn resolve_installed_component_assembly_controls_for_app(
     instance_parameters: BTreeMap<String, DesignParams>,
 ) -> AppResult<InstalledAssemblyControls> {
     let assembly_source =
-        resolve_installed_component_assembly_for_app(app, package_id, version, assembly_id).await?;
-    let mates_solved = assembly_source
-        .mate_results
-        .iter()
-        .all(|result| result.solved);
-    let components = assembly_source
-        .components
-        .iter()
-        .map(|component| {
-            let overrides = instance_parameters
-                .get(&component.instance_id)
-                .cloned()
-                .unwrap_or_default();
-            let parameters = merge_component_render_parameters(
-                &component.installed_source.component,
-                &overrides,
-            );
-            InstalledAssemblyComponentControls {
-                instance_id: component.instance_id.clone(),
-                component_id: component.component_id.clone(),
-                parameters,
-                placement_frame: component.placement_frame.clone(),
-                installed_source: component.installed_source.clone(),
-            }
-        })
-        .collect();
-
-    Ok(InstalledAssemblyControls {
-        package_id: assembly_source.package_id,
-        version: assembly_source.version,
-        package_display_name: assembly_source.package_display_name,
-        package_dir: assembly_source.package_dir,
-        assembly: assembly_source.assembly,
-        port_types: assembly_source.port_types,
-        mate_types: assembly_source.mate_types,
-        components,
-        mate_results: assembly_source.mate_results,
-        mates_solved,
-    })
+        resolve_installed_component_assembly_common(app, package_id, version, assembly_id).await?;
+    Ok(build_installed_assembly_controls(
+        assembly_source,
+        instance_parameters,
+    ))
 }
 
 #[tauri::command]
@@ -886,7 +858,7 @@ pub async fn resolve_installed_component_assembly_controls(
     instance_parameters: BTreeMap<String, DesignParams>,
     app: AppHandle,
 ) -> AppResult<InstalledAssemblyControls> {
-    resolve_installed_component_assembly_controls_for_app(
+    resolve_installed_component_assembly_controls_common(
         &app,
         package_id,
         version,
@@ -896,7 +868,28 @@ pub async fn resolve_installed_component_assembly_controls(
     .await
 }
 
-pub async fn render_installed_component_source_for_app(
+#[tauri::command]
+#[specta::specta]
+pub async fn render_installed_component_source(
+    package_id: String,
+    version: String,
+    component_id: String,
+    parameters: DesignParams,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<InstalledComponentRuntime> {
+    render_installed_component_source_common(
+        &app,
+        &state,
+        package_id,
+        version,
+        component_id,
+        parameters,
+    )
+    .await
+}
+
+pub async fn render_installed_component_source_common(
     app: &dyn PathResolver,
     state: &AppState,
     package_id: String,
@@ -915,28 +908,7 @@ pub async fn render_installed_component_source_for_app(
     render_resolved_component_source(app, state, installed_source, merged_parameters).await
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn render_installed_component_source(
-    package_id: String,
-    version: String,
-    component_id: String,
-    parameters: DesignParams,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> AppResult<InstalledComponentRuntime> {
-    render_installed_component_source_for_app(
-        &app,
-        &state,
-        package_id,
-        version,
-        component_id,
-        parameters,
-    )
-    .await
-}
-
-pub async fn render_installed_component_assembly_for_app(
+pub async fn render_installed_component_assembly_common(
     app: &dyn PathResolver,
     state: &AppState,
     package_id: String,
@@ -945,7 +917,7 @@ pub async fn render_installed_component_assembly_for_app(
     instance_parameters: BTreeMap<String, DesignParams>,
 ) -> AppResult<InstalledAssemblyRuntime> {
     let assembly_source =
-        resolve_installed_component_assembly_for_app(app, package_id, version, assembly_id).await?;
+        resolve_installed_component_assembly_common(app, package_id, version, assembly_id).await?;
     let placement_frames = assembly_source
         .components
         .iter()
@@ -1040,7 +1012,7 @@ pub async fn render_installed_component_assembly(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<InstalledAssemblyRuntime> {
-    render_installed_component_assembly_for_app(
+    render_installed_component_assembly_common(
         &app,
         &state,
         package_id,
@@ -1051,7 +1023,7 @@ pub async fn render_installed_component_assembly(
     .await
 }
 
-pub async fn export_installed_component_assembly_3mf_for_app(
+pub async fn export_installed_component_assembly_3mf_common(
     app: &dyn PathResolver,
     state: &AppState,
     package_id: String,
@@ -1061,7 +1033,7 @@ pub async fn export_installed_component_assembly_3mf_for_app(
     target_path: String,
     model_name: Option<String>,
 ) -> AppResult<()> {
-    let assembly_runtime = render_installed_component_assembly_for_app(
+    let assembly_runtime = render_installed_component_assembly_common(
         app,
         state,
         package_id,
@@ -1091,7 +1063,7 @@ pub async fn export_installed_component_assembly_3mf(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
-    export_installed_component_assembly_3mf_for_app(
+    export_installed_component_assembly_3mf_common(
         &app,
         &state,
         package_id,
@@ -1104,7 +1076,7 @@ pub async fn export_installed_component_assembly_3mf(
     .await
 }
 
-pub async fn export_installed_component_assembly_multipart_stl_zip_for_app(
+pub async fn export_installed_component_assembly_multipart_stl_zip_common(
     app: &dyn PathResolver,
     state: &AppState,
     package_id: String,
@@ -1114,7 +1086,7 @@ pub async fn export_installed_component_assembly_multipart_stl_zip_for_app(
     target_path: String,
     model_name: Option<String>,
 ) -> AppResult<()> {
-    let assembly_runtime = render_installed_component_assembly_for_app(
+    let assembly_runtime = render_installed_component_assembly_common(
         app,
         state,
         package_id,
@@ -1144,7 +1116,7 @@ pub async fn export_installed_component_assembly_multipart_stl_zip(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
-    export_installed_component_assembly_multipart_stl_zip_for_app(
+    export_installed_component_assembly_multipart_stl_zip_common(
         &app,
         &state,
         package_id,
@@ -2186,6 +2158,60 @@ fn merge_component_render_parameters(
     merged
 }
 
+fn build_installed_component_controls(
+    installed_source: InstalledComponentSource,
+    parameters: DesignParams,
+) -> InstalledComponentControls {
+    InstalledComponentControls {
+        parameters: merge_component_render_parameters(&installed_source.component, &parameters),
+        installed_source,
+    }
+}
+
+fn build_installed_assembly_controls(
+    assembly_source: InstalledAssemblySource,
+    instance_parameters: BTreeMap<String, DesignParams>,
+) -> InstalledAssemblyControls {
+    let mates_solved = assembly_source
+        .mate_results
+        .iter()
+        .all(|result| result.solved);
+    let components = assembly_source
+        .components
+        .iter()
+        .map(|component| {
+            let overrides = instance_parameters
+                .get(&component.instance_id)
+                .cloned()
+                .unwrap_or_default();
+            let parameters = merge_component_render_parameters(
+                &component.installed_source.component,
+                &overrides,
+            );
+            InstalledAssemblyComponentControls {
+                instance_id: component.instance_id.clone(),
+                component_id: component.component_id.clone(),
+                parameters,
+                placement_frame: component.placement_frame.clone(),
+                installed_source: component.installed_source.clone(),
+            }
+        })
+        .collect();
+
+    InstalledAssemblyControls {
+        package_id: assembly_source.package_id,
+        version: assembly_source.version,
+        package_display_name: assembly_source.package_display_name,
+        package_dir: assembly_source.package_dir,
+        assembly: assembly_source.assembly,
+        port_types: assembly_source.port_types,
+        mate_types: assembly_source.mate_types,
+        components,
+        mate_results: assembly_source.mate_results,
+        mates_solved,
+    }
+}
+
 pub(crate) fn validate_rendered_component_port_targets(
     installed_source: &InstalledComponentSource,
     artifact_bundle: &crate::models::ArtifactBundle,
@@ -2452,7 +2478,11 @@ fn component_feature_port_source_ref(
             installed_source.version,
             installed_source.component.component_id
         )),
-        path: Some(format!("{}/ports/{}", base, component_port.port_id)),
+        path: Some(format!(
+            "/{}/ports/{}",
+            base.trim_start_matches('/'),
+            component_port.port_id
+        )),
         start_byte: None,
         end_byte: None,
     }
@@ -3296,7 +3326,7 @@ mod tests {
             port.source_ref
                 .as_ref()
                 .and_then(|source_ref| source_ref.path.as_deref()),
-            Some("components/frame-rail/source.ecky/ports/dovetail_rail")
+            Some("/components/frame-rail/source.ecky/ports/dovetail_rail")
         );
         assert_eq!(port.confidence, Some(1.0));
         assert_eq!(port.target_role.as_deref(), Some("object"));
@@ -3367,7 +3397,7 @@ mod tests {
             port.source_ref
                 .as_ref()
                 .and_then(|source_ref| source_ref.path.as_deref()),
-            Some("components/frame-rail/source.ecky/ports/dovetail_rail")
+            Some("/components/frame-rail/source.ecky/ports/dovetail_rail")
         );
         assert_eq!(port.confidence, Some(1.0));
         assert_eq!(port.target_role.as_deref(), Some("face"));

@@ -27,6 +27,7 @@ pub struct LlmOutcome<T> {
 
 pub async fn generate_design(
     engine: &Engine,
+    system_prompt: &str,
     prompt: &str,
     images: Vec<String>,
 ) -> Result<LlmOutcome<DesignOutput>, String> {
@@ -47,7 +48,7 @@ pub async fn generate_design(
                 &client,
                 engine,
                 engine.model.as_str(),
-                crate::TECHNICAL_SYSTEM_PROMPT,
+                system_prompt,
                 prompt,
                 images,
                 "generate",
@@ -65,7 +66,7 @@ pub async fn generate_design(
                 &client,
                 engine,
                 engine.model.as_str(),
-                crate::TECHNICAL_SYSTEM_PROMPT,
+                system_prompt,
                 prompt,
                 images,
                 "generate",

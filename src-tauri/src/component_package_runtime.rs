@@ -946,3 +946,319 @@ fn archive_entry_name(root: &Path, path: &Path) -> AppResult<String> {
     }
     Ok(entry_name)
 }
+
+// --- Extracted component library (component-unification T5) ---
+//
+// Extracted components are stored one directory per component directly under
+// the component-library dir: `<library>/<name>/component.ecky` (copy-inline
+// `define-component` source) plus `<library>/<name>/ecky-header.json`
+// (compact header). Installed component packages keep their deeper
+// `<library>/<package>/<version>/` layout; the two never collide because
+// extracted component dirs hold an `ecky-header.json` at depth 1.
+
+pub const EXTRACTED_COMPONENT_SOURCE_FILE_NAME: &str = "component.ecky";
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedComponentSearchResult {
+    pub name: String,
+    pub one_liner: String,
+    pub param_keys: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedComponentRecord {
+    pub name: String,
+    pub source: String,
+    pub header: crate::component_extract::ComponentHeader,
+}
+
+pub fn save_extracted_component(
+    app: &dyn PathResolver,
+    extracted: &crate::component_extract::ExtractedComponent,
+) -> AppResult<PathBuf> {
+    let dir = extracted_component_dir(app, &extracted.name)?;
+    fs::create_dir_all(&dir).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to create component directory '{}': {}",
+            dir.display(),
+            err
+        ))
+    })?;
+    let source_path = dir.join(EXTRACTED_COMPONENT_SOURCE_FILE_NAME);
+    fs::write(&source_path, &extracted.component_source).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to write '{}': {}",
+            source_path.display(),
+            err
+        ))
+    })?;
+    let header_path = dir.join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
+    let header_json = serde_json::to_string_pretty(&extracted.header).map_err(|err| {
+        AppError::internal(format!("Failed to serialize component header: {err}"))
+    })?;
+    fs::write(&header_path, header_json).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to write '{}': {}",
+            header_path.display(),
+            err
+        ))
+    })?;
+    Ok(dir)
+}
+
+/// Header-only library scan: never reads `component.ecky` bodies.
+pub fn search_extracted_components(
+    app: &dyn PathResolver,
+    query: &str,
+    limit: usize,
+) -> AppResult<Vec<ExtractedComponentSearchResult>> {
+    let root = extracted_component_library_root(app)?;
+    let mut results = Vec::new();
+    if !root.exists() {
+        return Ok(results);
+    }
+    let needle = query.trim().to_lowercase();
+    let mut entries: Vec<PathBuf> = fs::read_dir(&root)
+        .map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to read component library '{}': {}",
+                root.display(),
+                err
+            ))
+        })?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    entries.sort();
+    for dir in entries {
+        let header_path = dir.join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
+        if !header_path.is_file() {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&header_path) else {
+            continue;
+        };
+        let Ok(header) = serde_json::from_str::<crate::component_extract::ComponentHeader>(&raw)
+        else {
+            continue;
+        };
+        let haystack = format!(
+            "{} {} {}",
+            header.name,
+            header.description.clone().unwrap_or_default(),
+            header.tags.join(" ")
+        )
+        .to_lowercase();
+        if !needle.is_empty() && !haystack.contains(&needle) {
+            continue;
+        }
+        let param_keys: Vec<String> = header
+            .params
+            .iter()
+            .map(|param| param.key.clone())
+            .collect();
+        let one_liner = header
+            .description
+            .clone()
+            .unwrap_or_else(|| format!("component {} ({})", header.name, param_keys.join(" ")));
+        results.push(ExtractedComponentSearchResult {
+            name: header.name,
+            one_liner,
+            param_keys,
+            tags: header.tags,
+        });
+        if results.len() >= limit {
+            break;
+        }
+    }
+    Ok(results)
+}
+
+pub fn read_extracted_component(
+    app: &dyn PathResolver,
+    name: &str,
+) -> AppResult<ExtractedComponentRecord> {
+    let dir = extracted_component_dir(app, name)?;
+    let source_path = dir.join(EXTRACTED_COMPONENT_SOURCE_FILE_NAME);
+    let header_path = dir.join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
+    if !source_path.is_file() || !header_path.is_file() {
+        return Err(AppError::not_found(format!(
+            "No extracted component named `{}` in the component library.",
+            name
+        )));
+    }
+    let source = fs::read_to_string(&source_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read '{}': {}",
+            source_path.display(),
+            err
+        ))
+    })?;
+    let raw_header = fs::read_to_string(&header_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read '{}': {}",
+            header_path.display(),
+            err
+        ))
+    })?;
+    let header = serde_json::from_str(&raw_header).map_err(|err| {
+        AppError::persistence(format!(
+            "Component header '{}' is invalid: {}",
+            header_path.display(),
+            err
+        ))
+    })?;
+    Ok(ExtractedComponentRecord {
+        name: name.to_string(),
+        source,
+        header,
+    })
+}
+
+fn extracted_component_library_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
+    component_library_root(app)
+}
+
+fn extracted_component_dir(app: &dyn PathResolver, name: &str) -> AppResult<PathBuf> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        || !name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+    {
+        return Err(AppError::validation(format!(
+            "Component name `{}` is not a safe library directory name.",
+            name
+        )));
+    }
+    Ok(extracted_component_library_root(app)?.join(name))
+}
+
+#[cfg(test)]
+mod extracted_component_library_tests {
+    use super::*;
+    use crate::component_extract::{extract_component, ComponentExtractRequest};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestResolver {
+        root: PathBuf,
+    }
+
+    impl PathResolver for TestResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    fn temp_resolver(name: &str) -> TestResolver {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        TestResolver {
+            root: std::env::temp_dir().join(format!("ecky-component-lib-{name}-{nonce}")),
+        }
+    }
+
+    fn sample_extracted(name: &str) -> crate::component_extract::ExtractedComponent {
+        let source = r#"
+            (model
+              (params (number width 12 :label "Width"))
+              (part bracket (box width 4 2)))
+        "#;
+        extract_component(&ComponentExtractRequest {
+            source: source.to_string(),
+            part_key: "bracket".to_string(),
+            component_name: Some(name.to_string()),
+            description: Some("L-shaped mounting bracket".to_string()),
+            tags: vec!["bracket".to_string(), "mount".to_string()],
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("message-1".to_string()),
+        })
+        .expect("extract")
+    }
+
+    #[test]
+    fn save_search_get_round_trip() {
+        let resolver = temp_resolver("roundtrip");
+        let extracted = sample_extracted("bracket");
+        let dir = save_extracted_component(&resolver, &extracted).expect("save");
+        assert!(dir.join("component.ecky").is_file());
+        assert!(dir.join("ecky-header.json").is_file());
+
+        let results = search_extracted_components(&resolver, "bracket", 10).expect("search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "bracket");
+        assert_eq!(results[0].one_liner, "L-shaped mounting bracket");
+        assert_eq!(results[0].param_keys, vec!["width".to_string()]);
+        assert_eq!(
+            results[0].tags,
+            vec!["bracket".to_string(), "mount".to_string()]
+        );
+
+        let record = read_extracted_component(&resolver, "bracket").expect("get");
+        assert!(record.source.contains("(define-component bracket"));
+        assert_eq!(record.header.name, "bracket");
+    }
+
+    #[test]
+    fn search_is_header_only_and_survives_missing_body() {
+        let resolver = temp_resolver("headeronly");
+        let extracted = sample_extracted("lonely");
+        let dir = save_extracted_component(&resolver, &extracted).expect("save");
+        fs::remove_file(dir.join("component.ecky")).expect("drop body");
+
+        let results = search_extracted_components(&resolver, "lonely", 10).expect("search");
+        assert_eq!(results.len(), 1, "search must not depend on bodies");
+
+        let err = read_extracted_component(&resolver, "lonely").expect_err("get needs body");
+        assert!(err.message.contains("lonely"), "{}", err.message);
+    }
+
+    #[test]
+    fn search_filters_by_query_and_respects_limit() {
+        let resolver = temp_resolver("filter");
+        save_extracted_component(&resolver, &sample_extracted("alpha-bracket")).expect("save");
+        save_extracted_component(&resolver, &sample_extracted("beta-hinge")).expect("save");
+
+        let hits = search_extracted_components(&resolver, "beta", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "beta-hinge");
+
+        let all = search_extracted_components(&resolver, "", 10).expect("search all");
+        assert_eq!(all.len(), 2);
+
+        let limited = search_extracted_components(&resolver, "", 1).expect("limited");
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[test]
+    fn unknown_component_get_is_deterministic() {
+        let resolver = temp_resolver("missing");
+        let err = read_extracted_component(&resolver, "ghost").expect_err("missing");
+        assert!(err.message.contains("ghost"), "{}", err.message);
+    }
+
+    #[test]
+    fn unsafe_component_names_are_rejected() {
+        let resolver = temp_resolver("unsafe");
+        let err = read_extracted_component(&resolver, "../escape").expect_err("unsafe");
+        assert!(err.message.contains("not a safe"), "{}", err.message);
+    }
+}

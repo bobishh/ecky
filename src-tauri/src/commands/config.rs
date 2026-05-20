@@ -60,9 +60,22 @@ pub async fn list_models(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_design_system_prompt(provider: Option<String>) -> AppResult<String> {
+pub async fn get_design_system_prompt(
+    provider: Option<String>,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
     let _ = provider;
-    Ok(crate::TECHNICAL_SYSTEM_PROMPT.to_string())
+    let (source_language, geometry_backend) = {
+        let config = state.config.lock().unwrap();
+        (
+            config.default_source_language,
+            config.default_geometry_backend,
+        )
+    };
+    Ok(crate::commands::generation::design_system_prompt(
+        source_language,
+        geometry_backend,
+    ))
 }
 
 #[tauri::command]

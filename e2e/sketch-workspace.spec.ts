@@ -65,6 +65,22 @@ async function installSketchMocks(
     mockWindow.__SKETCH_BREP_PACKAGE_CALLS__ = [];
     mockWindow.__BREP_HIDDEN_LINE_CALLS__ = [];
 
+    const draftStorageKey = '__SKETCH_PREVIEW_DRAFTS__';
+    const readDraftStore = () => {
+      try {
+        return JSON.parse(localStorage.getItem(draftStorageKey) ?? '{}') as Record<string, any>;
+      } catch {
+        return {};
+      }
+    };
+    const writeDraftStore = (store: Record<string, any>) => {
+      localStorage.setItem(draftStorageKey, JSON.stringify(store));
+    };
+    const draftScopeKey = (scopeId: string | null | undefined) => {
+      const normalized = `${scopeId ?? 'global'}`.trim();
+      return normalized ? normalized : 'global';
+    };
+
     const previewHullSourceForRequest = (request: any) => {
       if (mockHiddenLineMode !== 'multi-loop-ok' && mockHiddenLineMode !== 'multi-loop-edges-topology-mismatch-then-ok') {
         return `; preview-hull-source\n${mockSource}`;
@@ -131,6 +147,36 @@ async function installSketchMocks(
       if (cmd === 'get_history') return [];
       if (cmd === 'get_last_design') return null;
       if (cmd === 'get_default_macro') return '';
+      if (cmd === 'save_sketch_preview_draft') {
+        const request = args?.request ?? {};
+        const scopeId = draftScopeKey(request.scopeId);
+        const draft = {
+          scopeId: request.scopeId ?? null,
+          draftSource: request.draftSource,
+          artifactBundle: request.artifactBundle,
+          updatedAt: Math.floor(Date.now() / 1000),
+        };
+        const store = readDraftStore();
+        store[scopeId] = draft;
+        store.global = draft;
+        writeDraftStore(store);
+        return draft;
+      }
+      if (cmd === 'load_sketch_preview_draft') {
+        const request = args?.request ?? {};
+        const scopeId = draftScopeKey(request.scopeId);
+        const store = readDraftStore();
+        return store[scopeId] ?? store.global ?? null;
+      }
+      if (cmd === 'clear_sketch_preview_draft') {
+        const request = args?.request ?? {};
+        const scopeId = draftScopeKey(request.scopeId);
+        const store = readDraftStore();
+        delete store[scopeId];
+        delete store.global;
+        writeDraftStore(store);
+        return null;
+      }
       if (cmd === 'check_freecad') return true;
       if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
       if (cmd === 'get_active_agent_sessions') return [];
@@ -4126,6 +4172,36 @@ test.describe('Sketch workspace', () => {
     );
 
     await expect(draftPanel).toContainText(/MESH DRAFT FRESH/i);
+  });
+
+  test('Given sketch preview is saved When app reloads Then the same draft restores and discard clears it', async ({ page }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+    await drawClosedRectangle(page);
+    await page.getByRole('button', { name: /PREVIEW NOW|GENERATE DRAFT/ }).click();
+
+    const sketchStatus = page.getByLabel('Sketch preview status');
+    await expect(sketchStatus).toContainText(/DRAFT ACTIVE/i);
+
+    const draftPanel = draftModePanel(page);
+    await expect(draftPanel.getByRole('button', { name: /SAVE DRAFT/i })).toBeVisible();
+    await draftPanel.getByRole('button', { name: /SAVE DRAFT/i }).click();
+    await expect(sketchStatus).toContainText(/DRAFT SAVED/i);
+
+    await page.reload();
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await openSketchWorkspace(page);
+
+    const restoredStatus = page.getByLabel('Sketch preview status');
+    await expect(restoredStatus).toContainText(/DRAFT SAVED/i);
+    const restoredDraftPanel = draftModePanel(page);
+    await expect(restoredDraftPanel.getByRole('button', { name: /DISCARD DRAFT/i })).toBeVisible();
+    await restoredDraftPanel.getByRole('button', { name: /DISCARD DRAFT/i }).click();
+
+    await page.reload();
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await openSketchWorkspace(page);
+    await expect(page.getByLabel('Sketch preview status')).toHaveCount(0);
   });
 
   test('Given delayed draft refresh When draft mode rebuilds mesh draft Then draft panel locks and shows pending label until fresh', async ({ page }) => {

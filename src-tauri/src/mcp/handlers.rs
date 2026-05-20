@@ -2244,6 +2244,23 @@ pub async fn handle_finalize_thread(
     })
 }
 
+pub async fn handle_delete_thread(
+    state: &AppState,
+    req: DeleteThreadRequest,
+) -> AppResult<DeleteThreadResponse> {
+    let conn = state.db.lock().await;
+    let changed = crate::db::delete_thread(&conn, &req.thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    if !changed {
+        return Err(AppError::not_found("Thread not found."));
+    }
+
+    Ok(DeleteThreadResponse {
+        thread_id: req.thread_id,
+        deleted: true,
+    })
+}
+
 pub async fn handle_session_log_in(
     state: &AppState,
     req: SessionLoginRequest,
@@ -8413,6 +8430,23 @@ pub async fn handle_params_preview_render(
             req.geometry_backend,
         )?;
         let render_geometry_backend = authoring_context.geometry_backend;
+        let base_context = MacroAuthoringContext {
+            source_language: base_design.source_language,
+            geometry_backend: base_design.geometry_backend,
+        };
+        log_macro_backend_resolution(
+            state,
+            &conn,
+            ctx,
+            "params_preview_render",
+            &base_context,
+            &base_design.macro_dialect,
+            req.geometry_backend,
+            &authoring_context,
+            Some(&target_thread_id),
+            Some(&target_message_id),
+            tracked_model_id.as_deref(),
+        );
 
         drop(conn);
 
@@ -8688,6 +8722,64 @@ fn configured_authoring_context(state: &AppState) -> MacroAuthoringContext {
         source_language: config.default_source_language,
         geometry_backend: config.default_geometry_backend,
     }
+}
+
+fn log_macro_backend_resolution(
+    state: &AppState,
+    conn: &rusqlite::Connection,
+    ctx: &AgentContext,
+    phase: &'static str,
+    base_context: &MacroAuthoringContext,
+    macro_dialect: &MacroDialect,
+    requested_geometry_backend: Option<crate::models::GeometryBackend>,
+    resolved_context: &MacroAuthoringContext,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+    model_id: Option<&str>,
+) {
+    let configured_context = configured_authoring_context(state);
+    let requested = requested_geometry_backend
+        .map(|backend| backend.as_str())
+        .unwrap_or("none");
+    let summary = format!(
+        "Resolved macro render backend: sourceLanguage={} geometryBackend={}.",
+        resolved_context.source_language.as_str(),
+        resolved_context.geometry_backend.as_str()
+    );
+    let details = format!(
+        "baseSourceLanguage={}; baseGeometryBackend={}; requestedGeometryBackend={}; configSourceLanguage={}; configGeometryBackend={}; macroDialect={:?}",
+        base_context.source_language.as_str(),
+        base_context.geometry_backend.as_str(),
+        requested,
+        configured_context.source_language.as_str(),
+        configured_context.geometry_backend.as_str(),
+        macro_dialect,
+    );
+    eprintln!(
+        "[MCP] {} backend_resolved session={} agent={} thread={} message={} model={} {} {}",
+        phase,
+        ctx.session_id,
+        ctx.agent_label,
+        thread_id.unwrap_or("-"),
+        message_id.unwrap_or("-"),
+        model_id.unwrap_or("-"),
+        summary,
+        details,
+    );
+    push_trace_event_with_conn(
+        state,
+        conn,
+        ctx,
+        TraceEvent {
+            thread_id: thread_id.map(str::to_string),
+            message_id: message_id.map(str::to_string),
+            model_id: model_id.map(str::to_string),
+            phase,
+            kind: "backend_resolved",
+            summary,
+            details: Some(details),
+        },
+    );
 }
 
 fn resolve_macro_authoring_context(
@@ -9052,6 +9144,19 @@ pub async fn handle_macro_preview_render(
             req.geometry_backend,
         )?;
         let render_geometry_backend = authoring_context.geometry_backend;
+        log_macro_backend_resolution(
+            state,
+            &conn,
+            ctx,
+            "macro_preview_render",
+            &base_context,
+            &macro_dialect,
+            req.geometry_backend,
+            &authoring_context,
+            Some(&working_thread_id),
+            tracked_message_id.as_deref(),
+            tracked_model_id.as_deref(),
+        );
 
         drop(conn);
 
@@ -11354,9 +11459,26 @@ mod tests {
         }
     }
 
+    fn test_session_id() -> String {
+        // Globals like MACRO_BUFFERS and SESSION_RENDER_PREVIEWS are keyed by
+        // session id; a per-test-thread nonce keeps tests from contaminating
+        // each other through them while staying stable within one test.
+        thread_local! {
+            static NONCE: String = uuid::Uuid::new_v4().simple().to_string();
+        }
+        NONCE.with(|nonce| format!("session-1-{nonce}"))
+    }
+
+    fn test_session_id_other() -> String {
+        thread_local! {
+            static NONCE: String = uuid::Uuid::new_v4().simple().to_string();
+        }
+        NONCE.with(|nonce| format!("session-2-{nonce}"))
+    }
+
     fn test_ctx() -> AgentContext {
         AgentContext {
-            session_id: "session-1".to_string(),
+            session_id: test_session_id(),
             client_kind: "http".to_string(),
             host_label: "Claude Code".to_string(),
             agent_label: "claude".to_string(),
@@ -11367,7 +11489,7 @@ mod tests {
 
     fn test_ctx_other() -> AgentContext {
         AgentContext {
-            session_id: "session-2".to_string(),
+            session_id: test_session_id_other(),
             client_kind: "http".to_string(),
             host_label: "Codex".to_string(),
             agent_label: "codex".to_string(),
@@ -12010,7 +12132,7 @@ mod tests {
 
     async fn seed_live_session(state: &AppState) {
         state.mcp_sessions.lock().await.insert(
-            "session-1".to_string(),
+            test_session_id(),
             crate::models::McpSessionState {
                 client_kind: "mcp-http".to_string(),
                 host_label: "Claude Code".to_string(),
@@ -12062,7 +12184,7 @@ mod tests {
         let thread = history::get_thread(&conn, &response.thread_id).expect("created thread");
         assert_eq!(thread.title, "Seven Petal Badge");
         assert_eq!(thread.version_count, 0);
-        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+        let stored_session = db::get_sessions_by_ids(&conn, &[test_session_id()])
             .expect("stored session")
             .into_iter()
             .next()
@@ -12078,7 +12200,7 @@ mod tests {
             .mcp_sessions
             .lock()
             .await
-            .get("session-1")
+            .get(&test_session_id())
             .cloned()
             .expect("live session");
         assert_eq!(
@@ -12120,14 +12242,14 @@ mod tests {
             .mcp_sessions
             .lock()
             .await
-            .get("session-1")
+            .get(&test_session_id())
             .cloned()
             .expect("live session");
         assert_eq!(live_session.bound_thread_id.as_deref(), Some("thread-2"));
         assert!(live_session.last_target.is_none());
 
         let conn = state.db.lock().await;
-        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+        let stored_session = db::get_sessions_by_ids(&conn, &[test_session_id()])
             .expect("stored session")
             .into_iter()
             .next()
@@ -12140,7 +12262,7 @@ mod tests {
     async fn thread_borrow_message_target_sets_last_target() {
         let (state, _resolver) = seed_target().await;
         state.mcp_sessions.lock().await.insert(
-            "session-1".to_string(),
+            test_session_id(),
             crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
         );
 
@@ -12166,7 +12288,7 @@ mod tests {
             .mcp_sessions
             .lock()
             .await
-            .get("session-1")
+            .get(&test_session_id())
             .cloned()
             .expect("live session");
         assert_eq!(live_session.bound_thread_id.as_deref(), Some("thread-1"));
@@ -12212,7 +12334,7 @@ mod tests {
 
         let target = resolve_request_user_prompt_target(
             &state,
-            "session-1",
+            &test_session_id(),
             &UserPromptRequest {
                 request_id: None,
                 message: Some("Hello".to_string()),
@@ -12252,7 +12374,7 @@ mod tests {
 
         let target = resolve_request_user_prompt_target(
             &state,
-            "session-1",
+            &test_session_id(),
             &UserPromptRequest {
                 request_id: None,
                 message: Some("Hello".to_string()),
@@ -12388,11 +12510,11 @@ mod tests {
         crate::mcp::runtime::bind_managed_http_session(
             &state,
             "agent-1",
-            "session-1",
+            &test_session_id(),
             Some("Connected to Ecky.".to_string()),
         );
         state.mcp_sessions.lock().await.insert(
-            "session-1".to_string(),
+            test_session_id(),
             crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
         );
 
@@ -12415,7 +12537,7 @@ mod tests {
         assert_eq!(response.model_id, None);
 
         let conn = state.db.lock().await;
-        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+        let stored_session = db::get_sessions_by_ids(&conn, &[test_session_id()])
             .expect("stored session")
             .into_iter()
             .next()
@@ -12428,7 +12550,7 @@ mod tests {
             .mcp_sessions
             .lock()
             .await
-            .get("session-1")
+            .get(&test_session_id())
             .cloned()
             .expect("live session");
         assert_eq!(live_session.bound_thread_id, None);
@@ -12470,7 +12592,7 @@ mod tests {
         assert_eq!(response.model_id, None);
 
         let conn = state.db.lock().await;
-        let stored_session = db::get_sessions_by_ids(&conn, &["session-1".to_string()])
+        let stored_session = db::get_sessions_by_ids(&conn, &[test_session_id()])
             .expect("stored session")
             .into_iter()
             .next()
@@ -12502,7 +12624,7 @@ mod tests {
         crate::mcp::runtime::bind_managed_http_session(
             &state,
             "agent-1",
-            "session-1",
+            &test_session_id(),
             Some("Connected to Ecky.".to_string()),
         );
         crate::mcp::runtime::wake_auto_agent_by_label(
@@ -12599,7 +12721,7 @@ mod tests {
         }
 
         state.mcp_sessions.lock().await.insert(
-            "session-2".to_string(),
+            test_session_id_other(),
             crate::models::McpSessionState::new("http".to_string(), "Codex".to_string()),
         );
 
@@ -12619,26 +12741,23 @@ mod tests {
 
         assert_eq!(response.thread_id.as_deref(), Some("thread-1"));
         let sessions = state.mcp_sessions.lock().await;
-        let prior_owner = sessions.get("session-1").expect("prior owner");
+        let prior_owner = sessions.get(&test_session_id()).expect("prior owner");
         assert_eq!(prior_owner.bound_thread_id, None);
         assert!(prior_owner.last_target.is_none());
-        let new_owner = sessions.get("session-2").expect("new owner");
+        let new_owner = sessions.get(&test_session_id_other()).expect("new owner");
         assert_eq!(new_owner.bound_thread_id.as_deref(), Some("thread-1"));
         drop(sessions);
 
         let conn = state.db.lock().await;
-        let stored = db::get_sessions_by_ids(
-            &conn,
-            &[String::from("session-1"), String::from("session-2")],
-        )
-        .expect("stored sessions");
+        let stored = db::get_sessions_by_ids(&conn, &[test_session_id(), test_session_id_other()])
+            .expect("stored sessions");
         let old_row = stored
             .iter()
-            .find(|session| session.session_id == "session-1")
+            .find(|session| session.session_id == test_session_id())
             .expect("old row");
         let new_row = stored
             .iter()
-            .find(|session| session.session_id == "session-2")
+            .find(|session| session.session_id == test_session_id_other())
             .expect("new row");
         assert_eq!(old_row.thread_id, None);
         assert_eq!(new_row.thread_id.as_deref(), Some("thread-1"));
@@ -12648,7 +12767,7 @@ mod tests {
     async fn session_resume_blocks_claimed_thread_without_explicit_steal_path() {
         let (state, _resolver) = seed_target().await;
         state.mcp_sessions.lock().await.insert(
-            "session-2".to_string(),
+            test_session_id_other(),
             crate::models::McpSessionState {
                 client_kind: "mcp-http".to_string(),
                 host_label: "Codex".to_string(),
@@ -17566,7 +17685,15 @@ mod tests {
         let (state, resolver) = seed_target().await;
         let model_id = "generated-printability-no-risk-recipes";
         let preview_stl_path = resolver.root.join("printability-no-risk-preview.stl");
-        write_closed_tetra_binary_stl(&preview_stl_path);
+        // A unit tetra reads as a 1.00 mm thin wall (below the 1.20 mm
+        // advisory); scale it up so the mesh is genuinely risk-free.
+        let triangles = [
+            [[0.0f32, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            [[0.0f32, 0.0, 0.0], [0.0, 0.0, 10.0], [10.0, 0.0, 0.0]],
+            [[0.0f32, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            [[10.0f32, 0.0, 0.0], [0.0, 0.0, 10.0], [0.0, 10.0, 0.0]],
+        ];
+        write_binary_stl(&preview_stl_path, &triangles);
         let mut bundle = sample_bundle(model_id, "printability-no-risk-preview.stl");
         bundle.preview_stl_path = preview_stl_path.display().to_string();
         let manifest = sample_manifest(model_id);
@@ -18391,7 +18518,7 @@ mod tests {
         }
         {
             let mut sessions = state.mcp_sessions.lock().await;
-            let session = sessions.get_mut("session-1").expect("live session");
+            let session = sessions.get_mut(&test_session_id()).expect("live session");
             session.current_turn_id = Some("turn-1".to_string());
             session.current_turn_thread_id = Some("thread-1".to_string());
             session.current_turn_working_message_ids = vec!["user-working-1".to_string()];
@@ -18428,7 +18555,7 @@ mod tests {
                 .agent_origin
                 .as_ref()
                 .map(|origin| origin.session_id.as_str()),
-            Some("session-1")
+            Some(test_session_id().as_str())
         );
 
         let working_message = messages
@@ -18440,7 +18567,7 @@ mod tests {
             .mcp_sessions
             .lock()
             .await
-            .get("session-1")
+            .get(&test_session_id())
             .cloned()
             .expect("live session");
         assert!(live_session.current_turn_working_message_ids.is_empty());
@@ -18479,7 +18606,7 @@ mod tests {
             .mcp_sessions
             .lock()
             .await
-            .get("session-1")
+            .get(&test_session_id())
             .cloned()
             .expect("live session");
         assert!(live_session.busy);
@@ -18531,7 +18658,7 @@ mod tests {
             .mcp_sessions
             .lock()
             .await
-            .get("session-1")
+            .get(&test_session_id())
             .cloned()
             .expect("live session");
         assert!(!live_session.busy);
@@ -18638,8 +18765,7 @@ mod tests {
             statuses.get("user-pending-2"),
             Some(&MessageStatus::Working)
         );
-        let sessions =
-            db::get_sessions_by_ids(&conn, &[String::from("session-1")]).expect("sessions");
+        let sessions = db::get_sessions_by_ids(&conn, &[test_session_id()]).expect("sessions");
         assert_eq!(sessions[0].phase, "working");
         assert_eq!(sessions[0].message_id.as_deref(), Some("user-pending-1"));
     }
@@ -18673,15 +18799,20 @@ mod tests {
         .await
         .expect("session_log_out");
 
-        assert!(state.mcp_sessions.lock().await.get("session-1").is_none());
+        assert!(state
+            .mcp_sessions
+            .lock()
+            .await
+            .get(&test_session_id())
+            .is_none());
 
         let conn = state.db.lock().await;
-        let stored = db::get_sessions_by_ids(&conn, &[String::from("session-1")]).expect("stored");
+        let stored = db::get_sessions_by_ids(&conn, &[test_session_id()]).expect("stored");
         assert_eq!(stored[0].phase, "disconnected");
         let active = db::get_active_agent_sessions(&conn, 600).expect("active sessions");
         assert!(active
             .into_iter()
-            .all(|session| session.session_id != "session-1"));
+            .all(|session| session.session_id != test_session_id()));
     }
 
     #[test]
@@ -18745,4 +18876,103 @@ mod tests {
 
         assert!(err.message.contains("Macro buffer digest mismatch"));
     }
+}
+
+// --- Component library tools (component-unification T5) ---
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentExtractToolRequest {
+    /// Full `.ecky` model source containing the part to lift.
+    pub source: String,
+    pub part_key: String,
+    /// Component name; defaults to the part key.
+    pub name: Option<String>,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    /// Save the extracted component into the component library.
+    #[serde(default)]
+    pub save: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentExtractToolResponse {
+    pub name: String,
+    /// Copy-inline `define-component` source, pasteable into any model.
+    pub component_source: String,
+    pub header: crate::component_extract::ComponentHeader,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentSearchToolRequest {
+    pub query: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentSearchToolResponse {
+    pub results: Vec<crate::component_package_runtime::ExtractedComponentSearchResult>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentGetToolRequest {
+    pub name: String,
+}
+
+pub fn handle_component_extract(
+    app: &dyn PathResolver,
+    req: ComponentExtractToolRequest,
+) -> AppResult<ComponentExtractToolResponse> {
+    let extracted = crate::component_extract::extract_component(
+        &crate::component_extract::ComponentExtractRequest {
+            source: req.source,
+            part_key: req.part_key,
+            component_name: req.name,
+            description: req.description,
+            tags: req.tags,
+            thread_id: req.thread_id,
+            message_id: req.message_id,
+        },
+    )?;
+    let saved_path = if req.save {
+        let dir = crate::component_package_runtime::save_extracted_component(app, &extracted)?;
+        Some(dir.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    Ok(ComponentExtractToolResponse {
+        name: extracted.name.clone(),
+        component_source: extracted.component_source.clone(),
+        header: extracted.header.clone(),
+        saved_path,
+    })
+}
+
+pub fn handle_component_search(
+    app: &dyn PathResolver,
+    req: ComponentSearchToolRequest,
+) -> AppResult<ComponentSearchToolResponse> {
+    let limit = req.limit.unwrap_or(20).clamp(1, 100);
+    let results = crate::component_package_runtime::search_extracted_components(
+        app,
+        req.query.as_deref().unwrap_or(""),
+        limit,
+    )?;
+    Ok(ComponentSearchToolResponse { results })
+}
+
+pub fn handle_component_get(
+    app: &dyn PathResolver,
+    req: ComponentGetToolRequest,
+) -> AppResult<crate::component_package_runtime::ExtractedComponentRecord> {
+    crate::component_package_runtime::read_extracted_component(app, &req.name)
 }

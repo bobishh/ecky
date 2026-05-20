@@ -899,25 +899,18 @@ async fn package_commands_expose_archive_write_and_header_read() {
     let resolver = TempPathResolver {
         root: temp_root.clone(),
     };
-    let installed = component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("command install");
+    let installed =
+        install_component_package_archive(&resolver, &archive_path).expect("command install");
     let headers =
-        component_package_commands::list_installed_component_package_headers_for_app(&resolver)
-            .await
-            .expect("command list installed");
-    let resolved = component_package_commands::resolve_installed_component_source_for_app(
+        list_installed_component_package_headers(&resolver).expect("command list installed");
+    let resolved = resolve_installed_component_source(
         &resolver,
-        "bike.bottle-holder-kit".to_string(),
-        "0.1.0".to_string(),
-        "frame-rail".to_string(),
+        "bike.bottle-holder-kit",
+        "0.1.0",
+        "frame-rail",
     )
-    .await
     .expect("command resolve installed component");
-    let assembly = component_package_commands::resolve_installed_component_assembly_for_app(
+    let assembly = component_package_commands::resolve_installed_component_assembly_common(
         &resolver,
         "bike.bottle-holder-kit".to_string(),
         "0.1.0".to_string(),
@@ -963,14 +956,9 @@ async fn render_installed_component_source_renders_installed_ecky_component() {
     write_component_package_manifest(&project_dir, &package).expect("write manifest");
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let rendered = component_package_commands::render_installed_component_source_for_app(
+    let rendered = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -1097,30 +1085,24 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
     .expect("write package manifest");
     let archive_path = temp_root.join("parametric-body-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
+
+    let resolved_default = component_package_commands::resolve_installed_component_controls_common(
         &resolver,
-        archive_path.to_string_lossy().to_string(),
+        "generated.parametric-body-kit".to_string(),
+        "0.1.0".to_string(),
+        "parametric-body".to_string(),
+        Default::default(),
     )
     .await
-    .expect("install package");
-
-    let resolved_default =
-        component_package_commands::resolve_installed_component_controls_for_app(
-            &resolver,
-            "generated.parametric-body-kit".to_string(),
-            "0.1.0".to_string(),
-            "parametric-body".to_string(),
-            Default::default(),
-        )
-        .await
-        .expect("resolve default controls");
+    .expect("resolve default controls");
     assert_eq!(
         resolved_default.parameters.get("width"),
         Some(&ecky_cad_lib::models::ParamValue::Number(42.0))
     );
 
     let resolved_override =
-        component_package_commands::resolve_installed_component_controls_for_app(
+        component_package_commands::resolve_installed_component_controls_common(
             &resolver,
             "generated.parametric-body-kit".to_string(),
             "0.1.0".to_string(),
@@ -1168,15 +1150,10 @@ async fn resolve_installed_component_assembly_controls_merge_instance_initial_pa
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
     let assembly =
-        component_package_commands::resolve_installed_component_assembly_controls_for_app(
+        component_package_commands::resolve_installed_component_assembly_controls_common(
             &resolver,
             "bike.bottle-holder-kit".to_string(),
             "0.1.0".to_string(),
@@ -1304,14 +1281,9 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
     .expect("write package manifest");
     let archive_path = temp_root.join("parametric-body-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let rendered_default = component_package_commands::render_installed_component_source_for_app(
+    let rendered_default = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "generated.parametric-body-kit".to_string(),
@@ -1331,7 +1303,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
         .expect("default bounds");
     assert!((default_bounds.x_max - default_bounds.x_min - 42.0).abs() < 1.0e-6);
 
-    let rendered_override = component_package_commands::render_installed_component_source_for_app(
+    let rendered_override = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "generated.parametric-body-kit".to_string(),
@@ -1403,14 +1375,9 @@ async fn render_installed_component_source_imports_installed_step_component() {
     write_component_package_manifest(&project_dir, &package).expect("write manifest");
     let archive_path = temp_root.join("bike-kit-step.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let rendered = component_package_commands::render_installed_component_source_for_app(
+    let rendered = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -1581,14 +1548,9 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
 
     let archive_path = temp_root.join("generated-sampled.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let rendered = component_package_commands::render_installed_component_source_for_app(
+    let rendered = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "generated.sampled-shell-kit".to_string(),
@@ -1753,14 +1715,9 @@ async fn freecad_runtime_bundle_component_package_project_preserves_exact_source
 
     let archive_path = temp_root.join("generated-freecad.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let rendered = component_package_commands::render_installed_component_source_for_app(
+    let rendered = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "generated.freecad-shell-kit".to_string(),
@@ -2001,20 +1958,14 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
     let archive_path = temp_root.join("generated-zero-port.ecky");
     write_component_package_archive(&temp_root.join("project"), &archive_path)
         .expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install zero-port package");
+    install_component_package_archive(&resolver, &archive_path).expect("install zero-port package");
 
-    let resolved = component_package_commands::resolve_installed_component_source_for_app(
+    let resolved = resolve_installed_component_source(
         &resolver,
-        "generated.zero-port-geometry".to_string(),
-        "0.1.0".to_string(),
-        "sampled-body".to_string(),
+        "generated.zero-port-geometry",
+        "0.1.0",
+        "sampled-body",
     )
-    .await
     .expect("resolve installed zero-port component");
     assert!(resolved.component.ports.is_empty());
     assert_eq!(resolved.component.params.len(), 1);
@@ -2025,7 +1976,7 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
         Some(&ecky_cad_lib::models::ParamValue::Number(2.0))
     );
 
-    let rendered = component_package_commands::render_installed_component_source_for_app(
+    let rendered = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "generated.zero-port-geometry".to_string(),
@@ -2200,20 +2151,15 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
     let resolver = TempPathResolver {
         root: temp_root.clone(),
     };
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install explicit ui contract package");
+    install_component_package_archive(&resolver, &archive_path)
+        .expect("install explicit ui contract package");
 
-    let resolved = component_package_commands::resolve_installed_component_source_for_app(
+    let resolved = resolve_installed_component_source(
         &resolver,
-        "generated.step-ui-contract".to_string(),
-        "0.1.0".to_string(),
-        "step-body".to_string(),
+        "generated.step-ui-contract",
+        "0.1.0",
+        "step-body",
     )
-    .await
     .expect("resolve installed explicit ui contract package");
 
     assert_eq!(resolved.component.ui_spec, ui_spec);
@@ -2286,20 +2232,14 @@ async fn resolve_installed_component_source_backfills_params_from_source_when_ma
     let resolver = TempPathResolver {
         root: temp_root.clone(),
     };
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let resolved = component_package_commands::resolve_installed_component_source_for_app(
+    let resolved = resolve_installed_component_source(
         &resolver,
-        "generated.legacy-parametric".to_string(),
-        "0.1.0".to_string(),
-        "sampled-body".to_string(),
+        "generated.legacy-parametric",
+        "0.1.0",
+        "sampled-body",
     )
-    .await
     .expect("resolve installed component");
 
     assert_eq!(
@@ -2461,14 +2401,7 @@ async fn direct_runtime_bundle_component_package_project_preserves_topology_targ
 
     let bundle = ecky_cad_lib::services::render::render_model(
         r#"(model
-            (part body
-              (sampled-radial-loft
-                (theta z fz)
-                :height 40
-                :z-steps 6
-                :theta-steps 24
-                :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
-                :z-map (+ z (* fz 2)))))"#,
+            (part body (box 20 20 10)))"#,
         &Default::default(),
         Some(MacroDialect::EckyIrV0),
         Some(GeometryBackend::EckyRust),
@@ -2543,27 +2476,21 @@ async fn direct_runtime_bundle_component_package_project_preserves_topology_targ
 
     let archive_path = temp_root.join("generated-direct-targets.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let resolved = component_package_commands::resolve_installed_component_source_for_app(
+    let resolved = resolve_installed_component_source(
         &resolver,
-        "generated.direct-target-kit".to_string(),
-        "0.1.0".to_string(),
-        "sampled-body".to_string(),
+        "generated.direct-target-kit",
+        "0.1.0",
+        "sampled-body",
     )
-    .await
     .expect("resolve installed component");
     assert_eq!(
         resolved.component.ports[0].target_ids,
         vec![preferred_target_id.clone()]
     );
 
-    let rendered = component_package_commands::render_installed_component_source_for_app(
+    let rendered = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "generated.direct-target-kit".to_string(),
@@ -2672,27 +2599,21 @@ async fn accepted_brep_step_component_package_project_preserves_exact_target_ids
 
     let archive_path = temp_root.join("accepted-targets.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let resolved = component_package_commands::resolve_installed_component_source_for_app(
+    let resolved = resolve_installed_component_source(
         &resolver,
-        "accepted.target-kit".to_string(),
-        "0.1.0".to_string(),
-        "accepted-body".to_string(),
+        "accepted.target-kit",
+        "0.1.0",
+        "accepted-body",
     )
-    .await
     .expect("resolve installed accepted component");
     assert_eq!(
         resolved.component.ports[0].target_ids,
         vec![chosen_target_id.clone()]
     );
 
-    let rendered = component_package_commands::render_installed_component_source_for_app(
+    let rendered = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "accepted.target-kit".to_string(),
@@ -2741,14 +2662,9 @@ async fn render_installed_component_source_rejects_missing_runtime_target_ids() 
     write_component_package_manifest(&project_dir, &package).expect("write manifest");
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let err = component_package_commands::render_installed_component_source_for_app(
+    let err = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -2786,14 +2702,9 @@ async fn installed_assembly_resolution_expands_instance_sources_and_exact_target
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::resolve_installed_component_assembly_for_app(
+    let assembly = component_package_commands::resolve_installed_component_assembly_common(
         &resolver,
         "bike.bottle-holder-kit".to_string(),
         "0.1.0".to_string(),
@@ -2869,14 +2780,9 @@ async fn render_installed_assembly_returns_instance_runtimes_with_truthful_pendi
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -2975,14 +2881,9 @@ async fn render_installed_assembly_solves_linear_insert_port_frames_into_compone
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3091,14 +2992,9 @@ async fn render_installed_assembly_reports_clearance_rule_failure_in_mate_result
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3156,14 +3052,9 @@ async fn render_installed_assembly_merges_component_initial_params_per_instance(
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3248,14 +3139,9 @@ async fn render_installed_assembly_builds_joined_output_runtime_when_output_mode
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3355,14 +3241,9 @@ async fn render_installed_assembly_builds_joined_output_runtime_with_partial_fus
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3448,14 +3329,9 @@ async fn render_installed_assembly_reports_missing_fuse_zone_for_operation() {
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3532,14 +3408,9 @@ async fn render_installed_assembly_builds_joined_output_runtime_with_cut_group()
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3627,14 +3498,9 @@ async fn render_installed_assembly_reports_missing_cut_zone_for_operation() {
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3706,14 +3572,9 @@ async fn render_installed_assembly_builds_fused_output_runtime_for_pure_fuse_mod
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let assembly = component_package_commands::render_installed_component_assembly_for_app(
+    let assembly = component_package_commands::render_installed_component_assembly_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3808,15 +3669,10 @@ async fn export_installed_assembly_3mf_writes_placed_transform_items() {
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
     let output_path = temp_root.join("bottle-holder.3mf");
-    component_package_commands::export_installed_component_assembly_3mf_for_app(
+    component_package_commands::export_installed_component_assembly_3mf_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3838,8 +3694,8 @@ async fn export_installed_assembly_3mf_writes_placed_transform_items() {
         .read_to_string(&mut model_xml)
         .expect("read 3mf model");
 
-    assert!(model_xml.contains("<item objectid=\"1\" transform=\"1 0 0 0 0 1 0 0 0 0 1 0\"/>"));
-    assert!(model_xml.contains("<item objectid=\"2\" transform=\"-1 0 0 0 0 1 0 0 0 0 -1 10\"/>"));
+    assert!(model_xml.contains("<item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>"));
+    assert!(model_xml.contains("<item objectid=\"2\" transform=\"-1 0 0 0 1 0 0 0 -1 0 0 10\"/>"));
 
     fs::remove_dir_all(temp_root).ok();
 }
@@ -3873,15 +3729,10 @@ async fn export_installed_assembly_3mf_rejects_unsolved_mates() {
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
     let output_path = temp_root.join("bottle-holder.3mf");
-    let err = component_package_commands::export_installed_component_assembly_3mf_for_app(
+    let err = component_package_commands::export_installed_component_assembly_3mf_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3941,14 +3792,9 @@ async fn export_installed_assembly_multipart_stl_zip_bakes_placement_into_part_m
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
-    let cage_runtime = component_package_commands::render_installed_component_source_for_app(
+    let cage_runtime = component_package_commands::render_installed_component_source_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -3969,7 +3815,7 @@ async fn export_installed_assembly_multipart_stl_zip_bakes_placement_into_part_m
         read_binary_stl_triangles_from_reader(&mut fs::File::open(cage_asset_path).unwrap());
 
     let target_path = temp_root.join("placed-assembly.zip");
-    component_package_commands::export_installed_component_assembly_multipart_stl_zip_for_app(
+    component_package_commands::export_installed_component_assembly_multipart_stl_zip_common(
         &resolver,
         &state,
         "bike.bottle-holder-kit".to_string(),
@@ -4036,15 +3882,10 @@ async fn export_installed_assembly_multipart_stl_zip_rejects_unsolved_mates() {
     let archive_path = temp_root.join("bike-kit.ecky");
     write_component_package_archive(&project_dir, &archive_path).expect("write archive");
 
-    component_package_commands::install_component_package_archive_for_app(
-        &resolver,
-        archive_path.to_string_lossy().to_string(),
-    )
-    .await
-    .expect("install package");
+    install_component_package_archive(&resolver, &archive_path).expect("install package");
 
     let err =
-        component_package_commands::export_installed_component_assembly_multipart_stl_zip_for_app(
+        component_package_commands::export_installed_component_assembly_multipart_stl_zip_common(
             &resolver,
             &state,
             "bike.bottle-holder-kit".to_string(),

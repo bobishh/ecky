@@ -39,6 +39,8 @@
   import ParamPanelAdvisoryComposer from './components/ParamPanelAdvisoryComposer.svelte';
   import ParamPanelRelationComposer from './components/ParamPanelRelationComposer.svelte';
   import ParamPanelViewComposer from './components/ParamPanelViewComposer.svelte';
+  import { buildMacroAstMapProjection } from './macroAstMap';
+  import { buildMacroAstSceneLayout } from './macroAstSceneLayout';
   import { session } from './stores/sessionStore';
   import type {
     CheckboxField,
@@ -186,9 +188,11 @@
   let macroParseSeq = 0;
   let localSelectedPartId = $state<string | null>(null);
   let proposalMutationId = $state<string | null>(null);
-  let activeTab = $state<'views' | 'raw' | 'litho'>('views');
+  let activeTab = $state<'views' | 'raw' | 'litho' | 'newParams'>('views');
   let highlightedParamKey = $state<string | null>(null);
   let highlightTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  let macroSceneViewportElement = $state<HTMLElement | null>(null);
+  let macroSceneWidth = $state(1120);
 
   $effect(() => {
     const highlight = $uiHighlightStore;
@@ -443,6 +447,28 @@
       topologyMode: next.topologyMode ?? topologyMode,
     });
   }
+
+  function focusSceneField(fieldKey: string | undefined) {
+    if (!fieldKey || !macroSceneViewportElement) return;
+    const field = macroSceneViewportElement.querySelector(`[data-param-key="${fieldKey}"]`) as HTMLElement | null;
+    const focusTarget = field?.querySelector<HTMLElement>(
+      'input:not([type="hidden"]), button, textarea, select, [tabindex]:not([tabindex="-1"])',
+    );
+    focusTarget?.focus();
+  }
+
+  $effect(() => {
+    const element = macroSceneViewportElement;
+    if (!element) return;
+    const syncWidth = () => {
+      macroSceneWidth = Math.max(960, Math.floor(element.clientWidth));
+    };
+    syncWidth();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => syncWidth());
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
 
   $effect(() => {
     const code = `${macroCode ?? ''}`.trim();
@@ -722,6 +748,19 @@
     if (!attachment) return exports;
     return exports.filter((item) => item.label.includes(attachment.id));
   });
+
+  const macroAstMap = $derived.by(() =>
+    buildMacroAstMapProjection({
+      macroCode,
+      modelManifest,
+      uiSpec,
+      parameters: effectiveLocalParams,
+    }),
+  );
+
+  const macroFieldByKey = $derived.by(() => new Map(mergedFields.map((field) => [field.key, field])));
+  const macroScene = $derived.by(() => buildMacroAstSceneLayout(macroAstMap, { width: macroSceneWidth }));
+  const macroSceneNodeByIdMap = $derived.by(() => new Map(macroScene.nodes.map((node) => [node.id, node])));
 
   const manifestWarnings = $derived.by(() => {
     const warnings = new Set<string>();
@@ -1363,6 +1402,28 @@
       return { tone: 'size', tag: 'DIM', glyph: '<>', note: 'dimension' };
     }
     return { tone: 'neutral', tag: 'CTRL', glyph: '::', note: 'tunable value' };
+  }
+
+  function getMacroNodeShapePath(kind: string, syntaxVariant?: string | null): string {
+    switch (kind) {
+      case 'model':
+        return 'M10,8 C22,1 38,1 48,5 C58,9 72,0 84,7 C95,13 98,26 95,36 C92,49 80,57 66,59 C49,61 32,56 21,58 C10,60 2,50 2,39 C2,27 1,15 10,8 Z';
+      case 'part':
+        return 'M8,10 C18,2 35,1 46,5 C56,9 68,2 80,7 C91,12 97,22 95,34 C93,46 86,57 72,59 C58,61 42,56 31,58 C19,60 7,55 4,43 C1,30 2,18 8,10 Z';
+      case 'port':
+        return 'M10,12 C18,6 29,4 40,6 C51,8 62,4 74,6 C84,8 92,15 94,27 C96,39 92,49 83,53 C73,58 60,55 48,56 C35,57 20,58 11,50 C2,42 2,21 10,12 Z';
+      case 'param':
+        switch (syntaxVariant) {
+          case 'checkbox':
+            return 'M8,14 C14,7 24,4 36,5 C50,6 63,2 77,6 C88,9 95,18 96,29 C97,41 91,50 80,55 C68,60 53,56 41,57 C27,58 13,58 7,48 C1,38 1,23 8,14 Z';
+          case 'select':
+            return 'M7,13 C13,6 24,3 36,5 C48,7 62,3 76,6 C88,9 95,18 95,30 C95,42 89,51 79,55 C66,60 52,57 40,58 C26,59 12,58 6,48 C0,38 1,21 7,13 Z';
+          default:
+            return 'M6,12 C12,5 24,4 35,5 C48,7 61,3 74,6 C86,8 94,17 95,28 C96,40 91,50 82,55 C70,61 55,57 43,58 C28,59 14,58 7,49 C1,39 0,21 6,12 Z';
+        }
+      default:
+        return 'M8,10 C18,2 34,1 46,5 C58,9 71,1 83,7 C94,13 97,25 95,36 C93,48 84,58 71,59 C56,60 40,56 29,58 C17,60 6,54 3,42 C1,30 2,18 8,10 Z';
+    }
   }
 
   function selectPart(partId: string | null) {
@@ -2348,10 +2409,11 @@
               class="part-chip"
               class:part-chip-active={part.partId === localSelectedPartId}
               class:part-chip-readonly={!part.editable}
+              aria-label={part.label}
               onclick={() => selectPart(part.partId)}
               title={part.editable ? 'Select part controls' : 'Inspect-only part'}
             >
-              {part.label}
+              {part.label.toLowerCase()}
             </button>
           {/each}
         </div>
@@ -2423,7 +2485,105 @@
       </div>
     {/if}
 
-    {#if activeTab === 'litho'}
+    {#if activeTab === 'newParams'}
+      <div class="macro-ast-map-shell">
+        <div class="controls-head">
+          <div class="section-label">MACRO AST</div>
+          <div class="macro-ast-shell-meta">SOURCE BACKED / EDIT IN PLACE</div>
+        </div>
+
+        <div bind:this={macroSceneViewportElement} class="macro-ast-map-viewport macro-ast-scene" style={`min-height: ${macroScene.height}px;`}>
+          <svg
+            class="macro-ast-scene__svg"
+            viewBox={`0 0 ${macroScene.width} ${macroScene.height}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {#each macroScene.connectors as connector}
+              <path class="macro-ast-connector" d={connector.path} data-connector-id={connector.id} />
+            {/each}
+          </svg>
+
+          {#each macroScene.nodes as node}
+            {@const sceneNode = macroSceneNodeByIdMap.get(node.id)}
+            {#if sceneNode}
+              <section
+                class="macro-ast-node"
+                class:macro-ast-node-root={sceneNode.kind === 'model'}
+                class:macro-ast-node-part={sceneNode.kind === 'part'}
+                class:macro-ast-node-port={sceneNode.kind === 'port'}
+                class:macro-ast-node-param={sceneNode.kind === 'param'}
+                data-node-id={sceneNode.id}
+                data-node-kind={sceneNode.kind}
+                data-syntax-variant={sceneNode.syntaxVariant}
+                onclick={() => sceneNode.kind === 'param' && focusSceneField(sceneNode.fieldKey)}
+                style={`left:${sceneNode.x}px; top:${sceneNode.y}px; width:${sceneNode.w}px; height:${sceneNode.h}px;`}
+              >
+                <svg
+                  class="macro-ast-node__shape"
+                  viewBox={`0 0 ${sceneNode.w} ${sceneNode.h}`}
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  <path d={sceneNode.shapePath} />
+                </svg>
+
+                <div class="macro-ast-node__header">
+                  <div class="macro-ast-node__label">{sceneNode.label.toLowerCase()}</div>
+                  <span class="macro-ast-syntax-badge">{sceneNode.syntaxLabel}</span>
+                </div>
+
+                {#if sceneNode.kind === 'model'}
+                  <div class="macro-ast-node__meta">ROOT</div>
+                {:else if sceneNode.kind === 'part'}
+                  <div class="macro-ast-node__meta">PART REGION</div>
+                {:else if sceneNode.kind === 'port'}
+                  <div class="macro-ast-node__meta">INPUT PORT</div>
+                {:else}
+                  <div class="macro-ast-node__meta">INLINE PARAM</div>
+                {/if}
+
+                {#if sceneNode.kind === 'param'}
+                  {@const field = sceneNode.fieldKey ? macroFieldByKey.get(sceneNode.fieldKey) : null}
+                  {#if field}
+                    <div class="macro-ast-node__overlay">
+                      <ParamPanelControlField
+                        elementId={`macro-${field.key}`}
+                        field={field}
+                        value={effectiveLocalParams[field.key]}
+                        rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
+                        editable={!field.frozen}
+                        frozen={field.frozen}
+                        autoField={field._auto}
+                        highlighted={highlightedParamKey === field.key}
+                        cadTone={getCadHint(field).tone}
+                        liveApply={$liveApply}
+                        compact={true}
+                        onDraftValue={(nextValue) => stageParamDraft(field.key, nextValue)}
+                        onUpdate={(nextValue) => update(field.key, nextValue)}
+                        onPickImage={async () => {
+                          const file = await open({
+                            multiple: false,
+                            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
+                          });
+                          const selected = firstSelectedPath(file);
+                          if (selected) update(field.key, selected);
+                        }}
+                        onMouseEnter={() => setFocusedControl(null, field.key)}
+                        onMouseLeave={clearFocusedControl}
+                        onFocusIn={() => setFocusedControl(null, field.key)}
+                        onFocusOut={clearFocusedControl}
+                      />
+                    </div>
+                    <span class="macro-ast-control-anchor" aria-hidden="true"></span>
+                  {/if}
+                {/if}
+              </section>
+            {/if}
+          {/each}
+        </div>
+      </div>
+    {:else if activeTab === 'litho'}
       <div class="controls-head">
         <div class="section-label">LITHOPHANE ATTACHMENTS</div>
         <div class="context-strip-actions">
@@ -3842,6 +4002,209 @@
 
   .param-freezed {
     opacity: 0.5;
+  }
+
+  .macro-ast-map-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .macro-ast-shell-meta {
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    color: var(--secondary);
+    text-transform: uppercase;
+  }
+
+  .macro-ast-map-viewport {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--secondary) 40%, var(--bg-300));
+    background:
+      radial-gradient(circle at top right, color-mix(in srgb, var(--secondary) 12%, transparent), transparent 44%),
+      linear-gradient(180deg, color-mix(in srgb, var(--bg-100) 92%, var(--secondary) 8%), var(--bg-100));
+    padding: 10px;
+  }
+
+  .macro-ast-scene {
+    position: relative;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .macro-ast-scene__svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .macro-ast-connector {
+    fill: none;
+    stroke: color-mix(in srgb, var(--secondary) 48%, var(--primary) 10%);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.68;
+    filter: drop-shadow(0 0 8px color-mix(in srgb, var(--secondary) 22%, transparent));
+  }
+
+  .macro-ast-node {
+    --macro-variant-accent: var(--secondary);
+    position: absolute;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--macro-variant-accent) 30%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-200) 84%, var(--macro-variant-accent) 16%);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 12%, transparent);
+    padding: 8px 10px;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .macro-ast-node__shape {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    pointer-events: none;
+    opacity: 0.88;
+    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--macro-variant-accent) 24%, transparent));
+  }
+
+  .macro-ast-node__shape path {
+    fill: color-mix(in srgb, var(--macro-variant-accent) 10%, var(--bg-200));
+    stroke: color-mix(in srgb, var(--macro-variant-accent) 70%, var(--bg-300));
+    stroke-width: 1.1;
+  }
+
+  .macro-ast-node-root {
+    --macro-variant-accent: var(--secondary);
+    background: color-mix(in srgb, var(--bg-200) 76%, var(--secondary) 24%);
+    border-color: color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
+  }
+
+  .macro-ast-node-part,
+  .macro-ast-node-port,
+  .macro-ast-node-param {
+    margin-left: 12px;
+  }
+
+  .macro-ast-node-port {
+    --macro-variant-accent: var(--primary);
+    background: color-mix(in srgb, var(--bg-200) 88%, var(--primary) 12%);
+  }
+
+  .macro-ast-node-param {
+    background: color-mix(in srgb, var(--bg-200) 92%, var(--secondary) 8%);
+    cursor: text;
+  }
+
+  .macro-ast-node-param:focus-within {
+    outline: 1px solid color-mix(in srgb, var(--primary) 55%, transparent);
+    outline-offset: 1px;
+  }
+
+  .macro-ast-node[data-syntax-variant='number'],
+  .macro-ast-node[data-syntax-variant='range'] {
+    --macro-variant-accent: var(--cad-axis-x);
+  }
+
+  .macro-ast-node[data-syntax-variant='checkbox'] {
+    --macro-variant-accent: var(--cad-axis-y);
+  }
+
+  .macro-ast-node[data-syntax-variant='select'] {
+    --macro-variant-accent: var(--cad-axis-z);
+  }
+
+  .macro-ast-node[data-syntax-variant='image'] {
+    --macro-variant-accent: var(--primary);
+  }
+
+  .macro-ast-node[data-syntax-variant='solid'],
+  .macro-ast-node[data-syntax-variant='shell'],
+  .macro-ast-node[data-syntax-variant='feature'],
+  .macro-ast-node[data-syntax-variant='assembly'],
+  .macro-ast-node[data-syntax-variant='group'] {
+    --macro-variant-accent: var(--secondary);
+  }
+
+  .macro-ast-node__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+    position: relative;
+    z-index: 1;
+  }
+
+  .macro-ast-node__header-param {
+    align-items: center;
+  }
+
+  .macro-ast-syntax-badge {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border: 1px solid color-mix(in srgb, var(--macro-variant-accent) 42%, var(--bg-400));
+    background: color-mix(in srgb, var(--macro-variant-accent) 14%, var(--bg-200));
+    color: var(--macro-variant-accent);
+    font-family: var(--font-mono);
+    font-size: 0.52rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .macro-ast-node__label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.04em;
+  }
+
+  .macro-ast-node__meta {
+    margin-top: 4px;
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    position: relative;
+    z-index: 1;
+  }
+
+  .macro-ast-node__overlay {
+    position: relative;
+    z-index: 1;
+    margin-top: 6px;
+  }
+
+  .macro-ast-control-anchor {
+    position: absolute;
+    right: 10px;
+    top: calc(50% - 5px);
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--primary) 65%, var(--bg-300));
+    background: color-mix(in srgb, var(--secondary) 40%, var(--primary) 35%);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--secondary) 35%, transparent);
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  .macro-ast-node :global(.param-field) {
+    position: relative;
+    z-index: 1;
   }
 
   .no-params {

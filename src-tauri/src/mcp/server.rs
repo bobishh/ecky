@@ -1220,8 +1220,8 @@ fn workflow_guide_text(state: &AppState) -> String {
             "Ecky MCP guide\n\n",
             "Purpose:\n",
             "- One public authored language: `.ecky`.\n",
-            "- Backend metadata decides how `.ecky` renders: `build123d`, `freecad`, or `mesh`/`eckyRust`.\n",
-            "- EckyRust direction is a controlled CAD runtime pipeline: parse -> expand -> typecheck -> lower -> validate. Direct OCCT is internal-only today: a STEP/STL fast path for supported Core IR, not a source/backend setting.\n",
+            "- Backend metadata decides how `.ecky` renders: `build123d`, `freecad`, or Ecky native `mesh` (aliases: `native`, legacy `eckyRust`).\n",
+            "- Ecky native backend runs the controlled CAD runtime pipeline: parse -> expand -> typecheck -> lower -> validate. Direct OCCT may accelerate supported native renders, but the public backend setting is still `mesh`/`native`, not `directOcct`.\n",
             "- Never promise STEP unless artifact truth proves it: call `artifact_manifest_get` or `target_detail_get(section=\"artifactBundle\")` first and require `hasStepExport=true`, or confirm `exportArtifacts` contains `format=step`.\n",
             "- Use `artifact_manifest_get` for full machine-readable artifactBundle/modelManifest JSON. Use `target_detail_get(section=\"exportArtifacts\")` for the STEP path/detail; artifactBundle digest exposes `geometryBackend`, `edgeTargetCount`, `faceTargetCount`, `exportFormats`, `hasStepExport`, and `stepExportPath` for fast routing.\n",
             "- Use the current selected engine prompt as the design-policy baseline.\n\n",
@@ -1837,6 +1837,46 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             }
         }),
         json!({
+            "name": "component_extract",
+            "description": "Lift an existing part subtree into a closed, copy-inline `define-component` snippet. Referenced model params become the signature (metadata preserved); scalar outer let bindings become plain defaults; other free references are reported as blockers. Optionally saves the component into the component library.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "Full .ecky model source containing the part." },
+                    "partKey": { "type": "string", "description": "Key of the part/feature to extract." },
+                    "name": { "type": "string", "description": "Component name. Defaults to the part key." },
+                    "description": { "type": "string", "description": "One-line description surfaced by component_search." },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "threadId": { "type": "string", "description": "Provenance thread id." },
+                    "messageId": { "type": "string", "description": "Provenance message id." },
+                    "save": { "type": "boolean", "description": "Save to the component library (default false)." }
+                },
+                "required": ["source", "partKey"]
+            }
+        }),
+        json!({
+            "name": "component_search",
+            "description": "Search the component library by compact header (name, one-liner, param keys, tags). Header-only: never returns component bodies; use component_get for source.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Case-insensitive match against name, description, and tags. Omit for all." },
+                    "limit": { "type": "number", "description": "Max results (default 20, max 100)." }
+                }
+            }
+        }),
+        json!({
+            "name": "component_get",
+            "description": "Fetch one library component by name: full copy-inline `define-component` source plus its header.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
             "name": "freecad_library_import",
             "description": "Import one FreeCAD-library search result into an Ecky thread. Materializes runtime artifacts, creates a visible imported model version, and returns threadId/messageId plus artifactBundle/modelManifest.",
             "inputSchema": {
@@ -2248,8 +2288,8 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("parameterPatch", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d"],
-                        "description": "Optional: Explicitly choose geometry backend for Ecky source. build123d is the stable OCCT target; freecad is the direct CAD target."
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
+                        "description": "Optional: Explicitly choose geometry backend for Ecky source. `mesh`/`native` selects Ecky native lowering; `eckyRust` stays as a legacy alias."
                     }))
                 ],
                 &["parameterPatch"],
@@ -2259,7 +2299,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             "name": "macro_preview_render",
             "description": concat!(
                 "Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. ",
-                "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses build123d or freecad lowering; source extension does not. ",
+                "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses build123d, freecad, or native mesh lowering; source extension does not. ",
                 "Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. ",
                 "When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. ",
                 "uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). ",
@@ -2299,8 +2339,8 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("parameters", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d"],
-                        "description": "Optional: Explicitly choose geometry backend for Ecky source. build123d is the stable OCCT target; freecad is the direct CAD target."
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
+                        "description": "Optional: Explicitly choose geometry backend for Ecky source. `mesh`/`native` selects Ecky native lowering; `eckyRust` stays as a legacy alias."
                     }))
                 ],
                 &["macroCode"],
@@ -2769,7 +2809,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"],
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
                         "description": "Optional: Explicitly choose geometry backend for Ecky source."
                     }))
                 ],
@@ -2804,7 +2844,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"],
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
                         "description": "Optional: Explicitly choose geometry backend for Ecky source."
                     }))
                 ],
@@ -2839,7 +2879,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"]
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "value"],
@@ -2860,7 +2900,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"]
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "value"],
@@ -2881,7 +2921,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"]
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "value"],
@@ -2902,7 +2942,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"]
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "replacementSource"],
@@ -2924,7 +2964,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"]
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "bindingSource"],
@@ -2944,7 +2984,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"]
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest"],
@@ -2965,7 +3005,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "eckyRust"]
+                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "newName"],
@@ -3281,82 +3321,40 @@ async fn dispatch_request(
 }
 
 #[cfg(test)]
-fn dispatched_tool_names() -> Vec<&'static str> {
-    vec![
-        "health_check",
-        "session_log_in",
-        "session_log_out",
-        "resume_session",
-        "ui_dispatch",
-        "workspace_overview",
-        "freecad_library_search",
-        "freecad_library_import",
-        "thread_list",
-        "thread_create",
-        "thread_borrow",
-        "thread_meta_get",
-        "thread_messages_get",
-        "thread_get",
-        "agent_identity_set",
-        "target_meta_get",
-        "target_macro_get",
-        "ecky_ast_get",
-        "ecky_ast_inspect",
-        "ecky_ast_get_node",
-        "ecky_ast_patch_validate",
-        "ecky_ast_replace_and_render",
-        "ecky_ast_patch_preview",
-        "ecky_ast_set_number",
-        "ecky_ast_set_string",
-        "ecky_ast_set_select",
-        "ecky_ast_replace_call",
-        "ecky_ast_insert_binding",
-        "ecky_ast_delete_binding",
-        "ecky_ast_rename_binding_scoped",
-        "macro_buffer_get",
-        "macro_buffer_replace_range",
-        "macro_buffer_apply_patch",
-        "macro_buffer_preview_render",
-        "target_detail_get",
-        "artifact_manifest_get",
-        "artifact_feature_graph_get",
-        "target_get",
-        "ecky_dependency_get",
-        "ecky_selector_resolve",
-        "ecky_constraints_validate",
-        "get_model_screenshot",
-        "concept_preview_save",
-        "params_preview_render",
-        "macro_preview_render",
-        "macro_buffer_replace_and_preview",
-        "semantic_manifest_get",
-        "semantic_manifest_detail_get",
-        "control_primitive_save",
-        "control_primitive_delete",
-        "control_view_save",
-        "control_view_delete",
-        "measurement_annotation_save",
-        "measurement_annotation_delete",
-        "commit_preview_version",
-        "ecky_ast_patch_commit",
-        "thread_fork_from_target",
-        "compare_models",
-        "version_restore",
-        "user_confirm_request",
-        "request_user_prompt",
-        "mark_as_read",
-        "session_reply_save",
-        "session_activity_set",
-        "session_activity_clear",
-        "long_action_notice",
-        "long_action_clear",
-        "finalize_thread",
-        "verify_generated_model",
-        "get_structural_verification_summary",
-        "printability_analyze",
-        "printability_transform_recipes_get",
-        "semantic_transform_preview",
-    ]
+fn dispatched_tool_names() -> std::collections::BTreeSet<String> {
+    let source = include_str!("server.rs");
+    let match_start = source
+        .find("match params.name.as_str() {")
+        .expect("dispatch match");
+    let dispatch_body = &source[match_start..];
+    let match_end = dispatch_body
+        .find("            \"Unknown tool: {}\",")
+        .expect("dispatch fallback");
+
+    dispatch_body[..match_end]
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line.starts_with('"') {
+                return None;
+            }
+
+            Some(
+                line.split("=>")
+                    .next()
+                    .expect("dispatch arm")
+                    .split('|')
+                    .filter_map(|part| {
+                        let part = part.trim();
+                        part.strip_prefix('"')
+                            .and_then(|rest| rest.split_once('"'))
+                            .map(|(name, _)| name.to_string())
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect()
 }
 
 async fn execute_ecky_ast_replace_preview_call(
@@ -3582,6 +3580,24 @@ async fn dispatch_tool_call(
             };
             drop(conn);
             Ok((serde_json::to_value(response).unwrap(), next_target))
+        }
+        "component_extract" => {
+            let req_args: handlers::ComponentExtractToolRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_component_extract(server.app.as_ref(), req_args)?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "component_search" => {
+            let req_args: handlers::ComponentSearchToolRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_component_search(server.app.as_ref(), req_args)?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "component_get" => {
+            let req_args: handlers::ComponentGetToolRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_component_get(server.app.as_ref(), req_args)?;
+            Ok((serde_json::to_value(response).unwrap(), None))
         }
         "freecad_library_search" => {
             let req_args: FreecadLibrarySearchRequest =
@@ -6314,6 +6330,71 @@ mod tests {
     }
 
     #[test]
+    fn tool_definitions_include_component_library_tools() {
+        let tool_names = tool_definitions()
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        for expected in ["component_extract", "component_search", "component_get"] {
+            assert!(
+                tool_names.iter().any(|name| name == expected),
+                "expected {expected} in {tool_names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn component_extract_tool_handler_extracts_and_saves_to_library() {
+        let resolver = TestPathResolver {
+            root: std::env::temp_dir().join(format!(
+                "ecky-mcp-component-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        };
+        let source = r#"
+            (model
+              (params (number width 12 :label "Width"))
+              (part bracket (box width 4 2)))
+        "#;
+        let response = handlers::handle_component_extract(
+            &resolver,
+            serde_json::from_value(json!({
+                "source": source,
+                "partKey": "bracket",
+                "description": "Test bracket",
+                "tags": ["bracket"],
+                "save": true
+            }))
+            .expect("request parses"),
+        )
+        .expect("extract");
+        assert_eq!(response.name, "bracket");
+        assert!(response
+            .component_source
+            .contains("(define-component bracket"));
+        assert!(response.saved_path.is_some());
+
+        let search = handlers::handle_component_search(
+            &resolver,
+            serde_json::from_value(json!({ "query": "bracket" })).expect("request parses"),
+        )
+        .expect("search");
+        assert_eq!(search.results.len(), 1);
+        assert_eq!(search.results[0].name, "bracket");
+
+        let record = handlers::handle_component_get(
+            &resolver,
+            serde_json::from_value(json!({ "name": "bracket" })).expect("request parses"),
+        )
+        .expect("get");
+        assert!(record.source.contains("(define-component bracket"));
+    }
+
+    #[test]
     fn tool_definitions_include_concept_preview_save_without_generate() {
         let tool_names = tool_definitions()
             .into_iter()
@@ -6744,10 +6825,7 @@ mod tests {
             .into_iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<std::collections::BTreeSet<_>>();
-        let dispatched = dispatched_tool_names()
-            .into_iter()
-            .map(str::to_string)
-            .collect::<std::collections::BTreeSet<_>>();
+        let dispatched = dispatched_tool_names();
 
         let missing = defined.difference(&dispatched).cloned().collect::<Vec<_>>();
 
@@ -7003,7 +7081,8 @@ mod tests {
         assert!(workflow.contains("ecky://guides/surface-manifest/freecad"));
         assert!(workflow.contains("ecky://guides/surface-manifest/ecky-rust"));
         assert!(workflow.contains("parse -> expand -> typecheck -> lower -> validate"));
-        assert!(workflow.contains("Direct OCCT is internal-only today"));
+        assert!(workflow.contains("Ecky native backend runs the controlled CAD runtime pipeline"));
+        assert!(workflow.contains("public backend setting is still `mesh`/`native`"));
         assert!(workflow.contains("Never promise STEP unless artifact truth proves it"));
         assert!(workflow.contains("`artifact_manifest_get`"));
         assert!(workflow.contains("`target_detail_get(section=\"artifactBundle\")` first"));
@@ -7115,6 +7194,36 @@ mod tests {
         assert!(description.contains("featureGraph"));
         assert!(description.contains("correspondenceGraph"));
         assert!(description.contains("Does not edit or render"));
+    }
+
+    #[test]
+    fn preview_render_tools_expose_native_backend_aliases() {
+        let tools = tool_definitions();
+
+        for tool_name in ["params_preview_render", "macro_preview_render"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+                .expect("preview render tool");
+            let backend_enum = tool
+                .get("inputSchema")
+                .and_then(|schema| schema.get("properties"))
+                .and_then(|properties| properties.get("geometryBackend"))
+                .and_then(|backend| backend.get("enum"))
+                .and_then(Value::as_array)
+                .expect("geometryBackend enum");
+            let values = backend_enum
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+
+            assert!(values.contains(&"mesh"), "{tool_name} missing mesh");
+            assert!(values.contains(&"native"), "{tool_name} missing native");
+            assert!(
+                values.contains(&"eckyRust"),
+                "{tool_name} missing legacy alias"
+            );
+        }
     }
 
     #[test]

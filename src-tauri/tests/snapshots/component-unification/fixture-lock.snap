@@ -1,0 +1,54 @@
+fixture: dovetail-box
+  part: dovetail_box_body key: sha256:cc3c3b10f164610755222298f3bbab5fe250ce7dc851189c0225180837e0419c
+  part: dovetail_box_lid key: sha256:514ca68a0cd218f6a4772c2a5e3ea5222748130e801ab7463de7c7a17b02afaf
+fixture: film-adapter-film-gap-coupon
+  part: film_gate key: invalid-span
+  part: lens_adapter key: invalid-span
+fixture: film-adapter-golden-6part
+  part: film_gate_lower key: sha256:13d2cd762ec19fc554fe4811f3c844f6fe8b8840087a36d5039a43d9ed17e304
+  part: film_gate_upper_clamp key: sha256:7ba6132c64dc14e129416a54d91735b351d49e8a39c1638af52d5b81c9866a02
+  part: lens_bore_adapter_ring key: sha256:b8ac078cc32ab4a0b203e45f5d14fc933dd90ff4a278777cef38ebbf2f51c07a
+  part: lens_bore_lock_ring key: sha256:0a5d25e6fdb1cb06bfe19a18189e0e53d7bbf31f2ace3f31d84bab975e9fd3ac
+  part: film_guide_rail_left key: sha256:4a5e54e7268ba76fd0c475b4a11bdfffe040368dfd52c2f9e91be1f2336c48e2
+  part: film_guide_rail_right key: sha256:914f10b04d3f0e2cad914b21b3ba746b89c9cd53b623825891b4fec95fe49fe7
+fixture: film-path-gap-coupon
+  part: film_path_lower_035 key: invalid-span
+  part: film_path_upper_clamp_035 key: invalid-span
+  part: film_path_lower_045 key: invalid-span
+  part: film_path_upper_clamp_045 key: invalid-span
+  part: film_path_lower_055 key: invalid-span
+  part: film_path_upper_clamp_055 key: invalid-span
+fixture: film-scanning-adapter-helicoid
+  part: top_cover_integrated_helicoid key: sha256:4a4d23a606fcb8efd65cb3a95e1d702e6b39fc0034cf4fa7cab696bd0581b845
+  part: moving_lens_carrier key: sha256:cff940b64e108a489dffb14a98b92ecd1b8147b2fb031b66f07ebc86450d8cce
+fixture: helicoid-thread-coupon
+  part: coupon_male_020 key: sha256:474dd8f607b283d5455fbfc468c625eec7218cb349bef8a4156c792ed15b481d
+  part: coupon_female_020 key: sha256:3f6a27deb7a0592feac96b68c1f6d77079ee454f2d225a9858bb97c11f85815b
+  part: coupon_male_025 key: sha256:15a63daf4ac1c43ddbe07d55f95400425cac75904523fb2c499947633a3b1f02
+  part: coupon_female_025 key: sha256:2d2b03cadc6c1eed0a3f5a2b332c491032adbdb849a988e464b6a4291f2fadb7
+  part: coupon_male_030 key: sha256:94b9ecde65fa3dd98846786eafe7936af56011f22c8ea9590e12e0fd647569cb
+  part: coupon_female_030 key: sha256:63ba73d8fbe8b77fd8ed064537f96009a363a6e3cef87918f428b4d9dec94e33
+  part: coupon_male_035 key: sha256:3c93a7ec22f62a3717eec175e0927038fbc294cf0fa7bd4a93da48f8d30b972d
+  part: coupon_female_035 key: sha256:e575f22b09e1d08a29083b7bfaf935546622c31eaed66be87f8972acac5f8e06
+fixture: magnet-clamp-coupon
+  part: magnet_clamp_base_n key: sha256:234aa48b3065145a03d1707bd8ed9039990de7752a1c776b22f11dedd28f9010
+  part: magnet_clamp_base_s key: sha256:61e348301a9921a0de006c83c260dd6252c2e5ed98347c43f0505d76e444a268
+  part: magnet_polarity_mask_n key: sha256:92091961f375e5ba11b8251cd7527da1f2356f96930ff32692454d34f76c465e
+  part: magnet_polarity_mask_s key: sha256:55270e53416d6b8dd4dedf16336899387d21c3c9f9199f2996ae2b20c9b4c1f8
+fixture: physical-decision-calibration-fail
+  part: calibration_magnet_coupon key: sha256:30af1ec4bf803f9eca16255d8174cb085c1f528ea72e481ae4ada15be64e0a60
+  part: calibration_film_clamp_coupon key: sha256:80331689ab61374600687f6d4619dd6befcbe1d9cda59cbfed4e641a0a7c5934
+  part: calibration_lens_thread_coupon key: sha256:e0f1322ab678c6ceafc5d83b5e4d65aa7cd775135b99ab28c3758a5b41c3dac8
+fixture: physical-decision-calibration
+  part: calibration_magnet_coupon key: sha256:30af1ec4bf803f9eca16255d8174cb085c1f528ea72e481ae4ada15be64e0a60
+  part: calibration_film_clamp_coupon key: sha256:80331689ab61374600687f6d4619dd6befcbe1d9cda59cbfed4e641a0a7c5934
+  part: calibration_lens_thread_coupon key: sha256:e0f1322ab678c6ceafc5d83b5e4d65aa7cd775135b99ab28c3758a5b41c3dac8
+fixture: snap-hook-coupon
+  part: snap_hook_arm_025 key: sha256:cffb3512c93e18b74657021e3b7efa18851c8fb5a0acd375132b9a98f2ea9756
+  part: snap_hook_receiver_025 key: sha256:6dede3b62c9447c8cf5a06c2cf893c4ef9ed6df198e9777550d7aa72d777b58a
+  part: snap_hook_arm_035 key: sha256:2ca1e509a690a782537705f8adc7b80691a2e2a79e497abf1482a68a902beae2
+  part: snap_hook_receiver_035 key: sha256:20975a2690f8f3c858206231e329d6c478e97a708023ac133e6796f878155c72
+fixture: vermicomposter-lid-clearance
+  part: vermi_lid_020 key: sha256:b27b81cb69989b6ebc8830f551e9c4f459ec8509df497133d6954cce06513fc7
+  part: vermi_lid_040 key: sha256:9fe635fca5177ddaf54044329bb9a9e12689ce2047741b22cefce28916e81654
+  part: vermi_lid_060 key: sha256:1b41aaaaced351d40d74bf7770c346c111913e2a193ba68139cc1f65738d56dc

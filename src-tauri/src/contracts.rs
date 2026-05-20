@@ -712,7 +712,12 @@ pub enum GeometryBackend {
     #[default]
     #[serde(rename = "build123d")]
     Build123d,
-    #[serde(rename = "mesh", alias = "eckyRust", alias = "ecky_rust")]
+    #[serde(
+        rename = "mesh",
+        alias = "native",
+        alias = "eckyRust",
+        alias = "ecky_rust"
+    )]
     #[specta(rename = "mesh")]
     EckyRust,
 }
@@ -804,7 +809,7 @@ impl std::str::FromStr for GeometryBackend {
         match value {
             "freecad" => Ok(Self::Freecad),
             "build123d" => Ok(Self::Build123d),
-            "mesh" | "eckyRust" | "ecky_rust" => Ok(Self::EckyRust),
+            "mesh" | "native" | "eckyRust" | "ecky_rust" => Ok(Self::EckyRust),
             _ => Err(()),
         }
     }
@@ -3374,6 +3379,39 @@ pub struct SketchPreviewHullRequest {
     pub part_id: String,
     pub document: SketchDocument,
     pub fallback_depth: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchPreviewDraft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+    pub draft_source: SketchDraftSource,
+    pub artifact_bundle: ArtifactBundle,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSketchPreviewDraftRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+    pub draft_source: SketchDraftSource,
+    pub artifact_bundle: ArtifactBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSketchPreviewDraftRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearSketchPreviewDraftRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -7879,6 +7917,7 @@ mod tests {
         let backend = GeometryBackend::EckyRust;
         assert_eq!(backend.as_str(), "mesh");
         assert_eq!("mesh".parse::<GeometryBackend>().unwrap(), backend);
+        assert_eq!("native".parse::<GeometryBackend>().unwrap(), backend);
         assert_eq!("eckyRust".parse::<GeometryBackend>().unwrap(), backend);
         assert_eq!("ecky_rust".parse::<GeometryBackend>().unwrap(), backend);
     }

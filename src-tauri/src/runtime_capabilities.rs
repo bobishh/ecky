@@ -135,24 +135,9 @@ pub fn probe_direct_occt_runtime(app: &dyn PathResolver) -> RuntimeBackendCapabi
     if let Some(runner) =
         crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(app, true)
     {
-        let runtime_root = match resolve_direct_occt_runtime_root(app) {
-            Ok(path) => path,
-            Err(err) => {
-                return unavailable_capability(format!(
-                    "Direct OCCT unavailable: runner present but runtime root unresolved: {}",
-                    err
-                ))
-            }
-        };
-        let layout =
-            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
-        let blockers = layout.blocker_summary();
-        if !blockers.is_empty() {
-            return unavailable_capability(format!(
-                "Direct OCCT unavailable: runner present but runtime blocked; {}",
-                blockers.join("; ")
-            ));
-        }
+        // The precompiled runner is self-contained: a responsive runner means
+        // native renders are available even when the OCP/SDK compile layout
+        // is absent (runner-first export never compiles a shim).
         let output = Command::new(&runner).arg("--version").output();
         return match output {
             Ok(output) if output.status.success() => available_capability(
@@ -223,7 +208,9 @@ fn unavailable_capability(detail: String) -> RuntimeBackendCapability {
 }
 
 pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
-    if let Ok(path) = std::env::var("ECKY_OCCT_ROOT") {
+    if let Some(path) = crate::ecky_cad_host::direct_occt_sdk::scoped_env_var_os("ECKY_OCCT_ROOT")
+        .map(|value| value.to_string_lossy().into_owned())
+    {
         let runtime_root = PathBuf::from(path.trim()).join("runtime").join("occt");
         if runtime_root.is_dir() {
             return Ok(runtime_root);
@@ -711,8 +698,11 @@ mod tests {
     }
 
     #[test]
-    fn probe_direct_occt_runtime_reports_runtime_blocker_even_with_runner_present() {
-        let root = temp_root("direct-occt-runner-blocked");
+    fn probe_direct_occt_runtime_runner_alone_is_available_without_sdk_layout() {
+        // The precompiled runner is self-contained; the OCP/SDK compile layout
+        // is only needed for the shim-compile leg. A responsive runner alone
+        // means native renders are available.
+        let root = temp_root("direct-occt-runner-no-layout");
         let resolver = TestResolver { root: root.clone() };
         let runner = root
             .join("resources")
@@ -724,30 +714,18 @@ mod tests {
 
         let capability = probe_direct_occt_runtime(&resolver);
 
-        assert!(!capability.available, "{capability:?}");
-        assert!(
-            capability
-                .detail
-                .contains("runner present but runtime blocked"),
-            "{capability:?}"
-        );
+        assert!(capability.available, "{capability:?}");
+        assert!(capability.detail.contains("Runner ready"), "{capability:?}");
     }
 
     #[test]
     fn probe_direct_occt_runtime_reports_blocker_without_changing_recommendation() {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = LOCK
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .expect("lock");
+        let _no_cwd_runner =
+            crate::ecky_cad_host::direct_occt_runner::test_discovery::CwdFallbackGuard::disable();
         let root = temp_root("direct-occt-blocked");
         let resolver = TestResolver { root };
-        let cwd = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&resolver.root).expect("chdir");
 
         let capability = probe_direct_occt_runtime(&resolver);
-
-        std::env::set_current_dir(cwd).expect("restore cwd");
 
         assert!(!capability.available);
         assert!(capability.detail.contains("Direct OCCT"), "{capability:?}");

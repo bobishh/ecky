@@ -193,10 +193,14 @@ pub fn plan_core_program_with_params(
 ) -> AppResult<OcctPlan> {
     let normalized =
         super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)?;
-    plan_expanded_core_program(&normalized)
+    let expanded = expand_core_program_for_direct_occt(&normalized, parameters)?;
+    plan_expanded_core_program(&expanded, parameters)
 }
 
-fn plan_expanded_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
+fn plan_expanded_core_program(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+) -> AppResult<OcctPlan> {
     crate::ecky_core_ir::verify_core_program(program).map_err(|err| {
         AppError::validation(format!(
             "Direct OCCT adapter rejected invalid Core IR before planning: {}",
@@ -209,7 +213,7 @@ fn plan_expanded_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
         .iter()
         .map(|param| (param.id.raw(), param.key.clone()))
         .collect::<BTreeMap<_, _>>();
-    let parameters = program
+    let occt_parameters = program
         .parameters
         .iter()
         .map(|param| OcctParameter {
@@ -222,7 +226,7 @@ fn plan_expanded_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
         .parts
         .iter()
         .map(|part| {
-            let mut planner = PartPlanner::new(&param_names);
+            let mut planner = PartPlanner::new(&param_names, parameters);
             let root = planner.plan_node(&part.root)?;
             Ok(OcctPartPlan {
                 key: part.key.clone(),
@@ -233,7 +237,10 @@ fn plan_expanded_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
         })
         .collect::<AppResult<Vec<_>>>()?;
 
-    Ok(OcctPlan { parameters, parts })
+    Ok(OcctPlan {
+        parameters: occt_parameters,
+        parts,
+    })
 }
 
 fn expand_core_program_for_direct_occt(
@@ -1385,19 +1392,27 @@ fn next_id(next_node_id: &mut u64) -> NodeId {
 
 struct PartPlanner<'a> {
     param_names: &'a BTreeMap<u64, String>,
+    scalar_env: BTreeMap<String, ParamValue>,
+    scalar_node_values: BTreeMap<u64, OcctArg>,
     node_refs: BTreeMap<u64, OcctSlot>,
     locals: BTreeMap<String, OcctArg>,
     commands: Vec<OcctCommand>,
 }
 
 impl<'a> PartPlanner<'a> {
-    fn new(param_names: &'a BTreeMap<u64, String>) -> Self {
+    fn new(param_names: &'a BTreeMap<u64, String>, parameters: &'a DesignParams) -> Self {
         Self {
             param_names,
+            scalar_env: parameters.clone(),
+            scalar_node_values: BTreeMap::new(),
             node_refs: BTreeMap::new(),
             locals: BTreeMap::new(),
             commands: Vec::new(),
         }
+    }
+
+    fn scalar_env_snapshot(&self) -> BTreeMap<String, ParamValue> {
+        self.scalar_env.clone()
     }
 
     fn plan_node(&mut self, node: &CoreNode) -> AppResult<OcctSlot> {
@@ -1472,9 +1487,16 @@ impl<'a> PartPlanner<'a> {
     ) -> AppResult<OcctSlot> {
         let saved_locals = self.locals.clone();
         for binding in bindings {
-            let slot = self.plan_node(&binding.value)?;
-            self.node_refs.insert(binding.value.id.raw(), slot);
-            self.locals.insert(binding.name.clone(), OcctArg::Ref(slot));
+            let value = self.plan_arg(&binding.value)?;
+            if let Some(scalar) = occt_arg_to_scalar(&value) {
+                self.scalar_env.insert(binding.name.clone(), scalar);
+                self.scalar_node_values
+                    .insert(binding.value.id.raw(), value.clone());
+            }
+            self.locals.insert(binding.name.clone(), value.clone());
+            if let OcctArg::Ref(slot) = value {
+                self.node_refs.insert(binding.value.id.raw(), slot);
+            }
         }
         let root = self.plan_node(result);
         self.locals = saved_locals;
@@ -1485,6 +1507,11 @@ impl<'a> PartPlanner<'a> {
         let saved_locals = self.locals.clone();
         for binding in bindings {
             let value = self.plan_arg(&binding.value)?;
+            if let Some(scalar) = occt_arg_to_scalar(&value) {
+                self.scalar_env.insert(binding.name.clone(), scalar);
+                self.scalar_node_values
+                    .insert(binding.value.id.raw(), value.clone());
+            }
             self.locals.insert(binding.name.clone(), value);
         }
         let root = self.plan_node(body);
@@ -1512,6 +1539,9 @@ impl<'a> PartPlanner<'a> {
                 Ok(OcctArg::Param(name))
             }
             CoreNodeKind::Reference(CoreReference::Node(id)) => {
+                if let Some(value) = self.scalar_node_values.get(&id.raw()).cloned() {
+                    return Ok(value);
+                }
                 let slot = self.node_refs.get(&id.raw()).copied().ok_or_else(|| {
                     AppError::validation(format!(
                         "Direct OCCT adapter could not resolve Core node reference {:?}.",
@@ -1535,6 +1565,9 @@ impl<'a> PartPlanner<'a> {
                     .collect::<AppResult<Vec<_>>>()?,
             )),
             CoreNodeKind::Call { .. } | CoreNodeKind::Build { .. } | CoreNodeKind::Let { .. } => {
+                if let Some(scalar) = self.plan_scalar_arg(node)? {
+                    return Ok(scalar);
+                }
                 let slot = self.plan_node(node)?;
                 Ok(OcctArg::Ref(slot))
             }
@@ -1550,6 +1583,48 @@ impl<'a> PartPlanner<'a> {
                 id
             ))),
         }
+    }
+
+    fn plan_scalar_arg(&mut self, node: &CoreNode) -> AppResult<Option<OcctArg>> {
+        let env = self.scalar_env_snapshot();
+        Ok(match node.value_kind {
+            CoreValueKind::Number => Some(OcctArg::Number(
+                crate::ecky_ir::eval_core_number_with_locals(node, self.param_names, &env)?,
+            )),
+            CoreValueKind::Boolean => Some(OcctArg::Boolean(
+                crate::ecky_ir::eval_core_bool_with_locals(node, self.param_names, &env)?,
+            )),
+            CoreValueKind::Text => Some(OcctArg::Text(
+                crate::ecky_ir::eval_core_stringish_with_locals(node, self.param_names, &env)?,
+            )),
+            CoreValueKind::Any => {
+                if let Ok(number) =
+                    crate::ecky_ir::eval_core_number_with_locals(node, self.param_names, &env)
+                {
+                    Some(OcctArg::Number(number))
+                } else if let Ok(flag) =
+                    crate::ecky_ir::eval_core_bool_with_locals(node, self.param_names, &env)
+                {
+                    Some(OcctArg::Boolean(flag))
+                } else if let Ok(text) =
+                    crate::ecky_ir::eval_core_stringish_with_locals(node, self.param_names, &env)
+                {
+                    Some(OcctArg::Text(text))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+    }
+}
+
+fn occt_arg_to_scalar(arg: &OcctArg) -> Option<ParamValue> {
+    match arg {
+        OcctArg::Number(value) => Some(ParamValue::Number(*value)),
+        OcctArg::Boolean(flag) => Some(ParamValue::Boolean(*flag)),
+        OcctArg::Text(text) => Some(ParamValue::String(text.clone())),
+        _ => None,
     }
 }
 
@@ -1794,6 +1869,32 @@ mod tests {
             vec![OcctOp::Circle, OcctOp::Extrude, OcctOp::Shell]
         );
         assert_eq!(plan.parts[0].root, plan.parts[0].commands[2].output);
+    }
+
+    #[test]
+    fn plans_scalar_build_bindings_with_arithmetic_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape x (/ 10 2))
+                  (result (box x 2 2)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts[0].commands.len(), 1);
+        assert_eq!(plan.parts[0].commands[0].op, OcctOp::Box);
+        assert_eq!(
+            plan.parts[0].commands[0].args,
+            vec![
+                OcctArg::Number(5.0),
+                OcctArg::Number(2.0),
+                OcctArg::Number(2.0)
+            ]
+        );
     }
 
     #[test]

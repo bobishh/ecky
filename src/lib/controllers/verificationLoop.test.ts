@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runVerificationRound, runTwoStageVerification } from './verificationLoop';
-import type { VerificationLoopOptions, TwoStageOptions } from './verificationLoop';
+import { runVerificationRound } from './verificationLoop';
+import { runStructuralCheck } from './structuralVerification';
+import type { VerificationLoopOptions, TwoStageOptions, VerificationLoopResult } from './verificationLoop';
 import type { StructuralVerificationResult, VisualVerificationResult } from '../types/domain';
 
 const SCREENSHOTS = ['data:image/jpeg;base64,angle1', 'data:image/jpeg;base64,angle2'];
@@ -198,9 +199,58 @@ function twoStageOpts(overrides: Partial<TwoStageOptions> = {}): TwoStageOptions
   };
 }
 
+async function runTwoStageVerificationLike(
+  verifyAttempt: number,
+  opts: TwoStageOptions,
+): Promise<VerificationLoopResult> {
+  const structural = await runStructuralCheck({
+    modelId: opts.modelId,
+    originalPrompt: opts.originalPrompt,
+    currentGenerationAttempt: opts.currentGenerationAttempt,
+    maxGenerationAttempts: opts.maxGenerationAttempts,
+    verify: opts.verifyStructural,
+  });
+
+  let structuralSummary: string | null = null;
+  let structuralMetrics = null;
+
+  switch (structural.kind) {
+    case 'repair_needed':
+      return { kind: 'repair_needed', repairPrompt: structural.repairPrompt };
+    case 'failed_terminal':
+      return { kind: 'failed_terminal', issues: structural.issues };
+    case 'structural_passed':
+      structuralMetrics = structural.metrics;
+      structuralSummary = `Structural checks passed.\nParts: ${structural.metrics.partCount}` +
+        (structural.metrics.previewStlTriangleCount != null ? `\nTriangles: ${structural.metrics.previewStlTriangleCount}` : '') +
+        (structural.metrics.previewStlComponentCount != null ? `\nComponents: ${structural.metrics.previewStlComponentCount}` : '') +
+        (structural.metrics.previewStlNonManifoldEdgeCount != null ? `\nNon-manifold edges: ${structural.metrics.previewStlNonManifoldEdgeCount}` : '') +
+        (structural.metrics.previewStlOverhangTriangleCount != null ? `\nOverhang triangles: ${structural.metrics.previewStlOverhangTriangleCount}` : '') +
+        (structural.metrics.previewStlOverhangRatio != null ? `\nOverhang ratio: ${structural.metrics.previewStlOverhangRatio.toFixed(3)}` : '') +
+        (structural.metrics.totalVolume != null ? `\nVolume: ${structural.metrics.totalVolume.toFixed(2)}` : '') +
+        (structural.metrics.totalArea != null ? `\nArea: ${structural.metrics.totalArea.toFixed(2)}` : '');
+      break;
+    case 'structural_skipped':
+      break;
+  }
+
+  return runVerificationRound(verifyAttempt, {
+    originalPrompt: opts.originalPrompt,
+    maxVerifyAttempts: opts.maxVerifyAttempts,
+    currentGenerationAttempt: opts.currentGenerationAttempt,
+    maxGenerationAttempts: opts.maxGenerationAttempts,
+    skipReason: opts.screenshotSkipReason ?? null,
+    capture: opts.capture,
+    verify: opts.verifyScreenshot,
+    referenceImages: opts.referenceImages,
+    structuralSummary,
+    structuralMetrics,
+  });
+}
+
 test('two-stage: structural fail triggers repair without running screenshots', async () => {
   let screenshotCalled = false;
-  const result = await runTwoStageVerification(1, twoStageOpts({
+  const result = await runTwoStageVerificationLike(1, twoStageOpts({
     verifyStructural: async () => STRUCTURAL_FAIL,
     verifyScreenshot: async () => { screenshotCalled = true; return visualPass(); },
   }));
@@ -211,7 +261,7 @@ test('two-stage: structural fail triggers repair without running screenshots', a
 });
 
 test('two-stage: structural pass + screenshot pass → passed', async () => {
-  const result = await runTwoStageVerification(1, twoStageOpts({
+  const result = await runTwoStageVerificationLike(1, twoStageOpts({
     verifyStructural: async () => STRUCTURAL_PASS,
     verifyScreenshot: async () => visualPass(),
   }));
@@ -219,7 +269,7 @@ test('two-stage: structural pass + screenshot pass → passed', async () => {
 });
 
 test('two-stage: structural pass + screenshot fail → repair_needed with screenshot issues', async () => {
-  const result = await runTwoStageVerification(1, twoStageOpts({
+  const result = await runTwoStageVerificationLike(1, twoStageOpts({
     verifyStructural: async () => STRUCTURAL_PASS,
     verifyScreenshot: async () => visualFail('dome missing cap'),
   }));
@@ -230,7 +280,7 @@ test('two-stage: structural pass + screenshot fail → repair_needed with screen
 
 test('two-stage: structural skipped → falls through to screenshot verification', async () => {
   let screenshotCalled = false;
-  const result = await runTwoStageVerification(1, twoStageOpts({
+  const result = await runTwoStageVerificationLike(1, twoStageOpts({
     verifyStructural: async () => STRUCTURAL_SKIPPED,
     verifyScreenshot: async () => { screenshotCalled = true; return visualPass(); },
   }));
@@ -239,7 +289,7 @@ test('two-stage: structural skipped → falls through to screenshot verification
 });
 
 test('two-stage: structural terminal failure (last attempt) returns structural findings', async () => {
-  const result = await runTwoStageVerification(1, twoStageOpts({
+  const result = await runTwoStageVerificationLike(1, twoStageOpts({
     verifyStructural: async () => STRUCTURAL_FAIL,
     currentGenerationAttempt: 3,
     maxGenerationAttempts: 3,
@@ -251,7 +301,7 @@ test('two-stage: structural terminal failure (last attempt) returns structural f
 
 test('two-stage: structural verify throws → falls through to screenshot', async () => {
   let screenshotCalled = false;
-  const result = await runTwoStageVerification(1, twoStageOpts({
+  const result = await runTwoStageVerificationLike(1, twoStageOpts({
     verifyStructural: async () => { throw new Error('crash'); },
     verifyScreenshot: async () => { screenshotCalled = true; return visualPass(); },
   }));

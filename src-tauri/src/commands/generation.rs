@@ -19,6 +19,64 @@ use crate::{
     TECHNICAL_SYSTEM_PROMPT,
 };
 
+/// Complex, multi-part parametric Ecky example used for ecky<->build123d parity checks.
+/// Embedded verbatim so API-mode requests carry full language reference without URLs.
+const COMPLEX_ECKY_EXAMPLE: &str =
+    include_str!("../../tests/fixtures/cad/surface/thomas_modular_ramp.ecky");
+
+/// Per-language documentation appended to the API-mode system prompt.
+///
+/// FreeCAD Python and build123d are publicly documented, so a short recall note plus
+/// the app-specific runtime contract is enough. Ecky is proprietary and unknown to
+/// models, so the full surface guide plus a complete complex example is embedded.
+pub fn language_guide_text(
+    source_language: crate::models::SourceLanguage,
+    geometry_backend: crate::models::GeometryBackend,
+) -> String {
+    match source_language {
+        crate::models::SourceLanguage::EckyIrV0 => format!(
+            "Ecky is a proprietary in-app CAD language. It is NOT publicly documented; \
+             this guide and the example below are the complete authoritative reference. \
+             Do not invent forms, ops, or keywords beyond what is listed here.\n\n{}\n\
+             Complete worked example (complex, multi-part, parametric; runs unchanged on \
+             both `freecad` and `build123d` backends):\n```ecky\n{}\n```\n",
+            ecky_ir_v0_guide_text(geometry_backend),
+            COMPLEX_ECKY_EXAMPLE.trim()
+        ),
+        crate::models::SourceLanguage::Build123d => build123d_python_guide_text(),
+        crate::models::SourceLanguage::LegacyPython => freecad_python_guide_text(),
+    }
+}
+
+/// Full system prompt for API-mode design generation: base technical contract plus
+/// documentation for the target source language.
+pub fn design_system_prompt(
+    source_language: crate::models::SourceLanguage,
+    geometry_backend: crate::models::GeometryBackend,
+) -> String {
+    format!(
+        "{}\n\nTARGET LANGUAGE GUIDE (AUTHORITATIVE FOR `macro_code`)\n{}",
+        TECHNICAL_SYSTEM_PROMPT,
+        language_guide_text(source_language, geometry_backend)
+    )
+}
+
+pub fn freecad_python_guide_text() -> String {
+    concat!(
+        "Return a FreeCAD Python macro in `macro_code`.\n",
+        "Current fileExtension: `.FCMacro`.\n",
+        "Current sourceLanguage: `python` (FreeCAD).\n",
+        "FreeCAD's Python API (`FreeCAD`/`App`, `Part`) is publicly documented; use standard, well-known API only.\n\n",
+        "Runtime contract:\n",
+        "- The macro runs headless inside FreeCAD with an active empty document already created.\n",
+        "- Dynamic parameters are injected as a `params` dict (alias `parameters`); each key is also injected as a top-level variable. Always read with safe defaults: `radius = params.get('radius', 10.0)`.\n",
+        "- Build solids with `Part` (e.g. `Part.makeBox`, `Part.makeCylinder`, booleans via `.cut`/`.fuse`/`.common`).\n",
+        "- Expose finished solids either by adding `Part::Feature` objects to the active document, or by assigning `_ecky_parts = [('label', shape)]` (list of tuples: label, shape).\n",
+        "- All dimensions are millimeters. Keep solids manifold and printable.\n"
+    )
+    .to_string()
+}
+
 pub fn ecky_ir_v0_guide_text(backend: crate::models::GeometryBackend) -> String {
     match backend {
         crate::models::GeometryBackend::Build123d => ecky_build123d_guide_text(),
@@ -36,6 +94,7 @@ pub fn build123d_python_guide_text() -> String {
         "Return canonical `build123d` source in `macro_code`.\n",
         "Current fileExtension: `.py`.\n",
         "Current sourceLanguage: `build123d`.\n",
+        "build123d is a publicly documented Python CAD library; use standard, well-known API only.\n",
         "Start with `from build123d import *`.\n\n",
         "Rules:\n",
         "- Use `with BuildPart() as body:` or similar containers to define parts.\n",
@@ -591,22 +650,6 @@ pub async fn generate_design(
         },
     );
     let contextual_prompt =
-        if source_language == crate::models::SourceLanguage::EckyIrV0 && !question_mode {
-            format!(
-                "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
-                contextual_prompt,
-                ecky_ir_v0_guide_text(geometry_backend)
-            )
-        } else if source_language == crate::models::SourceLanguage::Build123d && !question_mode {
-            format!(
-                "{}\n\nEXPERIMENTAL ENGINE TARGET\n{}",
-                contextual_prompt,
-                build123d_python_guide_text()
-            )
-        } else {
-            contextual_prompt
-        };
-    let contextual_prompt =
         prepend_follow_up_context(contextual_prompt, follow_up_question.as_deref());
     let contextual_prompt =
         if let Some(notes) = build_visual_input_notes(image_data.as_ref(), attachments.as_ref()) {
@@ -616,7 +659,8 @@ pub async fn generate_design(
         };
     let images = prepare_images(image_data, attachments);
 
-    let mut output = llm::generate_design(&engine, &contextual_prompt, images)
+    let system_prompt = design_system_prompt(source_language, geometry_backend);
+    let mut output = llm::generate_design(&engine, &system_prompt, &contextual_prompt, images)
         .await
         .map_err(|raw_body| {
             AppError::with_details(

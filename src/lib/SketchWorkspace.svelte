@@ -161,14 +161,20 @@
   const ACCEPTED_BREP_PORT_TYPE_ID = 'mechanical.plane.mount.v1';
 
   let {
+    restoredPreview = null,
     onPreviewResult = null,
     onManualPreviewResult = null,
     onGhostPreviewChange = null,
+    onSaveDraft = null,
+    onDiscardDraft = null,
     onClose = null,
   }: {
+    restoredPreview?: PreviewResult;
     onPreviewResult?: ((result: PreviewResult) => void) | null;
     onManualPreviewResult?: ((result: PreviewResult) => void) | null;
     onGhostPreviewChange?: ((result: SketchGhostPreviewState | null) => void) | null;
+    onSaveDraft?: ((input: { newScope: boolean }) => void) | null;
+    onDiscardDraft?: (() => void) | null;
     onClose?: (() => void) | null;
   } = $props();
   const dispatch = createEventDispatcher<{ previewResult: PreviewResult }>();
@@ -194,6 +200,7 @@
   let sketchDocumentSnapshot = $state<SketchDocument | null>(null);
   let sketchDocumentImportText = $state('');
   let sketchDocumentEditorDirty = $state(false);
+  let saveDraftInNewScope = $state(false);
   let pointDrag = $state<PointDragState | null>(null);
   let selectedPoint = $state<SelectedPointState | null>(null);
   let snapToGrid = $state(false);
@@ -244,6 +251,11 @@
   const brepDerivedSketch = $derived.by(() =>
     hiddenLineResponse ? buildSketchDocumentFromBrepProjection(hiddenLineResponse) : null,
   );
+  $effect(() => {
+    if (draft || !restoredPreview) return;
+    draft = restoredPreview.draft;
+    artifactBundle = restoredPreview.artifactBundle;
+  });
   let autoPreviewTimer: ReturnType<typeof setTimeout> | null = null;
   let autoPreviewRunId = 0;
   let suggestionRunId = 0;
@@ -2025,6 +2037,18 @@
     publishPreviewResult(null);
   }
 
+  function discardPreviewDraft() {
+    clearAutoPreviewQueue();
+    autoPreviewRunId += 1;
+    generating = false;
+    autoQueued = false;
+    autoPreviewPrimitiveId = null;
+    errorText = '';
+    saveDraftInNewScope = false;
+    clearPreviewResult();
+    onDiscardDraft?.();
+  }
+
   function previewProfileFor(view: SketchView, currentStrokes: SketchStroke[] = strokes): SketchStroke | null {
     return currentStrokes.find((stroke) => stroke.view === view && stroke.closed) ?? null;
   }
@@ -2633,6 +2657,35 @@
                 })}
               </button>
             {/if}
+          {/if}
+          {#if draft && artifactBundle}
+            <div class="sketch-draft-mode__actions">
+              <label class="sketch-draft-mode__toggle">
+                <input
+                  type="checkbox"
+                  checked={saveDraftInNewScope}
+                  onchange={(event) => {
+                    saveDraftInNewScope = (event.currentTarget as HTMLInputElement).checked;
+                  }}
+                  disabled={generating}
+                />
+                <span>NEW THREAD</span>
+              </label>
+              <button
+                class="btn btn-xs btn-primary"
+                type="button"
+                onclick={() => {
+                  void onSaveDraft?.({ newScope: saveDraftInNewScope });
+                  saveDraftInNewScope = false;
+                }}
+                disabled={generating}
+              >
+                SAVE DRAFT
+              </button>
+              <button class="btn btn-xs" type="button" onclick={discardPreviewDraft} disabled={generating && !draft && !artifactBundle}>
+                DISCARD DRAFT
+              </button>
+            </div>
           {/if}
           <div class="sketch-token">{draftModeSummary.label}</div>
           <div class="sketch-token">{draftModeSummary.detail}</div>
@@ -4048,6 +4101,30 @@
     gap: 6px;
     color: var(--text);
     overflow: hidden;
+  }
+
+  .sketch-draft-mode__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .sketch-draft-mode__toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-100) 70%, transparent);
+    color: var(--text);
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+  }
+
+  .sketch-draft-mode__toggle input {
+    accent-color: var(--primary);
   }
 
   .sketch-draft-mode .sketch-token,

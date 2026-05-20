@@ -120,7 +120,7 @@ export async function runVerificationRound(
  * - Structural pass → proceed to screenshot verification
  * - Structural skipped → fall through to screenshot verification
  */
-export async function runTwoStageVerification(
+async function runTwoStageVerification(
   verifyAttempt: number,
   opts: TwoStageOptions,
 ): Promise<VerificationLoopResult> {

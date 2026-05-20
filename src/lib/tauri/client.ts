@@ -48,16 +48,19 @@ import {
   type UsageSummary,
   type ViewportCameraState,
 } from '../types/domain';
+import { resolveSketchPreviewDraftScopeId } from '../sketchPreviewDraftStore';
 import type {
   ComponentPackage,
   ComponentPackageHeader,
   BrepHiddenLineProjectionRequest,
   BrepHiddenLineProjectionResponse,
+  ClearSketchPreviewDraftRequest,
   ExportPartInput,
   FreecadLibraryImportRequest,
   FreecadLibraryItem,
   FreecadLibrarySearchRequest,
   InstalledComponentPackage,
+  LoadSketchPreviewDraftRequest,
   PostProcessingSpec,
   PromptTranscription,
   QueueAgentPromptInput,
@@ -71,6 +74,8 @@ import type {
   SketchBrepCandidateResponse,
   SketchDraftRequest,
   SketchDraftSource,
+  SaveSketchPreviewDraftRequest,
+  SketchPreviewDraft,
   SketchPreviewHullRequest,
   SketchSuggestionRequest,
   SketchSuggestionResponse,
@@ -86,7 +91,20 @@ function unwrapResult<T>(result: Result<T, AppError>): T {
   throw result.error;
 }
 
-export function isBackendError(error: unknown): error is AppError {
+async function invokeCommand<T>(command: Promise<Result<T, AppError>>): Promise<T>;
+async function invokeCommand<T, R>(
+  command: Promise<Result<T, AppError>>,
+  transform: (value: T) => R,
+): Promise<R>;
+async function invokeCommand<T, R>(
+  command: Promise<Result<T, AppError>>,
+  transform?: (value: T) => R,
+): Promise<T | R> {
+  const value = unwrapResult(await command);
+  return transform ? transform(value) : value;
+}
+
+function isBackendError(error: unknown): error is AppError {
   return Boolean(
     error &&
       typeof error === 'object' &&
@@ -114,19 +132,15 @@ export function formatBackendError(error: unknown): string {
 }
 
 export async function getConfig(): Promise<AppConfig> {
-  return normalizeConfig(unwrapResult(await commands.getConfig()));
-}
-
-export async function checkFreecad(): Promise<boolean> {
-  return unwrapResult(await commands.checkFreecad());
+  return invokeCommand(commands.getConfig(), normalizeConfig);
 }
 
 export async function getRuntimeCapabilities(): Promise<RuntimeCapabilities> {
-  return normalizeRuntimeCapabilities(unwrapResult(await commands.getRuntimeCapabilities()));
+  return invokeCommand(commands.getRuntimeCapabilities(), normalizeRuntimeCapabilities);
 }
 
 export async function saveConfig(config: AppConfig): Promise<void> {
-  unwrapResult(await commands.saveConfig(config));
+  await invokeCommand(commands.saveConfig(config));
 }
 
 export async function listModels(
@@ -134,27 +148,27 @@ export async function listModels(
   apiKey: string,
   baseUrl: string,
 ): Promise<string[]> {
-  return unwrapResult(await commands.listModels(provider, apiKey, baseUrl));
+  return invokeCommand(commands.listModels(provider, apiKey, baseUrl));
 }
 
 export async function getDesignSystemPrompt(provider?: string | null): Promise<string> {
-  return unwrapResult(await commands.getDesignSystemPrompt(provider ?? null));
+  return invokeCommand(commands.getDesignSystemPrompt(provider ?? null));
 }
 
 export async function listAgentModels(cmd: string): Promise<{ models: string[]; isLive: boolean }> {
-  return unwrapResult(await commands.listAgentModels(cmd));
+  return invokeCommand(commands.listAgentModels(cmd));
 }
 
 export async function getHistory(): Promise<Thread[]> {
-  return unwrapResult(await commands.getHistory()).map(normalizeThread);
+  return invokeCommand(commands.getHistory(), (threads) => threads.map(normalizeThread));
 }
 
 export async function getThread(id: string): Promise<Thread> {
-  return normalizeThread(unwrapResult(await commands.getThread(id)));
+  return invokeCommand(commands.getThread(id), normalizeThread);
 }
 
 export async function getThreadLatestVersion(threadId: string): Promise<Message | null> {
-  const message = unwrapResult(await commands.getThreadLatestVersion(threadId));
+  const message = await invokeCommand(commands.getThreadLatestVersion(threadId));
   return message ? normalizeMessage(message) : null;
 }
 
@@ -162,7 +176,7 @@ export async function getThreadMessageVersion(
   threadId: string,
   messageId: string,
 ): Promise<Message | null> {
-  const message = unwrapResult(await commands.getThreadMessageVersion(threadId, messageId));
+  const message = await invokeCommand(commands.getThreadMessageVersion(threadId, messageId));
   return message ? normalizeMessage(message) : null;
 }
 
@@ -172,56 +186,48 @@ export async function getThreadMessagesPage(
   limit = 50,
   includeVisualPayloads = false,
 ): Promise<ThreadMessagesPage> {
-  return normalizeThreadMessagesPage(
-    unwrapResult(
-      await commands.getThreadMessagesPage(
-        threadId,
-        before,
-        limit,
-        includeVisualPayloads,
-      ),
-    ),
+  return invokeCommand(
+    commands.getThreadMessagesPage(threadId, before, limit, includeVisualPayloads),
+    normalizeThreadMessagesPage,
   );
 }
 
-export async function clearHistory(): Promise<void> {
-  unwrapResult(await commands.clearHistory());
-}
-
 export async function deleteThread(id: string): Promise<void> {
-  unwrapResult(await commands.deleteThread(id));
+  await invokeCommand(commands.deleteThread(id));
 }
 
 export async function renameThread(id: string, title: string): Promise<void> {
-  unwrapResult(await commands.renameThread(id, title));
+  await invokeCommand(commands.renameThread(id, title));
 }
 
 export async function deleteVersion(messageId: string): Promise<void> {
-  unwrapResult(await commands.deleteVersion(messageId));
+  await invokeCommand(commands.deleteVersion(messageId));
 }
 
 export async function restoreVersion(messageId: string): Promise<void> {
-  unwrapResult(await commands.restoreVersion(messageId));
+  await invokeCommand(commands.restoreVersion(messageId));
 }
 
 export async function getDeletedMessages(): Promise<DeletedMessage[]> {
-  return unwrapResult(await commands.getDeletedMessages()).map(normalizeDeletedMessage);
+  return invokeCommand(commands.getDeletedMessages(), (messages) =>
+    messages.map(normalizeDeletedMessage),
+  );
 }
 
 export async function hideDeletedMessage(messageId: string): Promise<void> {
-  unwrapResult(await commands.hideDeletedMessage(messageId));
+  await invokeCommand(commands.hideDeletedMessage(messageId));
 }
 
 export async function finalizeThread(id: string, messageId: string | null = null): Promise<void> {
-  unwrapResult(await commands.finalizeThread(id, messageId));
+  await invokeCommand(commands.finalizeThread(id, messageId));
 }
 
 export async function reopenThread(id: string): Promise<void> {
-  unwrapResult(await commands.reopenThread(id));
+  await invokeCommand(commands.reopenThread(id));
 }
 
 export async function getInventory(): Promise<Thread[]> {
-  return unwrapResult(await commands.getInventory()).map(normalizeThread);
+  return invokeCommand(commands.getInventory(), (threads) => threads.map(normalizeThread));
 }
 
 export async function generateDesign(input: {
@@ -238,8 +244,8 @@ export async function generateDesign(input: {
   sourceLanguage?: SourceLanguage | null;
   geometryBackend?: GeometryBackend | null;
 }): Promise<GenerateOutput> {
-  const result = unwrapResult(
-    await commands.generateDesign(
+  const result = await invokeCommand(
+    commands.generateDesign(
       input.prompt,
       input.threadId,
       input.parentMacroCode,
@@ -270,8 +276,8 @@ export async function initGenerationAttempt(input: {
   attachments: Attachment[];
   imageData: string | null;
 }): Promise<string> {
-  return unwrapResult(
-    await commands.initGenerationAttempt(
+  return invokeCommand(
+    commands.initGenerationAttempt(
       input.threadId,
       input.prompt,
       input.attachments.map(toContractAttachment),
@@ -290,8 +296,8 @@ export async function finalizeGenerationAttempt(input: {
   errorMessage?: string;
   responseText?: string;
 }): Promise<void> {
-  unwrapResult(
-    await commands.finalizeGenerationAttempt(
+  await invokeCommand(
+    commands.finalizeGenerationAttempt(
       input.messageId,
       input.status,
       input.design ? toContractDesignOutput(input.design) : null,
@@ -311,8 +317,8 @@ export async function classifyIntent(input: {
   imageData: string | null;
   attachments: Attachment[];
 }): Promise<IntentDecision> {
-  const result = unwrapResult(
-    await commands.classifyIntent(
+  const result = await invokeCommand(
+    commands.classifyIntent(
       input.prompt,
       input.threadId,
       input.context,
@@ -326,10 +332,6 @@ export async function classifyIntent(input: {
   };
 }
 
-export async function renderStl(macroCode: string, parameters: DesignParams): Promise<string> {
-  return unwrapResult(await commands.renderStl(macroCode, parameters));
-}
-
 export async function renderModel(
   macroCode: string,
   parameters: DesignParams,
@@ -337,35 +339,34 @@ export async function renderModel(
   geometryBackend?: GeometryBackend | null,
   postProcessing?: PostProcessingSpec | null,
 ): Promise<ArtifactBundle> {
-  return normalizeArtifactBundle(
-    unwrapResult(
-      await commands.renderModel(
-        macroCode,
-        parameters,
-        macroDialect ?? null,
-        geometryBackend ?? null,
-        postProcessing ?? null,
-      ),
+  return invokeCommand(
+    commands.renderModel(
+      macroCode,
+      parameters,
+      macroDialect ?? null,
+      geometryBackend ?? null,
+      postProcessing ?? null,
     ),
+    normalizeArtifactBundle,
   );
 }
 
 export type { PostProcessingSpec };
 
 export async function importFcstd(sourcePath: string): Promise<ArtifactBundle> {
-  return normalizeArtifactBundle(unwrapResult(await commands.importFcstd(sourcePath)));
+  return invokeCommand(commands.importFcstd(sourcePath), normalizeArtifactBundle);
 }
 
 export async function searchFreecadLibrary(
   request: FreecadLibrarySearchRequest,
 ): Promise<FreecadLibraryItem[]> {
-  return unwrapResult(await commands.searchFreecadLibrary(request));
+  return invokeCommand(commands.searchFreecadLibrary(request));
 }
 
 export async function importFreecadLibraryPart(
   request: FreecadLibraryImportRequest,
 ): Promise<ArtifactBundle> {
-  return normalizeArtifactBundle(unwrapResult(await commands.importFreecadLibraryPart(request)));
+  return invokeCommand(commands.importFreecadLibraryPart(request), normalizeArtifactBundle);
 }
 
 export async function applyImportedModel(
@@ -374,20 +375,14 @@ export async function applyImportedModel(
   parameters: DesignParams,
   messageId?: string | null,
 ): Promise<ArtifactBundle> {
-  return normalizeArtifactBundle(
-    unwrapResult(
-      await commands.applyImportedModel(
-        artifactBundle,
-        manifest,
-        parameters,
-        messageId ?? null,
-      ),
-    ),
+  return invokeCommand(
+    commands.applyImportedModel(artifactBundle, manifest, parameters, messageId ?? null),
+    normalizeArtifactBundle,
   );
 }
 
 export async function getModelManifest(modelId: string): Promise<ModelManifest> {
-  return normalizeModelManifest(unwrapResult(await commands.getModelManifest(modelId)));
+  return invokeCommand(commands.getModelManifest(modelId), normalizeModelManifest);
 }
 
 export async function saveModelManifest(
@@ -395,110 +390,105 @@ export async function saveModelManifest(
   manifest: ModelManifest,
   messageId?: string | null,
 ): Promise<void> {
-  unwrapResult(await commands.saveModelManifest(modelId, manifest, messageId ?? null));
+  await invokeCommand(commands.saveModelManifest(modelId, manifest, messageId ?? null));
 }
 
 export async function getDefaultMacro(): Promise<string> {
-  return unwrapResult(await commands.getDefaultMacro());
+  return invokeCommand(commands.getDefaultMacro());
 }
 
 export async function getMessStlPath(): Promise<string> {
-  return unwrapResult(await commands.getMessStlPath());
+  return invokeCommand(commands.getMessStlPath());
 }
 
 export async function exportFile(sourcePath: string, targetPath: string): Promise<void> {
-  unwrapResult(await commands.exportFile(sourcePath, targetPath));
+  await invokeCommand(commands.exportFile(sourcePath, targetPath));
 }
 
 export async function exportEckyMcpSkillZip(targetPath: string): Promise<void> {
-  unwrapResult(await commands.exportEckyMcpSkillZip(targetPath));
-}
-
-export async function readComponentPackageManifest(
-  projectDir: string,
-): Promise<ComponentPackage> {
-  return unwrapResult(await commands.readComponentPackageManifest(projectDir));
-}
-
-export async function writeComponentPackageManifest(
-  projectDir: string,
-  componentPackage: ComponentPackage,
-): Promise<string> {
-  return unwrapResult(await commands.writeComponentPackageManifest(projectDir, componentPackage));
-}
-
-export async function writeComponentPackageArchive(
-  projectDir: string,
-  archivePath: string,
-): Promise<void> {
-  unwrapResult(await commands.writeComponentPackageArchive(projectDir, archivePath));
-}
-
-export async function readComponentPackageFromArchive(
-  archivePath: string,
-): Promise<ComponentPackage> {
-  return unwrapResult(await commands.readComponentPackageFromArchive(archivePath));
-}
-
-export async function readComponentPackageHeaderFromArchive(
-  archivePath: string,
-): Promise<ComponentPackageHeader> {
-  return unwrapResult(await commands.readComponentPackageHeaderFromArchive(archivePath));
-}
-
-export async function extractComponentPackageArchive(
-  archivePath: string,
-  targetDir: string,
-): Promise<ComponentPackage> {
-  return unwrapResult(await commands.extractComponentPackageArchive(archivePath, targetDir));
+  await invokeCommand(commands.exportEckyMcpSkillZip(targetPath));
 }
 
 export async function installComponentPackageArchive(
   archivePath: string,
 ): Promise<InstalledComponentPackage> {
-  return unwrapResult(await commands.installComponentPackageArchive(archivePath));
+  return invokeCommand(commands.installComponentPackageArchive(archivePath));
 }
 
 export async function listInstalledComponentPackageHeaders(): Promise<ComponentPackageHeader[]> {
-  return unwrapResult(await commands.listInstalledComponentPackageHeaders());
-}
-
-export async function generateSketchDraftSource(
-  request: SketchDraftRequest,
-): Promise<SketchDraftSource> {
-  return unwrapResult(await commands.generateSketchDraftSource(request));
+  return invokeCommand(commands.listInstalledComponentPackageHeaders());
 }
 
 export async function suggestSketchFeatures(
   request: SketchSuggestionRequest,
 ): Promise<SketchSuggestionResponse> {
-  return unwrapResult(await commands.suggestSketchFeatures(request));
+  return invokeCommand(commands.suggestSketchFeatures(request));
 }
 
 export async function generateSketchDraftPreview(
   request: SketchDraftRequest,
 ): Promise<{ draft: SketchDraftSource; artifactBundle: ArtifactBundle }> {
-  const [draft, bundle] = unwrapResult(await commands.generateSketchDraftPreview(request));
+  const [draft, bundle] = await invokeCommand(commands.generateSketchDraftPreview(request));
   return { draft, artifactBundle: normalizeArtifactBundle(bundle) };
 }
 
 export async function generateSketchPreviewHull(
   request: SketchPreviewHullRequest,
 ): Promise<{ draft: SketchDraftSource; artifactBundle: ArtifactBundle }> {
-  const [draft, bundle] = unwrapResult(await commands.generateSketchPreviewHull(request));
+  const [draft, bundle] = await invokeCommand(commands.generateSketchPreviewHull(request));
   return { draft, artifactBundle: normalizeArtifactBundle(bundle) };
+}
+
+export async function saveSketchPreviewDraft(input: {
+  scopeId?: string | null;
+  draftScopeId?: string | null;
+  draftSource: SketchDraftSource;
+  artifactBundle: ArtifactBundle;
+}): Promise<SketchPreviewDraft> {
+  const scopeId = resolveSketchPreviewDraftScopeId(input);
+  return invokeCommand(
+    commands.saveSketchPreviewDraft({
+      scopeId,
+      draftSource: input.draftSource,
+      artifactBundle: input.artifactBundle,
+    } satisfies SaveSketchPreviewDraftRequest),
+  );
+}
+
+export async function loadSketchPreviewDraft(input: {
+  scopeId?: string | null;
+  draftScopeId?: string | null;
+}): Promise<SketchPreviewDraft | null> {
+  const scopeId = resolveSketchPreviewDraftScopeId(input);
+  return invokeCommand(
+    commands.loadSketchPreviewDraft({
+      scopeId,
+    } satisfies LoadSketchPreviewDraftRequest),
+  );
+}
+
+export async function clearSketchPreviewDraft(input: {
+  scopeId?: string | null;
+  draftScopeId?: string | null;
+}): Promise<void> {
+  const scopeId = resolveSketchPreviewDraftScopeId(input);
+  await invokeCommand(
+    commands.clearSketchPreviewDraft({
+      scopeId,
+    } satisfies ClearSketchPreviewDraftRequest),
+  );
 }
 
 export async function analyzeSketchBrepCandidates(
   request: SketchBrepCandidateRequest,
 ): Promise<SketchBrepCandidateResponse> {
-  return unwrapResult(await commands.analyzeSketchBrepCandidates(request));
+  return invokeCommand(commands.analyzeSketchBrepCandidates(request));
 }
 
 export async function acceptSketchBrepCandidateSolution(
   request: SketchBrepCandidateAcceptRequest,
 ): Promise<Omit<SketchBrepCandidateAcceptResponse, 'artifactBundle'> & { artifactBundle: ArtifactBundle }> {
-  const response = unwrapResult(await commands.acceptSketchBrepCandidateSolution(request));
+  const response = await invokeCommand(commands.acceptSketchBrepCandidateSolution(request));
   return {
     ...response,
     artifactBundle: normalizeArtifactBundle(response.artifactBundle),
@@ -508,13 +498,13 @@ export async function acceptSketchBrepCandidateSolution(
 export async function acceptedBrepCandidateToComponentPackage(
   request: SketchAcceptedBrepComponentPackageRequest,
 ): Promise<ComponentPackage> {
-  return unwrapResult(await commands.acceptedBrepCandidateToComponentPackage(request));
+  return invokeCommand(commands.acceptedBrepCandidateToComponentPackage(request));
 }
 
 export async function extractBrepHiddenLineProjections(
   request: BrepHiddenLineProjectionRequest,
 ): Promise<BrepHiddenLineProjectionResponse> {
-  return unwrapResult(await commands.extractBrepHiddenLineProjections(request));
+  return invokeCommand(commands.extractBrepHiddenLineProjections(request));
 }
 
 export async function exportMultipartStlZip(
@@ -522,7 +512,7 @@ export async function exportMultipartStlZip(
   targetPath: string,
   modelName: string,
 ): Promise<void> {
-  unwrapResult(await commands.exportMultipartStlZip(parts, targetPath, modelName));
+  await invokeCommand(commands.exportMultipartStlZip(parts, targetPath, modelName));
 }
 
 export async function exportMultipart3mf(
@@ -530,7 +520,7 @@ export async function exportMultipart3mf(
   targetPath: string,
   modelName: string,
 ): Promise<void> {
-  unwrapResult(await commands.exportMultipart3mf(parts, targetPath, modelName));
+  await invokeCommand(commands.exportMultipart3mf(parts, targetPath, modelName));
 }
 
 export async function addManualVersion(input: {
@@ -546,8 +536,8 @@ export async function addManualVersion(input: {
   artifactBundle?: ArtifactBundle | null;
   modelManifest?: ModelManifest | null;
 }): Promise<string> {
-  return unwrapResult(
-    await commands.addManualVersion({
+  return invokeCommand(
+    commands.addManualVersion({
       threadId: input.threadId,
       title: input.title,
       versionName: input.versionName,
@@ -569,8 +559,8 @@ export async function addImportedModelVersion(input: {
   artifactBundle: ArtifactBundle;
   modelManifest: ModelManifest;
 }): Promise<string> {
-  return unwrapResult(
-    await commands.addImportedModelVersion(
+  return invokeCommand(
+    commands.addImportedModelVersion(
       input.threadId,
       input.title,
       input.artifactBundle,
@@ -580,21 +570,14 @@ export async function addImportedModelVersion(input: {
 }
 
 export async function updateUiSpec(messageId: string, uiSpec: UiSpec): Promise<void> {
-  unwrapResult(await commands.updateUiSpec(messageId, toContractUiSpec(uiSpec)));
+  await invokeCommand(commands.updateUiSpec(messageId, toContractUiSpec(uiSpec)));
 }
 
 export async function updateParameters(
   messageId: string,
   parameters: DesignParams,
 ): Promise<void> {
-  unwrapResult(await commands.updateParameters(messageId, parameters));
-}
-
-export async function updatePostProcessing(
-  messageId: string,
-  postProcessing: PostProcessingSpec | null,
-): Promise<void> {
-  unwrapResult(await commands.updatePostProcessing(messageId, postProcessing));
+  await invokeCommand(commands.updateParameters(messageId, parameters));
 }
 
 export async function updateVersionRuntime(
@@ -602,7 +585,7 @@ export async function updateVersionRuntime(
   artifactBundle: ArtifactBundle,
   modelManifest: ModelManifest,
 ): Promise<void> {
-  unwrapResult(await commands.updateVersionRuntime(messageId, artifactBundle, modelManifest));
+  await invokeCommand(commands.updateVersionRuntime(messageId, artifactBundle, modelManifest));
 }
 
 export async function updateVersionPreview(
@@ -610,7 +593,7 @@ export async function updateVersionPreview(
   imageData: string,
   artifactBundle: ArtifactBundle,
 ): Promise<void> {
-  unwrapResult(await commands.updateVersionPreview(messageId, imageData, artifactBundle));
+  await invokeCommand(commands.updateVersionPreview(messageId, imageData, artifactBundle));
 }
 
 export async function parseMacroParams(macroCode: string): Promise<ParsedParamsResult> {
@@ -622,42 +605,40 @@ export async function uploadAsset(input: {
   name: string;
   format: string;
 }) {
-  return unwrapResult(await commands.uploadAsset(input.sourcePath, input.name, input.format));
+  return invokeCommand(commands.uploadAsset(input.sourcePath, input.name, input.format));
 }
 
 export async function saveRecordedAudio(input: { base64Data: string; name: string }) {
-  return unwrapResult(await commands.saveRecordedAudio(input.base64Data, input.name));
+  return invokeCommand(commands.saveRecordedAudio(input.base64Data, input.name));
 }
 
 export async function transcribePromptAudio(input: TranscribePromptAudioInput): Promise<PromptTranscription> {
-  return unwrapResult(await commands.transcribePromptAudio(input));
+  return invokeCommand(commands.transcribePromptAudio(input));
 }
 
 export async function getLastDesign(): Promise<LastDesignSnapshot | null> {
-  return normalizeLastDesignSnapshot(unwrapResult(await commands.getLastDesign()));
+  return invokeCommand(commands.getLastDesign(), normalizeLastDesignSnapshot);
 }
 
 export async function saveLastDesign(snapshot: LastDesignSnapshot | null): Promise<void> {
-  unwrapResult(
-    await commands.saveLastDesign(snapshot ? toContractLastDesignSnapshot(snapshot) : null),
-  );
+  await invokeCommand(commands.saveLastDesign(snapshot ? toContractLastDesignSnapshot(snapshot) : null));
 }
 
 export async function getActiveAgentSessions(): Promise<AgentSession[]> {
-  return unwrapResult(await commands.getActiveAgentSessions());
+  return invokeCommand(commands.getActiveAgentSessions());
 }
 
 export async function getMcpServerStatus(): Promise<McpServerStatus> {
-  return unwrapResult(await commands.getMcpServerStatus());
+  return invokeCommand(commands.getMcpServerStatus());
 }
 
 export async function getAgentTerminalSnapshots(): Promise<AgentTerminalSnapshot[]> {
-  return unwrapResult(await commands.getAgentTerminalSnapshots());
+  return invokeCommand(commands.getAgentTerminalSnapshots());
 }
 
 export async function sendAgentTerminalInput(input: AgentTerminalInput): Promise<void> {
-  unwrapResult(
-    await commands.sendAgentTerminalInput({
+  await invokeCommand(
+    commands.sendAgentTerminalInput({
       agentId: input.agentId,
       text: input.text ?? '',
       key: input.key ?? null,
@@ -675,11 +656,11 @@ export async function resizeAgentTerminal(
   cols: number,
   rows: number,
 ): Promise<void> {
-  unwrapResult(await commands.resizeAgentTerminal(agentId, cols, rows));
+  await invokeCommand(commands.resizeAgentTerminal(agentId, cols, rows));
 }
 
 export async function resolveAgentConfirm(requestId: string, choice: string) {
-  unwrapResult(await commands.resolveAgentConfirm(requestId, choice));
+  await invokeCommand(commands.resolveAgentConfirm(requestId, choice));
 }
 
 export async function preparePromptAttachments(
@@ -688,11 +669,10 @@ export async function preparePromptAttachments(
   if (attachments.length === 0) {
     return [];
   }
-  return unwrapResult(
-    await commands.preparePromptAttachments(
-      attachments.map(toContractAttachment),
-    ),
-  ).map(normalizeAttachment);
+  return invokeCommand(
+    commands.preparePromptAttachments(attachments.map(toContractAttachment)),
+    (value) => value.map(normalizeAttachment),
+  );
 }
 
 export async function preparePromptWorkspaceCapture(input: {
@@ -701,20 +681,21 @@ export async function preparePromptWorkspaceCapture(input: {
   name?: string | null;
   explanation?: string | null;
 }): Promise<Attachment> {
-  return normalizeAttachment(
-    unwrapResult(
-      await commands.preparePromptWorkspaceCapture({
-        dataUrl: input.dataUrl,
-        threadId: input.threadId ?? null,
-        name: input.name ?? null,
-        explanation: input.explanation ?? null,
-      }),
-    ),
+  return invokeCommand(
+    commands.preparePromptWorkspaceCapture({
+      dataUrl: input.dataUrl,
+      threadId: input.threadId ?? null,
+      name: input.name ?? null,
+      explanation: input.explanation ?? null,
+    }),
+    normalizeAttachment,
   );
 }
 
 export async function getMessageAttachments(messageId: string): Promise<Attachment[]> {
-  return unwrapResult(await commands.getMessageAttachments(messageId)).map(normalizeAttachment);
+  return invokeCommand(commands.getMessageAttachments(messageId), (value) =>
+    value.map(normalizeAttachment),
+  );
 }
 
 export async function resolveAgentPrompt(input: {
@@ -724,8 +705,8 @@ export async function resolveAgentPrompt(input: {
   messageId?: string | null;
   attachments: Attachment[];
 }) {
-  unwrapResult(
-    await commands.resolveAgentPrompt({
+  await invokeCommand(
+    commands.resolveAgentPrompt({
       requestId: input.requestId,
       promptText: input.promptText,
       messageIds: input.messageIds ?? [],
@@ -740,8 +721,8 @@ export async function queueAgentPrompt(input: {
   promptText: string;
   attachments: Attachment[];
 }): Promise<{ threadId: string; messageId: string }> {
-  return unwrapResult(
-    await commands.queueAgentPrompt({
+  return invokeCommand(
+    commands.queueAgentPrompt({
       threadId: input.threadId ?? null,
       promptText: input.promptText,
       attachments: input.attachments.map(toContractAttachment),
@@ -761,14 +742,12 @@ export async function resolveAgentViewportScreenshot(input: {
   modelId?: string | null;
   includeOverlays: boolean;
 }) {
-  unwrapResult(
-    await commands.resolveAgentViewportScreenshot(input as ResolveViewportScreenshotInput),
-  );
+  await invokeCommand(commands.resolveAgentViewportScreenshot(input as ResolveViewportScreenshotInput));
 }
 
 export async function rejectAgentViewportScreenshot(requestId: string, error: string) {
-  unwrapResult(
-    await commands.rejectAgentViewportScreenshot({
+  await invokeCommand(
+    commands.rejectAgentViewportScreenshot({
       requestId,
       error,
     } as RejectViewportScreenshotInput),
@@ -776,11 +755,11 @@ export async function rejectAgentViewportScreenshot(requestId: string, error: st
 }
 
 export async function getThreadAgentState(threadId: string): Promise<ThreadAgentState> {
-  return unwrapResult(await commands.getThreadAgentState(threadId));
+  return invokeCommand(commands.getThreadAgentState(threadId));
 }
 
 export async function getAppLogs(): Promise<AppLogEntry[]> {
-  return unwrapResult(await commands.getAppLogs());
+  return invokeCommand(commands.getAppLogs());
 }
 
 export async function wakePrimaryAutoAgent(
@@ -788,7 +767,7 @@ export async function wakePrimaryAutoAgent(
   messageId?: string | null,
   modelId?: string | null,
 ): Promise<void> {
-  unwrapResult(await commands.wakePrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
+  await invokeCommand(commands.wakePrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
 }
 
 export async function stopPrimaryAutoAgent(
@@ -796,7 +775,7 @@ export async function stopPrimaryAutoAgent(
   messageId?: string | null,
   modelId?: string | null,
 ): Promise<void> {
-  unwrapResult(await commands.stopPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
+  await invokeCommand(commands.stopPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
 }
 
 export async function restartPrimaryAutoAgent(
@@ -804,13 +783,7 @@ export async function restartPrimaryAutoAgent(
   messageId?: string | null,
   modelId?: string | null,
 ): Promise<void> {
-  unwrapResult(
-    await commands.restartPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null),
-  );
-}
-
-export async function wakeAutoAgent(label: string): Promise<void> {
-  unwrapResult(await commands.wakeAutoAgent(label));
+  await invokeCommand(commands.restartPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
 }
 
 export async function verifyRender(
@@ -819,22 +792,22 @@ export async function verifyRender(
   referenceImagePaths: string[] = [],
   structuralSummary: string | null = null,
 ): Promise<VisualVerificationResult> {
-  return unwrapResult(await commands.verifyRender(originalPrompt, screenshots, referenceImagePaths, structuralSummary));
+  return invokeCommand(commands.verifyRender(originalPrompt, screenshots, referenceImagePaths, structuralSummary));
 }
 
 export async function verifyGeneratedModel(
   modelId: string,
   originalPrompt: string,
 ): Promise<StructuralVerificationResult> {
-  return unwrapResult(await commands.verifyGeneratedModel(modelId, originalPrompt));
+  return invokeCommand(commands.verifyGeneratedModel(modelId, originalPrompt));
 }
 
 export async function getThreadWindowLayout(threadId: string): Promise<ThreadWindowLayout | null> {
-  return unwrapResult(await commands.getThreadWindowLayout(threadId));
+  return invokeCommand(commands.getThreadWindowLayout(threadId));
 }
 
 export async function saveThreadWindowLayout(threadId: string, layout: ThreadWindowLayout): Promise<void> {
-  unwrapResult(await commands.saveThreadWindowLayout(threadId, layout));
+  await invokeCommand(commands.saveThreadWindowLayout(threadId, layout));
 }
 
 export type { AppLogEntry };

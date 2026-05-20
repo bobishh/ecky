@@ -12,12 +12,12 @@
     onViewerDisplayChange,
     onViewerSelectionModeChange,
   }: {
-    activeTab?: 'views' | 'raw' | 'litho';
+    activeTab?: 'views' | 'raw' | 'litho' | 'newParams';
     outlineEnabled?: boolean;
     topologyMode?: TopologyMode;
     selectionMode?: 'orbit' | 'select' | 'measure';
     macroCode?: string;
-    onActiveTabChange?: (tab: 'views' | 'raw' | 'litho') => void;
+    onActiveTabChange?: (tab: 'views' | 'raw' | 'litho' | 'newParams') => void;
     onShowCode?: () => void;
     onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
     onViewerSelectionModeChange?: (mode: 'orbit' | 'select' | 'measure') => void;
@@ -32,6 +32,16 @@
   >
     VIEWS
   </button>
+  {#if macroCode}
+    <button
+      class="panel-mode-tab"
+      class:panel-mode-tab-active={activeTab === 'newParams'}
+      aria-label="new params"
+      onclick={() => onActiveTabChange?.('newParams')}
+    >
+      NEW PARAMS
+    </button>
+  {/if}
   <button
     class="panel-mode-tab"
     class:panel-mode-tab-active={activeTab === 'raw'}

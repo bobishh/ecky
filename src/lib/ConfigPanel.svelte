@@ -588,6 +588,21 @@
     }
   }
 
+  async function toggleAudioMute() {
+    const currentMicrowave = getMicrowaveConfig();
+    const nextMuted = !currentMicrowave.muted;
+    config = {
+      ...config,
+      microwave: {
+        ...currentMicrowave,
+        muted: nextMuted,
+      },
+    };
+    if (onsave) {
+      await onsave();
+    }
+  }
+
   async function refreshDesignSystemPrompt(provider: string | null | undefined) {
     designSystemPromptError = '';
     try {
@@ -960,6 +975,21 @@
           <div class="field-help">
             VLM screenshot verification rounds after render. 0 = disabled (structural check always runs). Default: 0.
           </div>
+        </div>
+
+        <div class="field">
+          <div class="field-title">AUDIO</div>
+          <div class="conn-type-row">
+            <button
+              class="conn-type-btn {microwave.muted ? 'active' : ''}"
+              type="button"
+              aria-pressed={microwave.muted}
+              onclick={toggleAudioMute}
+            >
+              {microwave.muted ? 'AUDIO OFF' : 'AUDIO ON'}
+            </button>
+          </div>
+          <div class="field-help">Controls Ecky speech and microwave playback. Save registry to persist.</div>
         </div>
 
         <div class="field">

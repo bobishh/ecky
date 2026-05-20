@@ -428,10 +428,10 @@ fn unsupported_required_direct_occt_error(details: String) -> AppError {
     )
 }
 
-fn blocked_direct_occt_mesh_fallback_error(details: String) -> AppError {
+fn blocked_direct_occt_native_error(details: String) -> AppError {
     AppError::with_details(
         crate::models::AppErrorCode::Validation,
-        "Ecky Native direct OCCT render failed. Mesh fallback blocked.",
+        "Ecky Native direct OCCT render failed.",
         details,
     )
 }
@@ -523,6 +523,13 @@ fn render_model_unlocked(
     };
     let result = match dispatch_backend {
         GeometryBackend::EckyRust => {
+            // Explicit native requests are Direct OCCT only: real OCCT success
+            // or the real OCCT error, never a silently degraded mesh artifact.
+            // The one sanctioned mesh path is a redirect: a Build123d/FreeCAD
+            // request whose source uses mesh-only ops (`wall-pattern`) lands
+            // here because the Rust mesh renderer is the designated handler
+            // for those ops.
+            let mesh_only_redirect = resolved_backend != GeometryBackend::EckyRust;
             let uses_exact_only = effective_dialect == MacroDialect::EckyIrV0
                 && crate::ecky_ir::source_uses_exact_backend_only_cad_ops(macro_code);
             let uses_direct_occt_required = effective_dialect == MacroDialect::EckyIrV0
@@ -551,19 +558,21 @@ fn render_model_unlocked(
                 Ok(None) => {
                     if uses_exact_only {
                         Err(unsupported_exact_only_direct_occt_error(
-                            "EckyRust/direct OCCT cannot fall back from exact-backend-only CAD ops."
+                            "EckyRust/direct OCCT did not produce a native bundle for exact-backend-only CAD ops."
                                 .to_string(),
                         ))
                     } else if uses_direct_occt_required {
                         Err(unsupported_required_direct_occt_error(format!(
-                            "EckyRust/direct OCCT cannot fall back for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`. {}",
+                            "EckyRust/direct OCCT did not produce a native bundle for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`. {}",
                             direct_occt_capability
                                 .as_ref()
                                 .map(|capability| capability.detail.as_str())
                                 .unwrap_or("Direct OCCT availability not probed.")
                         )))
+                    } else if mesh_only_redirect {
+                        crate::ecky_ir::render_model(macro_code, parameters, app)
                     } else if direct_occt_ready && direct_occt_plannable {
-                        Err(blocked_direct_occt_mesh_fallback_error(format!(
+                        Err(blocked_direct_occt_native_error(format!(
                             "Direct OCCT runtime reported ready and planned this model, but native export returned no bundle. {}",
                             direct_occt_capability
                                 .as_ref()
@@ -571,7 +580,13 @@ fn render_model_unlocked(
                                 .unwrap_or("Direct OCCT availability not probed.")
                         )))
                     } else {
-                        crate::ecky_ir::render_model(macro_code, parameters, app)
+                        Err(blocked_direct_occt_native_error(format!(
+                            "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}. {}",
+                            direct_occt_capability
+                                .as_ref()
+                                .map(|capability| capability.detail.as_str())
+                                .unwrap_or("Direct OCCT availability not probed.")
+                        )))
                     }
                 }
                 Err(err) => {
@@ -600,10 +615,18 @@ fn render_model_unlocked(
                             }
                         }
                         Err(unsupported_required_direct_occt_error(details))
-                    } else if direct_occt_ready && direct_occt_plannable {
-                        let mut details = String::from(
-                            "Direct OCCT runtime reported ready and planned this model, but native export failed.",
-                        );
+                    } else if mesh_only_redirect {
+                        crate::ecky_ir::render_model(macro_code, parameters, app)
+                    } else {
+                        let mut details = if direct_occt_ready && direct_occt_plannable {
+                            String::from(
+                                "Direct OCCT runtime reported ready and planned this model, but native export failed.",
+                            )
+                        } else {
+                            format!(
+                                "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}."
+                            )
+                        };
                         details.push(' ');
                         details.push_str(&err.to_string());
                         if let Some(extra) = err.details.as_deref() {
@@ -612,9 +635,7 @@ fn render_model_unlocked(
                                 details.push_str(extra);
                             }
                         }
-                        Err(blocked_direct_occt_mesh_fallback_error(details))
-                    } else {
-                        crate::ecky_ir::render_model(macro_code, parameters, app)
+                        Err(blocked_direct_occt_native_error(details))
                     }
                 }
             }
@@ -1540,12 +1561,12 @@ endsolid sample
     }
 
     #[tokio::test]
-    async fn ecky_rust_dispatch_falls_back_to_mesh_when_direct_occt_cannot_export_operation() {
+    async fn ecky_rust_request_fails_closed_when_direct_occt_cannot_export_operation() {
         let root = temp_root("direct-fallback");
         let resolver = TestResolver { root: root.clone() };
         let state = test_state(&root);
 
-        let bundle = render_model(
+        let err = render_model(
             r#"(model
                 (part body
                   (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
@@ -1558,14 +1579,18 @@ endsolid sample
             &resolver,
         )
         .await
-        .expect("mesh fallback render");
+        .expect_err("native backend should fail closed without Direct OCCT support");
 
-        assert!(bundle.model_id.starts_with("generated-ir-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
-        assert!(!bundle
-            .export_artifacts
-            .iter()
-            .any(|artifact| artifact.format == "step"));
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
+        assert!(
+            diagnostic.contains("Direct OCCT")
+                || diagnostic.contains("Native backend requires Direct OCCT"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !diagnostic.contains("not supported by current `.ecky` runtime"),
+            "must not fall through to mesh runtime: {err:?}"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

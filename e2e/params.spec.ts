@@ -71,6 +71,56 @@ endsolid mock
           };
         }
         if (cmd === 'generate_design') {
+          if (`${args?.prompt ?? ''}`.includes('seeded macro')) {
+            (window as any).__PARAM_SCENARIO__ = 'seeded-macro';
+            return {
+              threadId: args.threadId || 'mock-thread-1',
+              messageId: 'mock-msg-1',
+              usage: null,
+              design: {
+                title: 'Seeded Macro',
+                versionName: 'V1',
+                interactionMode: 'design',
+                macroCode:
+                  '(model\n' +
+                  '  (part/region shell\n' +
+                  '    (input port inlet)\n' +
+                  '    (inline param anchor width))\n' +
+                  ')\n',
+                uiSpec: {
+                  fields: [
+                    {
+                      type: 'number',
+                      key: 'model_size_mm',
+                      label: 'Model Size',
+                    },
+                    {
+                      type: 'number',
+                      key: 'part_region_mm',
+                      label: 'Part Region',
+                    },
+                    {
+                      type: 'number',
+                      key: 'input_port_diameter_mm',
+                      label: 'Input Port Diameter',
+                    },
+                    {
+                      type: 'number',
+                      key: 'inline_anchor_width_mm',
+                      label: 'Inline Anchor Width',
+                    },
+                  ],
+                },
+                initialParams: {
+                  model_size_mm: 40,
+                  part_region_mm: 12,
+                  input_port_diameter_mm: 6,
+                  inline_anchor_width_mm: 3,
+                },
+                postProcessing: null,
+              },
+            };
+          }
           if (`${args?.prompt ?? ''}`.includes('narrow layout box')) {
             (window as any).__PARAM_SCENARIO__ = 'narrow-layout-box';
             return {
@@ -213,6 +263,179 @@ endsolid mock
           };
         }
         if (cmd === 'get_model_manifest') {
+          if ((window as any).__PARAM_SCENARIO__ === 'seeded-macro') {
+            return {
+              modelId: 'seeded-macro-model',
+              sourceKind: 'generated',
+              document: {
+                documentName: 'Seeded Macro',
+                documentLabel: 'Seeded Macro',
+                objectCount: 1,
+                warnings: [],
+              },
+              parts: [
+                {
+                  partId: 'part-model',
+                  freecadObjectName: 'model_body',
+                  label: 'Model',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['model_size_mm'],
+                },
+                {
+                  partId: 'part-region',
+                  freecadObjectName: 'part_region_shell',
+                  label: 'Part/Region',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['part_region_mm'],
+                },
+                {
+                  partId: 'input-port',
+                  freecadObjectName: 'input_port_inlet',
+                  label: 'Input Port',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['input_port_diameter_mm'],
+                },
+                {
+                  partId: 'inline-anchor',
+                  freecadObjectName: 'inline_param_anchor',
+                  label: 'Inline Param Anchor',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['inline_anchor_width_mm'],
+                },
+              ],
+              parameterGroups: [],
+              controlPrimitives: [
+                {
+                  primitiveId: 'primitive-model-size',
+                  label: 'Model Size',
+                  kind: 'number',
+                  source: 'generated',
+                  partIds: ['part-model'],
+                  bindings: [{ parameterKey: 'model_size_mm', scale: 1, offset: 0, min: null, max: null }],
+                  editable: true,
+                  order: 0,
+                },
+                {
+                  primitiveId: 'primitive-part-region',
+                  label: 'Part Region',
+                  kind: 'number',
+                  source: 'generated',
+                  partIds: ['part-region'],
+                  bindings: [{ parameterKey: 'part_region_mm', scale: 1, offset: 0, min: null, max: null }],
+                  editable: true,
+                  order: 1,
+                },
+                {
+                  primitiveId: 'primitive-input-port',
+                  label: 'Input Port Diameter',
+                  kind: 'number',
+                  source: 'generated',
+                  partIds: ['input-port'],
+                  bindings: [{ parameterKey: 'input_port_diameter_mm', scale: 1, offset: 0, min: null, max: null }],
+                  editable: true,
+                  order: 2,
+                },
+                {
+                  primitiveId: 'primitive-inline-anchor',
+                  label: 'Inline Param Anchor',
+                  kind: 'number',
+                  source: 'generated',
+                  partIds: ['inline-anchor'],
+                  bindings: [{ parameterKey: 'inline_anchor_width_mm', scale: 1, offset: 0, min: null, max: null }],
+                  editable: true,
+                  order: 3,
+                },
+              ],
+              controlRelations: [],
+              controlViews: [
+                {
+                  viewId: 'view-model',
+                  label: 'Model',
+                  scope: 'global',
+                  partIds: [],
+                  primitiveIds: ['primitive-model-size'],
+                  sections: [
+                    {
+                      sectionId: 'model-main',
+                      label: 'Model',
+                      primitiveIds: ['primitive-model-size'],
+                      collapsed: false,
+                    },
+                  ],
+                  default: true,
+                  source: 'generated',
+                  status: 'accepted',
+                  order: 0,
+                },
+                {
+                  viewId: 'view-part-region',
+                  label: 'Part/Region',
+                  scope: 'part',
+                  partIds: ['part-region'],
+                  primitiveIds: ['primitive-part-region'],
+                  sections: [
+                    {
+                      sectionId: 'part-region-main',
+                      label: 'Part/Region',
+                      primitiveIds: ['primitive-part-region'],
+                      collapsed: false,
+                    },
+                  ],
+                  default: false,
+                  source: 'generated',
+                  status: 'accepted',
+                  order: 1,
+                },
+                {
+                  viewId: 'view-input-port',
+                  label: 'Input Port',
+                  scope: 'part',
+                  partIds: ['input-port'],
+                  primitiveIds: ['primitive-input-port'],
+                  sections: [
+                    {
+                      sectionId: 'input-port-main',
+                      label: 'Input Port',
+                      primitiveIds: ['primitive-input-port'],
+                      collapsed: false,
+                    },
+                  ],
+                  default: false,
+                  source: 'generated',
+                  status: 'accepted',
+                  order: 2,
+                },
+                {
+                  viewId: 'view-inline-anchor',
+                  label: 'Inline Param Anchor',
+                  scope: 'part',
+                  partIds: ['inline-anchor'],
+                  primitiveIds: ['primitive-inline-anchor'],
+                  sections: [
+                    {
+                      sectionId: 'inline-anchor-main',
+                      label: 'Inline Param Anchor',
+                      primitiveIds: ['primitive-inline-anchor'],
+                      collapsed: false,
+                    },
+                  ],
+                  default: false,
+                  source: 'generated',
+                  status: 'accepted',
+                  order: 3,
+                },
+              ],
+              selectionTargets: [],
+              advisories: [],
+              measurementAnnotations: [],
+              warnings: [],
+              enrichmentState: { status: 'none', proposals: [] },
+            };
+          }
           if ((window as any).__PARAM_SCENARIO__ === 'narrow-layout-box') {
             return {
               modelId: 'narrow-layout-box',
@@ -345,8 +568,130 @@ endsolid mock
     await expect(page.getByRole('button', { name: /CANCEL/i })).toBeVisible();
 
     await page.getByRole('button', { name: /CANCEL/i }).click();
-    await page.getByRole('button', { name: 'RAW' }).click();
+    await page.getByRole('button', { name: 'RAW', exact: true }).click();
     await expect(page.locator('.panel-code-btn')).toBeVisible();
+  });
+
+  test('Given seeded macro When New Params opens Then syntax markers reflect block types', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a seeded macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    await expect(page.locator('.macro-ast-node-root .macro-ast-node__shape')).toBeVisible();
+    await expect.soft(page.locator('.macro-ast-node-root .macro-ast-syntax-badge')).toContainText('MODEL');
+    await expect.soft(page.locator('.macro-ast-node-part .macro-ast-syntax-badge').first()).toContainText('SOLID');
+    await expect.soft(page.locator('.macro-ast-node-port .macro-ast-syntax-badge').first()).toContainText('PORT');
+    await expect.soft(page.locator('.macro-ast-node-param .macro-ast-syntax-badge').first()).toContainText('NUMBER');
+  });
+
+  test('Given seeded macro When New Params opens Then connector layer and overlay anchors exist', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a seeded macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    await expect(page.locator('.macro-ast-scene__svg')).toBeVisible();
+    await expect
+      .poll(async () => page.locator('.macro-ast-connector').count())
+      .toBeGreaterThan(0);
+    await expect(page.locator('.macro-ast-control-anchor').first()).toBeVisible();
+  });
+
+  test('Given seeded macro When a param blob is clicked Then the embedded control gets focus', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a seeded macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    await page.locator('.macro-ast-node-param .macro-ast-node__header').first().click();
+    await expect(page.locator('.macro-ast-node-param input.param-input').first()).toBeFocused();
+  });
+
+  test('Given seeded macro When New Params opens Then the old PARAMS entrypoint remains and semantic views stay named', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a seeded macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'VIEWS' }).click();
+
+    await expect.soft(page.getByRole('button', { name: 'PARAMS', exact: true })).toBeVisible();
+    await expect.soft(page.getByRole('button', { name: 'new params', exact: true })).toBeVisible();
+    await expect.soft(page.locator('.param-panel .context-strip-head + .part-strip-list .view-chip')).toContainText([
+      'model',
+      'part/region',
+      'input port',
+      'inline param anchor',
+    ]);
+  });
+
+  test('Given seeded macro When New Params edits a value Then Apply rerenders the draft', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a seeded macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    const beforeRenderCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    );
+
+    const firstParam = page.locator('.macro-ast-map-shell .param-field input.param-input').first();
+    await expect(firstParam).toBeVisible();
+    await firstParam.fill('42');
+    await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled();
+
+    const pendingRenderCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    );
+    expect(pendingRenderCount).toBe(beforeRenderCount);
+
+    await page.getByRole('button', { name: 'APPLY' }).click();
+
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+        ),
+      )
+      .toBe(beforeRenderCount + 1);
   });
 
   test('views tab keeps context actions and empty state after the split', async ({ page }) => {
@@ -391,7 +736,7 @@ endsolid mock
     await expect(page.getByRole('button', { name: '+ RULE' })).toBeVisible();
     await expect(page.getByRole('button', { name: '+ LINK' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'RAW' }).click();
+    await page.getByRole('button', { name: 'RAW', exact: true }).click();
     const longLabel = page.locator('[data-param-key=\"top_lid_side_shutter_clearance\"] .param-label');
     await expect(longLabel).toContainText('Top Lid Side Shutter Clearance');
 
@@ -466,7 +811,7 @@ endsolid mock
 
     await page.getByRole('button', { name: 'PARAMS' }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'RAW' }).click();
+    await page.getByRole('button', { name: 'RAW', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
 
     const beforeRenderCount = await page.evaluate(
@@ -501,7 +846,7 @@ endsolid mock
 
     await page.getByRole('button', { name: 'PARAMS' }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'RAW' }).click();
+    await page.getByRole('button', { name: 'RAW', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
 
     const parentFindsBeforeDebounce = await page.locator('#p600').evaluate(async (input) => {
@@ -528,7 +873,7 @@ endsolid mock
 
     await page.getByRole('button', { name: 'PARAMS' }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'RAW' }).click();
+    await page.getByRole('button', { name: 'RAW', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
 
     const beforeRenderCount = await page.evaluate(

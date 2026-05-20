@@ -19,6 +19,7 @@
 - **MCP-First Authoring Order**: Follow `inspect -> validate -> preview -> commit` through MCP tools before claiming completion.
 - **No SQLite Writes**: Never write SQLite files directly (`history.sqlite` or any app DB). All updates must flow through MCP commands.
 - **AST Patch Preference**: Prefer AST patch operations over full macro rewrites when an `ecky_ast_*` patch can express the change.
+- **No Junk Threads**: Do not create speculative `TMP`/throwaway threads or versions for debugging when an existing target thread can be inspected or forked. If the agent creates temporary history noise during a failed attempt, it must clean that noise up before stopping.
 
 ## Development Approach
 

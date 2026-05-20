@@ -544,14 +544,6 @@ function mergeRestoredMessagePayload(existing: Message | undefined, incoming: Me
   };
 }
 
-export function mergeRestoredThreadMessagesForTests(
-  existingMessages: Message[],
-  incomingMessages: Message[],
-  activeMessageId: string | null,
-): Message[] {
-  return mergeRestoredThreadMessages(existingMessages, incomingMessages, activeMessageId);
-}
-
 async function fetchDefaultMacro() {
   try {
     const code = await getDefaultMacro();

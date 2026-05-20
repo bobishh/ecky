@@ -2,11 +2,12 @@ use tauri::{AppHandle, State};
 
 use crate::models::{
     AppError, AppResult, AppState, ArtifactBundle, BrepHiddenLineProjectionRequest,
-    ComponentPackage, DesignParams, GeometryBackend, MacroDialect, PathResolver,
+    ClearSketchPreviewDraftRequest, ComponentPackage, DesignParams, GeometryBackend,
+    LoadSketchPreviewDraftRequest, MacroDialect, SaveSketchPreviewDraftRequest,
     SketchAcceptedBrepComponentPackageRequest, SketchBrepCandidateAcceptRequest,
     SketchBrepCandidateAcceptResponse, SketchBrepCandidateRequest, SketchBrepCandidateResponse,
-    SketchDraftRequest, SketchDraftSource, SketchPreviewHullRequest, SketchSuggestionRequest,
-    SketchSuggestionResponse, SketchView,
+    SketchDraftRequest, SketchDraftSource, SketchPreviewDraft, SketchPreviewHullRequest,
+    SketchSuggestionRequest, SketchSuggestionResponse, SketchView,
 };
 use crate::sketch_draft_runtime;
 
@@ -26,27 +27,13 @@ pub async fn suggest_sketch_features(
     Ok(sketch_draft_runtime::suggest_sketch_features(request))
 }
 
-pub async fn generate_sketch_draft_preview_for_app(
-    app: &dyn PathResolver,
-    request: SketchDraftRequest,
-) -> AppResult<(SketchDraftSource, ArtifactBundle)> {
-    sketch_draft_runtime::generate_sketch_draft_preview(request, app)
-}
-
 #[tauri::command]
 #[specta::specta]
 pub async fn generate_sketch_draft_preview(
     request: SketchDraftRequest,
     app: AppHandle,
 ) -> AppResult<(SketchDraftSource, ArtifactBundle)> {
-    generate_sketch_draft_preview_for_app(&app, request).await
-}
-
-pub async fn generate_sketch_preview_hull_for_app(
-    app: &dyn PathResolver,
-    request: SketchPreviewHullRequest,
-) -> AppResult<(SketchDraftSource, ArtifactBundle)> {
-    sketch_draft_runtime::generate_sketch_preview_hull(request, app)
+    sketch_draft_runtime::generate_sketch_draft_preview(request, &app)
 }
 
 #[tauri::command]
@@ -55,7 +42,34 @@ pub async fn generate_sketch_preview_hull(
     request: SketchPreviewHullRequest,
     app: AppHandle,
 ) -> AppResult<(SketchDraftSource, ArtifactBundle)> {
-    generate_sketch_preview_hull_for_app(&app, request).await
+    sketch_draft_runtime::generate_sketch_preview_hull(request, &app)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn save_sketch_preview_draft(
+    request: SaveSketchPreviewDraftRequest,
+    app: AppHandle,
+) -> AppResult<SketchPreviewDraft> {
+    crate::services::sketch_preview_draft::save_sketch_preview_draft(&app, request)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn load_sketch_preview_draft(
+    request: LoadSketchPreviewDraftRequest,
+    app: AppHandle,
+) -> AppResult<Option<SketchPreviewDraft>> {
+    crate::services::sketch_preview_draft::load_sketch_preview_draft(&app, request)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_sketch_preview_draft(
+    request: ClearSketchPreviewDraftRequest,
+    app: AppHandle,
+) -> AppResult<()> {
+    crate::services::sketch_preview_draft::clear_sketch_preview_draft(&app, request)
 }
 
 #[tauri::command]

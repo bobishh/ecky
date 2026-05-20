@@ -1333,11 +1333,21 @@ pub(super) fn eval_geometry_with_bindings(
         "build" => {
             let build = parse_typed_build_expr(&value)?;
             let mut local_bindings = bindings.clone();
+            let mut local_env = env.clone();
             for binding in build.bindings {
-                let geometry = eval_geometry_with_bindings(&binding.expr, env, &local_bindings)?;
+                if let Ok(number) = eval_number(&binding.expr, &local_env) {
+                    local_env.insert(binding.name, ParamValue::Number(number));
+                    continue;
+                }
+                if let Ok(flag) = eval_bool(&binding.expr, &local_env) {
+                    local_env.insert(binding.name, ParamValue::Boolean(flag));
+                    continue;
+                }
+                let geometry =
+                    eval_geometry_with_bindings(&binding.expr, &local_env, &local_bindings)?;
                 local_bindings.insert(binding.name, geometry);
             }
-            eval_geometry_with_bindings(&build.result, env, &local_bindings)
+            eval_geometry_with_bindings(&build.result, &local_env, &local_bindings)
         }
         "compound" => {
             if args.is_empty() {

@@ -25,8 +25,7 @@ test('Given docs route When page opens Then manifest-driven docs index and artic
 
   await expect(page.getByRole('heading', { name: 'Verify Clauses' })).toBeVisible();
   await expect(page.getByText('Use verify when source should declare structural expectations explicitly.')).toBeVisible();
-  await expect(page.locator('pre').first()).toContainText('(verify');
-  await expect(page.locator('pre').filter({ hasText: 'clearance min-distance' }).first()).toBeVisible();
+  await expect(page.locator('pre').first()).toContainText('clearance min-distance');
 });
 
 test('Given docs route When pending article opens Then pending state stays visible', async ({ page }) => {

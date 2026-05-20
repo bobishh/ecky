@@ -703,7 +703,7 @@ export function pickOverlayControls(
   return partScoped.length > 0 ? [...partScoped, ...globalControls] : visibleControls;
 }
 
-export function buildPrimitivePatch(
+function buildPrimitivePatch(
   manifest: ModelManifest | null,
   primitiveId: string,
   nextValue: ParamValue,

@@ -19,6 +19,7 @@
 pub mod bindings;
 pub mod build123d;
 pub mod commands;
+pub mod component_extract;
 pub mod component_package_runtime;
 pub mod context;
 pub mod contracts;

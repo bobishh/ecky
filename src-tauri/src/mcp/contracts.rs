@@ -1574,6 +1574,21 @@ pub struct FinalizeThreadResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteThreadRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteThreadResponse {
+    pub thread_id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VersionRestoreRequest {
     #[serde(flatten)]
     pub identity: AgentIdentityOverride,
