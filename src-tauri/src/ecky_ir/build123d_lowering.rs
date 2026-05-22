@@ -5,7 +5,7 @@ use crate::ecky_core_ir::{
     CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload,
     CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
 };
-use crate::models::{AppResult, ParamValue};
+use crate::models::{AppError, AppResult, ParamValue};
 
 use super::edge_ops::{
     edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
@@ -35,16 +35,19 @@ fn core_selector_payload_to_ir_value(payload: &CoreSelectorPayload) -> AppResult
     match payload {
         CoreSelectorPayload::EdgeAll
         | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTag(_)
         | CoreSelectorPayload::EdgeTargetIds(_) => Ok(Value::Selector(
             crate::ecky_ir::model::IrSelectorExpr::Edge(edge_selector_spec_from_core_payload(
                 payload,
             )?),
         )),
-        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => Ok(
-            Value::Selector(crate::ecky_ir::model::IrSelectorExpr::Face(
-                face_selector_spec_from_core_payload(payload)?,
-            )),
-        ),
+        CoreSelectorPayload::FaceClauses(_)
+        | CoreSelectorPayload::FaceTag(_)
+        | CoreSelectorPayload::FaceTargetIds(_) => Ok(Value::Selector(
+            crate::ecky_ir::model::IrSelectorExpr::Face(face_selector_spec_from_core_payload(
+                payload,
+            )?),
+        )),
     }
 }
 
@@ -119,8 +122,14 @@ mod typed_hole_tests {
 }
 
 pub fn lower_to_build123d(source: &str) -> AppResult<String> {
-    let model = parse_model(source)?;
-    lower_model_to_build123d(&model)
+    match parse_model(source) {
+        Ok(model) => lower_model_to_build123d(&model),
+        Err(_) => {
+            let program = crate::ecky_scheme::compile_to_core_program(source)
+                .map_err(|err| AppError::parse(err.to_string()))?;
+            lower_core_program_to_build123d(&program)
+        }
+    }
 }
 
 pub(crate) fn lower_model_to_build123d(model: &IrModel) -> AppResult<String> {
@@ -299,6 +308,11 @@ fn lower_num_expr(value: &Value, scope: &LoweringScope<'_>) -> AppResult<String>
         return Ok(fmt_f64(n));
     }
     if let Some(sym) = value.as_symbol() {
+        match sym {
+            "pi" => return Ok("math.pi".to_string()),
+            "tau" => return Ok("(2.0 * math.pi)".to_string()),
+            _ => {}
+        }
         if let Some(binding) = scope.resolve_binding(sym) {
             return match binding {
                 LoweredBinding::Number(expr) => Ok(expr.clone()),
@@ -2311,6 +2325,12 @@ impl<'a> ExprLowerer<'a> {
                 for keyword in keywords {
                     items.push(Value::keyword(keyword.name.clone()));
                     items.push(match (keyword.name.as_str(), keyword.selector_payload()) {
+                        ("created-by", None) => {
+                            return Err(validation(format!(
+                                "`{}` does not recognize option `:created-by`.",
+                                core_operation_name_local(op)
+                            )))
+                        }
                         ("edges", None) => {
                             return Err(validation(
                                 "CoreProgram `:edges` keyword requires selector payload.",
@@ -2590,9 +2610,17 @@ impl<'a> ExprLowerer<'a> {
         cad_op: &str,
         expected_kind: LoweredListKind,
         subject: Option<String>,
+        _scope: &LoweringScope<'_>,
     ) -> AppResult<LoweredList> {
         if list.kind == expected_kind {
             return Ok(list);
+        }
+        if expected_kind == LoweredListKind::Point2d && list.kind == LoweredListKind::Pair {
+            return Ok(LoweredList::new(
+                list.items,
+                LoweredListKind::Point2d,
+                list.source_op,
+            ));
         }
 
         let suffix = list.source_suffix();
@@ -2631,6 +2659,7 @@ impl<'a> ExprLowerer<'a> {
                     cad_op,
                     expected_kind,
                     Some(format!("symbol `{}`", sym)),
+                    scope,
                 ),
                 Some(binding) => Err(unsupported(format!(
                     "CAD op `{}` expected {} but symbol `{}` resolved to {}.",
@@ -2644,7 +2673,7 @@ impl<'a> ExprLowerer<'a> {
         }
 
         if let Some(list) = self.try_materialize_list_binding(value, scope)? {
-            return self.require_list_kind(list, cad_op, expected_kind, None);
+            return self.require_list_kind(list, cad_op, expected_kind, None, scope);
         }
 
         if let Some(items) = value.to_vec() {

@@ -259,7 +259,7 @@ impl FaceSelector {
     }
 }
 
-pub(super) fn parse_edge_selector_value(selector_str: &str) -> AppResult<EdgeSelector> {
+pub(crate) fn parse_edge_selector_value(selector_str: &str) -> AppResult<EdgeSelector> {
     if let Some(target_ids) = exact_edge_target_ids_from_selector_str(selector_str)? {
         return Ok(EdgeSelector::TargetIds(target_ids));
     }
@@ -407,6 +407,12 @@ pub(crate) fn edge_selector_spec_from_core_payload(
         CoreSelectorPayload::EdgeTargetIds(target_ids) => {
             parse_edge_selector_spec(&format!("target-ids:{}", target_ids.join("|")))
         }
+        CoreSelectorPayload::EdgeTag(tag_name) => {
+            parse_edge_selector_spec(&format!("target-ids:tag:{tag_name}"))
+        }
+        CoreSelectorPayload::FaceTag(tag_name) => Err(validation(format!(
+            "Expected edge selector payload, got face tag `{tag_name}`.",
+        ))),
         CoreSelectorPayload::FaceTargetIds(target_ids) => Err(validation(format!(
             "Expected edge selector payload, got face target ids {:?}.",
             target_ids
@@ -428,9 +434,15 @@ pub(crate) fn face_selector_spec_from_core_payload(
         CoreSelectorPayload::FaceTargetIds(target_ids) => {
             parse_face_selector_spec(&format!("target-ids:{}", target_ids.join("|")))
         }
+        CoreSelectorPayload::FaceTag(tag_name) => {
+            parse_face_selector_spec(&format!("target-ids:tag:{tag_name}"))
+        }
         CoreSelectorPayload::EdgeAll => Err(validation(
             "Expected face selector payload, got edge selector `all`.",
         )),
+        CoreSelectorPayload::EdgeTag(tag_name) => Err(validation(format!(
+            "Expected face selector payload, got edge tag `{tag_name}`.",
+        ))),
         CoreSelectorPayload::EdgeClauses(clauses) => Err(validation(format!(
             "Expected face selector payload, got edge selector clauses {:?}.",
             clauses

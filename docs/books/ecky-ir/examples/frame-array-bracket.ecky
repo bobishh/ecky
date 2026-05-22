@@ -1,0 +1,30 @@
+(model
+  (part bracket
+    (build
+      (shape rail
+        (bezier-path ((-18 0 4) (-8 7 9) (8 -7 12) (18 0 16))))
+      (shape rib
+        (sweep (circle 1.1) rail))
+      (shape end-frame
+        (path-frame rail :at end :up (0 0 1)))
+      (shape pad
+        (extrude (rounded-rect 12 8 1.5) 3))
+      (shape placed-pad
+        (place end-frame pad :offset (0 0 -1.5) :rotate (0 0 18)))
+      (shape base
+        (difference
+          (extrude (rounded-rect 48 24 3) 4)
+          (linear-array 3 14 0 0
+            (translate -14 0 -2 (cylinder 2.1 10)))))
+      (shape locator-posts
+        (grid-array 2 3 16 10
+          (translate -16 -5 4 (cylinder 1.2 8))))
+      (shape fan-stops
+        (clip-box
+          (radial-array 6 60 11
+            (translate 0 0 4 (cone 1.8 0.8 5)))
+          :x (-24 24)
+          :y (-12 18)
+          :z (0 12)))
+      (result
+        (union base rib placed-pad locator-posts fan-stops)))))

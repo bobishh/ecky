@@ -5,19 +5,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::ecky_core_ir::{CorePreviewViewDecl, CoreSelectorTagDecl};
 use crate::ecky_scheme::compiler::try_compile_to_core_program;
 use crate::freecad::resolve_resource_path;
 use crate::models::{
     validate_model_runtime_bundle, AppError, AppResult, ArtifactBundle, DesignParams,
     DocumentMetadata, EnrichmentStatus, ExportArtifact, GeometryBackend, ManifestBounds,
     ManifestEnrichmentState, ModelManifest, ModelSourceKind, PartBinding, PathResolver,
-    SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerAsset, ViewerAssetFormat,
-    ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
+    PreviewView, PreviewViewOffset, SelectionTarget, SelectionTargetKind, SourceLanguage,
+    ViewerAsset, ViewerAssetFormat, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
+    MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
     durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
-    stable_edge_target_id, stable_face_target_id, topology_target_aliases, viewer_target_alias_ids,
+    resolve_tagged_anchors, stable_edge_target_id, stable_face_target_id, topology_target_aliases,
+    viewer_target_alias_ids,
 };
 
 const RUNNER_RESOURCE_PATH: &str = "server/build123d_runner.py";
@@ -213,9 +216,11 @@ pub fn render_model_with_sources(
         &report,
         &part_topology_ids.root_node_ids,
         &part_topology_ids.stable_node_keys,
+        &part_topology_ids.selector_tags,
+        &part_topology_ids.preview_views,
         source_language,
         Some(path_to_string(&authored_source_path)?),
-    );
+    )?;
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
     write_manifest(&manifest_path, &manifest)?;
 
@@ -441,9 +446,12 @@ fn build_manifest(
         report,
         part_root_node_ids,
         &part_stable_node_keys,
+        &[],
+        &[],
         source_language,
         source_path,
     )
+    .expect("build manifest")
 }
 
 fn build_manifest_with_stable_node_keys(
@@ -451,9 +459,11 @@ fn build_manifest_with_stable_node_keys(
     report: &RunnerReport,
     part_root_node_ids: &HashMap<String, u64>,
     part_stable_node_keys: &HashMap<String, String>,
+    selector_tags: &[CoreSelectorTagDecl],
+    preview_view_decls: &[CorePreviewViewDecl],
     source_language: SourceLanguage,
     source_path: Option<String>,
-) -> ModelManifest {
+) -> AppResult<ModelManifest> {
     let mut parts = Vec::new();
     let mut selection_targets = Vec::new();
     let mut stable_edge_target_counts = HashMap::<String, usize>::new();
@@ -604,7 +614,19 @@ fn build_manifest_with_stable_node_keys(
         let _ = index; // suppress unused warning
     }
 
-    ModelManifest {
+    let tagged_anchor_edge_targets =
+        tagged_anchor_edge_targets_from_report(report, &selection_targets);
+    let tagged_anchor_face_targets =
+        tagged_anchor_face_targets_from_report(report, &selection_targets);
+    let tagged_anchors = resolve_tagged_anchors(
+        selector_tags,
+        &selection_targets,
+        &tagged_anchor_edge_targets,
+        &tagged_anchor_face_targets,
+    )?;
+    let preview_views = preview_views_from_decls(preview_view_decls);
+
+    Ok(ModelManifest {
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -634,9 +656,11 @@ fn build_manifest_with_stable_node_keys(
         control_primitives: Vec::new(),
         control_relations: Vec::new(),
         control_views: Vec::new(),
+        preview_views,
         advisories: Vec::new(),
         selection_targets,
         measurement_annotations: Vec::new(),
+        tagged_anchors,
         feature_graph: None,
         correspondence_graph: None,
         warnings: report.warnings.clone(),
@@ -644,7 +668,27 @@ fn build_manifest_with_stable_node_keys(
             status: EnrichmentStatus::None,
             proposals: Vec::new(),
         },
-    }
+    })
+}
+
+fn preview_views_from_decls(preview_view_decls: &[CorePreviewViewDecl]) -> Vec<PreviewView> {
+    preview_view_decls
+        .iter()
+        .map(|view| PreviewView {
+            view_id: format!("preview-{}", stable_part_id(&view.name)),
+            label: view.name.clone(),
+            offsets: view
+                .part_offsets
+                .iter()
+                .map(|offset| PreviewViewOffset {
+                    part_id: stable_part_id(&offset.part_key),
+                    dx: offset.dx,
+                    dy: offset.dy,
+                    dz: offset.dz,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn build_viewer_assets(parts: &[PartBinding]) -> Vec<ViewerAsset> {
@@ -667,6 +711,101 @@ fn build_viewer_assets(parts: &[PartBinding]) -> Vec<ViewerAsset> {
                 .collect()
         })
         .collect()
+}
+
+fn tagged_anchor_edge_targets_from_report(
+    report: &RunnerReport,
+    selection_targets: &[SelectionTarget],
+) -> Vec<ViewerEdgeTarget> {
+    let selection_targets_by_id = selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Edge)
+        .flat_map(|target| {
+            target
+                .target_id
+                .iter()
+                .map(String::as_str)
+                .chain(target.durable_target_id.iter().map(String::as_str))
+                .chain(target.canonical_target_id.iter().map(String::as_str))
+                .chain(target.alias_ids.iter().map(String::as_str))
+                .map(move |target_id| (target_id, target))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut edge_targets = Vec::new();
+
+    for object in &report.objects {
+        for edge in object.edges.iter().filter(|edge| valid_runner_edge(edge)) {
+            let target_id = runner_edge_target_id(&object.object_name, edge);
+            let Some(selection_target) = selection_targets_by_id.get(target_id.as_str()) else {
+                continue;
+            };
+            let (Some(start), Some(end)) = (edge.start.as_ref(), edge.end.as_ref()) else {
+                continue;
+            };
+            edge_targets.push(ViewerEdgeTarget {
+                target_id: preferred_public_topology_target_id(selection_target, &target_id),
+                durable_target_id: selection_target.durable_target_id.clone(),
+                canonical_target_id: Some(target_id.clone()),
+                alias_ids: viewer_target_alias_ids(selection_target, &target_id),
+                part_id: selection_target.part_id.clone(),
+                viewer_node_id: selection_target.viewer_node_id.clone(),
+                label: runner_edge_label(&object.object_name, edge),
+                editable: selection_target.editable,
+                start: runner_point_to_viewer(start),
+                end: runner_point_to_viewer(end),
+            });
+        }
+    }
+
+    edge_targets
+}
+
+fn tagged_anchor_face_targets_from_report(
+    report: &RunnerReport,
+    selection_targets: &[SelectionTarget],
+) -> Vec<ViewerFaceTarget> {
+    let selection_targets_by_id = selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Face)
+        .flat_map(|target| {
+            target
+                .target_id
+                .iter()
+                .map(String::as_str)
+                .chain(target.durable_target_id.iter().map(String::as_str))
+                .chain(target.canonical_target_id.iter().map(String::as_str))
+                .chain(target.alias_ids.iter().map(String::as_str))
+                .map(move |target_id| (target_id, target))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut face_targets = Vec::new();
+
+    for object in &report.objects {
+        for face in object.faces.iter().filter(|face| valid_runner_face(face)) {
+            let target_id = runner_face_target_id(&object.object_name, face);
+            let Some(selection_target) = selection_targets_by_id.get(target_id.as_str()) else {
+                continue;
+            };
+            let Some(center) = face.center.as_ref() else {
+                continue;
+            };
+            face_targets.push(ViewerFaceTarget {
+                target_id: preferred_public_topology_target_id(selection_target, &target_id),
+                durable_target_id: selection_target.durable_target_id.clone(),
+                canonical_target_id: Some(target_id.clone()),
+                alias_ids: viewer_target_alias_ids(selection_target, &target_id),
+                part_id: selection_target.part_id.clone(),
+                viewer_node_id: selection_target.viewer_node_id.clone(),
+                label: runner_face_label(&object.object_name, face),
+                editable: selection_target.editable,
+                center: runner_point_to_viewer(center),
+                normal: face.normal.as_ref().map(runner_point_to_array),
+                area: face.area,
+            });
+        }
+    }
+
+    face_targets
 }
 
 fn edge_targets_from_report(
@@ -801,6 +940,8 @@ fn valid_runner_face(face: &RunnerFaceTarget) -> bool {
 struct AuthoredPartTopologyIds {
     root_node_ids: HashMap<String, u64>,
     stable_node_keys: HashMap<String, String>,
+    selector_tags: Vec<CoreSelectorTagDecl>,
+    preview_views: Vec<CorePreviewViewDecl>,
 }
 
 fn authored_part_topology_ids(
@@ -830,6 +971,8 @@ fn authored_part_topology_ids(
                     .map(|stable_node_key| (part.key.clone(), stable_node_key))
             })
             .collect(),
+        selector_tags: program.selector_tags.clone(),
+        preview_views: program.preview_views.clone(),
     })
 }
 
@@ -1007,6 +1150,10 @@ fn runner_point_to_viewer(point: &RunnerEdgePoint) -> ViewerEdgePoint {
     }
 }
 
+fn runner_point_to_array(point: &RunnerEdgePoint) -> [f64; 3] {
+    [point.x, point.y, point.z]
+}
+
 fn write_manifest(path: &Path, manifest: &ModelManifest) -> AppResult<()> {
     let data =
         serde_json::to_string_pretty(manifest).map_err(|e| AppError::persistence(e.to_string()))?;
@@ -1036,6 +1183,7 @@ fn path_to_string(path: &Path) -> AppResult<String> {
 mod tests {
     use super::*;
     use crate::models::EngineKind;
+    use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
     struct TestResolver {
@@ -1092,6 +1240,23 @@ mod tests {
                 _ => None,
             }
         }
+    }
+
+    fn file_sha256(path: &Path) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(std::fs::read(path).expect("read file"));
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn step_data_sha256(path: &Path) -> String {
+        let step = std::fs::read_to_string(path).expect("read step");
+        let data = step
+            .split_once("DATA;\n")
+            .map(|(_, tail)| tail)
+            .expect("step DATA section");
+        let mut hasher = Sha256::new();
+        hasher.update(data.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 
     #[test]
@@ -1422,6 +1587,211 @@ _ecky_parts = [("body", _body)]
     }
 
     #[test]
+    fn build_manifest_carries_preview_views_as_display_only_offsets() {
+        let report = RunnerReport {
+            document_name: "Doc".to_string(),
+            document_label: "Doc".to_string(),
+            warnings: Vec::new(),
+            objects: vec![
+                RunnerObject {
+                    object_name: "body".to_string(),
+                    label: "body".to_string(),
+                    export_path: "/tmp/body.stl".to_string(),
+                    bounds: None,
+                    volume: None,
+                    area: None,
+                    edges: Vec::new(),
+                    faces: Vec::new(),
+                },
+                RunnerObject {
+                    object_name: "lid".to_string(),
+                    label: "lid".to_string(),
+                    export_path: "/tmp/lid.stl".to_string(),
+                    bounds: None,
+                    volume: None,
+                    area: None,
+                    edges: Vec::new(),
+                    faces: Vec::new(),
+                },
+            ],
+        };
+
+        let manifest = build_manifest_with_stable_node_keys(
+            "model",
+            &report,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &[CorePreviewViewDecl {
+                name: "exploded".to_string(),
+                part_offsets: vec![crate::ecky_core_ir::CorePreviewPartOffset {
+                    part_key: "lid".to_string(),
+                    dx: 0.0,
+                    dy: 0.0,
+                    dz: 40.0,
+                }],
+            }],
+            SourceLanguage::EckyIrV0,
+            Some("/tmp/source.ecky".to_string()),
+        )
+        .expect("manifest");
+
+        assert_eq!(manifest.preview_views.len(), 1);
+        assert_eq!(manifest.preview_views[0].view_id, "preview-exploded");
+        assert_eq!(manifest.preview_views[0].offsets[0].part_id, "lid");
+        assert_eq!(manifest.preview_views[0].offsets[0].dz, 40.0);
+    }
+
+    #[test]
+    fn build_manifest_records_exact_face_tagged_anchor_ids() {
+        let report = RunnerReport {
+            document_name: "Doc".to_string(),
+            document_label: "Doc".to_string(),
+            warnings: Vec::new(),
+            objects: vec![RunnerObject {
+                object_name: "body".to_string(),
+                label: "body".to_string(),
+                export_path: "/tmp/body.stl".to_string(),
+                bounds: None,
+                volume: None,
+                area: None,
+                edges: Vec::new(),
+                faces: vec![RunnerFaceTarget {
+                    target_id: "body:face:5:0-0-10:100".to_string(),
+                    face_index: Some(5),
+                    label: "body.Face6".to_string(),
+                    center: Some(RunnerEdgePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 10.0,
+                    }),
+                    normal: Some(RunnerEdgePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 1.0,
+                    }),
+                    area: Some(100.0),
+                }],
+            }],
+        };
+
+        let manifest = build_manifest_with_stable_node_keys(
+            "model",
+            &report,
+            &HashMap::from([("body".to_string(), 42_u64)]),
+            &HashMap::new(),
+            &[CoreSelectorTagDecl {
+                name: "mounting_top".to_string(),
+                kind: crate::ecky_core_ir::CoreSelectorTagKind::Face,
+                authored_selector: "target-id:body:face:5:0-0-10:100".to_string(),
+                target: "body".to_string(),
+            }],
+            &[],
+            SourceLanguage::EckyIrV0,
+            Some("/tmp/source.ecky".to_string()),
+        )
+        .expect("manifest");
+
+        let anchor = manifest
+            .tagged_anchors
+            .get("mounting_top")
+            .expect("tagged anchor");
+        assert_eq!(anchor.target_ids, vec!["body:face:0-0-10:100".to_string()]);
+        assert_eq!(
+            anchor.durable_target_ids,
+            vec!["body:node:42:face:0-0-10:100".to_string()]
+        );
+        assert_eq!(
+            anchor.canonical_target_ids,
+            vec!["body:face:5:0-0-10:100".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_manifest_records_clause_face_tagged_anchor_ids() {
+        let report = RunnerReport {
+            document_name: "Doc".to_string(),
+            document_label: "Doc".to_string(),
+            warnings: Vec::new(),
+            objects: vec![RunnerObject {
+                object_name: "body".to_string(),
+                label: "body".to_string(),
+                export_path: "/tmp/body.stl".to_string(),
+                bounds: None,
+                volume: None,
+                area: None,
+                edges: Vec::new(),
+                faces: vec![
+                    RunnerFaceTarget {
+                        target_id: "body:face:2:0-0-0:100".to_string(),
+                        face_index: Some(2),
+                        label: "body.Face3".to_string(),
+                        center: Some(RunnerEdgePoint {
+                            x: 0.0,
+                            y: 0.0,
+                            z: 0.0,
+                        }),
+                        normal: Some(RunnerEdgePoint {
+                            x: 0.0,
+                            y: 0.0,
+                            z: -1.0,
+                        }),
+                        area: Some(100.0),
+                    },
+                    RunnerFaceTarget {
+                        target_id: "body:face:5:0-0-10:100".to_string(),
+                        face_index: Some(5),
+                        label: "body.Face6".to_string(),
+                        center: Some(RunnerEdgePoint {
+                            x: 0.0,
+                            y: 0.0,
+                            z: 10.0,
+                        }),
+                        normal: Some(RunnerEdgePoint {
+                            x: 0.0,
+                            y: 0.0,
+                            z: 1.0,
+                        }),
+                        area: Some(100.0),
+                    },
+                ],
+            }],
+        };
+
+        let manifest = build_manifest_with_stable_node_keys(
+            "model",
+            &report,
+            &HashMap::from([("body".to_string(), 42_u64)]),
+            &HashMap::new(),
+            &[CoreSelectorTagDecl {
+                name: "mounting_top".to_string(),
+                kind: crate::ecky_core_ir::CoreSelectorTagKind::Face,
+                authored_selector: "top".to_string(),
+                target: "body".to_string(),
+            }],
+            &[],
+            SourceLanguage::EckyIrV0,
+            Some("/tmp/source.ecky".to_string()),
+        )
+        .expect("manifest");
+
+        let anchor = manifest
+            .tagged_anchors
+            .get("mounting_top")
+            .expect("tagged anchor");
+        assert_eq!(anchor.authored_selector, "top");
+        assert_eq!(anchor.target_ids, vec!["body:face:0-0-10:100".to_string()]);
+        assert_eq!(
+            anchor.durable_target_ids,
+            vec!["body:node:42:face:0-0-10:100".to_string()]
+        );
+        assert_eq!(
+            anchor.canonical_target_ids,
+            vec!["body:face:5:0-0-10:100".to_string()]
+        );
+    }
+
+    #[test]
     fn build_manifest_prefers_stable_source_node_key_for_durable_topology_targets() {
         let report = RunnerReport {
             document_name: "Doc".to_string(),
@@ -1473,9 +1843,12 @@ _ecky_parts = [("body", _body)]
             &report,
             &HashMap::from([("body".to_string(), 42_u64)]),
             &HashMap::from([("body".to_string(), "sha256:source-span".to_string())]),
+            &[],
+            &[],
             SourceLanguage::EckyIrV0,
             Some("/tmp/source.ecky".to_string()),
-        );
+        )
+        .expect("manifest");
 
         let edge_target = manifest
             .selection_targets
@@ -1854,6 +2227,63 @@ _ecky_parts = [("body", _body)]
         )
         .expect("parse manifest");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
+    }
+
+    #[test]
+    fn render_model_with_sources_keeps_export_digests_identical_with_preview_views() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-build123d-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = RepoResourceResolver { root };
+        let base_source = r#"(model
+            (part body
+              (box 20 20 10))
+            (part lid
+              (translate 0 0 10
+                (box 20 20 2))))"#;
+        let viewed_source = r#"(model
+            (part body
+              (box 20 20 10))
+            (part lid
+              (translate 0 0 10
+                (box 20 20 2)))
+            (view exploded
+              (offset-part lid 0 0 40)))"#;
+        let executable = crate::ecky_ir::lower_to_build123d(base_source).expect("lower");
+
+        let base_bundle = render_model_with_sources(
+            &executable,
+            Some(base_source),
+            &BTreeMap::new(),
+            &resolver,
+            SourceLanguage::EckyIrV0,
+        )
+        .expect("render base");
+        let viewed_bundle = render_model_with_sources(
+            &executable,
+            Some(viewed_source),
+            &BTreeMap::new(),
+            &resolver,
+            SourceLanguage::EckyIrV0,
+        )
+        .expect("render viewed");
+
+        let base_manifest: crate::models::ModelManifest = serde_json::from_str(
+            &std::fs::read_to_string(&base_bundle.manifest_path).expect("read base manifest"),
+        )
+        .expect("parse base manifest");
+        let viewed_manifest: crate::models::ModelManifest = serde_json::from_str(
+            &std::fs::read_to_string(&viewed_bundle.manifest_path).expect("read viewed manifest"),
+        )
+        .expect("parse viewed manifest");
+
+        let base_step = Path::new(&base_bundle.export_artifacts[0].path);
+        let viewed_step = Path::new(&viewed_bundle.export_artifacts[0].path);
+        assert_ne!(file_sha256(base_step), file_sha256(viewed_step));
+        assert_eq!(step_data_sha256(base_step), step_data_sha256(viewed_step));
+        assert!(base_manifest.preview_views.is_empty());
+        assert_eq!(viewed_manifest.preview_views.len(), 1);
+        assert_eq!(viewed_manifest.preview_views[0].view_id, "preview-exploded");
     }
 
     #[test]

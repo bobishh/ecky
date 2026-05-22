@@ -21,6 +21,7 @@ function sampleMessage(overrides: Partial<Message>): Message {
     status: overrides.status ?? 'success',
     output: overrides.output ?? null,
     usage: overrides.usage ?? null,
+    structuralVerification: overrides.structuralVerification ?? null,
     artifactBundle: overrides.artifactBundle ?? null,
     modelManifest: overrides.modelManifest ?? null,
     agentOrigin: overrides.agentOrigin ?? null,

@@ -4,15 +4,50 @@ use super::{
     CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp,
     CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CorePathOp,
     CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSelectorPayload, CoreSurfaceOp,
-    CoreTransformOp, CoreValueKind, NodeId, SourceSpan,
+    CoreTransformOp, CoreValueKind, NodeId, ParamId, SourceSpan,
 };
 
 #[derive(Debug, Clone, Default)]
 struct KindEnv {
     locals: HashMap<String, CoreValueKind>,
     local_list_items: HashMap<String, CoreValueKind>,
+    local_dimensions: HashMap<String, UnitDimension>,
     nodes: HashMap<NodeId, CoreValueKind>,
     node_list_items: HashMap<NodeId, CoreValueKind>,
+    node_dimensions: HashMap<NodeId, UnitDimension>,
+    param_dimensions: HashMap<ParamId, UnitDimension>,
+    literal_dimensions: HashMap<SourceSpan, UnitDimension>,
+    unit_mode: UnitCheckMode,
+}
+
+impl KindEnv {
+    fn for_program(
+        program: &CoreProgram,
+        unit_mode: UnitCheckMode,
+        literal_dimensions: &HashMap<SourceSpan, UnitDimension>,
+    ) -> Self {
+        let param_dimensions = program
+            .parameters
+            .iter()
+            .filter_map(|param| {
+                unit_dimension_from_unit_name(param.constraints.unit.as_deref())
+                    .map(|dimension| (param.id, dimension))
+            })
+            .collect();
+        Self {
+            param_dimensions,
+            literal_dimensions: literal_dimensions.clone(),
+            unit_mode,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum UnitCheckMode {
+    #[default]
+    Permissive,
+    Strict,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,38 +72,213 @@ struct ArgSpec {
     expected: ExpectedKind,
 }
 
-pub fn verify_core_program(program: &CoreProgram) -> CoreResult<()> {
-    let env = KindEnv::default();
-    for part in &program.parts {
-        verify_node(&part.root, &env)?;
-    }
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnitDimension {
+    Length,
+    Angle,
+    Scalar,
 }
 
-fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
+#[derive(Debug, Clone, Copy)]
+enum DimensionSlots {
+    Fixed(&'static [Option<UnitDimension>]),
+    NumericPrefixExceptTrailing {
+        dimension: UnitDimension,
+        trailing_args: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpDimensionSignature {
+    slots: DimensionSlots,
+}
+
+const NO_DIMS: &[Option<UnitDimension>] = &[];
+const BOX_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+];
+const ONE_LENGTH_DIM: &[Option<UnitDimension>] = &[Some(UnitDimension::Length)];
+const TWO_LENGTH_DIMS: &[Option<UnitDimension>] =
+    &[Some(UnitDimension::Length), Some(UnitDimension::Length)];
+const CYLINDER_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Scalar),
+];
+const CIRCLE_DIMS: &[Option<UnitDimension>] =
+    &[Some(UnitDimension::Length), Some(UnitDimension::Scalar)];
+const CONE_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Scalar),
+];
+const ROUNDED_RECTANGLE_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+];
+const ROUNDED_POLYGON_DIMS: &[Option<UnitDimension>] = &[
+    None,
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Scalar),
+];
+const TRANSLATE_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    None,
+];
+const ROTATE_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Angle),
+    Some(UnitDimension::Angle),
+    Some(UnitDimension::Angle),
+    None,
+];
+const MIRROR_DIMS: &[Option<UnitDimension>] = &[None, Some(UnitDimension::Length), None];
+const EXTRUDE_DIMS: &[Option<UnitDimension>] = &[None, Some(UnitDimension::Length)];
+const REVOLVE_DIMS: &[Option<UnitDimension>] = &[
+    None,
+    Some(UnitDimension::Angle),
+    Some(UnitDimension::Scalar),
+];
+const LOFT_DIMS: &[Option<UnitDimension>] = &[Some(UnitDimension::Length)];
+const SHELL_DIMS: &[Option<UnitDimension>] = &[Some(UnitDimension::Length), None];
+const OFFSET_DIMS: &[Option<UnitDimension>] = &[Some(UnitDimension::Length), None];
+const TAPER_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Scalar),
+    Some(UnitDimension::Scalar),
+    None,
+];
+const TWIST_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Angle),
+    None,
+];
+const LINEAR_ARRAY_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Scalar),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    None,
+];
+const RADIAL_ARRAY_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Scalar),
+    Some(UnitDimension::Angle),
+    Some(UnitDimension::Length),
+    None,
+];
+const GRID_ARRAY_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Scalar),
+    Some(UnitDimension::Scalar),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    None,
+];
+const ARC_ARRAY_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Scalar),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Angle),
+    Some(UnitDimension::Angle),
+    None,
+];
+
+pub fn verify_core_program(program: &CoreProgram) -> CoreResult<()> {
+    verify_core_program_with_unit_mode(program, UnitCheckMode::Permissive)
+}
+
+pub fn verify_core_program_strict_units(program: &CoreProgram) -> CoreResult<()> {
+    verify_core_program_with_unit_mode(program, UnitCheckMode::Strict)
+}
+
+pub(crate) fn verify_core_program_with_literal_dimensions(
+    program: &CoreProgram,
+    literal_dimensions: &HashMap<SourceSpan, String>,
+    strict_units: bool,
+) -> CoreResult<Vec<CompilerError>> {
+    let literal_dimensions = literal_dimensions
+        .iter()
+        .filter_map(|(span, dimension)| {
+            unit_dimension_from_unit_name(Some(dimension.as_str())).map(|kind| (*span, kind))
+        })
+        .collect::<HashMap<_, _>>();
+    verify_core_program_with_unit_mode_and_literal_dimensions(
+        program,
+        if strict_units {
+            UnitCheckMode::Strict
+        } else {
+            UnitCheckMode::Permissive
+        },
+        &literal_dimensions,
+    )
+}
+
+fn verify_core_program_with_unit_mode(
+    program: &CoreProgram,
+    unit_mode: UnitCheckMode,
+) -> CoreResult<()> {
+    verify_core_program_with_unit_mode_and_literal_dimensions(program, unit_mode, &HashMap::new())
+        .map(|_| ())
+}
+
+fn verify_core_program_with_unit_mode_and_literal_dimensions(
+    program: &CoreProgram,
+    unit_mode: UnitCheckMode,
+    literal_dimensions: &HashMap<SourceSpan, UnitDimension>,
+) -> CoreResult<Vec<CompilerError>> {
+    let env = KindEnv::for_program(program, unit_mode, literal_dimensions);
+    let mut warnings = Vec::new();
+    for part in &program.parts {
+        verify_node(&part.root, &env, &mut warnings)?;
+    }
+    Ok(warnings)
+}
+
+fn verify_node(
+    node: &CoreNode,
+    env: &KindEnv,
+    warnings: &mut Vec<CompilerError>,
+) -> CoreResult<()> {
     match &node.kind {
         CoreNodeKind::Literal(literal) => verify_literal_node(node, literal),
         CoreNodeKind::Reference(_) => Ok(()),
         CoreNodeKind::Build { bindings, result } => {
             let mut nested = env.clone();
             for binding in bindings {
-                verify_node(&binding.value, &nested)?;
+                verify_node(&binding.value, &nested, warnings)?;
                 nested
                     .nodes
                     .insert(binding.value.id, effective_kind(&binding.value, &nested));
+                if let Some(dimension) = effective_dimension(&binding.value, &nested) {
+                    nested.node_dimensions.insert(binding.value.id, dimension);
+                } else {
+                    nested.node_dimensions.remove(&binding.value.id);
+                }
                 if let Some(item_kind) = list_item_kind(&binding.value, &nested) {
                     nested.node_list_items.insert(binding.value.id, item_kind);
                 }
             }
-            verify_node(result, &nested)
+            verify_node(result, &nested, warnings)
         }
         CoreNodeKind::Let { bindings, body } => {
             let mut nested = env.clone();
             for binding in bindings {
-                verify_node(&binding.value, &nested)?;
+                verify_node(&binding.value, &nested, warnings)?;
                 let kind = effective_kind(&binding.value, &nested);
                 nested.locals.insert(binding.name.clone(), kind);
                 nested.nodes.insert(binding.value.id, kind);
+                if let Some(dimension) = effective_dimension(&binding.value, &nested) {
+                    nested
+                        .local_dimensions
+                        .insert(binding.name.clone(), dimension);
+                    nested.node_dimensions.insert(binding.value.id, dimension);
+                } else {
+                    nested.local_dimensions.remove(&binding.name);
+                    nested.node_dimensions.remove(&binding.value.id);
+                }
                 if let Some(item_kind) = list_item_kind(&binding.value, &nested) {
                     nested
                         .local_list_items
@@ -78,17 +288,17 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
                     nested.local_list_items.remove(&binding.name);
                 }
             }
-            verify_node(body, &nested)
+            verify_node(body, &nested, warnings)
         }
         CoreNodeKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            verify_node(condition, env)?;
+            verify_node(condition, env, warnings)?;
             verify_expected_node("if", 0, "condition", ExpectedKind::Boolean, condition, env)?;
-            verify_node(then_branch, env)?;
-            verify_node(else_branch, env)?;
+            verify_node(then_branch, env, warnings)?;
+            verify_node(else_branch, env, warnings)?;
             let then_kind = effective_kind(then_branch, env);
             let else_kind = effective_kind(else_branch, env);
             if kinds_are_known_and_distinct(then_kind, else_kind) {
@@ -107,16 +317,16 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
         }
         CoreNodeKind::Call { op, args, keywords } => {
             for arg in args {
-                verify_node(arg, env)?;
+                verify_node(arg, env, warnings)?;
             }
             for keyword in keywords {
-                verify_node(keyword.source_node(), env)?;
+                verify_node(keyword.source_node(), env, warnings)?;
             }
-            verify_call(op, args, keywords, node, env)
+            verify_call(op, args, keywords, node, env, warnings)
         }
         CoreNodeKind::Range { start, end } => {
-            verify_node(start, env)?;
-            verify_node(end, env)?;
+            verify_node(start, env, warnings)?;
+            verify_node(end, env, warnings)?;
             verify_expected_node("range", 0, "start", ExpectedKind::Number, start, env)?;
             verify_expected_node("range", 1, "end", ExpectedKind::Number, end, env)
         }
@@ -139,7 +349,7 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
             }
             let mut nested = env.clone();
             for (index, source) in sources.iter().enumerate() {
-                verify_node(source, env)?;
+                verify_node(source, env, warnings)?;
                 verify_expected_node("map", index, "source", ExpectedKind::List, source, env)?;
                 if let Some(item_kind) = list_item_kind(source, env) {
                     nested.locals.insert(params[index].clone(), item_kind);
@@ -148,18 +358,18 @@ fn verify_node(node: &CoreNode, env: &KindEnv) -> CoreResult<()> {
                     nested.local_list_items.remove(&params[index]);
                 }
             }
-            verify_node(body, &nested)
+            verify_node(body, &nested, warnings)
         }
         CoreNodeKind::Apply { op, args, list } => {
             for arg in args {
-                verify_node(arg, env)?;
+                verify_node(arg, env, warnings)?;
             }
-            verify_node(list, env)?;
+            verify_node(list, env, warnings)?;
             verify_apply(op, args, list, node, env)
         }
         CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
             for item in items {
-                verify_node(item, env)?;
+                verify_node(item, env, warnings)?;
             }
             if matches!(
                 node.value_kind,
@@ -214,6 +424,7 @@ fn verify_call(
     keywords: &[CoreKeywordArg],
     node: &CoreNode,
     env: &KindEnv,
+    warnings: &mut Vec<CompilerError>,
 ) -> CoreResult<()> {
     let name = operation_name(op);
     match op {
@@ -234,7 +445,8 @@ fn verify_call(
         }
         CoreOperation::Custom(_) => Ok(()),
     }?;
-    verify_keywords(&name, keywords, env)
+    verify_keywords(&name, keywords, env)?;
+    verify_call_dimensions(op, &name, args, env, warnings)
 }
 
 fn verify_typed_hole(
@@ -1194,6 +1406,175 @@ fn effective_kind(node: &CoreNode, env: &KindEnv) -> CoreValueKind {
     }
 }
 
+fn effective_dimension(node: &CoreNode, env: &KindEnv) -> Option<UnitDimension> {
+    match &node.kind {
+        CoreNodeKind::Literal(CoreLiteral::Number(_)) => node.span.and_then(|span| {
+            env.literal_dimensions.get(&span).copied().or_else(|| {
+                env.literal_dimensions
+                    .get(&SourceSpan::new(None, span.start, span.end))
+                    .copied()
+            })
+        }),
+        CoreNodeKind::Reference(CoreReference::Parameter(id)) => {
+            env.param_dimensions.get(id).copied()
+        }
+        CoreNodeKind::Reference(CoreReference::Local(name)) => {
+            env.local_dimensions.get(name).copied()
+        }
+        CoreNodeKind::Reference(CoreReference::Node(id)) => env.node_dimensions.get(id).copied(),
+        CoreNodeKind::Let { bindings, body } => {
+            let nested = env_with_let_bindings(bindings, env);
+            effective_dimension(body, &nested)
+        }
+        CoreNodeKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_dimension = effective_dimension(then_branch, env)?;
+            let else_dimension = effective_dimension(else_branch, env)?;
+            (then_dimension == else_dimension).then_some(then_dimension)
+        }
+        _ => None,
+    }
+}
+
+fn unit_dimension_from_unit_name(unit: Option<&str>) -> Option<UnitDimension> {
+    let unit = unit?.to_ascii_lowercase();
+    match unit.as_str() {
+        "length" | "mm" | "millimeter" | "millimeters" | "cm" | "centimeter" | "centimeters"
+        | "m" | "meter" | "meters" | "in" | "inch" | "inches" => Some(UnitDimension::Length),
+        "angle" | "deg" | "degree" | "degrees" | "rad" | "radian" | "radians" => {
+            Some(UnitDimension::Angle)
+        }
+        "scalar" | "ratio" | "count" | "segments" => Some(UnitDimension::Scalar),
+        _ => None,
+    }
+}
+
+fn verify_call_dimensions(
+    op: &CoreOperation,
+    op_name: &str,
+    args: &[CoreNode],
+    env: &KindEnv,
+    warnings: &mut Vec<CompilerError>,
+) -> CoreResult<()> {
+    let Some(signature) = op_dimension_signature(op) else {
+        return Ok(());
+    };
+    for (index, arg) in args.iter().enumerate() {
+        let Some(expected) = expected_dimension_for_arg(signature, index, args.len()) else {
+            continue;
+        };
+        let Some(actual) = effective_dimension(arg, env) else {
+            continue;
+        };
+        if actual != expected {
+            let error = CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                format!(
+                    "op `{}` arg {} expected {} dimension, got {} dimension.",
+                    op_name,
+                    index,
+                    unit_dimension_label(expected),
+                    unit_dimension_label(actual)
+                ),
+            )
+            .with_span(arg.span.unwrap_or(SourceSpan::new(None, 0, 0)));
+            if env.unit_mode == UnitCheckMode::Strict {
+                return Err(error);
+            }
+            warnings.push(error);
+        }
+    }
+    Ok(())
+}
+
+fn expected_dimension_for_arg(
+    signature: OpDimensionSignature,
+    index: usize,
+    arity: usize,
+) -> Option<UnitDimension> {
+    match signature.slots {
+        DimensionSlots::Fixed(slots) => slots.get(index).copied().flatten(),
+        DimensionSlots::NumericPrefixExceptTrailing {
+            dimension,
+            trailing_args,
+        } => (index + trailing_args < arity).then_some(dimension),
+    }
+}
+
+fn op_dimension_signature(op: &CoreOperation) -> Option<OpDimensionSignature> {
+    let slots = match op {
+        CoreOperation::Primitive(CorePrimitive::Box) => DimensionSlots::Fixed(BOX_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Sphere) => DimensionSlots::Fixed(ONE_LENGTH_DIM),
+        CoreOperation::Primitive(CorePrimitive::Cylinder) => DimensionSlots::Fixed(CYLINDER_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Cone) => DimensionSlots::Fixed(CONE_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Circle) => DimensionSlots::Fixed(CIRCLE_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Rectangle) => {
+            DimensionSlots::Fixed(TWO_LENGTH_DIMS)
+        }
+        CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => {
+            DimensionSlots::Fixed(ROUNDED_RECTANGLE_DIMS)
+        }
+        CoreOperation::Primitive(CorePrimitive::RoundedPolygon) => {
+            DimensionSlots::Fixed(ROUNDED_POLYGON_DIMS)
+        }
+        CoreOperation::Primitive(CorePrimitive::Polygon)
+        | CoreOperation::Primitive(CorePrimitive::Profile)
+        | CoreOperation::Primitive(CorePrimitive::MakeFace)
+        | CoreOperation::Primitive(CorePrimitive::Text)
+        | CoreOperation::Primitive(CorePrimitive::Svg)
+        | CoreOperation::Primitive(CorePrimitive::Stl)
+        | CoreOperation::Boolean(_)
+        | CoreOperation::Frame(_)
+        | CoreOperation::Meta(_) => DimensionSlots::Fixed(NO_DIMS),
+        CoreOperation::Transform(CoreTransformOp::Translate) => {
+            DimensionSlots::Fixed(TRANSLATE_DIMS)
+        }
+        CoreOperation::Transform(CoreTransformOp::Rotate) => DimensionSlots::Fixed(ROTATE_DIMS),
+        CoreOperation::Transform(CoreTransformOp::Scale) => {
+            DimensionSlots::NumericPrefixExceptTrailing {
+                dimension: UnitDimension::Scalar,
+                trailing_args: 1,
+            }
+        }
+        CoreOperation::Transform(CoreTransformOp::Mirror) => DimensionSlots::Fixed(MIRROR_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Extrude) => DimensionSlots::Fixed(EXTRUDE_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Revolve) => DimensionSlots::Fixed(REVOLVE_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Loft) => DimensionSlots::Fixed(LOFT_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Sweep) => DimensionSlots::Fixed(NO_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Shell)
+        | CoreOperation::Surface(CoreSurfaceOp::Fillet)
+        | CoreOperation::Surface(CoreSurfaceOp::Chamfer) => DimensionSlots::Fixed(SHELL_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Offset)
+        | CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => {
+            DimensionSlots::Fixed(OFFSET_DIMS)
+        }
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => DimensionSlots::Fixed(TAPER_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Twist) => DimensionSlots::Fixed(TWIST_DIMS),
+        CoreOperation::Path(_) => DimensionSlots::Fixed(NO_DIMS),
+        CoreOperation::Array(CoreArrayOp::LinearArray) => DimensionSlots::Fixed(LINEAR_ARRAY_DIMS),
+        CoreOperation::Array(CoreArrayOp::RadialArray) => DimensionSlots::Fixed(RADIAL_ARRAY_DIMS),
+        CoreOperation::Array(CoreArrayOp::GridArray) => DimensionSlots::Fixed(GRID_ARRAY_DIMS),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => DimensionSlots::Fixed(ARC_ARRAY_DIMS),
+        CoreOperation::Array(CoreArrayOp::Repeat)
+        | CoreOperation::Array(CoreArrayOp::RepeatUnion)
+        | CoreOperation::Array(CoreArrayOp::RepeatCompound)
+        | CoreOperation::Array(CoreArrayOp::RepeatPick) => DimensionSlots::Fixed(NO_DIMS),
+        CoreOperation::Custom(_) => return None,
+    };
+    Some(OpDimensionSignature { slots })
+}
+
+fn unit_dimension_label(dimension: UnitDimension) -> &'static str {
+    match dimension {
+        UnitDimension::Length => "length",
+        UnitDimension::Angle => "angle",
+        UnitDimension::Scalar => "scalar",
+    }
+}
+
 fn kinds_are_known_and_distinct(left: CoreValueKind, right: CoreValueKind) -> bool {
     if matches!(
         (left, right),
@@ -1443,7 +1824,8 @@ mod tests {
     use super::*;
     use crate::ecky_core_ir::{
         CompilerErrorKind, CoreBinding, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation,
-        CorePart, CorePathOp, CorePrimitive, CoreSurfaceOp, CoreTransformOp, CoreValueKind, NodeId,
+        CoreParameter, CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart,
+        CorePathOp, CorePrimitive, CoreSurfaceOp, CoreTransformOp, CoreValueKind, NodeId, ParamId,
         PartId, ProgramId,
     };
 
@@ -1467,6 +1849,14 @@ mod tests {
         CoreNode::new(
             NodeId::new(id),
             CoreNodeKind::Reference(CoreReference::Local(name.into())),
+            CoreValueKind::Any,
+        )
+    }
+
+    fn param_ref(id: u64, param_id: u64) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Reference(CoreReference::Parameter(ParamId::new(param_id))),
             CoreValueKind::Any,
         )
     }
@@ -1529,6 +1919,34 @@ mod tests {
                 root,
             }],
         )
+    }
+
+    fn part_with_params(root: CoreNode, parameters: Vec<CoreParameter>) -> CoreProgram {
+        CoreProgram::new(
+            ProgramId::new(1),
+            parameters,
+            vec![CorePart {
+                id: PartId::new(1),
+                key: "body".into(),
+                label: "Body".into(),
+                root,
+            }],
+        )
+    }
+
+    fn number_param(id: u64, key: &str, unit: &str) -> CoreParameter {
+        CoreParameter {
+            id: ParamId::new(id),
+            key: key.into(),
+            label: key.into(),
+            kind: CoreParameterKind::Number,
+            default_value: CoreParameterValue::Number(1.0),
+            frozen: false,
+            constraints: CoreParameterConstraints {
+                unit: Some(unit.into()),
+                ..CoreParameterConstraints::default()
+            },
+        }
     }
 
     fn box_node(id: u64) -> CoreNode {
@@ -1657,6 +2075,78 @@ mod tests {
         let err = verify_core_program(&program).expect_err("expected verifier failure");
         assert_eq!(err.kind, CompilerErrorKind::TypeMismatch);
         err.message
+    }
+
+    fn strict_units_err(program: CoreProgram) -> String {
+        let err = verify_core_program_with_unit_mode(&program, UnitCheckMode::Strict)
+            .expect_err("expected verifier failure");
+        assert_eq!(err.kind, CompilerErrorKind::TypeMismatch);
+        err.message
+    }
+
+    fn permissive_unit_warnings(
+        program: &CoreProgram,
+        literal_dimensions: &std::collections::HashMap<SourceSpan, String>,
+    ) -> Vec<CompilerError> {
+        verify_core_program_with_literal_dimensions(program, literal_dimensions, false)
+            .expect("permissive verifier should not fail")
+    }
+
+    fn all_core_operations() -> Vec<CoreOperation> {
+        vec![
+            CoreOperation::Primitive(CorePrimitive::Box),
+            CoreOperation::Primitive(CorePrimitive::Sphere),
+            CoreOperation::Primitive(CorePrimitive::Cylinder),
+            CoreOperation::Primitive(CorePrimitive::Cone),
+            CoreOperation::Primitive(CorePrimitive::Circle),
+            CoreOperation::Primitive(CorePrimitive::Rectangle),
+            CoreOperation::Primitive(CorePrimitive::RoundedRectangle),
+            CoreOperation::Primitive(CorePrimitive::RoundedPolygon),
+            CoreOperation::Primitive(CorePrimitive::Polygon),
+            CoreOperation::Primitive(CorePrimitive::Profile),
+            CoreOperation::Primitive(CorePrimitive::MakeFace),
+            CoreOperation::Primitive(CorePrimitive::Text),
+            CoreOperation::Primitive(CorePrimitive::Svg),
+            CoreOperation::Primitive(CorePrimitive::Stl),
+            CoreOperation::Boolean(CoreBooleanOp::Union),
+            CoreOperation::Boolean(CoreBooleanOp::Difference),
+            CoreOperation::Boolean(CoreBooleanOp::Intersection),
+            CoreOperation::Boolean(CoreBooleanOp::Xor),
+            CoreOperation::Transform(CoreTransformOp::Translate),
+            CoreOperation::Transform(CoreTransformOp::Rotate),
+            CoreOperation::Transform(CoreTransformOp::Scale),
+            CoreOperation::Transform(CoreTransformOp::Mirror),
+            CoreOperation::Surface(CoreSurfaceOp::Extrude),
+            CoreOperation::Surface(CoreSurfaceOp::Revolve),
+            CoreOperation::Surface(CoreSurfaceOp::Loft),
+            CoreOperation::Surface(CoreSurfaceOp::Sweep),
+            CoreOperation::Surface(CoreSurfaceOp::Shell),
+            CoreOperation::Surface(CoreSurfaceOp::Offset),
+            CoreOperation::Surface(CoreSurfaceOp::OffsetRounded),
+            CoreOperation::Surface(CoreSurfaceOp::Fillet),
+            CoreOperation::Surface(CoreSurfaceOp::Chamfer),
+            CoreOperation::Surface(CoreSurfaceOp::Taper),
+            CoreOperation::Surface(CoreSurfaceOp::Twist),
+            CoreOperation::Path(CorePathOp::Polyline),
+            CoreOperation::Path(CorePathOp::BezierPath),
+            CoreOperation::Path(CorePathOp::Bspline),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::LinearArray),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RadialArray),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::GridArray),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::ArcArray),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::Repeat),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatUnion),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatCompound),
+            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatPick),
+            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Plane),
+            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Location),
+            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::PathFrame),
+            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Place),
+            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::ClipBox),
+            CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Group),
+            CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Comment),
+            CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Annotate),
+        ]
     }
 
     #[test]
@@ -2002,5 +2492,128 @@ mod tests {
         ));
 
         verify_core_program(&program).expect("compound/solid branches are compatible shapes");
+    }
+
+    #[test]
+    fn op_dimension_table_covers_every_builtin_operation() {
+        for op in all_core_operations() {
+            assert!(
+                op_dimension_signature(&op).is_some(),
+                "missing dimension signature for {}",
+                operation_name(&op)
+            );
+        }
+    }
+
+    #[test]
+    fn strict_units_reject_length_parameter_where_angle_expected() {
+        let width = number_param(1, "width", "length");
+        let root = call(
+            10,
+            CoreOperation::Transform(CoreTransformOp::Rotate),
+            vec![num(11, 0.0), num(12, 0.0), param_ref(13, 1), box_node(20)],
+            CoreValueKind::Solid,
+        );
+        let message = strict_units_err(part_with_params(root, vec![width]));
+
+        assert!(message.contains("rotate"), "{message}");
+        assert!(message.contains("arg 2"), "{message}");
+        assert!(message.contains("angle"), "{message}");
+        assert!(message.contains("length"), "{message}");
+    }
+
+    #[test]
+    fn permissive_units_allow_parameter_dimension_mismatch() {
+        let width = number_param(1, "width", "length");
+        let root = call(
+            10,
+            CoreOperation::Transform(CoreTransformOp::Rotate),
+            vec![num(11, 0.0), num(12, 0.0), param_ref(13, 1), box_node(20)],
+            CoreValueKind::Solid,
+        );
+        let program = part_with_params(root, vec![width]);
+
+        verify_core_program(&program).expect("default unit mode remains permissive");
+    }
+
+    #[test]
+    fn permissive_units_collect_warning_for_literal_dimension_mismatch() {
+        let span = SourceSpan::new(None, 12, 16);
+        let root = CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Call {
+                op: CoreOperation::Transform(CoreTransformOp::Rotate),
+                args: vec![
+                    num(11, 0.0),
+                    num(12, 0.0),
+                    CoreNode::new(
+                        NodeId::new(13),
+                        CoreNodeKind::Literal(CoreLiteral::Number(12.0)),
+                        CoreValueKind::Number,
+                    )
+                    .with_span(span),
+                    box_node(20),
+                ],
+                keywords: vec![],
+            },
+            CoreValueKind::Solid,
+        );
+        let warnings = permissive_unit_warnings(
+            &part(root),
+            &std::collections::HashMap::from([(span, "length".to_string())]),
+        );
+
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].message.contains("rotate"),
+            "{}",
+            warnings[0].message
+        );
+        assert_eq!(warnings[0].primary_span, Some(span));
+    }
+
+    #[test]
+    fn strict_units_reject_literal_dimension_mismatch_from_span_table() {
+        let span = SourceSpan::new(None, 12, 16);
+        let root = CoreNode::new(
+            NodeId::new(10),
+            CoreNodeKind::Call {
+                op: CoreOperation::Transform(CoreTransformOp::Rotate),
+                args: vec![
+                    num(11, 0.0),
+                    num(12, 0.0),
+                    CoreNode::new(
+                        NodeId::new(13),
+                        CoreNodeKind::Literal(CoreLiteral::Number(12.0)),
+                        CoreValueKind::Number,
+                    )
+                    .with_span(SourceSpan::new(
+                        Some(crate::ecky_core_ir::SourceFileId::new(1)),
+                        12,
+                        16,
+                    )),
+                    box_node(20),
+                ],
+                keywords: vec![],
+            },
+            CoreValueKind::Solid,
+        );
+        let err = verify_core_program_with_literal_dimensions(
+            &part(root),
+            &std::collections::HashMap::from([(span, "length".to_string())]),
+            true,
+        )
+        .expect_err("strict literal dimension mismatch should fail");
+
+        assert_eq!(err.kind, CompilerErrorKind::TypeMismatch);
+        assert!(err.message.contains("rotate"), "{}", err.message);
+        assert_eq!(
+            err.primary_span,
+            Some(SourceSpan::new(
+                Some(crate::ecky_core_ir::SourceFileId::new(1)),
+                12,
+                16,
+            ))
+        );
     }
 }

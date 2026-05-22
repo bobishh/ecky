@@ -1,9 +1,10 @@
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
 
 use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use steel_core::parser::ast::{Atom, Define, ExprKind, Let};
 use steel_core::parser::parser::Parser;
+use steel_core::parser::span::Span;
 use steel_core::parser::tokens::TokenType;
 use steel_core::rvals::SteelVal;
 
@@ -12,9 +13,10 @@ use crate::ecky_core_ir::{
     CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFeatureDecl,
     CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation,
     CoreParameter, CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart,
-    CorePathOp, CorePrimitive, CoreProgram, CoreProgramConstraints, CoreReference,
-    CoreRelationConstraint, CoreRelationOperand, CoreRelationOperator, CoreResult,
-    CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
+    CorePathOp, CorePreviewPartOffset, CorePreviewViewDecl, CorePrimitive, CoreProgram,
+    CoreProgramConstraints, CoreReference, CoreRelationConstraint, CoreRelationOperand,
+    CoreRelationOperator, CoreResult, CoreSelectorPayload, CoreSelectorTagDecl,
+    CoreSelectorTagKind, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
     CoreValueKind, CoreVerifyClause, CoreVerifySection, CoreVerifyValue, NodeId, ParamId, PartId,
     ProgramId, SourceFileId, SourceSpan,
 };
@@ -57,6 +59,18 @@ enum ComponentRole {
 }
 
 fn selector_payload_for_keyword(name: &str, value: &CoreNode) -> Option<CoreSelectorPayload> {
+    if let Some(tag_name) = selector_tag_reference_name(value) {
+        return match name {
+            "edges" => Some(CoreSelectorPayload::EdgeTargetIds(vec![format!(
+                "tag:{tag_name}"
+            )])),
+            "faces" => Some(CoreSelectorPayload::FaceTargetIds(vec![format!(
+                "tag:{tag_name}"
+            )])),
+            _ => None,
+        };
+    }
+
     let selector = match &value.kind {
         CoreNodeKind::Literal(CoreLiteral::Text(text)) => text.as_str(),
         CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => match symbol {
@@ -74,6 +88,23 @@ fn selector_payload_for_keyword(name: &str, value: &CoreNode) -> Option<CoreSele
     match name {
         "edges" => parse_core_edge_selector_payload(selector).ok(),
         "faces" => parse_core_face_selector_payload(selector).ok(),
+        _ => None,
+    }
+}
+
+fn selector_tag_reference_name(value: &CoreNode) -> Option<&str> {
+    let CoreNodeKind::Call { op, args, keywords } = &value.kind else {
+        return None;
+    };
+    if !matches!(op, CoreOperation::Custom(name) if name == "tag")
+        || !keywords.is_empty()
+        || args.len() != 1
+    {
+        return None;
+    }
+    match &args[0].kind {
+        CoreNodeKind::Reference(CoreReference::Local(name)) => Some(name.as_str()),
+        CoreNodeKind::Literal(CoreLiteral::Text(name)) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -128,22 +159,56 @@ fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProg
 fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     bootstrap::validate_user_source(source)
         .map_err(|err| CompilerError::new(CompilerErrorKind::Parse, err))?;
-    let source = rewrite_sequence_destructuring_source(source)?;
-    reject_model_level_sequence_forms(&source)?;
-    let source = lower_component_definitions_source(&source)?;
+    let (normalized_source, literal_dimensions) = normalize_unit_literals_source(source)?;
+    let strict_units = source_enables_strict_units(&normalized_source);
 
-    if can_use_expanded_ast(&source) {
-        if let Ok(program) = compile_to_core_program_from_expanded_ast(&source) {
-            return verify_compiled_core_program(program);
+    if source == normalized_source {
+        let legacy_source = rewrite_sequence_destructuring_source(source)?;
+        reject_model_level_sequence_forms(&legacy_source)?;
+        let legacy_source = lower_component_definitions_source(&legacy_source)?;
+
+        if can_use_expanded_ast(&legacy_source) {
+            if let Ok(program) = compile_to_core_program_from_expanded_ast_legacy(&legacy_source) {
+                return verify_compiled_core_program(program, strict_units, &literal_dimensions);
+            }
+        }
+
+        return compile_to_core_program_via_runtime_legacy(&legacy_source).and_then(|program| {
+            verify_compiled_core_program(program, strict_units, &literal_dimensions)
+        });
+    }
+
+    let expanded_source = normalized_source.clone();
+    let runtime_source = rewrite_sequence_destructuring_source(&normalized_source)?;
+    reject_model_level_sequence_forms(&runtime_source)?;
+    let runtime_source = lower_component_definitions_source(&runtime_source)?;
+
+    if can_use_expanded_ast(&expanded_source) {
+        if let Ok(program) = compile_to_core_program_from_expanded_ast(&expanded_source) {
+            return verify_compiled_core_program(program, strict_units, &literal_dimensions);
         }
     }
 
-    compile_to_core_program_via_runtime(&source).and_then(verify_compiled_core_program)
+    compile_to_core_program_via_runtime(&runtime_source).and_then(|program| {
+        verify_compiled_core_program(program, strict_units, &literal_dimensions)
+    })
 }
 
-fn verify_compiled_core_program(program: CoreProgram) -> CoreResult<CoreProgram> {
-    crate::ecky_core_ir::verify_core_program(&program)?;
+fn verify_compiled_core_program(
+    program: CoreProgram,
+    strict_units: bool,
+    literal_dimensions: &HashMap<SourceSpan, String>,
+) -> CoreResult<CoreProgram> {
+    let _warnings = crate::ecky_core_ir::verify_core_program_with_literal_dimensions(
+        &program,
+        literal_dimensions,
+        strict_units,
+    )?;
     Ok(program)
+}
+
+fn source_enables_strict_units(source: &str) -> bool {
+    source.contains("(meta units strict)") || source.contains("(meta \"units\" \"strict\")")
 }
 
 fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
@@ -240,7 +305,12 @@ fn can_use_expanded_ast(source: &str) -> bool {
 }
 
 fn compile_to_core_program_via_runtime(source: &str) -> CoreResult<CoreProgram> {
-    let source = lower_component_definitions_source(source)?;
+    let source = normalize_unit_literals_source(source)?.0;
+    let source = lower_component_definitions_source(&source)?;
+    compile_to_core_program_via_runtime_legacy(&source)
+}
+
+fn compile_to_core_program_via_runtime_legacy(source: &str) -> CoreResult<CoreProgram> {
     let mut engine = bootstrap::new_engine();
     let runtime_source = rewrite_runtime_model_clause_wrappers(&source)?;
     seed_symbol_bindings(&mut engine, &runtime_source);
@@ -266,6 +336,152 @@ fn compile_to_core_program_via_runtime(source: &str) -> CoreResult<CoreProgram> 
     parse_program(&root)
 }
 
+fn normalize_unit_literals_source(
+    source: &str,
+) -> CoreResult<(String, HashMap<SourceSpan, String>)> {
+    let source = inject_param_units_from_suffixed_defaults(source)?;
+    let mut out = String::with_capacity(source.len());
+    let mut literal_dimensions = HashMap::new();
+    let mut token = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    let flush_token = |token: &mut String,
+                       out: &mut String,
+                       literal_dimensions: &mut HashMap<SourceSpan, String>| {
+        if token.is_empty() {
+            return;
+        }
+        if let Some((value, dimension)) = parse_suffixed_unit_literal(token) {
+            let start = out.len() as u32;
+            out.push_str(&format_normalized_number(value));
+            let end = out.len() as u32;
+            literal_dimensions.insert(SourceSpan::new(None, start, end), dimension.to_string());
+        } else {
+            out.push_str(token);
+        }
+        token.clear();
+    };
+
+    for ch in source.chars() {
+        if in_comment {
+            flush_token(&mut token, &mut out, &mut literal_dimensions);
+            out.push(ch);
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+        if in_string {
+            flush_token(&mut token, &mut out, &mut literal_dimensions);
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                flush_token(&mut token, &mut out, &mut literal_dimensions);
+                in_string = true;
+                out.push(ch);
+            }
+            ';' => {
+                flush_token(&mut token, &mut out, &mut literal_dimensions);
+                in_comment = true;
+                out.push(ch);
+            }
+            '(' | ')' | '[' | ']' | '\'' | '`' | ',' if !token.is_empty() => {
+                flush_token(&mut token, &mut out, &mut literal_dimensions);
+                out.push(ch);
+            }
+            ch if ch.is_whitespace() => {
+                flush_token(&mut token, &mut out, &mut literal_dimensions);
+                out.push(ch);
+            }
+            _ => token.push(ch),
+        }
+    }
+    flush_token(&mut token, &mut out, &mut literal_dimensions);
+    Ok((out, literal_dimensions))
+}
+
+fn inject_param_units_from_suffixed_defaults(source: &str) -> CoreResult<String> {
+    let param_re = Regex::new(
+        r#"\(number(\s+)([A-Za-z_][A-Za-z0-9_-]*)(\s+)([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?(?:mm|cm|m|in|deg|rad))([^)]*)\)"#,
+    )
+    .expect("param unit literal regex");
+    Ok(param_re
+        .replace_all(source, |caps: &regex::Captures<'_>| {
+            let default = caps.get(4).map(|m| m.as_str()).unwrap_or_default();
+            let tail = caps.get(5).map(|m| m.as_str()).unwrap_or_default();
+            if tail.contains(":unit") || tail.contains("#:unit") {
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            let Some((_value, dimension)) = parse_suffixed_unit_literal(default) else {
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            };
+            format!(
+                "(number{}{}{}{} :unit \"{}\"{})",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(" "),
+                caps.get(2).map(|m| m.as_str()).unwrap_or_default(),
+                caps.get(3).map(|m| m.as_str()).unwrap_or(" "),
+                default,
+                dimension,
+                tail
+            )
+        })
+        .into_owned())
+}
+
+fn parse_suffixed_unit_literal(token: &str) -> Option<(f64, &'static str)> {
+    for (suffix, multiplier, dimension) in [
+        ("deg", 1.0, "angle"),
+        ("rad", 180.0 / std::f64::consts::PI, "angle"),
+        ("mm", 1.0, "length"),
+        ("cm", 10.0, "length"),
+        ("in", 25.4, "length"),
+        ("m", 1000.0, "length"),
+    ] {
+        let Some(number) = token.strip_suffix(suffix) else {
+            continue;
+        };
+        if number.is_empty() || number == "+" || number == "-" {
+            return None;
+        }
+        let Ok(parsed) = number.parse::<f64>() else {
+            return None;
+        };
+        return Some((parsed * multiplier, dimension));
+    }
+    None
+}
+
+fn format_normalized_number(value: f64) -> String {
+    if value.is_finite() && (value.fract().abs() < 1e-12) {
+        return format!("{}", value.trunc() as i64);
+    }
+    let formatted = format!("{value:.12}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
 fn rewrite_runtime_model_clause_wrappers(source: &str) -> CoreResult<String> {
     let forms = Parser::parse_without_lowering(source)
         .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
@@ -282,6 +498,9 @@ fn rewrite_runtime_expr_source(expr: &ExprKind) -> String {
             if expr_list_head_is(&list.args, "define-syntax") {
                 return expr.to_string();
             }
+            if let Some(rewritten_repeat) = rewrite_runtime_repeat_call_source(&list.args) {
+                return rewritten_repeat;
+            }
             if expr_list_head_is(&list.args, "model") {
                 return rewrite_runtime_model_source(&list.args);
             }
@@ -294,11 +513,7 @@ fn rewrite_runtime_expr_source(expr: &ExprKind) -> String {
                     .join(" ")
             )
         }
-        ExprKind::Define(def) => format!(
-            "(define {} {})",
-            def.name,
-            rewrite_runtime_expr_source(&def.body)
-        ),
+        ExprKind::Define(_) => expr.to_string(),
         ExprKind::Begin(begin) => format!(
             "(begin {})",
             begin
@@ -309,6 +524,71 @@ fn rewrite_runtime_expr_source(expr: &ExprKind) -> String {
                 .join(" ")
         ),
         _ => expr.to_string(),
+    }
+}
+
+fn rewrite_runtime_repeat_body_source(
+    expr: &ExprKind,
+    preserved_locals: &BTreeSet<String>,
+) -> String {
+    if !expr_references_preserved_locals(expr, preserved_locals) {
+        return rewrite_runtime_expr_source(expr);
+    }
+
+    match expr {
+        ExprKind::List(list) => format!(
+            "(list {})",
+            list.args
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    rewrite_runtime_repeat_item_source(item, preserved_locals, index == 0)
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        _ => rewrite_runtime_repeat_item_source(expr, preserved_locals, false),
+    }
+}
+
+fn rewrite_runtime_repeat_item_source(
+    expr: &ExprKind,
+    preserved_locals: &BTreeSet<String>,
+    head_position: bool,
+) -> String {
+    match expr {
+        ExprKind::Atom(atom) => match &atom.syn.ty {
+            TokenType::Identifier(name) => {
+                let name = name.to_string();
+                if head_position || preserved_locals.contains(&name) {
+                    format!("(quote {name})")
+                } else {
+                    expr.to_string()
+                }
+            }
+            _ => expr.to_string(),
+        },
+        ExprKind::List(_) => rewrite_runtime_repeat_body_source(expr, preserved_locals),
+        _ => rewrite_runtime_expr_source(expr),
+    }
+}
+
+fn expr_references_preserved_locals(expr: &ExprKind, preserved_locals: &BTreeSet<String>) -> bool {
+    match expr {
+        ExprKind::Atom(atom) => match &atom.syn.ty {
+            TokenType::Identifier(name) => preserved_locals.contains(&name.to_string()),
+            _ => false,
+        },
+        ExprKind::List(list) => list
+            .args
+            .iter()
+            .any(|item| expr_references_preserved_locals(item, preserved_locals)),
+        ExprKind::Begin(begin) => begin
+            .exprs
+            .iter()
+            .any(|item| expr_references_preserved_locals(item, preserved_locals)),
+        ExprKind::Define(def) => expr_references_preserved_locals(&def.body, preserved_locals),
+        _ => false,
     }
 }
 
@@ -348,7 +628,35 @@ fn rewrite_runtime_model_clause_group_source(expr: &ExprKind) -> String {
             );
             format!("({} {} {})", head, items[1], body)
         }
-        _ => format!("(list {})", expr),
+        _ => format!("(list {})", rewrite_runtime_expr_source(expr)),
+    }
+}
+
+fn rewrite_runtime_repeat_call_source(items: &[ExprKind]) -> Option<String> {
+    let head = items.first().and_then(expr_head_name)?;
+    if !matches!(
+        head.as_str(),
+        "repeat" | "repeat-union" | "repeat-compound" | "repeat-pick"
+    ) {
+        return None;
+    }
+    let index_symbol = items.get(1).and_then(expr_identifier)?;
+    let mut preserved_locals = BTreeSet::new();
+    preserved_locals.insert(index_symbol.clone());
+
+    match head.as_str() {
+        "repeat" | "repeat-union" | "repeat-compound" if items.len() == 4 => Some(format!(
+            "(list (quote {head}) (quote {index_symbol}) {} {})",
+            rewrite_runtime_expr_source(&items[2]),
+            rewrite_runtime_repeat_body_source(&items[3], &preserved_locals),
+        )),
+        "repeat-pick" if items.len() == 5 => Some(format!(
+            "(list (quote {head}) (quote {index_symbol}) {} {} {})",
+            rewrite_runtime_expr_source(&items[2]),
+            rewrite_runtime_repeat_body_source(&items[3], &preserved_locals),
+            rewrite_runtime_repeat_body_source(&items[4], &preserved_locals),
+        )),
+        _ => None,
     }
 }
 
@@ -437,10 +745,25 @@ fn model_level_sequence_form_error(name: &str) -> CompilerError {
 
 fn compile_to_core_program_from_expanded_ast(source: &str) -> CoreResult<CoreProgram> {
     validate_source_budget_before_steel(source)?;
+    let mut engine = bootstrap::new_engine();
+    let (wrapped, offset_map) = wrap_expanded_ast_source(source);
+    let forms = engine
+        .emit_expanded_ast_without_optimizations(&wrapped, None)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+    let decoded = forms
+        .iter()
+        .map(decode_expanded_expr)
+        .map(|expr| remap_expanded_source_spans(expr, &offset_map))
+        .collect::<Vec<_>>();
+    parse_expanded_program(&decoded)
+}
+
+fn compile_to_core_program_from_expanded_ast_legacy(source: &str) -> CoreResult<CoreProgram> {
+    validate_source_budget_before_steel(source)?;
     let source = rewrite_sequence_destructuring_source(source)?;
     let source = lower_component_definitions_source(&source)?;
     let mut engine = bootstrap::new_engine();
-    let wrapped = wrap_expanded_ast_source(&source);
+    let wrapped = wrap_expanded_ast_source_legacy(&source);
     let forms = engine
         .emit_expanded_ast_without_optimizations(&wrapped, None)
         .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
@@ -1556,7 +1879,47 @@ fn rewrite_component_instantiation(
     }
 }
 
-fn wrap_expanded_ast_source(source: &str) -> String {
+fn expanded_ast_source_prelude() -> &'static str {
+    "(require \"ecky/params\")\n(require \"ecky/cad\")\n"
+}
+
+fn wrap_expanded_ast_source(source: &str) -> (String, Vec<u32>) {
+    let mut normalized = String::with_capacity(source.len() + 32);
+    let mut normalized_offsets = vec![0u32];
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let prev = index
+            .checked_sub(1)
+            .and_then(|prev_index| bytes.get(prev_index).copied());
+        let next = bytes.get(index + 1).copied();
+        let prev_is_keyword_boundary = index == 0
+            || prev.is_some_and(|value| matches!(value, b' ' | b'\n' | b'\r' | b'\t' | b'('));
+        let next_starts_keyword = next.is_some_and(|value| value.is_ascii_alphabetic());
+
+        if byte == b':' && prev_is_keyword_boundary && next_starts_keyword {
+            normalized.push('#');
+            normalized_offsets.push(index as u32);
+        }
+
+        normalized.push(byte as char);
+        normalized_offsets.push((index + 1) as u32);
+        index += 1;
+    }
+
+    let prelude = expanded_ast_source_prelude();
+    let mut wrapped = String::with_capacity(prelude.len() + normalized.len());
+    wrapped.push_str(prelude);
+    wrapped.push_str(&normalized);
+
+    let mut wrapped_offsets = vec![0u32; prelude.len() + 1];
+    wrapped_offsets.extend(normalized_offsets.into_iter().skip(1));
+    (wrapped, wrapped_offsets)
+}
+
+fn wrap_expanded_ast_source_legacy(source: &str) -> String {
     let keyword_re = Regex::new(r#"(^|[\s(])\:([A-Za-z][A-Za-z0-9_-]*)"#).expect("keyword regex");
     let normalized = keyword_re.replace_all(source, "$1#:$2");
     format!(
@@ -1651,6 +2014,128 @@ fn decode_quoted_expr(value: &ExprKind) -> ExprKind {
             ExprKind::Vector(decoded)
         }
         other => decode_expanded_expr(other),
+    }
+}
+
+fn remap_expanded_span(span: Span, offset_map: &[u32]) -> Span {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= offset_map.len() || end >= offset_map.len() {
+        return span;
+    }
+    Span::new(offset_map[start], offset_map[end], span.source_id)
+}
+
+fn remap_expanded_source_spans(value: ExprKind, offset_map: &[u32]) -> ExprKind {
+    match value {
+        ExprKind::Atom(mut atom) => {
+            atom.syn.span = remap_expanded_span(atom.syn.span, offset_map);
+            ExprKind::Atom(atom)
+        }
+        ExprKind::If(if_expr) => {
+            let mut shifted = *if_expr;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.test_expr = remap_expanded_source_spans(shifted.test_expr, offset_map);
+            shifted.then_expr = remap_expanded_source_spans(shifted.then_expr, offset_map);
+            shifted.else_expr = remap_expanded_source_spans(shifted.else_expr, offset_map);
+            ExprKind::If(Box::new(shifted))
+        }
+        ExprKind::Let(let_expr) => {
+            let mut shifted = *let_expr;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.bindings = shifted
+                .bindings
+                .into_iter()
+                .map(|(name, body)| {
+                    (
+                        remap_expanded_source_spans(name, offset_map),
+                        remap_expanded_source_spans(body, offset_map),
+                    )
+                })
+                .collect();
+            shifted.body_expr = remap_expanded_source_spans(shifted.body_expr, offset_map);
+            ExprKind::Let(Box::new(shifted))
+        }
+        ExprKind::Define(def) => {
+            let mut shifted = *def;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.name = remap_expanded_source_spans(shifted.name, offset_map);
+            shifted.body = remap_expanded_source_spans(shifted.body, offset_map);
+            ExprKind::Define(Box::new(shifted))
+        }
+        ExprKind::LambdaFunction(lambda) => {
+            let mut shifted = *lambda;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.args = shifted
+                .args
+                .into_iter()
+                .map(|arg| remap_expanded_source_spans(arg, offset_map))
+                .collect();
+            shifted.body = remap_expanded_source_spans(shifted.body, offset_map);
+            ExprKind::LambdaFunction(Box::new(shifted))
+        }
+        ExprKind::Begin(begin) => {
+            let mut shifted = *begin;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.exprs = shifted
+                .exprs
+                .into_iter()
+                .map(|expr| remap_expanded_source_spans(expr, offset_map))
+                .collect();
+            ExprKind::Begin(Box::new(shifted))
+        }
+        ExprKind::Return(ret) => {
+            let mut shifted = *ret;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.expr = remap_expanded_source_spans(shifted.expr, offset_map);
+            ExprKind::Return(Box::new(shifted))
+        }
+        ExprKind::Quote(quote) => {
+            let mut shifted = *quote;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.expr = remap_expanded_source_spans(shifted.expr, offset_map);
+            ExprKind::Quote(Box::new(shifted))
+        }
+        ExprKind::Macro(macro_expr) => {
+            let mut shifted = *macro_expr;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            ExprKind::Macro(Box::new(shifted))
+        }
+        ExprKind::SyntaxRules(rules) => {
+            let mut shifted = *rules;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            ExprKind::SyntaxRules(Box::new(shifted))
+        }
+        ExprKind::List(mut list) => {
+            list.location = remap_expanded_span(list.location, offset_map);
+            list.args = list
+                .args
+                .into_iter()
+                .map(|expr| remap_expanded_source_spans(expr, offset_map))
+                .collect();
+            ExprKind::List(list)
+        }
+        ExprKind::Set(set_expr) => {
+            let mut shifted = *set_expr;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            shifted.variable = remap_expanded_source_spans(shifted.variable, offset_map);
+            shifted.expr = remap_expanded_source_spans(shifted.expr, offset_map);
+            ExprKind::Set(Box::new(shifted))
+        }
+        ExprKind::Require(require_expr) => {
+            let mut shifted = *require_expr;
+            shifted.location.span = remap_expanded_span(shifted.location.span, offset_map);
+            ExprKind::Require(Box::new(shifted))
+        }
+        ExprKind::Vector(mut vector) => {
+            vector.span = remap_expanded_span(vector.span, offset_map);
+            vector.args = vector
+                .args
+                .into_iter()
+                .map(|expr| remap_expanded_source_spans(expr, offset_map))
+                .collect();
+            ExprKind::Vector(vector)
+        }
     }
 }
 
@@ -1865,6 +2350,8 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let mut next_node = 1u64;
     let mut feature_decls = BTreeMap::new();
     let mut verify_clauses = Vec::new();
+    let mut selector_tags = Vec::new();
+    let mut preview_views = Vec::new();
 
     let clauses = collect_expanded_model_clauses(&forms[1..], helpers)?;
     let mut raw_parts = Vec::new();
@@ -1885,6 +2372,10 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
                 pending_relations.append(&mut parsed_relations);
             }
             "verify" => verify_clauses.push(parse_expanded_verify_clause(&clause_form.items)?),
+            "tag-face" | "tag-edge" | "tag-edges" => {
+                selector_tags.push(parse_expanded_selector_tag_decl(&clause_form.items)?)
+            }
+            "view" => preview_views.push(parse_expanded_preview_view_decl(&clause_form.items)?),
             "part" | "feature" => raw_parts.push(clause_form),
             "meta" => {}
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
@@ -1967,6 +2458,8 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
         .with_feature_decls(feature_decls)
+        .with_selector_tags(selector_tags)
+        .with_preview_views(preview_views)
         .with_constraints(constraints))
 }
 
@@ -1983,6 +2476,82 @@ fn parse_expanded_verify_clause(items: &[ExprKind]) -> CoreResult<CoreVerifyClau
         metric: parse_expanded_verify_section(&items[2], "metric")?,
         expect: parse_expanded_verify_section(&items[3], "expect")?,
     })
+}
+
+fn parse_expanded_selector_tag_decl(items: &[ExprKind]) -> CoreResult<CoreSelectorTagDecl> {
+    if items.len() < 5 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`tag-face`/`tag-edges` expects a name, selector keyword/value, and target shape.",
+        ));
+    }
+    let clause = expr_name(items.first().ok_or_else(|| {
+        CompilerError::new(CompilerErrorKind::Parse, "Empty selector tag clause.")
+    })?)?;
+    let name = expr_value_symbol_or_text(&items[1], "selector tag name")?;
+    let keyword = expr_name(&items[2])
+        .ok()
+        .map(|name| normalize_keyword(&name))
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-face`/`tag-edges` selector keyword must be `:face`, `:faces`, `:edge`, or `:edges`.",
+            )
+        })?;
+    let kind = match (clause.as_str(), keyword.as_str()) {
+        ("tag-face", ":face" | ":faces") => CoreSelectorTagKind::Face,
+        ("tag-edge" | "tag-edges", ":edge" | ":edges") => CoreSelectorTagKind::Edge,
+        ("tag-face", _) => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-face` requires `:face` or `:faces`.",
+            ))
+        }
+        ("tag-edge" | "tag-edges", _) => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-edge`/`tag-edges` requires `:edge` or `:edges`.",
+            ))
+        }
+        _ => CoreSelectorTagKind::Face,
+    };
+    Ok(CoreSelectorTagDecl {
+        name,
+        kind,
+        authored_selector: expr_value_symbol_or_text(&items[3], "selector tag selector")?,
+        target: expr_value_symbol_or_text(&items[4], "selector tag target")?,
+    })
+}
+
+fn parse_expanded_preview_view_decl(items: &[ExprKind]) -> CoreResult<CorePreviewViewDecl> {
+    if items.len() < 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`view` expects a name and at least one `(offset-part ...)` item.",
+        ));
+    }
+    let name = expr_value_symbol_or_text(&items[1], "view name")?;
+    let mut part_offsets = Vec::new();
+    for item in items.iter().skip(2) {
+        let offset_items = expr_list_items(item, "view item")?;
+        let clause =
+            expr_name(offset_items.first().ok_or_else(|| {
+                CompilerError::new(CompilerErrorKind::Parse, "Empty view item.")
+            })?)?;
+        if clause != "offset-part" || offset_items.len() != 5 {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`view` items must be `(offset-part <part> dx dy dz)`.",
+            ));
+        }
+        part_offsets.push(CorePreviewPartOffset {
+            part_key: expr_value_symbol_or_text(&offset_items[1], "offset-part part")?,
+            dx: expr_number_value(&offset_items[2], "offset-part dx")?,
+            dy: expr_number_value(&offset_items[3], "offset-part dy")?,
+            dz: expr_number_value(&offset_items[4], "offset-part dz")?,
+        });
+    }
+    Ok(CorePreviewViewDecl { name, part_offsets })
 }
 
 fn parse_expanded_verify_section(
@@ -6592,7 +7161,7 @@ fn is_point_literal_expr(items: &[ExprKind]) -> bool {
 
 fn seed_symbol_bindings(engine: &mut steel_core::steel_vm::engine::Engine, source: &str) {
     let binding_re =
-        Regex::new(r#"\((number|toggle|select|image|part|shape)\s+([A-Za-z][A-Za-z0-9_-]*)"#)
+        Regex::new(r#"\((number|toggle|select|image|part|shape|tag-face|tag-edge|tag-edges)\s+([A-Za-z][A-Za-z0-9_-]*)"#)
             .expect("binding regex");
     for capture in binding_re.captures_iter(source) {
         if let Some(name) = capture.get(2).map(|m| m.as_str()) {
@@ -6656,6 +7225,8 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     let mut next_node = 1u64;
     let mut feature_decls = BTreeMap::new();
     let mut verify_clauses = Vec::new();
+    let mut selector_tags = Vec::new();
+    let mut preview_views = Vec::new();
 
     for form in forms.into_iter().skip(1) {
         let items = list_items(&form, "model clause")?;
@@ -6671,6 +7242,10 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
                 pending_relations.append(&mut parsed_relations);
             }
             "verify" => verify_clauses.push(parse_verify_clause(&items)?),
+            "tag-face" | "tag-edge" | "tag-edges" => {
+                selector_tags.push(parse_selector_tag_decl(&items)?)
+            }
+            "view" => preview_views.push(parse_preview_view_decl(&items)?),
             "part" | "feature" => {
                 part_spellings.insert(raw_parts.len(), clause.to_string());
                 raw_parts.push(items);
@@ -6758,6 +7333,8 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
         .with_feature_decls(feature_decls)
+        .with_selector_tags(selector_tags)
+        .with_preview_views(preview_views)
         .with_constraints(constraints))
 }
 
@@ -6774,6 +7351,82 @@ fn parse_verify_clause(items: &[SteelVal]) -> CoreResult<CoreVerifyClause> {
         metric: parse_verify_section(&items[2], "metric")?,
         expect: parse_verify_section(&items[3], "expect")?,
     })
+}
+
+fn parse_selector_tag_decl(items: &[SteelVal]) -> CoreResult<CoreSelectorTagDecl> {
+    if items.len() < 5 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`tag-face`/`tag-edges` expects a name, selector keyword/value, and target shape.",
+        ));
+    }
+    let clause = symbol_name(items.first().ok_or_else(|| {
+        CompilerError::new(CompilerErrorKind::Parse, "Empty selector tag clause.")
+    })?)?;
+    let name = value_symbol_or_text(&items[1], "selector tag name")?;
+    let keyword = symbol_name(&items[2])
+        .ok()
+        .map(|name| normalize_keyword(&name))
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-face`/`tag-edges` selector keyword must be `:face`, `:faces`, `:edge`, or `:edges`.",
+            )
+        })?;
+    let kind = match (clause.as_str(), keyword.as_str()) {
+        ("tag-face", ":face" | ":faces") => CoreSelectorTagKind::Face,
+        ("tag-edge" | "tag-edges", ":edge" | ":edges") => CoreSelectorTagKind::Edge,
+        ("tag-face", _) => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-face` requires `:face` or `:faces`.",
+            ))
+        }
+        ("tag-edge" | "tag-edges", _) => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-edge`/`tag-edges` requires `:edge` or `:edges`.",
+            ))
+        }
+        _ => CoreSelectorTagKind::Face,
+    };
+    Ok(CoreSelectorTagDecl {
+        name,
+        kind,
+        authored_selector: value_symbol_or_text(&items[3], "selector tag selector")?,
+        target: value_symbol_or_text(&items[4], "selector tag target")?,
+    })
+}
+
+fn parse_preview_view_decl(items: &[SteelVal]) -> CoreResult<CorePreviewViewDecl> {
+    if items.len() < 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`view` expects a name and at least one `(offset-part ...)` item.",
+        ));
+    }
+    let name = value_symbol_or_text(&items[1], "view name")?;
+    let mut part_offsets = Vec::new();
+    for item in items.iter().skip(2) {
+        let offset_items = list_items(item, "view item")?;
+        let clause =
+            symbol_name(offset_items.first().ok_or_else(|| {
+                CompilerError::new(CompilerErrorKind::Parse, "Empty view item.")
+            })?)?;
+        if clause != "offset-part" || offset_items.len() != 5 {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`view` items must be `(offset-part <part> dx dy dz)`.",
+            ));
+        }
+        part_offsets.push(CorePreviewPartOffset {
+            part_key: value_symbol_or_text(&offset_items[1], "offset-part part")?,
+            dx: number_value(&offset_items[2], "offset-part dx")?,
+            dy: number_value(&offset_items[3], "offset-part dy")?,
+            dz: number_value(&offset_items[4], "offset-part dz")?,
+        });
+    }
+    Ok(CorePreviewViewDecl { name, part_offsets })
 }
 
 fn parse_verify_section(value: &SteelVal, expected: &str) -> CoreResult<CoreVerifySection> {
@@ -8571,6 +9224,63 @@ mod tests {
     }
 
     #[test]
+    fn compiles_repetition_dedup_model_with_define_helper_component_and_model_let_star() {
+        let source = r#"
+            (define (divider-depth tray_d wall)
+              (- tray_d (* 2 wall)))
+
+            (define-component divider
+              ((number height 12) (number depth 34))
+              (box 4 depth height))
+
+            (model
+              (let* ((tray_d 40)
+                     (wall 3)
+                     (pitch 18)
+                     (slot_w 6)
+                     (rib_h 12)
+                     (divider_d (divider-depth tray_d wall)))
+                (part tray
+                  (difference
+                    (union
+                      (box 80 tray_d 18)
+                      (repeat-union i 4
+                        (translate (- (* i pitch) 27) 0 9
+                          (divider :height rib_h :depth divider_d))))
+                    (repeat-union i 4
+                      (translate (- (* i pitch) 27) 0 0
+                        (box slot_w 30 20)))))))
+        "#;
+
+        let expanded = compile_to_core_program(source).expect("expanded compile");
+        let runtime = compile_to_core_program_via_runtime(source).expect("runtime compile");
+
+        assert_eq!(expanded.parts.len(), 1);
+        assert_eq!(runtime.parts.len(), 1);
+        assert_eq!(expanded.parts[0].key, "tray");
+        assert_eq!(runtime.parts[0].key, "tray");
+    }
+
+    #[test]
+    fn compiles_preview_view_offsets_via_runtime_path() {
+        let source = r#"
+            (model
+              (part body (box 20 20 10))
+              (part lid (translate 0 0 10 (box 20 20 2)))
+              (view exploded
+                (offset-part lid 0 0 40)))
+        "#;
+
+        let program = compile_to_core_program(source).expect("compile");
+
+        assert_eq!(program.preview_views.len(), 1);
+        assert_eq!(program.preview_views[0].name, "exploded");
+        assert_eq!(program.preview_views[0].part_offsets.len(), 1);
+        assert_eq!(program.preview_views[0].part_offsets[0].part_key, "lid");
+        assert_eq!(program.preview_views[0].part_offsets[0].dz, 40.0);
+    }
+
+    #[test]
     fn spliced_model_clauses_preserve_unsupported_clause_error() {
         let err = compile_to_core_program_from_expanded_ast(
             r#"
@@ -9225,6 +9935,115 @@ mod tests {
             program.parameters[0].constraints.unit.as_deref(),
             Some("length")
         );
+    }
+
+    #[test]
+    fn normalizes_suffixed_unit_literals_in_core_nodes() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (rotate 0 0 0.5rad
+                  (box 1in 2cm 0.5m))))
+            "#,
+        )
+        .expect("compile suffixed unit literals");
+
+        let source = emit_program(&program);
+        assert!(source.contains("(box 25.4 20 500)"), "{source}");
+        assert!(source.contains("(rotate 0 0 28.6478897565"), "{source}");
+    }
+
+    #[test]
+    fn infers_param_unit_from_suffixed_default_and_bounds() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (params
+                (number width 70mm :min 40mm :max 120mm)
+                (number sweep 0.5rad :min 0deg :max 90deg))
+              (part body (rotate 0 0 sweep (box width 10mm 2mm))))
+            "#,
+        )
+        .expect("compile suffixed param metadata");
+
+        assert_eq!(
+            program.parameters[0].constraints.unit.as_deref(),
+            Some("length")
+        );
+        assert_eq!(
+            program.parameters[0].default_value,
+            crate::ecky_core_ir::CoreParameterValue::Number(70.0)
+        );
+        assert_eq!(program.parameters[0].constraints.min, Some(40.0));
+        assert_eq!(program.parameters[0].constraints.max, Some(120.0));
+        assert_eq!(
+            program.parameters[1].constraints.unit.as_deref(),
+            Some("angle")
+        );
+        let crate::ecky_core_ir::CoreParameterValue::Number(sweep) =
+            program.parameters[1].default_value
+        else {
+            panic!("sweep default should be numeric");
+        };
+        assert!((sweep - 28.64788975654116).abs() < 1e-9, "{sweep}");
+        assert_eq!(program.parameters[1].constraints.min, Some(0.0));
+        assert_eq!(program.parameters[1].constraints.max, Some(90.0));
+    }
+
+    #[test]
+    fn runtime_path_normalizes_suffixed_unit_literals() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (params (number width 1in))
+              (part body (box width 2cm 3mm)))
+            "#,
+        )
+        .expect("runtime compile suffixed units");
+
+        assert_eq!(
+            program.parameters[0].constraints.unit.as_deref(),
+            Some("length")
+        );
+        assert_eq!(
+            program.parameters[0].default_value,
+            crate::ecky_core_ir::CoreParameterValue::Number(25.4)
+        );
+        let source = emit_program(&program);
+        assert!(source.contains("(box width 20 3)"), "{source}");
+    }
+
+    #[test]
+    fn strict_units_meta_rejects_dimension_mismatch() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (meta units strict)
+              (params (number width 12mm))
+              (part body (rotate 0 0 width (box 10mm 10mm 2mm))))
+            "#,
+        )
+        .expect_err("strict units reject length as angle");
+
+        assert_eq!(err.kind, CompilerErrorKind::TypeMismatch);
+        assert!(err.message.contains("rotate"), "{}", err.message);
+        assert!(err.message.contains("arg 2"), "{}", err.message);
+        assert!(err.message.contains("angle"), "{}", err.message);
+        assert!(err.message.contains("length"), "{}", err.message);
+        assert!(err.primary_span.is_some(), "{err:?}");
+    }
+
+    #[test]
+    fn units_default_remains_permissive_without_meta() {
+        compile_to_core_program(
+            r#"
+            (model
+              (params (number width 12mm))
+              (part body (rotate 0 0 width (box 10mm 10mm 2mm))))
+            "#,
+        )
+        .expect("unit dimension mismatch stays permissive by default");
     }
 
     #[test]
@@ -10146,7 +10965,10 @@ mod tests {
             "#,
         )
         .expect("compile");
-        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
+            panic!("expected build");
+        };
+        let CoreNodeKind::Call { keywords, .. } = &result.kind else {
             panic!("expected call");
         };
         assert_eq!(keywords.len(), 1);
@@ -10171,7 +10993,10 @@ mod tests {
             "#,
         )
         .expect("compile");
-        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
+            panic!("expected build");
+        };
+        let CoreNodeKind::Call { keywords, .. } = &result.kind else {
             panic!("expected call");
         };
         assert_eq!(
@@ -10190,6 +11015,58 @@ mod tests {
     }
 
     #[test]
+    fn compiles_created_by_selector_keyword_on_expanded_path() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape blank (box 10 10 10))
+                  (shape pocket (box 4 4 4))
+                  (shape solid (difference blank pocket))
+                  (result
+                    (fillet 0.5
+                      :edges "left+vertical"
+                      :created-by pocket
+                      solid)))))
+            "#,
+        )
+        .expect("compile");
+        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
+            panic!("expected build");
+        };
+        let CoreNodeKind::Call { keywords, .. } = &result.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(keywords.len(), 2);
+        assert_eq!(keywords[0].name, "edges");
+        assert_eq!(keywords[1].name, "created-by");
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::EdgeClauses(vec![
+                crate::ecky_core_ir::CoreEdgeSelectorClause::Boundary {
+                    axis: crate::ecky_core_ir::CoreEdgeAxis::X,
+                    bound: crate::ecky_core_ir::CoreEdgeBound::Min,
+                },
+                crate::ecky_core_ir::CoreEdgeSelectorClause::Axis(
+                    crate::ecky_core_ir::CoreEdgeAxis::Z,
+                ),
+            ]))
+            .as_ref()
+        );
+        assert_eq!(keywords[1].selector_payload(), None);
+        assert!(
+            matches!(
+                &keywords[1].source_node().kind,
+                CoreNodeKind::Reference(CoreReference::Local(name)) if name == "pocket"
+            ) || matches!(
+                &keywords[1].source_node().kind,
+                CoreNodeKind::Reference(CoreReference::Node(_))
+            )
+        );
+    }
+
+    #[test]
     fn compiles_exact_face_selector_keyword_payload() {
         let program = compile_to_core_program(
             r#"
@@ -10201,7 +11078,10 @@ mod tests {
             "#,
         )
         .expect("compile");
-        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
+            panic!("expected build");
+        };
+        let CoreNodeKind::Call { keywords, .. } = &result.kind else {
             panic!("expected call");
         };
         assert_eq!(keywords.len(), 1);
@@ -10270,6 +11150,102 @@ mod tests {
                 ),
             ]))
             .as_ref()
+        );
+    }
+
+    #[test]
+    fn compiles_authored_face_tag_selector_payload() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (tag-face mounting_top :faces "top" body)
+              (part body
+                (shell 0.8
+                  :faces (tag mounting_top)
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("compile");
+
+        assert_eq!(program.selector_tags.len(), 1);
+        assert_eq!(program.selector_tags[0].name, "mounting_top");
+        assert_eq!(program.selector_tags[0].authored_selector, "top");
+        assert_eq!(program.selector_tags[0].target, "body");
+        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceTargetIds(vec![
+                "tag:mounting_top".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn runtime_path_compiles_authored_face_tag_selector_payload() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (tag-face mounting_top :faces "top" body)
+              (part body
+                (shell 0.8
+                  :faces (tag mounting_top)
+                  (box 10 10 10))))
+            "#,
+        )
+        .expect("runtime compile");
+
+        assert_eq!(program.selector_tags.len(), 1);
+        assert_eq!(program.selector_tags[0].name, "mounting_top");
+        let CoreNodeKind::Call { keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceTargetIds(vec![
+                "tag:mounting_top".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn runtime_path_compiles_created_by_selector_keyword() {
+        let program = compile_to_core_program_via_runtime(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape blank (box 10 10 10))
+                  (shape pocket (box 4 4 4))
+                  (shape solid (difference blank pocket))
+                  (result
+                    (fillet 0.5
+                      :edges "left+vertical"
+                      :created-by pocket
+                      solid)))))
+            "#,
+        )
+        .expect("runtime compile");
+        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
+            panic!("expected build");
+        };
+        let CoreNodeKind::Call { keywords, .. } = &result.kind else {
+            panic!("expected call");
+        };
+        assert_eq!(keywords.len(), 2);
+        assert_eq!(keywords[1].name, "created-by");
+        assert_eq!(keywords[1].selector_payload(), None);
+        assert!(
+            matches!(
+                &keywords[1].source_node().kind,
+                CoreNodeKind::Reference(CoreReference::Local(name)) if name == "pocket"
+            ) || matches!(
+                &keywords[1].source_node().kind,
+                CoreNodeKind::Reference(CoreReference::Node(_))
+            )
         );
     }
 
@@ -11180,6 +12156,79 @@ mod tests {
         if snapshot_content != expected {
             panic!(
                 "core-digest snapshot mismatch:\n\nExpected:\n{}\n\nGot:\n{}",
+                expected, snapshot_content
+            );
+        }
+    }
+
+    #[test]
+    fn permissive_units_lock_keeps_existing_fixture_emit_digests() {
+        let snapshot_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/units/permissive-emit-digest.snap");
+        let fixture_roots = [
+            (
+                "examples",
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../model-runtime/examples"),
+            ),
+            (
+                "surface",
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/cad/surface"),
+            ),
+        ];
+
+        let mut snapshot_content = String::new();
+        for (group, root) in fixture_roots {
+            let mut entries: Vec<_> = std::fs::read_dir(&root)
+                .expect("fixture dir exists")
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "ecky")
+                        .unwrap_or(false)
+                })
+                .collect();
+            entries.sort_by_key(|e| e.path());
+
+            for entry in entries {
+                let path = entry.path();
+                let fixture_name = path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                let source = std::fs::read_to_string(&path).expect("read fixture");
+
+                match compile_to_core_program(&source) {
+                    Ok(program) => {
+                        use sha2::{Digest, Sha256};
+                        let emitted = emit_program(&program);
+                        let mut hasher = Sha256::new();
+                        hasher.update(emitted.as_bytes());
+                        let digest = format!("{:x}", hasher.finalize());
+                        snapshot_content.push_str(&format!("{group}/{fixture_name}: {digest}\n"));
+                    }
+                    Err(_) => {
+                        snapshot_content.push_str(&format!("{group}/{fixture_name}: skip\n"));
+                    }
+                }
+            }
+        }
+
+        if !snapshot_path.exists() {
+            std::fs::create_dir_all(snapshot_path.parent().unwrap()).expect("create snapshot dir");
+            std::fs::write(&snapshot_path, &snapshot_content).expect("write snapshot");
+            panic!(
+                "snapshot materialized at {} — rerun test",
+                snapshot_path.display()
+            );
+        }
+
+        let expected = std::fs::read_to_string(&snapshot_path).expect("read snapshot");
+        if snapshot_content != expected {
+            panic!(
+                "permissive-units emit digest snapshot mismatch:\n\nExpected:\n{}\n\nGot:\n{}",
                 expected, snapshot_content
             );
         }

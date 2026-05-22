@@ -292,14 +292,15 @@ fn ir_expr_from_core_selector_payload(payload: &CoreSelectorPayload) -> AppResul
     match payload {
         CoreSelectorPayload::EdgeAll
         | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTag(_)
         | CoreSelectorPayload::EdgeTargetIds(_) => Ok(IrExpr::Selector(IrSelectorExpr::Edge(
             edge_selector_spec_from_core_payload(payload)?,
         ))),
-        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => {
-            Ok(IrExpr::Selector(IrSelectorExpr::Face(
-                face_selector_spec_from_core_payload(payload)?,
-            )))
-        }
+        CoreSelectorPayload::FaceClauses(_)
+        | CoreSelectorPayload::FaceTag(_)
+        | CoreSelectorPayload::FaceTargetIds(_) => Ok(IrExpr::Selector(IrSelectorExpr::Face(
+            face_selector_spec_from_core_payload(payload)?,
+        ))),
     }
 }
 

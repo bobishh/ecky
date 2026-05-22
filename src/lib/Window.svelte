@@ -16,6 +16,7 @@
     minHeight = 300,
     title = "",
     hidden = false,
+    focused = false,
     highlighted = false,
     onclose,
     children
@@ -30,6 +31,7 @@
     minHeight?: number;
     title?: string;
     hidden?: boolean;
+    focused?: boolean;
     highlighted?: boolean;
     onclose: () => void;
     children: Snippet;
@@ -187,6 +189,7 @@
   class="window"
   class:window--hidden={hidden}
   class:window--interacting={dragging || resizing}
+  class:window--focused={focused}
   class:window--highlighted={highlighted}
   data-window-id={windowId ?? undefined}
   style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z};"
@@ -228,6 +231,14 @@
 
   .window--interacting {
     user-select: none;
+  }
+
+  .window--focused {
+    border-color: color-mix(in srgb, var(--secondary) 72%, var(--primary));
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--secondary) 64%, transparent),
+      0 0 34px color-mix(in srgb, var(--secondary) 26%, transparent),
+      0 8px 32px rgba(0, 0, 0, 0.5);
   }
 
   .window--highlighted {

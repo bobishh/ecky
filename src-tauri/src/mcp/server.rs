@@ -1253,9 +1253,10 @@ fn workflow_guide_text(state: &AppState) -> String {
             "- JSON surface manifests are authoritative for supported forms, helpers, CAD ops, and wall-pattern modes. Use them on demand for concrete ops.\n",
             "- Reuse existing semantic views before inventing new control groupings.\n",
             "- Stay in the app loop. Use `mcp_request_user_prompt` for human replies.\n",
-            "- Prefer typed/static errors and structural verification first; screenshot verification second.\n",
-            "- Check the structuralVerification section when using target_get to ensure the generated model passed basic manifold and bounding box checks.\n",
-            "- Use get_model_screenshot to visually verify geometric edits after structural checks.\n\n",
+            "- Prefer typed/static errors and `verify_generated_model` first; screenshot verification second.\n",
+            "- After every preview/render that may become a user-visible version, call `verify_generated_model` before commit.\n",
+            "- If verification is red and repairable, patch source/params and preview again. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages.\n",
+            "- Use get_model_screenshot to visually verify geometric edits after `verify_generated_model` passes.\n\n",
             "Recommended startup sequence:\n",
             "1. Call workspace_overview. It resolves sourceLanguage, geometryBackend, primaryGuideUri, and compatibilityManifestUri.\n",
             "2. Read only `agentBrief.primaryGuideUri` / `agentBrief.mustRead` for normal authoring.\n",
@@ -1265,9 +1266,10 @@ fn workflow_guide_text(state: &AppState) -> String {
             "6. Use target_get only when you truly need the full payload.\n",
             "7. If semantic bindings matter, call semantic_manifest_get before changing views or annotations.\n",
             "8. Then mutate with params_preview_render, macro_buffer_replace_and_preview, macro_preview_render, or semantic tools; prefer buffer replacement for non-trivial edits and use macro_preview_render for the first version after thread_create.\n",
-            "9. Commit successful preview drafts with commit_preview_version; capture returned threadId/messageId/modelId in output evidence.\n",
-            "10. Never update history.sqlite directly. State mutations must go through MCP tools.\n",
-            "11. Use measurement_annotation tools for dimension meaning, and long_action_notice/long_action_clear for slow work.\n"
+            "9. Call verify_generated_model on the preview/render draft. If red, repair source/params and preview again until green or repair cap exhausted.\n",
+            "10. Commit green verified preview drafts with commit_preview_version; capture returned threadId/messageId/modelId in output evidence. If capped red remains, do not commit; report exact red issues.\n",
+            "11. Never update history.sqlite directly. State mutations must go through MCP tools.\n",
+            "12. Use measurement_annotation tools for dimension meaning, and long_action_notice/long_action_clear for slow work.\n"
         ),
         selected_engine_label(state),
         authoring_card_text()
@@ -1834,6 +1836,43 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     "includeArchitecture": { "type": "boolean" }
                 },
                 "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "project_folder_export",
+            "description": "Mirror a thread's active macro into a plain folder (<projectsRoot>/<slug>/model.ecky + ecky-project.json) so external editors and file-skill agents can author source directly. Re-export refreshes a stale folder.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": { "type": "string", "description": "Thread to mirror. Defaults to the session target." },
+                    "messageId": { "type": "string", "description": "Version message to mirror. Defaults to the active version." },
+                    "slug": { "type": "string", "description": "Folder name. Defaults to a deterministic slug from title + thread id." }
+                }
+            }
+        }),
+        json!({
+            "name": "project_folder_status",
+            "description": "Read-only sync classification of a project folder: clean | fileChanged | threadAdvanced | conflict | missing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" }
+                },
+                "required": ["slug"]
+            }
+        }),
+        json!({
+            "name": "project_folder_apply",
+            "description": "Apply an externally edited model.ecky back onto its bound thread: compile check, preview render, commit as a new version, rebase the folder manifest. Refuses stale (threadAdvanced) folders; conflict needs force=true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "force": { "type": "boolean", "description": "Apply the file on top of the current head even when both sides changed since export." },
+                    "title": { "type": "string" },
+                    "versionName": { "type": "string" }
+                },
+                "required": ["slug"]
             }
         }),
         json!({
@@ -2458,7 +2497,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "commit_preview_version",
-            "description": "Persist the latest successful draft as a new saved version.",
+            "description": "Persist the latest green verified preview draft as a new saved version. Call verify_generated_model first; if verification is red, repair and preview again. Do not commit capped red results.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -2615,7 +2654,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "verify_generated_model",
-            "description": "Run deterministic structural verification on the generated model for the currently bound target/thread. Returns artifactDigest plus the full structured result including pass/fail, issue codes, metrics, and verifier source. This is the authoritative first check — screenshot/VLM verification is secondary.",
+            "description": "Run deterministic structural verification plus authored `(verify ...)` clauses on the generated model for the currently bound target/thread. Call after preview/render and before commit_preview_version. Returns artifactDigest plus the full structured result including pass/fail, issue codes, metrics, and verifier source. If red, repair source/params and preview again; commit only green verification, or report capped red honestly without commit. Screenshot/VLM verification is secondary.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3580,6 +3619,42 @@ async fn dispatch_tool_call(
             };
             drop(conn);
             Ok((serde_json::to_value(response).unwrap(), next_target))
+        }
+        "project_folder_export" => {
+            let req_args: handlers::ProjectFolderExportRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_project_folder_export(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "project_folder_status" => {
+            let req_args: handlers::ProjectFolderStatusRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_project_folder_status(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+            )
+            .await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "project_folder_apply" => {
+            let req_args: handlers::ProjectFolderApplyRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_project_folder_apply(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await?;
+            emit_history_updated(server);
+            Ok((serde_json::to_value(response).unwrap(), None))
         }
         "component_extract" => {
             let req_args: handlers::ComponentExtractToolRequest =
@@ -5542,6 +5617,7 @@ async fn persist_freecad_library_import_version(
         usage: None,
         artifact_bundle: Some(artifact_bundle.clone()),
         model_manifest: Some(model_manifest.clone()),
+        structural_verification: None,
         agent_origin: None,
         image_data: None,
         visual_kind: None,
@@ -5805,9 +5881,11 @@ mod tests {
             control_primitives: Vec::new(),
             control_relations: Vec::new(),
             control_views: Vec::new(),
+            preview_views: Vec::new(),
             advisories: Vec::new(),
             selection_targets: Vec::new(),
             measurement_annotations: Vec::new(),
+            tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
@@ -5851,6 +5929,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: Some(bundle),
                     model_manifest: Some(manifest),
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -6336,7 +6415,14 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        for expected in ["component_extract", "component_search", "component_get"] {
+        for expected in [
+            "component_extract",
+            "component_search",
+            "component_get",
+            "project_folder_export",
+            "project_folder_status",
+            "project_folder_apply",
+        ] {
             assert!(
                 tool_names.iter().any(|name| name == expected),
                 "expected {expected} in {tool_names:?}"
@@ -6627,6 +6713,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -7039,6 +7126,22 @@ mod tests {
             .and_then(Value::as_str)
             .expect("verify_generated_model description");
         assert!(description.contains("artifactDigest"));
+        assert!(description.contains("authored `(verify ...)` clauses"));
+        assert!(description.contains("Call after preview/render and before commit_preview_version"));
+        assert!(description.contains("commit only green verification"));
+        assert!(description.contains("report capped red honestly without commit"));
+
+        let commit = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("commit_preview_version"))
+            .expect("commit_preview_version tool");
+        let description = commit
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("commit_preview_version description");
+        assert!(description.contains("green verified preview draft"));
+        assert!(description.contains("Call verify_generated_model first"));
+        assert!(description.contains("Do not commit capped red results"));
 
         let printability = tools
             .iter()
@@ -7093,7 +7196,14 @@ mod tests {
             workflow.contains("`target_detail_get(section=\"exportArtifacts\")` for the STEP path")
         );
         assert!(workflow.contains("artifactBundle digest exposes `geometryBackend`, `edgeTargetCount`, `faceTargetCount`, `exportFormats`, `hasStepExport`, and `stepExportPath`"));
-        assert!(workflow.contains("structural verification first"));
+        assert!(workflow.contains("`verify_generated_model` first"));
+        assert!(workflow.contains("call `verify_generated_model` before commit"));
+        assert!(workflow.contains("Commit only green verification"));
+        assert!(workflow.contains("do not commit and report capped red honestly"));
+        assert!(workflow.contains("Call verify_generated_model on the preview/render draft"));
+        assert!(
+            workflow.contains("Commit green verified preview drafts with commit_preview_version")
+        );
         assert!(workflow.contains("target_meta_get"));
         assert!(workflow.contains("target_macro_get"));
         assert!(workflow.contains("artifact_manifest_get"));
@@ -7245,6 +7355,9 @@ mod tests {
         assert!(text.contains("compatibilityManifestUri"));
         assert!(text.contains("concrete"));
         assert!(text.contains("only after lowerer/render errors"));
+        assert!(text.contains("call `verify_generated_model` before commit"));
+        assert!(text.contains("Commit only green verification"));
+        assert!(text.contains("do not commit and report capped red honestly"));
         for uri in [
             "ecky://guides/surface-manifest/build123d",
             "ecky://guides/surface-manifest/freecad",
@@ -7644,9 +7757,11 @@ mod tests {
             control_primitives: Vec::new(),
             control_relations: Vec::new(),
             control_views: Vec::new(),
+            preview_views: Vec::new(),
             advisories: Vec::new(),
             selection_targets: Vec::new(),
             measurement_annotations: Vec::new(),
+            tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),

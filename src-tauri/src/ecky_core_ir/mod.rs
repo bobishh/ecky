@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 mod signatures;
-pub use signatures::verify_core_program;
+pub(crate) use signatures::verify_core_program_with_literal_dimensions;
+pub use signatures::{verify_core_program, verify_core_program_strict_units};
 
 macro_rules! opaque_id {
     ($name:ident) => {
@@ -313,12 +314,42 @@ pub struct CoreFeatureDecl {
     pub param_keys: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreSelectorTagKind {
+    Face,
+    Edge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreSelectorTagDecl {
+    pub name: String,
+    pub kind: CoreSelectorTagKind,
+    pub authored_selector: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorePreviewPartOffset {
+    pub part_key: String,
+    pub dx: f64,
+    pub dy: f64,
+    pub dz: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorePreviewViewDecl {
+    pub name: String,
+    pub part_offsets: Vec<CorePreviewPartOffset>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreProgram {
     pub id: ProgramId,
     pub parameters: Vec<CoreParameter>,
     pub parts: Vec<CorePart>,
     pub feature_decls: BTreeMap<String, CoreFeatureDecl>,
+    pub selector_tags: Vec<CoreSelectorTagDecl>,
+    pub preview_views: Vec<CorePreviewViewDecl>,
     pub constraints: CoreProgramConstraints,
 }
 
@@ -329,6 +360,8 @@ impl CoreProgram {
             parameters,
             parts,
             feature_decls: BTreeMap::new(),
+            selector_tags: Vec::new(),
+            preview_views: Vec::new(),
             constraints: CoreProgramConstraints::default(),
         }
     }
@@ -340,6 +373,16 @@ impl CoreProgram {
 
     pub fn with_constraints(mut self, constraints: CoreProgramConstraints) -> Self {
         self.constraints = constraints;
+        self
+    }
+
+    pub fn with_selector_tags(mut self, selector_tags: Vec<CoreSelectorTagDecl>) -> Self {
+        self.selector_tags = selector_tags;
+        self
+    }
+
+    pub fn with_preview_views(mut self, preview_views: Vec<CorePreviewViewDecl>) -> Self {
+        self.preview_views = preview_views;
         self
     }
 }
@@ -360,8 +403,10 @@ pub struct CoreShapeBinding {
 pub enum CoreSelectorPayload {
     EdgeAll,
     EdgeClauses(Vec<CoreEdgeSelectorClause>),
+    EdgeTag(String),
     EdgeTargetIds(Vec<String>),
     FaceClauses(Vec<CoreFaceSelectorClause>),
+    FaceTag(String),
     FaceTargetIds(Vec<String>),
 }
 

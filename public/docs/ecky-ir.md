@@ -1,6 +1,705 @@
-# Ecky Language Docs
+# Ecky IR Field Guide
 
-Single-source reference for `.ecky` authoring. Left sidebar gives section index. Right pane shows one section at a time. This file is source of truth for web docs, desktop docs window, static build, and later Rust-side parsing.
+Learn Ecky IR by building models in order. Each chapter introduces one small idea, shows the code that creates the rendered result, then reuses the idea in a larger model. This single Markdown document is the source for the desktop docs window and the EPUB build.
+
+Read the main lessons in order. The app sidebar exposes the same book one chapter at a time. Use **OPEN IN CODE** on any chapter to load its first runnable `.ecky` snippet into the code window.
+
+## First Solid: Ball on a Base
+
+Start with the smallest complete `.ecky` program: one `model`, one `part`, one primitive.
+
+```scheme
+(model
+  (part marker
+    (sphere 10)))
+```
+
+![Rendered output for First Solid: Ball on a Base, example 1](assets/01-first-solid-01.png)
+
+`model` is the root. `part` gives the geometry a stable id. `sphere` produces the solid.
+
+Add another primitive with `union` when two solids should become one part.
+
+```scheme
+(model
+  (part marker
+    (union
+      (box 28 28 4)
+      (translate 0 0 10
+        (sphere 10)))))
+```
+
+![Rendered output for First Solid: Ball on a Base, example 2](assets/01-first-solid-02.png)
+
+`box` makes the base. `translate` moves the ball up so it sits on the base instead of overlapping the center.
+
+Use this pattern for first tests: primitive first, then one transform, then one boolean.
+
+## Sketch to Solid: Plate from a Profile
+
+Most useful CAD starts as a 2D outline. In Ecky IR, a sketch/profile becomes a solid with `extrude`.
+
+```scheme
+(model
+  (part plate
+    (extrude
+      (rounded-rect 70 42 5)
+      4)))
+```
+
+![Rendered output for Sketch to Solid: Plate from a Profile, example 1](assets/02-sketch-extrude-01.png)
+
+`rounded-rect` is the closed 2D profile. `extrude` gives it thickness.
+
+Use `profile` when the shape has holes.
+
+```scheme
+(model
+  (part washer_plate
+    (extrude
+      (profile
+        :outer (rounded-rect 70 42 5)
+        :holes (circle 9 64))
+      4)))
+```
+
+![Rendered output for Sketch to Solid: Plate from a Profile, example 2](assets/02-sketch-extrude-02.png)
+
+The outer profile defines material. The hole profile removes material during the extrusion.
+
+This is the core move: draw a closed 2D region, then give it height.
+
+## Parameters: Make the Plate Editable
+
+Once a model works with constants, move design choices into `params`.
+
+```scheme
+(model
+  (params
+    (number plate_w 70 :label "Plate width" :min 40 :max 120 :step 1)
+    (number plate_h 42 :label "Plate height" :min 20 :max 80 :step 1)
+    (number corner_r 5 :label "Corner radius" :min 0 :max 12 :step 0.5)
+    (number thickness 4 :label "Thickness" :min 1 :max 12 :step 0.5))
+  (part plate
+    (extrude
+      (rounded-rect plate_w plate_h corner_r)
+      thickness)))
+```
+
+![Rendered output for Parameters: Make the Plate Editable, example 1](assets/03-parameters-01.png)
+
+The geometry reads the parameter names directly. The UI reads labels, min/max, and step from the declarations.
+
+Keep parameters physical: widths, heights, clearances, radii. Put derived math near the geometry.
+
+```scheme
+(shape hole_r (/ bore_d 2))
+```
+
+That line is better than repeating `(/ bore_d 2)` through cuts and selectors.
+
+## Cut and Join: Mounting Plate
+
+Use `build` when a part needs named intermediate geometry.
+
+```scheme
+(model
+  (params
+    (number plate_w 80)
+    (number plate_h 48)
+    (number thickness 5)
+    (number hole_r 4))
+  (part mount
+    (build
+      (shape blank
+        (extrude (rounded-rect plate_w plate_h 4) thickness))
+      (shape hole_left
+        (translate -24 0 -0.5
+          (cylinder hole_r (+ thickness 1))))
+      (shape hole_right
+        (translate 24 0 -0.5
+          (cylinder hole_r (+ thickness 1))))
+      (result
+        (difference blank hole_left hole_right)))))
+```
+
+![Rendered output for Cut and Join: Mounting Plate, example 1](assets/04-cut-and-join-01.png)
+
+`build` names each step. `difference` subtracts cutters from the blank. The cutters are slightly taller than the plate so the cut passes fully through.
+
+Add material with `union` or `fuse`.
+
+```scheme
+(result
+  (union
+    (difference blank hole_left hole_right)
+    (translate 0 0 thickness
+      (cylinder 12 8))))
+```
+
+The result is still one part, but the intent stays readable.
+
+## Round, Chamfer, Shell: Select Edges and Faces
+
+Edge operations happen after the main solid exists.
+
+```scheme
+(model
+  (part soft_block
+    (fillet 2
+      :edges "top"
+      (box 60 36 16))))
+```
+
+![Rendered output for Round, Chamfer, Shell: Select Edges and Faces, example 1](assets/05-round-shell-select-01.png)
+
+`:edges "top"` selects top boundary edges. Use `chamfer` when the edge should become flat instead of rounded.
+
+```scheme
+(model
+  (part beveled_block
+    (chamfer 1.5
+      :edges "bottom"
+      (box 60 36 16))))
+```
+
+![Rendered output for Round, Chamfer, Shell: Select Edges and Faces, example 2](assets/05-round-shell-select-02.png)
+
+Use `shell` to hollow a solid by removing selected faces.
+
+```scheme
+(model
+  (part open_tray
+    (shell 2
+      :faces "top"
+      (box 70 44 22))))
+```
+
+![Rendered output for Round, Chamfer, Shell: Select Edges and Faces, example 3](assets/05-round-shell-select-03.png)
+
+Selectors should describe a physical feature: top, bottom, planar normal, or a stable target id. Avoid anonymous offsets for fit-critical faces.
+
+Tag any fit-critical selector. The tag records intended topology in the manifest, so param changes can rebind the same seat, lip, or opening instead of chasing backend face indexes.
+
+```scheme
+(model
+  (tag-face tray_opening :faces "top" tray)
+  (part tray
+    (shell 2
+      :faces (tag tray_opening)
+      (box 70 44 22))))
+```
+
+When a `build` introduces helper solids, use `:created-by <shape>` to keep clause selectors scoped to topology from that intermediate shape only.
+
+```scheme
+(model
+  (part body
+    (build
+      (shape blank (box 70 44 22))
+      (shape pocket (translate 0 0 10 (box 30 18 12)))
+      (shape tray (difference blank pocket))
+      (result
+        (shell 2
+          :faces "planar+normal-z+area-max"
+          :created-by pocket
+          tray)))))
+```
+
+Here `:created-by pocket` limits face candidates to the cavity created from `pocket`, not every planar top-facing face on `tray`.
+
+## Paths and Surfaces: Revolve and Sweep
+
+Use `revolve` when a 2D profile turns around an axis.
+
+```scheme
+(model
+  (part knob
+    (revolve
+      (make-face
+        (path
+          (12 0 0)
+          (18 0 0)
+          (18 18 0)
+          (10 24 0)
+          (12 0 0)))
+      360)))
+```
+
+![Rendered output for Paths and Surfaces: Revolve and Sweep, example 1](assets/06-paths-and-surfaces-01.png)
+
+`path` creates the outline. `make-face` turns the closed outline into a face. `revolve` spins it into a solid.
+
+Use `sweep` when a profile follows a path.
+
+```scheme
+(model
+  (part handle
+    (sweep
+      (circle 2.2 32)
+      (bezier-path
+        ((-24 0 0) (-10 18 6) (10 18 6) (24 0 0))))))
+```
+
+![Rendered output for Paths and Surfaces: Revolve and Sweep, example 2](assets/06-paths-and-surfaces-02.png)
+
+The circle is the cross-section. The bezier path is the centerline. Sweep keeps those responsibilities separate.
+
+Use `loft` when one profile needs to become another profile across height or distance.
+
+## Repetition: Ribs, Slots, and Patterns
+
+Repeated geometry should be authored as repetition, not copied blocks.
+
+```scheme
+(model
+  (part ribbed_plate
+    (build
+      (shape base
+        (box 90 40 4))
+      (shape ribs
+        (repeat-union i 5
+          (translate (- (* i 18) 36) 0 5
+            (box 4 34 6))))
+      (result
+        (union base ribs)))))
+```
+
+![Rendered output for Repetition: Ribs, Slots, and Patterns, example 1](assets/07-repetition-01.png)
+
+`repeat-union` makes one merged body from repeated solids. The index `i` is local to the repeat body.
+
+When repeated features share the same fit math, hoist derived values once instead of repeating arithmetic at every call site. Use model-level `let*` for dependent dimensions, a helper `define` for placement math, and `define-component` when one repeated body needs the same closed geometry everywhere.
+
+```scheme
+(define (divider-depth tray_d wall)
+  (- tray_d (* 2 wall)))
+
+(define-component divider
+  ((number height 12) (number depth 34))
+  (box 4 depth height))
+
+(model
+  (let* ((tray_d 40)
+         (wall 3)
+         (pitch 18)
+         (slot_w 6)
+         (rib_h 12)
+         (divider_d (divider-depth tray_d wall)))
+    (part tray
+      (difference
+        (union
+          (box 80 tray_d 18)
+          (repeat-union i 4
+            (translate (- (* i pitch) 27) 0 9
+              (divider :height rib_h :depth divider_d))))
+        (repeat-union i 4
+          (translate (- (* i pitch) 27) 0 0
+            (box slot_w 30 20)))))))
+```
+
+This de-duplicates the model in three directions at once: `pitch`, `slot_w`, and `wall` exist once, `divider-depth` owns the wall-offset math once, and `divider` owns the repeated rib body once. If the same derived value or repeated body shows up across parts, stop and lift it.
+
+Use `repeat-compound` when repeated items should stay grouped instead of merged.
+
+```scheme
+(shape rollers
+  (repeat-compound i 4
+    (translate (- (* i 16) 24) 0 8
+      (cylinder 3 8))))
+```
+
+Use `repeat-pick` when only some indices should produce geometry.
+
+```scheme
+(shape end_stop
+  (repeat-pick i 5 (= i 4)
+    (translate 36 0 12
+      (sphere 4))))
+```
+
+## Placement and Frames: Put Geometry Where It Belongs
+
+Simple transforms are enough for many models.
+
+```scheme
+(translate 20 0 0 (box 10 10 10))
+(rotate 0 0 45 (box 10 10 10))
+(mirror :normal (1 0 0) (box 10 10 10))
+```
+
+Use frames when placement should be named and reused.
+
+```scheme
+(model
+  (part angled_pin
+    (build
+      (shape pin_pose
+        (plane
+          :origin (20 0 4)
+          :normal (0 1 1)
+          :x (1 0 0)))
+      (shape pin
+        (cylinder 3 24))
+      (result
+        (place pin_pose pin)))))
+```
+
+![Rendered output for Placement and Frames: Put Geometry Where It Belongs, example 1](assets/08-placement-and-frames-01.png)
+
+`plane` describes a local coordinate system. `place` moves geometry into it.
+
+For path-driven models, `path-frame` can sample a location and tangent along a path. Use it when attachments must follow a curve instead of a fixed world axis.
+
+## Verification: State What Must Stay True
+
+`verify` turns design assumptions into checks. Author verify clauses from requirements, not from whichever geometry already renders. In MCP flow, treat each clause as an outer TDD test for the model: expect the first run to go red, run `verify_generated_model`, then fix the model and re-render until the same requirement goes green.
+
+Start with the invariant, not the fix. This model says the lid must keep at least `0.3` mm clearance above the body:
+
+```scheme
+(model
+  (verify
+    (tag lid_clearance body.lid_gap)
+    (metric gap (clearance min-distance body lid))
+    (expect gap (>= 0.3)))
+  (part body (box 80 50 20))
+  (part lid
+    (translate 0 0 20.4
+      (box 78 48 3))))
+```
+
+![Rendered output for Verification: State What Must Stay True, example 1](assets/09-verification-01.png)
+
+`tag` names the concern. `metric` measures it. `expect` sets the condition.
+
+### Red to green: lid clearance
+
+Red state: the expected clearance is `0.3`, but the lid sits only `0.2` mm above the body. Run `verify_generated_model` on this version. Expect the first run to go red because the requirement is right and the geometry is wrong.
+
+```text
+(model
+  (verify
+    (tag lid_clearance body.lid_gap)
+    (metric gap (clearance min-distance body lid))
+    (expect gap (>= 0.3)))
+  (part body (box 80 50 20))
+  (part lid
+    (translate 0 0 20.2
+      (box 78 48 3))))
+```
+
+Green state: keep the same `verify` block and move the lid to `20.4`. Then fix the model and re-render. Run `verify_generated_model` again. The requirement stays fixed while the model changes to satisfy it.
+
+```text
+(part lid
+  (translate 0 0 20.4
+    (box 78 48 3)))
+```
+
+Worked red-to-green loop:
+
+1. Write one `verify` clause from one physical requirement.
+2. Run `verify_generated_model` and confirm the failure names the violated promise.
+3. Change geometry, parameters, or named constraints. Do not weaken the requirement to get green.
+4. Fix the model and re-render.
+5. Run `verify_generated_model` again until the original clause passes.
+
+Use verification for:
+
+- minimum clearances
+- expected part count
+- STL triangle or component checks
+- required STEP or preview artifacts
+
+Do not delete a failing verification clause to make a render pass. Fix the model or the stated requirement.
+
+## Real Model Patterns: Procedural Cuts and Arrayed Frames
+
+Before the final film adapter, three smaller real fixtures show language features that are not obvious from hand-sized teaching examples: generated cutter lists, deterministic pseudo-random layout, path frames, array helpers, and parameter-driven repeated cavities.
+
+### Procedural perforated panel
+
+This model uses `map` and `range` to generate cutters, `hash-signed` to jitter each cutter, `voronoi2` to vary cutter radius, and `apply union` to turn the generated list into one cutter body.
+
+<!-- render-source: ../examples/voronoi-perforated-panel.ecky -->
+
+![Rendered output for Real Model Patterns: Procedural Cuts and Arrayed Frames, example 1](assets/10-real-model-patterns-01.png)
+
+The important line is the result expression:
+
+```scheme
+(result
+  (difference
+    panel
+    (apply union
+      (map
+        (lambda (cell)
+          (let* ((col (- cell (* 4 (floor (/ cell 4)))))
+                 (row (floor (/ cell 4)))
+                 (x (* (- col 1.5) 14))
+                 (y (* (- row 1.0) 12))
+                 (jx (+ x (* 2.4 (hash-signed col row 23))))
+                 (jy (+ y (* 2.4 (hash-signed (+ col 19.19) (+ row 7.73) 54))))
+                 (r (+ 2.2 (* 1.1 (voronoi2 (/ jx 14.0) (/ jy 12.0) 23)))))
+            (translate jx jy 0
+              (cylinder r 8 24))))
+        (range 0 cell-count)))))
+```
+
+`range` decides how many cutters exist. `map` builds one cylinder per cell. `let*` is required because `jx`, `jy`, and `r` depend on earlier bindings. `apply union` converts the list of cylinders into one boolean operand for `difference`.
+
+This is the pattern to use when the count is parametric but the result is still one printable part.
+
+### Frame and array bracket
+
+This fixture combines curve-driven placement with arrays. The rib is swept along a bezier path. The pad is placed at a sampled path frame. The base holes, locator posts, and fan stops use three array helpers.
+
+<!-- render-source: ../examples/frame-array-bracket.ecky -->
+
+![Rendered output for Real Model Patterns: Procedural Cuts and Arrayed Frames, example 2](assets/10-real-model-patterns-02.png)
+
+The model has three distinct placement styles:
+
+```scheme
+(shape rail
+  (bezier-path ((-18 0 4) (-8 7 9) (8 -7 12) (18 0 16))))
+(shape rib
+  (sweep (circle 1.1) rail))
+(shape end-frame
+  (path-frame rail :at end :up (0 0 1)))
+(shape placed-pad
+  (place end-frame pad :offset (0 0 -1.5) :rotate (0 0 18)))
+```
+
+`sweep` makes geometry follow the path. `path-frame` samples a pose from the path. `place` uses that pose to attach another solid.
+
+The array helpers do the repeated work:
+
+```scheme
+(linear-array 3 14 0 0
+  (translate -14 0 -2 (cylinder 2.1 10)))
+
+(grid-array 2 3 16 10
+  (translate -16 -5 4 (cylinder 1.2 8)))
+
+(radial-array 6 60 11
+  (translate 0 0 4 (cone 1.8 0.8 5)))
+```
+
+Use these when the pattern is regular. Use `map` and `range` when each instance needs custom math.
+
+### Woodlouse hotel
+
+This small habitat uses one cutter list for the entrances, then repeated shelves and vertical dividers. The point is not insect biology; the point is using named dimensions to keep repeated voids aligned with repeated structure.
+
+<!-- render-source: ../examples/woodlouse-hotel.ecky -->
+
+![Rendered output for Real Model Patterns: Procedural Cuts and Arrayed Frames, example 3](assets/10-real-model-patterns-03.png)
+
+The entrances are generated from one parametric chamber count:
+
+```scheme
+(shape entrances
+  (apply union
+    (map
+      (lambda (cell)
+        (let* ((col (- cell (* chamber_cols (floor (/ cell chamber_cols)))))
+               (row (floor (/ cell chamber_cols)))
+               (x (+ (* -0.5 hotel_w) wall (* (+ col 0.5) col_gap)))
+               (z (+ wall (* (+ row 0.55) floor_gap))))
+          (translate x (* -0.5 hotel_d) z
+            (rotate 90 0 0
+              (cylinder entrance_r (+ hotel_d 6) 24)))))
+      (range 0 (* chamber_cols 3)))))
+```
+
+`chamber_cols` drives both cutter count and divider spacing. `col_gap` is derived from `hotel_w` and `chamber_cols`, so openings stay centered when the model is resized.
+
+## Final Model: Integrated Film Adapter Open Helicoid v9
+
+The last model is `Ecky integrated film adapter open helicoid v9`. It is not a single decorative adapter. It is an assembly built from sliding parts: a recessed base with male rails, a lower insert, an upper clamp, a tunnel module with female-bottom and male-top joints, an open top cover with the female helicoid socket, and a separate moving lens carrier with matching male helicoid threads.
+
+<!-- render-source: ../examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky -->
+
+![Rendered output for Final Model: Integrated Film Adapter Open Helicoid v9, example 1](assets/10-complex-film-adapter-01.png)
+
+The source is stored as `docs/books/ecky-ir/examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky`. The chapter reads it in layers instead of dumping all 493 lines at once.
+
+### 1. Public controls define physical fit
+
+The first block exposes dimensions that matter after printing: film format, aperture, rail geometry, insert stack, film gap, lens bore, and helicoid thread geometry.
+
+```scheme
+(params
+  (select film_format "120_645" :label "film format"
+    :options (("120 6x9" "120_6x9") ("120 6x6" "120_6x6")
+              ("120 6x4.5" "120_645") ("135 36x24" "135") ("110" "110")))
+  (number rail_tip_w 5.4 :label "joint max W" :min 3.5 :max 8 :step 0.1)
+  (number rail_h 4.2 :label "joint H" :min 2 :max 6 :step 0.1)
+  (number fit_clearance 0.25 :label "fit clearance" :min 0 :max 0.8 :step 0.05)
+  (number film_gap 0.6 :label "film velvet gap" :min 0.1 :max 1.5 :step 0.05)
+  (number lens_bore_d 59.6 :label "lens bore D" :min 50 :max 68 :step 0.1)
+  (number thread_turns 3.2 :label "helicoid turns" :min 1.5 :max 5 :step 0.1)
+  (number thread_clearance 0.25 :label "helicoid clearance" :min 0.15 :max 0.6 :step 0.05))
+```
+
+This is the same habit as earlier chapters: public parameters are physical, not arbitrary. `fit_clearance` appears in rail channels and detents. `film_gap` controls the clamp stack. `lens_bore_d`, `thread_turns`, and `thread_clearance` drive the helicoid interface.
+
+### 2. Base makes recessed pockets and male rails
+
+The base starts as a rounded plate, removes the aperture and insert pocket, then adds male triangular rail profiles on both long sides.
+
+```scheme
+(part base_recessed_male_rails
+  (build
+    (shape raw_plate
+      (extrude (rounded-rect outer_w outer_h corner_r) base_h))
+    (shape aperture_cut
+      (translate 0 0 -0.1
+        (box aperture_w aperture_h (+ base_h 0.2))))
+    (shape frame_pocket
+      (translate 0 0 (- base_h pocket_depth)
+        (extrude
+          (rounded-rect (+ holder_w (* 2 fit_clearance))
+                        (+ holder_h (* 2 fit_clearance))
+                        holder_corner_r)
+          (+ pocket_depth 0.2))))
+    (shape plate
+      (difference raw_plate aperture_cut frame_pocket film_path_cut))
+    (shape rail_left
+      (translate (- (/ outer_w 2)) rail_y rail_z
+        (rotate 0 90 0
+          (extrude rail_profile_pos outer_w))))
+    (result
+      (fuse plate rail_left rail_right detent_top_left detent_top_right
+            detent_bottom_left detent_bottom_right))))
+```
+
+`rail_profile_pos` and `rail_profile_neg` are small triangular sketches. They become long rails by `extrude`, then get fused onto the base. This is the same sketch-to-extrude move from chapter 2, applied to sliding joints.
+
+### 3. Film insert is a two-piece stack
+
+The lower insert carries the film guides. The upper insert clamps above the film gap. Both use the selected film format to derive `frame_w`, `frame_h`, and `film_strip_w`.
+
+```scheme
+(shape frame_w
+  (if (= film_format "135") 36
+    (if (= film_format "110") 17
+      (if (= film_format "120_645") 42
+        (if (= film_format "120_6x6") 56 84)))))
+(shape guide_top
+  (translate 0 (/ film_channel_h 2) (- (+ holder_thickness (/ film_guide_h 2)) 0.24)
+    (box (- holder_w 8) film_guide_rail_w film_guide_h)))
+(shape lower_frame
+  (difference
+    lower_raw
+    aperture_cut
+    notch_top_left
+    notch_top_right
+    notch_bottom_left
+    notch_bottom_right))
+```
+
+The insert stack is why the model has `holder_thickness`, `film_gap`, and `insert_lid_thickness` as separate controls. Those are real Z layers, not a single magic height.
+
+### 4. Tunnel joins bottom and top modules
+
+The tunnel module has both sides of the sliding interface. Its bottom cuts female channels so it can slide onto the base rails. Its top adds male rails so the top cover can slide onto the tunnel.
+
+```scheme
+(part tunnel_female_bottom_male_top
+  (build
+    (shape channel_profile_pos
+      (polygon
+        (((/ (+ rail_h (* 2 fit_clearance)) 2) 0)
+         (0 (/ (+ rail_tip_w (* 2 fit_clearance)) 2))
+         ((- (/ (+ rail_h (* 2 fit_clearance)) 2)) 0))))
+    (shape body
+      (difference body_blank tunnel_cut))
+    (shape channel_left
+      (translate (- (+ (/ outer_w 2) lead_in)) rail_y channel_z
+        (rotate 0 90 0
+          (extrude channel_profile_pos (+ outer_w (* 2 lead_in))))))
+    (shape rail_left
+      (translate (- (/ outer_w 2)) rail_y rail_z
+        (rotate 0 90 0
+          (extrude rail_profile_pos outer_w))))
+    (result
+      (fuse
+        (difference body channel_left channel_right)
+        rail_left
+        rail_right))))
+```
+
+This is the sliding-joint core. Female channels are oversized by `fit_clearance`; male rails use the nominal profile. The book built these ideas earlier as sketches, cuts, and named clearances. Here they become a printable mechanical interface.
+
+### 5. Top cover is open and owns the female helicoid
+
+The cover removes matching rail channels and opens the center so the helicoid socket is visible. The female thread is modeled as two clipped helical ridges subtracted from a sleeve.
+
+```scheme
+(shape female_thread_a_raw
+  (translate 0 0 (+ socket_base_z thread_z0)
+    (helical-ridge
+      :radius female_root_r
+      :pitch thread_pitch
+      :height thread_len
+      :base-width female_axial_width
+      :crest-width (* female_axial_width 0.58)
+      :depth female_depth)))
+(shape female_thread_a
+  (clip-box female_thread_a_raw
+    :x ((- female_thread_clip_r) female_thread_clip_r)
+    :y ((- female_thread_clip_r) female_thread_clip_r)
+    :z ((+ socket_base_z 0.05) (+ socket_base_z sleeve_h 1))))
+(shape female_thread_b
+  (rotate 0 0 180 female_thread_a))
+(shape socket_threaded_shell
+  (difference
+    (translate 0 0 socket_base_z
+      (cylinder socket_outer_r sleeve_h))
+    female_thread_a
+    female_thread_b))
+```
+
+`thread_pitch` comes from carrier height and turn count. `female_thread_b` is the second start, made by rotating the first. The clipped ends keep the helix printable and bounded inside the socket height.
+
+### 6. Moving lens carrier matches the cover
+
+The carrier is separate and previewed to the side with `carrier_preview_x`. It uses the same thread pitch, height, and clearance math, but its ridges are fused onto the carrier body instead of cut out of the socket.
+
+```scheme
+(shape male_thread_a_raw
+  (translate 0 0 thread_z0
+    (helical-ridge
+      :radius ridge_root_r
+      :pitch thread_pitch
+      :height thread_len
+      :base-width thread_width
+      :crest-width (* thread_width 0.58)
+      :depth ridge_sweep_depth)))
+(shape male_thread_a
+  (clip-box male_thread_a_raw
+    :x ((- thread_clip_r) thread_clip_r)
+    :y ((- thread_clip_r) thread_clip_r)
+    :z (0 carrier_h)))
+(shape carrier_outer
+  (fuse carrier_body male_thread_a male_thread_b))
+(result
+  (translate carrier_preview_x 0 socket_base_z
+    (difference carrier_outer stop_aperture lens_slip_bore)))
+```
+
+That last `translate` is preview layout, not fit math. The carrier is offset so the reader can see both halves of the helicoid in one render.
+
+### What the whole book was building toward
+
+The early ball and plate examples taught primitives and extrusion. The plate-with-hole examples taught profiles and cuts. The parameter chapter made fit dimensions editable. The repetition and placement chapters introduced authored structure instead of copied solids. The final model uses all of that for a real mechanism: rails slide into channels, film inserts locate inside a recessed pocket, the tunnel stacks onto the base, the open cover stacks onto the tunnel, and the lens carrier threads into the cover through a two-start helicoid.
+
+## Appendix: Language Reference
+
+Use this section after the lessons when you need exact forms, signatures, helper names, selector strings, and verification grammar. The reference is intentionally dense; the earlier chapters show when each piece matters.
 
 ## Language Overview
 
@@ -117,6 +816,41 @@ Read it as:
 
 - final value returned by `build`
 
+### `assembly` (planned)
+
+Reserved shape sketch:
+
+```scheme
+(model
+  (assembly exploded_preview
+    ...))
+```
+
+- planned top-level clause for explicit multi-part assembly recipes
+- spelling reserved in book now; runtime/compiler support deferred
+- spec'd grammar reserved now; implementation deferred until views prove the display/manufacturing split
+- intended to formalize what component packages already do at the package layer
+- assemblies stay placement-based as today; no mate/joint solver implied
+- examples here mark intent only, not accepted source today
+- until implementation lands, keep physical bodies as `part`s, use `view` for preview-only offsets, and use component packages for solved assembly workflows
+
+### `export` (planned)
+
+Reserved shape sketch:
+
+```scheme
+(model
+  (export manufacturing
+    ...))
+```
+
+- planned top-level clause for authored export/manufacturing policy
+- spelling reserved in book now; runtime/compiler support deferred
+- reserved until views prove the display/manufacturing split
+- preview transforms never affect STL or STEP artifacts
+- examples here mark intent only, not accepted source today
+- until implementation lands, use current export commands, artifact manifests, and package output modes outside `.ecky` source
+
 ## Components
 
 A component is a named, parameterized, closed geometry unit. Define once,
@@ -194,6 +928,31 @@ Agents lift proven parts into the shared library and reuse them by source:
 
 Extraction is copy-inline only: the returned source is self-contained and
 no registry reference is created implicitly.
+
+## Projects As Folders
+
+A project can live as a plain folder on disk: edit `model.ecky` with any
+editor or LLM file skill; Ecky stays the renderer, validator, and history.
+
+```text
+<projectsRoot>/<slug>/
+  model.ecky          edit this with anything
+  ecky-project.json   binding manifest, owned by Ecky
+```
+
+- `project_folder_export` writes the folder from a thread's active version
+- `project_folder_status` classifies it: `clean`, `fileChanged`,
+  `threadAdvanced` (stale; re-export), `conflict`, or `missing`
+- `project_folder_apply` compiles the edited file, renders a preview, and
+  commits it as a new version on the bound thread, then rebases the manifest
+
+Rules:
+
+- the folder is a mirror; threads and versions remain the record
+- a stale folder never silently clobbers the thread: re-export to refresh
+- a conflict (both sides moved) applies only with an explicit force, and the
+  previous head stays available as a version
+- never edit `ecky-project.json` by hand
 
 ## Verify Clauses
 
@@ -329,6 +1088,20 @@ Supported relation operators:
   - `:step` number
   - `:unit` one of `length | angle | ratio | count | text`
   - `:frozen` boolean
+
+### Units and suffixed literals
+
+For physical authoring, generation should emit suffixed literals like mm/cm/in/deg/rad.
+
+Examples:
+
+- `12mm`
+- `2.54cm`
+- `0.25in`
+- `45deg`
+- `1.5708rad`
+
+Prompt generators explicitly: emit suffixed literals for lengths and angles. Use bare numbers only for counts, ratios, and unitless math.
 
 ### `toggle`
 

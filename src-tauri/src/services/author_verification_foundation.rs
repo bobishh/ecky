@@ -4,7 +4,9 @@ use std::{
 };
 
 use crate::contracts::{
-    ArtifactBundle, ManifestBounds, ModelManifest, StructuralIssue, StructuralVerificationResult,
+    ArtifactBundle, AuthoredVerifyCheck,
+    AuthoredVerifyCheckStatus as PublicAuthorVerifyCheckStatus, AuthoredVerifyValue,
+    ManifestBounds, ModelManifest, StructuralIssue, StructuralVerificationResult,
 };
 use crate::ecky_core_ir::{CoreVerifyClause, CoreVerifyValue};
 
@@ -137,6 +139,7 @@ pub(crate) struct AuthorVerifyCheckResult {
     pub metric_alias: Option<String>,
     pub metric_source: Option<String>,
     pub metric_key: Option<String>,
+    pub comparator: Option<String>,
     pub expected: Option<AuthorVerifyResolvedValue>,
     pub actual: Option<AuthorVerifyResolvedValue>,
     pub message: String,
@@ -257,6 +260,14 @@ pub(crate) fn merge_author_verification_into_structural_result(
         manifest,
         Some(&result),
     );
+    result.authored_verify_checks = evaluation
+        .checks
+        .iter()
+        .map(|check| {
+            let clause = program.constraints.verify_clauses.get(check.clause_index);
+            authored_verify_check_contract(check, clause)
+        })
+        .collect();
     if evaluation.passed {
         return result;
     }
@@ -281,6 +292,51 @@ pub(crate) fn merge_author_verification_into_structural_result(
     }
 
     finalize_structural_verification_result(result)
+}
+
+fn authored_verify_check_contract(
+    check: &AuthorVerifyCheckResult,
+    clause: Option<&CoreVerifyClause>,
+) -> AuthoredVerifyCheck {
+    let tag = clause
+        .map(authored_verify_tag)
+        .filter(|tag| !tag.is_empty())
+        .unwrap_or_else(|| format!("verify-{}", check.clause_index + 1));
+    AuthoredVerifyCheck {
+        // The New Params macro map keys verify nodes `verify:<tag>`; using the
+        // same id makes the verify chip clickable -> focuses that node.
+        stable_node_id: Some(format!("verify:{tag}")),
+        status: match check.status {
+            AuthorVerifyCheckStatus::Passed => PublicAuthorVerifyCheckStatus::Passed,
+            AuthorVerifyCheckStatus::Failed => PublicAuthorVerifyCheckStatus::Failed,
+            AuthorVerifyCheckStatus::Error => PublicAuthorVerifyCheckStatus::Error,
+        },
+        tag,
+        message: check.message.clone(),
+        metric_source: check.metric_source.clone(),
+        metric_key: check.metric_key.clone(),
+        comparator: check.comparator.clone(),
+        expected: check.expected.as_ref().map(authored_verify_value_contract),
+        actual: check.actual.as_ref().map(authored_verify_value_contract),
+    }
+}
+
+fn authored_verify_value_contract(value: &AuthorVerifyResolvedValue) -> AuthoredVerifyValue {
+    match value {
+        AuthorVerifyResolvedValue::Number(number) => AuthoredVerifyValue::Number(*number),
+        AuthorVerifyResolvedValue::Boolean(flag) => AuthoredVerifyValue::Boolean(*flag),
+        AuthorVerifyResolvedValue::Text(text) => AuthoredVerifyValue::Text(text.clone()),
+    }
+}
+
+fn authored_verify_tag(clause: &CoreVerifyClause) -> String {
+    clause
+        .tag
+        .items
+        .iter()
+        .filter_map(verify_symbol_like)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn finalize_structural_verification_result(
@@ -452,6 +508,7 @@ fn evaluate_verify_clause(
                 metric_alias: alias,
                 metric_source: Some(metric_ref.source.to_string()),
                 metric_key: Some(metric_ref.key.to_string()),
+                comparator: Some(expected.0.to_string()),
                 expected: Some(expected.1.clone()),
                 actual: None,
                 message,
@@ -470,6 +527,7 @@ fn evaluate_verify_clause(
         metric_alias: alias,
         metric_source: Some(metric_ref.source.to_string()),
         metric_key: Some(metric_ref.key.to_string()),
+        comparator: Some(expected.0.to_string()),
         expected: Some(expected.1.clone()),
         actual: Some(actual.clone()),
         message: format!(
@@ -1229,7 +1287,14 @@ fn resolve_literal(value: &CoreVerifyValue) -> Option<AuthorVerifyResolvedValue>
         CoreVerifyValue::Number(value) => Some(AuthorVerifyResolvedValue::Number(*value)),
         CoreVerifyValue::Boolean(value) => Some(AuthorVerifyResolvedValue::Boolean(*value)),
         CoreVerifyValue::Text(value) | CoreVerifyValue::Symbol(value) => {
-            Some(AuthorVerifyResolvedValue::Text(value.clone()))
+            // `(= false)` / `(= true)` carry the boolean through as a symbol;
+            // resolve it so boolean metrics (e.g. `has-step`) compare as
+            // booleans instead of always mismatching a Text literal.
+            match value.as_str() {
+                "true" => Some(AuthorVerifyResolvedValue::Boolean(true)),
+                "false" => Some(AuthorVerifyResolvedValue::Boolean(false)),
+                _ => Some(AuthorVerifyResolvedValue::Text(value.clone())),
+            }
         }
         CoreVerifyValue::List(_) => None,
     }
@@ -1246,6 +1311,7 @@ fn verify_error(
         metric_alias,
         metric_source: None,
         metric_key: None,
+        comparator: None,
         expected: None,
         actual: None,
         message: message.to_string(),
@@ -1380,6 +1446,7 @@ mod tests {
             control_primitives: vec![],
             control_relations: vec![],
             control_views: vec![],
+            preview_views: vec![],
             advisories: vec![],
             selection_targets: vec![crate::contracts::SelectionTarget {
                 target_id: Some("face-1".to_string()),
@@ -1408,6 +1475,7 @@ mod tests {
                 formula_hint: None,
                 source: crate::contracts::MeasurementAnnotationSource::Generated,
             }],
+            tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: vec!["minor warning".to_string()],
@@ -1535,6 +1603,7 @@ mod tests {
                     },
                 ]
             },
+            authored_verify_checks: Vec::new(),
             metrics: StructuralMetrics {
                 part_count: 2,
                 preview_stl_size_bytes: Some(2048),
@@ -1934,6 +2003,47 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.code == "AUTHORED_VERIFY_FAILED"));
+    }
+
+    #[test]
+    fn merge_author_verification_into_structural_result_exposes_public_check_statuses() {
+        let bundle = authored_bundle_with_source(
+            r#"
+            (model
+              (verify
+                (tag step_export)
+                (metric check (stl triangle-count))
+                (expect check (> 100)))
+              (verify
+                (tag bad_clearance)
+                (metric check (stl non-manifold-edge-count))
+                (expect check (= 1)))
+              (part body (box 10 10 10)))
+            "#,
+        );
+
+        let result = merge_author_verification_into_structural_result(
+            &bundle,
+            &sample_manifest(),
+            sample_structural_result(true),
+        );
+
+        assert_eq!(result.authored_verify_checks.len(), 2);
+        assert_eq!(result.authored_verify_checks[0].tag, "step_export");
+        assert_eq!(
+            result.authored_verify_checks[0].status,
+            crate::contracts::AuthoredVerifyCheckStatus::Passed
+        );
+        assert_eq!(result.authored_verify_checks[1].tag, "bad_clearance");
+        assert_eq!(
+            result.authored_verify_checks[1].status,
+            crate::contracts::AuthoredVerifyCheckStatus::Failed
+        );
+        assert_eq!(
+            result.authored_verify_checks[1].stable_node_id.as_deref(),
+            Some("verify:bad_clearance")
+        );
+        assert!(result.authored_verify_checks[1].message.contains("0 = 1"));
     }
 
     #[test]

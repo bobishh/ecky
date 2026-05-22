@@ -27,6 +27,9 @@
     diffAfter = null,
     diffTitle = 'LAST MACRO DIFF',
     diffSummary = '',
+    z = 0,
+    hidden = false,
+    focused = true,
     onclose,
     onApply,
     onCommit,
@@ -42,6 +45,9 @@
     diffAfter?: string | null;
     diffTitle?: string;
     diffSummary?: string;
+    z?: number;
+    hidden?: boolean;
+    focused?: boolean;
     onclose: () => void;
     onApply?: (code: string) => Promise<unknown> | unknown;
     onCommit?: (payload: CodeModalCommitPayload) => Promise<void> | void;
@@ -160,8 +166,12 @@
 </script>
 
 <Window 
+  windowId="code"
   title={`MACRO INSPECTOR: ${title}`} 
   {onclose} 
+  {z}
+  {hidden}
+  {focused}
   bind:x 
   bind:y 
   bind:width 

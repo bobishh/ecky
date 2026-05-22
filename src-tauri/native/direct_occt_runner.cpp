@@ -907,6 +907,18 @@ std::array<double, 2> require_range_arg(const Arg& arg, const std::string& label
     return {std::min(first, second), std::max(first, second)};
 }
 
+std::array<double, 2> require_point2_arg(const Arg& arg, const std::string& label) {
+    if (arg.kind == Arg::Kind::Point2) {
+        return arg.point2_value;
+    }
+    if (arg.kind == Arg::Kind::List && arg.list_value.size() == 2 &&
+        arg.list_value[0].kind == Arg::Kind::Number &&
+        arg.list_value[1].kind == Arg::Kind::Number) {
+        return {arg.list_value[0].number_value, arg.list_value[1].number_value};
+    }
+    throw EvalError(label + " expects point2 values");
+}
+
 struct ProfileRefs {
     std::vector<std::uint64_t> outer;
     std::vector<std::uint64_t> holes;
@@ -1163,20 +1175,54 @@ std::optional<SelectorPayload> exact_face_selector(const Command& command, const
 std::vector<std::array<double, 2>> require_point2_list(
     const std::vector<Arg>& args,
     std::size_t index,
-    const std::string& op
+    const std::string& op,
+    std::size_t min_points = 3
 ) {
     if (index >= args.size() || args[index].kind != Arg::Kind::List) {
         throw EvalError(op + " expects a list of 2D points");
     }
     std::vector<std::array<double, 2>> points;
     for (const Arg& arg : args[index].list_value) {
-        if (arg.kind != Arg::Kind::Point2) {
-            throw EvalError(op + " expects point2 values");
-        }
-        points.push_back(arg.point2_value);
+        points.push_back(require_point2_arg(arg, op));
     }
-    if (points.size() < 3) {
-        throw EvalError(op + " expects at least three points");
+    if (points.size() < min_points) {
+        throw EvalError(op + " expects at least " + std::to_string(min_points) + " points");
+    }
+    return points;
+}
+
+std::vector<double> require_number_list_arg(const Arg& arg, const std::string& label) {
+    if (arg.kind == Arg::Kind::Point2) {
+        return {arg.point2_value[0], arg.point2_value[1]};
+    }
+    if (arg.kind == Arg::Kind::Point3) {
+        return {arg.point3_value[0], arg.point3_value[1], arg.point3_value[2]};
+    }
+    if (arg.kind != Arg::Kind::List) {
+        throw EvalError(label + " expects number list");
+    }
+    std::vector<double> values;
+    values.reserve(arg.list_value.size());
+    for (const Arg& item : arg.list_value) {
+        if (item.kind != Arg::Kind::Number) {
+            throw EvalError(label + " expects number list");
+        }
+        values.push_back(item.number_value);
+    }
+    return values;
+}
+
+std::vector<std::array<double, 2>> require_point2_list_arg(const Arg& arg, const std::string& label, std::size_t min_points) {
+    if (arg.kind != Arg::Kind::List) {
+        throw EvalError(label + " expects point2 list");
+    }
+    std::vector<std::array<double, 2>> points;
+    points.reserve(arg.list_value.size());
+    for (const Arg& item : arg.list_value) {
+        points.push_back(require_point2_arg(item, label));
+    }
+    if (points.size() < min_points) {
+        throw EvalError(label + " expects at least " + std::to_string(min_points) + " points");
     }
     return points;
 }
@@ -1269,7 +1315,28 @@ TopoDS_Wire first_wire(const TopoDS_Shape& shape, const std::string& op) {
 }
 
 TopoDS_Shape make_face_from_shape(const TopoDS_Shape& shape, const std::string& op) {
-    BRepBuilderAPI_MakeFace face(first_wire(shape, op));
+    BRepBuilderAPI_MakeWire wire_builder;
+    bool has_profile_edge = false;
+    for (TopExp_Explorer explorer(shape, TopAbs_WIRE); explorer.More(); explorer.Next()) {
+        wire_builder.Add(TopoDS::Wire(explorer.Current()));
+        has_profile_edge = true;
+    }
+    if (!has_profile_edge) {
+        for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+            wire_builder.Add(TopoDS::Edge(explorer.Current()));
+            has_profile_edge = true;
+        }
+    }
+    if (!has_profile_edge) {
+        throw EvalError(op + " expects a wire/profile shape");
+    }
+    if (!wire_builder.IsDone()) {
+        throw EvalError(op + " could not assemble profile wire");
+    }
+    BRepBuilderAPI_MakeFace face(wire_builder.Wire());
+    if (!face.IsDone()) {
+        throw EvalError(op + " could not build face");
+    }
     return face.Shape();
 }
 
@@ -1348,7 +1415,7 @@ TopoDS_Shape make_profile_face(
             throw EvalError("profile could not build outer face");
         }
         for (const auto& hole_wire : hole_wires_by_outer[index]) {
-            face_builder.Add(hole_wire);
+            face_builder.Add(TopoDS::Wire(hole_wire.Reversed()));
         }
         faces.push_back(face_builder.Shape());
     }
@@ -1380,28 +1447,33 @@ TopoDS_Shape make_rounded_rect_face(double width, double height, double radius) 
     if (r <= 1.0e-12) {
         return make_polygon_face({{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}});
     }
+    double arc_mid = r * std::sqrt(0.5);
     BRepBuilderAPI_MakeWire wire_builder;
     wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x0 + r, y0, 0), gp_Pnt(x1 - r, y0, 0)).Edge());
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
-                         GC_MakeArcOfCircle(gp_Pnt(x1 - r, y0, 0), gp_Pnt(x1, y0, 0),
+                         GC_MakeArcOfCircle(gp_Pnt(x1 - r, y0, 0),
+                                            gp_Pnt(x1 - r + arc_mid, y0 + r - arc_mid, 0),
                                             gp_Pnt(x1, y0 + r, 0))
                              .Value())
                          .Edge());
     wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x1, y0 + r, 0), gp_Pnt(x1, y1 - r, 0)).Edge());
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
-                         GC_MakeArcOfCircle(gp_Pnt(x1, y1 - r, 0), gp_Pnt(x1, y1, 0),
+                         GC_MakeArcOfCircle(gp_Pnt(x1, y1 - r, 0),
+                                            gp_Pnt(x1 - r + arc_mid, y1 - r + arc_mid, 0),
                                             gp_Pnt(x1 - r, y1, 0))
                              .Value())
                          .Edge());
     wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x1 - r, y1, 0), gp_Pnt(x0 + r, y1, 0)).Edge());
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
-                         GC_MakeArcOfCircle(gp_Pnt(x0 + r, y1, 0), gp_Pnt(x0, y1, 0),
+                         GC_MakeArcOfCircle(gp_Pnt(x0 + r, y1, 0),
+                                            gp_Pnt(x0 + r - arc_mid, y1 - r + arc_mid, 0),
                                             gp_Pnt(x0, y1 - r, 0))
                              .Value())
                          .Edge());
     wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x0, y1 - r, 0), gp_Pnt(x0, y0 + r, 0)).Edge());
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
-                         GC_MakeArcOfCircle(gp_Pnt(x0, y0 + r, 0), gp_Pnt(x0, y0, 0),
+                         GC_MakeArcOfCircle(gp_Pnt(x0, y0 + r, 0),
+                                            gp_Pnt(x0 + r - arc_mid, y0 + r - arc_mid, 0),
                                             gp_Pnt(x0 + r, y0, 0))
                              .Value())
                          .Edge());
@@ -1706,7 +1778,10 @@ std::vector<int> resolve_edge_target_indexes(
         }
         std::string requested_stable_id = stable_edge_target_id(requested_target_id);
         if (stable_counts[requested_stable_id] > 1) {
-            throw EvalError("edge selector is ambiguous");
+            throw EvalError(
+                std::string("edge selector ambiguously matched stable edge target: ") +
+                requested_target_id
+            );
         }
         for (std::size_t candidate_index = 0; candidate_index < edge_stable_ids.size(); ++candidate_index) {
             if (edge_stable_ids[candidate_index] != requested_stable_id) {
@@ -1721,14 +1796,16 @@ std::vector<int> resolve_edge_target_indexes(
             break;
         }
         if (!matched) {
-            throw EvalError("edge selector target id not found");
+            throw EvalError(
+                std::string("edge selector did not match target ids: ") + requested_target_id
+            );
         }
     }
     if (matched_target_ids.size() != requested_target_ids.size()) {
-        throw EvalError("edge selector is ambiguous");
+        throw EvalError("edge selector ambiguously matched stable edge target");
     }
     if (matched_indexes.empty()) {
-        throw EvalError("edge selector target id not found");
+        throw EvalError("edge selector did not match target ids");
     }
     return matched_indexes;
 }
@@ -1865,7 +1942,10 @@ std::vector<TopoDS_Face> resolve_face_targets(
         }
         std::string requested_stable_id = stable_face_target_id(requested_target_id);
         if (stable_counts[requested_stable_id] > 1) {
-            throw EvalError("face selector is ambiguous");
+            throw EvalError(
+                std::string("face selector ambiguously matched stable face target: ") +
+                requested_target_id
+            );
         }
         for (std::size_t candidate_index = 0; candidate_index < face_stable_ids.size(); ++candidate_index) {
             if (face_stable_ids[candidate_index] != requested_stable_id) {
@@ -1881,14 +1961,16 @@ std::vector<TopoDS_Face> resolve_face_targets(
             break;
         }
         if (!matched) {
-            throw EvalError("face selector target id not found");
+            throw EvalError(
+                std::string("face selector did not match target ids: ") + requested_target_id
+            );
         }
     }
     if (matched_target_ids.size() != requested_target_ids.size()) {
-        throw EvalError("face selector is ambiguous");
+        throw EvalError("face selector ambiguously matched stable face target");
     }
     if (matched_faces.empty()) {
-        throw EvalError("face selector target id not found");
+        throw EvalError("face selector did not match target ids");
     }
     return matched_faces;
 }
@@ -2331,25 +2413,99 @@ TopoDS_Shape make_bezier_path_wire(const std::vector<std::array<double, 3>>& poi
     return wire_builder.Wire();
 }
 
-TopoDS_Shape make_bspline_face(const std::vector<std::array<double, 2>>& points) {
-    if (points.size() < 3) {
-        throw EvalError("bspline requires at least three points");
+struct BsplineArgs {
+    std::vector<std::array<double, 2>> points;
+    bool closed = false;
+    std::optional<std::vector<std::array<double, 2>>> tangents;
+    std::optional<std::vector<double>> tangent_scalars;
+};
+
+BsplineArgs bspline_args(const Command& command) {
+    BsplineArgs result;
+    result.points = require_point2_list(command.args, 0, "bspline", 2);
+    if (command.args.size() > 1) {
+        result.closed = require_bool_arg(command.args, 1, "bspline");
     }
-    TColgp_Array1OfPnt poles(1, static_cast<Standard_Integer>(points.size()));
-    for (std::size_t index = 0; index < points.size(); ++index) {
-        poles.SetValue(static_cast<Standard_Integer>(index + 1), gp_Pnt(points[index][0], points[index][1], 0));
+    for (const auto& keyword : command.keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError("bspline keywords expect arg values only");
+        }
+        if (keyword.name == "closed") {
+            if (keyword.value.kind != Arg::Kind::Boolean) {
+                throw EvalError("bspline :closed expects boolean");
+            }
+            result.closed = keyword.value.bool_value;
+            continue;
+        }
+        if (keyword.name == "tangents") {
+            result.tangents = require_point2_list_arg(keyword.value, "bspline :tangents", 2);
+            continue;
+        }
+        if (keyword.name == "tangent_scalars" || keyword.name == "tangent-scalars") {
+            result.tangent_scalars = require_number_list_arg(keyword.value, "bspline :tangent-scalars");
+            continue;
+        }
+        throw EvalError("bspline does not recognize `:" + keyword.name + "`");
     }
-    GeomAPI_PointsToBSpline bspline_builder(poles, 3, 8, GeomAbs_C2, 1.0e-4);
-    Handle(Geom_BSplineCurve) curve = bspline_builder.Curve();
+    if (result.tangents.has_value() &&
+        result.tangents->size() != 2 &&
+        result.tangents->size() != result.points.size()) {
+        throw EvalError("bspline :tangents expects 2 entries or one per point");
+    }
+    if (result.tangent_scalars.has_value() &&
+        result.tangent_scalars->size() != 2 &&
+        result.tangent_scalars->size() != result.points.size()) {
+        throw EvalError("bspline :tangent-scalars expects 2 entries or one per point");
+    }
+    if (result.points.size() < 3 && !result.tangents.has_value()) {
+        throw EvalError("bspline requires at least three points unless tangents are supplied");
+    }
+    return result;
+}
+
+TopoDS_Shape make_bspline_shape(const BsplineArgs& args) {
     BRepBuilderAPI_MakeWire wire_builder;
-    wire_builder.Add(BRepBuilderAPI_MakeEdge(curve).Edge());
-    const auto& first = points.front();
-    const auto& last = points.back();
-    if (distance2(first, last) > 1.0e-9) {
+    const auto& first = args.points.front();
+    const auto& last = args.points.back();
+    if (args.tangents.has_value()) {
+        const auto& first_tangent = args.tangents->front();
+        const auto& last_tangent = args.tangents->back();
+        const double first_scale = args.tangent_scalars.has_value() && !args.tangent_scalars->empty()
+            ? args.tangent_scalars->front()
+            : 1.0;
+        const double last_scale = args.tangent_scalars.has_value() && !args.tangent_scalars->empty()
+            ? args.tangent_scalars->back()
+            : 1.0;
+        std::array<std::array<double, 2>, 4> bezier_poles{
+            first,
+            std::array<double, 2>{first[0] + first_tangent[0] * first_scale, first[1] + first_tangent[1] * first_scale},
+            std::array<double, 2>{last[0] - last_tangent[0] * last_scale, last[1] - last_tangent[1] * last_scale},
+            last,
+        };
+        TColgp_Array1OfPnt poles(1, 4);
+        for (std::size_t index = 0; index < bezier_poles.size(); ++index) {
+            poles.SetValue(static_cast<Standard_Integer>(index + 1), gp_Pnt(bezier_poles[index][0], bezier_poles[index][1], 0));
+        }
+        Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(poles);
+        wire_builder.Add(BRepBuilderAPI_MakeEdge(curve).Edge());
+    } else {
+        TColgp_Array1OfPnt poles(1, static_cast<Standard_Integer>(args.points.size()));
+        for (std::size_t index = 0; index < args.points.size(); ++index) {
+            poles.SetValue(static_cast<Standard_Integer>(index + 1), gp_Pnt(args.points[index][0], args.points[index][1], 0));
+        }
+        GeomAPI_PointsToBSpline bspline_builder(poles, 3, 8, GeomAbs_C2, 1.0e-4);
+        Handle(Geom_BSplineCurve) curve = bspline_builder.Curve();
+        wire_builder.Add(BRepBuilderAPI_MakeEdge(curve).Edge());
+    }
+    if (args.closed && distance2(first, last) > 1.0e-9) {
         wire_builder.Add(
             BRepBuilderAPI_MakeEdge(gp_Pnt(last[0], last[1], 0), gp_Pnt(first[0], first[1], 0)).Edge());
     }
-    return BRepBuilderAPI_MakeFace(wire_builder.Wire()).Shape();
+    TopoDS_Wire wire = wire_builder.Wire();
+    if (args.closed) {
+        return BRepBuilderAPI_MakeFace(wire).Shape();
+    }
+    return wire;
 }
 
 TopoDS_Shape linear_array_shape(const TopoDS_Shape& shape, std::size_t count, double dx, double dy, double dz) {
@@ -2458,28 +2614,98 @@ gp_Trsf make_location_frame(const gp_Trsf* base) {
     return gp_Trsf();
 }
 
-gp_Trsf make_path_frame(const TopoDS_Shape& path) {
-    std::vector<TopoDS_Edge> edges;
-    for (TopExp_Explorer explorer(path, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-        edges.push_back(TopoDS::Edge(explorer.Current()));
+double path_frame_anchor_arg(const Arg& arg) {
+    if (arg.kind == Arg::Kind::Number) {
+        return std::min(1.0, std::max(0.0, arg.number_value));
     }
-    if (edges.empty()) {
+    if ((arg.kind == Arg::Kind::Symbol || arg.kind == Arg::Kind::Text) && arg.text_value == "start") {
+        return 0.0;
+    }
+    if ((arg.kind == Arg::Kind::Symbol || arg.kind == Arg::Kind::Text) && arg.text_value == "end") {
+        return 1.0;
+    }
+    throw EvalError("path-frame :at expects `start`, `end`, or a numeric 0..1 anchor");
+}
+
+struct PathFrameArgs {
+    std::uint64_t path_ref = 0;
+    double at = 1.0;
+    std::array<double, 3> up{0.0, 0.0, 1.0};
+};
+
+PathFrameArgs path_frame_args(const Command& command) {
+    if (command.args.size() != 1 || command.args[0].kind != Arg::Kind::Ref) {
+        throw EvalError("path-frame expects one path reference");
+    }
+    PathFrameArgs result;
+    result.path_ref = command.args[0].ref_value;
+    for (const auto& keyword : command.keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError("path-frame keywords expect arg values only");
+        }
+        if (keyword.name == "at") {
+            result.at = path_frame_anchor_arg(keyword.value);
+            continue;
+        }
+        if (keyword.name == "up") {
+            if (keyword.value.kind != Arg::Kind::Point3) {
+                throw EvalError("path-frame :up expects a 3D vector");
+            }
+            result.up = keyword.value.point3_value;
+            continue;
+        }
+        throw EvalError("path-frame does not recognize `:" + keyword.name + "`");
+    }
+    return result;
+}
+
+gp_Trsf make_path_frame(const TopoDS_Shape& path, double at, std::array<double, 3> up) {
+    std::vector<TopoDS_Edge> edges;
+    std::vector<double> edge_lengths;
+    double total_length = 0.0;
+    for (TopExp_Explorer explorer(path, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        GProp_GProps props;
+        BRepGProp::LinearProperties(edge, props);
+        double length = std::max(0.0, props.Mass());
+        edges.push_back(edge);
+        edge_lengths.push_back(length);
+        total_length += length;
+    }
+    if (edges.empty() || total_length <= 1.0e-9) {
         throw EvalError("path-frame expects a path with at least one edge");
     }
 
-    TopoDS_Edge edge = edges.back();
+    double target_length = std::min(1.0, std::max(0.0, at)) * total_length;
+    std::size_t edge_index = edges.size() - 1;
+    double local_t = 1.0;
+    double walked_length = 0.0;
+    for (std::size_t candidate = 0; candidate < edges.size(); ++candidate) {
+        double length = edge_lengths[candidate];
+        if (target_length <= walked_length + length || candidate + 1 == edges.size()) {
+            edge_index = candidate;
+            local_t = length <= 1.0e-9 ? 0.0 : (target_length - walked_length) / length;
+            local_t = std::min(1.0, std::max(0.0, local_t));
+            break;
+        }
+        walked_length += length;
+    }
+
+    TopoDS_Edge edge = edges[edge_index];
     BRepAdaptor_Curve curve(edge);
     gp_Pnt origin;
     gp_Vec derivative;
-    curve.D1(curve.LastParameter(), origin, derivative);
+    double first = curve.FirstParameter();
+    double last = curve.LastParameter();
+    curve.D1(first + (last - first) * local_t, origin, derivative);
     if (derivative.Magnitude() <= 1.0e-9) {
         throw EvalError("path-frame got a zero-length tangent");
     }
 
     gp_Vec tangent = derivative;
     tangent.Normalize();
-    gp_Vec up(0, 0, 1);
-    gp_Vec x_hint = up - tangent.Multiplied(up.Dot(tangent));
+    gp_Vec up_vec(up[0], up[1], up[2]);
+    gp_Vec x_hint = up_vec - tangent.Multiplied(up_vec.Dot(tangent));
     if (x_hint.Magnitude() <= 1.0e-9) {
         gp_Vec fallback(0, 1, 0);
         x_hint = fallback - tangent.Multiplied(fallback.Dot(tangent));
@@ -2549,7 +2775,7 @@ SlotValue evaluate_command(
     };
 
     if (!command.keywords.empty() && op != "box" && op != "profile" && op != "plane" &&
-        op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell") {
+        op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline") {
         throw EvalError(op + " keywords unsupported yet");
     }
 
@@ -2596,10 +2822,7 @@ SlotValue evaluate_command(
         }
         std::vector<std::array<double, 2>> points;
         for (const Arg& arg : command.args[0].list_value) {
-            if (arg.kind != Arg::Kind::Point2) {
-                throw EvalError(op + " expects point2 values");
-            }
-            points.push_back(arg.point2_value);
+            points.push_back(require_point2_arg(arg, op));
         }
         return make_polygon_face(points);
     }
@@ -2696,10 +2919,8 @@ SlotValue evaluate_command(
         throw EvalError(op + " expects zero or one frame reference");
     }
     if (op == "path-frame") {
-        if (command.args.size() != 1) {
-            throw EvalError(op + " expects one path reference");
-        }
-        return make_path_frame(get_ref_shape(0));
+        PathFrameArgs args = path_frame_args(command);
+        return make_path_frame(lookup_shape(slots, args.path_ref, op), args.at, args.up);
     }
     if (op == "place") {
         if (command.args.size() != 2) {
@@ -2708,7 +2929,7 @@ SlotValue evaluate_command(
         return place_shape(get_ref_frame(0), get_ref_shape(1));
     }
     if (op == "bspline") {
-        return make_bspline_face(require_point2_list(command.args, 0, op));
+        return make_bspline_shape(bspline_args(command));
     }
     if (op == "union" || op == "difference" || op == "intersection" || op == "compound") {
         std::vector<Arg> refs = require_ref_list(command.args, op);

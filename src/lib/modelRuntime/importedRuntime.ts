@@ -11,6 +11,11 @@ export type ImportedPreviewTransform = {
     y: number;
     z: number;
   };
+  translate?: {
+    x: number;
+    y: number;
+    z: number;
+  };
 };
 
 function humanizeParameterKey(key: string): string {

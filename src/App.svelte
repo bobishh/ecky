@@ -34,6 +34,7 @@
     setThreadWindowLayoutRemembered,
     type WindowId,
   } from './lib/stores/windowStore';
+  import { triggerMacroNodeFocus } from './lib/stores/uiHighlightStore';
   import {
     activeMicrowaveCount,
     setMuted,
@@ -49,6 +50,7 @@
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
   import { handleGenerate, isQuestionIntent } from './lib/controllers/requestOrchestrator';
   import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange, applyManualCodeDraft } from './lib/controllers/manualController';
+  import { openProjectInEditor } from './lib/tauri/client';
   import {
     loadFromHistory,
     createNewThread,
@@ -75,7 +77,7 @@
     createSketchPreviewDraftScopeId,
     normalizeSketchPreviewDraftScopeId,
   } from './lib/sketchPreviewDraftStore';
-  import { showCodeModal, selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
+  import { selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
   import { boot, saveConfig, fetchModels } from './lib/boot/restore';
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
   import { nowSeconds } from './lib/stores/timeEngine';
@@ -128,7 +130,7 @@
   } from './lib/agents/workspaceCapture';
   import { codeInspectorTitle } from './lib/modelEngineLabel';
   import { buildFailedDraftSeed } from './lib/manualDraftSeed';
-  import { getDefaultMacro, loadSketchPreviewDraft } from './lib/tauri/client';
+  import { loadSketchPreviewDraft } from './lib/tauri/client';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
@@ -159,6 +161,11 @@
     buildImportedUiSpec,
     type ImportedPreviewTransform,
   } from './lib/modelRuntime/importedRuntime';
+  import {
+    buildPreviewViewTransforms,
+    mergePreviewTransforms,
+    resolveActivePreviewView,
+  } from './lib/modelRuntime/previewViews';
   import {
     buildSemanticPatch,
     ensureSemanticManifest,
@@ -485,7 +492,8 @@
     }
 
     const current = get(workingCopy);
-    const nextCode = seed?.code ?? (current.macroCode.trim() || await getDefaultMacro());
+    const hasSeedCode = seed ? Object.prototype.hasOwnProperty.call(seed, 'code') : false;
+    const nextCode = hasSeedCode ? seed?.code ?? '' : current.macroCode;
     const nextTitle = seed?.title ?? (current.title || 'Manual Edit');
     const nextSourceLanguage = seed?.sourceLanguage ?? current.sourceLanguage ?? 'legacyPython';
     const nextGeometryBackend = seed?.geometryBackend ?? current.geometryBackend ?? 'freecad';
@@ -514,7 +522,11 @@
     codeModalSourceLanguage = nextSourceLanguage;
     selectedCode.set(nextCode);
     selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
-    showCodeModal.set(true);
+    showWindow('code');
+  }
+
+  function closeCodeModal() {
+    closeWindowStore('code');
   }
 
   function openDocsSnippetInCode(snippet: string, title: string) {
@@ -527,8 +539,8 @@
   }
 
   function handleDockCodeToggle() {
-    if ($showCodeModal) {
-      showCodeModal.set(false);
+    if ($windowStore.code.visible) {
+      closeCodeModal();
       return;
     }
     void openVersionCodeModal();
@@ -641,6 +653,7 @@
   let pendingViewportScreenshotChoices = $state<PendingViewportScreenshotChoice[]>([]);
 
   let activeControlViewId = $state<string | null>(null);
+  let activePreviewViewId = $state<string | null>(null);
   const contextState = $derived.by(() =>
     deriveContextState({
       activeArtifactBundle,
@@ -666,6 +679,16 @@
   const importedPreviewTransforms = $derived.by<Record<string, ImportedPreviewTransform>>(
     () => contextState.importedPreviewTransforms,
   );
+  const availablePreviewViews = $derived.by(() => activeModelManifest?.previewViews ?? []);
+  const activePreviewView = $derived.by(
+    () => resolveActivePreviewView(activeModelManifest, activePreviewViewId),
+  );
+  const authoredPreviewTransforms = $derived.by<Record<string, ImportedPreviewTransform>>(
+    () => buildPreviewViewTransforms(activeModelManifest, activePreviewViewId),
+  );
+  const effectivePreviewTransforms = $derived.by<Record<string, ImportedPreviewTransform>>(
+    () => mergePreviewTransforms(importedPreviewTransforms, authoredPreviewTransforms),
+  );
   const overlaySelectedPart = $derived.by(() => contextState.overlaySelectedPart);
   const overlayPreviewOnly = $derived.by(() => contextState.overlayPreviewOnly);
   const availableControlViews = $derived.by<MaterializedSemanticView[]>(
@@ -677,6 +700,9 @@
   const activeMeasurementCallout = $derived.by(() => contextState.activeMeasurementCallout);
   $effect(() => {
     activeControlViewId = contextState.resolvedActiveControlViewId;
+  });
+  $effect(() => {
+    activePreviewViewId = activePreviewView?.viewId ?? null;
   });
   const suppressViewportBusyUi = $derived(isBooting);
   let showEnrichmentModal = $state(false);
@@ -902,6 +928,7 @@
   let lastAgentPresenceConnected = false;
   let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
   const terminalWindowState = $derived($windowStore.terminal);
+  const codeWindowState = $derived($windowStore.code);
   const sketchWindowState = $derived($windowStore.sketch);
   const projectsWindowState = $derived($windowStore.projects);
   const paramsWindowState = $derived($windowStore.params);
@@ -910,6 +937,7 @@
   const settingsWindowState = $derived($windowStore.settings);
   const activityWindowState = $derived($windowStore.activity);
   let mountedWindows = $state<Record<WindowId, boolean>>({
+    code: false,
     projects: false,
     params: false,
     dialogue: false,
@@ -921,7 +949,7 @@
   });
   $effect(() => {
     const s = $windowStore;
-    for (const id of ['projects', 'params', 'dialogue', 'docs', 'settings', 'terminal', 'activity', 'sketch'] as WindowId[]) {
+    for (const id of ['code', 'projects', 'params', 'dialogue', 'docs', 'settings', 'terminal', 'activity', 'sketch'] as WindowId[]) {
       if (s[id].visible) {
         mountedWindows[id] = true;
       }
@@ -1135,7 +1163,7 @@
           seededDraft.geometryBackend,
         ),
       );
-      showCodeModal.set(true);
+      showWindow('code');
     },
     getDrawingCanvas: () => drawingOverlay?.hasDrawing() ? drawingOverlay.getCanvas() : null,
     clearDrawing: () => { drawingOverlay?.clear(); drawMode = false; },
@@ -2145,6 +2173,14 @@
       return;
     }
     await handleGenerate(prompt, attachments, { uiDeps: requestOrchestratorUiDeps });
+  }
+
+  async function handlePromptPanelAuthoredVerifyFocus(message: Message, stableNodeId: string) {
+    const requestedNodeId = stableNodeId.trim();
+    if (!requestedNodeId || !isRenderableVersionTimelineMessage(message) || !$activeThreadId) return;
+    await loadVersion(message, $activeThreadId);
+    await tick();
+    triggerMacroNodeFocus(requestedNodeId);
   }
 
   function startBlankProject() {
@@ -3329,7 +3365,7 @@
         </button>
         <button
           class="dock-btn"
-          class:dock-btn--active={$showCodeModal}
+          class:dock-btn--active={$windowStore.code.visible}
           data-dock-label="CODE"
           onclick={handleDockCodeToggle}
           aria-label="CODE"
@@ -3480,7 +3516,7 @@
                 overlayControls={hasSketchPreview ? [] : overlayControls}
                 overlayAdvisories={hasSketchPreview ? [] : overlayAdvisories}
                 activeMeasurementCallout={hasSketchPreview ? null : activeMeasurementCallout}
-                previewTransforms={hasSketchPreview ? {} : importedPreviewTransforms}
+                previewTransforms={hasSketchPreview ? {} : effectivePreviewTransforms}
                 viewerMode={!hasSketchPreview && paramsWindowState.visible ? viewerMode : 'orbit'}
                 onOverlayChange={handleSemanticControlChange}
                 onControlFocusChange={(focus) => focusedMeasurementControl = focus}
@@ -3495,6 +3531,20 @@
                 busyText={viewerBusyText}
                 topologyMode={viewerTopologyMode}
               />
+              {#if !hasSketchPreview && availablePreviewViews.length > 0}
+                <div class="preview-view-switcher" aria-label="Preview view switcher">
+                  {#each availablePreviewViews as previewView (previewView.viewId)}
+                    <button
+                      class="preview-view-switcher__button"
+                      class:preview-view-switcher__button--active={previewView.viewId === activePreviewViewId}
+                      onclick={() => activePreviewViewId = previewView.viewId}
+                      type="button"
+                    >
+                      {previewView.label}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
               {#if sketchPreviewStatus}
                 <section class="sketch-preview-status" aria-label="Sketch preview status">
                   <div class="sketch-preview-status__head">
@@ -3751,6 +3801,7 @@
       minWidth={320}
       minHeight={300}
       title="Projects"
+      focused={projectsWindowState.active}
       hidden={!projectsWindowState.visible}
       highlighted={$onboarding.highlightTarget === 'projects'}
       onclose={() => closeWindowStore('projects')}
@@ -3775,6 +3826,7 @@
       minWidth={280}
       minHeight={250}
       title="Parameters"
+      focused={paramsWindowState.active}
       hidden={!paramsWindowState.visible}
       highlighted={$onboarding.highlightTarget === 'params'}
       onclose={() => closeWindowStore('params')}
@@ -3798,6 +3850,7 @@
             workingCopy.patch({ postProcessing: nextPostProcessing });
           }}
           onSemanticChange={handleSemanticControlChange}
+          onApplyMacroCode={(code) => applyManualCodeDraft(code)}
           onchange={handleParamPanelChange}
           oncommit={handleParamPanelCommit}
           onspecchange={(spec, params) => {
@@ -3822,6 +3875,11 @@
           }}
           onViewerSelectionModeChange={(mode) => {
             viewerMode = mode;
+          }}
+          onOpenInEditor={() => {
+            void openProjectInEditor($activeThreadId ?? null, $activeVersionId ?? null).catch((error) => {
+              console.error('open in editor failed:', error);
+            });
           }}
           onShowCode={() => {
             void openVersionCodeModal({
@@ -3849,6 +3907,7 @@
       minWidth={400}
       minHeight={350}
       title="Settings"
+      focused={settingsWindowState.active}
       hidden={!settingsWindowState.visible}
       highlighted={false}
       onclose={() => closeWindowStore('settings')}
@@ -3879,6 +3938,7 @@
       minWidth={440}
       minHeight={320}
       title="Session Activity"
+      focused={activityWindowState.active}
       hidden={!activityWindowState.visible}
       highlighted={false}
       onclose={() => closeWindowStore('activity')}
@@ -3902,6 +3962,7 @@
       minWidth={520}
       minHeight={360}
       title="Sketch Workspace"
+      focused={sketchWindowState.active}
       hidden={!sketchWindowState.visible}
       highlighted={false}
       onclose={() => closeWindowStore('sketch')}
@@ -3929,6 +3990,7 @@
       minWidth={350}
       minHeight={260}
       title="Dialogue"
+      focused={dialogueWindowState.active}
       hidden={!dialogueWindowState.visible}
       highlighted={$onboarding.highlightTarget === 'dialogue'}
       onclose={() => closeWindowStore('dialogue')}
@@ -3955,6 +4017,7 @@
             messagesLoading={$activeThreadMessagesLoading}
             messagesHasMore={activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false}
             messagesPageLoading={activeThread ? ($threadMessagePageState[activeThread.id]?.isLoading ?? false) : false}
+            requests={$activeThreadRequests}
             onLoadOlderMessages={() => activeThread && loadOlderThreadMessages(activeThread.id)}
             activeThreadId={$activeThreadId}
             sendWorkspaceCapture={sendWorkspaceCaptureForActiveThread}
@@ -3973,6 +4036,7 @@
             }}
             onDeleteVersion={deleteVersion}
             onRestoreVersion={restoreVersion}
+            onAuthoredVerifyFocus={handlePromptPanelAuthoredVerifyFocus}
             bind:activeVersionId={$activeVersionId}
             onVersionChange={loadVersion}
           />
@@ -3992,6 +4056,7 @@
       minWidth={760}
       minHeight={480}
       title="Ecky IR Docs"
+      focused={docsWindowState.active}
       hidden={!docsWindowState.visible}
       highlighted={false}
       onclose={() => closeWindowStore('docs')}
@@ -4011,6 +4076,7 @@
       minWidth={400}
       minHeight={300}
       title={`${visibleAgentTerminal.agentLabel} Terminal`}
+      focused={terminalWindowState.active}
       hidden={!terminalWindowState.visible}
       highlighted={false}
       onclose={() => {
@@ -4126,7 +4192,7 @@
     </Modal>
   {/if}
 
-  {#if $showCodeModal}
+  {#if mountedWindows.code}
     <CodeModal
       bind:code={$selectedCode}
       mode={codeModalMode}
@@ -4141,7 +4207,10 @@
       onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
       onCommit={codeModalMode === 'version' ? commitManualVersion : undefined}
       onFork={codeModalMode === 'version' ? forkManualVersion : undefined}
-      onclose={() => showCodeModal.set(false)}
+      z={codeWindowState.z}
+      hidden={!codeWindowState.visible}
+      focused={codeWindowState.active}
+      onclose={closeCodeModal}
     />
   {/if}
 
@@ -4176,6 +4245,34 @@
     z-index: 5;
     transition: opacity 180ms ease, filter 180ms ease;
     overflow: hidden;
+  }
+  .preview-view-switcher {
+    position: absolute;
+    left: 12px;
+    top: 12px;
+    z-index: 36;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-width: min(420px, calc(100% - 24px));
+    overflow: hidden;
+  }
+  .preview-view-switcher__button {
+    border: 1px solid color-mix(in srgb, var(--secondary) 36%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 6px 10px;
+    cursor: pointer;
+    overflow: hidden;
+  }
+  .preview-view-switcher__button--active {
+    color: var(--primary);
+    border-color: color-mix(in srgb, var(--primary) 52%, var(--bg-300));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 24%, transparent);
   }
   .sketch-preview-status {
     position: absolute;

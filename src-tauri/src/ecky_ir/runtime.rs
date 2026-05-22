@@ -495,16 +495,19 @@ fn runtime_ir_expr_from_core_selector_payload(payload: &CoreSelectorPayload) -> 
     match payload {
         CoreSelectorPayload::EdgeAll
         | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTag(_)
         | CoreSelectorPayload::EdgeTargetIds(_) => Ok(IrExpr::Selector(
             crate::ecky_ir::model::IrSelectorExpr::Edge(edge_selector_spec_from_core_payload(
                 payload,
             )?),
         )),
-        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => Ok(
-            IrExpr::Selector(crate::ecky_ir::model::IrSelectorExpr::Face(
-                face_selector_spec_from_core_payload(payload)?,
-            )),
-        ),
+        CoreSelectorPayload::FaceClauses(_)
+        | CoreSelectorPayload::FaceTag(_)
+        | CoreSelectorPayload::FaceTargetIds(_) => Ok(IrExpr::Selector(
+            crate::ecky_ir::model::IrSelectorExpr::Face(face_selector_spec_from_core_payload(
+                payload,
+            )?),
+        )),
     }
 }
 
@@ -1147,9 +1150,11 @@ fn render_prepared_parts(
         control_primitives: Vec::new(),
         control_relations: Vec::new(),
         control_views: Vec::new(),
+        preview_views: Vec::new(),
         advisories: Vec::new(),
         selection_targets,
         measurement_annotations: Vec::new(),
+        tagged_anchors: std::collections::BTreeMap::new(),
         feature_graph: Some(feature_graph),
         correspondence_graph: None,
         warnings: Vec::new(),

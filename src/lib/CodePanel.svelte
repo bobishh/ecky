@@ -57,13 +57,20 @@
       EditorView.theme({
         '&': { height: '100%', fontSize: '14px', fontFamily: 'var(--font-mono)' },
         '.cm-scroller': { overflow: 'auto' },
-        '.cm-ecky-comment': { color: '#6e7b95' },
+        '.cm-ecky-comment': { color: '#6e7b95', fontStyle: 'italic' },
         '.cm-ecky-keyword': { color: '#d4a04f', fontWeight: '700' },
+        '.cm-ecky-kind': { color: '#d98f70', fontWeight: '700' },
+        '.cm-ecky-op': { color: '#62b6ab' },
+        '.cm-ecky-helper': { color: '#a98fd1' },
+        '.cm-ecky-name': { color: '#f0d49a', fontWeight: '700' },
+        '.cm-ecky-call': { color: '#e2c089' },
         '.cm-ecky-number': { color: '#7db2d7' },
         '.cm-ecky-string': { color: '#8ebf86' },
         '.cm-ecky-atom': { color: '#cf8d5a' },
         '.cm-ecky-symbol': { color: '#d7deea' },
-        '.cm-ecky-paren': { color: '#9aa8c3' },
+        '.cm-ecky-paren-1': { color: '#8a93ad' },
+        '.cm-ecky-paren-2': { color: '#7fa3a0' },
+        '.cm-ecky-paren-3': { color: '#9d8fbd' },
       }),
     ];
   }
@@ -249,7 +256,37 @@
     color: #d7deea !important;
   }
 
-  :global(.cm-editor .cm-ecky-paren) {
-    color: #9aa8c3 !important;
+  :global(.cm-editor .cm-ecky-kind) {
+    color: #d98f70 !important;
+    font-weight: 700 !important;
+  }
+
+  :global(.cm-editor .cm-ecky-op) {
+    color: #62b6ab !important;
+  }
+
+  :global(.cm-editor .cm-ecky-helper) {
+    color: #a98fd1 !important;
+  }
+
+  :global(.cm-editor .cm-ecky-name) {
+    color: #f0d49a !important;
+    font-weight: 700 !important;
+  }
+
+  :global(.cm-editor .cm-ecky-call) {
+    color: #e2c089 !important;
+  }
+
+  :global(.cm-editor .cm-ecky-paren-1) {
+    color: #8a93ad !important;
+  }
+
+  :global(.cm-editor .cm-ecky-paren-2) {
+    color: #7fa3a0 !important;
+  }
+
+  :global(.cm-editor .cm-ecky-paren-3) {
+    color: #9d8fbd !important;
   }
 </style>

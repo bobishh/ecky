@@ -1,5 +1,5 @@
-import assert from 'node:assert/strict';
-import test from 'node:test';
+import assert from "node:assert/strict";
+import test from "node:test";
 
 import {
   hasActiveLithophaneAttachments,
@@ -12,233 +12,343 @@ import {
   normalizePostProcessing,
   normalizeThread,
   toContractDesignOutput,
-} from './domain';
+} from "./domain";
 
-test('normalizeDesignOutput resolves legacy defaults', () => {
+test("normalizeDesignOutput resolves legacy defaults", () => {
   const output = normalizeDesignOutput({
-    engineKind: 'freecad',
+    engineKind: "freecad",
   } as any);
 
-  assert.equal(output.sourceLanguage, 'legacyPython');
-  assert.equal(output.geometryBackend, 'freecad');
+  assert.equal(output.sourceLanguage, "legacyPython");
+  assert.equal(output.geometryBackend, "freecad");
 });
 
-test('normalizeThread does not synthesize authoring context', () => {
+test("normalizeThread does not synthesize authoring context", () => {
   const thread = normalizeThread({
-    engine_kind: 'freecad',
-    engineKind: 'ecky',
-    source_language: 'legacyPython',
-    sourceLanguage: 'ecky',
-    geometry_backend: 'freecad',
-    geometryBackend: 'mesh',
+    engine_kind: "freecad",
+    engineKind: "ecky",
+    source_language: "legacyPython",
+    sourceLanguage: "ecky",
+    geometry_backend: "freecad",
+    geometryBackend: "mesh",
   } as any);
 
-  assert.equal('engineKind' in thread, false);
-  assert.equal('sourceLanguage' in thread, false);
-  assert.equal('geometryBackend' in thread, false);
+  assert.equal("engineKind" in thread, false);
+  assert.equal("sourceLanguage" in thread, false);
+  assert.equal("geometryBackend" in thread, false);
 });
 
-test('toContractDesignOutput preserves authoring context fields', () => {
+test("toContractDesignOutput preserves authoring context fields", () => {
   const contract = toContractDesignOutput({
-    title: 'Threaded',
-    versionName: 'V2',
-    response: 'ok',
-    interactionMode: 'design',
-    macroCode: '(model (part body (box 1 1 1)))',
-    macroDialect: 'ecky',
-    engineKind: 'ecky',
-    sourceLanguage: 'ecky',
-    geometryBackend: 'build123d',
+    title: "Threaded",
+    versionName: "V2",
+    response: "ok",
+    interactionMode: "design",
+    macroCode: "(model (part body (box 1 1 1)))",
+    macroDialect: "ecky",
+    engineKind: "ecky",
+    sourceLanguage: "ecky",
+    geometryBackend: "build123d",
     uiSpec: { fields: [] },
     initialParams: {},
     postProcessing: null,
   } as any);
 
-  assert.equal(contract.engineKind, 'ecky');
-  assert.equal(contract.sourceLanguage, 'ecky');
-  assert.equal(contract.geometryBackend, 'build123d');
+  assert.equal(contract.engineKind, "ecky");
+  assert.equal(contract.sourceLanguage, "ecky");
+  assert.equal(contract.geometryBackend, "build123d");
 });
 
-test('normalizeMessage heals ecky ir output backend from build123d runtime bundle', () => {
+test("normalizeMessage heals ecky ir output backend from build123d runtime bundle", () => {
   const message = normalizeMessage({
-    id: 'm1',
-    role: 'assistant',
-    content: '',
-    status: 'success',
+    id: "m1",
+    role: "assistant",
+    content: "",
+    status: "success",
     timestamp: 0,
     output: {
-      engineKind: 'ecky',
-      sourceLanguage: 'ecky',
-      geometryBackend: 'mesh',
-      macroCode: '(model (part body (box 1 1 1)))',
+      engineKind: "ecky",
+      sourceLanguage: "ecky",
+      geometryBackend: "mesh",
+      macroCode: "(model (part body (box 1 1 1)))",
       uiSpec: { fields: [] },
       initialParams: {},
     } as any,
     artifactBundle: {
-      modelId: 'model',
-      sourceKind: 'generated',
-      contentHash: 'x',
-      fcstdPath: '',
-      manifestPath: '',
-      previewStlPath: '',
-      geometryBackend: 'build123d',
+      modelId: "model",
+      sourceKind: "generated",
+      contentHash: "x",
+      fcstdPath: "",
+      manifestPath: "",
+      previewStlPath: "",
+      geometryBackend: "build123d",
     } as any,
     modelManifest: null,
   } as any);
 
-  assert.equal(message.output?.geometryBackend, 'build123d');
-  assert.equal(message.output?.sourceLanguage, 'ecky');
+  assert.equal(message.output?.geometryBackend, "build123d");
+  assert.equal(message.output?.sourceLanguage, "ecky");
 });
 
-test('normalizeArtifactBundle preserves topology target alias ids', () => {
+test("normalizeMessage preserves structural verification authored checks from persisted history payloads", () => {
+  const message = normalizeMessage({
+    id: "m-verify",
+    role: "assistant",
+    content: "Version ready.",
+    status: "success",
+    timestamp: 0,
+    output: null,
+    artifactBundle: null,
+    modelManifest: null,
+    structural_verification: {
+      passed: false,
+      summary: "Authored verify failed.",
+      issues: [],
+      authored_verify_checks: [
+        {
+          tag: "rib_clearance",
+          status: "failed",
+          message: "Gap below minimum.",
+          stable_node_id: "part:rib",
+          metric_source: "clearance",
+          metric_key: "min-distance",
+          comparator: ">=",
+          expected: { kind: "number", value: 0.3 },
+          actual: { kind: "number", value: 0.12 },
+        },
+      ],
+      metrics: {
+        partCount: 1,
+        totalVolume: 1,
+        totalArea: 1,
+        bbox: null,
+        previewStlSizeBytes: 1,
+        previewStlTriangleCount: 1,
+        previewStlComponentCount: 1,
+        previewStlNonManifoldEdgeCount: 0,
+        previewStlOverhangTriangleCount: 0,
+        previewStlOverhangRatio: 0,
+      },
+      verifierStatus: "ok",
+      verifierSource: "rust_structural",
+    },
+  } as any);
+
+  assert.equal(message.structuralVerification?.authoredVerifyChecks?.length, 1);
+  assert.deepEqual(message.structuralVerification?.authoredVerifyChecks?.[0], {
+    tag: "rib_clearance",
+    status: "failed",
+    message: "Gap below minimum.",
+    stableNodeId: "part:rib",
+    metricSource: "clearance",
+    metricKey: "min-distance",
+    comparator: ">=",
+    expected: { kind: "number", value: 0.3 },
+    actual: { kind: "number", value: 0.12 },
+  });
+});
+
+test("normalizeArtifactBundle preserves topology target alias ids", () => {
   const bundle = normalizeArtifactBundle({
-    modelId: 'model',
-    sourceKind: 'generated',
-    contentHash: 'x',
-    fcstdPath: '',
-    manifestPath: '',
-    previewStlPath: '',
-    edgeTargets: [{
-      targetId: 'body:edge:0-0-0_10-0-0',
-      durableTargetId: 'body:node:42:edge:0-0-0_10-0-0',
-      canonicalTargetId: 'body:edge:0:0-0-0_10-0-0',
-      aliasIds: ['body:edge:0:0-0-0_10-0-0'],
-    }],
-    faceTargets: [{
-      targetId: 'body:face:0-0-10:100',
-      durableTargetId: 'body:node:42:face:0-0-10:100',
-      canonicalTargetId: 'body:face:5:0-0-10:100',
-      aliasIds: ['body:face:5:0-0-10:100'],
-    }],
+    modelId: "model",
+    sourceKind: "generated",
+    contentHash: "x",
+    fcstdPath: "",
+    manifestPath: "",
+    previewStlPath: "",
+    edgeTargets: [
+      {
+        targetId: "body:edge:0-0-0_10-0-0",
+        durableTargetId: "body:node:42:edge:0-0-0_10-0-0",
+        canonicalTargetId: "body:edge:0:0-0-0_10-0-0",
+        aliasIds: ["body:edge:0:0-0-0_10-0-0"],
+      },
+    ],
+    faceTargets: [
+      {
+        targetId: "body:face:0-0-10:100",
+        durableTargetId: "body:node:42:face:0-0-10:100",
+        canonicalTargetId: "body:face:5:0-0-10:100",
+        aliasIds: ["body:face:5:0-0-10:100"],
+      },
+    ],
   } as any);
 
   assert.ok(bundle.edgeTargets?.[0]);
   assert.ok(bundle.faceTargets?.[0]);
-  assert.equal(bundle.edgeTargets[0].durableTargetId, 'body:node:42:edge:0-0-0_10-0-0');
-  assert.equal(bundle.faceTargets[0].durableTargetId, 'body:node:42:face:0-0-10:100');
-  assert.equal(bundle.edgeTargets[0].canonicalTargetId, 'body:edge:0:0-0-0_10-0-0');
-  assert.equal(bundle.faceTargets[0].canonicalTargetId, 'body:face:5:0-0-10:100');
-  assert.deepEqual(bundle.edgeTargets[0].aliasIds, ['body:edge:0:0-0-0_10-0-0']);
-  assert.deepEqual(bundle.faceTargets[0].aliasIds, ['body:face:5:0-0-10:100']);
+  assert.equal(
+    bundle.edgeTargets[0].durableTargetId,
+    "body:node:42:edge:0-0-0_10-0-0",
+  );
+  assert.equal(
+    bundle.faceTargets[0].durableTargetId,
+    "body:node:42:face:0-0-10:100",
+  );
+  assert.equal(
+    bundle.edgeTargets[0].canonicalTargetId,
+    "body:edge:0:0-0-0_10-0-0",
+  );
+  assert.equal(
+    bundle.faceTargets[0].canonicalTargetId,
+    "body:face:5:0-0-10:100",
+  );
+  assert.deepEqual(bundle.edgeTargets[0].aliasIds, [
+    "body:edge:0:0-0-0_10-0-0",
+  ]);
+  assert.deepEqual(bundle.faceTargets[0].aliasIds, ["body:face:5:0-0-10:100"]);
 });
 
-test('normalizeMessage preserves durable topology target ids on manifest', () => {
-  const message = normalizeMessage({
-    id: 'm1',
-    role: 'assistant',
-    content: '',
-    status: 'success',
-    timestamp: 0,
-    output: null,
-    artifactBundle: null,
-    modelManifest: {
-      modelId: 'model',
-      sourceKind: 'generated',
-      contentHash: 'x',
-      fcstdPath: '',
-      manifestPath: '',
-      previewStlPath: '',
-      document: {
-        documentName: 'Doc',
-        documentLabel: 'Doc',
-        sourcePath: null,
-        objectCount: 1,
-        warnings: [],
-      },
-      parts: [],
-      parameterGroups: [],
-      controlPrimitives: [],
-      controlRelations: [],
-      controlViews: [],
-      advisories: [],
-      selectionTargets: [{
-        targetId: 'body:edge:0-0-0_10-0-0',
-        durableTargetId: 'body:node:42:edge:0-0-0_10-0-0',
-        canonicalTargetId: 'body:edge:0:0-0-0_10-0-0',
-        aliasIds: ['legacy-edge'],
-        partId: 'body',
-        viewerNodeId: 'Body001',
-        label: 'Body Edge',
-        kind: 'edge',
+test("normalizeMessage preserves durable topology target ids on manifest", () => {
+  const sourceManifest = {
+    modelId: "model",
+    sourceKind: "generated",
+    contentHash: "x",
+    fcstdPath: "",
+    manifestPath: "",
+    previewStlPath: "",
+    document: {
+      documentName: "Doc",
+      documentLabel: "Doc",
+      sourcePath: null,
+      objectCount: 1,
+      warnings: [],
+    },
+    parts: [],
+    parameterGroups: [],
+    controlPrimitives: [],
+    controlRelations: [],
+    controlViews: [],
+    advisories: [],
+    selectionTargets: [
+      {
+        targetId: "body:edge:0-0-0_10-0-0",
+        durableTargetId: "body:node:42:edge:0-0-0_10-0-0",
+        canonicalTargetId: "body:edge:0:0-0-0_10-0-0",
+        aliasIds: ["legacy-edge"],
+        partId: "body",
+        viewerNodeId: "Body001",
+        label: "Body Edge",
+        kind: "edge",
         editable: true,
         parameterKeys: [],
         primitiveIds: [],
         viewIds: [],
-      }],
-      measurementAnnotations: [],
-      warnings: [],
-      enrichmentState: { status: 'none', proposals: [] },
-    } as any,
+      },
+    ],
+    measurementAnnotations: [],
+    taggedAnchors: {
+      mountingTop: {
+        kind: "face",
+        authoredSelector: "target-id:body:edge:0-0-0_10-0-0",
+        target: "body",
+        targetIds: ["body:edge:0-0-0_10-0-0"],
+        durableTargetIds: ["body:node:42:edge:0-0-0_10-0-0"],
+        canonicalTargetIds: ["body:edge:0:0-0-0_10-0-0"],
+        aliasIds: ["legacy-edge"],
+      },
+    },
+    warnings: [],
+    enrichmentState: { status: "none", proposals: [] },
+  };
+  const message = normalizeMessage({
+    id: "m1",
+    role: "assistant",
+    content: "",
+    status: "success",
+    timestamp: 0,
+    output: null,
+    artifactBundle: null,
+    modelManifest: sourceManifest as any,
   } as any);
 
   assert.equal(
     message.modelManifest?.selectionTargets?.[0]?.durableTargetId,
-    'body:node:42:edge:0-0-0_10-0-0',
+    "body:node:42:edge:0-0-0_10-0-0",
+  );
+  assert.equal(
+    message.modelManifest?.taggedAnchors?.mountingTop?.durableTargetIds?.[0],
+    "body:node:42:edge:0-0-0_10-0-0",
+  );
+  assert.notEqual(
+    message.modelManifest?.taggedAnchors?.mountingTop?.targetIds,
+    sourceManifest.taggedAnchors.mountingTop.targetIds,
   );
 });
 
-test('normalizeLastDesignSnapshot heals ecky ir output backend from build123d runtime bundle', () => {
+test("normalizeLastDesignSnapshot heals ecky ir output backend from build123d runtime bundle", () => {
   const snapshot = normalizeLastDesignSnapshot({
     design: {
-      engineKind: 'ecky',
-      sourceLanguage: 'ecky',
-      geometryBackend: 'mesh',
-      macroCode: '(model (part body (box 1 1 1)))',
+      engineKind: "ecky",
+      sourceLanguage: "ecky",
+      geometryBackend: "mesh",
+      macroCode: "(model (part body (box 1 1 1)))",
       uiSpec: { fields: [] },
       initialParams: {},
     },
     artifactBundle: {
-      modelId: 'model',
-      sourceKind: 'generated',
-      contentHash: 'x',
-      fcstdPath: '',
-      manifestPath: '',
-      previewStlPath: '',
-      geometryBackend: 'build123d',
+      modelId: "model",
+      sourceKind: "generated",
+      contentHash: "x",
+      fcstdPath: "",
+      manifestPath: "",
+      previewStlPath: "",
+      geometryBackend: "build123d",
     },
     modelManifest: null,
   } as any);
 
-  assert.equal(snapshot?.design?.geometryBackend, 'build123d');
-  assert.equal(snapshot?.design?.sourceLanguage, 'ecky');
+  assert.equal(snapshot?.design?.geometryBackend, "build123d");
+  assert.equal(snapshot?.design?.sourceLanguage, "ecky");
 });
 
-test('normalizeRuntimeCapabilities accepts legacy mesh alias and returns mesh only', () => {
+test("normalizeRuntimeCapabilities accepts legacy mesh alias and returns mesh only", () => {
   const normalized = normalizeRuntimeCapabilities({
-    freecad: { available: true, detail: 'FreeCAD ready', path: '/tmp/freecadcmd' },
-    build123d: { available: true, detail: 'BUILD123D ready', path: '/tmp/python3' },
-    directOcct: { available: true, detail: 'Direct OCCT ready', path: '/tmp/include' },
-    eckyRust: { available: true, detail: 'NATIVE ready', path: '/tmp/mesh' },
+    freecad: {
+      available: true,
+      detail: "FreeCAD ready",
+      path: "/tmp/freecadcmd",
+    },
+    build123d: {
+      available: true,
+      detail: "BUILD123D ready",
+      path: "/tmp/python3",
+    },
+    directOcct: {
+      available: true,
+      detail: "Direct OCCT ready",
+      path: "/tmp/include",
+    },
+    eckyRust: { available: true, detail: "NATIVE ready", path: "/tmp/mesh" },
     recommendedAuthoringContext: {
-      engineKind: 'ecky',
-      sourceLanguage: 'ecky',
-      geometryBackend: 'mesh',
+      engineKind: "ecky",
+      sourceLanguage: "ecky",
+      geometryBackend: "mesh",
     },
   } as any);
 
-  assert.equal(normalized.directOcct.detail, 'Direct OCCT ready');
-  assert.equal(normalized.mesh.detail, 'NATIVE ready');
-  assert.equal(normalized.recommendedAuthoringContext.engineKind, 'ecky');
-  assert.equal(normalized.recommendedAuthoringContext.sourceLanguage, 'ecky');
-  assert.equal(normalized.recommendedAuthoringContext.geometryBackend, 'mesh');
+  assert.equal(normalized.directOcct.detail, "Direct OCCT ready");
+  assert.equal(normalized.mesh.detail, "NATIVE ready");
+  assert.equal(normalized.recommendedAuthoringContext.engineKind, "ecky");
+  assert.equal(normalized.recommendedAuthoringContext.sourceLanguage, "ecky");
+  assert.equal(normalized.recommendedAuthoringContext.geometryBackend, "mesh");
 });
 
-test('normalizeRuntimeCapabilities gives internal direct OCCT safe fallback', () => {
+test("normalizeRuntimeCapabilities gives internal direct OCCT safe fallback", () => {
   const normalized = normalizeRuntimeCapabilities({
-    freecad: { available: false, detail: 'missing' },
-    build123d: { available: false, detail: 'missing' },
-    mesh: { available: true, detail: 'bundled' },
+    freecad: { available: false, detail: "missing" },
+    build123d: { available: false, detail: "missing" },
+    mesh: { available: true, detail: "bundled" },
   } as any);
 
   assert.equal(normalized.directOcct.available, false);
-  assert.equal(normalized.directOcct.detail, 'Unavailable');
+  assert.equal(normalized.directOcct.detail, "Unavailable");
 });
 
-test('normalizePostProcessing lifts legacy displacement into a lithophane attachment', () => {
+test("normalizePostProcessing lifts legacy displacement into a lithophane attachment", () => {
   const normalized = normalizePostProcessing({
     displacement: {
-      imageParam: 'image_path',
-      projection: 'planar',
+      imageParam: "image_path",
+      projection: "planar",
       depthMm: 2.5,
       invert: true,
     },
@@ -247,20 +357,20 @@ test('normalizePostProcessing lifts legacy displacement into a lithophane attach
   assert.ok(normalized);
   assert.equal(normalized?.lithophaneAttachments?.length, 1);
   assert.deepEqual(normalized?.lithophaneAttachments?.[0], {
-    id: 'legacy-image-path',
+    id: "legacy-image-path",
     enabled: true,
-    source: { kind: 'param', imageParam: 'image_path' },
-    targetPartId: '',
+    source: { kind: "param", imageParam: "image_path" },
+    targetPartId: "",
     placement: {
-      mode: 'partSidePatch',
-      side: 'front',
-      projection: 'planar',
+      mode: "partSidePatch",
+      side: "front",
+      projection: "planar",
       widthMm: 0,
       heightMm: 0,
       offsetXMm: 0,
       offsetYMm: 0,
       rotationDeg: 0,
-      overflowMode: 'contain',
+      overflowMode: "contain",
       bleedMarginMm: 0,
     },
     relief: {
@@ -268,24 +378,28 @@ test('normalizePostProcessing lifts legacy displacement into a lithophane attach
       invert: true,
     },
     color: {
-      mode: 'mono',
+      mode: "mono",
       channelThicknessMm: 0.4,
     },
   });
 });
 
-test('hasActiveLithophaneAttachments ignores disabled attachments', () => {
+test("hasActiveLithophaneAttachments ignores disabled attachments", () => {
   assert.equal(
     hasActiveLithophaneAttachments({
       lithophaneAttachments: [
         {
-          id: 'off',
+          id: "off",
           enabled: false,
-          source: { kind: 'file', imagePath: '/tmp/x.png' },
-          targetPartId: '',
-          placement: { mode: 'partSidePatch', side: 'front', projection: 'auto' },
+          source: { kind: "file", imagePath: "/tmp/x.png" },
+          targetPartId: "",
+          placement: {
+            mode: "partSidePatch",
+            side: "front",
+            projection: "auto",
+          },
           relief: { depthMm: 1, invert: false },
-          color: { mode: 'mono', channelThicknessMm: 0.4 },
+          color: { mode: "mono", channelThicknessMm: 0.4 },
         },
       ],
     }),
@@ -293,31 +407,34 @@ test('hasActiveLithophaneAttachments ignores disabled attachments', () => {
   );
 });
 
-test('normalizeConfig defaults STT language to en-US when voice config is missing', () => {
+test("normalizeConfig defaults STT language to en-US when voice config is missing", () => {
   const config = normalizeConfig({
     engines: [],
-    selectedEngineId: '',
+    selectedEngineId: "",
   } as any);
 
-  assert.equal(config.voice.sttLanguageCode, 'en-US');
+  assert.equal(config.voice.sttLanguageCode, "en-US");
 });
 
-test('normalizeConfig preserves configured STT language code', () => {
+test("normalizeConfig preserves configured STT language code", () => {
   const config = normalizeConfig({
     engines: [],
-    selectedEngineId: '',
-    voice: { sttLanguageCode: 'ru-RU' },
+    selectedEngineId: "",
+    voice: { sttLanguageCode: "ru-RU" },
   } as any);
 
-  assert.equal(config.voice.sttLanguageCode, 'ru-RU');
+  assert.equal(config.voice.sttLanguageCode, "ru-RU");
 });
 
-test('normalizeConfig preserves CAD text font path', () => {
+test("normalizeConfig preserves CAD text font path", () => {
   const config = normalizeConfig({
     engines: [],
-    selectedEngineId: '',
-    cadTextFontPath: '/System/Library/Fonts/Supplemental/Arial Black.ttf',
+    selectedEngineId: "",
+    cadTextFontPath: "/System/Library/Fonts/Supplemental/Arial Black.ttf",
   } as any);
 
-  assert.equal(config.cadTextFontPath, '/System/Library/Fonts/Supplemental/Arial Black.ttf');
+  assert.equal(
+    config.cadTextFontPath,
+    "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+  );
 });

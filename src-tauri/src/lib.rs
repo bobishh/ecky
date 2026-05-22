@@ -41,6 +41,7 @@ pub mod llm_context;
 pub mod mcp;
 pub mod model_runtime;
 pub mod models;
+pub mod project_mirror;
 pub mod runtime_capabilities;
 pub mod services;
 pub mod sketch_brep_validation;
@@ -138,6 +139,10 @@ fn init_history_db_with_recovery(
             Ok((recovered, warnings))
         }
     }
+}
+
+fn has_explicit_max_verify_attempts(raw: &serde_json::Value) -> bool {
+    raw.get("maxVerifyAttempts").is_some() || raw.get("max_verify_attempts").is_some()
 }
 
 pub fn generate_genie_traits() -> GenieTraits {
@@ -529,7 +534,7 @@ pub fn run() {
         default_source_language: crate::models::SourceLanguage::LegacyPython,
         default_geometry_backend: crate::models::GeometryBackend::Freecad,
         max_generation_attempts: 3,
-        max_verify_attempts: 0,
+        max_verify_attempts: 2,
     };
 
     let app = tauri::Builder::default()
@@ -549,6 +554,7 @@ pub fn run() {
             let mut config = default_config;
             let mut has_explicit_mcp_mode = false;
             let mut has_explicit_primary_agent = false;
+            let mut has_explicit_max_verify_attempts_field = false;
             let config_path = config_dir.join("config.json");
             if config_path.exists() {
                 if let Ok(data) = fs::read_to_string(&config_path) {
@@ -559,6 +565,8 @@ pub fn run() {
                             .get("mcp")
                             .and_then(|mcp| mcp.get("primaryAgentId"))
                             .is_some();
+                        has_explicit_max_verify_attempts_field =
+                            has_explicit_max_verify_attempts(&raw);
                     }
                     if let Ok(c) = serde_json::from_str::<crate::models::Config>(&data) {
                         config = c;
@@ -579,6 +587,10 @@ pub fn run() {
             if !has_explicit_primary_agent
                 || crate::mcp::runtime::ensure_primary_agent_id(&mut config)
             {
+                should_persist_config = true;
+            }
+            if !has_explicit_max_verify_attempts_field && config.max_verify_attempts != 2 {
+                config.max_verify_attempts = 2;
                 should_persist_config = true;
             }
             if should_persist_config {
@@ -663,6 +675,47 @@ pub fn run() {
             }
 
             crate::mcp::runtime::initialize_auto_agent_supervisors(state.clone());
+
+            {
+                // Project folder watcher: external edits to
+                // <projects>/<slug>/model.ecky auto-apply as new versions
+                // ("edit in place" for editors and LLM file skills).
+                let resolver: Arc<dyn PathResolver + Send + Sync> = Arc::new(app.handle().clone());
+                let watcher_state = state.clone();
+                let watcher_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri::Emitter;
+                    let mut watcher = crate::mcp::handlers::ProjectFolderWatcher::new();
+                    let ctx = crate::mcp::handlers::project_folder_watcher_context();
+                    loop {
+                        sleep(Duration::from_secs(1)).await;
+                        let events = watcher.tick(&watcher_state, resolver.as_ref(), &ctx).await;
+                        if events.is_empty() {
+                            continue;
+                        }
+                        if events.iter().any(|event| {
+                            matches!(
+                                event,
+                                crate::mcp::handlers::ProjectFolderWatchEvent::Applied { .. }
+                            )
+                        }) {
+                            let _ = watcher_handle.emit("history-updated", ());
+                        }
+                        let _ = watcher_handle.emit("project-folder-sync", &events);
+                        for event in &events {
+                            if let crate::mcp::handlers::ProjectFolderWatchEvent::ApplyFailed {
+                                slug,
+                                error,
+                            } = event
+                            {
+                                watcher_state.push_log(format!(
+                                    "[PROJECT] folder `{slug}` apply failed: {error}"
+                                ));
+                            }
+                        }
+                    }
+                });
+            }
 
             Ok(())
         })
@@ -790,6 +843,17 @@ mod tests {
         assert_eq!(traits.version, crate::models::GENIE_TRAITS_VERSION);
         assert!(traits.seed > 0);
         assert!((10..=24).contains(&traits.vertex_count));
+    }
+
+    #[test]
+    fn detects_explicit_max_verify_attempts_in_camel_or_snake_case() {
+        assert!(has_explicit_max_verify_attempts(&serde_json::json!({
+            "maxVerifyAttempts": 0
+        })));
+        assert!(has_explicit_max_verify_attempts(&serde_json::json!({
+            "max_verify_attempts": 0
+        })));
+        assert!(!has_explicit_max_verify_attempts(&serde_json::json!({})));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 # Node / Frontend
 node_modules/
 dist/
+target/
 .dist/
 .svelte-kit/
 .vercel
@@ -42,6 +43,9 @@ server/test_runner.py
 server/test_fc.py
 server/test_main.py
 server/test_env.py
+tmp/
+public/docs/assets/
+docs/books/ecky-ir/assets/
 
 # Python
 __pycache__/

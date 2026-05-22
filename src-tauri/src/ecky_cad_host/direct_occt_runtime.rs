@@ -10,7 +10,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
-use crate::ecky_core_ir::{CorePart, CoreProgram};
+use crate::ecky_core_ir::{CorePart, CoreProgram, CoreSelectorTagDecl};
 use crate::models::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
     EnrichmentStatus, ExportArtifact, GeometryBackend, ManifestEnrichmentState, ModelManifest,
@@ -21,7 +21,8 @@ use crate::models::{
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
     durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
-    stable_edge_target_id, stable_face_target_id, topology_target_aliases, viewer_target_alias_ids,
+    resolve_tagged_anchors, stable_edge_target_id, stable_face_target_id, topology_target_aliases,
+    viewer_target_alias_ids,
 };
 
 const SOURCE_FILE_NAME: &str = "source.ecky";
@@ -58,6 +59,8 @@ struct DirectOcctTopologyEdge {
     #[serde(default)]
     edge_index: Option<u32>,
     #[serde(default)]
+    originating_slot_index: Option<u64>,
+    #[serde(default)]
     label: String,
     #[serde(default)]
     start: Option<DirectOcctTopologyPoint>,
@@ -72,6 +75,8 @@ struct DirectOcctTopologyFace {
     target_id: Option<String>,
     #[serde(default)]
     face_index: Option<u32>,
+    #[serde(default)]
+    originating_slot_index: Option<u64>,
     #[serde(default)]
     label: String,
     #[serde(default)]
@@ -184,6 +189,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
                 &source_path,
                 &part_specs,
                 &parameter_keys,
+                &program.selector_tags,
                 topology_report,
                 &part_stable_node_keys,
                 &part_root_node_ids,
@@ -218,6 +224,7 @@ pub(crate) fn build_direct_occt_manifest(
     source_path: &Path,
     parts: &[(String, String)],
     parameter_keys: &[String],
+    selector_tags: &[CoreSelectorTagDecl],
     topology_report: Option<&DirectOcctTopologyReport>,
     part_root_node_ids: &HashMap<String, u64>,
 ) -> AppResult<ModelManifest> {
@@ -227,6 +234,7 @@ pub(crate) fn build_direct_occt_manifest(
         source_path,
         parts,
         parameter_keys,
+        selector_tags,
         topology_report,
         &part_stable_node_keys,
         part_root_node_ids,
@@ -238,6 +246,7 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
     source_path: &Path,
     parts: &[(String, String)],
     parameter_keys: &[String],
+    selector_tags: &[CoreSelectorTagDecl],
     topology_report: Option<&DirectOcctTopologyReport>,
     part_stable_node_keys: &HashMap<String, String>,
     part_root_node_ids: &HashMap<String, u64>,
@@ -252,6 +261,16 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
         topology_report,
         part_stable_node_keys,
         part_root_node_ids,
+    )?;
+    let tagged_anchor_edge_targets =
+        direct_occt_tagged_anchor_edge_targets(topology_report, &selection_targets);
+    let tagged_anchor_face_targets =
+        direct_occt_tagged_anchor_face_targets(topology_report, &selection_targets);
+    let tagged_anchors = resolve_tagged_anchors(
+        selector_tags,
+        &selection_targets,
+        &tagged_anchor_edge_targets,
+        &tagged_anchor_face_targets,
     )?;
 
     Ok(ModelManifest {
@@ -284,9 +303,11 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
         control_primitives: Vec::new(),
         control_relations: Vec::new(),
         control_views: Vec::new(),
+        preview_views: Vec::new(),
         advisories: Vec::new(),
         selection_targets,
         measurement_annotations: Vec::new(),
+        tagged_anchors,
         feature_graph: None,
         correspondence_graph: None,
         warnings: Vec::new(),
@@ -661,6 +682,122 @@ fn direct_occt_topology_target_parameter_keys(parameter_keys: &[String]) -> Vec<
     Vec::new()
 }
 
+fn direct_occt_tagged_anchor_edge_targets(
+    topology_report: Option<&DirectOcctTopologyReport>,
+    selection_targets: &[SelectionTarget],
+) -> Vec<ViewerEdgeTarget> {
+    let Some(topology_report) = topology_report else {
+        return Vec::new();
+    };
+    let selection_targets_by_id = selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Edge)
+        .flat_map(|target| {
+            target
+                .target_id
+                .iter()
+                .map(String::as_str)
+                .chain(target.durable_target_id.iter().map(String::as_str))
+                .chain(target.canonical_target_id.iter().map(String::as_str))
+                .chain(target.alias_ids.iter().map(String::as_str))
+                .map(move |target_id| (target_id, target))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut edge_targets = Vec::new();
+
+    for topology_part in &topology_report.parts {
+        let part_id = topology_part.part_id.trim();
+        for edge in topology_part
+            .edges
+            .iter()
+            .filter(|edge| edge.start.is_some() && edge.end.is_some())
+        {
+            let target_id = direct_occt_edge_target_id(part_id, edge);
+            let Some(selection_target) = selection_targets_by_id.get(target_id.as_str()) else {
+                continue;
+            };
+            let Some(start) = edge.start.as_ref() else {
+                continue;
+            };
+            let Some(end) = edge.end.as_ref() else {
+                continue;
+            };
+
+            edge_targets.push(ViewerEdgeTarget {
+                target_id: preferred_public_topology_target_id(selection_target, &target_id),
+                durable_target_id: selection_target.durable_target_id.clone(),
+                canonical_target_id: Some(target_id.clone()),
+                alias_ids: viewer_target_alias_ids(selection_target, &target_id),
+                part_id: selection_target.part_id.clone(),
+                viewer_node_id: selection_target.viewer_node_id.clone(),
+                label: direct_occt_edge_label(topology_part, edge),
+                editable: selection_target.editable,
+                start: direct_occt_point_to_viewer(start),
+                end: direct_occt_point_to_viewer(end),
+            });
+        }
+    }
+
+    edge_targets
+}
+
+fn direct_occt_tagged_anchor_face_targets(
+    topology_report: Option<&DirectOcctTopologyReport>,
+    selection_targets: &[SelectionTarget],
+) -> Vec<ViewerFaceTarget> {
+    let Some(topology_report) = topology_report else {
+        return Vec::new();
+    };
+    let selection_targets_by_id = selection_targets
+        .iter()
+        .filter(|target| target.kind == SelectionTargetKind::Face)
+        .flat_map(|target| {
+            target
+                .target_id
+                .iter()
+                .map(String::as_str)
+                .chain(target.durable_target_id.iter().map(String::as_str))
+                .chain(target.canonical_target_id.iter().map(String::as_str))
+                .chain(target.alias_ids.iter().map(String::as_str))
+                .map(move |target_id| (target_id, target))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut face_targets = Vec::new();
+
+    for topology_part in &topology_report.parts {
+        let part_id = topology_part.part_id.trim();
+        for face in topology_part
+            .faces
+            .iter()
+            .filter(|face| face.center.is_some())
+        {
+            let target_id = direct_occt_face_target_id(part_id, face);
+            let Some(selection_target) = selection_targets_by_id.get(target_id.as_str()) else {
+                continue;
+            };
+            let Some(center) = face.center.as_ref() else {
+                continue;
+            };
+
+            face_targets.push(ViewerFaceTarget {
+                target_id: preferred_public_topology_target_id(selection_target, &target_id),
+                durable_target_id: selection_target.durable_target_id.clone(),
+                canonical_target_id: Some(target_id.clone()),
+                alias_ids: viewer_target_alias_ids(selection_target, &target_id),
+                part_id: selection_target.part_id.clone(),
+                viewer_node_id: selection_target.viewer_node_id.clone(),
+                label: direct_occt_face_label(topology_part, face),
+                editable: selection_target.editable,
+                center: direct_occt_point_to_viewer(center),
+                normal: face.normal,
+                area: face.area,
+            });
+        }
+    }
+
+    face_targets
+}
+
 fn direct_occt_edge_targets(
     topology_report: Option<&DirectOcctTopologyReport>,
     manifest: &ModelManifest,
@@ -962,9 +1099,10 @@ mod tests {
         bundled_build123d_runtime_root_from_repo, bundled_occt_runtime_root_from_repo,
         inspect_build123d_ocp_runtime,
     };
+    use crate::ecky_core_ir::CoreSelectorTagKind;
     use crate::models::{
         validate_model_runtime_bundle, ParamValue, PathResolver, SelectionTargetKind,
-        ViewerAssetFormat,
+        TaggedAnchorKind, ViewerAssetFormat,
     };
     use std::path::PathBuf;
 
@@ -1095,6 +1233,7 @@ mod tests {
             &direct_source_path,
             &direct_part_specs,
             &direct_parameter_keys,
+            &program.selector_tags,
             Some(&direct_topology),
             &direct_part_stable_node_keys,
             &direct_part_root_node_ids,
@@ -1289,6 +1428,7 @@ echo "fake runner plan: $plan"
             &direct_source_path,
             &direct_part_specs,
             &direct_parameter_keys,
+            &program.selector_tags,
             Some(&direct_topology),
             &direct_part_stable_node_keys,
             &direct_part_root_node_ids,
@@ -1443,6 +1583,7 @@ echo "fake runner plan: $plan"
             &source_path,
             &[("body".to_string(), "Body".to_string())],
             &Vec::<String>::new(),
+            &[],
             None,
             &HashMap::new(),
         )
@@ -1635,6 +1776,7 @@ echo "fake runner plan: $plan"
                 ("post".to_string(), "Post".to_string()),
             ],
             &["width".to_string()],
+            &[],
             None,
             &HashMap::new(),
         )
@@ -1679,6 +1821,7 @@ echo "fake runner plan: $plan"
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
                     face_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     center: Some(DirectOcctTopologyPoint {
                         x: 5.0,
@@ -1696,6 +1839,7 @@ echo "fake runner plan: $plan"
             &source_path,
             &[("body".to_string(), "Body".to_string())],
             &Vec::<String>::new(),
+            &[],
             Some(&topology),
             &HashMap::from([(String::from("body"), 42_u64)]),
         )
@@ -1769,6 +1913,7 @@ echo "fake runner plan: $plan"
             &source_path,
             &[("body".to_string(), "Body".to_string())],
             &Vec::<String>::new(),
+            &[],
             Some(&topology),
             &HashMap::from([(String::from("body"), 42_u64)]),
         )
@@ -1819,6 +1964,147 @@ echo "fake runner plan: $plan"
     }
 
     #[test]
+    fn direct_occt_manifest_records_exact_face_tagged_anchor_ids() {
+        let root = temp_root("direct-occt-tagged-face-anchor");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model (part body (box 10 20 30)))").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                edges: Vec::new(),
+                faces: vec![DirectOcctTopologyFace {
+                    target_id: None,
+                    face_index: Some(0),
+                    originating_slot_index: None,
+                    label: String::new(),
+                    center: Some(DirectOcctTopologyPoint {
+                        x: 5.0,
+                        y: 10.0,
+                        z: 15.0,
+                    }),
+                    normal: Some([0.0, 0.0, 1.0]),
+                    area: Some(200.0),
+                }],
+            }],
+        };
+
+        let manifest = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &Vec::<String>::new(),
+            &[CoreSelectorTagDecl {
+                name: "mounting_top".to_string(),
+                kind: CoreSelectorTagKind::Face,
+                authored_selector: "target-id:body:face:5-10-15:200".to_string(),
+                target: "body".to_string(),
+            }],
+            Some(&topology),
+            &HashMap::from([(String::from("body"), 42_u64)]),
+        )
+        .expect("manifest");
+
+        let anchor = manifest
+            .tagged_anchors
+            .get("mounting_top")
+            .expect("tagged anchor");
+        assert_eq!(anchor.kind, TaggedAnchorKind::Face);
+        assert_eq!(anchor.authored_selector, "target-id:body:face:5-10-15:200");
+        assert_eq!(anchor.target, "body");
+        assert_eq!(anchor.target_ids, vec!["body:face:5-10-15:200".to_string()]);
+        assert_eq!(
+            anchor.durable_target_ids,
+            vec!["body:node:42:face:5-10-15:200".to_string()]
+        );
+        assert_eq!(
+            anchor.canonical_target_ids,
+            vec!["body:face:0:5-10-15:200".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_manifest_records_clause_face_tagged_anchor_ids() {
+        let root = temp_root("direct-occt-tagged-clause-face-anchor");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model (part body (box 10 20 30)))").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                edges: Vec::new(),
+                faces: vec![
+                    DirectOcctTopologyFace {
+                        target_id: None,
+                        face_index: Some(2),
+                        originating_slot_index: None,
+                        label: String::new(),
+                        center: Some(DirectOcctTopologyPoint {
+                            x: 5.0,
+                            y: 10.0,
+                            z: 0.0,
+                        }),
+                        normal: Some([0.0, 0.0, -1.0]),
+                        area: Some(200.0),
+                    },
+                    DirectOcctTopologyFace {
+                        target_id: None,
+                        face_index: Some(5),
+                        originating_slot_index: None,
+                        label: String::new(),
+                        center: Some(DirectOcctTopologyPoint {
+                            x: 5.0,
+                            y: 10.0,
+                            z: 15.0,
+                        }),
+                        normal: Some([0.0, 0.0, 1.0]),
+                        area: Some(200.0),
+                    },
+                ],
+            }],
+        };
+
+        let manifest = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &Vec::<String>::new(),
+            &[CoreSelectorTagDecl {
+                name: "mounting_top".to_string(),
+                kind: CoreSelectorTagKind::Face,
+                authored_selector: "top".to_string(),
+                target: "body".to_string(),
+            }],
+            Some(&topology),
+            &HashMap::from([(String::from("body"), 42_u64)]),
+        )
+        .expect("manifest");
+
+        let anchor = manifest
+            .tagged_anchors
+            .get("mounting_top")
+            .expect("tagged anchor");
+        assert_eq!(anchor.kind, TaggedAnchorKind::Face);
+        assert_eq!(anchor.authored_selector, "top");
+        assert_eq!(anchor.target, "body");
+        assert_eq!(anchor.target_ids, vec!["body:face:5-10-15:200".to_string()]);
+        assert_eq!(
+            anchor.durable_target_ids,
+            vec!["body:node:42:face:5-10-15:200".to_string()]
+        );
+        assert_eq!(
+            anchor.canonical_target_ids,
+            vec!["body:face:5:5-10-15:200".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn direct_occt_runtime_read_direct_occt_topology_report_fails_without_file() {
         let root = temp_root("direct-occt-missing-topology");
         let topology_path = root.join(TOPOLOGY_FILE_NAME);
@@ -1850,6 +2136,50 @@ echo "fake runner plan: $plan"
     }
 
     #[test]
+    fn direct_occt_runtime_read_direct_occt_topology_report_reads_originating_slot_indexes() {
+        let root = temp_root("direct-occt-topology-originating-slot-indexes");
+        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(
+            &topology_path,
+            r#"{
+  "parts": [
+    {
+      "partId": "body",
+      "label": "Body",
+      "edges": [
+        {
+          "edgeIndex": 0,
+          "originatingSlotIndex": 7,
+          "label": "Body.Edge1",
+          "start": { "x": 0, "y": 0, "z": 0 },
+          "end": { "x": 10, "y": 0, "z": 0 }
+        }
+      ],
+      "faces": [
+        {
+          "faceIndex": 1,
+          "originatingSlotIndex": 9,
+          "label": "Body.Face2",
+          "center": { "x": 5, "y": 5, "z": 10 },
+          "normal": [0, 0, 1],
+          "area": 100
+        }
+      ]
+    }
+  ]
+}"#,
+        )
+        .expect("topology");
+
+        let topology = read_direct_occt_topology_report(&topology_path).expect("read topology");
+
+        assert_eq!(topology.parts[0].edges[0].originating_slot_index, Some(7));
+        assert_eq!(topology.parts[0].faces[0].originating_slot_index, Some(9));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn direct_occt_selection_targets_remain_non_editable_without_exact_binding() {
         let root = temp_root("direct-occt-non-editable-targets");
         let source_path = root.join(SOURCE_FILE_NAME);
@@ -1862,6 +2192,7 @@ echo "fake runner plan: $plan"
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     start: Some(DirectOcctTopologyPoint {
                         x: 0.0,
@@ -1877,6 +2208,7 @@ echo "fake runner plan: $plan"
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
                     face_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     center: Some(DirectOcctTopologyPoint {
                         x: 5.0,
@@ -1894,6 +2226,7 @@ echo "fake runner plan: $plan"
             &source_path,
             &[("body".to_string(), "Body".to_string())],
             &["width".to_string()],
+            &[],
             Some(&topology),
             &HashMap::new(),
         )
@@ -1930,6 +2263,7 @@ echo "fake runner plan: $plan"
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     start: Some(DirectOcctTopologyPoint {
                         x: 0.0,
@@ -1945,6 +2279,7 @@ echo "fake runner plan: $plan"
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
                     face_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     center: Some(DirectOcctTopologyPoint {
                         x: 5.0,
@@ -1962,6 +2297,7 @@ echo "fake runner plan: $plan"
             &source_path,
             &[("body".to_string(), "Body".to_string())],
             &["width".to_string(), "height".to_string()],
+            &[],
             Some(&topology),
             &HashMap::new(),
         )
@@ -2002,6 +2338,7 @@ echo "fake runner plan: $plan"
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     start: Some(DirectOcctTopologyPoint {
                         x: 0.0,
@@ -2017,6 +2354,7 @@ echo "fake runner plan: $plan"
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
                     face_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     center: Some(DirectOcctTopologyPoint {
                         x: 5.0,
@@ -2034,6 +2372,7 @@ echo "fake runner plan: $plan"
             &source_path,
             &[("body".to_string(), "Body".to_string())],
             &["width".to_string()],
+            &[],
             Some(&topology),
             &HashMap::new(),
         )
@@ -2071,6 +2410,7 @@ echo "fake runner plan: $plan"
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
+                    originating_slot_index: None,
                     label: String::new(),
                     start: Some(DirectOcctTopologyPoint {
                         x: 0.0,
@@ -2092,6 +2432,7 @@ echo "fake runner plan: $plan"
             &source_path,
             &[("body".to_string(), "Body".to_string())],
             &Vec::<String>::new(),
+            &[],
             Some(&topology),
             &HashMap::from([("body".to_string(), "sha256:abcdef".to_string())]),
             &HashMap::from([(String::from("body"), 42_u64)]),
@@ -2136,6 +2477,7 @@ echo "fake runner plan: $plan"
         let forward = DirectOcctTopologyEdge {
             target_id: None,
             edge_index: Some(0),
+            originating_slot_index: None,
             label: String::new(),
             start: Some(DirectOcctTopologyPoint {
                 x: 0.0,
@@ -2151,6 +2493,7 @@ echo "fake runner plan: $plan"
         let reversed = DirectOcctTopologyEdge {
             target_id: None,
             edge_index: Some(0),
+            originating_slot_index: None,
             label: String::new(),
             start: forward.end.clone(),
             end: forward.start.clone(),

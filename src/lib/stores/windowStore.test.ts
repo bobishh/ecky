@@ -6,6 +6,7 @@ import { get } from 'svelte/store';
 import {
   ALL_WINDOW_IDS,
   _resetWindowStoreForTest,
+  bringToFront,
   showWindow,
   windowRegistry,
   windowStore,
@@ -31,6 +32,25 @@ test('showWindow opens hidden window, clears minimized state, and raises z order
   assert.equal(state.dialogue.visible, true);
   assert.equal(state.dialogue.minimized, false);
   assert.ok(state.dialogue.z > paramsZ);
+
+  _resetWindowStoreForTest();
+});
+
+test('bringToFront makes the clicked visible window the focused top window', () => {
+  _resetWindowStoreForTest();
+
+  showWindow('projects');
+  showWindow('params');
+  let state = get(windowStore);
+  assert.equal(state.params.active, true);
+  assert.equal(state.projects.active, false);
+  const paramsZ = state.params.z;
+
+  bringToFront('projects');
+  state = get(windowStore);
+  assert.equal(state.projects.active, true);
+  assert.equal(state.params.active, false);
+  assert.ok(state.projects.z > paramsZ);
 
   _resetWindowStoreForTest();
 });

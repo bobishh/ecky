@@ -19,7 +19,12 @@ type ApiDialogueMockMode = 'design' | 'questionWithoutFinal';
 async function installApiDialogueMocks(
   page: Page,
   mode: ApiDialogueMockMode = 'design',
-  options: { initialHistory?: any[]; structuralResult?: any; maxGenerationAttempts?: number } = {},
+  options: {
+    initialHistory?: any[];
+    structuralResult?: any;
+    structuralResults?: any[];
+    maxGenerationAttempts?: number;
+  } = {},
 ) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
     await route.fulfill({
@@ -29,7 +34,7 @@ async function installApiDialogueMocks(
     });
   });
 
-  await page.addInitScript(({ mockMode, initialHistory, structuralResult, maxGenerationAttempts }) => {
+  await page.addInitScript(({ mockMode, initialHistory, structuralResult, structuralResults, maxGenerationAttempts }) => {
     const mockWindow = window as any;
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -68,8 +73,10 @@ async function installApiDialogueMocks(
     mockWindow.__MOCK_MANIFEST__ = manifest;
     mockWindow.__MOCK_GENERATE_CALLS__ = [];
     mockWindow.__MOCK_FINALIZE_CALLS__ = [];
+    mockWindow.__MOCK_VERIFY_CALLS__ = [];
     mockWindow.__MOCK_MODE__ = mockMode;
     mockWindow.__MOCK_STRUCTURAL_RESULT__ = structuralResult ?? null;
+    mockWindow.__MOCK_STRUCTURAL_RESULTS__ = Array.isArray(structuralResults) ? [...structuralResults] : [];
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
@@ -228,6 +235,10 @@ async function installApiDialogueMocks(
       if (cmd === 'get_model_manifest') return mockWindow.__MOCK_MANIFEST__;
       if (cmd === 'save_model_manifest') return null;
       if (cmd === 'verify_generated_model') {
+        mockWindow.__MOCK_VERIFY_CALLS__.push(args);
+        if (mockWindow.__MOCK_STRUCTURAL_RESULTS__.length > 0) {
+          return mockWindow.__MOCK_STRUCTURAL_RESULTS__.shift();
+        }
         if (mockWindow.__MOCK_STRUCTURAL_RESULT__) return mockWindow.__MOCK_STRUCTURAL_RESULT__;
         return {
           passed: true,
@@ -301,6 +312,7 @@ async function installApiDialogueMocks(
     mockMode: mode,
     initialHistory: options.initialHistory ?? [],
     structuralResult: options.structuralResult ?? null,
+    structuralResults: options.structuralResults ?? [],
     maxGenerationAttempts: options.maxGenerationAttempts,
   });
 }
@@ -498,6 +510,85 @@ test.describe('API dialogue mode', () => {
     expect(finalizeCalls.at(-1)).toEqual(expect.objectContaining({
       status: 'error',
       errorMessage: expect.stringContaining('Authored verify requirements failed.'),
+    }));
+  });
+
+  test('Given structural verification fails once and passes on retry When prompt submits Then mocked generation finishes green after one repair loop', async ({ page }) => {
+    await installApiDialogueMocks(page, 'design', {
+      maxGenerationAttempts: 2,
+      structuralResults: [
+        {
+          passed: false,
+          summary: 'Structural verification failed: PREVIEW_STL_DISCONNECTED_COMPONENTS',
+          issues: [
+            {
+              code: 'PREVIEW_STL_DISCONNECTED_COMPONENTS',
+              message: 'Preview STL contains 2 disconnected triangle components.',
+              partId: null,
+              numericPayload: 2,
+            },
+          ],
+          metrics: {
+            partCount: 2,
+            previewStlSizeBytes: 2048,
+            previewStlTriangleCount: 128,
+            previewStlComponentCount: 2,
+            previewStlNonManifoldEdgeCount: 0,
+            previewStlOverhangTriangleCount: 0,
+            previewStlOverhangRatio: 0,
+            totalVolume: 1000,
+            totalArea: 500,
+            bbox: null,
+          },
+          verifierStatus: 'ok',
+          verifierSource: 'rustStructural',
+        },
+        {
+          passed: true,
+          summary: 'Structural checks passed.',
+          issues: [],
+          metrics: {
+            partCount: 1,
+            previewStlSizeBytes: 1024,
+            previewStlTriangleCount: 32,
+            previewStlComponentCount: 1,
+            previewStlNonManifoldEdgeCount: 0,
+            previewStlOverhangTriangleCount: 0,
+            previewStlOverhangRatio: 0,
+            totalVolume: 8000,
+            totalArea: 2400,
+            bbox: null,
+          },
+          verifierStatus: 'ok',
+          verifierSource: 'rustStructural',
+        },
+      ],
+    });
+
+    await openDialogue(page);
+
+    const promptInput = page.getByPlaceholder(/Type a question or design change/i);
+    await promptInput.fill('make one sealed cup');
+    await promptInput.press('Meta+Enter');
+
+    await expect(page.getByRole('button', { name: /DONE .*make one sealed cup/i })).toBeVisible({
+      timeout: 15000,
+    });
+    await expect(page.locator('.trail-assistant').last()).toContainText('Cup ready.');
+    await expect(page.locator('.trail-assistant').last()).not.toContainText('Structural verification failed');
+
+    const generateCalls = await page.evaluate(() => (window as any).__MOCK_GENERATE_CALLS__);
+    expect(generateCalls).toHaveLength(2);
+    expect(generateCalls[1]?.prompt).toContain('Structural verification failed');
+    expect(generateCalls[1]?.prompt).toContain('Please fix the geometry code to resolve the structural issues.');
+
+    const verifyCalls = await page.evaluate(() => (window as any).__MOCK_VERIFY_CALLS__);
+    expect(verifyCalls).toHaveLength(2);
+
+    const finalizeCalls = await page.evaluate(() => (window as any).__MOCK_FINALIZE_CALLS__);
+    expect(finalizeCalls).toHaveLength(1);
+    expect(finalizeCalls[0]).toEqual(expect.objectContaining({
+      status: 'success',
     }));
   });
 });

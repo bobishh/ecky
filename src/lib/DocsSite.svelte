@@ -38,7 +38,7 @@
       }
 
       const markdown = await response.text();
-      const parsed = parseDocsDocument(markdown);
+      const parsed = parseDocsDocument(markdown, { assetBasePath: '/docs' });
       documentData = parsed;
       activeSlug = window.location.hash.replace(/^#/, '') || parsed.sections[0]?.slug || null;
     } catch (nextError) {
@@ -87,7 +87,7 @@
 
 <svelte:head>
   {#if showHead}
-    <title>Ecky Language Docs</title>
+    <title>Ecky IR Field Guide</title>
   {/if}
 </svelte:head>
 

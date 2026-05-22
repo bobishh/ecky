@@ -3,7 +3,6 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { workingCopy } from '../stores/workingCopy';
 import { activeThreadIdStore as activeThreadId, activeVersionId, config } from '../stores/domainState';
 import { refreshHistory, rememberCommittedVersionMessage } from '../stores/history';
-import { showCodeModal } from '../stores/viewState';
 import { session, setManualRenderActive } from '../stores/sessionStore';
 import { startMicrowaveHum, stopMicrowaveHum, ensureContext } from '../audio/microwave';
 import { paramPanelState } from '../stores/paramPanelState';
@@ -36,6 +35,7 @@ import {
   renderModel,
   saveModelManifest,
 } from '../tauri/client';
+import { closeWindow as closeWindowStore } from '../stores/windowStore';
 import type { WorkingCopyState } from '../stores/workingCopy';
 
 let latestParamRenderSeq = 0;
@@ -66,6 +66,37 @@ export function shouldPreserveWorkingCopyMacroDraft(
   committedMacroCode: string,
 ): boolean {
   return workingCopyState.dirty && workingCopyState.macroCode !== committedMacroCode;
+}
+
+export function resolveManualRenderRoute(input: {
+  code: string;
+  configDefaultGeometryBackend: GeometryBackend;
+  workingMacroDialect: MacroDialect | null | undefined;
+  workingSourceLanguage: SourceLanguage | null | undefined;
+}): { macroDialect: MacroDialect; geometryBackend: GeometryBackend } {
+  const trimmed = input.code.trim();
+  if (trimmed.startsWith('(model') || trimmed.startsWith('(scene')) {
+    return {
+      macroDialect: 'ecky',
+      geometryBackend: input.configDefaultGeometryBackend,
+    };
+  }
+
+  if (
+    trimmed.includes('build123d') ||
+    input.workingSourceLanguage === 'build123d' ||
+    input.workingMacroDialect === 'build123d'
+  ) {
+    return {
+      macroDialect: 'build123d',
+      geometryBackend: 'build123d',
+    };
+  }
+
+  return {
+    macroDialect: 'legacy',
+    geometryBackend: 'freecad',
+  };
 }
 
 function restoreWorkingCopyMacroDraftIfNeeded(
@@ -706,6 +737,7 @@ export async function handleParamChange(
       wc.macroDialect ?? null,
       wc.geometryBackend ?? null,
       wc.postProcessing ?? null,
+      get(session).modelManifest,
     );
     const runtime = await inspectRuntimeBundle(
       bundle,
@@ -947,10 +979,12 @@ export async function applyManualCodeDraft(editedCode: string) {
     const reconciled = await reconcileManualControls(editedCode, panel.uiSpec, panel.params);
     const nextUiSpec = reconciled.uiSpec;
     const nextParams = reconciled.params;
-    const manualMacroDialect =
-      wc.sourceLanguage === 'build123d' || wc.macroDialect === 'build123d' ? wc.macroDialect ?? 'build123d' : null;
-    const manualGeometryBackend =
-      wc.sourceLanguage === 'build123d' || wc.geometryBackend === 'build123d' ? 'build123d' : null;
+    const manualRoute = resolveManualRenderRoute({
+      code: editedCode,
+      configDefaultGeometryBackend: currentConfig.defaultGeometryBackend,
+      workingMacroDialect: wc.macroDialect,
+      workingSourceLanguage: wc.sourceLanguage,
+    });
     recordRenderEvent({
       threadId: snapshotThreadId,
       versionId: targetVersionId,
@@ -962,9 +996,10 @@ export async function applyManualCodeDraft(editedCode: string) {
     const bundle = await renderModel(
       editedCode,
       nextParams,
-      manualMacroDialect,
-      manualGeometryBackend,
+      manualRoute.macroDialect,
+      manualRoute.geometryBackend,
       wc.postProcessing ?? null,
+      get(session).modelManifest,
     );
     const runtime = await inspectRuntimeBundle(
       bundle,
@@ -1113,10 +1148,12 @@ export async function commitManualVersion(
     const nextUiSpec = reconciled.uiSpec;
     const nextParams = reconciled.params;
 
-    const manualMacroDialect =
-      wc.sourceLanguage === 'build123d' || wc.macroDialect === 'build123d' ? wc.macroDialect ?? 'build123d' : null;
-    const manualGeometryBackend =
-      wc.sourceLanguage === 'build123d' || wc.geometryBackend === 'build123d' ? 'build123d' : null;
+    const manualRoute = resolveManualRenderRoute({
+      code: editedCode,
+      configDefaultGeometryBackend: currentConfig.defaultGeometryBackend,
+      workingMacroDialect: wc.macroDialect,
+      workingSourceLanguage: wc.sourceLanguage,
+    });
     recordRenderEvent({
       threadId: snapshotThreadId,
       versionId: panel.versionId || wc.sourceVersionId || get(activeVersionId),
@@ -1128,9 +1165,10 @@ export async function commitManualVersion(
     const bundle = await renderModel(
       editedCode,
       nextParams,
-      manualMacroDialect,
-      manualGeometryBackend,
+      manualRoute.macroDialect,
+      manualRoute.geometryBackend,
       wc.postProcessing ?? null,
+      get(session).modelManifest,
     );
     const runtime = await inspectRuntimeBundle(
       bundle,
@@ -1214,7 +1252,7 @@ export async function commitManualVersion(
       restoreWorkingCopyMacroDraftIfNeeded(previousWorkingCopy, committedDesign.macroCode);
       paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
       activeVersionId.set(newMsgId);
-      showCodeModal.set(false);
+      closeWindowStore('code');
       recordRenderEvent({
         threadId: snapshotThreadId,
         versionId: newMsgId,

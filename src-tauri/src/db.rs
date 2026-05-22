@@ -50,6 +50,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             usage TEXT,
             artifact_bundle TEXT,
             model_manifest TEXT,
+            structural_verification TEXT,
             agent_origin TEXT,
             timestamp INTEGER NOT NULL,
             image_data TEXT,
@@ -192,6 +193,10 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN usage TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN artifact_bundle TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN model_manifest TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE messages ADD COLUMN structural_verification TEXT",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN agent_origin TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'success'",
@@ -734,6 +739,10 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
         .model_manifest
         .as_ref()
         .and_then(|manifest| serde_json::to_string(manifest).ok());
+    let structural_verification_str = msg
+        .structural_verification
+        .as_ref()
+        .and_then(|result| serde_json::to_string(result).ok());
     let agent_origin_str = msg
         .agent_origin
         .as_ref()
@@ -744,7 +753,7 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
         serde_json::to_string(&msg.attachment_images).ok()
     };
     conn.execute(
-        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             msg.id,
             thread_id,
@@ -755,6 +764,7 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
             usage_str,
             artifact_bundle_str,
             model_manifest_str,
+            structural_verification_str,
             agent_origin_str,
             msg.timestamp as i64,
             msg.image_data,
@@ -1065,12 +1075,12 @@ fn load_thread_message_rows(
     include_deleted: bool,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
     let sql = if include_deleted {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded'
          ORDER BY timestamp ASC, rowid ASC"
     } else {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded' AND deleted_at IS NULL
          ORDER BY timestamp ASC, rowid ASC"
@@ -1088,7 +1098,7 @@ fn load_thread_message_rows_with_clause(
     limit: Option<usize>,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
     let mut sql = format!(
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
          FROM messages
          WHERE {}
          ORDER BY {}",
@@ -1116,10 +1126,13 @@ fn load_thread_message_rows_from_stmt(
         let artifact_bundle = artifact_bundle_str.and_then(|s| serde_json::from_str(&s).ok());
         let model_manifest_str: Option<String> = row.get(7)?;
         let model_manifest = model_manifest_str.and_then(|s| serde_json::from_str(&s).ok());
-        let agent_origin_str: Option<String> = row.get(8)?;
+        let structural_verification_str: Option<String> = row.get(8)?;
+        let structural_verification =
+            structural_verification_str.and_then(|s| serde_json::from_str(&s).ok());
+        let agent_origin_str: Option<String> = row.get(9)?;
         let agent_origin = deserialize_agent_origin(agent_origin_str.as_deref());
-        let visual_kind = row.get(11)?;
-        let attachment_images_str: Option<String> = row.get(12)?;
+        let visual_kind = row.get(12)?;
+        let attachment_images_str: Option<String> = row.get(13)?;
         let attachment_images = attachment_images_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -1134,13 +1147,14 @@ fn load_thread_message_rows_from_stmt(
                 usage,
                 artifact_bundle,
                 model_manifest,
+                structural_verification,
                 agent_origin,
-                timestamp: row.get::<_, i64>(9)? as u64,
-                image_data: row.get(10)?,
+                timestamp: row.get::<_, i64>(10)? as u64,
+                image_data: row.get(11)?,
                 visual_kind,
                 attachment_images,
             },
-            deleted_at: row.get(13)?,
+            deleted_at: row.get(14)?,
         })
     })?;
 
@@ -1252,6 +1266,7 @@ pub fn update_message_status_and_output(
         usage,
         artifact_bundle,
         model_manifest,
+        structural_verification,
         visual_kind,
         content,
     } = update;
@@ -1259,15 +1274,18 @@ pub fn update_message_status_and_output(
     let usage_str = usage.and_then(|value| serde_json::to_string(value).ok());
     let artifact_bundle_str = artifact_bundle.and_then(|value| serde_json::to_string(value).ok());
     let model_manifest_str = model_manifest.and_then(|value| serde_json::to_string(value).ok());
+    let structural_verification_str =
+        structural_verification.and_then(|value| serde_json::to_string(value).ok());
     if let Some(text) = content {
         conn.execute(
-            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, visual_kind = COALESCE(?6, visual_kind), content = ?7 WHERE id = ?8",
+            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, structural_verification = ?6, visual_kind = COALESCE(?7, visual_kind), content = ?8 WHERE id = ?9",
             params![
                 status,
                 output_str,
                 usage_str,
                 artifact_bundle_str,
                 model_manifest_str,
+                structural_verification_str,
                 visual_kind,
                 text,
                 message_id
@@ -1275,13 +1293,14 @@ pub fn update_message_status_and_output(
         )?;
     } else {
         conn.execute(
-            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, visual_kind = COALESCE(?6, visual_kind) WHERE id = ?7",
+            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, structural_verification = ?6, visual_kind = COALESCE(?7, visual_kind) WHERE id = ?8",
             params![
                 status,
                 output_str,
                 usage_str,
                 artifact_bundle_str,
                 model_manifest_str,
+                structural_verification_str,
                 visual_kind,
                 message_id
             ],
@@ -1296,6 +1315,7 @@ pub struct MessageStatusUpdate<'a> {
     pub usage: Option<&'a crate::models::UsageSummary>,
     pub artifact_bundle: Option<&'a crate::models::ArtifactBundle>,
     pub model_manifest: Option<&'a crate::models::ModelManifest>,
+    pub structural_verification: Option<&'a crate::models::StructuralVerificationResult>,
     pub visual_kind: Option<&'a crate::models::MessageVisualKind>,
     pub content: Option<&'a str>,
 }
@@ -1417,7 +1437,7 @@ pub fn restore_version_cluster(conn: &Connection, id: &str) -> SqlResult<Option<
 
 pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>> {
     let mut stmt = conn.prepare("
-        SELECT m.id, m.thread_id, t.title as thread_title, m.role, m.content, m.output, m.usage, m.artifact_bundle, m.model_manifest, m.agent_origin, m.timestamp, m.image_data, m.visual_kind, m.attachment_images, m.deleted_at
+        SELECT m.id, m.thread_id, t.title as thread_title, m.role, m.content, m.output, m.usage, m.artifact_bundle, m.model_manifest, m.structural_verification, m.agent_origin, m.timestamp, m.image_data, m.visual_kind, m.attachment_images, m.deleted_at
         FROM messages m
         JOIN threads t ON m.thread_id = t.id
         WHERE m.deleted_at IS NOT NULL
@@ -1443,10 +1463,13 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
         let model_manifest_str: Option<String> = row.get(8)?;
         let model_manifest =
             model_manifest_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
-        let agent_origin_str: Option<String> = row.get(9)?;
+        let structural_verification_str: Option<String> = row.get(9)?;
+        let structural_verification =
+            structural_verification_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
+        let agent_origin_str: Option<String> = row.get(10)?;
         let agent_origin = deserialize_agent_origin(agent_origin_str.as_deref());
-        let visual_kind = row.get(12)?;
-        let attachment_images_str: Option<String> = row.get(13)?;
+        let visual_kind = row.get(13)?;
+        let attachment_images_str: Option<String> = row.get(14)?;
         let attachment_images = attachment_images_str
             .and_then(|json_str| serde_json::from_str(&json_str).ok())
             .unwrap_or_default();
@@ -1461,12 +1484,13 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
             usage,
             artifact_bundle,
             model_manifest,
+            structural_verification,
             agent_origin,
-            timestamp: row.get::<_, i64>(10)? as u64,
-            image_data: row.get(11)?,
+            timestamp: row.get::<_, i64>(11)? as u64,
+            image_data: row.get(12)?,
             visual_kind,
             attachment_images,
-            deleted_at: row.get::<_, i64>(14)? as u64,
+            deleted_at: row.get::<_, i64>(15)? as u64,
         })
     })?;
 
@@ -1568,6 +1592,25 @@ pub fn update_message_artifact_bundle(
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     conn.execute(
         "UPDATE messages SET artifact_bundle = ?1 WHERE id = ?2",
+        params![serialized, message_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_message_structural_verification(
+    conn: &Connection,
+    message_id: &str,
+    result: Option<&crate::models::StructuralVerificationResult>,
+) -> SqlResult<()> {
+    let serialized = match result {
+        Some(result) => Some(
+            serde_json::to_string(result)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+        ),
+        None => None,
+    };
+    conn.execute(
+        "UPDATE messages SET structural_verification = ?1 WHERE id = ?2",
         params![serialized, message_id],
     )?;
     Ok(())
@@ -2299,6 +2342,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: now,
             image_data: None,
@@ -2356,6 +2400,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 100,
             image_data: None,
@@ -2371,6 +2416,7 @@ mod tests {
             usage: None,
             artifact_bundle: Some(sample_artifact_bundle("assistant-1")),
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 101,
             image_data: None,
@@ -2436,6 +2482,7 @@ mod tests {
             usage: None,
             artifact_bundle: Some(sample_artifact_bundle("assistant-manual")),
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 200,
             image_data: None,
@@ -2470,6 +2517,7 @@ mod tests {
             usage: None,
             artifact_bundle: Some(sample_artifact_bundle("assistant-older")),
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 100,
             image_data: None,
@@ -2485,6 +2533,7 @@ mod tests {
             usage: None,
             artifact_bundle: Some(sample_artifact_bundle("assistant-newer")),
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 200,
             image_data: None,
@@ -2530,6 +2579,7 @@ mod tests {
             usage: None,
             artifact_bundle: Some(sample_artifact_bundle("assistant-trash")),
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 250,
             image_data: None,
@@ -2565,6 +2615,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 300,
             image_data: Some("data:image/png;base64,viewport".to_string()),
@@ -2613,6 +2664,7 @@ mod tests {
             usage: None,
             artifact_bundle: Some(sample_artifact_bundle("assistant-preview")),
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 400,
             image_data: None,
@@ -2653,6 +2705,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 500,
             image_data: None,
@@ -2668,6 +2721,7 @@ mod tests {
             usage: None,
             artifact_bundle: Some(sample_artifact_bundle("assistant-rendered")),
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 501,
             image_data: None,
@@ -2709,6 +2763,7 @@ mod tests {
                 usage: None,
                 artifact_bundle: None,
                 model_manifest: None,
+                structural_verification: None,
                 agent_origin: None,
                 timestamp: 200,
                 image_data: None,
@@ -2730,6 +2785,7 @@ mod tests {
                 usage: None,
                 artifact_bundle: None,
                 model_manifest: None,
+                structural_verification: None,
                 agent_origin: None,
                 timestamp: 300,
                 image_data: None,
@@ -2766,6 +2822,7 @@ mod tests {
                 usage: None,
                 artifact_bundle: None,
                 model_manifest: None,
+                structural_verification: None,
                 agent_origin: None,
                 timestamp: 100,
                 image_data: None,
@@ -2805,6 +2862,7 @@ mod tests {
                 usage: None,
                 artifact_bundle: None,
                 model_manifest: None,
+                structural_verification: None,
                 agent_origin: None,
                 timestamp: 100,
                 image_data: None,
@@ -2826,6 +2884,7 @@ mod tests {
                 usage: None,
                 artifact_bundle: None,
                 model_manifest: None,
+                structural_verification: None,
                 agent_origin: None,
                 timestamp: 100,
                 image_data: None,
@@ -2860,6 +2919,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 100,
             image_data: None,
@@ -2875,6 +2935,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: Some(crate::models::AgentOrigin {
                 host_label: "Codex MCP Client".to_string(),
                 client_kind: "mcp-http".to_string(),
@@ -2898,6 +2959,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             timestamp: 102,
             image_data: None,
@@ -2996,6 +3058,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     timestamp: 100 + index as u64,
                     image_data: None,
@@ -3329,9 +3392,11 @@ mod tests {
                 control_primitives: Vec::new(),
                 control_relations: Vec::new(),
                 control_views: Vec::new(),
+                preview_views: Vec::new(),
                 advisories: Vec::new(),
                 selection_targets: Vec::new(),
                 measurement_annotations: Vec::new(),
+                tagged_anchors: std::collections::BTreeMap::new(),
                 feature_graph: None,
                 correspondence_graph: None,
                 warnings: Vec::new(),

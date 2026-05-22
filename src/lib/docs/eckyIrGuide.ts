@@ -15,11 +15,17 @@ export type DocsDocument = {
   sections: DocsSection[];
 };
 
+export type DocsRenderOptions = {
+  assetBasePath?: string;
+};
+
 const STATUS_SUFFIX = /\s+\[(pending|ready)\]\s*$/i;
 
 export function isDocsRoute(pathname: string): boolean {
   return pathname === '/docs/ecky-ir'
     || pathname === '/learn/ecky-ir'
+    || pathname === '/ecky-ir'
+    || pathname === '/ecky-ir/'
     || pathname.startsWith('/docs/ecky-ir/')
     || pathname.startsWith('/learn/ecky-ir/');
 }
@@ -28,16 +34,16 @@ export function docsSourcePath(): string {
   return '/docs/ecky-ir.md';
 }
 
-export function parseDocsDocument(markdown: string): DocsDocument {
+export function parseDocsDocument(markdown: string, options: DocsRenderOptions = {}): DocsDocument {
   const normalized = markdown.replace(/\r\n/g, '\n').trim();
-  const sections = splitSections(normalized);
+  const sections = splitSections(normalized, options);
   const titleMatch = normalized.match(/^#\s+(.+)$/m);
-  const title = titleMatch?.[1]?.trim() || 'Ecky Language Docs';
+  const title = titleMatch?.[1]?.trim() || 'Ecky IR Field Guide';
   const summaryMarkdown = extractSummary(normalized);
 
   return {
     title,
-    summaryHtml: renderMarkdownFragment(summaryMarkdown),
+    summaryHtml: renderMarkdownFragment(summaryMarkdown, options),
     sections,
   };
 }
@@ -51,7 +57,7 @@ export function resolveSection(
   return sections.find((section) => section.slug === slug) ?? sections[0];
 }
 
-export function renderMarkdownFragment(markdown: string): string {
+export function renderMarkdownFragment(markdown: string, options: DocsRenderOptions = {}): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
   const chunks: string[] = [];
   const paragraph: string[] = [];
@@ -71,6 +77,11 @@ export function renderMarkdownFragment(markdown: string): string {
       continue;
     }
 
+    if (trimmed.startsWith('<!--') && trimmed.endsWith('-->')) {
+      flushParagraph();
+      continue;
+    }
+
     if (trimmed.startsWith('```')) {
       flushParagraph();
       const language = trimmed.slice(3).trim();
@@ -83,6 +94,16 @@ export function renderMarkdownFragment(markdown: string): string {
       const className = language ? ` class="language-${escapeHtml(language)}"` : '';
       chunks.push(
         `<pre><code${className}>${escapeHtml(codeLines.join('\n').trimEnd())}</code></pre>`,
+      );
+      continue;
+    }
+
+    const image = parseImageBlock(trimmed);
+    if (image) {
+      flushParagraph();
+      const src = resolveAssetSrc(image.src, options);
+      chunks.push(
+        `<figure><img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt)}" /><figcaption>${renderInline(image.alt)}</figcaption></figure>`,
       );
       continue;
     }
@@ -121,7 +142,7 @@ export function renderMarkdownFragment(markdown: string): string {
   return chunks.join('');
 }
 
-function splitSections(markdown: string): DocsSection[] {
+function splitSections(markdown: string, options: DocsRenderOptions): DocsSection[] {
   const lines = markdown.split('\n');
   const sections: DocsSection[] = [];
   let currentTitle: string | null = null;
@@ -136,7 +157,7 @@ function splitSections(markdown: string): DocsSection[] {
       title: currentTitle,
       status: currentStatus,
       bodyMarkdown,
-      bodyHtml: renderMarkdownFragment(bodyMarkdown),
+      bodyHtml: renderMarkdownFragment(bodyMarkdown, options),
       snippet: extractFirstSnippet(bodyMarkdown),
     });
   }
@@ -188,6 +209,20 @@ function renderInline(text: string): string {
   output = output.replace(/`([^`]+)`/g, (_match, code) => `<code>${escapeHtml(code)}</code>`);
   output = output.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   return output;
+}
+
+function parseImageBlock(text: string): { alt: string; src: string } | null {
+  const matched = text.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+  if (!matched) return null;
+  return {
+    alt: matched[1].trim(),
+    src: matched[2].trim(),
+  };
+}
+
+function resolveAssetSrc(src: string, options: DocsRenderOptions): string {
+  if (!options.assetBasePath || /^(?:[a-z]+:|\/|#)/i.test(src)) return src;
+  return `${options.assetBasePath.replace(/\/?$/, '/')}${src.replace(/^\/+/, '')}`;
 }
 
 function escapeHtml(text: string): string {

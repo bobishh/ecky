@@ -41,6 +41,10 @@ function queueStats(byId: Record<string, QueuedRequest>) {
   };
 }
 
+export function defaultMaxVerifyAttempts(maxVerifyAttempts: number | null | undefined): number {
+  return Number.isFinite(maxVerifyAttempts) ? maxVerifyAttempts as number : 2;
+}
+
 function createRequestQueue() {
   const { subscribe, set, update } = writable<RequestQueueState>({
     byId: {},
@@ -69,7 +73,7 @@ function createRequestQueue() {
         phase: 'classifying',
         attempt: 1,
         maxAttempts: get(config)?.maxGenerationAttempts ?? 3,
-        maxVerifyAttempts: get(config)?.maxVerifyAttempts ?? 0,
+        maxVerifyAttempts: defaultMaxVerifyAttempts(get(config)?.maxVerifyAttempts),
         isQuestion: false,
         lightResponse: '',
         screenshot: null,

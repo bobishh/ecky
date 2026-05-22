@@ -13,6 +13,7 @@ use crate::contracts::{AppResult, DesignParams, ParsedParamsResult};
 use crate::ecky_core_ir::{CoreNode, CoreNodeKind, CoreOperation, CoreProgram};
 use crate::ecky_scheme::try_compile_to_core_program;
 use crate::models::ArtifactBundle;
+use crate::models::ModelManifest;
 use crate::PathResolver;
 
 pub fn source_uses_ecky_rust_only_cad_ops(source: &str) -> bool {
@@ -52,15 +53,37 @@ pub fn source_uses_direct_occt_required_cad_ops(source: &str) -> bool {
 }
 
 pub fn lower_to_build123d(source: &str) -> AppResult<String> {
+    lower_to_build123d_with_previous_manifest(source, None)
+}
+
+pub fn lower_to_build123d_with_previous_manifest(
+    source: &str,
+    previous_manifest: Option<&ModelManifest>,
+) -> AppResult<String> {
     if let Some(program) = try_compile_to_core_program(source) {
-        return build123d_lowering::lower_core_program_to_build123d(&program?);
+        let program = crate::topology_target_ids::rebind_program_tagged_selectors(
+            &program?,
+            previous_manifest,
+        )?;
+        return build123d_lowering::lower_core_program_to_build123d(&program);
     }
     build123d_lowering::lower_to_build123d(source)
 }
 
 pub fn lower_to_freecad(source: &str) -> AppResult<String> {
+    lower_to_freecad_with_previous_manifest(source, None)
+}
+
+pub fn lower_to_freecad_with_previous_manifest(
+    source: &str,
+    previous_manifest: Option<&ModelManifest>,
+) -> AppResult<String> {
     if let Some(program) = try_compile_to_core_program(source) {
-        return freecad_lowering::lower_core_program_to_freecad(&program?);
+        let program = crate::topology_target_ids::rebind_program_tagged_selectors(
+            &program?,
+            previous_manifest,
+        )?;
+        return freecad_lowering::lower_core_program_to_freecad(&program);
     }
     freecad_lowering::lower_to_freecad(source)
 }
@@ -77,8 +100,21 @@ pub fn render_model(
     parameters: &DesignParams,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
+    render_model_with_previous_manifest(source, parameters, None, app)
+}
+
+pub fn render_model_with_previous_manifest(
+    source: &str,
+    parameters: &DesignParams,
+    previous_manifest: Option<&ModelManifest>,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
     if let Some(program) = try_compile_to_core_program(source) {
-        return runtime::render_core_program(&program?, source, parameters, app);
+        let program = crate::topology_target_ids::rebind_program_tagged_selectors(
+            &program?,
+            previous_manifest,
+        )?;
+        return runtime::render_core_program(&program, source, parameters, app);
     }
     runtime::render_model(source, parameters, app)
 }
@@ -375,7 +411,7 @@ fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
-use crate::models::{EngineKind, ModelManifest, ParamValue};
+use crate::models::{EngineKind, ParamValue};
 
 #[cfg(test)]
 use self::runtime::{mesh_area, mesh_volume};

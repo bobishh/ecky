@@ -244,6 +244,7 @@ pub async fn add_manual_version(
         usage: None,
         artifact_bundle: artifact_bundle.clone(),
         model_manifest: model_manifest.clone(),
+        structural_verification: None,
         agent_origin,
         image_data: None,
         visual_kind: None,

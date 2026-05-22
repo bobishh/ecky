@@ -6,6 +6,7 @@
   import { ThreeMFLoader } from 'three/examples/jsm/loaders/3MFLoader.js';
   import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+  import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
   import ViewportTransmutation from './ViewportTransmutation.svelte';
   import { estimateBase64Bytes, profileLog } from './debug/profiler';
   import type {
@@ -213,6 +214,7 @@
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
+  const stlNormalCreaseAngle = Math.PI / 3;
   let pointerDownAt: { x: number; y: number } | null = null;
   let isOrbitDragging = false;
 
@@ -756,8 +758,11 @@
     object.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (!mesh.isMesh || !(mesh.geometry instanceof THREE.BufferGeometry)) return;
-      const geometry = mesh.geometry;
-      geometry.computeVertexNormals();
+      const geometry = prepareDisplayGeometry(mesh.geometry, asset.format === 'stl');
+      if (geometry !== mesh.geometry) {
+        mesh.geometry.dispose();
+        mesh.geometry = geometry;
+      }
       geometry.computeBoundingBox();
       mesh.material = createMaterial(tone, asset.partId === selectedPartId);
       const outline = createOutline(geometry, tone, asset.partId === selectedPartId);
@@ -796,13 +801,16 @@
         return;
       }
 
-      geometry.computeVertexNormals();
-      geometry.computeBoundingBox();
+      const displayGeometry = prepareDisplayGeometry(geometry, true);
+      if (displayGeometry !== geometry) {
+        geometry.dispose();
+      }
+      displayGeometry.computeBoundingBox();
       const tone = resolveViewerTone(null, manifestParts);
       const material = createMaterial(tone, false);
-      const mesh = new THREE.Mesh(geometry, material);
-      const outline = createOutline(geometry, tone, false);
-      const topology = createTopologyOverlay(geometry, tone);
+      const mesh = new THREE.Mesh(displayGeometry, material);
+      const outline = createOutline(displayGeometry, tone, false);
+      const topology = createTopologyOverlay(displayGeometry, tone);
       if (outline) {
         mesh.add(outline);
       }
@@ -813,7 +821,7 @@
 
       disposeModel();
       modelRoot = nextRoot;
-      runtimeMeshes = [{ partId: null, baseBounds: geometry.boundingBox?.clone() ?? null, outline, mesh, topology, tone }];
+      runtimeMeshes = [{ partId: null, baseBounds: displayGeometry.boundingBox?.clone() ?? null, outline, mesh, topology, tone }];
       applyPreviewTransforms();
       scene.add(modelRoot);
       frameModel(modelRoot);
@@ -829,6 +837,15 @@
       disposeDetachedGroup(nextRoot);
       notifyModelLoadError(token, 'Failed to load STL', error);
     }
+  }
+
+  function prepareDisplayGeometry(geometry: THREE.BufferGeometry, smoothStlSeams: boolean): THREE.BufferGeometry {
+    if (!smoothStlSeams) {
+      geometry.computeVertexNormals();
+      return geometry;
+    }
+
+    return toCreasedNormals(geometry, stlNormalCreaseAngle);
   }
 
   function frameModel(object: THREE.Object3D) {
@@ -1141,12 +1158,12 @@
         continue;
       }
 
-      const { scale, anchor } = preview;
+      const { scale, anchor, translate } = preview;
       entry.mesh.scale.set(scale.x, scale.y, scale.z);
       entry.mesh.position.set(
-        (1 - scale.x) * anchor.x,
-        (1 - scale.y) * anchor.y,
-        (1 - scale.z) * anchor.z,
+        (1 - scale.x) * anchor.x + (translate?.x ?? 0),
+        (1 - scale.y) * anchor.y + (translate?.y ?? 0),
+        (1 - scale.z) * anchor.z + (translate?.z ?? 0),
       );
     }
 
@@ -1158,12 +1175,12 @@
         continue;
       }
 
-      const { scale, anchor } = preview;
+      const { scale, anchor, translate } = preview;
       entry.line.scale.set(scale.x, scale.y, scale.z);
       entry.line.position.set(
-        (1 - scale.x) * anchor.x,
-        (1 - scale.y) * anchor.y,
-        (1 - scale.z) * anchor.z,
+        (1 - scale.x) * anchor.x + (translate?.x ?? 0),
+        (1 - scale.y) * anchor.y + (translate?.y ?? 0),
+        (1 - scale.z) * anchor.z + (translate?.z ?? 0),
       );
     }
 
@@ -1175,12 +1192,12 @@
         continue;
       }
 
-      const { scale, anchor } = preview;
+      const { scale, anchor, translate } = preview;
       entry.mesh.scale.set(scale.x, scale.y, scale.z);
       entry.mesh.position.set(
-        entry.basePosition.x + (1 - scale.x) * anchor.x,
-        entry.basePosition.y + (1 - scale.y) * anchor.y,
-        entry.basePosition.z + (1 - scale.z) * anchor.z,
+        entry.basePosition.x + (1 - scale.x) * anchor.x + (translate?.x ?? 0),
+        entry.basePosition.y + (1 - scale.y) * anchor.y + (translate?.y ?? 0),
+        entry.basePosition.z + (1 - scale.z) * anchor.z + (translate?.z ?? 0),
       );
     }
   }

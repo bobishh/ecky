@@ -1,0 +1,493 @@
+(model
+  (params
+    (number outer_w 116 :label "outer W" :min 90 :max 140 :step 1)
+    (number outer_h 92 :label "outer H" :min 80 :max 120 :step 1)
+    (select film_format "120_645" :label "film format" :options (("120 6x9" "120_6x9") ("120 6x6" "120_6x6") ("120 6x4.5" "120_645") ("135 36x24" "135") ("110" "110")))
+    (number tunnel_aperture_w 92 :label "middle aperture W" :min 64 :max 104 :step 1)
+    (number tunnel_aperture_h 76 :label "middle aperture H" :min 42 :max 90 :step 1)
+    (number corner_r 4 :label "corner R" :min 0 :max 8 :step 0.5)
+    (number base_h 3 :label "base H" :min 3 :max 8 :step 0.5)
+    (number module_h 58 :label "module H" :min 24 :max 90 :step 1)
+    (number rail_y 41 :label "rail Y" :min 34 :max 45 :step 0.5)
+    (number rail_tip_w 5.4 :label "joint max W" :min 3.5 :max 8 :step 0.1)
+    (number rail_h 4.2 :label "joint H" :min 2 :max 6 :step 0.1)
+    (number joint_sink 0.6 :label "joint sink" :min 0.2 :max 2.5 :step 0.1)
+    (number fit_clearance 0.25 :label "fit clearance" :min 0 :max 0.8 :step 0.05)
+    (number lead_in 3 :label "lead in" :min 0 :max 8 :step 0.5)
+    (number holder_extra_x 12 :label "insert side margin" :min 4 :max 18 :step 0.5)
+    (number holder_extra_y 7 :label "insert film margin" :min 3 :max 14 :step 0.5)
+    (number holder_corner_r 3 :label "insert corner R" :min 0 :max 8 :step 0.5)
+    (number holder_thickness 0.85 :label "lower insert H" :min 0.6 :max 2 :step 0.05)
+    (number insert_lid_thickness 0.55 :label "upper insert H" :min 0.4 :max 2 :step 0.05)
+    (number film_gap 0.6 :label "film velvet gap" :min 0.1 :max 1.5 :step 0.05)
+    (number film_slot_extra 1 :label "film slot extra" :min 0 :max 4 :step 0.25)
+    (number film_guide_rail_w 1.2 :label "film guide rail W" :min 0.6 :max 4 :step 0.1)
+    (number film_guide_h 0.3 :label "film guide rail H" :min 0.15 :max 0.8 :step 0.05)
+    (number insert_join_w 3.4 :label "insert dovetail W" :min 2.5 :max 6 :step 0.2)
+    (number insert_join_h 0.35 :label "insert dovetail H" :min 0.25 :max 1.2 :step 0.05)
+    (number frame_detent_bite 0.2 :label "frame detent bite" :min 0 :max 0.5 :step 0.05)
+    (number frame_detent_len 8 :label "frame detent len" :min 4 :max 16 :step 0.5)
+    (number frame_light_clearance 0 :label "frame light clearance" :min 0 :max 3 :step 0.25)
+    (number lens_bore_d 59.6 :label "lens bore D" :min 50 :max 68 :step 0.1)
+    (number adapter_h 6 :label "adapter H" :min 4 :max 10 :step 0.5)
+    (number assembly_gap 0.05 :label "assembly gap" :min 0 :max 0.3 :step 0.01)
+    (number sleeve_wall 2.8 :label "helicoid sleeve wall" :min 1.8 :max 5 :step 0.1)
+    (number sleeve_h 22 :label "helicoid sleeve H" :min 12 :max 34 :step 0.5)
+    (number carrier_h 20 :label "moving carrier H" :min 12 :max 34 :step 0.5)
+    (number carrier_wall 2.0 :label "carrier wall" :min 1.2 :max 4 :step 0.1)
+    (number thread_turns 3.2 :label "helicoid turns" :min 1.5 :max 5 :step 0.1)
+    (number thread_depth 1.25 :label "helicoid depth" :min 0.7 :max 2.2 :step 0.05)
+    (number thread_width 1.45 :label "helicoid ridge W" :min 0.9 :max 2.6 :step 0.05)
+    (number thread_clearance 0.25 :label "helicoid clearance" :min 0.15 :max 0.6 :step 0.05)
+    (number thread_start_z 0.8 :label "thread start Z" :min 0.2 :max 3 :step 0.1)
+    (number lens_stop_lip_w 2.4 :label "lens stop lip W" :min 1 :max 5 :step 0.1)
+    (number lens_stop_h 1.2 :label "lens stop H" :min 0.6 :max 3 :step 0.1)
+    (number carrier_preview_x 90 :label "carrier preview X" :min 0 :max 140 :step 1))
+  (part base_recessed_male_rails
+    (build
+      (shape frame_w 84)
+      (shape frame_h 56)
+      (shape film_strip_w
+        (if (= film_format "135") 35
+          (if (= film_format "110") 16 61.5)))
+      (shape aperture_w (+ frame_w frame_light_clearance))
+      (shape aperture_h (+ frame_h frame_light_clearance))
+      (shape holder_w (+ 84 holder_extra_x))
+      (shape holder_h (+ 61.5 holder_extra_y))
+      (shape film_channel_h film_strip_w)
+      (shape film_slot_h (+ 61.5 film_slot_extra))
+      (shape rail_profile_pos
+        (polygon
+          (((/ rail_h 2) 0)
+           (0 (/ rail_tip_w 2))
+           ((- (/ rail_h 2)) 0))))
+      (shape rail_profile_neg
+        (polygon
+          (((/ rail_h 2) 0)
+           ((- (/ rail_h 2)) 0)
+           (0 (- (/ rail_tip_w 2))))))
+      (shape raw_plate
+        (extrude (rounded-rect outer_w outer_h corner_r) base_h))
+      (shape aperture_cut
+        (translate 0 0 -0.1
+          (box aperture_w aperture_h (+ base_h 0.2))))
+      (shape insert_stack_h (+ holder_thickness film_gap insert_lid_thickness))
+      (shape pocket_depth (+ insert_stack_h assembly_gap))
+      (shape frame_pocket
+        (translate 0 0 (- base_h pocket_depth)
+          (extrude
+            (rounded-rect (+ holder_w (* 2 fit_clearance)) (+ holder_h (* 2 fit_clearance)) holder_corner_r)
+            (+ pocket_depth 0.2))))
+      (shape pocket_floor_z (- base_h pocket_depth))
+      (shape film_slot_z (+ pocket_floor_z holder_thickness (/ film_gap 2)))
+      (shape film_path_cut
+        (translate 0 0 film_slot_z
+          (box (+ outer_w (* 2 lead_in)) film_slot_h (+ film_gap 0.35))))
+      (shape detent_z (+ pocket_floor_z (/ insert_stack_h 2)))
+      (shape detent_x (- (/ holder_w 2) (/ frame_detent_len 2) 4))
+      (shape detent_y (+ (/ holder_h 2) (/ fit_clearance 2)))
+      (shape detent_depth (+ fit_clearance frame_detent_bite))
+      (shape detent_top_left
+        (translate (- detent_x) detent_y detent_z
+          (box frame_detent_len detent_depth insert_stack_h)))
+      (shape detent_top_right
+        (translate detent_x detent_y detent_z
+          (box frame_detent_len detent_depth insert_stack_h)))
+      (shape detent_bottom_left
+        (translate (- detent_x) (- detent_y) detent_z
+          (box frame_detent_len detent_depth insert_stack_h)))
+      (shape detent_bottom_right
+        (translate detent_x (- detent_y) detent_z
+          (box frame_detent_len detent_depth insert_stack_h)))
+      (shape plate
+        (difference raw_plate aperture_cut frame_pocket film_path_cut))
+      (shape rail_z (- (+ base_h (/ rail_h 2)) joint_sink))
+      (shape rail_left
+        (translate (- (/ outer_w 2)) rail_y rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_pos outer_w))))
+      (shape rail_right
+        (translate (- (/ outer_w 2)) (- rail_y) rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_neg outer_w))))
+      (result
+        (fuse
+          plate
+          rail_left
+          rail_right
+          detent_top_left
+          detent_top_right
+          detent_bottom_left
+          detent_bottom_right))))
+
+  (part film_insert_lower_guides
+    (build
+      (shape frame_w
+        (if (= film_format "135") 36
+          (if (= film_format "110") 17
+            (if (= film_format "120_645") 42
+              (if (= film_format "120_6x6") 56 84)))))
+      (shape frame_h
+        (if (= film_format "135") 24
+          (if (= film_format "110") 13
+            56)))
+      (shape film_strip_w
+        (if (= film_format "135") 35
+          (if (= film_format "110") 16 61.5)))
+      (shape aperture_w (+ frame_w frame_light_clearance))
+      (shape aperture_h (+ frame_h frame_light_clearance))
+      (shape holder_w (+ 84 holder_extra_x))
+      (shape holder_h (+ 61.5 holder_extra_y))
+      (shape film_channel_h film_strip_w)
+      (shape film_slot_h (+ 61.5 film_slot_extra))
+      (shape frame_z (- base_h (+ holder_thickness film_gap insert_lid_thickness)))
+      (shape join_y (- (/ holder_h 2) 2))
+      (shape join_profile
+        (polygon
+          ((0 0) (0.01 0) (0.01 0.01) (0 0.01))))
+      (shape detent_x (- (/ holder_w 2) (/ frame_detent_len 2) 4))
+      (shape detent_y (+ (/ holder_h 2) (/ fit_clearance 2)))
+      (shape notch_depth (+ fit_clearance frame_detent_bite 0.2))
+      (shape notch_len (+ frame_detent_len 0.2))
+      (shape notch_z (/ holder_thickness 2))
+      (shape notch_top_left
+        (translate (- detent_x) detent_y notch_z
+          (box notch_len notch_depth (+ holder_thickness 0.2))))
+      (shape notch_top_right
+        (translate detent_x detent_y notch_z
+          (box notch_len notch_depth (+ holder_thickness 0.2))))
+      (shape notch_bottom_left
+        (translate (- detent_x) (- detent_y) notch_z
+          (box notch_len notch_depth (+ holder_thickness 0.2))))
+      (shape notch_bottom_right
+        (translate detent_x (- detent_y) notch_z
+          (box notch_len notch_depth (+ holder_thickness 0.2))))
+      (shape join_channel_top
+        (translate 0 0 0
+          (box 0.01 0.01 0.01)))
+      (shape join_channel_bottom
+        (translate 0 0 0
+          (box 0.01 0.01 0.01)))
+      (shape lower_raw
+        (extrude (rounded-rect holder_w holder_h holder_corner_r) holder_thickness))
+      (shape aperture_cut
+        (translate 0 0 -0.1 (box aperture_w aperture_h (+ holder_thickness 0.2))))
+      (shape guide_top
+        (translate 0 (/ film_channel_h 2) (- (+ holder_thickness (/ film_guide_h 2)) 0.24)
+          (box (- holder_w 8) film_guide_rail_w film_guide_h)))
+      (shape guide_bottom
+        (translate 0 (- (/ film_channel_h 2)) (- (+ holder_thickness (/ film_guide_h 2)) 0.24)
+          (box (- holder_w 8) film_guide_rail_w film_guide_h)))
+      (shape lower_frame
+        (difference
+          lower_raw
+          aperture_cut
+          notch_top_left
+          notch_top_right
+          notch_bottom_left
+          notch_bottom_right))
+      (result
+        (translate 0 0 frame_z
+          (fuse lower_frame guide_top guide_bottom)))))
+
+  (part film_insert_upper_clamp
+    (build
+      (shape frame_w
+        (if (= film_format "135") 36
+          (if (= film_format "110") 17
+            (if (= film_format "120_645") 42
+              (if (= film_format "120_6x6") 56 84)))))
+      (shape frame_h
+        (if (= film_format "135") 24
+          (if (= film_format "110") 13
+            56)))
+      (shape film_strip_w
+        (if (= film_format "135") 35
+          (if (= film_format "110") 16 61.5)))
+      (shape aperture_w (+ frame_w frame_light_clearance))
+      (shape aperture_h (+ frame_h frame_light_clearance))
+      (shape holder_w (+ 84 holder_extra_x))
+      (shape holder_h (+ 61.5 holder_extra_y))
+      (shape film_channel_h film_strip_w)
+      (shape film_slot_h (+ 61.5 film_slot_extra))
+      (shape frame_z (- base_h (+ holder_thickness film_gap insert_lid_thickness)))
+      (shape top_z (+ frame_z holder_thickness film_gap))
+      (shape join_y (- (/ holder_h 2) 2))
+      (shape join_profile
+        (polygon
+          ((0 0) (0.01 0) (0.01 0.01) (0 0.01))))
+      (shape detent_x (- (/ holder_w 2) (/ frame_detent_len 2) 4))
+      (shape detent_y (+ (/ holder_h 2) (/ fit_clearance 2)))
+      (shape notch_depth (+ fit_clearance frame_detent_bite 0.2))
+      (shape notch_len (+ frame_detent_len 0.2))
+      (shape notch_z (/ insert_lid_thickness 2))
+      (shape notch_top_left
+        (translate (- detent_x) detent_y notch_z
+          (box notch_len notch_depth (+ insert_lid_thickness 0.2))))
+      (shape notch_top_right
+        (translate detent_x detent_y notch_z
+          (box notch_len notch_depth (+ insert_lid_thickness 0.2))))
+      (shape notch_bottom_left
+        (translate (- detent_x) (- detent_y) notch_z
+          (box notch_len notch_depth (+ insert_lid_thickness 0.2))))
+      (shape notch_bottom_right
+        (translate detent_x (- detent_y) notch_z
+          (box notch_len notch_depth (+ insert_lid_thickness 0.2))))
+      (shape upper_raw
+        (extrude (rounded-rect holder_w holder_h holder_corner_r) insert_lid_thickness))
+      (shape aperture_cut
+        (translate 0 0 -0.1 (box (+ aperture_w 2) (+ aperture_h 2) (+ insert_lid_thickness 0.2))))
+      (shape join_rail_top
+        (translate 0 0 0
+          (box 0.01 0.01 0.01)))
+      (shape join_rail_bottom
+        (translate 0 0 0
+          (box 0.01 0.01 0.01)))
+      (shape upper_frame
+        (difference
+          upper_raw
+          aperture_cut
+          notch_top_left
+          notch_top_right
+          notch_bottom_left
+          notch_bottom_right))
+      (result
+        (translate 0 0 top_z upper_frame))))
+
+  (part tunnel_female_bottom_male_top
+    (build
+      (shape frame_w
+        (if (= film_format "135") 36
+          (if (= film_format "110") 17
+            (if (= film_format "120_645") 42
+              (if (= film_format "120_6x6") 56 84)))))
+      (shape frame_h
+        (if (= film_format "135") 24
+          (if (= film_format "110") 13
+            56)))
+      (shape film_strip_w
+        (if (= film_format "135") 35
+          (if (= film_format "110") 16 61.5)))
+      (shape aperture_w (+ frame_w frame_light_clearance))
+      (shape aperture_h (+ frame_h frame_light_clearance))
+      (shape holder_w (+ 84 holder_extra_x))
+      (shape holder_h (+ 61.5 holder_extra_y))
+      (shape film_channel_h film_strip_w)
+      (shape film_slot_h (+ 61.5 film_slot_extra))
+      (shape body_z (+ base_h assembly_gap))
+      (shape rail_z (- (+ body_z module_h (/ rail_h 2)) joint_sink))
+      (shape channel_z (- (+ body_z (/ rail_h 2)) joint_sink))
+      (shape rail_profile_pos
+        (polygon
+          (((/ rail_h 2) 0)
+           (0 (/ rail_tip_w 2))
+           ((- (/ rail_h 2)) 0))))
+      (shape rail_profile_neg
+        (polygon
+          (((/ rail_h 2) 0)
+           ((- (/ rail_h 2)) 0)
+           (0 (- (/ rail_tip_w 2))))))
+      (shape channel_profile_pos
+        (polygon
+          (((/ (+ rail_h (* 2 fit_clearance)) 2) 0)
+           (0 (/ (+ rail_tip_w (* 2 fit_clearance)) 2))
+           ((- (/ (+ rail_h (* 2 fit_clearance)) 2)) 0))))
+      (shape channel_profile_neg
+        (polygon
+          (((/ (+ rail_h (* 2 fit_clearance)) 2) 0)
+           ((- (/ (+ rail_h (* 2 fit_clearance)) 2)) 0)
+           (0 (- (/ (+ rail_tip_w (* 2 fit_clearance)) 2))))))
+      (shape body_blank
+        (translate 0 0 body_z
+          (extrude (rounded-rect outer_w outer_h corner_r) module_h)))
+      (shape tunnel_cut
+        (translate 0 0 (- body_z 0.1)
+          (box tunnel_aperture_w tunnel_aperture_h (+ module_h 0.2))))
+      (shape body
+        (difference body_blank tunnel_cut))
+      (shape channel_left
+        (translate (- (+ (/ outer_w 2) lead_in)) rail_y channel_z
+          (rotate 0 90 0
+            (extrude channel_profile_pos (+ outer_w (* 2 lead_in))))))
+      (shape channel_right
+        (translate (- (+ (/ outer_w 2) lead_in)) (- rail_y) channel_z
+          (rotate 0 90 0
+            (extrude channel_profile_neg (+ outer_w (* 2 lead_in))))))
+      (shape rail_left
+        (translate (- (/ outer_w 2)) rail_y rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_pos outer_w))))
+      (shape rail_right
+        (translate (- (/ outer_w 2)) (- rail_y) rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_neg outer_w))))
+      (result
+        (fuse
+          (difference body channel_left channel_right)
+          rail_left
+          rail_right))))
+
+
+  (part top_cover_integrated_helicoid
+    (build
+      (shape frame_w
+        (if (= film_format "135") 36
+          (if (= film_format "110") 17
+            (if (= film_format "120_645") 42
+              (if (= film_format "120_6x6") 56 84)))))
+      (shape frame_h
+        (if (= film_format "135") 24
+          (if (= film_format "110") 13
+            56)))
+      (shape film_strip_w
+        (if (= film_format "135") 35
+          (if (= film_format "110") 16 61.5)))
+      (shape aperture_w (+ frame_w frame_light_clearance))
+      (shape aperture_h (+ frame_h frame_light_clearance))
+      (shape holder_w (+ 84 holder_extra_x))
+      (shape holder_h (+ 61.5 holder_extra_y))
+      (shape film_channel_h film_strip_w)
+      (shape film_slot_h (+ 61.5 film_slot_extra))
+      (shape top_z (+ base_h module_h (* 2 assembly_gap)))
+      (shape socket_base_z (+ top_z adapter_h))
+      (shape lens_slip_r (/ lens_bore_d 2))
+      (shape carrier_core_r (+ lens_slip_r carrier_wall))
+      (shape ridge_depth (max 0.45 (- thread_depth (* thread_clearance 0.45))))
+      (shape ridge_overlap 0.28)
+      (shape ridge_outer_r (+ carrier_core_r ridge_depth))
+      (shape socket_bore_r (+ carrier_core_r thread_clearance))
+      (shape female_inner_r (- carrier_core_r ridge_overlap 0.25))
+      (shape female_outer_r (+ ridge_outer_r thread_clearance 0.55))
+      (shape female_path_r (- (+ carrier_core_r (/ ridge_depth 2)) (/ ridge_overlap 2)))
+      (shape female_depth (* 2 (max (- female_outer_r female_path_r) (- female_path_r female_inner_r))))
+      (shape female_root_r (- female_path_r (/ female_depth 2)))
+      (shape female_axial_width (+ thread_width (* 2 thread_clearance) 0.45))
+      (shape socket_outer_r (+ (max socket_bore_r female_outer_r) sleeve_wall))
+      (shape thread_run_h sleeve_h)
+      (shape thread_z0 (- thread_start_z))
+      (shape thread_len (+ thread_run_h (* 2 thread_start_z)))
+      (shape thread_pitch (/ carrier_h (max 0.5 thread_turns)))
+      (shape channel_h (+ rail_h (* 2 fit_clearance)))
+      (shape channel_w (+ rail_tip_w (* 2 fit_clearance)))
+      (shape channel_z (- (+ top_z (/ rail_h 2)) joint_sink))
+      (shape channel_profile_pos
+        (polygon
+          (((/ channel_h 2) 0)
+           (0 (/ channel_w 2))
+           ((- (/ channel_h 2)) 0))))
+      (shape channel_profile_neg
+        (polygon
+          (((/ channel_h 2) 0)
+           ((- (/ channel_h 2)) 0)
+           (0 (- (/ channel_w 2))))))
+      (shape plate_blank
+        (translate 0 0 top_z
+          (extrude (rounded-rect outer_w outer_h corner_r) adapter_h)))
+      (shape channel_left
+        (translate (- (+ (/ outer_w 2) lead_in)) rail_y channel_z
+          (rotate 0 90 0
+            (extrude channel_profile_pos (+ outer_w (* 2 lead_in))))))
+      (shape channel_right
+        (translate (- (+ (/ outer_w 2) lead_in)) (- rail_y) channel_z
+          (rotate 0 90 0
+            (extrude channel_profile_neg (+ outer_w (* 2 lead_in))))))
+      (shape female_thread_clip_r (+ female_root_r female_depth 1))
+      (shape female_thread_a_raw
+        (translate 0 0 (+ socket_base_z thread_z0)
+          (helical-ridge
+            :radius female_root_r
+            :pitch thread_pitch
+            :height thread_len
+            :base-width female_axial_width
+            :crest-width (* female_axial_width 0.58)
+            :depth female_depth)))
+      (shape female_thread_a
+        (clip-box female_thread_a_raw
+          :x ((- female_thread_clip_r) female_thread_clip_r)
+          :y ((- female_thread_clip_r) female_thread_clip_r)
+          :z ((+ socket_base_z 0.05) (+ socket_base_z sleeve_h 1))))
+      (shape female_thread_b
+        (rotate 0 0 180 female_thread_a))
+      (shape socket_threaded_shell
+        (difference
+          (translate 0 0 socket_base_z
+            (cylinder socket_outer_r sleeve_h))
+          female_thread_a
+          female_thread_b))
+      (shape socket_bore_cut
+        (translate 0 0 (- socket_base_z 0.4)
+          (cylinder socket_bore_r (+ sleeve_h 0.8))))
+      (shape socket_shell
+        (difference socket_threaded_shell socket_bore_cut))
+      (shape open_plate_center
+        (translate 0 0 (- top_z 0.5)
+          (cylinder female_outer_r (+ adapter_h 1.0))))
+      (result
+        (fuse
+          (difference plate_blank channel_left channel_right open_plate_center)
+          socket_shell))))
+
+  (part moving_lens_carrier
+    (build
+      (shape frame_w
+        (if (= film_format "135") 36
+          (if (= film_format "110") 17
+            (if (= film_format "120_645") 42
+              (if (= film_format "120_6x6") 56 84)))))
+      (shape frame_h
+        (if (= film_format "135") 24
+          (if (= film_format "110") 13
+            56)))
+      (shape film_strip_w
+        (if (= film_format "135") 35
+          (if (= film_format "110") 16 61.5)))
+      (shape aperture_w (+ frame_w frame_light_clearance))
+      (shape aperture_h (+ frame_h frame_light_clearance))
+      (shape holder_w (+ 84 holder_extra_x))
+      (shape holder_h (+ 61.5 holder_extra_y))
+      (shape film_channel_h film_strip_w)
+      (shape film_slot_h (+ 61.5 film_slot_extra))
+      (shape top_z (+ base_h module_h (* 2 assembly_gap)))
+      (shape socket_base_z (+ top_z adapter_h))
+      (shape lens_slip_r (/ lens_bore_d 2))
+      (shape lens_clear_r (max 8 (- lens_slip_r lens_stop_lip_w)))
+      (shape carrier_core_r (+ lens_slip_r carrier_wall))
+      (shape ridge_depth (max 0.45 (- thread_depth (* thread_clearance 0.45))))
+      (shape ridge_overlap 0.28)
+      (shape ridge_sweep_depth (+ ridge_depth ridge_overlap))
+      (shape ridge_root_r (- carrier_core_r ridge_overlap))
+      (shape thread_run_h carrier_h)
+      (shape thread_z0 (- thread_start_z))
+      (shape thread_len (+ thread_run_h (* 2 thread_start_z)))
+      (shape thread_pitch (/ carrier_h (max 0.5 thread_turns)))
+      (shape carrier_body
+        (cylinder carrier_core_r carrier_h))
+      (shape thread_clip_r (+ ridge_root_r ridge_sweep_depth 1))
+      (shape male_thread_a_raw
+        (translate 0 0 thread_z0
+          (helical-ridge
+            :radius ridge_root_r
+            :pitch thread_pitch
+            :height thread_len
+            :base-width thread_width
+            :crest-width (* thread_width 0.58)
+            :depth ridge_sweep_depth)))
+      (shape male_thread_a
+        (clip-box male_thread_a_raw
+          :x ((- thread_clip_r) thread_clip_r)
+          :y ((- thread_clip_r) thread_clip_r)
+          :z (0 carrier_h)))
+      (shape male_thread_b
+        (rotate 0 0 180 male_thread_a))
+      (shape carrier_outer
+        (fuse carrier_body male_thread_a male_thread_b))
+      (shape stop_aperture
+        (translate 0 0 -0.6
+          (cylinder lens_clear_r (+ carrier_h 1.2))))
+      (shape lens_slip_bore
+        (translate 0 0 lens_stop_h
+          (cylinder lens_slip_r (+ carrier_h 1.2))))
+      (result
+        (translate carrier_preview_x 0 socket_base_z
+          (difference carrier_outer stop_aperture lens_slip_bore))))))
+

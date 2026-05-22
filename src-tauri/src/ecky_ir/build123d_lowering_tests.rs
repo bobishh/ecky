@@ -442,6 +442,90 @@ fn lower_to_build123d_bspline_accepts_build_bound_generated_point_lists() {
 }
 
 #[test]
+fn lower_to_build123d_bspline_accepts_public_docs_mapped_point_list() {
+    let src = r#"
+    (define control-points
+      (map
+        (lambda (angle)
+          (list
+            (* 26 (cos (* pi (/ angle 180.0))))
+            (* 16 (sin (* pi (/ angle 180.0))))))
+        (linspace 0 315 8)))
+
+    (model
+      (part body
+        (extrude (bspline control-points :closed #t) 10)))
+    "#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(code.contains("Spline("), "bspline: {}", code);
+    assert!(code.contains("periodic=True"), "closed: {}", code);
+}
+
+#[test]
+fn lower_to_build123d_falls_back_to_core_when_legacy_lowering_rejects_runtime_list_binding() {
+    let src = r#"
+    (model
+      (params (number chamber_cols 5 :min 3 :max 7 :step 1))
+      (part body
+        (build
+          (shape cutters
+            (apply union
+              (map
+                (lambda (cell)
+                  (translate cell 0 0 (cylinder 1 3 12)))
+                (range 0 chamber_cols))))
+          (result
+            (difference
+              (box 20 10 4 :align '(center center min))
+              cutters)))))
+    "#;
+    let code = lower_to_build123d(src).expect("lower");
+
+    assert!(
+        code.contains("range(int(math.floor("),
+        "runtime range: {code}"
+    );
+    assert!(code.contains("_ecky_collect_solids"), "map solids: {code}");
+}
+
+#[test]
+fn lower_to_build123d_accepts_shape_bound_parametric_map_with_let_star_body() {
+    let src = r#"
+    (model
+      (params
+        (number hotel_w 74 :label "hotel width" :min 50 :max 110 :step 1)
+        (number hotel_d 34 :label "hotel depth" :min 24 :max 54 :step 1)
+        (number chamber_cols 5 :label "chamber columns" :min 3 :max 7 :step 1)
+        (number entrance_r 3.4 :label "entrance radius" :min 2 :max 6 :step 0.1))
+      (part body
+        (build
+          (shape wall 3)
+          (shape col_gap (/ (- hotel_w (* 2 wall)) chamber_cols))
+          (shape cutters
+            (apply union
+              (map
+                (lambda (cell)
+                  (let* ((col (- cell (* chamber_cols (floor (/ cell chamber_cols)))))
+                         (x (+ (* -0.5 hotel_w) wall (* (+ col 0.5) col_gap))))
+                    (translate x (* -0.5 hotel_d) 0
+                      (rotate 90 0 0
+                        (cylinder entrance_r (+ hotel_d 6) 24)))))
+                (range 0 (* chamber_cols 3)))))
+          (result
+            (difference
+              (box hotel_w hotel_d 4 :align '(center center min))
+              cutters)))))
+    "#;
+    let code = lower_to_build123d(src).expect("lower");
+
+    assert!(
+        code.contains("range(int(math.floor("),
+        "runtime range: {code}"
+    );
+    assert!(code.contains("_ecky_collect_solids"), "map solids: {code}");
+}
+
+#[test]
 fn lower_to_build123d_path_accepts_lorenz_point_helper() {
     let src = r#"(model
         (part rail
@@ -1468,6 +1552,34 @@ fn lower_core_program_to_build123d_rejects_wrong_kind_selector_payload_on_edges_
     assert!(
         err.to_string()
             .contains("CoreProgram `:edges` keyword requires edge selector payload"),
+        "{err}"
+    );
+}
+
+#[test]
+fn lower_core_program_to_build123d_rejects_created_by_selector_option() {
+    let program = crate::ecky_scheme::compile_to_core_program(
+        r#"
+        (model
+          (part body
+            (build
+              (shape blank (box 10 10 10))
+              (shape pocket (box 4 4 4))
+              (shape solid (difference blank pocket))
+              (result
+                (fillet 1
+                  :edges "left+vertical"
+                  :created-by pocket
+                  solid)))))
+        "#,
+    )
+    .expect("program");
+
+    let err = lower_core_program_to_build123d(&program)
+        .expect_err("created-by should fail in build123d lowering");
+    assert!(
+        err.to_string()
+            .contains("`fillet` does not recognize option `:created-by`"),
         "{err}"
     );
 }

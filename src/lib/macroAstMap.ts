@@ -1,6 +1,8 @@
 import type { DesignParams, ModelManifest, UiField, UiSpec } from './types/domain';
 
-export type MacroAstMapNodeKind = 'model' | 'part' | 'port' | 'param';
+export type MacroAstMapNodeKind = 'model' | 'part' | 'port' | 'param' | 'verify';
+
+export type MacroAstSourceRange = { startByte: number; endByte: number };
 
 export type MacroAstMapNode = {
   id: string;
@@ -10,7 +12,18 @@ export type MacroAstMapNode = {
   fieldKey?: string;
   syntaxVariant?: string;
   syntaxLabel?: string;
+  /** Exact byte range of this node in the macro source, when known. */
+  sourceRange?: MacroAstSourceRange;
   children: MacroAstMapNode[];
+};
+
+/** Shape of `macro_ast_source_map` results (backend command). */
+export type MacroAstSourceMapEntry = {
+  id: string;
+  kind: string;
+  label: string;
+  startByte: number;
+  endByte: number;
 };
 
 export type MacroAstMapProjection = {
@@ -22,6 +35,7 @@ type MacroAstMapInput = {
   modelManifest?: ModelManifest | null;
   uiSpec?: UiSpec | null;
   parameters?: DesignParams;
+  sourceNodes?: MacroAstSourceMapEntry[] | null;
 };
 
 type MacroAstPart = {
@@ -60,7 +74,39 @@ function normalizeSyntaxVariant(value: string | null | undefined): string {
   return normalized.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
 }
 
+function sourceRangeFor(
+  entries: Map<string, MacroAstSourceMapEntry>,
+  ...ids: string[]
+): MacroAstSourceRange | undefined {
+  for (const id of ids) {
+    const entry = entries.get(id);
+    if (entry) return { startByte: entry.startByte, endByte: entry.endByte };
+  }
+  return undefined;
+}
+
+function paramNode(
+  idPrefix: string,
+  field: UiField,
+  value: string | number | boolean | null,
+): MacroAstMapNode {
+  const fieldSyntaxVariant = normalizeSyntaxVariant(field.type);
+  return {
+    id: `${idPrefix}/param:${field.key}`,
+    kind: 'param',
+    label: normalizeFieldLabel(field),
+    value,
+    fieldKey: field.key,
+    syntaxVariant: fieldSyntaxVariant,
+    syntaxLabel: fieldSyntaxVariant.toUpperCase(),
+    children: [],
+  };
+}
+
 export function buildMacroAstMapProjection(input: MacroAstMapInput): MacroAstMapProjection {
+  const sourceEntries = new Map(
+    (input.sourceNodes ?? []).map((entry) => [entry.id, entry]),
+  );
   const fields = Array.isArray(input.uiSpec?.fields)
     ? input.uiSpec.fields.filter((field): field is UiField => Boolean(field))
     : [];
@@ -75,6 +121,72 @@ export function buildMacroAstMapProjection(input: MacroAstMapInput): MacroAstMap
     }),
   );
 
+  // A field belongs to a part only when exactly one part claims it. Fields
+  // claimed by several parts (or by none) are model-level knobs: rendered
+  // once in a shared group instead of duplicated under every part.
+  const claimCounts = new Map<string, number>();
+  for (const part of parts) {
+    for (const key of part.parameterKeys) {
+      if (!fieldByKey.has(key)) continue;
+      claimCounts.set(key, (claimCounts.get(key) ?? 0) + 1);
+    }
+  }
+  const valueOf = (field: UiField) =>
+    (input.parameters?.[field.key] ?? null) as string | number | boolean | null;
+
+  const partNodes: MacroAstMapNode[] = parts.map((part, partIndex) => {
+    const ownFields = part.parameterKeys
+      .filter((key) => claimCounts.get(key) === 1)
+      .map((key) => fieldByKey.get(key))
+      .filter((field): field is UiField => Boolean(field));
+    return {
+      id: `part:${part.partId}`,
+      kind: 'part',
+      label: part.label || `Part ${partIndex + 1}`,
+      value: null,
+      sourceRange: sourceRangeFor(
+        sourceEntries,
+        `part:${part.partId}`,
+        `feature:${part.partId}`,
+      ),
+      syntaxVariant: normalizeSyntaxVariant(partById.get(part.partId)?.kind ?? 'part'),
+      syntaxLabel: normalizeSyntaxVariant(partById.get(part.partId)?.kind ?? 'part').toUpperCase(),
+      children: ownFields.map((field) => paramNode(`part:${part.partId}`, field, valueOf(field))),
+    };
+  });
+
+  const sharedFields = fields.filter((field) => (claimCounts.get(field.key) ?? 0) !== 1);
+  const sharedGroup: MacroAstMapNode[] = sharedFields.length
+    ? [
+        {
+          id: 'shared-params',
+          kind: 'part',
+          label: 'Model Params',
+          value: null,
+          syntaxVariant: 'shared',
+          syntaxLabel: 'SHARED',
+          children: sharedFields.map((field) => paramNode('shared', field, valueOf(field))),
+        },
+      ]
+    : [];
+  const verifyNodes: MacroAstMapNode[] = (input.sourceNodes ?? [])
+    .filter((entry) => entry.kind === 'verify')
+    .map((entry, index) => {
+      const tag = `${entry.label || ''}`.trim();
+      return {
+        // Key by tag so an authored verify chip (`verify:<tag>`) focuses this
+        // node; fall back to the source-map id when the clause has no tag.
+        id: tag ? `verify:${tag}` : entry.id || `verify:${index}`,
+        kind: 'verify' as const,
+        label: tag || `verify ${index + 1}`,
+        value: null,
+        syntaxVariant: 'verify',
+        syntaxLabel: 'VERIFY',
+        sourceRange: { startByte: entry.startByte, endByte: entry.endByte },
+        children: [],
+      } satisfies MacroAstMapNode;
+    });
+
   const root: MacroAstMapNode = {
     id: 'macro-root',
     kind: 'model',
@@ -82,47 +194,8 @@ export function buildMacroAstMapProjection(input: MacroAstMapInput): MacroAstMap
     value: null,
     syntaxVariant: 'model',
     syntaxLabel: 'MODEL',
-    children: parts.map((part, partIndex) => {
-      const partFields = part.parameterKeys.length > 0
-        ? part.parameterKeys
-            .map((key) => fieldByKey.get(key))
-            .filter((field): field is UiField => Boolean(field))
-        : fields;
-
-      return {
-        id: `part:${part.partId}`,
-        kind: 'part',
-        label: part.label || `Part ${partIndex + 1}`,
-        value: null,
-        syntaxVariant: normalizeSyntaxVariant(partById.get(part.partId)?.kind ?? 'part'),
-        syntaxLabel: normalizeSyntaxVariant(partById.get(part.partId)?.kind ?? 'part').toUpperCase(),
-        children: partFields.map((field) => {
-          const value = input.parameters?.[field.key] ?? null;
-          const fieldSyntaxVariant = normalizeSyntaxVariant(field.type);
-          return {
-            id: `part:${part.partId}/port:${field.key}`,
-            kind: 'port',
-            label: normalizeFieldLabel(field),
-            value,
-            fieldKey: field.key,
-            syntaxVariant: fieldSyntaxVariant,
-            syntaxLabel: 'PORT',
-            children: [
-              {
-                id: `part:${part.partId}/param:${field.key}`,
-                kind: 'param',
-                label: `${normalizeFieldLabel(field)}: ${formatValue(value)}`,
-                value,
-                fieldKey: field.key,
-                syntaxVariant: fieldSyntaxVariant,
-                syntaxLabel: fieldSyntaxVariant.toUpperCase(),
-                children: [],
-              },
-            ],
-          };
-        }),
-      };
-    }),
+    sourceRange: sourceRangeFor(sourceEntries, 'model'),
+    children: [...verifyNodes, ...sharedGroup, ...partNodes],
   };
 
   return { root };

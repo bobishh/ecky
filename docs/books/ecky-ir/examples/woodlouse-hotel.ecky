@@ -1,0 +1,46 @@
+(model
+  (params
+    (number hotel_w 74 :label "hotel width" :min 50 :max 110 :step 1)
+    (number hotel_d 34 :label "hotel depth" :min 24 :max 54 :step 1)
+    (number hotel_h 42 :label "hotel height" :min 28 :max 70 :step 1)
+    (number chamber_cols 5 :label "chamber columns" :min 3 :max 7 :step 1)
+    (number entrance_r 3.4 :label "entrance radius" :min 2 :max 6 :step 0.1))
+  (part woodlouse_hotel
+    (build
+      (shape wall 3)
+      (shape floor_gap (/ (- hotel_h (* 2 wall)) 3))
+      (shape col_gap (/ (- hotel_w (* 2 wall)) chamber_cols))
+      (shape body
+        (box hotel_w hotel_d hotel_h :align '(center center min)))
+      (shape roof
+        (translate 0 0 hotel_h
+          (box (+ hotel_w 10) (+ hotel_d 12) 5 :align '(center center min))))
+      (shape shelves
+        (linear-array 2 0 0 floor_gap
+          (translate 0 0 (+ wall floor_gap)
+            (box (- hotel_w (* 2 wall)) (+ hotel_d 2) 1.5 :align '(center center center)))))
+      (shape entrances
+        (apply union
+          (map
+            (lambda (cell)
+              (let* ((col (- cell (* chamber_cols (floor (/ cell chamber_cols)))))
+                     (row (floor (/ cell chamber_cols)))
+                     (x (+ (* -0.5 hotel_w) wall (* (+ col 0.5) col_gap)))
+                     (z (+ wall (* (+ row 0.55) floor_gap))))
+                (translate x (* -0.5 hotel_d) z
+                  (rotate 90 0 0
+                    (cylinder entrance_r (+ hotel_d 6) 24)))))
+            (range 0 (* chamber_cols 3)))))
+      (shape vertical_dividers
+        (apply union
+          (map
+            (lambda (divider)
+              (translate (+ (* -0.5 hotel_w) wall (* divider col_gap)) 0 (/ hotel_h 2)
+                (box 1.4 (+ hotel_d 2) (- hotel_h (* 2 wall)) :align '(center center center))))
+            (range 1 chamber_cols))))
+      (result
+        (union
+          (difference body entrances)
+          shelves
+          vertical_dividers
+          roof)))))

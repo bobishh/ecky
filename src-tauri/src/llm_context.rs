@@ -691,9 +691,11 @@ mod tests {
             }],
             control_relations: vec![],
             control_views: vec![],
+            preview_views: vec![],
             advisories: vec![],
             selection_targets: vec![],
             measurement_annotations: vec![],
+            tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: vec![],
@@ -722,6 +724,7 @@ mod tests {
                     numeric_payload: None,
                 }]
             },
+            authored_verify_checks: Vec::new(),
             metrics: StructuralMetrics {
                 part_count: 2,
                 preview_stl_size_bytes: Some(4096),

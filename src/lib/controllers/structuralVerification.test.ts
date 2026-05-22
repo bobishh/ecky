@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runStructuralCheck } from './structuralVerification';
+import { deriveAuthoredVerifyChips, runStructuralCheck } from './structuralVerification';
 import type { StructuralCheckOptions } from './structuralVerification';
 import type { StructuralVerificationResult } from '../types/domain';
 
@@ -166,6 +166,99 @@ test('repair prompt preserves authored verify guidance when authored checks fail
   assert.match(result.repairPrompt, /Authored verify requirements failed\./);
   assert.match(result.repairPrompt, /Do not remove or weaken `\(verify \.\.\.\)` clauses\./);
   assert.match(result.repairPrompt, /AUTHORED_VERIFY_FAILED/);
+});
+
+test('repair prompt includes deterministic authored verify feedback block', async () => {
+  const result = await runStructuralCheck(baseOpts({
+    verify: async () => ({
+      ...FAIL_RESULT,
+      summary: 'Structural verification failed: AUTHORED_VERIFY_FAILED',
+      issues: [
+        {
+          code: 'AUTHORED_VERIFY_FAILED',
+          message: 'verify hinge_a/clearance_check: clearance min-distance = 0.12, expected >= 0.3 (pin_d=8, bore=8.3).',
+          partId: 'hinge_a',
+          numericPayload: 0.12,
+        },
+      ],
+    }),
+  }));
+
+  assert.equal(result.kind, 'repair_needed');
+  assert.ok('repairPrompt' in result);
+  assert.match(result.repairPrompt, /Authored verify retry feedback:/);
+  assert.match(
+    result.repairPrompt,
+    /- verify hinge_a: verify hinge_a\/clearance_check: clearance min-distance = 0\.12, expected >= 0\.3 \(pin_d=8, bore=8\.3\)\. \(value: 0\.12\)/,
+  );
+});
+
+test('deriveAuthoredVerifyChips maps public authored checks to stable chip data', () => {
+  const chips = deriveAuthoredVerifyChips({
+    ...FAIL_RESULT,
+    authoredVerifyChecks: [
+      {
+        tag: 'step_export',
+        status: 'passed',
+        message: 'true = true',
+        stableNodeId: 'verify:step_export',
+        metricSource: 'manifest',
+        metricKey: 'has-step',
+        comparator: '==',
+        expected: { kind: 'boolean', value: true },
+        actual: { kind: 'boolean', value: true },
+      },
+      {
+        tag: 'bad_clearance',
+        status: 'failed',
+        message: '0 = 1',
+        stableNodeId: null,
+        metricSource: 'clearance',
+        metricKey: 'min-distance',
+        comparator: '>=',
+        expected: { kind: 'number', value: 0.3 },
+        actual: { kind: 'number', value: 0.12 },
+      },
+      {
+        tag: 'selector_missing',
+        status: 'error',
+        message: 'Unsupported verify selector `missing`.',
+        stableNodeId: null,
+      },
+    ],
+  });
+
+  assert.deepEqual(chips, [
+    {
+      id: 'verify:step_export',
+      label: 'step_export',
+      status: 'passed',
+      tone: 'green',
+      message: 'manifest has-step expected == true; actual true',
+      stableNodeId: 'verify:step_export',
+    },
+    {
+      id: 'authored-verify:bad_clearance',
+      label: 'bad_clearance',
+      status: 'failed',
+      tone: 'red',
+      message: 'clearance min-distance expected >= 0.3; actual 0.12',
+      stableNodeId: null,
+    },
+    {
+      id: 'authored-verify:selector_missing',
+      label: 'selector_missing',
+      status: 'error',
+      tone: 'red',
+      message: 'Unsupported verify selector `missing`.',
+      stableNodeId: null,
+    },
+  ]);
+});
+
+test('deriveAuthoredVerifyChips returns no chips while authored verification is absent or pending', () => {
+  assert.deepEqual(deriveAuthoredVerifyChips(PASS_RESULT), []);
+  assert.deepEqual(deriveAuthoredVerifyChips(null), []);
 });
 
 // ── terminal failure ────────────────────────────────────────────────────────

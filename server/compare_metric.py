@@ -7,7 +7,9 @@ from pathlib import Path
 
 @dataclass
 class MeshMetrics:
+    triangle_count: int
     volume: float
+    surface_area: float
     min_bound: tuple[float, float, float]
     max_bound: tuple[float, float, float]
 
@@ -84,6 +86,22 @@ def _triangle_volume(
     return (v0[0] * cx + v0[1] * cy + v0[2] * cz) / 6.0
 
 
+def _triangle_area(
+    triangle: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
+) -> float:
+    v0, v1, v2 = triangle
+    ax = v1[0] - v0[0]
+    ay = v1[1] - v0[1]
+    az = v1[2] - v0[2]
+    bx = v2[0] - v0[0]
+    by = v2[1] - v0[1]
+    bz = v2[2] - v0[2]
+    cx = ay * bz - az * by
+    cy = az * bx - ax * bz
+    cz = ax * by - ay * bx
+    return (cx * cx + cy * cy + cz * cz) ** 0.5 / 2.0
+
+
 def mesh_metrics(path: Path) -> MeshMetrics:
     triangles = _load_triangles(path)
     if not triangles:
@@ -93,16 +111,20 @@ def mesh_metrics(path: Path) -> MeshMetrics:
     ys: list[float] = []
     zs: list[float] = []
     signed_volume = 0.0
+    surface_area = 0.0
 
     for triangle in triangles:
         signed_volume += _triangle_volume(triangle)
+        surface_area += _triangle_area(triangle)
         for vx, vy, vz in triangle:
             xs.append(vx)
             ys.append(vy)
             zs.append(vz)
 
     return MeshMetrics(
+        triangle_count=len(triangles),
         volume=abs(signed_volume),
+        surface_area=surface_area,
         min_bound=(min(xs), min(ys), min(zs)),
         max_bound=(max(xs), max(ys), max(zs)),
     )
@@ -164,6 +186,10 @@ def main() -> None:
                 {
                     "reference_volume": ref_mesh.volume,
                     "generated_volume": gen_mesh.volume,
+                    "reference_surface_area": ref_mesh.surface_area,
+                    "generated_surface_area": gen_mesh.surface_area,
+                    "reference_triangle_count": ref_mesh.triangle_count,
+                    "generated_triangle_count": gen_mesh.triangle_count,
                     "volume_difference_percent": vol_diff,
                     "bounding_box_match_error": bb_diff,
                     "bounding_box_axis_deltas": bb_axis,
@@ -176,6 +202,10 @@ def main() -> None:
     print("--- Metric Comparison ---")
     print(f"Reference Volume: {ref_mesh.volume:.2f} mm^3")
     print(f"Generated Volume: {gen_mesh.volume:.2f} mm^3")
+    print(f"Reference Surface Area: {ref_mesh.surface_area:.2f} mm^2")
+    print(f"Generated Surface Area: {gen_mesh.surface_area:.2f} mm^2")
+    print(f"Reference Triangles: {ref_mesh.triangle_count}")
+    print(f"Generated Triangles: {gen_mesh.triangle_count}")
     print(f"Volume Difference: {vol_diff:.2f}%")
     print(f"Bounding Box Match Error: {bb_diff:.2f} mm")
     print(

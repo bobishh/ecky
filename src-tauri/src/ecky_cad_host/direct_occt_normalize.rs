@@ -44,6 +44,8 @@ pub fn normalize_core_program_for_direct_occt(
         parameters: program.parameters.clone(),
         parts,
         feature_decls: program.feature_decls.clone(),
+        selector_tags: program.selector_tags.clone(),
+        preview_views: program.preview_views.clone(),
         constraints: program.constraints.clone(),
     })
 }
@@ -59,53 +61,94 @@ fn normalize_node_for_direct_occt(
         CoreNodeKind::Reference(_) => Ok(node.clone()),
         CoreNodeKind::Build { bindings, result } => {
             let mut nested_env = env.clone();
+            let mut nested_node_env = BTreeMap::new();
             let normalized_bindings = bindings
                 .iter()
                 .map(|binding| {
-                    let value = normalize_node_for_direct_occt(
-                        &binding.value,
+                    let binding_value =
+                        rewrite_scalar_node_refs_for_eval(&binding.value, &nested_node_env);
+                    let normalized_value = normalize_node_for_direct_occt(
+                        &binding_value,
                         param_names,
                         &nested_env,
                         next_node_id,
                     )?;
-                    if let Some(value) = eval_scalar_binding(&value, param_names, &nested_env)? {
-                        nested_env.insert(binding.name.clone(), value);
+                    let value =
+                        rewrite_scalar_node_refs_for_eval(&normalized_value, &nested_node_env);
+                    if let Some(param_value) =
+                        eval_scalar_binding(&value, param_names, &nested_env, &nested_node_env)
+                            .map_err(|err| {
+                                AppError::validation(format!(
+                            "Direct OCCT normalizer could not evaluate build binding `{}`: {err}",
+                            binding.name
+                        ))
+                            })?
+                    {
+                        nested_env.insert(binding.name.clone(), param_value.clone());
+                        nested_node_env.insert(binding.value.id.raw(), param_value.clone());
+                        nested_node_env.insert(value.id.raw(), param_value.clone());
+                        let literal =
+                            param_value_literal_node(next_node_id, &param_value, value.span);
+                        nested_node_env.insert(literal.id.raw(), param_value);
+                        Ok(CoreShapeBinding {
+                            name: binding.name.clone(),
+                            value: literal,
+                        })
+                    } else {
+                        Ok(CoreShapeBinding {
+                            name: binding.name.clone(),
+                            value,
+                        })
                     }
-                    Ok(CoreShapeBinding {
-                        name: binding.name.clone(),
-                        value,
-                    })
                 })
                 .collect::<AppResult<Vec<_>>>()?;
             Ok(rebuild_node(
                 node,
                 CoreNodeKind::Build {
                     bindings: normalized_bindings,
-                    result: Box::new(normalize_node_for_direct_occt(
-                        result,
-                        param_names,
-                        &nested_env,
-                        next_node_id,
-                    )?),
+                    result: Box::new(rewrite_scalar_node_refs_for_eval(
+                        &normalize_node_for_direct_occt(
+                            result,
+                            param_names,
+                            &nested_env,
+                            next_node_id,
+                        )?,
+                        &nested_node_env,
+                    )),
                 },
             ))
         }
         CoreNodeKind::Let { bindings, body } => {
             let mut nested_env = env.clone();
+            let mut nested_node_env = BTreeMap::new();
             let normalized_bindings = bindings
                 .iter()
                 .map(|binding| {
-                    let value = normalize_node_for_direct_occt(
-                        &binding.value,
+                    let binding_value =
+                        rewrite_scalar_node_refs_for_eval(&binding.value, &nested_node_env);
+                    let normalized_value = normalize_node_for_direct_occt(
+                        &binding_value,
                         param_names,
                         &nested_env,
                         next_node_id,
                     )?;
+                    let value =
+                        rewrite_scalar_node_refs_for_eval(&normalized_value, &nested_node_env);
                     let literal_value = if let Some(param_value) =
-                        eval_scalar_binding(&value, param_names, &nested_env)?
-                    {
+                        eval_scalar_binding(&value, param_names, &nested_env, &nested_node_env)
+                            .map_err(|err| {
+                                AppError::validation(format!(
+                            "Direct OCCT normalizer could not evaluate let binding `{}`: {err}",
+                            binding.name
+                        ))
+                            })? {
                         nested_env.insert(binding.name.clone(), param_value.clone());
-                        param_value_literal_node(next_node_id, &param_value, value.span)
+                        nested_node_env.insert(binding.value.id.raw(), param_value.clone());
+                        nested_node_env.insert(value.id.raw(), param_value.clone());
+                        let literal =
+                            param_value_literal_node(next_node_id, &param_value, value.span);
+                        nested_node_env.insert(literal.id.raw(), param_value.clone());
+                        literal
                     } else {
                         value
                     };
@@ -119,12 +162,15 @@ fn normalize_node_for_direct_occt(
                 node,
                 CoreNodeKind::Let {
                     bindings: normalized_bindings,
-                    body: Box::new(normalize_node_for_direct_occt(
-                        body,
-                        param_names,
-                        &nested_env,
-                        next_node_id,
-                    )?),
+                    body: Box::new(rewrite_scalar_node_refs_for_eval(
+                        &normalize_node_for_direct_occt(
+                            body,
+                            param_names,
+                            &nested_env,
+                            next_node_id,
+                        )?,
+                        &nested_node_env,
+                    )),
                 },
             ))
         }
@@ -301,7 +347,7 @@ fn normalize_node_for_direct_occt(
                             &loop_env,
                             next_node_id,
                         )?;
-                        last_selected = Some(rewrap_with_index(
+                        last_selected = Some(rewrap_with_index_preserving_id(
                             node,
                             &index,
                             iteration as f64,
@@ -332,14 +378,21 @@ fn normalize_node_for_direct_occt(
                 let normalized_keywords = keywords
                     .iter()
                     .map(|keyword| {
-                        normalize_keyword_source_for_direct_occt(
-                            keyword.name.as_str(),
-                            keyword.source_node(),
-                            param_names,
-                            env,
-                            next_node_id,
-                        )
-                        .map(|source| match keyword.selector_payload() {
+                        let source = if keyword.selector_payload().is_some() {
+                            Ok(clone_node_with_fresh_ids(
+                                keyword.source_node(),
+                                next_node_id,
+                            ))
+                        } else {
+                            normalize_keyword_source_for_direct_occt(
+                                keyword.name.as_str(),
+                                keyword.source_node(),
+                                param_names,
+                                env,
+                                next_node_id,
+                            )
+                        }?;
+                        Ok(match keyword.selector_payload() {
                             Some(selector) => CoreKeywordArg::selector(
                                 keyword.name.clone(),
                                 source,
@@ -425,73 +478,19 @@ fn normalize_node_for_direct_occt(
             params,
             sources,
             body,
-        } => {
-            let normalized_sources = sources
-                .iter()
-                .map(|source| {
-                    normalize_node_for_direct_occt(source, param_names, env, next_node_id)
-                })
-                .collect::<AppResult<Vec<_>>>()?;
-            let source_items = normalized_sources
-                .iter()
-                .map(|source| list_items(source, next_node_id, "`map` source"))
-                .collect::<AppResult<Vec<_>>>()?;
-            if source_items.is_empty() {
-                return Ok(rebuild_node(node, CoreNodeKind::List(Vec::new())));
-            }
-
-            for (index, items) in source_items.iter().enumerate() {
-                let shortest = source_items[0].len();
-                if items.len() != shortest {
-                    return Err(AppError::validation(format!(
-                        "`map` source length mismatch at source {index}: expected {shortest}, got {}",
-                        items.len()
-                    )));
-                }
-            }
-
-            let mut mapped = Vec::new();
-            if params.len() != source_items.len() {
-                return Err(AppError::validation(format!(
-                    "`map` expected {} parameters, got {}",
-                    source_items.len(),
-                    params.len()
-                )));
-            }
-
-            for index in 0..source_items[0].len() {
-                let mut iteration_env = env.clone();
-                let mut bindings = Vec::with_capacity(params.len());
-                for (param_name, source_values) in params.iter().zip(&source_items) {
-                    let value = source_values[index].clone();
-                    if let Some(value) = eval_scalar_binding(&value, param_names, &iteration_env)? {
-                        iteration_env.insert(param_name.clone(), value);
-                    }
-                    bindings.push(CoreBinding {
-                        name: param_name.clone(),
-                        value,
-                    });
-                }
-                let mapped_body = normalize_node_for_direct_occt(
-                    body,
-                    param_names,
-                    &iteration_env,
-                    next_node_id,
-                )?;
-                let mapped_value_kind = mapped_body.value_kind;
-                mapped.push(CoreNode {
-                    id: next_id(next_node_id),
-                    kind: CoreNodeKind::Let {
-                        bindings,
-                        body: Box::new(mapped_body),
-                    },
-                    value_kind: mapped_value_kind,
-                    span: node.span,
-                });
-            }
-
-            Ok(rebuild_node(node, CoreNodeKind::List(mapped)))
-        }
+        } => Ok(rebuild_node(
+            node,
+            CoreNodeKind::Map {
+                params: params.clone(),
+                sources: sources
+                    .iter()
+                    .map(|source| {
+                        normalize_node_for_direct_occt(source, param_names, env, next_node_id)
+                    })
+                    .collect::<AppResult<Vec<_>>>()?,
+                body: Box::new(clone_node_with_fresh_ids(body, next_node_id)),
+            },
+        )),
         CoreNodeKind::Apply { op, args, list } => {
             let normalized_args = args
                 .iter()
@@ -499,6 +498,16 @@ fn normalize_node_for_direct_occt(
                 .collect::<AppResult<Vec<_>>>()?;
             let normalized_list =
                 normalize_node_for_direct_occt(list, param_names, env, next_node_id)?;
+            if matches!(normalized_list.kind, CoreNodeKind::Map { .. }) {
+                return Ok(rebuild_node(
+                    node,
+                    CoreNodeKind::Apply {
+                        op: op.clone(),
+                        args: normalized_args,
+                        list: Box::new(normalized_list),
+                    },
+                ));
+            }
             let items = list_items(&normalized_list, next_node_id, "`apply` list")?;
             let mut expanded = normalized_args;
             expanded.extend(items);
@@ -655,8 +664,44 @@ fn rewrap_with_index(
     body: CoreNode,
     next_node_id: &mut u64,
 ) -> CoreNode {
+    rewrap_with_index_id(
+        next_id(next_node_id),
+        template,
+        index_name,
+        index_value,
+        body,
+        next_node_id,
+    )
+}
+
+fn rewrap_with_index_preserving_id(
+    template: &CoreNode,
+    index_name: &str,
+    index_value: f64,
+    body: CoreNode,
+    next_node_id: &mut u64,
+) -> CoreNode {
+    rewrap_with_index_id(
+        template.id,
+        template,
+        index_name,
+        index_value,
+        body,
+        next_node_id,
+    )
+}
+
+fn rewrap_with_index_id(
+    id: NodeId,
+    template: &CoreNode,
+    index_name: &str,
+    index_value: f64,
+    body: CoreNode,
+    next_node_id: &mut u64,
+) -> CoreNode {
+    let body = clone_node_with_fresh_ids(&body, next_node_id);
     CoreNode {
-        id: next_id(next_node_id),
+        id,
         kind: CoreNodeKind::Let {
             bindings: vec![CoreBinding {
                 name: index_name.to_string(),
@@ -785,20 +830,213 @@ fn eval_scalar_binding(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
 ) -> AppResult<Option<ParamValue>> {
     let node = rewrite_local_aliases_for_eval(node, env);
+    let node = rewrite_scalar_node_refs_for_eval(&node, node_env);
     Ok(match node.value_kind {
         CoreValueKind::Number => Some(ParamValue::Number(
-            crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env)?,
+            crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env).map_err(
+                |err| {
+                    AppError::validation(format!(
+                        "Direct OCCT normalizer could not evaluate scalar number node {:?}: {err}",
+                        node.id
+                    ))
+                },
+            )?,
         )),
         CoreValueKind::Boolean => Some(ParamValue::Boolean(
-            crate::ecky_ir::eval_core_bool_with_locals(&node, param_names, env)?,
+            crate::ecky_ir::eval_core_bool_with_locals(&node, param_names, env).map_err(|err| {
+                AppError::validation(format!(
+                    "Direct OCCT normalizer could not evaluate scalar boolean node {:?}: {err}",
+                    node.id
+                ))
+            })?,
         )),
         CoreValueKind::Text => Some(ParamValue::String(
-            crate::ecky_ir::eval_core_stringish_with_locals(&node, param_names, env)?,
+            crate::ecky_ir::eval_core_stringish_with_locals(&node, param_names, env).map_err(
+                |err| {
+                    AppError::validation(format!(
+                        "Direct OCCT normalizer could not evaluate scalar text node {:?}: {err}",
+                        node.id
+                    ))
+                },
+            )?,
         )),
+        CoreValueKind::Any => {
+            if let Ok(number) =
+                crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env)
+            {
+                Some(ParamValue::Number(number))
+            } else if let Ok(flag) =
+                crate::ecky_ir::eval_core_bool_with_locals(&node, param_names, env)
+            {
+                Some(ParamValue::Boolean(flag))
+            } else if let Ok(text) =
+                crate::ecky_ir::eval_core_stringish_with_locals(&node, param_names, env)
+            {
+                Some(ParamValue::String(text))
+            } else {
+                None
+            }
+        }
         _ => None,
     })
+}
+
+fn rewrite_scalar_node_refs_for_eval(
+    node: &CoreNode,
+    node_env: &BTreeMap<u64, ParamValue>,
+) -> CoreNode {
+    match &node.kind {
+        CoreNodeKind::Reference(crate::ecky_core_ir::CoreReference::Node(id)) => node_env
+            .get(&id.raw())
+            .map(|value| param_value_node_with_id(node.id, value, node.span))
+            .unwrap_or_else(|| node.clone()),
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => node.clone(),
+        CoreNodeKind::Call { op, args, keywords } => rebuild_node(
+            node,
+            CoreNodeKind::Call {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| rewrite_scalar_node_refs_for_eval(arg, node_env))
+                    .collect(),
+                keywords: keywords
+                    .iter()
+                    .map(|keyword| match keyword.selector_payload() {
+                        Some(selector) => CoreKeywordArg::selector(
+                            keyword.name.clone(),
+                            rewrite_scalar_node_refs_for_eval(keyword.source_node(), node_env),
+                            selector.clone(),
+                        ),
+                        None => CoreKeywordArg::expr(
+                            keyword.name.clone(),
+                            rewrite_scalar_node_refs_for_eval(keyword.source_node(), node_env),
+                        ),
+                    })
+                    .collect(),
+            },
+        ),
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => rebuild_node(
+            node,
+            CoreNodeKind::If {
+                condition: Box::new(rewrite_scalar_node_refs_for_eval(condition, node_env)),
+                then_branch: Box::new(rewrite_scalar_node_refs_for_eval(then_branch, node_env)),
+                else_branch: Box::new(rewrite_scalar_node_refs_for_eval(else_branch, node_env)),
+            },
+        ),
+        CoreNodeKind::List(items) => rebuild_node(
+            node,
+            CoreNodeKind::List(
+                items
+                    .iter()
+                    .map(|item| rewrite_scalar_node_refs_for_eval(item, node_env))
+                    .collect(),
+            ),
+        ),
+        CoreNodeKind::Range { start, end } => rebuild_node(
+            node,
+            CoreNodeKind::Range {
+                start: Box::new(rewrite_scalar_node_refs_for_eval(start, node_env)),
+                end: Box::new(rewrite_scalar_node_refs_for_eval(end, node_env)),
+            },
+        ),
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => rebuild_node(
+            node,
+            CoreNodeKind::Map {
+                params: params.clone(),
+                sources: sources
+                    .iter()
+                    .map(|source| rewrite_scalar_node_refs_for_eval(source, node_env))
+                    .collect(),
+                body: Box::new(rewrite_scalar_node_refs_for_eval(body, node_env)),
+            },
+        ),
+        CoreNodeKind::Apply { op, args, list } => rebuild_node(
+            node,
+            CoreNodeKind::Apply {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| rewrite_scalar_node_refs_for_eval(arg, node_env))
+                    .collect(),
+                list: Box::new(rewrite_scalar_node_refs_for_eval(list, node_env)),
+            },
+        ),
+        CoreNodeKind::Let { bindings, body } => rebuild_node(
+            node,
+            CoreNodeKind::Let {
+                bindings: bindings
+                    .iter()
+                    .map(|binding| CoreBinding {
+                        name: binding.name.clone(),
+                        value: rewrite_scalar_node_refs_for_eval(&binding.value, node_env),
+                    })
+                    .collect(),
+                body: Box::new(rewrite_scalar_node_refs_for_eval(body, node_env)),
+            },
+        ),
+        CoreNodeKind::Build { bindings, result } => rebuild_node(
+            node,
+            CoreNodeKind::Build {
+                bindings: bindings
+                    .iter()
+                    .map(|binding| CoreShapeBinding {
+                        name: binding.name.clone(),
+                        value: rewrite_scalar_node_refs_for_eval(&binding.value, node_env),
+                    })
+                    .collect(),
+                result: Box::new(rewrite_scalar_node_refs_for_eval(result, node_env)),
+            },
+        ),
+        CoreNodeKind::Group(items) => rebuild_node(
+            node,
+            CoreNodeKind::Group(
+                items
+                    .iter()
+                    .map(|item| rewrite_scalar_node_refs_for_eval(item, node_env))
+                    .collect(),
+            ),
+        ),
+    }
+}
+
+fn param_value_node_with_id(id: NodeId, value: &ParamValue, span: Option<SourceSpan>) -> CoreNode {
+    match value {
+        ParamValue::Number(number) => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Number(*number)),
+            value_kind: CoreValueKind::Number,
+            span,
+        },
+        ParamValue::Boolean(flag) => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Boolean(*flag)),
+            value_kind: CoreValueKind::Boolean,
+            span,
+        },
+        ParamValue::String(text) => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Text(text.clone())),
+            value_kind: CoreValueKind::Text,
+            span,
+        },
+        ParamValue::Null => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Text(String::new())),
+            value_kind: CoreValueKind::Text,
+            span,
+        },
+    }
 }
 
 fn param_value_literal_node(
@@ -829,9 +1067,28 @@ fn param_value_literal_node(
     }
 }
 
-fn rewrite_local_aliases_for_eval(node: &CoreNode, env: &BTreeMap<String, ParamValue>) -> CoreNode {
+pub(super) fn rewrite_local_aliases_for_eval(
+    node: &CoreNode,
+    env: &BTreeMap<String, ParamValue>,
+) -> CoreNode {
     match &node.kind {
         CoreNodeKind::Reference(crate::ecky_core_ir::CoreReference::Local(name)) => {
+            if name == "pi" {
+                return CoreNode {
+                    id: node.id,
+                    kind: CoreNodeKind::Literal(CoreLiteral::Number(std::f64::consts::PI)),
+                    value_kind: CoreValueKind::Number,
+                    span: node.span,
+                };
+            }
+            if name == "tau" {
+                return CoreNode {
+                    id: node.id,
+                    kind: CoreNodeKind::Literal(CoreLiteral::Number(std::f64::consts::TAU)),
+                    value_kind: CoreValueKind::Number,
+                    span: node.span,
+                };
+            }
             let resolved = resolve_eval_local_alias(name, env).unwrap_or_else(|| name.clone());
             if resolved == *name {
                 return node.clone();
@@ -1377,120 +1634,6 @@ fn keyword_text(keywords: &[CoreKeywordArg], name: &str) -> Option<String> {
         })
 }
 
-fn operation_name(op: &CoreOperation) -> String {
-    match op {
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Box) => "box".to_string(),
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Sphere) => {
-            "sphere".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Cylinder) => {
-            "cylinder".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Cone) => "cone".to_string(),
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Circle) => {
-            "circle".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Rectangle) => {
-            "rectangle".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::RoundedRectangle) => {
-            "rounded-rectangle".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::RoundedPolygon) => {
-            "rounded-polygon".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Polygon) => {
-            "polygon".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Profile) => {
-            "profile".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::MakeFace) => {
-            "make-face".to_string()
-        }
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Text) => "text".to_string(),
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Svg) => "svg".to_string(),
-        CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Stl) => {
-            "import-stl".to_string()
-        }
-        CoreOperation::Boolean(crate::ecky_core_ir::CoreBooleanOp::Union) => "union".to_string(),
-        CoreOperation::Boolean(crate::ecky_core_ir::CoreBooleanOp::Difference) => {
-            "difference".to_string()
-        }
-        CoreOperation::Boolean(crate::ecky_core_ir::CoreBooleanOp::Intersection) => {
-            "intersection".to_string()
-        }
-        CoreOperation::Boolean(crate::ecky_core_ir::CoreBooleanOp::Xor) => "xor".to_string(),
-        CoreOperation::Transform(crate::ecky_core_ir::CoreTransformOp::Translate) => {
-            "translate".to_string()
-        }
-        CoreOperation::Transform(crate::ecky_core_ir::CoreTransformOp::Rotate) => {
-            "rotate".to_string()
-        }
-        CoreOperation::Transform(crate::ecky_core_ir::CoreTransformOp::Scale) => {
-            "scale".to_string()
-        }
-        CoreOperation::Transform(crate::ecky_core_ir::CoreTransformOp::Mirror) => {
-            "mirror".to_string()
-        }
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Extrude) => {
-            "extrude".to_string()
-        }
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Revolve) => {
-            "revolve".to_string()
-        }
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Loft) => "loft".to_string(),
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Sweep) => "sweep".to_string(),
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Shell) => "shell".to_string(),
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Offset) => "offset".to_string(),
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::OffsetRounded) => {
-            "offset-rounded".to_string()
-        }
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Fillet) => "fillet".to_string(),
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Chamfer) => {
-            "chamfer".to_string()
-        }
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Taper) => "taper".to_string(),
-        CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Twist) => "twist".to_string(),
-        CoreOperation::Path(crate::ecky_core_ir::CorePathOp::Polyline) => "polyline".to_string(),
-        CoreOperation::Path(crate::ecky_core_ir::CorePathOp::BezierPath) => {
-            "bezier-path".to_string()
-        }
-        CoreOperation::Path(crate::ecky_core_ir::CorePathOp::Bspline) => "bspline".to_string(),
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::LinearArray) => {
-            "linear-array".to_string()
-        }
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RadialArray) => {
-            "radial-array".to_string()
-        }
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::GridArray) => {
-            "grid-array".to_string()
-        }
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::ArcArray) => "arc-array".to_string(),
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::Repeat) => "repeat".to_string(),
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatUnion) => {
-            "repeat-union".to_string()
-        }
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatCompound) => {
-            "repeat-compound".to_string()
-        }
-        CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatPick) => {
-            "repeat-pick".to_string()
-        }
-        CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Plane) => "plane".to_string(),
-        CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Location) => "location".to_string(),
-        CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::PathFrame) => {
-            "path-frame".to_string()
-        }
-        CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Place) => "place".to_string(),
-        CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::ClipBox) => "clip-box".to_string(),
-        CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Group) => "compound".to_string(),
-        CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Comment) => "comment".to_string(),
-        CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Annotate) => "annotate".to_string(),
-        CoreOperation::Custom(name) => name.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1557,6 +1700,35 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(numbers, vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn preserves_tagged_selector_keyword_payloads_during_direct_occt_normalization() {
+        let program = compile(
+            r#"
+            (model
+              (tag-face mounting_top :faces "top" body)
+              (part body
+                (shell 0.8
+                  :faces (tag mounting_top)
+                  (box 10 10 10))))
+            "#,
+        );
+
+        let normalized = normalize_core_program_for_direct_occt(&program, &Default::default())
+            .expect("normalize");
+        let crate::ecky_core_ir::CoreNodeKind::Call { keywords, .. } =
+            &normalized.parts[0].root.kind
+        else {
+            panic!("expected call");
+        };
+
+        assert_eq!(
+            keywords[0].selector_payload(),
+            Some(&crate::ecky_core_ir::CoreSelectorPayload::FaceTargetIds(
+                vec!["tag:mounting_top".to_string()]
+            ))
+        );
     }
 
     #[test]
@@ -1631,6 +1803,32 @@ mod tests {
             &normalized.parts[0].root.kind,
             CoreNodeKind::Call { op: CoreOperation::Boolean(crate::ecky_core_ir::CoreBooleanOp::Union), args, .. } if args.len() == 3
         ));
+
+        let repeat_translate_program = compile(
+            r#"
+            (model
+              (part body
+                (repeat-union i 3
+                  (translate (* i 10) 0 0
+                    (box 1 1 1)))))
+            "#,
+        );
+        let normalized =
+            normalize_core_program_for_direct_occt(&repeat_translate_program, &Default::default())
+                .expect("normalize");
+        match &normalized.parts[0].root.kind {
+            CoreNodeKind::Call { args, .. } => {
+                let body_ids = args
+                    .iter()
+                    .map(|arg| match &arg.kind {
+                        CoreNodeKind::Let { body, .. } => body.id.raw(),
+                        other => panic!("expected repeated let body, got {:?}", other),
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(body_ids.len(), 3);
+            }
+            other => panic!("expected call, got {:?}", other),
+        }
 
         let pick_program = compile(
             r#"
@@ -1859,6 +2057,8 @@ mod tests {
                 },
             ],
             feature_decls: Default::default(),
+            selector_tags: Vec::new(),
+            preview_views: Vec::new(),
             constraints: Default::default(),
         };
 

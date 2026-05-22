@@ -34,7 +34,10 @@ pub async fn save_config(
         let mut state_config = state.config.lock().unwrap();
         *state_config = config;
     }
-    crate::mcp::runtime::sync_auto_agent_supervisors(state.inner().clone());
+    let state_for_sync = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::mcp::runtime::sync_auto_agent_supervisors(state_for_sync);
+    });
     Ok(())
 }
 
@@ -316,4 +319,74 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectEditorLink {
+    pub slug: String,
+    pub folder: String,
+    pub file: String,
+}
+
+/// "Open in editor": mirror the active macro to its project folder (unless
+/// the folder carries unapplied external edits) and open `model.ecky` with
+/// the system editor. The folder watcher picks edits up as new versions.
+#[tauri::command]
+#[specta::specta]
+pub async fn open_project_in_editor(
+    thread_id: Option<String>,
+    message_id: Option<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectEditorLink> {
+    use crate::project_mirror::{self, ProjectSyncState};
+
+    let target = {
+        let conn = state.db.lock().await;
+        crate::services::target::resolve_editable_target(&conn, &app, thread_id, message_id)?
+    };
+    let slug = project_mirror::project_slug(&target.design_output.title, &target.thread_id);
+    let dir = project_mirror::project_dir(&app, &slug)?;
+
+    let manifest = project_mirror::read_manifest(&dir)?;
+    let file_digest = project_mirror::read_project_source(&dir)?
+        .map(|source| project_mirror::source_digest(&source));
+    let has_unapplied_edits = matches!(
+        project_mirror::classify_sync_state(file_digest.as_deref(), manifest.as_ref(), None),
+        ProjectSyncState::FileChanged
+    );
+    if !has_unapplied_edits {
+        let model_id = target
+            .artifact_bundle
+            .as_ref()
+            .map(|bundle| bundle.model_id.clone());
+        project_mirror::export_project(
+            &app,
+            &project_mirror::ExportProjectRequest {
+                slug: &slug,
+                thread_id: &target.thread_id,
+                message_id: &target.message_id,
+                model_id: model_id.as_deref(),
+                source: &target.design_output.macro_code,
+            },
+        )?;
+    }
+
+    let file = dir.join(project_mirror::PROJECT_SOURCE_FILE_NAME);
+    tauri_plugin_shell::ShellExt::shell(&app)
+        .open(file.to_string_lossy().as_ref(), None)
+        .map_err(|err| {
+            crate::models::AppError::internal(format!(
+                "Failed to open '{}' in the system editor: {}",
+                file.display(),
+                err
+            ))
+        })?;
+
+    Ok(ProjectEditorLink {
+        slug,
+        folder: dir.to_string_lossy().to_string(),
+        file: file.to_string_lossy().to_string(),
+    })
 }

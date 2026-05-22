@@ -4,6 +4,7 @@ pub mod config;
 pub mod design;
 pub mod generation;
 pub mod history;
+pub mod macro_ast;
 pub mod render;
 pub mod session;
 pub mod sketch;

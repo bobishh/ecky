@@ -121,6 +121,31 @@ endsolid mock
               },
             };
           }
+          if (`${args?.prompt ?? ''}`.includes('editable macro')) {
+            (window as any).__PARAM_SCENARIO__ = 'editable-macro';
+            return {
+              threadId: args.threadId || 'mock-thread-1',
+              messageId: 'mock-msg-1',
+              usage: null,
+              design: {
+                title: 'Editable Macro',
+                versionName: 'V1',
+                interactionMode: 'design',
+                macroCode: '(model\n  (part body (box 10 20 5)))',
+                uiSpec: {
+                  fields: [
+                    {
+                      type: 'number',
+                      key: 'model_size_mm',
+                      label: 'Model Size',
+                    },
+                  ],
+                },
+                initialParams: { model_size_mm: 10 },
+                postProcessing: null,
+              },
+            };
+          }
           if (`${args?.prompt ?? ''}`.includes('narrow layout box')) {
             (window as any).__PARAM_SCENARIO__ = 'narrow-layout-box';
             return {
@@ -248,6 +273,47 @@ endsolid mock
             },
           };
         }
+        if (cmd === 'macro_ast_source_map') {
+          const src = String(args?.macroCode ?? '');
+          const balanced = (start: number) => {
+            let depth = 0;
+            for (let i = start; i < src.length; i += 1) {
+              const ch = src[i];
+              if (ch === '(') depth += 1;
+              else if (ch === ')') {
+                depth -= 1;
+                if (depth === 0) return i + 1;
+              }
+            }
+            return -1;
+          };
+          const nodes: any[] = [];
+          const modelStart = src.indexOf('(model');
+          if (modelStart >= 0) {
+            const modelEnd = balanced(modelStart);
+            if (modelEnd > 0) {
+              nodes.push({ id: 'model', kind: 'model', label: 'model', startByte: modelStart, endByte: modelEnd });
+            }
+            const partRe = /\((part|feature)\s+([A-Za-z0-9_-]+)/g;
+            let match: RegExpExecArray | null;
+            while ((match = partRe.exec(src))) {
+              const end = balanced(match.index);
+              if (end > 0) {
+                nodes.push({
+                  id: `${match[1]}:${match[2]}`,
+                  kind: match[1],
+                  label: match[2],
+                  startByte: match.index,
+                  endByte: end,
+                });
+              }
+            }
+          }
+          return nodes;
+        }
+        if (cmd === 'render_model' && String(args?.macroCode ?? '').includes('boom')) {
+          throw { code: 'validation', message: 'mock render exploded: boom op unsupported' };
+        }
         if (cmd === 'render_model') {
           return {
             modelId: 'litho-model',
@@ -263,6 +329,28 @@ endsolid mock
           };
         }
         if (cmd === 'get_model_manifest') {
+          if ((window as any).__PARAM_SCENARIO__ === 'editable-macro') {
+            return {
+              modelId: 'editable-macro-model',
+              sourceKind: 'generated',
+              document: {
+                documentName: 'Editable Macro',
+                documentLabel: 'Editable Macro',
+                objectCount: 1,
+                warnings: [],
+              },
+              parts: [
+                {
+                  partId: 'body',
+                  freecadObjectName: 'body',
+                  label: 'Body',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['model_size_mm'],
+                },
+              ],
+            };
+          }
           if ((window as any).__PARAM_SCENARIO__ === 'seeded-macro') {
             return {
               modelId: 'seeded-macro-model',
@@ -569,7 +657,8 @@ endsolid mock
 
     await page.getByRole('button', { name: /CANCEL/i }).click();
     await page.getByRole('button', { name: 'RAW', exact: true }).click();
-    await expect(page.locator('.panel-code-btn')).toBeVisible();
+    await expect(page.locator('.panel-code-btn:not(.panel-file-btn)')).toBeVisible();
+    await expect(page.locator('.panel-file-btn')).toBeVisible();
   });
 
   test('Given seeded macro When New Params opens Then syntax markers reflect block types', async ({
@@ -589,8 +678,9 @@ endsolid mock
     await expect(page.locator('.macro-ast-node-root .macro-ast-node__shape')).toBeVisible();
     await expect.soft(page.locator('.macro-ast-node-root .macro-ast-syntax-badge')).toContainText('MODEL');
     await expect.soft(page.locator('.macro-ast-node-part .macro-ast-syntax-badge').first()).toContainText('SOLID');
-    await expect.soft(page.locator('.macro-ast-node-port .macro-ast-syntax-badge').first()).toContainText('PORT');
     await expect.soft(page.locator('.macro-ast-node-param .macro-ast-syntax-badge').first()).toContainText('NUMBER');
+    // Ports are dots on param modules now, not nested blocks.
+    await expect(page.locator('.macro-ast-node-port')).toHaveCount(0);
   });
 
   test('Given seeded macro When New Params opens Then connector layer and overlay anchors exist', async ({
@@ -673,6 +763,9 @@ endsolid mock
       () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
     );
 
+    // Zoomed out the map shows dense chips; clicking a module flies the
+    // camera in and reveals the live control.
+    await page.locator('.macro-ast-node-param .macro-ast-node__header').first().click();
     const firstParam = page.locator('.macro-ast-map-shell .param-field input.param-input').first();
     await expect(firstParam).toBeVisible();
     await firstParam.fill('42');
@@ -1043,5 +1136,111 @@ endsolid mock
     const addVersionCall = calls.find((entry: { cmd: string }) => entry.cmd === 'add_manual_version');
     expect(addVersionCall?.args?.input?.parameters?.width).toBe(42);
     expect(addVersionCall?.args?.input?.artifactBundle?.previewStlPath).toBe('/mock.stl');
+  });
+
+  test('Given editable macro When part node source is edited in place Then the edit renders', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make an editable macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    const partNode = page.locator('.macro-ast-node-part[data-node-id="part:body"]');
+    await expect(partNode).toBeVisible();
+    await partNode.locator('.macro-ast-node__header').first().dblclick();
+
+    // Split pane: full document with the node scope highlighted.
+    const pane = page.getByTestId('macro-source-pane');
+    await expect(pane).toBeVisible();
+    await expect(pane).toContainText('EDIT SOURCE / BODY');
+    await expect(pane.locator('.cm-content')).toContainText('(part body (box 10 20 5))');
+    await expect(pane.locator('.cm-ecky-scope').first()).toBeVisible();
+
+    await pane.locator('.cm-content').fill('(model\n  (part body (box 12 20 5)))');
+    await pane.getByRole('button', { name: 'APPLY' }).click();
+
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            (window as any).__PARAM_CALLS__.filter(
+              (entry: { cmd: string; args?: any }) =>
+                entry.cmd === 'render_model' &&
+                `${entry.args?.macroCode ?? ''}`.includes('box 12 20 5'),
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+    await expect(pane).toHaveCount(0);
+  });
+
+  test('Given editable macro When an in-place edit fails to render Then the error stays at the source pane', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make an editable macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    const partNode = page.locator('.macro-ast-node-part[data-node-id="part:body"]');
+    await partNode.locator('.macro-ast-node__header').first().dblclick();
+    const pane = page.getByTestId('macro-source-pane');
+    await pane.locator('.cm-content').fill('(model\n  (part body (boom 12 20 5)))');
+    await pane.getByRole('button', { name: 'APPLY' }).click();
+
+    await expect(pane.locator('.macro-source-pane__error')).toBeVisible();
+    await expect(pane.locator('.macro-source-pane__error')).toContainText('boom');
+    await expect(pane).toBeVisible();
+  });
+
+  test('Given editable macro When ADD PART opens the pane Then the template scope applies as a new part', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make an editable macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+    await expect(page.getByTestId('macro-ast-minimap')).toBeVisible();
+
+    await page.locator('.macro-ast-insert-trigger').click();
+    const pane = page.getByTestId('macro-source-pane');
+    await expect(pane).toBeVisible();
+    await expect(pane).toContainText('EDIT SOURCE / NEW PART PART_2');
+    await expect(pane.locator('.cm-content')).toContainText('(part part_2 (box 10 10 10))');
+    await expect(pane.locator('.cm-ecky-scope').first()).toBeVisible();
+
+    await pane.getByRole('button', { name: 'APPLY' }).click();
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            (window as any).__PARAM_CALLS__.filter(
+              (entry: { cmd: string; args?: any }) =>
+                entry.cmd === 'render_model' &&
+                `${entry.args?.macroCode ?? ''}`.includes('(part part_2 (box 10 10 10))'),
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+    await expect(pane).toHaveCount(0);
   });
 });

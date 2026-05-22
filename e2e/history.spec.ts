@@ -121,7 +121,7 @@ test.describe('History Panel', () => {
     await expect(page.getByRole('dialog', { name: /Start New Project/i })).toBeVisible();
   });
 
-  test('Given blank project starts When default macro seeds thread Then viewport code opens immediately', async ({ page }) => {
+  test('Given blank project starts When code window opens Then editor stays empty', async ({ page }) => {
     await installProjectSwitcherMocks()({ page });
 
     await page.goto('/');
@@ -136,7 +136,10 @@ test.describe('History Panel', () => {
     await viewportCodeButton.click();
 
     await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
-    await expect(page.locator('.cm-content').first()).toContainText('# mock macro');
+    const editor = page.locator('.cm-content').first();
+    await expect(editor).toBeVisible();
+    await expect.poll(async () => (await editor.innerText()).trim()).toBe('');
+    await expect(editor).not.toContainText('# mock macro');
   });
 
   test('shows no project cards when no history', async ({ page }) => {

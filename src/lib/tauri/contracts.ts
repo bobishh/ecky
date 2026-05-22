@@ -61,6 +61,19 @@ async exportEckyMcpSkillZip(targetPath: string) : Promise<Result<null, AppError>
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * "Open in editor": mirror the active macro to its project folder (unless
+ * the folder carries unapplied external edits) and open `model.ecky` with
+ * the system editor. The folder watcher picks edits up as new versions.
+ */
+async openProjectInEditor(threadId: string | null, messageId: string | null) : Promise<Result<ProjectEditorLink, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_project_in_editor", { threadId, messageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async readComponentPackageManifest(projectDir: string) : Promise<Result<ComponentPackage, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("read_component_package_manifest", { projectDir }) };
@@ -192,6 +205,14 @@ async exportInstalledComponentAssembly3mf(packageId: string, version: string, as
 async exportInstalledComponentAssemblyMultipartStlZip(packageId: string, version: string, assemblyId: string, instanceParameters: Partial<{ [key in string]: Partial<{ [key in string]: ParamValue }> }>, targetPath: string, modelName: string | null) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_installed_component_assembly_multipart_stl_zip", { packageId, version, assemblyId, instanceParameters, targetPath, modelName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async macroAstSourceMap(macroCode: string) : Promise<Result<MacroAstSourceNode[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_ast_source_map", { macroCode }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -357,6 +378,14 @@ async finalizeGenerationAttempt(messageId: string, status: FinalizeStatus, desig
     else return { status: "error", error: e  as any };
 }
 },
+async persistStructuralVerification(messageId: string, structuralVerification: StructuralVerificationResult) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("persist_structural_verification", { messageId, structuralVerification }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async classifyIntent(prompt: string, threadId: string | null, context: string | null, imageData: string | null, attachments: Attachment[] | null) : Promise<Result<IntentDecision, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("classify_intent", { prompt, threadId, context, imageData, attachments }) };
@@ -405,9 +434,9 @@ async renderStl(macroCode: string, parameters: Partial<{ [key in string]: ParamV
     else return { status: "error", error: e  as any };
 }
 },
-async renderModel(macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>, macroDialect: MacroDialect | null, geometryBackend: GeometryBackend | null, postProcessing: PostProcessingSpec | null) : Promise<Result<ArtifactBundle, AppError>> {
+async renderModel(macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>, macroDialect: MacroDialect | null, geometryBackend: GeometryBackend | null, postProcessing: PostProcessingSpec | null, previousManifest: ModelManifest | null) : Promise<Result<ArtifactBundle, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("render_model", { macroCode, parameters, macroDialect, geometryBackend, postProcessing }) };
+    return { status: "ok", data: await TAURI_INVOKE("render_model", { macroCode, parameters, macroDialect, geometryBackend, postProcessing, previousManifest }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -904,6 +933,19 @@ export type AssemblyOutputMode = "separateParts" | "joinedAssembly" | "fusedSoli
 export type Asset = { id: string; name: string; path: string; format: string }
 export type Attachment = { path: string; name: string; explanation: string; dataUrl?: string | null; kind: AttachmentKind }
 export type AttachmentKind = "image" | "cad"
+export type AuthoredVerifyCheck = { tag: string; status: AuthoredVerifyCheckStatus; message: string; stableNodeId?: string | null; 
+/**
+ * Machine-readable delta: where the metric came from, the comparator, and
+ * the expected vs actual values. Lets the agent fix a red check without
+ * re-parsing `message`.
+ */
+metricSource?: string | null; metricKey?: string | null; comparator?: string | null; expected?: AuthoredVerifyValue | null; actual?: AuthoredVerifyValue | null }
+export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error"
+/**
+ * A resolved verify value (expected or actual). Boundary-typed so MCP agents
+ * and UI chips read machine values instead of parsing the message string.
+ */
+export type AuthoredVerifyValue = { kind: "number"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string }
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
  */
@@ -944,7 +986,7 @@ export type ControlViewSection = { sectionId: string; label: string; primitiveId
 export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
 export type CorrespondenceEdge = { edgeId: string; source: FeatureOutputRef; target: FeatureOutputRef; relation: string; sourceRef?: SourceRef | null }
 export type CorrespondenceGraph = { edges: CorrespondenceEdge[] }
-export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
+export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; structuralVerification?: StructuralVerificationResult | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
 export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
@@ -993,6 +1035,11 @@ export type LithophanePlacementMode = "partSidePatch"
 export type LithophaneRelief = { depthMm?: number; invert?: boolean }
 export type LithophaneSide = "front" | "back" | "left" | "right" | "top" | "bottom"
 export type LoadSketchPreviewDraftRequest = { scopeId?: string | null }
+export type MacroAstSourceNode = { id: string; kind: string; label: string; 
+/**
+ * Byte offsets into the exact source string that was passed in.
+ */
+startByte: number; endByte: number }
 export type MacroDialect = "legacy" | "cadFrameworkV1" | "ecky" | "build123d"
 export type ManifestBounds = { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number }
 export type ManifestEnrichmentState = { status: EnrichmentStatus; proposals?: EnrichmentProposal[] }
@@ -1035,12 +1082,12 @@ export type MeasurementAxis = "x" | "y" | "z" | "radial" | "normal" | "path" | "
 export type MeasurementBasis = "outer" | "inner" | "wall" | "clearance" | "centerline" | "pitch" | "custom"
 export type MeasurementGuide = { guideId: string; kind: MeasurementGuideKind; anchorIds?: string[]; labelAnchorId?: string | null; targetIds?: string[] }
 export type MeasurementGuideKind = "linear" | "radial" | "clearance" | "pitch" | "leader"
-export type Message = { id: string; role: MessageRole; content: string; status: MessageStatus; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; timestamp: number }
+export type Message = { id: string; role: MessageRole; content: string; status: MessageStatus; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; structuralVerification?: StructuralVerificationResult | null; agentOrigin?: AgentOrigin | null; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; timestamp: number }
 export type MessageRole = "user" | "assistant"
 export type MessageStatus = "pending" | "working" | "success" | "error" | "discarded"
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
 export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep" | "importedMesh"
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
@@ -1055,6 +1102,9 @@ export type PortTypeDefinition = { typeId: string; displayName: string; base?: s
 export type PostProcessingSpec = { displacement?: DisplacementSpec | null; lithophaneAttachments?: LithophaneAttachment[] }
 export type PreparePromptWorkspaceCaptureInput = { dataUrl: string; threadId?: string | null; name?: string | null; explanation?: string | null }
 export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
+export type PreviewView = { viewId: string; label: string; offsets?: PreviewViewOffset[] }
+export type PreviewViewOffset = { partId: string; dx: number; dy: number; dz: number }
+export type ProjectEditorLink = { slug: string; folder: string; file: string }
 export type ProjectionType = "planar" | "auto" | "cylindrical" | "spherical"
 export type PromptTranscription = { text: string; provider: string; model: string }
 export type QueueAgentPromptInput = { threadId?: string | null; promptText: string; attachments?: Attachment[] }
@@ -1110,7 +1160,9 @@ export type StructuralIssue = { code: string; message: string;
  */
 partId?: string | null; numericPayload?: number | null }
 export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; previewStlTriangleCount?: number | null; previewStlComponentCount?: number | null; previewStlNonManifoldEdgeCount?: number | null; previewStlOverhangTriangleCount?: number | null; previewStlOverhangRatio?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
-export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
+export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; authoredVerifyChecks?: AuthoredVerifyCheck[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
+export type TaggedAnchorBinding = { kind: TaggedAnchorKind; authoredSelector: string; target: string; targetIds: string[]; durableTargetIds: string[]; canonicalTargetIds: string[]; aliasIds: string[] }
+export type TaggedAnchorKind = "face" | "edge"
 export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
 export type ThreadAgentState = { 
 /**

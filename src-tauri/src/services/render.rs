@@ -134,7 +134,7 @@ fn classify_lowering_diagnostic_kind(message: &str, details: Option<&str>) -> Op
 fn lower_ecky_with_large_stack(
     label: &'static str,
     macro_code: &str,
-    lower: fn(&str) -> AppResult<String>,
+    lower: impl FnOnce(&str) -> AppResult<String> + Send + 'static,
 ) -> AppResult<String> {
     let source = macro_code.to_string();
     let source_for_diagnostics = source.clone();
@@ -374,6 +374,7 @@ fn try_render_direct_occt_ecky_ir(
     macro_code: &str,
     parameters: &DesignParams,
     effective_dialect: &MacroDialect,
+    previous_manifest: Option<&ModelManifest>,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<Option<ArtifactBundle>> {
@@ -384,6 +385,8 @@ fn try_render_direct_occt_ecky_ir(
         Ok(program) => program,
         Err(_) => return Ok(None),
     };
+    let program =
+        crate::topology_target_ids::rebind_program_tagged_selectors(&program, previous_manifest)?;
     let runtime_root = match crate::runtime_capabilities::resolve_direct_occt_runtime_root(app) {
         Ok(runtime_root) => runtime_root,
         Err(_) => return Ok(None),
@@ -465,16 +468,62 @@ pub async fn render_model(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
-    let _guard = state.render_lock.lock().await;
-    render_model_unlocked(
+    render_model_with_previous_manifest(
         macro_code,
         parameters,
         macro_dialect,
         geometry_backend,
         post_processing,
+        None,
         state,
         app,
     )
+    .await
+}
+
+pub async fn render_model_with_previous_manifest(
+    macro_code: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    let _guard = state.render_lock.lock().await;
+    let first_attempt = render_model_unlocked(
+        macro_code,
+        parameters,
+        macro_dialect.clone(),
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        state,
+        app,
+    );
+    match first_attempt {
+        Ok(bundle) => Ok(bundle),
+        Err(err)
+            if previous_manifest.is_some()
+                && source_has_selector_tags(macro_code)
+                && is_tagged_selector_mismatch_error(&err) =>
+        {
+            let bundle = render_model_unlocked(
+                macro_code,
+                parameters,
+                macro_dialect,
+                geometry_backend,
+                post_processing,
+                None,
+                state,
+                app,
+            )?;
+            append_tagged_selector_rebind_warning(app, &bundle);
+            Ok(bundle)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn render_model_unlocked(
@@ -483,6 +532,7 @@ fn render_model_unlocked(
     macro_dialect: Option<MacroDialect>,
     geometry_backend: Option<GeometryBackend>,
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
@@ -501,16 +551,28 @@ fn render_model_unlocked(
     // Lower Ecky IR to the target backend before dispatch.
     // Legacy Python and Build123d sources stay as-is.
     let lowered = match (dispatch_backend, effective_dialect.clone()) {
-        (GeometryBackend::Build123d, MacroDialect::EckyIrV0) => Some(lower_ecky_with_large_stack(
-            "build123d",
-            macro_code,
-            crate::ecky_ir::lower_to_build123d,
-        )?),
-        (GeometryBackend::Freecad, MacroDialect::EckyIrV0) => Some(lower_ecky_with_large_stack(
-            "freecad",
-            macro_code,
-            crate::ecky_ir::lower_to_freecad,
-        )?),
+        (GeometryBackend::Build123d, MacroDialect::EckyIrV0) => {
+            Some(lower_ecky_with_large_stack("build123d", macro_code, {
+                let previous_manifest = previous_manifest.cloned();
+                move |source| {
+                    crate::ecky_ir::lower_to_build123d_with_previous_manifest(
+                        source,
+                        previous_manifest.as_ref(),
+                    )
+                }
+            })?)
+        }
+        (GeometryBackend::Freecad, MacroDialect::EckyIrV0) => {
+            Some(lower_ecky_with_large_stack("freecad", macro_code, {
+                let previous_manifest = previous_manifest.cloned();
+                move |source| {
+                    crate::ecky_ir::lower_to_freecad_with_previous_manifest(
+                        source,
+                        previous_manifest.as_ref(),
+                    )
+                }
+            })?)
+        }
         _ => None,
     };
     let dispatch_source = lowered.as_deref().unwrap_or(macro_code);
@@ -547,6 +609,7 @@ fn render_model_unlocked(
                     macro_code,
                     parameters,
                     &effective_dialect,
+                    previous_manifest,
                     state,
                     app,
                 )
@@ -570,7 +633,12 @@ fn render_model_unlocked(
                                 .unwrap_or("Direct OCCT availability not probed.")
                         )))
                     } else if mesh_only_redirect {
-                        crate::ecky_ir::render_model(macro_code, parameters, app)
+                        crate::ecky_ir::render_model_with_previous_manifest(
+                            macro_code,
+                            parameters,
+                            previous_manifest,
+                            app,
+                        )
                     } else if direct_occt_ready && direct_occt_plannable {
                         Err(blocked_direct_occt_native_error(format!(
                             "Direct OCCT runtime reported ready and planned this model, but native export returned no bundle. {}",
@@ -616,7 +684,12 @@ fn render_model_unlocked(
                         }
                         Err(unsupported_required_direct_occt_error(details))
                     } else if mesh_only_redirect {
-                        crate::ecky_ir::render_model(macro_code, parameters, app)
+                        crate::ecky_ir::render_model_with_previous_manifest(
+                            macro_code,
+                            parameters,
+                            previous_manifest,
+                            app,
+                        )
                     } else {
                         let mut details = if direct_occt_ready && direct_occt_plannable {
                             String::from(
@@ -680,6 +753,55 @@ fn render_model_unlocked(
         }
     };
     result.and_then(|bundle| finalize_render_bundle(bundle, parameters, post_processing, app))
+}
+
+fn source_has_selector_tags(source: &str) -> bool {
+    let Some(program) = crate::ecky_scheme::try_compile_to_core_program(source) else {
+        return false;
+    };
+    program
+        .map(|program| !program.selector_tags.is_empty())
+        .unwrap_or(false)
+}
+
+fn is_tagged_selector_mismatch_error(err: &AppError) -> bool {
+    let mut combined = err.message.to_ascii_lowercase();
+    if let Some(details) = err.details.as_deref() {
+        if !details.is_empty() {
+            combined.push(' ');
+            combined.push_str(&details.to_ascii_lowercase());
+        }
+    }
+    [
+        "did not match target ids",
+        "ambiguously matched stable face target",
+        "ambiguously matched stable edge target",
+        "direct occt edge selector target ids did not match current topology",
+        "direct occt edge selector stable target id ambiguously matched current topology",
+        "direct occt shell face selector target ids did not match current topology",
+        "direct occt shell face selector stable target id ambiguously matched current topology",
+        "matched no shell opening faces",
+        "matched no edges",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle))
+}
+
+fn append_tagged_selector_rebind_warning(app: &dyn PathResolver, bundle: &ArtifactBundle) {
+    let Ok(mut manifest) = crate::model_runtime::read_model_manifest(app, &bundle.model_id) else {
+        return;
+    };
+    let warning =
+        "Tagged selector recorded ids no longer matched current topology; rerender fell back to authored selector declarations.".to_string();
+    if manifest
+        .warnings
+        .iter()
+        .any(|existing| existing == &warning)
+    {
+        return;
+    }
+    manifest.warnings.push(warning);
+    let _ = crate::model_runtime::write_model_manifest(app, &bundle.model_id, &manifest);
 }
 
 pub async fn render_model_source(
@@ -754,6 +876,7 @@ fn render_model_source_unlocked(
                 Some(resolved_dialect),
                 geometry_backend,
                 post_processing,
+                None,
                 state,
                 app,
             );
@@ -802,8 +925,9 @@ fn resolve_source_macro_dialect(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_lowering_error, apply_requested_post_processing, load_manifest_for_bundle,
-        render_model, resolve_dispatch_backend, resolve_geometry_backend,
+        annotate_lowering_error, apply_requested_post_processing,
+        is_tagged_selector_mismatch_error, load_manifest_for_bundle, render_model,
+        render_model_with_previous_manifest, resolve_dispatch_backend, resolve_geometry_backend,
     };
     use crate::contracts::{
         Config, DisplacementSpec, LithophaneAttachment, LithophaneAttachmentSource,
@@ -1296,9 +1420,11 @@ endsolid sample
                 control_primitives: vec![],
                 control_relations: vec![],
                 control_views: vec![],
+                preview_views: vec![],
                 advisories: vec![],
                 selection_targets: vec![],
                 measurement_annotations: vec![],
+                tagged_anchors: std::collections::BTreeMap::new(),
                 feature_graph: None,
                 correspondence_graph: None,
                 warnings: vec![],
@@ -1515,6 +1641,26 @@ endsolid sample
             ),
             GeometryBackend::Freecad
         );
+    }
+
+    #[test]
+    fn tagged_selector_mismatch_detector_matches_runner_target_id_errors() {
+        let err = AppError::with_details(
+            crate::models::AppErrorCode::Render,
+            "build123d runner failed.",
+            "stderr:\nValueError: Edge selector `{'kind': 'targetIds'}` did not match target ids: ['body:edge:old']",
+        );
+        assert!(is_tagged_selector_mismatch_error(&err));
+
+        let direct_occt = AppError::with_details(
+            crate::models::AppErrorCode::Render,
+            "Direct OCCT native shim probe failed.",
+            "stderr:\nDirect OCCT edge selector target ids did not match current topology for part `body`. requested=body:edge:old",
+        );
+        assert!(is_tagged_selector_mismatch_error(&direct_occt));
+
+        let unrelated = AppError::validation("shell expects positive wall thickness");
+        assert!(!is_tagged_selector_mismatch_error(&unrelated));
     }
 
     #[test]
@@ -2805,6 +2951,86 @@ exit 5
             .expect("load manifest")
             .expect("runtime manifest");
         assert!(!manifest.selection_targets.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tagged_face_selector_survives_parameter_sweep_across_manifest_rebind() {
+        let root = temp_root("tagged-face-parameter-sweep");
+        let resolver = TestResolver { root: root.clone() };
+        let state = test_state(&root);
+        let build123d = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
+        let freecad =
+            crate::runtime_capabilities::probe_freecad_runtime(Some("FreeCADCmd"), &resolver);
+        let backend = if build123d.available {
+            Some(GeometryBackend::Build123d)
+        } else if freecad.available {
+            Some(GeometryBackend::Freecad)
+        } else {
+            None
+        };
+        let Some(backend) = backend else {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        };
+
+        let source = r#"(model
+            (params (number pedestal 2 :min 2 :max 8))
+            (tag-face mounting_top :faces "top" body)
+            (part body
+              (fillet 1.5
+                :faces (tag mounting_top)
+                (union
+                  (box 20 20 20)
+                  (translate 0 0 (- pedestal) (box 8 8 pedestal))))))"#;
+
+        let base_bundle = render_model(
+            source,
+            &DesignParams::from([("pedestal".to_string(), ParamValue::Number(2.0))]),
+            Some(MacroDialect::EckyIrV0),
+            Some(backend),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("base tagged render");
+        let base_manifest = load_manifest_for_bundle(&base_bundle)
+            .expect("load base manifest")
+            .expect("base manifest");
+        let base_anchor = base_manifest
+            .tagged_anchors
+            .get("mounting_top")
+            .expect("base anchor");
+        assert!(!base_anchor.target_ids.is_empty());
+
+        let next_bundle = render_model_with_previous_manifest(
+            source,
+            &DesignParams::from([("pedestal".to_string(), ParamValue::Number(8.0))]),
+            Some(MacroDialect::EckyIrV0),
+            Some(backend),
+            None,
+            Some(&base_manifest),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("rerender with previous manifest");
+        let next_manifest = load_manifest_for_bundle(&next_bundle)
+            .expect("load next manifest")
+            .expect("next manifest");
+        let next_anchor = next_manifest
+            .tagged_anchors
+            .get("mounting_top")
+            .expect("next anchor");
+
+        assert!(!next_anchor.target_ids.is_empty());
+        assert_eq!(base_anchor.target_ids, next_anchor.target_ids);
+        assert_ne!(
+            base_anchor.canonical_target_ids, next_anchor.canonical_target_ids,
+            "parameter sweep should reindex canonical face ids"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

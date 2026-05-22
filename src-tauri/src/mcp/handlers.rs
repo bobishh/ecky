@@ -1185,6 +1185,7 @@ pub async fn handle_request_user_prompt(
                 usage: None,
                 artifact_bundle: None,
                 model_manifest: None,
+                structural_verification: None,
                 agent_origin: Some(agent_dialogue::build_agent_origin(
                     &dialogue_identity(ctx),
                     timestamp,
@@ -1444,6 +1445,7 @@ pub async fn handle_mark_as_read(
                 usage: None,
                 artifact_bundle: None,
                 model_manifest: None,
+                structural_verification: None,
                 visual_kind: None,
                 content: None,
             },
@@ -1559,6 +1561,7 @@ pub async fn handle_session_reply_save(
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: Some(agent_dialogue::build_agent_origin(
                 &dialogue_identity(&ctx),
                 timestamp,
@@ -1586,6 +1589,7 @@ pub async fn handle_session_reply_save(
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     visual_kind: None,
                     content: None,
                 },
@@ -1742,6 +1746,7 @@ pub async fn handle_concept_preview_save(
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: Some(agent_dialogue::build_agent_origin(
                 &dialogue_identity(&ctx),
                 timestamp,
@@ -8450,12 +8455,13 @@ pub async fn handle_params_preview_render(
 
         drop(conn);
 
-        let artifact_bundle = render::render_model(
+        let artifact_bundle = render::render_model_with_previous_manifest(
             &base_design.macro_code,
             &healed_params,
             Some(base_design.macro_dialect.clone()),
             Some(render_geometry_backend),
             next_post_processing.as_ref(),
+            base_model_manifest.as_ref(),
             state,
             app,
         )
@@ -9166,12 +9172,13 @@ pub async fn handle_macro_preview_render(
             .or_else(|| base_design.post_processing.clone());
 
         let render_started = Instant::now();
-        let artifact_bundle = render::render_model(
+        let artifact_bundle = render::render_model_with_previous_manifest(
             &req.macro_code,
             &initial_params,
             Some(macro_dialect.clone()),
             Some(render_geometry_backend),
             next_post_processing.as_ref(),
+            base_model_manifest.as_ref(),
             state,
             app,
         )
@@ -11135,12 +11142,13 @@ pub async fn handle_semantic_transform_preview(
             )?;
         }
 
-        let artifact_bundle = render::render_model(
+        let artifact_bundle = render::render_model_with_previous_manifest(
             &next_source,
             &design_output.initial_params,
             Some(MacroDialect::EckyIrV0),
             Some(design_output.geometry_backend),
             design_output.post_processing.as_ref(),
+            Some(&manifest),
             state,
             app,
         )
@@ -11763,6 +11771,7 @@ mod tests {
                 status: EnrichmentStatus::Accepted,
                 order: 1,
             }],
+            preview_views: Vec::new(),
             advisories: Vec::new(),
             selection_targets: vec![
                 crate::models::SelectionTarget {
@@ -11795,6 +11804,7 @@ mod tests {
                 },
             ],
             measurement_annotations: Vec::new(),
+            tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
@@ -12082,6 +12092,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: Some(base_bundle),
                     model_manifest: Some(base_manifest),
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -12921,6 +12932,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -12941,6 +12953,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -12961,6 +12974,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -13066,6 +13080,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: Some(sample_bundle("model-2", "preview.stl")),
                     model_manifest: Some(sample_manifest("model-2")),
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -15680,6 +15695,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: message.artifact_bundle.as_ref(),
                     model_manifest: message.model_manifest.as_ref(),
+                    structural_verification: None,
                     visual_kind: None,
                     content: Some("Base version"),
                 },
@@ -15747,6 +15763,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: message.artifact_bundle.as_ref(),
                     model_manifest: message.model_manifest.as_ref(),
+                    structural_verification: None,
                     visual_kind: None,
                     content: Some("Base version"),
                 },
@@ -15809,6 +15826,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: message.artifact_bundle.as_ref(),
                     model_manifest: message.model_manifest.as_ref(),
+                    structural_verification: None,
                     visual_kind: None,
                     content: Some("Base version"),
                 },
@@ -16662,6 +16680,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: Some(bad_bundle),
                     model_manifest: Some(bad_manifest),
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -16743,6 +16762,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: Some(stored_bundle),
                     model_manifest: Some(stale_message_manifest),
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -16862,6 +16882,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: Some(stored_bundle),
                     model_manifest: Some(sample_manifest(model_id)),
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -17102,6 +17123,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: Some(stored_bundle),
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -17185,6 +17207,33 @@ mod tests {
             .iter()
             .any(|issue| issue.code == "AUTHORED_VERIFY_FAILED"));
         assert!(response.result.summary.contains("AUTHORED_VERIFY_FAILED"));
+
+        // MCP-first verify-TDD: the agent must read a machine-readable delta,
+        // not parse the message string. The failed check carries metric origin,
+        // comparator, and expected vs actual as typed values.
+        let check = response
+            .result
+            .authored_verify_checks
+            .iter()
+            .find(|check| check.tag == "body_shell")
+            .expect("authored verify check for body_shell");
+        assert_eq!(
+            check.status,
+            crate::contracts::AuthoredVerifyCheckStatus::Failed
+        );
+        // Clickable in the New Params map: chip stableNodeId == verify node id.
+        assert_eq!(check.stable_node_id.as_deref(), Some("verify:body_shell"));
+        assert_eq!(check.metric_source.as_deref(), Some("manifest"));
+        assert_eq!(check.metric_key.as_deref(), Some("has-step"));
+        assert_eq!(check.comparator.as_deref(), Some("="));
+        assert_eq!(
+            check.expected,
+            Some(crate::contracts::AuthoredVerifyValue::Boolean(false))
+        );
+        assert!(matches!(
+            check.actual,
+            Some(crate::contracts::AuthoredVerifyValue::Boolean(_))
+        ));
     }
 
     #[tokio::test]
@@ -18507,6 +18556,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -18690,6 +18740,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -18710,6 +18761,7 @@ mod tests {
                     usage: None,
                     artifact_bundle: None,
                     model_manifest: None,
+                    structural_verification: None,
                     agent_origin: None,
                     image_data: None,
                     visual_kind: None,
@@ -18876,6 +18928,383 @@ mod tests {
 
         assert!(err.message.contains("Macro buffer digest mismatch"));
     }
+
+    #[tokio::test]
+    async fn project_folder_export_edit_apply_commits_new_version() {
+        let (state, resolver) =
+            seed_target_with_macro("Bracket", "V-base", "(model (part body (box 10 10 5)))").await;
+
+        let export = handle_project_folder_export(
+            &state,
+            &resolver,
+            ProjectFolderExportRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                slug: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("export");
+        assert!(export.slug.starts_with("bracket-"), "{}", export.slug);
+        assert_eq!(export.manifest.thread_id, "thread-1");
+        assert_eq!(export.manifest.message_id, "msg-1");
+
+        let status = handle_project_folder_status(
+            &state,
+            &resolver,
+            ProjectFolderStatusRequest {
+                slug: export.slug.clone(),
+            },
+        )
+        .await
+        .expect("status");
+        assert_eq!(status.state, crate::project_mirror::ProjectSyncState::Clean);
+
+        // External edit through the plain filesystem, like any editor or LLM
+        // file skill would do.
+        let source_path = std::path::Path::new(&export.folder)
+            .join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+        std::fs::write(&source_path, "(model (part body (box 12 10 5)))").expect("edit file");
+
+        let status = handle_project_folder_status(
+            &state,
+            &resolver,
+            ProjectFolderStatusRequest {
+                slug: export.slug.clone(),
+            },
+        )
+        .await
+        .expect("status after edit");
+        assert_eq!(
+            status.state,
+            crate::project_mirror::ProjectSyncState::FileChanged
+        );
+
+        let applied = handle_project_folder_apply(
+            &state,
+            &resolver,
+            ProjectFolderApplyRequest {
+                identity: AgentIdentityOverride::default(),
+                slug: export.slug.clone(),
+                force: false,
+                title: None,
+                version_name: Some("V-folder-edit".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("apply");
+        assert!(!applied.no_op);
+        assert_eq!(
+            applied.state_before,
+            crate::project_mirror::ProjectSyncState::FileChanged
+        );
+        assert_eq!(applied.thread_id, "thread-1");
+        assert_ne!(applied.message_id, "msg-1");
+
+        {
+            let conn = state.db.lock().await;
+            let messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
+            let committed = messages
+                .iter()
+                .find(|message| message.id == applied.message_id)
+                .expect("committed version");
+            assert!(committed
+                .output
+                .as_ref()
+                .expect("output")
+                .macro_code
+                .contains("box 12 10 5"));
+        }
+
+        // Manifest rebased: folder reads clean against the new head.
+        let status = handle_project_folder_status(
+            &state,
+            &resolver,
+            ProjectFolderStatusRequest {
+                slug: export.slug.clone(),
+            },
+        )
+        .await
+        .expect("status after apply");
+        assert_eq!(status.state, crate::project_mirror::ProjectSyncState::Clean);
+
+        // Idempotent: applying a clean folder is a no-op.
+        let noop = handle_project_folder_apply(
+            &state,
+            &resolver,
+            ProjectFolderApplyRequest {
+                identity: AgentIdentityOverride::default(),
+                slug: export.slug.clone(),
+                force: false,
+                title: None,
+                version_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("noop apply");
+        assert!(noop.no_op);
+    }
+
+    #[tokio::test]
+    async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
+        let (state, resolver) =
+            seed_target_with_macro("Mount", "V-base", "(model (part body (box 8 8 4)))").await;
+
+        let export = handle_project_folder_export(
+            &state,
+            &resolver,
+            ProjectFolderExportRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                slug: Some("mount-stale-check".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("export");
+
+        // Advance the thread behind the folder's back (normal in-app edit).
+        let preview = handle_macro_preview_render(
+            &state,
+            &resolver,
+            MacroReplaceRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                macro_code: "(model (part body (box 9 8 4)))".to_string(),
+                macro_dialect: None,
+                ui_spec: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("in-app preview");
+        handle_commit_preview_version(
+            &state,
+            &resolver,
+            VersionSaveRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some(preview.thread_id.clone()),
+                message_id: Some(preview.message_id.clone()),
+                title: None,
+                version_name: Some("V-in-app".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("in-app commit");
+
+        // File untouched + thread advanced -> stale, must re-export.
+        let err = handle_project_folder_apply(
+            &state,
+            &resolver,
+            ProjectFolderApplyRequest {
+                identity: AgentIdentityOverride::default(),
+                slug: export.slug.clone(),
+                force: false,
+                title: None,
+                version_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("stale folder refused");
+        assert!(err.message.contains("stale"), "{}", err.message);
+        assert!(
+            err.message.contains("project_folder_export"),
+            "{}",
+            err.message
+        );
+
+        // File ALSO edited -> conflict; refused without force, applied with it.
+        let source_path = std::path::Path::new(&export.folder)
+            .join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+        std::fs::write(&source_path, "(model (part body (box 7 7 7)))").expect("edit file");
+
+        let err = handle_project_folder_apply(
+            &state,
+            &resolver,
+            ProjectFolderApplyRequest {
+                identity: AgentIdentityOverride::default(),
+                slug: export.slug.clone(),
+                force: false,
+                title: None,
+                version_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("conflict refused without force");
+        assert!(err.message.contains("conflict"), "{}", err.message);
+        assert!(err.message.contains("force"), "{}", err.message);
+
+        let applied = handle_project_folder_apply(
+            &state,
+            &resolver,
+            ProjectFolderApplyRequest {
+                identity: AgentIdentityOverride::default(),
+                slug: export.slug.clone(),
+                force: true,
+                title: None,
+                version_name: Some("V-forced".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("forced apply");
+        assert_eq!(
+            applied.state_before,
+            crate::project_mirror::ProjectSyncState::Conflict
+        );
+        let conn = state.db.lock().await;
+        let messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
+        assert!(messages
+            .iter()
+            .any(|message| message.id == applied.message_id));
+    }
+
+    #[tokio::test]
+    async fn project_folder_apply_reports_missing_folder() {
+        let (state, resolver) = seed_target().await;
+        let err = handle_project_folder_apply(
+            &state,
+            &resolver,
+            ProjectFolderApplyRequest {
+                identity: AgentIdentityOverride::default(),
+                slug: "never-exported".to_string(),
+                force: false,
+                title: None,
+                version_name: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect_err("missing folder");
+        assert!(
+            err.message.contains("project_folder_export"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn project_folder_watcher_applies_settled_edits_in_place() {
+        let (state, resolver) = seed_target_with_macro(
+            "Live Bracket",
+            "V-base",
+            "(model (part body (box 10 10 5)))",
+        )
+        .await;
+        let export = handle_project_folder_export(
+            &state,
+            &resolver,
+            ProjectFolderExportRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                slug: Some("live-bracket-watch".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("export");
+
+        let mut watcher = ProjectFolderWatcher::new();
+        let ctx = test_ctx();
+
+        // Clean folder: ticks are silent.
+        assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+
+        let source_path = std::path::Path::new(&export.folder)
+            .join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+        std::fs::write(&source_path, "(model (part body (box 11 10 5)))").expect("edit");
+
+        // First tick after the edit: settle, no apply yet.
+        assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+
+        // Second tick: digest unchanged -> applied and committed.
+        let events = watcher.tick(&state, &resolver, &ctx).await;
+        assert_eq!(events.len(), 1);
+        let ProjectFolderWatchEvent::Applied {
+            slug, message_id, ..
+        } = &events[0]
+        else {
+            panic!("expected Applied, got {events:?}");
+        };
+        assert_eq!(slug, "live-bracket-watch");
+        {
+            let conn = state.db.lock().await;
+            let messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
+            let committed = messages
+                .iter()
+                .find(|message| &message.id == message_id)
+                .expect("watcher-committed version");
+            assert!(committed
+                .output
+                .as_ref()
+                .expect("output")
+                .macro_code
+                .contains("box 11 10 5"));
+        }
+
+        // Folder is clean again; nothing further happens.
+        assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn project_folder_watcher_reports_broken_edit_once_and_retries_after_change() {
+        let (state, resolver) =
+            seed_target_with_macro("Watch Errors", "V-base", "(model (part body (box 8 8 4)))")
+                .await;
+        let export = handle_project_folder_export(
+            &state,
+            &resolver,
+            ProjectFolderExportRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                slug: Some("watch-errors".to_string()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .expect("export");
+        let source_path = std::path::Path::new(&export.folder)
+            .join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+
+        let mut watcher = ProjectFolderWatcher::new();
+        let ctx = test_ctx();
+
+        std::fs::write(&source_path, "(model (part body (box 1 1 1))$)").expect("broken edit");
+        assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+        let events = watcher.tick(&state, &resolver, &ctx).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            matches!(&events[0], ProjectFolderWatchEvent::ApplyFailed { slug, .. } if slug == "watch-errors"),
+            "{events:?}"
+        );
+
+        // Same broken digest: memoized, no re-render attempts.
+        assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+        assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+
+        // Fixing the file retries and applies.
+        std::fs::write(&source_path, "(model (part body (box 2 2 2)))").expect("fixed edit");
+        assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+        let events = watcher.tick(&state, &resolver, &ctx).await;
+        assert!(
+            matches!(&events[0], ProjectFolderWatchEvent::Applied { .. }),
+            "{events:?}"
+        );
+    }
 }
 
 // --- Component library tools (component-unification T5) ---
@@ -18975,4 +19404,360 @@ pub fn handle_component_get(
     req: ComponentGetToolRequest,
 ) -> AppResult<crate::component_package_runtime::ExtractedComponentRecord> {
     crate::component_package_runtime::read_extracted_component(app, &req.name)
+}
+
+// --- Filesystem project mirror tools (filesystem-project-mirror T2) ---
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolderExportRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    /// Folder slug; defaults to a deterministic slug from title + thread id.
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolderExportResponse {
+    pub slug: String,
+    pub folder: String,
+    pub manifest: crate::project_mirror::ProjectManifest,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolderStatusRequest {
+    pub slug: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolderApplyRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub slug: String,
+    /// Apply the file on top of the current thread head even when both the
+    /// file and the thread moved since export (`conflict`).
+    #[serde(default)]
+    pub force: bool,
+    pub title: Option<String>,
+    pub version_name: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolderApplyResponse {
+    pub state_before: crate::project_mirror::ProjectSyncState,
+    /// True when the folder was already clean and nothing was committed.
+    pub no_op: bool,
+    pub thread_id: String,
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub manifest: crate::project_mirror::ProjectManifest,
+}
+
+pub async fn handle_project_folder_export(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: ProjectFolderExportRequest,
+    ctx: &AgentContext,
+) -> AppResult<ProjectFolderExportResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let _ = ctx;
+    let target = {
+        let conn = state.db.lock().await;
+        crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            req.thread_id.clone(),
+            req.message_id.clone(),
+        )?
+    };
+    let slug = match req.slug {
+        Some(slug) => slug,
+        None => crate::project_mirror::project_slug(&target.design_output.title, &target.thread_id),
+    };
+    let model_id = target
+        .artifact_bundle
+        .as_ref()
+        .map(|bundle| bundle.model_id.clone());
+    let (dir, manifest) = crate::project_mirror::export_project(
+        app,
+        &crate::project_mirror::ExportProjectRequest {
+            slug: &slug,
+            thread_id: &target.thread_id,
+            message_id: &target.message_id,
+            model_id: model_id.as_deref(),
+            source: &target.design_output.macro_code,
+        },
+    )?;
+    Ok(ProjectFolderExportResponse {
+        slug,
+        folder: dir.to_string_lossy().to_string(),
+        manifest,
+    })
+}
+
+async fn project_thread_head(
+    state: &AppState,
+    slug: &str,
+    app: &dyn PathResolver,
+) -> AppResult<Option<String>> {
+    let dir = crate::project_mirror::project_dir(app, slug)?;
+    let Some(manifest) = crate::project_mirror::read_manifest(&dir)? else {
+        return Ok(None);
+    };
+    let conn = state.db.lock().await;
+    db::get_latest_successful_message_id_in_thread(&conn, &manifest.thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))
+}
+
+pub async fn handle_project_folder_status(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: ProjectFolderStatusRequest,
+) -> AppResult<crate::project_mirror::ProjectFolderStatus> {
+    let head = project_thread_head(state, &req.slug, app).await?;
+    crate::project_mirror::folder_status(app, &req.slug, head.as_deref())
+}
+
+pub async fn handle_project_folder_apply(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: ProjectFolderApplyRequest,
+    ctx: &AgentContext,
+) -> AppResult<ProjectFolderApplyResponse> {
+    use crate::project_mirror::ProjectSyncState;
+
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let status = handle_project_folder_status(
+        state,
+        app,
+        ProjectFolderStatusRequest {
+            slug: req.slug.clone(),
+        },
+    )
+    .await?;
+
+    let manifest = match (&status.state, status.manifest.clone()) {
+        (ProjectSyncState::Missing, _) | (_, None) => {
+            return Err(AppError::validation(format!(
+                "Project folder `{}` has no exported model; run project_folder_export first.",
+                req.slug
+            )))
+        }
+        (_, Some(manifest)) => manifest,
+    };
+
+    match status.state {
+        ProjectSyncState::Clean => {
+            return Ok(ProjectFolderApplyResponse {
+                state_before: ProjectSyncState::Clean,
+                no_op: true,
+                thread_id: manifest.thread_id.clone(),
+                message_id: manifest.message_id.clone(),
+                model_id: manifest.model_id.clone(),
+                manifest,
+            })
+        }
+        ProjectSyncState::ThreadAdvanced => {
+            return Err(AppError::validation(format!(
+                "Project folder `{}` is stale: thread `{}` advanced past the exported version. Run project_folder_export to refresh the folder.",
+                req.slug, manifest.thread_id
+            )))
+        }
+        ProjectSyncState::Conflict if !req.force => {
+            return Err(AppError::validation(format!(
+                "Project folder `{}` conflicts: both the file and thread `{}` changed since export. Pass force=true to apply the file on top of the current head, or re-export to discard the file edit.",
+                req.slug, manifest.thread_id
+            )))
+        }
+        _ => {}
+    }
+
+    let dir = crate::project_mirror::project_dir(app, &req.slug)?;
+    let source = crate::project_mirror::read_project_source(&dir)?.ok_or_else(|| {
+        AppError::validation(format!(
+            "Project folder `{}` lost its model.ecky during apply.",
+            req.slug
+        ))
+    })?;
+    let state_before = status.state;
+
+    let preview = handle_macro_preview_render(
+        state,
+        app,
+        MacroReplaceRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(manifest.thread_id.clone()),
+            message_id: status.thread_head_message_id.clone(),
+            macro_code: source.clone(),
+            macro_dialect: None,
+            ui_spec: None,
+            parameters: None,
+            post_processing: None,
+            geometry_backend: None,
+        },
+        ctx,
+    )
+    .await?;
+    let commit = handle_commit_preview_version(
+        state,
+        app,
+        VersionSaveRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(preview.thread_id.clone()),
+            message_id: Some(preview.message_id.clone()),
+            title: req.title,
+            version_name: req.version_name,
+        },
+        ctx,
+    )
+    .await?;
+
+    // Rebase the manifest onto the committed version; the file bytes we
+    // applied become the new clean baseline.
+    let rebased = crate::project_mirror::ProjectManifest {
+        message_id: commit.message_id.clone(),
+        model_id: Some(commit.model_id.clone()),
+        source_digest: crate::project_mirror::source_digest(&source),
+        exported_at: now_secs(),
+        ..manifest
+    };
+    crate::project_mirror::write_manifest(&dir, &rebased)?;
+
+    Ok(ProjectFolderApplyResponse {
+        state_before,
+        no_op: false,
+        thread_id: commit.thread_id,
+        message_id: commit.message_id,
+        model_id: Some(commit.model_id),
+        manifest: rebased,
+    })
+}
+
+// --- Project folder watcher (filesystem-project-mirror T5) ---
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ProjectFolderWatchEvent {
+    /// A settled external edit was applied and committed.
+    Applied {
+        slug: String,
+        thread_id: String,
+        message_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_id: Option<String>,
+    },
+    /// A settled external edit failed to compile/render/commit. Reported
+    /// once per file digest; editing the file again retries.
+    ApplyFailed { slug: String, error: String },
+}
+
+/// Polling watcher state. One instance lives in the app's watcher loop;
+/// tests drive `tick` directly.
+///
+/// Two-tick settle: a changed digest must be seen unchanged on two
+/// consecutive ticks before applying, so partial editor writes never reach
+/// the compiler. A digest that failed to apply is memoized and skipped until
+/// the file changes again, so a broken save does not re-render every tick.
+#[derive(Default)]
+pub struct ProjectFolderWatcher {
+    pending: HashMap<String, String>,
+    failed: HashMap<String, String>,
+}
+
+impl ProjectFolderWatcher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn tick(
+        &mut self,
+        state: &AppState,
+        app: &dyn PathResolver,
+        ctx: &AgentContext,
+    ) -> Vec<ProjectFolderWatchEvent> {
+        let mut events = Vec::new();
+        let Ok(slugs) = crate::project_mirror::list_project_slugs(app) else {
+            return events;
+        };
+        for slug in slugs {
+            let Ok(dir) = crate::project_mirror::project_dir(app, &slug) else {
+                continue;
+            };
+            let Ok(Some(manifest)) = crate::project_mirror::read_manifest(&dir) else {
+                continue;
+            };
+            let Ok(Some(source)) = crate::project_mirror::read_project_source(&dir) else {
+                continue;
+            };
+            let digest = crate::project_mirror::source_digest(&source);
+            if digest == manifest.source_digest {
+                self.pending.remove(&slug);
+                self.failed.remove(&slug);
+                continue;
+            }
+            if self.failed.get(&slug) == Some(&digest) {
+                continue;
+            }
+            // Two-tick settle before touching the compiler.
+            if self.pending.insert(slug.clone(), digest.clone()) != Some(digest.clone()) {
+                continue;
+            }
+
+            let applied = handle_project_folder_apply(
+                state,
+                app,
+                ProjectFolderApplyRequest {
+                    identity: AgentIdentityOverride::default(),
+                    slug: slug.clone(),
+                    force: false,
+                    title: None,
+                    version_name: Some("folder-sync".to_string()),
+                },
+                ctx,
+            )
+            .await;
+            self.pending.remove(&slug);
+            match applied {
+                Ok(response) => {
+                    self.failed.remove(&slug);
+                    events.push(ProjectFolderWatchEvent::Applied {
+                        slug,
+                        thread_id: response.thread_id,
+                        message_id: response.message_id,
+                        model_id: response.model_id,
+                    });
+                }
+                Err(err) => {
+                    // Stale/conflict folders are not auto-resolved; like a
+                    // compile failure they are reported once per digest.
+                    self.failed.insert(slug.clone(), digest);
+                    events.push(ProjectFolderWatchEvent::ApplyFailed {
+                        slug,
+                        error: err.to_string(),
+                    });
+                }
+            }
+        }
+        events
+    }
+}
+
+pub fn project_folder_watcher_context() -> AgentContext {
+    AgentContext {
+        session_id: "project-folder-watcher".to_string(),
+        client_kind: "watcher".to_string(),
+        host_label: "Ecky".to_string(),
+        agent_label: "folder-sync".to_string(),
+        llm_model_id: None,
+        llm_model_label: None,
+    }
 }

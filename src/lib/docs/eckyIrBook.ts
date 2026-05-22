@@ -2,8 +2,7 @@ import { parseDocsDocument, renderMarkdownFragment } from './eckyIrGuide';
 
 export type EckyIrBookInput = {
   docsMarkdown: string;
-  walkthroughMarkdown: string;
-  complexModelSource: string;
+  assetSourceRoot?: string;
 };
 
 export type EckyIrBookChapter = {
@@ -12,27 +11,33 @@ export type EckyIrBookChapter = {
   bodyHtml: string;
 };
 
+export type EckyIrBookAsset = {
+  sourcePath: string;
+  outputPath: string;
+  mediaType: string;
+};
+
 export type EckyIrBook = {
   title: string;
   summaryHtml: string;
   chapters: EckyIrBookChapter[];
+  assets: EckyIrBookAsset[];
   html: string;
 };
 
 export function buildEckyIrBook(input: EckyIrBookInput): EckyIrBook {
   const docs = parseDocsDocument(input.docsMarkdown);
-  const walkthrough = parseWalkthroughChapter(
-    input.walkthroughMarkdown,
-    input.complexModelSource,
-  );
   const title = 'Ecky IR Field Guide';
+  const assets = collectBookAssets(
+    input.docsMarkdown,
+    input.assetSourceRoot ?? 'target/book/public/docs',
+  );
   const chapters: EckyIrBookChapter[] = [
     ...docs.sections.map((section) => ({
       id: `docs-${section.slug}`,
       title: section.title,
       bodyHtml: section.bodyHtml,
     })),
-    walkthrough,
   ];
 
   const tocHtml = chapters
@@ -163,6 +168,24 @@ export function buildEckyIrBook(input: EckyIrBookInput): EckyIrBook {
       .summary p {
         font-size: 1.08rem;
       }
+
+      figure {
+        margin: 1.25rem 0 1.5rem;
+      }
+
+      figure img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border: 1px solid #8b6a2b;
+        background: #f8f2e8;
+      }
+
+      figcaption {
+        margin-top: 0.45rem;
+        font-size: 0.92rem;
+        color: #5a4731;
+      }
     </style>
   </head>
   <body>
@@ -171,7 +194,7 @@ export function buildEckyIrBook(input: EckyIrBookInput): EckyIrBook {
       <h1>${escapeHtml(title)}</h1>
       <div class="summary">
         ${docs.summaryHtml}
-        <p>This edition packages canonical Ecky IR documentation and adds one full teardown of the film scanning adapter helicoid model.</p>
+        <p>Lessons move from one primitive solid to a complete multi-part model.</p>
       </div>
     </section>
     <nav class="toc" id="toc">
@@ -186,29 +209,42 @@ export function buildEckyIrBook(input: EckyIrBookInput): EckyIrBook {
     title,
     summaryHtml: docs.summaryHtml,
     chapters,
+    assets,
     html,
   };
 }
 
-function parseWalkthroughChapter(markdown: string, complexModelSource: string): EckyIrBookChapter {
-  const normalized = injectComplexModelSource(markdown, complexModelSource).replace(/\r\n/g, '\n').trim();
-  const lines = normalized.split('\n');
-  const heading = lines.find((line) => line.startsWith('# '));
-  const title = heading?.slice(2).trim() || 'Complex Model Walkthrough';
-  const bodyMarkdown = lines
-    .filter((line, index) => !(index === 0 && line.startsWith('# ')))
-    .join('\n')
-    .trim();
+function collectBookAssets(docsMarkdown: string, assetSourceRoot: string): EckyIrBookAsset[] {
+  const assets = new Map<string, EckyIrBookAsset>();
 
-  return {
-    id: 'complex-model-walkthrough',
-    title,
-    bodyHtml: renderMarkdownFragment(bodyMarkdown),
-  };
+  for (const matched of docsMarkdown.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+    const outputPath = matched[1]?.trim();
+    if (!outputPath) continue;
+    registerAsset(assets, assetSourceRoot, outputPath);
+  }
+
+  return [...assets.values()];
 }
 
-function injectComplexModelSource(markdown: string, complexModelSource: string): string {
-  return markdown.replace('{{COMPLEX_MODEL_SOURCE}}', complexModelSource.trim());
+function registerAsset(store: Map<string, EckyIrBookAsset>, assetSourceRoot: string, outputPath: string) {
+  if (store.has(outputPath)) return;
+
+  store.set(outputPath, {
+    sourcePath: joinAssetPath(assetSourceRoot, outputPath),
+    outputPath,
+    mediaType: mediaTypeFor(outputPath),
+  });
+}
+
+function joinAssetPath(root: string, outputPath: string): string {
+  return `${root.replace(/\/+$/, '')}/${outputPath.replace(/^\/+/, '')}`;
+}
+
+function mediaTypeFor(outputPath: string): string {
+  if (outputPath.endsWith('.svg')) return 'image/svg+xml';
+  if (outputPath.endsWith('.png')) return 'image/png';
+  if (outputPath.endsWith('.jpg') || outputPath.endsWith('.jpeg')) return 'image/jpeg';
+  return 'application/octet-stream';
 }
 
 function escapeHtml(value: string): string {

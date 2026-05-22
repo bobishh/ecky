@@ -21,6 +21,7 @@ import type {
   Request,
   RuntimeAuthoringContext,
   StructuralMetrics,
+  StructuralVerificationResult,
   UsageSummary,
 } from '../types/domain';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
@@ -39,6 +40,7 @@ import {
   getModelManifest,
   getMessStlPath,
   initGenerationAttempt,
+  persistStructuralVerification,
   renderModel,
   saveModelManifest,
   saveConfig,
@@ -801,6 +803,7 @@ class GenerationPipeline {
             data.macroDialect ?? null,
             data.geometryBackend ?? null,
             data.postProcessing ?? null,
+            get(activeThreadId) === this.snapshotThreadId ? get(session).modelManifest : null,
           );
           const rawManifest = await getModelManifest(bundle.modelId);
           const previousManifest =
@@ -828,6 +831,7 @@ class GenerationPipeline {
           // ── Stage 1: Structural verification (always runs) ──────────────
           let structuralSummary: string | null = null;
           let structuralMetrics: StructuralMetrics | null = null;
+          let structuralVerification: StructuralVerificationResult | null = null;
           {
             this.updateStatus('Structural verification...');
             const structResult = await runStructuralCheck({
@@ -839,6 +843,8 @@ class GenerationPipeline {
             });
 
             console.info('[Pipeline] structural verify:', structResult.kind);
+            structuralVerification =
+              structResult.kind === 'structural_skipped' ? null : structResult.verification;
 
             if (structResult.kind === 'repair_needed') {
               currentPrompt = structResult.repairPrompt;
@@ -923,7 +929,7 @@ class GenerationPipeline {
           }
           // ── End verification ──────────────────────────────────────────────
 
-          await this.commitSuccess(data, bundle, manifest);
+          await this.commitSuccess(data, bundle, manifest, structuralVerification);
           return;
 
         } catch (renderError) {
@@ -1110,6 +1116,7 @@ class GenerationPipeline {
     data: DesignOutput,
     bundle: import('../types/domain').ArtifactBundle,
     manifest: import('../types/domain').ModelManifest,
+    structuralVerification: StructuralVerificationResult | null,
   ) {
     const runtime = await inspectRuntimeBundle(
       bundle,
@@ -1128,6 +1135,10 @@ class GenerationPipeline {
 
     await this.finalizeAttempt('success', data, undefined, undefined, bundle, manifest);
     this.checkCanceled();
+    if (this.assistantMessageId && structuralVerification) {
+      await persistStructuralVerification(this.assistantMessageId, structuralVerification);
+      this.checkCanceled();
+    }
 
     if (this.isActiveThread()) {
       activeThreadId.set(this.snapshotThreadId);
@@ -1169,6 +1180,7 @@ class GenerationPipeline {
         stlUrl: stlUrlValue,
         artifactBundle: renderableBundle,
         modelManifest: manifest,
+        structuralVerification,
       }
     });
     this.stopMicrowave(true);

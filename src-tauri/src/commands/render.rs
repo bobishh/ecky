@@ -841,15 +841,17 @@ pub async fn render_model(
     macro_dialect: Option<MacroDialect>,
     geometry_backend: Option<crate::models::GeometryBackend>,
     post_processing: Option<crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<ModelManifest>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<ArtifactBundle> {
-    render_service::render_model(
+    render_service::render_model_with_previous_manifest(
         &macro_code,
         &parameters,
         macro_dialect,
         geometry_backend,
         post_processing.as_ref(),
+        previous_manifest.as_ref(),
         &state,
         &app,
     )
@@ -1309,6 +1311,7 @@ mod tests {
                 status: EnrichmentStatus::Accepted,
                 order: 0,
             }],
+            preview_views: Vec::new(),
             advisories: vec![Advisory {
                 advisory_id: "advisory-outer-shell".to_string(),
                 label: "Shell note".to_string(),
@@ -1338,6 +1341,7 @@ mod tests {
                 view_ids: vec!["view-outer-shell".to_string()],
             }],
             measurement_annotations: Vec::new(),
+            tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: vec![

@@ -1905,6 +1905,8 @@ pub struct Message {
     #[serde(default)]
     pub model_manifest: Option<ModelManifest>,
     #[serde(default)]
+    pub structural_verification: Option<StructuralVerificationResult>,
+    #[serde(default)]
     pub agent_origin: Option<AgentOrigin>,
     #[serde(default, alias = "image_data")]
     pub image_data: Option<String>,
@@ -2148,10 +2150,53 @@ pub struct StructuralVerificationResult {
     pub passed: bool,
     pub summary: String,
     pub issues: Vec<StructuralIssue>,
+    #[serde(default)]
+    pub authored_verify_checks: Vec<AuthoredVerifyCheck>,
     pub metrics: StructuralMetrics,
     pub verifier_status: VerifierStatus,
     #[serde(default)]
     pub verifier_source: Option<VerifierSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthoredVerifyCheckStatus {
+    Passed,
+    Failed,
+    Error,
+}
+
+/// A resolved verify value (expected or actual). Boundary-typed so MCP agents
+/// and UI chips read machine values instead of parsing the message string.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "value")]
+pub enum AuthoredVerifyValue {
+    Number(f64),
+    Boolean(bool),
+    Text(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthoredVerifyCheck {
+    pub tag: String,
+    pub status: AuthoredVerifyCheckStatus,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_node_id: Option<String>,
+    /// Machine-readable delta: where the metric came from, the comparator, and
+    /// the expected vs actual values. Lets the agent fix a red check without
+    /// re-parsing `message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<AuthoredVerifyValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<AuthoredVerifyValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -2382,6 +2427,8 @@ pub struct DeletedMessage {
     pub artifact_bundle: Option<ArtifactBundle>,
     #[serde(default)]
     pub model_manifest: Option<ModelManifest>,
+    #[serde(default)]
+    pub structural_verification: Option<StructuralVerificationResult>,
     #[serde(default)]
     pub agent_origin: Option<AgentOrigin>,
     pub timestamp: u64,
@@ -2883,6 +2930,24 @@ pub struct ControlView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct PreviewViewOffset {
+    pub part_id: String,
+    pub dx: f64,
+    pub dy: f64,
+    pub dz: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewView {
+    pub view_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub offsets: Vec<PreviewViewOffset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Advisory {
     pub advisory_id: String,
     pub label: String,
@@ -2990,6 +3055,29 @@ pub struct CorrespondenceGraph {
     pub edges: Vec<CorrespondenceEdge>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TaggedAnchorKind {
+    Face,
+    Edge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaggedAnchorBinding {
+    pub kind: TaggedAnchorKind,
+    pub authored_selector: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub durable_target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canonical_target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alias_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelManifest {
@@ -3021,11 +3109,15 @@ pub struct ModelManifest {
     #[serde(default)]
     pub control_views: Vec<ControlView>,
     #[serde(default)]
+    pub preview_views: Vec<PreviewView>,
+    #[serde(default)]
     pub advisories: Vec<Advisory>,
     #[serde(default)]
     pub selection_targets: Vec<SelectionTarget>,
     #[serde(default)]
     pub measurement_annotations: Vec<MeasurementAnnotation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tagged_anchors: BTreeMap<String, TaggedAnchorBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_graph: Option<FeatureGraph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4789,6 +4881,34 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
         }
     }
 
+    for view in &manifest.preview_views {
+        if view.view_id.trim().is_empty() {
+            return Err(AppError::validation(
+                "preview views must include a non-empty viewId.",
+            ));
+        }
+        if !view_ids.insert(view.view_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "preview view '{}' is duplicated.",
+                view.view_id
+            )));
+        }
+        if view.label.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "preview view '{}' must include a non-empty label.",
+                view.view_id
+            )));
+        }
+        for offset in &view.offsets {
+            if !part_ids.contains(offset.part_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "preview view '{}' references unknown partId '{}'.",
+                    view.view_id, offset.part_id
+                )));
+            }
+        }
+    }
+
     for relation in &manifest.control_relations {
         if relation.relation_id.trim().is_empty() {
             return Err(AppError::validation(
@@ -4920,6 +5040,64 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
                         .as_deref()
                         .unwrap_or(target.viewer_node_id.as_str()),
                     view_id
+                )));
+            }
+        }
+    }
+
+    for (tag_name, anchor) in &manifest.tagged_anchors {
+        if tag_name.trim().is_empty() {
+            return Err(AppError::validation(
+                "taggedAnchors must use non-empty tag names.",
+            ));
+        }
+        if anchor.authored_selector.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "tagged anchor '{}' must use a non-empty authoredSelector.",
+                tag_name
+            )));
+        }
+        if anchor.target.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "tagged anchor '{}' must use a non-empty target.",
+                tag_name
+            )));
+        }
+        if anchor.target_ids.is_empty() {
+            return Err(AppError::validation(format!(
+                "tagged anchor '{}' must record at least one targetId.",
+                tag_name
+            )));
+        }
+        for target_id in &anchor.target_ids {
+            if !selection_target_ids.contains(target_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "tagged anchor '{}' references unknown targetId '{}'.",
+                    tag_name, target_id
+                )));
+            }
+        }
+        for durable_target_id in &anchor.durable_target_ids {
+            if !selection_target_ids.contains(durable_target_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "tagged anchor '{}' references unknown durableTargetId '{}'.",
+                    tag_name, durable_target_id
+                )));
+            }
+        }
+        for canonical_target_id in &anchor.canonical_target_ids {
+            if !selection_target_ids.contains(canonical_target_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "tagged anchor '{}' references unknown canonicalTargetId '{}'.",
+                    tag_name, canonical_target_id
+                )));
+            }
+        }
+        for alias_id in &anchor.alias_ids {
+            if !selection_target_ids.contains(alias_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "tagged anchor '{}' references unknown aliasId '{}'.",
+                    tag_name, alias_id
                 )));
             }
         }
@@ -6633,6 +6811,7 @@ mod tests {
                 status: EnrichmentStatus::Accepted,
                 order: 0,
             }],
+            preview_views: Vec::new(),
             advisories: vec![Advisory {
                 advisory_id: "advisory-shell-radius".to_string(),
                 label: "Shell note".to_string(),
@@ -6658,6 +6837,7 @@ mod tests {
                 view_ids: vec!["view-shell".to_string()],
             }],
             measurement_annotations: Vec::new(),
+            tagged_anchors: BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
@@ -6801,9 +6981,11 @@ mod tests {
             control_primitives: Vec::new(),
             control_relations: Vec::new(),
             control_views: Vec::new(),
+            preview_views: Vec::new(),
             advisories: Vec::new(),
             selection_targets,
             measurement_annotations: Vec::new(),
+            tagged_anchors: BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
@@ -6817,6 +6999,29 @@ mod tests {
     #[test]
     fn validate_model_manifest_accepts_consistent_manifest() {
         validate_model_manifest(&sample_manifest()).expect("manifest should be valid");
+    }
+
+    #[test]
+    fn validate_model_manifest_accepts_tagged_anchor_bindings() {
+        let mut manifest = sample_manifest();
+        manifest.selection_targets[0].durable_target_id = Some("durable-target-shell".to_string());
+        manifest.selection_targets[0].canonical_target_id =
+            Some("canonical-target-shell".to_string());
+        manifest.selection_targets[0].alias_ids = vec!["legacy-target-shell".to_string()];
+        manifest.tagged_anchors.insert(
+            "mounting_top".to_string(),
+            TaggedAnchorBinding {
+                kind: TaggedAnchorKind::Face,
+                authored_selector: "target-id:target-shell".to_string(),
+                target: "part-shell".to_string(),
+                target_ids: vec!["target-shell".to_string()],
+                durable_target_ids: vec!["durable-target-shell".to_string()],
+                canonical_target_ids: vec!["canonical-target-shell".to_string()],
+                alias_ids: vec!["legacy-target-shell".to_string()],
+            },
+        );
+
+        validate_model_manifest(&manifest).expect("manifest should accept tagged anchors");
     }
 
     #[test]
@@ -7267,6 +7472,28 @@ mod tests {
 
         let err =
             validate_model_manifest(&manifest).expect_err("manifest should reject bad targetId");
+        assert!(err.message.contains("unknown targetId"));
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_unknown_tagged_anchor_target_ids() {
+        let mut manifest = sample_manifest();
+        manifest.tagged_anchors.insert(
+            "mounting_top".to_string(),
+            TaggedAnchorBinding {
+                kind: TaggedAnchorKind::Face,
+                authored_selector: "target-id:missing-target".to_string(),
+                target: "part-shell".to_string(),
+                target_ids: vec!["missing-target".to_string()],
+                durable_target_ids: Vec::new(),
+                canonical_target_ids: Vec::new(),
+                alias_ids: Vec::new(),
+            },
+        );
+
+        let err = validate_model_manifest(&manifest)
+            .expect_err("manifest should reject bad tagged anchor targetId");
+        assert!(err.message.contains("tagged anchor 'mounting_top'"));
         assert!(err.message.contains("unknown targetId"));
     }
 

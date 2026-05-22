@@ -37,7 +37,7 @@ export const config = writable<AppConfig>({
   defaultSourceLanguage: 'legacyPython',
   defaultGeometryBackend: 'freecad',
   maxGenerationAttempts: 3,
-  maxVerifyAttempts: 0,
+  maxVerifyAttempts: 2,
 });
 export const availableModels = writable<string[]>([]);
 export const isLoadingModels = writable<boolean>(false);

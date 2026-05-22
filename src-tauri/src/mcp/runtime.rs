@@ -949,6 +949,7 @@ fn write_agent_instructions(
            i. If a step will take more than a few seconds, call `session_activity_set`, and call \
               `session_activity_clear` when that step finishes.\n\
            j. Act on the request using `macro_buffer_replace_and_preview`, `macro_preview_render`, or `params_preview_render`; prefer buffer replacement for non-trivial edits.\n\
+           k. After every preview/render that may become a user-visible version, call `verify_generated_model`. If verification is red and the request is still repairable, patch source/params and preview again before commit. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages.\n\
         5. When you finish a user-facing turn, call `session_reply_save` for the final reply \
            (or fatal error) if the user should see text in the thread history.\n\
         6. Immediately after the turn completes, call `request_user_prompt` again so Ecky can \
@@ -1042,7 +1043,7 @@ fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
         After that, treat `bootstrap_ecky`, `workspace_overview`, `agentBrief.primaryGuideUri`, and `agentBrief.mustRead` as the normal modeling policy source of truth. If the source language is `ecky`, write `.ecky`; do not switch to Python because the backend is `freecad`. Read `agentBrief.compatibilityManifestUri` only for concrete op/support questions, and prose backend guides only after lowerer/render errors or artifact/export claims. If `workspace_overview` says the thread has no saved versions yet, \
         use agentBrief config/session defaults plus queued user context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, `macro_buffer_get`, `artifact_manifest_get`, and `target_detail_get(section=...)` \
         before falling back to `target_get`. Use `session_activity_set` / `session_activity_clear` for \
-        long steps instead of relying on terminal text. At the end of each turn, save any final user-facing \
+        long steps instead of relying on terminal text. After preview/render, call `verify_generated_model`; patch and preview again on red before commit. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages. At the end of each turn, save any final user-facing \
         reply with `session_reply_save` and then immediately call `request_user_prompt` again.",
         endpoint_url = endpoint_url,
         agent_label = agent.label,
@@ -3704,6 +3705,10 @@ mod tests {
         assert!(prompt.contains("(extrude (polygon"));
         assert!(prompt.contains("let*"));
         assert!(prompt.contains("macro_preview_render"));
+        assert!(prompt.contains("call `verify_generated_model`"));
+        assert!(prompt.contains("patch and preview again on red before commit"));
+        assert!(prompt.contains("Commit only green verification"));
+        assert!(prompt.contains("do not commit and report capped red honestly"));
         assert!(prompt.contains("config/session defaults"));
 
         assert!(instructions.contains("call `target_meta_get`"));
@@ -3715,6 +3720,9 @@ mod tests {
         assert!(instructions.contains("Ecky authoring card"));
         assert!(instructions.contains("ecky://guides/ecky-source"));
         assert!(instructions.contains("macro_preview_render"));
+        assert!(instructions.contains("call `verify_generated_model`"));
+        assert!(instructions.contains("Commit only green verification"));
+        assert!(instructions.contains("do not commit and report capped red honestly"));
         assert!(instructions.contains("config/session defaults"));
     }
 

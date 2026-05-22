@@ -529,6 +529,7 @@ mod tests {
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             image_data: None,
             visual_kind: None,

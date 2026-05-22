@@ -16,7 +16,6 @@ import { repairDefaultAuthoringContext } from '../runtimeCapabilities';
 import {
   formatBackendError,
   getConfig,
-  getDefaultMacro,
   getHistory,
   getLastDesign,
   getRuntimeCapabilities,
@@ -320,7 +319,6 @@ async function restoreLastDesign() {
     );
     if (!last?.threadId || !last?.messageId) {
       await resetToBlankSession(Boolean(last));
-      await fetchDefaultMacro();
       return;
     }
 
@@ -347,7 +345,6 @@ async function restoreLastDesign() {
 
     if (!targetMessage) {
       await resetToBlankSession(true);
-      await fetchDefaultMacro();
       return;
     }
 
@@ -369,7 +366,6 @@ async function restoreLastDesign() {
   } catch (e) {
     console.error("[Boot] Failed to restore last design:", e);
     await resetToBlankSession(true);
-    await fetchDefaultMacro();
   }
 }
 
@@ -542,22 +538,6 @@ function mergeRestoredMessagePayload(existing: Message | undefined, incoming: Me
     artifactBundle: incoming.artifactBundle ?? existing.artifactBundle,
     modelManifest: incoming.modelManifest ?? existing.modelManifest,
   };
-}
-
-async function fetchDefaultMacro() {
-  try {
-    const code = await getDefaultMacro();
-    if (!get(workingCopy).macroCode) {
-      workingCopy.patch({ macroCode: code });
-      paramPanelState.hydrate({
-        versionId: null,
-        uiSpec: { fields: [] },
-        params: {}
-      });
-    }
-  } catch (e) {
-    console.error("[Boot] Failed to load default macro:", e);
-  }
 }
 
 async function resetToBlankSession(clearSnapshot: boolean) {

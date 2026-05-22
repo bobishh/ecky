@@ -973,7 +973,7 @@
             bind:value={config.maxVerifyAttempts}
           />
           <div class="field-help">
-            VLM screenshot verification rounds after render. 0 = disabled (structural check always runs). Default: 0.
+            VLM screenshot verification rounds after render. 0 = disabled (structural check always runs). Default: 2.
           </div>
         </div>
 
@@ -1578,13 +1578,13 @@
             <div class="field-note" data-testid="engine-system-prompt-carrier">
               {selectedEnginePromptCarrier}
             </div>
-            <textarea
+            <pre
               class="input-mono system-prompt-preview"
               aria-label="SYSTEM PROMPT"
-              readonly
-              spellcheck="false"
-              value={designSystemPrompt}
-            ></textarea>
+              aria-readonly="true"
+              data-testid="engine-system-prompt-code"
+              tabindex="0"
+            ><code>{designSystemPrompt}</code></pre>
             {#if designSystemPromptError}
               <div class="field-note">{designSystemPromptError}</div>
             {/if}
@@ -1841,11 +1841,28 @@
   }
 
   .system-prompt-preview {
+    width: 100%;
     min-height: 220px;
-    resize: vertical;
+    max-height: 360px;
+    margin: 0;
+    padding: 12px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    color: var(--text);
     line-height: 1.45;
     white-space: pre-wrap;
+    word-break: break-word;
     overflow: auto;
+    outline: none;
+  }
+
+  .system-prompt-preview:focus {
+    border-color: var(--primary);
+  }
+
+  .system-prompt-preview code {
+    font: inherit;
+    color: inherit;
   }
 
   .direct-occt-fastpath {

@@ -113,7 +113,7 @@ async function installNimMockWithConfig(page: Page, configInput: ReturnType<type
         return null;
       }
       if (cmd === 'get_design_system_prompt') {
-        return 'Return a JSON object with:\\n1. \"title\": 2-5 words project title.';
+        return 'Return a JSON object with:\\nStart with `(model ...)`.\\n```ecky\\n(model (part body (sphere 10)))\\n```';
       }
       if (cmd === 'list_models') {
         return [
@@ -155,8 +155,8 @@ async function installNimMockWithConfig(page: Page, configInput: ReturnType<type
 
 async function openNimEngineSettings(page: Page) {
   await page.goto('/');
-  await expect(page.getByRole('button', { name: '⚙️' })).toBeVisible();
-  await page.getByRole('button', { name: '⚙️' }).click();
+  await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByText('CONNECTION TYPE')).toBeVisible();
   await expect(page.locator('.engine-card')).not.toHaveCount(0);
   await page.locator('.engine-card').first().click();
@@ -186,13 +186,15 @@ test.describe('NVIDIA NIM vision capability hints', () => {
 
     await expect(page.getByTestId('engine-system-prompt')).toBeVisible();
     await expect(page.getByTestId('engine-system-prompt-carrier')).toContainText('OPENAI / OLLAMA SYSTEM MESSAGE');
-    await expect(page.getByLabel(/SYSTEM PROMPT/i)).toBeEditable({ editable: false });
+    await expect(page.getByTestId('engine-system-prompt-code')).toBeVisible();
+    await expect(page.getByTestId('engine-system-prompt-code')).toContainText('Start with `(model ...)`');
+    await expect(page.locator('[data-testid="engine-system-prompt"] textarea')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'COPY SYSTEM PROMPT' }).click();
 
     await expect.poll(async () =>
       page.evaluate(() => (window as any).__SYSTEM_PROMPT_COPY__ ?? ''),
-    ).toContain('Return a JSON object with:');
+    ).toContain('Start with `(model ...)`');
   });
 
   test('Given selected engine changes When engine settings stay open Then system prompt carrier updates for selected engine', async ({ page }) => {

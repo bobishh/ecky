@@ -346,17 +346,40 @@ fn runner_command_supported(command: &OcctCommand) -> bool {
     }
     match command.op {
         OcctOp::Box => runner_box_keywords_supported(command),
+        OcctOp::Sphere => runner_primitive_align_keywords_supported(command, 1),
+        OcctOp::Cylinder => runner_primitive_align_keywords_supported(command, 2),
+        OcctOp::Cone => runner_primitive_align_keywords_supported(command, 3),
         OcctOp::Profile => runner_profile_keywords_supported(command),
         OcctOp::Plane => runner_plane_keywords_supported(command),
+        OcctOp::PathFrame => runner_path_frame_keywords_supported(command),
         OcctOp::ClipBox => runner_clip_box_keywords_supported(command),
         OcctOp::Fillet | OcctOp::Chamfer => runner_exact_edge_selector_supported(command),
         OcctOp::Shell => runner_shell_supported(command),
+        OcctOp::Bspline => runner_bspline_keywords_supported(command),
         _ => false,
     }
 }
 
 fn runner_box_keywords_supported(command: &OcctCommand) -> bool {
     if command.args.len() != 3
+        || !command
+            .args
+            .iter()
+            .all(|arg| matches!(arg, OcctArg::Number(_)))
+    {
+        return false;
+    }
+    if command.keywords.len() != 1 {
+        return false;
+    }
+    let keyword = &command.keywords[0];
+    keyword.name == "align"
+        && keyword.selector_payload().is_none()
+        && runner_align_tuple_supported(keyword.source_arg())
+}
+
+fn runner_primitive_align_keywords_supported(command: &OcctCommand, arg_count: usize) -> bool {
+    if command.args.len() != arg_count
         || !command
             .args
             .iter()
@@ -447,6 +470,70 @@ fn runner_plane_keywords_supported(command: &OcctCommand) -> bool {
         match keyword.name.as_str() {
             "origin" | "x" | "normal" => {
                 if !matches!(keyword.source_arg(), OcctArg::Point3(_)) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn runner_path_frame_keywords_supported(command: &OcctCommand) -> bool {
+    if command.args.len() != 1 || !matches!(command.args[0], OcctArg::Ref(_)) {
+        return false;
+    }
+    for keyword in &command.keywords {
+        if keyword.selector_payload().is_some() {
+            return false;
+        }
+        match keyword.name.as_str() {
+            "at" => {
+                if !matches!(
+                    keyword.source_arg(),
+                    OcctArg::Number(_) | OcctArg::Symbol(_) | OcctArg::Text(_)
+                ) {
+                    return false;
+                }
+            }
+            "up" => {
+                if !matches!(keyword.source_arg(), OcctArg::Point3(_)) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn runner_bspline_keywords_supported(command: &OcctCommand) -> bool {
+    if command.args.is_empty() || command.args.len() > 2 {
+        return false;
+    }
+    if !matches!(command.args[0], OcctArg::List(_)) {
+        return false;
+    }
+    if command.args.len() == 2 && !matches!(command.args[1], OcctArg::Boolean(_)) {
+        return false;
+    }
+    for keyword in &command.keywords {
+        if keyword.selector_payload().is_some() {
+            return false;
+        }
+        match keyword.name.as_str() {
+            "closed" => {
+                if !matches!(keyword.source_arg(), OcctArg::Boolean(_)) {
+                    return false;
+                }
+            }
+            "tangents" => {
+                if !matches!(keyword.source_arg(), OcctArg::List(_)) {
+                    return false;
+                }
+            }
+            "tangent_scalars" | "tangent-scalars" => {
+                if !matches!(keyword.source_arg(), OcctArg::List(_)) {
                     return false;
                 }
             }
@@ -681,6 +768,11 @@ fn runner_selector_payload(
                 "targetIds": target_ids,
             })
         }
+        crate::ecky_core_ir::CoreSelectorPayload::EdgeTag(tag_name) => serde_json::json!({
+            "type": "targetIds",
+            "kind": "edge",
+            "targetIds": [format!("tag:{tag_name}")],
+        }),
         crate::ecky_core_ir::CoreSelectorPayload::EdgeClauses(clauses) => serde_json::json!({
             "type": "clauses",
             "kind": "edge",
@@ -693,6 +785,11 @@ fn runner_selector_payload(
                 "targetIds": target_ids,
             })
         }
+        crate::ecky_core_ir::CoreSelectorPayload::FaceTag(tag_name) => serde_json::json!({
+            "type": "targetIds",
+            "kind": "face",
+            "targetIds": [format!("tag:{tag_name}")],
+        }),
         crate::ecky_core_ir::CoreSelectorPayload::FaceClauses(clauses) => serde_json::json!({
             "type": "clauses",
             "kind": "face",
@@ -1490,6 +1587,46 @@ mod tests {
         })
     }
 
+    fn supported_round_primitives_with_align_plan() -> OcctPlan {
+        let align = || {
+            vec![OcctKeyword {
+                name: "align".to_string(),
+                value: OcctKeywordValue::Arg(OcctArg::List(vec![
+                    OcctArg::Symbol("min".to_string()),
+                    OcctArg::Symbol("center".to_string()),
+                    OcctArg::Symbol("max".to_string()),
+                ])),
+            }]
+        };
+        sample_plan_for_commands(
+            OcctSlot(3),
+            vec![
+                OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Sphere,
+                    args: vec![OcctArg::Number(4.0)],
+                    keywords: align(),
+                },
+                OcctCommand {
+                    output: OcctSlot(2),
+                    op: OcctOp::Cylinder,
+                    args: vec![OcctArg::Number(2.0), OcctArg::Number(8.0)],
+                    keywords: align(),
+                },
+                OcctCommand {
+                    output: OcctSlot(3),
+                    op: OcctOp::Cone,
+                    args: vec![
+                        OcctArg::Number(3.0),
+                        OcctArg::Number(1.0),
+                        OcctArg::Number(7.0),
+                    ],
+                    keywords: align(),
+                },
+            ],
+        )
+    }
+
     fn keyword_profile_holes_plan() -> OcctPlan {
         sample_plan_for_commands(
             OcctSlot(4),
@@ -1906,6 +2043,9 @@ mod tests {
     #[test]
     fn runner_supports_plan_accepts_supported_keyword_profile_and_clip_box_forms() {
         assert!(runner_supports_plan(&supported_box_with_keyword_plan()));
+        assert!(runner_supports_plan(
+            &supported_round_primitives_with_align_plan()
+        ));
         assert!(runner_supports_plan(&keyworded_plane_plan()));
         assert!(runner_supports_plan(&keyword_profile_holes_plan()));
         assert!(runner_supports_plan(&keyword_clip_box_plan()));

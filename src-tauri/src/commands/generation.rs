@@ -11,7 +11,7 @@ use crate::models::{
     validate_design_output, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle,
     Attachment, AttachmentKind, DesignOutput, FinalizeStatus, GenerateDesignOptions,
     GenerateOutput, IntentDecision, InteractionMode, MacroDialect, Message, MessageRole,
-    MessageStatus, ModelManifest, UiSpec, UsageSummary,
+    MessageStatus, ModelManifest, StructuralVerificationResult, UiSpec, UsageSummary,
 };
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::{
@@ -19,16 +19,11 @@ use crate::{
     TECHNICAL_SYSTEM_PROMPT,
 };
 
-/// Complex, multi-part parametric Ecky example used for ecky<->build123d parity checks.
-/// Embedded verbatim so API-mode requests carry full language reference without URLs.
-const COMPLEX_ECKY_EXAMPLE: &str =
-    include_str!("../../tests/fixtures/cad/surface/thomas_modular_ramp.ecky");
-
 /// Per-language documentation appended to the API-mode system prompt.
 ///
 /// FreeCAD Python and build123d are publicly documented, so a short recall note plus
 /// the app-specific runtime contract is enough. Ecky is proprietary and unknown to
-/// models, so the full surface guide plus a complete complex example is embedded.
+/// models, so a compact authoring guide is embedded.
 pub fn language_guide_text(
     source_language: crate::models::SourceLanguage,
     geometry_backend: crate::models::GeometryBackend,
@@ -38,10 +33,8 @@ pub fn language_guide_text(
             "Ecky is a proprietary in-app CAD language. It is NOT publicly documented; \
              this guide and the example below are the complete authoritative reference. \
              Do not invent forms, ops, or keywords beyond what is listed here.\n\n{}\n\
-             Complete worked example (complex, multi-part, parametric; runs unchanged on \
-             both `freecad` and `build123d` backends):\n```ecky\n{}\n```\n",
-            ecky_ir_v0_guide_text(geometry_backend),
-            COMPLEX_ECKY_EXAMPLE.trim()
+             Prefer the smallest model that satisfies the request, then add named structure.\n",
+            ecky_ir_v0_guide_text(geometry_backend)
         ),
         crate::models::SourceLanguage::Build123d => build123d_python_guide_text(),
         crate::models::SourceLanguage::LegacyPython => freecad_python_guide_text(),
@@ -121,118 +114,128 @@ fn ecky_backend_guide_text(
     } else {
         format!("Target geometryBackend: `{backend_label}`.\n")
     };
-    let runtime_direction = if matches!(backend, crate::models::GeometryBackend::EckyRust) {
-        "\
-         EckyRust CAD VM direction:\n\
-         - EckyRust is a controlled CAD runtime pipeline: parse -> expand -> typecheck -> lower -> validate.\n\
-         - Public authoring backend is still `mesh`/`eckyRust`; direct OCCT is an internal STEP/STL fast path for the supported Core IR subset when the bundled SDK is ready.\n\
-         - Do not promise STEP for every mesh/eckyRust render. Check `ArtifactBundle.exportArtifacts` for a `format=step` artifact after render.\n\
-         - Prefer typed/static errors and structural verification first; screenshot verification second.\n\
-         - Wall-pattern is mesh/eckyRust only. Point/list helpers are portable across `.ecky` backends.\n\n"
-            .to_string()
+    let backend_note = if matches!(backend, crate::models::GeometryBackend::EckyRust) {
+        "- `mesh`/`eckyRust` renders through EckyRust CAD VM. Do not promise STEP unless `ArtifactBundle.exportArtifacts` proves one exists.\n"
     } else {
-        "\
-         Verification order:\n\
-         - Prefer typed/static errors and structural verification first; screenshot verification second.\n\
-         - Point/list helpers are portable across `.ecky` backends. Wall-pattern is mesh/eckyRust only.\n\n"
-            .to_string()
+        "- This is still `.ecky` source. Backend only selects lowerer/runtime behavior; do not write Python for `.ecky` requests.\n"
     };
     let wall_patterns = if surface.wall_pattern_modes.is_empty() {
         String::new()
     } else {
         format!(
-            "\nMesh-only wall patterns:\n- `wall-pattern` is available only on `mesh`/`eckyRust`.\n- Named `:mode` values: {}.\n- Implicit/manifold modes: `gyroid`, `schwarz-p`, `schwarz-d`/`diamond-field`, `neovius`.\n- Chaotic field mode: `attractor-field`.\n- Use `:seed` for deterministic noise-like and attractor-field patterns.\n",
+            "- Mesh-only `wall-pattern` is available here. Named `:mode` values: {}.\n",
             crate::ecky_language_surface::join_backticked(surface.wall_pattern_modes)
         )
     };
+    let supported_ops = crate::ecky_language_surface::join_backticked(&surface.cad_ops);
+    let model_clauses = crate::ecky_language_surface::join_backticked(surface.model_clauses);
+    let expression_forms = crate::ecky_language_surface::join_backticked(surface.expression_forms);
+    let numeric_helpers = crate::ecky_language_surface::join_backticked(surface.numeric_helpers);
+    let point_helpers = crate::ecky_language_surface::join_backticked(surface.point_list_helpers);
 
     format!(
         "Return canonical Ecky source in `macro_code`.\n\
-         Current fileExtension: `.ecky`.\n\
-         Current sourceLanguage: `ecky`.\n\
-         {target_line}\
-         Start with `(model ...)`.\n\n\
-         {runtime_direction}\
-         Typed holes:\n\
-         - {typed_hole_policy}\n\n\
-         Model top-level clauses:\n\
-         - Direct clauses: {}.\n\
-         - Model-level wrappers: {}; wrapper bodies splice model clauses.\n\
-         - `if`, `map`, `flat-map`, helper calls, and generated clause lists are not valid directly at model-clause level.\n\
-         - Use `map`/`range` inside `part` geometry/list expressions, not to emit top-level `part` or `params` clauses.\n\n\
-         Expression/list forms:\n\
-         - Supported forms: {}.\n\
-         - `let` is parallel; use `let*` for sequential bindings.\n\
-         - `map` supports multiple source lists: `(map (lambda (x y) ...) xs ys)`.\n\
-         - Static tuple destructuring is supported only for `zip` and static `enumerate`: `(map (lambda ((x y)) ...) (zip xs ys))`, `(map (lambda ((index value)) ...) (enumerate (range 8)))`.\n\
-         - Keep code pure: no `set!`, assignment, mutation, or hidden side effects.\n\n\
-         Numeric and generative helpers:\n\
-         - Numeric helpers: {}.\n\
-         - Deterministic point/list helpers: {}.\n\
-         - Chaotic helper signatures: `(lorenz-points count dt scale)`, `(rossler-points count dt scale)`, `(logistic-bifurcation-points r-count samples transient scale)`, `(henon-points count scale)`.\n\
-         - Chaotic point helpers are deterministic from their numeric args; current chaotic point helpers have no separate seed argument.\n\
-         - Seeded helpers are deterministic: same literal counts/steps, params, and seed produce the same points. No unseeded randomness. Use explicit `seed` params with `hash01`, `noise2`, `fbm2`, `voronoi2`, `organic-loop`, `jittered-grid`, and `voronoi-cells`.\n\
-         - Bounded literal counts/steps: keep `count`, `samples`, `transient`, `rows`, and `cols` as small positive integer literals; drive radius, spacing, amplitude, scale, and seed from params.\n\n\
-         Supported CAD ops for this backend:\n\
-         - {}.\n\
-         - Keywords are not callable nodes. Example: `:align` belongs on primitives; do not call `(align ...)`.\n\
-         {wall_patterns}\n\
-         Decorative text/logo/relief primitives:\n\
-         - Use `text` for raised or engraved lettering: `(text \"LABEL\" size)`; use `extrude` for relief height and `difference` for engraving.\n\
-         - Use `svg` for logo/profile artwork: `(svg path-or-data)`; prefer absolute attachment/artifact paths or literal SVG data.\n\
-         - Use `import-stl` only when reusing a provided mesh asset: `(import-stl path)`; do not invent local asset paths.\n\
-         - Drive decorative size from named dimensions such as `logo-width`, `logo-height`, `text-size`, `relief-height`, and `engrave-depth`.\n\
-         - Place top-face decoration at `(+ base-height relief-height)` or named equivalent, with base solids aligned `:align '(center center min)` so Z math is explicit.\n\
-         - For vertical wall decoration, rotate/translate onto the wall plane; keep relief normal pointing outward and bind wall side/orientation names.\n\
-         - Name fit-critical bindings before geometry, e.g. `wall-thickness`, `top-z`, `logo-x`, `logo-y`, `relief-height`; no anonymous offsets for placement or clearance.\n\n\
-         Param types:\n\
-         - `(number key default :label \"...\" :min n :max n)`.\n\
-         - `(select key \"default\" :label \"...\" :options ((\"Label\" \"value\") ...))`.\n\
-         - `(toggle key #t :label \"...\")`.\n\
-         - `(image key \"\" :label \"...\")`.\n\n\
-         Examples:\n\n\
-         Model-level let* splicing clauses:\n\
-         (model\n\
-           (let* ((default-r 20)\n\
-                  (default-h (* default-r 3)))\n\
-             (params (number radius default-r :label \"Radius\" :min 5 :max 80)\n\
-                     (number height default-h :label \"Height\" :min 10 :max 200))\n\
-             (part body (cylinder radius height 48))))\n\n\
-         Organic loop profile:\n\
-         (model\n\
-           (params (number seed 7 :label \"Seed\" :min 0 :max 99))\n\
-           (part body\n\
-             (extrude (polygon (organic-loop 24 30 4 seed)) 6)))\n\n\
-         Voronoi-ish perforation centers:\n\
-         (model\n\
-           (params (number seed 3 :label \"Seed\" :min 0 :max 99))\n\
-           (part panel\n\
-             (difference\n\
-               (box 90 60 4 :align '(center center min))\n\
-               (apply union\n\
-                 (map (lambda (cell)\n\
-                        (let* ((col (- cell (* 6 (floor (/ cell 6)))))\n\
-                               (row (floor (/ cell 6)))\n\
-                               (x (* (- col 2.5) 14))\n\
-                               (y (* (- row 1.5) 12))\n\
-                               (jx (+ x (* 2 (hash-signed col row seed))))\n\
-                               (jy (+ y (* 2 (hash-signed (+ col 17) (+ row 5) seed)))))\n\
-                          (translate jx jy -1 (cylinder 2.2 8 16))))\n\
-                      (range 24))))))\n\n\
-         Zip destructuring:\n\
-         (model\n\
-           (part body\n\
-             (extrude\n\
-               (polygon\n\
-                 (map (lambda ((x y)) (list x y))\n\
-                      (zip (range 0 4) (list 0 12 12 0))))\n\
-               2)))\n",
-        crate::ecky_language_surface::join_backticked(surface.model_clauses),
-        crate::ecky_language_surface::join_backticked(surface.model_wrappers),
-        crate::ecky_language_surface::join_backticked(surface.expression_forms),
-        crate::ecky_language_surface::join_backticked(surface.numeric_helpers),
-        crate::ecky_language_surface::join_backticked(surface.point_list_helpers),
-        crate::ecky_language_surface::join_backticked(&surface.cad_ops),
+Current fileExtension: `.ecky`.\n\
+Current sourceLanguage: `ecky`.\n\
+{target_line}\
+Start every renderable answer with `(model ...)`.\n\n\
+AUTHORING RULES\n\
+- Output finished renderable geometry unless user explicitly asks for a placeholder. {typed_hole_policy}\n\
+- Top-level model clauses: {model_clauses}. Use `params`, `part`, and `meta` directly under `model`.\n\
+- Supported expression forms: {expression_forms}. Use `let*` when later bindings depend on earlier ones.\n\
+- Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry, not to generate top-level clauses.\n\
+- Supported CAD ops for this backend: {supported_ops}.\n\
+- Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}.\n\
+- Keywords are not callable nodes: write `(box 10 10 2 :align '(center center min))`, never `(align ...)`.\n\
+- Name fit-critical bindings before use: `wall`, `clearance`, `bore-r`, `top-z`. No anonymous offsets for fit-critical geometry.\n\
+- For generated Ecky models, write top-level `(verify ...)` clauses in the same `(model ...)` from the user's requirements before trusting geometry; a red first render is expected repair input.\n\
+- Verify with typed/static errors first, structural checks second, screenshots last.\n\
+{backend_note}{wall_patterns}\n\
+PARAMS\n\
+- `(number key default :label \"...\" :min n :max n :step n)`\n\
+- `(select key \"default\" :label \"...\" :options ((\"Label\" \"value\") ...))`\n\
+- `(toggle key #t :label \"...\")`\n\
+- `(image key \"\" :label \"...\")`\n\n\
+PROGRESSIVE ECKY EXAMPLES\n\n\
+1. First solid:\n\
+```ecky\n\
+(model\n\
+  (part marker\n\
+    (sphere 10)))\n\
+```\n\n\
+2. Sketch then extrude:\n\
+```ecky\n\
+(model\n\
+  (part plate\n\
+    (extrude (rounded-rect 70 42 5) 4)))\n\
+```\n\n\
+3. Sketch with a hole:\n\
+```ecky\n\
+(model\n\
+  (part washer\n\
+    (extrude\n\
+      (profile :outer (rounded-rect 70 42 5)\n\
+               :holes (circle 9 64))\n\
+      4)))\n\
+```\n\n\
+4. Parameters, named stages, and cuts:\n\
+```ecky\n\
+(model\n\
+  (params\n\
+    (number plate-w 80 :label \"Plate width\" :min 40 :max 120)\n\
+    (number plate-h 48 :label \"Plate height\" :min 20 :max 80)\n\
+    (number hole-r 4 :label \"Hole radius\" :min 2 :max 8))\n\
+  (part mount\n\
+    (build\n\
+      (shape blank (extrude (rounded-rect plate-w plate-h 4) 5))\n\
+      (shape left-hole (translate -24 0 -0.5 (cylinder hole-r 6)))\n\
+      (shape right-hole (translate 24 0 -0.5 (cylinder hole-r 6)))\n\
+      (result (difference blank left-hole right-hole)))))\n\
+```\n\n\
+5. Repetition instead of copy-paste:\n\
+```ecky\n\
+(model\n\
+  (part ribbed-plate\n\
+    (build\n\
+      (shape base (box 90 40 4))\n\
+      (shape ribs\n\
+        (repeat-union i 5\n\
+          (translate (- (* i 18) 36) 0 5 (box 4 34 6))))\n\
+      (result (union base ribs)))))\n\
+```\n\n\
+6. Final-pattern model: plate + bore + clipped thread + repeated features:\n\
+```ecky\n\
+(model\n\
+  (params\n\
+    (number lens-bore-d 59.6 :label \"Lens bore D\" :min 50 :max 68)\n\
+    (number clearance 0.25 :label \"Thread clearance\" :min 0.1 :max 0.6))\n\
+  (part adapter\n\
+    (build\n\
+      (shape bore-r (/ lens-bore-d 2))\n\
+      (shape carrier\n\
+        (extrude\n\
+          (profile :outer (rounded-rect 96 62 6)\n\
+                   :holes (rounded-rect 72 38 3))\n\
+          4))\n\
+      (shape socket\n\
+        (difference\n\
+          (translate 0 0 4 (cylinder (+ bore-r 5) 24))\n\
+          (translate 0 0 3.5 (cylinder (+ bore-r clearance) 25))))\n\
+      (shape thread-a\n\
+        (clip-box\n\
+          (translate 0 0 7\n\
+            (helical-ridge :radius bore-r :pitch 4 :height 18\n\
+                           :base-width 1.2 :crest-width 0.55 :depth 0.9\n\
+                           :female #t :clearance clearance))\n\
+          :x (-36 36) :y (-36 36) :z (7 25)))\n\
+      (shape thread-b (rotate 0 0 180 thread-a))\n\
+      (shape ribs\n\
+        (repeat-union i 5\n\
+          (translate (- (* i 18) 36) 31 6 (box 5 8 8))))\n\
+      (result (union carrier socket thread-a thread-b ribs)))))\n\
+```\n\n\
+READING ORDER FOR GENERATED CODE\n\
+Start primitive or sketch. Add params. Add named `build` stages. Add booleans. Add repetition/placement. Add verification clauses only when model invariants matter.\n",
         typed_hole_policy = surface.typed_hole_policy,
     )
 }
@@ -802,6 +805,7 @@ pub async fn init_generation_attempt(
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             image_data,
             visual_kind: None,
@@ -829,6 +833,7 @@ pub async fn init_generation_attempt(
             usage: None,
             artifact_bundle: None,
             model_manifest: None,
+            structural_verification: None,
             agent_origin: None,
             image_data: None,
             visual_kind: None,
@@ -890,6 +895,7 @@ pub async fn finalize_generation_attempt(
             usage: usage.as_ref(),
             artifact_bundle: artifact_bundle.as_ref(),
             model_manifest: model_manifest.as_ref(),
+            structural_verification: None,
             visual_kind: None,
             content: content.as_deref(),
         },
@@ -942,6 +948,19 @@ pub async fn finalize_generation_attempt(
         }
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn persist_structural_verification(
+    message_id: String,
+    structural_verification: StructuralVerificationResult,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let db = state.db.lock().await;
+    db::update_message_structural_verification(&db, &message_id, Some(&structural_verification))
+        .map_err(|err| AppError::persistence(err.to_string()))?;
     Ok(())
 }
 
@@ -1199,48 +1218,34 @@ mod tests {
         assert!(build123d.contains("Current sourceLanguage: `ecky`."));
         assert!(build123d.contains("Target geometryBackend: `build123d`."));
         assert!(build123d.contains("Return canonical Ecky source in `macro_code`."));
-        assert!(build123d.contains("typed/static errors and structural verification first"));
-        assert!(build123d.contains("Point/list helpers are portable"));
-        assert!(build123d.contains("Wall-pattern is mesh/eckyRust only"));
-        assert!(
-            build123d.contains("Typed holes are supported only as CAD-VM planning placeholders")
-        );
-        assert!(build123d.contains("unfilled holes intentionally reject during render/lowering"));
-        assert!(build123d.contains(
-            "Do not emit `(hole ...)` when the user expects a finished renderable model"
-        ));
-        assert!(build123d.contains("Direct clauses: `params`, `part`, `meta`."));
-        assert!(build123d.contains("wrapper bodies splice model clauses"));
-        assert!(build123d.contains("Use `map`/`range` inside `part` geometry/list expressions"));
-        assert!(build123d.contains("Static tuple destructuring is supported only for `zip`"));
-        assert!(build123d.contains("Decorative text/logo/relief primitives"));
-        assert!(build123d.contains("Use `text` for raised or engraved lettering"));
-        assert!(build123d.contains("Use `svg` for logo/profile artwork"));
-        assert!(build123d.contains("Use `import-stl` only when reusing a provided mesh asset"));
-        assert!(build123d.contains("Drive decorative size from named dimensions"));
-        assert!(build123d.contains("Place top-face decoration at `(+ base-height relief-height)`"));
-        assert!(build123d
-            .contains("For vertical wall decoration, rotate/translate onto the wall plane"));
+        assert!(build123d.contains("Start every renderable answer with `(model ...)`."));
+        assert!(build123d.contains("PROGRESSIVE ECKY EXAMPLES"));
+        assert!(build123d.contains("1. First solid"));
+        assert!(build123d.contains("(sphere 10)"));
+        assert!(build123d.contains("2. Sketch then extrude"));
+        assert!(build123d.contains("(extrude (rounded-rect 70 42 5) 4)"));
+        assert!(build123d.contains("3. Sketch with a hole"));
+        assert!(build123d.contains("(profile :outer (rounded-rect 70 42 5)"));
+        assert!(build123d.contains("4. Parameters, named stages, and cuts"));
+        assert!(build123d.contains("(params"));
+        assert!(build123d.contains("(build"));
+        assert!(build123d.contains("(difference blank left-hole right-hole)"));
+        assert!(build123d.contains("5. Repetition instead of copy-paste"));
+        assert!(build123d.contains("(repeat-union i 5"));
+        assert!(build123d.contains("6. Final-pattern model"));
+        assert!(build123d.contains("helical-ridge"));
+        assert!(build123d.contains("clip-box"));
+        assert!(build123d.contains("READING ORDER FOR GENERATED CODE"));
+        assert!(build123d.contains("Use `let*` when later bindings depend on earlier ones"));
+        assert!(build123d.contains("Use `map`, `range`, `repeat-union`, and `repeat-compound`"));
         assert!(build123d.contains("Name fit-critical bindings"));
-        assert!(build123d.contains("Zip destructuring"));
-        assert!(build123d.contains("Deterministic point/list helpers"));
-        assert!(build123d.contains("`organic-loop`"));
-        assert!(build123d.contains("`voronoi-cells`"));
-        assert!(build123d.contains("`lorenz-points`"));
-        assert!(build123d.contains("`rossler-points`"));
-        assert!(build123d.contains("`logistic-bifurcation-points`"));
-        assert!(build123d.contains("`henon-points`"));
-        assert!(build123d.contains("Bounded literal counts/steps"));
-        assert!(build123d.contains("Seeded helpers are deterministic"));
         assert!(build123d.contains("`offset-rounded`"));
         assert!(build123d.contains("`grid-array`"));
         assert!(build123d.contains("`arc-array`"));
         assert!(build123d.contains("`deg->rad`"));
         assert!(build123d.contains("`rad->deg`"));
-        assert!(build123d.contains("Model-level let* splicing clauses"));
-        assert!(!build123d.contains("Python"));
+        assert!(build123d.contains("do not write Python for `.ecky` requests"));
         assert!(!build123d.contains("`wall-pattern`"));
-        assert!(!build123d.contains("direct OCCT"));
         assert!(!build123d.contains("`schwarz-p`"));
         assert!(!build123d.contains("`schwarz-d`"));
         assert!(!build123d.contains("`diamond-field`"));
@@ -1251,21 +1256,18 @@ mod tests {
         assert!(ecky.contains("Current fileExtension: `.ecky`."));
         assert!(ecky.contains("Current sourceLanguage: `ecky`."));
         assert!(ecky.contains("never from thread metadata"));
-        assert!(ecky.contains("EckyRust is a controlled CAD runtime pipeline"));
-        assert!(ecky.contains("parse -> expand -> typecheck -> lower -> validate"));
-        assert!(ecky.contains("direct OCCT is an internal STEP/STL fast path"));
-        assert!(ecky.contains("Do not promise STEP for every mesh/eckyRust render"));
+        assert!(ecky.contains("renders through EckyRust CAD VM"));
+        assert!(ecky.contains("Do not promise STEP"));
         assert!(ecky.contains("ArtifactBundle.exportArtifacts"));
-        assert!(ecky.contains("typed/static errors and structural verification first"));
-        assert!(ecky.contains("Point/list helpers are portable"));
-        assert!(ecky.contains("Typed holes are supported only as CAD-VM planning placeholders"));
-        assert!(ecky.contains("unfilled holes intentionally reject during render/lowering"));
-        assert!(ecky.contains("Direct clauses: `params`, `part`, `meta`."));
-        assert!(ecky.contains("wrapper bodies splice model clauses"));
-        assert!(ecky.contains("Use `map`/`range` inside `part` geometry/list expressions"));
-        assert!(ecky.contains("Static tuple destructuring is supported only for `zip`"));
-        assert!(ecky.contains("Zip destructuring"));
-        assert!(ecky.contains("Model-level let* splicing clauses"));
+        assert!(ecky.contains("PROGRESSIVE ECKY EXAMPLES"));
+        assert!(ecky.contains("write top-level `(verify ...)` clauses"));
+        assert!(ecky.contains("red first render is expected repair input"));
+        assert!(ecky.contains("(sphere 10)"));
+        assert!(ecky.contains("(extrude (rounded-rect 70 42 5) 4)"));
+        assert!(ecky.contains("(difference blank left-hole right-hole)"));
+        assert!(ecky.contains("(repeat-union i 5"));
+        assert!(ecky.contains("helical-ridge"));
+        assert!(ecky.contains("clip-box"));
         assert!(ecky.contains("`wall-pattern`"));
         assert!(ecky.contains("`cellular`"));
         assert!(ecky.contains("`gyroid`"));
@@ -1279,25 +1281,12 @@ mod tests {
         assert!(freecad.contains("Current fileExtension: `.ecky`."));
         assert!(freecad.contains("Target geometryBackend: `freecad`."));
         assert!(freecad.contains("Return canonical Ecky source in `macro_code`."));
-        assert!(freecad.contains("typed/static errors and structural verification first"));
-        assert!(freecad.contains("Point/list helpers are portable"));
-        assert!(freecad.contains("Wall-pattern is mesh/eckyRust only"));
-        assert!(freecad.contains("Typed holes are supported only as CAD-VM planning placeholders"));
-        assert!(freecad.contains("unfilled holes intentionally reject during render/lowering"));
-        assert!(freecad.contains("Direct clauses: `params`, `part`, `meta`."));
-        assert!(freecad.contains("Use `map`/`range` inside `part` geometry/list expressions"));
-        assert!(freecad.contains("Static tuple destructuring is supported only for `zip`"));
-        assert!(freecad.contains("Decorative text/logo/relief primitives"));
-        assert!(freecad.contains("Use `text` for raised or engraved lettering"));
-        assert!(freecad.contains("Use `svg` for logo/profile artwork"));
-        assert!(freecad.contains("Use `import-stl` only when reusing a provided mesh asset"));
-        assert!(freecad.contains("Drive decorative size from named dimensions"));
-        assert!(freecad.contains("Place top-face decoration at `(+ base-height relief-height)`"));
-        assert!(
-            freecad.contains("For vertical wall decoration, rotate/translate onto the wall plane")
-        );
-        assert!(freecad.contains("Name fit-critical bindings"));
-        assert!(freecad.contains("Zip destructuring"));
+        assert!(freecad.contains("This is still `.ecky` source"));
+        assert!(freecad.contains("do not write Python for `.ecky` requests"));
+        assert!(freecad.contains("PROGRESSIVE ECKY EXAMPLES"));
+        assert!(freecad.contains("(sphere 10)"));
+        assert!(freecad.contains("Sketch then extrude"));
+        assert!(freecad.contains("Final-pattern model"));
         assert!(freecad.contains("`grid-array`"));
         assert!(freecad.contains("`arc-array`"));
         assert!(!freecad.contains("`wall-pattern`"));

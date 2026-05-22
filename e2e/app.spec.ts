@@ -1,5 +1,9 @@
 import { test, expect } from '@playwright/test';
 
+async function numericZIndex(locator) {
+  return locator.evaluate((element) => Number.parseInt(window.getComputedStyle(element).zIndex || '0', 10));
+}
+
 test('Given app opens When workbench loads Then bottom icon dock controls are available', async ({ page }) => {
   await page.goto('/');
 
@@ -78,10 +82,11 @@ test('Given workbench dock When code button clicked twice Then inspector toggles
 
   const codeButton = dock.getByRole('button', { name: 'CODE' });
   await codeButton.click();
-  await expect(page.getByText(/MACRO INSPECTOR:/i)).toHaveCount(0);
+  const codeWindow = page.locator('[data-window-id="code"]');
+  await expect(codeWindow).toBeHidden();
 
   await codeButton.click();
-  await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
+  await expect(codeWindow).toBeVisible();
 });
 
 test('Given workbench dock When sketch clicked twice Then sketch workspace behaves like a toggle window without close sketch action', async ({
@@ -109,17 +114,22 @@ test('Given workbench dock When docs opens Then floating docs window renders les
 
   const docsWindow = page.locator('[data-window-id="docs"]');
   await expect(docsWindow).toBeVisible();
-  await expect(docsWindow.getByRole('heading', { name: 'Ecky Language Docs' })).toBeVisible();
-  await expect(docsWindow.getByRole('button', { name: 'Language Overview' })).toBeVisible();
+  await expect(docsWindow.getByRole('heading', { name: 'Ecky IR Field Guide' })).toBeVisible();
+  await expect(docsWindow.getByRole('button', { name: 'First Solid: Ball on a Base' })).toBeVisible();
+  await expect(docsWindow.getByRole('button', { name: 'Final Model: Integrated Film Adapter Open Helicoid v9' })).toBeVisible();
   await expect(docsWindow.getByRole('button', { name: 'Verify Clauses' })).toBeVisible();
 
-  await docsWindow.getByRole('button', { name: 'Forms and Structure' }).click();
-  await expect(docsWindow.getByRole('heading', { name: 'Forms and Structure' })).toBeVisible();
+  await docsWindow.getByRole('button', { name: 'First Solid: Ball on a Base' }).click();
+  await expect(docsWindow.getByRole('heading', { name: 'First Solid: Ball on a Base' })).toBeVisible();
   await expect(docsWindow.locator('pre').first()).toContainText('(model');
+  await expect(docsWindow.locator('img[alt*="First Solid"]').first()).toBeVisible();
   await docsWindow.getByRole('button', { name: 'OPEN IN CODE' }).click();
-  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Forms and Structure' });
+  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: First Solid: Ball on a Base' });
   await expect(codeModal).toBeVisible();
-  await expect(codeModal.locator('.cm-content')).toContainText('(model');
+  await expect(codeModal).toHaveClass(/window--focused/);
+  await expect(docsWindow).not.toHaveClass(/window--focused/);
+  expect(await numericZIndex(codeModal)).toBeGreaterThan(await numericZIndex(docsWindow));
+  await expect(codeModal.locator('.cm-content')).toContainText('(sphere 10)');
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();
@@ -127,13 +137,14 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(codeModal.getByText('ECKY SOURCE')).toHaveCount(0);
   await expect(codeModal.getByText('SCRATCH SNIPPET ONLY')).toHaveCount(0);
   await codeModal.locator('.window-close').click();
-  await expect(codeModal).toHaveCount(0);
+  await expect(codeModal).toBeHidden();
+  await expect(docsWindow).toHaveClass(/window--focused/);
 
-  await docsWindow.getByRole('button', { name: 'Tutorial: Path to Solid' }).click();
-  await expect(docsWindow.getByRole('heading', { name: 'Tutorial: Path to Solid' })).toBeVisible();
-  await expect(docsWindow.locator('pre').first()).toContainText('(sweep');
+  await docsWindow.getByRole('button', { name: 'Paths and Surfaces: Revolve and Sweep' }).click();
+  await expect(docsWindow.getByRole('heading', { name: 'Paths and Surfaces: Revolve and Sweep' })).toBeVisible();
+  await expect(docsWindow.locator('pre').first()).toContainText('(revolve');
   await docsWindow.getByRole('button', { name: 'OPEN IN CODE' }).click();
-  const tutorialModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Tutorial: Path to Solid' });
+  const tutorialModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Paths and Surfaces: Revolve and Sweep' });
   await expect(tutorialModal).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'COPY CODE' })).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
@@ -142,9 +153,9 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(tutorialModal.getByText('ECKY SOURCE')).toHaveCount(0);
   await expect(tutorialModal.getByText('SCRATCH SNIPPET ONLY')).toHaveCount(0);
   await expect(tutorialModal.locator('.cm-ecky-keyword').filter({ hasText: 'model' }).first()).toHaveCSS('color', 'rgb(212, 160, 79)');
-  await expect(tutorialModal.locator('.cm-ecky-number').filter({ hasText: '1.4' }).first()).toHaveCSS('color', 'rgb(125, 178, 215)');
+  await expect(tutorialModal.locator('.cm-ecky-number').filter({ hasText: '360' }).first()).toHaveCSS('color', 'rgb(125, 178, 215)');
   await tutorialModal.locator('.window-close').click();
-  await expect(tutorialModal).toHaveCount(0);
+  await expect(tutorialModal).toBeHidden();
 
   await docsWindow.getByRole('button', { name: 'Verify Clauses' }).click();
   await expect(docsWindow.getByRole('heading', { name: 'Verify Clauses' })).toBeVisible();
@@ -162,7 +173,7 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(verifyModal.getByText('SCRATCH SNIPPET ONLY')).toHaveCount(0);
   await expect(verifyModal.locator('.cm-ecky-keyword').filter({ hasText: 'verify' }).first()).toHaveCSS('color', 'rgb(212, 160, 79)');
   await verifyModal.locator('.window-close').click();
-  await expect(verifyModal).toHaveCount(0);
+  await expect(verifyModal).toBeHidden();
 
   await docsWindow.getByRole('button', { name: /Constraint dojo/i }).click();
   await expect(docsWindow.getByRole('heading', { name: 'Constraint Dojo' })).toBeVisible();
@@ -176,10 +187,10 @@ test('Given fresh thread When docs snippet opens in code Then modal can apply as
   await page.goto('/');
   await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'DOCS' }).click();
   const docsWindow = page.locator('[data-window-id="docs"]');
-  await docsWindow.getByRole('button', { name: 'Tutorial: Path to Solid' }).click();
+  await docsWindow.getByRole('button', { name: 'First Solid: Ball on a Base' }).click();
   await docsWindow.getByRole('button', { name: 'OPEN IN CODE' }).click();
 
-  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Tutorial: Path to Solid' });
+  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: First Solid: Ball on a Base' });
   await expect(codeModal).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();

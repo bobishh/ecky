@@ -5,35 +5,27 @@ import path from 'node:path';
 import { buildEckyIrBook } from '../src/lib/docs/eckyIrBook';
 
 const root = process.cwd();
-const outputDir = path.join(root, 'dist', 'books');
+const bookTargetDir = path.join(root, 'target', 'book');
+const outputDir = path.join(bookTargetDir, 'dist', 'books');
 const htmlPath = path.join(outputDir, 'ecky-ir-field-guide.html');
 const epubPath = path.join(outputDir, 'ecky-ir-field-guide.epub');
 const epubWorkDir = path.join(outputDir, 'ecky-ir-field-guide-epub');
+const docsSourcePath = path.join(root, 'public', 'docs', 'ecky-ir.md');
 
-const docsMarkdown = read('public', 'docs', 'ecky-ir.md');
-const walkthroughMarkdown = read('docs', 'books', 'ecky-ir-helicoid-walkthrough.md');
-const complexModelSource = read(
-  'model-runtime',
-  'examples',
-  'film-scanning-adapter-helicoid.ecky',
-);
+const docsMarkdown = fs.readFileSync(docsSourcePath, 'utf8');
 
 const book = buildEckyIrBook({
   docsMarkdown,
-  walkthroughMarkdown,
-  complexModelSource,
+  assetSourceRoot: 'target/book/public/docs',
 });
 
 fs.mkdirSync(outputDir, { recursive: true });
 fs.writeFileSync(htmlPath, book.html);
+copyHtmlAssets(book);
 writeEpub(book);
 
 console.log(`HTML: ${htmlPath}`);
 console.log(`EPUB: ${epubPath}`);
-
-function read(...parts: string[]): string {
-  return fs.readFileSync(path.join(root, ...parts), 'utf8');
-}
 
 function writeEpub(book: ReturnType<typeof buildEckyIrBook>) {
   const metaInfDir = path.join(epubWorkDir, 'META-INF');
@@ -57,6 +49,7 @@ function writeEpub(book: ReturnType<typeof buildEckyIrBook>) {
   fs.writeFileSync(path.join(oebpsDir, 'content.xhtml'), bookContentXhtml(book));
   fs.writeFileSync(path.join(oebpsDir, 'nav.xhtml'), bookNavXhtml(book));
   fs.writeFileSync(path.join(oebpsDir, 'package.opf'), bookPackageOpf(book));
+  copyEpubAssets(book, oebpsDir);
 
   fs.rmSync(epubPath, { force: true });
   execFileSync('zip', ['-X0', epubPath, 'mimetype'], {
@@ -92,7 +85,7 @@ function bookContentXhtml(book: ReturnType<typeof buildEckyIrBook>): string {
       <h1>${escapeXml(book.title)}</h1>
       <div class="summary">
         ${book.summaryHtml}
-        <p>This edition packages canonical Ecky IR documentation and adds one full teardown of the film scanning adapter helicoid model.</p>
+        <p>This edition packages the canonical Ecky IR language reference as a single EPUB.</p>
       </div>
     </section>
     ${chapters}
@@ -122,6 +115,13 @@ function bookNavXhtml(book: ReturnType<typeof buildEckyIrBook>): string {
 }
 
 function bookPackageOpf(book: ReturnType<typeof buildEckyIrBook>): string {
+  const assetItems = book.assets
+    .map(
+      (asset, index) =>
+        `<item id="asset-${index}" href="${escapeXml(asset.outputPath)}" media-type="${escapeXml(asset.mediaType)}" />`,
+    )
+    .join('\n    ');
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <package version="3.0" unique-identifier="bookid" xmlns="http://www.idpf.org/2007/opf">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -134,6 +134,7 @@ function bookPackageOpf(book: ReturnType<typeof buildEckyIrBook>): string {
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav" />
     <item id="content" href="content.xhtml" media-type="application/xhtml+xml" />
     <item id="styles" href="styles.css" media-type="text/css" />
+    ${assetItems}
   </manifest>
   <spine>
     <itemref idref="nav" linear="no" />
@@ -240,7 +241,43 @@ pre {
 a {
   color: #6b4c18;
   text-decoration: none;
+}
+
+figure {
+  margin: 1.25rem 0 1.5rem;
+}
+
+figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid #8b6a2b;
+  background: #f8f2e8;
+}
+
+figcaption {
+  margin-top: 0.45rem;
+  font-size: 0.92rem;
+  color: #5a4731;
 }`;
+}
+
+function copyHtmlAssets(book: ReturnType<typeof buildEckyIrBook>) {
+  for (const asset of book.assets) {
+    const source = path.join(root, asset.sourcePath);
+    const target = path.join(outputDir, asset.outputPath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
+}
+
+function copyEpubAssets(book: ReturnType<typeof buildEckyIrBook>, oebpsDir: string) {
+  for (const asset of book.assets) {
+    const source = path.join(root, asset.sourcePath);
+    const target = path.join(oebpsDir, asset.outputPath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
 }
 
 function escapeXml(value: string): string {

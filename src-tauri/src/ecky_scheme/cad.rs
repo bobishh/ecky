@@ -7,6 +7,12 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "model",
         "part",
         "feature",
+        "view",
+        "offset-part",
+        "tag-face",
+        "tag-edge",
+        "tag-edges",
+        "tag",
         "build",
         "shape",
         "result",
@@ -91,6 +97,24 @@ pub fn source() -> String {
               (list 'feature (quote name) role-key (quote role) params-key (list (quote param) ...) expr)]\n\
              [(_ name role-key role expr)\n\
               (list 'feature (quote name) role-key (quote role) expr)]))\n\
+         (define-syntax view\n\
+           (syntax-rules ()\n\
+             [(_ name item ...) (list 'view (quote name) item ...)]))\n\
+         (define-syntax offset-part\n\
+           (syntax-rules ()\n\
+             [(_ part dx dy dz) (list 'offset-part (quote part) dx dy dz)]))\n\
+         (define-syntax tag-face\n\
+           (syntax-rules ()\n\
+             [(_ name selector-key selector target) (list 'tag-face (quote name) selector-key selector (quote target))]))\n\
+         (define-syntax tag-edge\n\
+           (syntax-rules ()\n\
+             [(_ name selector-key selector target) (list 'tag-edge (quote name) selector-key selector (quote target))]))\n\
+         (define-syntax tag-edges\n\
+           (syntax-rules ()\n\
+             [(_ name selector-key selector target) (list 'tag-edges (quote name) selector-key selector (quote target))]))\n\
+         (define-syntax tag\n\
+           (syntax-rules ()\n\
+             [(_ name) (list 'tag (quote name))]))\n\
          (define-syntax build\n\
            (syntax-rules ()\n\
              [(_ item ...) (list 'build item ...)]))\n\
@@ -115,6 +139,8 @@ pub fn source() -> String {
             "model"
                 | "part"
                 | "feature"
+                | "view"
+                | "offset-part"
                 | "build"
                 | "shape"
                 | "result"

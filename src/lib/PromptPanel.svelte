@@ -12,6 +12,7 @@
   import type {
     Attachment,
     Message,
+    Request,
     UsageSummary,
     ViewerAsset,
   } from './types/domain';
@@ -27,6 +28,8 @@
   } from './threadTimeline';
   import { modelEngineLabel } from './modelEngineLabel';
   import type { DialogueState } from './composables/dialogueState';
+  import type { AuthoredVerifyChip } from './controllers/structuralVerification';
+  import { buildVersionAuthoredVerifyChipMap } from './versionAuthoredVerifyCards';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -68,6 +71,7 @@
     messagesLoading = false,
     messagesHasMore = false,
     messagesPageLoading = false,
+    requests = [],
     onLoadOlderMessages,
     onShowCode,
     activeThreadId = null,
@@ -79,6 +83,7 @@
     onVersionChange,
     onDeleteVersion,
     onRestoreVersion,
+    onAuthoredVerifyFocus,
   }: {
     onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
     isGenerating?: boolean;
@@ -89,6 +94,7 @@
     messagesLoading?: boolean;
     messagesHasMore?: boolean;
     messagesPageLoading?: boolean;
+    requests?: Request[];
     onLoadOlderMessages?: () => Promise<void> | void;
     onShowCode: (message: CodeVersionMessage) => void;
     activeThreadId?: string | null;
@@ -100,6 +106,7 @@
     onVersionChange?: (message: VersionMessage) => void;
     onDeleteVersion?: (messageId: string) => void;
     onRestoreVersion?: (messageId: string) => void;
+    onAuthoredVerifyFocus?: (message: VersionMessage, stableNodeId: string) => Promise<void> | void;
   } = $props();
 
   const PROMPT_DRAFTS_STORAGE_KEY = 'ecky:prompt-drafts:v1';
@@ -536,6 +543,7 @@
   }
 
   const timelineMessages = $derived(threadTimelineMessages(messages));
+  const authoredVerifyChipMap = $derived(buildVersionAuthoredVerifyChipMap(messages, requests));
   const versionMessages = $derived(versionTimelineMessages(messages));
   const activeVersionIndex = $derived(
     activeVersionTimelineIndex(versionMessages, activeVersionId),
@@ -716,6 +724,14 @@
     }
   }
 
+  function timelineAuthoredVerifyChips(message: Message): AuthoredVerifyChip[] {
+    return authoredVerifyChipMap[message.id] ?? [];
+  }
+
+  function authoredVerifyChipClickable(chip: AuthoredVerifyChip): boolean {
+    return Boolean(chip.stableNodeId?.trim());
+  }
+
 </script>
 
 <div 
@@ -867,6 +883,7 @@
       {@const isActiveVersion = isVersion && activeVersion?.id === msg.id}
       {@const isDiscardedVersion = isVersion && msg.status === 'discarded'}
       {@const statusLabel = messageStatusLabel(msg)}
+      {@const authoredVerifyChips = isVersion ? timelineAuthoredVerifyChips(msg) : []}
       <div
         class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'} {isActiveVersion ? 'trail-active-version' : ''} {isDiscardedVersion ? 'trail-discarded-version' : ''} {isTuneVersion ? 'trail-tune-version' : ''} {msg.status === 'error' ? 'trail-error' : ''}"
       >
@@ -948,6 +965,27 @@
             {msg.output.response || msg.content}
           {:else}
             {msg.content}
+          {/if}
+          {#if authoredVerifyChips.length > 0}
+            <div class="trail-authored-verify" aria-label="Authored verify results">
+              {#each authoredVerifyChips as chip (chip.id)}
+                <button
+                  class="trail-authored-verify__chip trail-authored-verify__chip--{chip.tone}"
+                  class:trail-authored-verify__chip--clickable={authoredVerifyChipClickable(chip)}
+                  type="button"
+                  disabled={!authoredVerifyChipClickable(chip)}
+                  title={chip.message}
+                  aria-label={`Authored verify ${chip.label}: ${chip.message}`}
+                  onclick={() => {
+                    if (isVersion && chip.stableNodeId) {
+                      void onAuthoredVerifyFocus?.(msg, chip.stableNodeId);
+                    }
+                  }}
+                >
+                  <span>{chip.label}</span>
+                </button>
+              {/each}
+            </div>
           {/if}
           {#if msg.id === lastMessage?.id && msg.role === 'assistant' && msg.status === 'error' && dialogueState.mode === 'generate' && failedPromptForRetry}
             <div class="error-actions">
@@ -1627,6 +1665,57 @@
   .trail-usage {
     margin-top: 8px;
     opacity: 0.9;
+  }
+
+  .trail-authored-verify {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .trail-authored-verify__chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border: 1px solid var(--bg-400);
+    background: var(--bg-100);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  .trail-authored-verify__chip--green {
+    border-color: color-mix(in srgb, var(--secondary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-100));
+    color: var(--secondary);
+  }
+
+  .trail-authored-verify__chip--red {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--danger) 10%, var(--bg-100));
+    color: var(--danger);
+  }
+
+  .trail-authored-verify__chip--clickable {
+    cursor: pointer;
+  }
+
+  .trail-authored-verify__chip--clickable:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .trail-authored-verify__chip:disabled {
+    cursor: default;
+    opacity: 0.85;
   }
 
   .trail-visuals {

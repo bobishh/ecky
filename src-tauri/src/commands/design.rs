@@ -934,6 +934,7 @@ pub async fn add_imported_model_version(
         usage: None,
         artifact_bundle: Some(artifact_bundle.clone()),
         model_manifest: Some(model_manifest.clone()),
+        structural_verification: None,
         agent_origin: None,
         image_data: None,
         visual_kind: None,
@@ -1133,6 +1134,8 @@ pub async fn update_version_runtime(
         db::update_message_artifact_bundle(&db, &message_id, &artifact_bundle)
             .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
         db::update_message_model_manifest(&db, &message_id, &model_manifest)
+            .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
+        db::update_message_structural_verification(&db, &message_id, None)
             .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
 
         let current_output = db::get_message_output_and_thread(&db, &message_id)

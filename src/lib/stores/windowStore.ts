@@ -6,6 +6,7 @@ import type { ThreadWindowLayout, ThreadWindowState } from '../tauri/contracts';
 import { fitRectToViewport } from '../windowGeometry';
 
 export type WindowId =
+  | 'code'
   | 'projects'
   | 'params'
   | 'dialogue'
@@ -23,6 +24,12 @@ export type WindowRegistryEntry = {
 };
 
 export const windowRegistry: Record<WindowId, WindowRegistryEntry> = {
+  code: {
+    title: 'Macro Inspector',
+    defaultRect: { x: 60, y: 40, width: 960, height: 620 },
+    minSize: { width: 760, height: 520 },
+    mountPolicy: 'keepAlive',
+  },
   projects: {
     title: 'Projects',
     defaultRect: { x: 80, y: 80, width: 420, height: 500 },
@@ -76,6 +83,7 @@ export const windowRegistry: Record<WindowId, WindowRegistryEntry> = {
 export type WindowState = {
   visible: boolean;
   minimized: boolean;
+  active: boolean;
   x: number;
   y: number;
   width: number;
@@ -92,6 +100,7 @@ type ThreadWindowCacheEntry = {
 };
 
 const ALL_WINDOW_IDS: WindowId[] = [
+  'code',
   'projects',
   'params',
   'dialogue',
@@ -109,6 +118,7 @@ function buildDefaults(): WindowStoreState {
     state[id] = {
       visible: false,
       minimized: false,
+      active: false,
       ...reg.defaultRect,
       z: 0,
     };
@@ -141,11 +151,12 @@ function mergeDbLayout(dbLayout: ThreadWindowLayout | null): WindowStoreState {
     defaults[id] = {
       visible: saved.visible,
       minimized: saved.minimized ?? false,
+      active: false,
       ...clamped,
       z: saved.z,
     };
   }
-  return defaults;
+  return focusTopVisible(defaults);
 }
 
 const store = writable<WindowStoreState>(buildDefaults());
@@ -170,6 +181,35 @@ function cloneState(state: WindowStoreState): WindowStoreState {
     next[id] = { ...state[id] };
   }
   return next;
+}
+
+function nextRaisedZ(state: WindowStoreState): number {
+  const maxZ = Math.max(0, ...ALL_WINDOW_IDS.map((id) => state[id].z));
+  const z = Math.max(nextZ, maxZ + 1);
+  nextZ = z + 1;
+  return z;
+}
+
+function setActiveWindow(state: WindowStoreState, activeId: WindowId | null): WindowStoreState {
+  for (const id of ALL_WINDOW_IDS) {
+    state[id] = {
+      ...state[id],
+      active: activeId === id && state[id].visible,
+    };
+  }
+  return state;
+}
+
+function focusTopVisible(state: WindowStoreState): WindowStoreState {
+  let activeId: WindowId | null = null;
+  let activeZ = -Infinity;
+  for (const id of ALL_WINDOW_IDS) {
+    const candidate = state[id];
+    if (!candidate.visible || candidate.z < activeZ) continue;
+    activeId = id;
+    activeZ = candidate.z;
+  }
+  return setActiveWindow(state, activeId);
 }
 
 function ensureThreadCache(threadId: string): ThreadWindowCacheEntry {
@@ -318,16 +358,17 @@ export async function loadLayoutForThread(threadId: string) {
 
 export function bringToFront(id: WindowId) {
   const next = cloneState(currentState());
-  next[id] = { ...next[id], z: nextZ++ };
-  commitState(next);
+  if (!next[id].visible) return;
+  next[id] = { ...next[id], z: nextRaisedZ(next) };
+  commitState(setActiveWindow(next, id));
 }
 
 export function showWindow(id: WindowId) {
   const next = cloneState(currentState());
   const reg = windowRegistry[id];
   const clamped = clampRect(next[id], reg.minSize);
-  next[id] = { ...next[id], ...clamped, visible: true, minimized: false, z: nextZ++ };
-  commitState(next);
+  next[id] = { ...next[id], ...clamped, visible: true, minimized: false, z: nextRaisedZ(next) };
+  commitState(setActiveWindow(next, id));
 }
 
 export function ensureWindowVisible(id: WindowId) {
@@ -338,18 +379,19 @@ export function toggleWindow(id: WindowId) {
   const next = cloneState(currentState());
   if (next[id].visible) {
     next[id] = { ...next[id], visible: false };
+    commitState(focusTopVisible(next));
   } else {
     const reg = windowRegistry[id];
     const clamped = clampRect(next[id], reg.minSize);
-    next[id] = { ...next[id], ...clamped, visible: true, minimized: false, z: nextZ++ };
+    next[id] = { ...next[id], ...clamped, visible: true, minimized: false, z: nextRaisedZ(next) };
+    commitState(setActiveWindow(next, id));
   }
-  commitState(next);
 }
 
 export function closeWindow(id: WindowId) {
   const next = cloneState(currentState());
   next[id] = { ...next[id], visible: false };
-  commitState(next);
+  commitState(focusTopVisible(next));
 }
 
 export function updateRect(id: WindowId, rect: { x: number; y: number; width: number; height: number }) {

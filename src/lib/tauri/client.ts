@@ -310,6 +310,15 @@ export async function finalizeGenerationAttempt(input: {
   );
 }
 
+export async function persistStructuralVerification(
+  messageId: string,
+  structuralVerification: StructuralVerificationResult,
+): Promise<void> {
+  await invokeCommand(
+    commands.persistStructuralVerification(messageId, structuralVerification),
+  );
+}
+
 export async function classifyIntent(input: {
   prompt: string;
   threadId: string | null;
@@ -332,12 +341,26 @@ export async function classifyIntent(input: {
   };
 }
 
+export type { MacroAstSourceNode } from './contracts';
+
+export async function openProjectInEditor(
+  threadId: string | null,
+  messageId: string | null,
+): Promise<import('./contracts').ProjectEditorLink> {
+  return invokeCommand(commands.openProjectInEditor(threadId, messageId));
+}
+
+export async function macroAstSourceMap(macroCode: string): Promise<import('./contracts').MacroAstSourceNode[]> {
+  return invokeCommand(commands.macroAstSourceMap(macroCode));
+}
+
 export async function renderModel(
   macroCode: string,
   parameters: DesignParams,
   macroDialect?: MacroDialect | null,
   geometryBackend?: GeometryBackend | null,
   postProcessing?: PostProcessingSpec | null,
+  previousManifest?: ModelManifest | null,
 ): Promise<ArtifactBundle> {
   return invokeCommand(
     commands.renderModel(
@@ -346,6 +369,7 @@ export async function renderModel(
       macroDialect ?? null,
       geometryBackend ?? null,
       postProcessing ?? null,
+      previousManifest ?? null,
     ),
     normalizeArtifactBundle,
   );

@@ -26,7 +26,6 @@ import {
   reopenThread as reopenThreadCommand,
   getInventory as getInventoryCommand,
   formatBackendError,
-  getDefaultMacro,
   getHistory,
   getMessStlPath,
   getModelManifest,
@@ -823,27 +822,6 @@ export function createNewThread(payload: NewThreadPayload | null | undefined) {
     commitInitialMacro(payload.code, payload.title);
   } else {
     session.setStatus('New design session started.');
-    void seedBlankThreadDefaultMacro(newId);
-  }
-}
-
-async function seedBlankThreadDefaultMacro(threadId: string) {
-  try {
-    const code = await getDefaultMacro();
-    if (get(activeThreadId) !== threadId) return;
-    if (get(workingCopy).macroCode.trim()) return;
-
-    workingCopy.patch({
-      macroCode: code,
-      dirty: false,
-    });
-    paramPanelState.hydrate({
-      versionId: null,
-      uiSpec: { fields: [] },
-      params: {},
-    });
-  } catch (error) {
-    console.error('[History] Failed to seed blank thread macro:', error);
   }
 }
 

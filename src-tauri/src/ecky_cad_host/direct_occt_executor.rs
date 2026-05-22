@@ -12,6 +12,9 @@ use crate::ecky_core_ir::{
 };
 use crate::models::{AppError, AppResult, DesignParams, ParamValue, PathResolver};
 
+const PREVIEW_MESH_LINEAR_DEFLECTION_MM: f64 = 0.05;
+const PREVIEW_MESH_ANGULAR_DEFLECTION_RAD: f64 = 0.15;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectOcctExport {
     pub step_path: PathBuf,
@@ -19,15 +22,27 @@ pub struct DirectOcctExport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum EdgeSelector {
+enum EdgeSelectorKind {
     TargetIds(Vec<String>),
     Clauses(Vec<CoreEdgeSelectorClause>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ShellFaceSelector {
+struct EdgeSelector {
+    kind: EdgeSelectorKind,
+    created_by_slot_index: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellFaceSelectorKind {
     TargetIds(Vec<String>),
     Clauses(Vec<CoreFaceSelectorClause>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellFaceSelector {
+    kind: ShellFaceSelectorKind,
+    created_by_slot_index: Option<u64>,
 }
 
 pub fn export_core_program_step_stl(
@@ -133,7 +148,18 @@ pub fn emit_plan_export_source_with_params(
             ))
         })?;
         part_roots.push(root_var.clone());
-        part_topology_roots.push((part.key.clone(), part.label.clone(), root_var));
+        let topology_slots = part
+            .commands
+            .iter()
+            .filter(|command| occt_command_outputs_shape(command.op))
+            .map(|command| (command.output.0, slot_var(command.output)))
+            .collect::<Vec<_>>();
+        part_topology_roots.push((
+            part.key.clone(),
+            part.label.clone(),
+            root_var,
+            topology_slots,
+        ));
     }
 
     let root_var = if part_roots.len() == 1 {
@@ -218,8 +244,10 @@ pub fn emit_plan_export_source_with_params(
 #include <gp_Vec.hxx>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
 #include <sstream>
 #include <string>
@@ -244,7 +272,7 @@ int main() {{
     if (!topology_file.good()) {{
         return 4;
     }}
-    BRepMesh_IncrementalMesh mesh(shape, 0.2);
+    BRepMesh_IncrementalMesh mesh(shape, {PREVIEW_MESH_LINEAR_DEFLECTION_MM}, false, {PREVIEW_MESH_ANGULAR_DEFLECTION_RAD}, true);
     StlAPI_Writer stl_writer;
     if (!stl_writer.Write(shape, "{}")) {{
         return 3;
@@ -258,16 +286,30 @@ int main() {{
     ))
 }
 
-fn direct_occt_topology_writer_calls(part_roots: &[(String, String, String)]) -> String {
+fn direct_occt_topology_writer_calls(
+    part_roots: &[(String, String, String, Vec<(u64, String)>)],
+) -> String {
     part_roots
         .iter()
-        .map(|(key, label, root_var)| {
+        .map(|(key, label, root_var, topology_slots)| {
             let label = if label.trim().is_empty() { key } else { label };
+            let slot_indexes = topology_slots
+                .iter()
+                .map(|(slot_index, _)| slot_index.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let slot_shapes = topology_slots
+                .iter()
+                .map(|(_, slot_var)| slot_var.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
             format!(
-                "    write_part_faces(topology_file, {}, {}, {}, first_topology_part);\n",
+                "    write_part_faces(topology_file, {}, {}, {}, std::vector<std::uint64_t>{{{}}}, std::vector<TopoDS_Shape>{{{}}}, first_topology_part);\n",
                 cpp_string_literal(key),
                 cpp_string_literal(label),
-                root_var
+                root_var,
+                slot_indexes,
+                slot_shapes
             )
         })
         .collect::<String>()
@@ -288,6 +330,10 @@ fn cpp_string_literal(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+fn occt_command_outputs_shape(op: OcctOp) -> bool {
+    !matches!(op, OcctOp::Plane | OcctOp::Location | OcctOp::PathFrame)
 }
 
 fn direct_occt_topology_writer_source() -> &'static str {
@@ -312,6 +358,25 @@ void write_json_number(std::ofstream& out, double value) {
     } else {
         out << 0;
     }
+}
+
+std::int64_t direct_occt_originating_slot_index(
+    const std::vector<std::uint64_t>& slot_indexes,
+    const std::vector<TopoDS_Shape>& slot_shapes,
+    TopAbs_ShapeEnum shape_kind,
+    const TopoDS_Shape& target
+) {
+    std::size_t slot_count = std::min(slot_indexes.size(), slot_shapes.size());
+    for (std::size_t slot_index = 0; slot_index < slot_count; ++slot_index) {
+        TopTools_IndexedMapOfShape slot_map;
+        TopExp::MapShapes(slot_shapes[slot_index], shape_kind, slot_map);
+        for (int shape_ordinal = 1; shape_ordinal <= slot_map.Extent(); ++shape_ordinal) {
+            if (slot_map.FindKey(shape_ordinal).IsSame(target)) {
+                return static_cast<std::int64_t>(slot_indexes[slot_index]);
+            }
+        }
+    }
+    return -1;
 }
 
 std::string direct_occt_format_coordinate(double value) {
@@ -442,6 +507,8 @@ void write_part_faces(
     const std::string& part_id,
     const std::string& part_label,
     const TopoDS_Shape& part_shape,
+    const std::vector<std::uint64_t>& slot_indexes,
+    const std::vector<TopoDS_Shape>& slot_shapes,
     bool& first_part
 ) {
     if (!first_part) {
@@ -475,6 +542,15 @@ void write_part_faces(
             }
             first_edge = false;
             out << "{\"edgeIndex\":" << edge_index;
+            std::int64_t edge_originating_slot_index = direct_occt_originating_slot_index(
+                slot_indexes,
+                slot_shapes,
+                TopAbs_EDGE,
+                edge
+            );
+            if (edge_originating_slot_index >= 0) {
+                out << ",\"originatingSlotIndex\":" << edge_originating_slot_index;
+            }
             out << ",\"label\":";
             std::ostringstream edge_label;
             edge_label << part_label << ".Edge" << (edge_index + 1);
@@ -541,6 +617,15 @@ void write_part_faces(
         }
         first_face = false;
         out << "{\"faceIndex\":" << face_index;
+        std::int64_t face_originating_slot_index = direct_occt_originating_slot_index(
+            slot_indexes,
+            slot_shapes,
+            TopAbs_FACE,
+            face
+        );
+        if (face_originating_slot_index >= 0) {
+            out << ",\"originatingSlotIndex\":" << face_originating_slot_index;
+        }
         out << ",\"label\":";
         std::ostringstream face_label;
         face_label << part_label << ".Face" << (face_index + 1);
@@ -578,6 +663,9 @@ fn emit_command(
         && !matches!(
             command.op,
             OcctOp::Box
+                | OcctOp::Sphere
+                | OcctOp::Cylinder
+                | OcctOp::Cone
                 | OcctOp::Profile
                 | OcctOp::Plane
                 | OcctOp::Location
@@ -587,6 +675,7 @@ fn emit_command(
                 | OcctOp::Fillet
                 | OcctOp::Chamfer
                 | OcctOp::Shell
+                | OcctOp::Bspline
         )
     {
         return Err(AppError::validation(format!(
@@ -600,22 +689,23 @@ fn emit_command(
             emit_box_operation(body, &var, args.width, args.depth, args.height, args.align);
         }
         OcctOp::Sphere => {
-            let radius = numeric_prefix_args::<1>(&command.args)?[0];
-            body.push_str(&format!(
-                "    TopoDS_Shape {var} = BRepPrimAPI_MakeSphere({radius}).Shape();\n"
-            ));
+            let args = sphere_args(&command.args, &command.keywords)?;
+            emit_sphere_operation(body, &var, args.radius, args.align);
         }
         OcctOp::Cylinder => {
-            let [radius, height] = numeric_prefix_args::<2>(&command.args)?;
-            body.push_str(&format!(
-                "    TopoDS_Shape {var} = BRepPrimAPI_MakeCylinder({radius}, {height}).Shape();\n"
-            ));
+            let args = cylinder_args(&command.args, &command.keywords)?;
+            emit_cylinder_operation(body, &var, args.radius, args.height, args.align);
         }
         OcctOp::Cone => {
-            let [radius1, radius2, height] = numeric_prefix_args::<3>(&command.args)?;
-            body.push_str(&format!(
-                "    TopoDS_Shape {var} = BRepPrimAPI_MakeCone({radius1}, {radius2}, {height}).Shape();\n"
-            ));
+            let args = cone_args(&command.args, &command.keywords)?;
+            emit_cone_operation(
+                body,
+                &var,
+                args.radius1,
+                args.radius2,
+                args.height,
+                args.align,
+            );
         }
         OcctOp::Circle => {
             let [radius] = numeric_args(&command.args)?;
@@ -716,8 +806,8 @@ fn emit_command(
             emit_bezier_path_wire(body, &var, &points)?;
         }
         OcctOp::Bspline => {
-            let points = point2_list_arg(&command.args, 0)?;
-            emit_bspline_face(body, &var, &points)?;
+            let args = bspline_args(&command.args, &command.keywords)?;
+            emit_bspline_shape(body, &var, &args)?;
         }
         OcctOp::Plane => {
             let args = plane_args(&command.args, &command.keywords)?;
@@ -985,17 +1075,36 @@ fn stringish_arg(args: &[OcctArg], index: usize, label: &str) -> AppResult<Strin
 }
 
 fn edge_selector(keywords: &[OcctKeyword], op_name: &str) -> AppResult<Option<EdgeSelector>> {
+    let created_by_slot_index = selector_created_by_slot_index(keywords, op_name, "edges")?;
     let Some(keyword) = selector_keyword(keywords, op_name, "edges")? else {
         return Ok(None);
     };
     match keyword.selector_payload() {
-        Some(CoreSelectorPayload::EdgeAll) => Ok(None),
-        Some(CoreSelectorPayload::EdgeTargetIds(target_ids)) => {
-            Ok(Some(EdgeSelector::TargetIds(target_ids.clone())))
+        Some(CoreSelectorPayload::EdgeAll) => {
+            if created_by_slot_index.is_some() {
+                Ok(Some(EdgeSelector {
+                    kind: EdgeSelectorKind::Clauses(Vec::new()),
+                    created_by_slot_index,
+                }))
+            } else {
+                Ok(None)
+            }
         }
-        Some(CoreSelectorPayload::EdgeClauses(clauses)) => {
-            Ok(Some(EdgeSelector::Clauses(clauses.clone())))
-        }
+        Some(CoreSelectorPayload::EdgeTargetIds(target_ids)) => Ok(Some(EdgeSelector {
+            kind: EdgeSelectorKind::TargetIds(target_ids.clone()),
+            created_by_slot_index,
+        })),
+        Some(CoreSelectorPayload::EdgeTag(tag_name)) => Ok(Some(EdgeSelector {
+            kind: EdgeSelectorKind::TargetIds(vec![format!("tag:{tag_name}")]),
+            created_by_slot_index,
+        })),
+        Some(CoreSelectorPayload::EdgeClauses(clauses)) => Ok(Some(EdgeSelector {
+            kind: EdgeSelectorKind::Clauses(clauses.clone()),
+            created_by_slot_index,
+        })),
+        Some(CoreSelectorPayload::FaceTag(tag_name)) => Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :edges` got face selector tag `{tag_name}`.",
+        ))),
         Some(CoreSelectorPayload::FaceTargetIds(target_ids)) => Err(AppError::validation(format!(
             "Direct OCCT executor `{op_name} :edges` got face selector payload {:?}.",
             target_ids
@@ -1014,21 +1123,30 @@ fn shell_face_selector(
     keywords: &[OcctKeyword],
     op_name: &str,
 ) -> AppResult<Option<ShellFaceSelector>> {
+    let created_by_slot_index = selector_created_by_slot_index(keywords, op_name, "faces")?;
     let Some(keyword) = selector_keyword(keywords, op_name, "faces")? else {
         return Ok(None);
     };
     match keyword.selector_payload() {
-        Some(CoreSelectorPayload::FaceTargetIds(target_ids)) => {
-            Ok(Some(ShellFaceSelector::TargetIds(target_ids.clone())))
-        }
-        Some(CoreSelectorPayload::FaceClauses(clauses)) => {
-            Ok(Some(ShellFaceSelector::Clauses(clauses.clone())))
-        }
-        Some(CoreSelectorPayload::EdgeAll | CoreSelectorPayload::EdgeClauses(_)) => {
-            Err(AppError::validation(format!(
-                "Direct OCCT executor `{op_name} :faces` got edge selector payload.",
-            )))
-        }
+        Some(CoreSelectorPayload::FaceTargetIds(target_ids)) => Ok(Some(ShellFaceSelector {
+            kind: ShellFaceSelectorKind::TargetIds(target_ids.clone()),
+            created_by_slot_index,
+        })),
+        Some(CoreSelectorPayload::FaceTag(tag_name)) => Ok(Some(ShellFaceSelector {
+            kind: ShellFaceSelectorKind::TargetIds(vec![format!("tag:{tag_name}")]),
+            created_by_slot_index,
+        })),
+        Some(CoreSelectorPayload::FaceClauses(clauses)) => Ok(Some(ShellFaceSelector {
+            kind: ShellFaceSelectorKind::Clauses(clauses.clone()),
+            created_by_slot_index,
+        })),
+        Some(
+            CoreSelectorPayload::EdgeAll
+            | CoreSelectorPayload::EdgeClauses(_)
+            | CoreSelectorPayload::EdgeTag(_),
+        ) => Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :faces` got edge selector payload.",
+        ))),
         Some(CoreSelectorPayload::EdgeTargetIds(target_ids)) => Err(AppError::validation(format!(
             "Direct OCCT executor `{op_name} :faces` got edge selector payload {:?}.",
             target_ids
@@ -1037,6 +1155,47 @@ fn shell_face_selector(
             "Direct OCCT executor `{op_name} :faces` requires typed selector payload.",
         ))),
     }
+}
+
+fn selector_created_by_slot_index(
+    keywords: &[OcctKeyword],
+    op_name: &str,
+    selector_keyword_name: &str,
+) -> AppResult<Option<u64>> {
+    let mut created_by_slot_index = None;
+    let mut saw_selector_keyword = false;
+
+    for keyword in keywords {
+        match keyword.name.as_str() {
+            name if name == selector_keyword_name => saw_selector_keyword = true,
+            "created-by" => {
+                if created_by_slot_index.is_some() {
+                    return Err(AppError::validation(format!(
+                        "Direct OCCT executor `{op_name}` got duplicate `:created-by` keywords.",
+                    )));
+                }
+                let slot = match keyword.source_arg() {
+                    OcctArg::Ref(slot) => slot.0,
+                    other => {
+                        return Err(AppError::validation(format!(
+                            "Direct OCCT executor `{op_name} :created-by` requires a build shape reference, got {:?}.",
+                            other
+                        )))
+                    }
+                };
+                created_by_slot_index = Some(slot);
+            }
+            _ => {}
+        }
+    }
+
+    if created_by_slot_index.is_some() && !saw_selector_keyword {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name} :created-by` requires `:{selector_keyword_name}`.",
+        )));
+    }
+
+    Ok(created_by_slot_index)
 }
 
 fn selector_keyword<'a>(
@@ -1054,6 +1213,7 @@ fn selector_keyword<'a>(
                     )));
                 }
             }
+            "created-by" => {}
             other => {
                 return Err(AppError::validation(format!(
                     "Direct OCCT executor `{op_name}` does not support keyword `:{other}`.",
@@ -1334,6 +1494,27 @@ struct BoxArgs {
     align: [AxisAlign; 3],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SphereArgs {
+    radius: f64,
+    align: [AxisAlign; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CylinderArgs {
+    radius: f64,
+    height: f64,
+    align: [AxisAlign; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConeArgs {
+    radius1: f64,
+    radius2: f64,
+    height: f64,
+    align: [AxisAlign; 3],
+}
+
 fn box_args(args: &[OcctArg], keywords: &[super::direct_occt::OcctKeyword]) -> AppResult<BoxArgs> {
     let [width, depth, height] = numeric_args(args)?;
     let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Min];
@@ -1353,6 +1534,63 @@ fn box_args(args: &[OcctArg], keywords: &[super::direct_occt::OcctKeyword]) -> A
         height,
         align,
     })
+}
+
+fn sphere_args(
+    args: &[OcctArg],
+    keywords: &[super::direct_occt::OcctKeyword],
+) -> AppResult<SphereArgs> {
+    let [radius] = numeric_args(args)?;
+    let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Center];
+    apply_align_keywords("sphere", keywords, &mut align)?;
+    Ok(SphereArgs { radius, align })
+}
+
+fn cylinder_args(
+    args: &[OcctArg],
+    keywords: &[super::direct_occt::OcctKeyword],
+) -> AppResult<CylinderArgs> {
+    let [radius, height] = numeric_prefix_args::<2>(args)?;
+    let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Min];
+    apply_align_keywords("cylinder", keywords, &mut align)?;
+    Ok(CylinderArgs {
+        radius,
+        height,
+        align,
+    })
+}
+
+fn cone_args(
+    args: &[OcctArg],
+    keywords: &[super::direct_occt::OcctKeyword],
+) -> AppResult<ConeArgs> {
+    let [radius1, radius2, height] = numeric_prefix_args::<3>(args)?;
+    let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Min];
+    apply_align_keywords("cone", keywords, &mut align)?;
+    Ok(ConeArgs {
+        radius1,
+        radius2,
+        height,
+        align,
+    })
+}
+
+fn apply_align_keywords(
+    op: &str,
+    keywords: &[super::direct_occt::OcctKeyword],
+    align: &mut [AxisAlign; 3],
+) -> AppResult<()> {
+    for keyword in keywords {
+        match keyword.name.as_str() {
+            "align" => *align = align_tuple_arg(keyword.source_arg(), &format!("{op} :align"))?,
+            other => {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT executor `{op}` does not recognize `:{other}`."
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn align_tuple_arg(arg: &OcctArg, context: &str) -> AppResult<[AxisAlign; 3]> {
@@ -1397,6 +1635,14 @@ fn axis_align_offset(size: f64, align: AxisAlign) -> f64 {
         AxisAlign::Min => 0.0,
         AxisAlign::Center => -size * 0.5,
         AxisAlign::Max => -size,
+    }
+}
+
+fn centered_axis_align_offset(size: f64, align: AxisAlign) -> f64 {
+    match align {
+        AxisAlign::Min => size * 0.5,
+        AxisAlign::Center => 0.0,
+        AxisAlign::Max => -size * 0.5,
     }
 }
 
@@ -1687,6 +1933,15 @@ fn taper_args(args: &[OcctArg]) -> AppResult<(f64, f64, f64, OcctSlot)> {
 }
 
 fn point2_list_arg(args: &[OcctArg], index: usize) -> AppResult<Vec<[f64; 2]>> {
+    point2_list_arg_min(args, index, 3, "polygon")
+}
+
+fn point2_list_arg_min(
+    args: &[OcctArg],
+    index: usize,
+    min_points: usize,
+    op_name: &str,
+) -> AppResult<Vec<[f64; 2]>> {
     let Some(arg) = args.get(index) else {
         return Err(AppError::validation(format!(
             "Direct OCCT executor expected 2D point list at arg {index}, got no argument."
@@ -1713,10 +1968,153 @@ fn point2_list_arg(args: &[OcctArg], index: usize) -> AppResult<Vec<[f64; 2]>> {
             ))),
         })
         .collect::<AppResult<Vec<_>>>()?;
-    if points.len() < 3 {
+    if points.len() < min_points {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name}` requires at least {min_points} points."
+        )));
+    }
+    Ok(points)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BsplineArgs {
+    points: Vec<[f64; 2]>,
+    closed: bool,
+    tangents: Option<Vec<[f64; 2]>>,
+    tangent_scalars: Option<Vec<f64>>,
+}
+
+fn bspline_args(
+    args: &[OcctArg],
+    keywords: &[super::direct_occt::OcctKeyword],
+) -> AppResult<BsplineArgs> {
+    let mut closed = if args.len() > 1 {
+        bool_arg(args, 1)?
+    } else {
+        false
+    };
+    let mut tangents = None;
+    let mut tangent_scalars = None;
+
+    for keyword in keywords {
+        if keyword.selector_payload().is_some() {
+            return Err(AppError::validation(
+                "Direct OCCT executor `bspline` keywords expect arg values only.",
+            ));
+        }
+        match keyword.name.as_str() {
+            "closed" => closed = bool_occt_arg(keyword.source_arg(), "bspline :closed")?,
+            "tangents" => {
+                let value = point2_list_occt_arg(keyword.source_arg(), 2, "bspline :tangents")?;
+                tangents = Some(value);
+            }
+            "tangent_scalars" | "tangent-scalars" => {
+                tangent_scalars = Some(number_list_occt_arg(
+                    keyword.source_arg(),
+                    "bspline :tangent-scalars",
+                )?);
+            }
+            other => {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT executor `bspline` does not recognize `:{other}`."
+                )))
+            }
+        }
+    }
+
+    let points = point2_list_arg_min(args, 0, 2, "bspline")?;
+    if let Some(tangents) = &tangents {
+        if tangents.len() != 2 && tangents.len() != points.len() {
+            return Err(AppError::validation(format!(
+                "Direct OCCT executor `bspline` `:tangents` expects 2 entries or one per point ({}).",
+                points.len()
+            )));
+        }
+    }
+    if let Some(scalars) = &tangent_scalars {
+        if scalars.len() != 2 && scalars.len() != points.len() {
+            return Err(AppError::validation(format!(
+                "Direct OCCT executor `bspline` `:tangent-scalars` expects 2 entries or one per point ({}).",
+                points.len()
+            )));
+        }
+    }
+    if points.len() < 3 && tangents.is_none() {
         return Err(AppError::validation(
-            "Direct OCCT executor `polygon` requires at least three points.",
+            "Direct OCCT executor `bspline` requires at least three points unless tangents are supplied.",
         ));
+    }
+
+    Ok(BsplineArgs {
+        points,
+        closed,
+        tangents,
+        tangent_scalars,
+    })
+}
+
+fn bool_occt_arg(arg: &OcctArg, label: &str) -> AppResult<bool> {
+    match arg {
+        OcctArg::Boolean(value) => Ok(*value),
+        other => Err(AppError::validation(format!(
+            "Direct OCCT executor expected boolean for {label}, got {:?}.",
+            other
+        ))),
+    }
+}
+
+fn number_list_occt_arg(arg: &OcctArg, label: &str) -> AppResult<Vec<f64>> {
+    if let OcctArg::Point2(point) = arg {
+        return Ok(point.to_vec());
+    }
+    if let OcctArg::Point3(point) = arg {
+        return Ok(point.to_vec());
+    }
+    let OcctArg::List(items) = arg else {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor expected number list for {label}, got {:?}.",
+            arg
+        )));
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| match item {
+            OcctArg::Number(value) => Ok(*value),
+            other => Err(AppError::validation(format!(
+                "Direct OCCT executor expected number at {label}[{index}], got {:?}.",
+                other
+            ))),
+        })
+        .collect()
+}
+
+fn point2_list_occt_arg(arg: &OcctArg, min_points: usize, label: &str) -> AppResult<Vec<[f64; 2]>> {
+    let OcctArg::List(items) = arg else {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor expected 2D point list for {label}, got {:?}.",
+            arg
+        )));
+    };
+    let points = items
+        .iter()
+        .enumerate()
+        .map(|(point_index, item)| match item {
+            OcctArg::Point2(point) => Ok(*point),
+            OcctArg::List(values) if values.len() == 2 => {
+                let [x, y] = numeric_args::<2>(values)?;
+                Ok([x, y])
+            }
+            other => Err(AppError::validation(format!(
+                "Direct OCCT executor expected 2D point at {label}[{point_index}], got {:?}.",
+                other
+            ))),
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    if points.len() < min_points {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor `{label}` requires at least {min_points} points."
+        )));
     }
     Ok(points)
 }
@@ -1753,6 +2151,22 @@ fn point3_sequence_args(args: &[OcctArg]) -> AppResult<Vec<[f64; 3]>> {
     Ok(points)
 }
 
+fn emit_created_by_subshape_filter(
+    var: &str,
+    label: &str,
+    shape_kind: &str,
+    created_by_var: &str,
+    candidate_var: &str,
+    created_by_slot_index: Option<u64>,
+) -> String {
+    if created_by_slot_index.is_none() {
+        return String::new();
+    }
+    format!(
+        "        bool {var}_created_by_{label}_matches = false;\n        TopTools_IndexedMapOfShape {var}_created_by_{label}_map;\n        TopExp::MapShapes({created_by_var}, {shape_kind}, {var}_created_by_{label}_map);\n        for (int {var}_created_by_{label}_ordinal = 1; {var}_created_by_{label}_ordinal <= {var}_created_by_{label}_map.Extent(); ++{var}_created_by_{label}_ordinal) {{\n            if ({var}_created_by_{label}_map.FindKey({var}_created_by_{label}_ordinal).IsSame({candidate_var})) {{\n                {var}_created_by_{label}_matches = true;\n                break;\n            }}\n        }}\n        if (!{var}_created_by_{label}_matches) {{\n            continue;\n        }}\n",
+    )
+}
+
 fn emit_edge_radius_operation(
     body: &mut String,
     var: &str,
@@ -1763,7 +2177,27 @@ fn emit_edge_radius_operation(
     part_key: &str,
     selector: Option<&EdgeSelector>,
 ) {
-    if let Some(EdgeSelector::TargetIds(target_ids)) = selector {
+    if let Some(EdgeSelector {
+        kind: EdgeSelectorKind::TargetIds(target_ids),
+        created_by_slot_index,
+    }) = selector
+    {
+        let created_by_filter = emit_created_by_subshape_filter(
+            var,
+            "edge",
+            "TopAbs_EDGE",
+            &slot_var(OcctSlot(
+                created_by_slot_index.as_ref().copied().unwrap_or_default(),
+            )),
+            &format!("{var}_edge"),
+            *created_by_slot_index,
+        );
+        let edge_no_match_message = cpp_string_literal(&format!(
+            "Direct OCCT edge selector target ids did not match current topology for part `{part_key}`."
+        ));
+        let edge_ambiguous_message = cpp_string_literal(&format!(
+            "Direct OCCT edge selector stable target id ambiguously matched current topology for part `{part_key}`."
+        ));
         let target_id_vector = if target_ids.is_empty() {
             "{}".to_string()
         } else {
@@ -1777,10 +2211,24 @@ fn emit_edge_radius_operation(
             )
         };
         body.push_str(&format!(
-            "    {builder_type} {var}_{label}({input_var});\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<std::string> {var}_edge_target_ids;\n    std::vector<std::string> {var}_edge_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n        std::string {var}_target_id = direct_occt_edge_target_id({part_id}, {var}_edge_index, {var}_edge);\n        std::string {var}_stable_id = direct_occt_stable_edge_target_id({var}_target_id);\n        {var}_edge_target_ids.push_back({var}_target_id);\n        {var}_edge_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_edge_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_edge_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ return 7; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ return 4; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ return 7; }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n",
+            "    {builder_type} {var}_{label}({input_var});\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<std::string> {var}_edge_target_ids;\n    std::vector<std::string> {var}_edge_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n{created_by_filter}        std::string {var}_target_id = direct_occt_edge_target_id({part_id}, {var}_edge_index, {var}_edge);\n        std::string {var}_stable_id = direct_occt_stable_edge_target_id({var}_target_id);\n        {var}_edge_target_ids.push_back({var}_target_id);\n        {var}_edge_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_edge_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_edge_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ std::cerr << {edge_ambiguous_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 7; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ std::cerr << {edge_no_match_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 4; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ std::cerr << {edge_ambiguous_message} << std::endl; return 7; }}\n    if ({var}_matched_edge_indexes.empty()) {{ std::cerr << {edge_no_match_message} << std::endl; return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n",
             part_id = cpp_string_literal(part_key)
         ));
-    } else if let Some(EdgeSelector::Clauses(clauses)) = selector {
+    } else if let Some(EdgeSelector {
+        kind: EdgeSelectorKind::Clauses(clauses),
+        created_by_slot_index,
+    }) = selector
+    {
+        let created_by_filter = emit_created_by_subshape_filter(
+            var,
+            "edge",
+            "TopAbs_EDGE",
+            &slot_var(OcctSlot(
+                created_by_slot_index.as_ref().copied().unwrap_or_default(),
+            )),
+            &format!("{var}_edge"),
+            *created_by_slot_index,
+        );
         let clause_checks = clauses
             .iter()
             .map(|clause| match clause {
@@ -1846,7 +2294,7 @@ fn emit_edge_radius_operation(
             })
             .collect::<String>();
         body.push_str(&format!(
-            "    {builder_type} {var}_{label}({input_var});\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax;\n    {var}_shape_box.Get({var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax);\n    Standard_Real {var}_edge_tol = std::max({var}_shape_xmax - {var}_shape_xmin, std::max({var}_shape_ymax - {var}_shape_ymin, std::max({var}_shape_zmax - {var}_shape_zmin, 1.0))) * 1.0e-6;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    std::vector<int> {var}_matched_edge_indexes;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n        Bnd_Box {var}_edge_box;\n        BRepBndLib::Add({var}_edge, {var}_edge_box);\n        Standard_Real {var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax;\n        {var}_edge_box.Get({var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax);\n        bool {var}_edge_matches = true;\n{clause_checks}        if ({var}_edge_matches) {{\n            {var}_matched_edge_indexes.push_back({var}_edge_index);\n        }}\n    }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
+            "    {builder_type} {var}_{label}({input_var});\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax;\n    {var}_shape_box.Get({var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax);\n    Standard_Real {var}_edge_tol = std::max({var}_shape_xmax - {var}_shape_xmin, std::max({var}_shape_ymax - {var}_shape_ymin, std::max({var}_shape_zmax - {var}_shape_zmin, 1.0))) * 1.0e-6;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    std::vector<int> {var}_matched_edge_indexes;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n{created_by_filter}        Bnd_Box {var}_edge_box;\n        BRepBndLib::Add({var}_edge, {var}_edge_box);\n        Standard_Real {var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax;\n        {var}_edge_box.Get({var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax);\n        bool {var}_edge_matches = true;\n{clause_checks}        if ({var}_edge_matches) {{\n            {var}_matched_edge_indexes.push_back({var}_edge_index);\n        }}\n    }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
         ));
     } else {
         body.push_str(&format!(
@@ -1864,7 +2312,27 @@ fn emit_shell_operation(
     selector: Option<&ShellFaceSelector>,
 ) {
     let offset = -thickness.abs();
-    if let Some(ShellFaceSelector::TargetIds(target_ids)) = selector {
+    if let Some(ShellFaceSelector {
+        kind: ShellFaceSelectorKind::TargetIds(target_ids),
+        created_by_slot_index,
+    }) = selector
+    {
+        let created_by_filter = emit_created_by_subshape_filter(
+            var,
+            "face",
+            "TopAbs_FACE",
+            &slot_var(OcctSlot(
+                created_by_slot_index.as_ref().copied().unwrap_or_default(),
+            )),
+            &format!("{var}_face"),
+            *created_by_slot_index,
+        );
+        let face_no_match_message = cpp_string_literal(&format!(
+            "Direct OCCT shell face selector target ids did not match current topology for part `{part_key}`."
+        ));
+        let face_ambiguous_message = cpp_string_literal(&format!(
+            "Direct OCCT shell face selector stable target id ambiguously matched current topology for part `{part_key}`."
+        ));
         let target_id_vector = if target_ids.is_empty() {
             "std::vector<std::string>{}".to_string()
         } else {
@@ -1878,12 +2346,26 @@ fn emit_shell_operation(
             )
         };
         body.push_str(&format!(
-            "    TopTools_ListOfShape {var}_closing_faces;\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<TopoDS_Face> {var}_faces;\n    std::vector<std::string> {var}_face_target_ids;\n    std::vector<std::string> {var}_face_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    int {var}_face_index = 0;\n    for (TopExp_Explorer {var}_face_explorer({input_var}, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next(), ++{var}_face_index) {{\n        TopoDS_Face {var}_face = TopoDS::Face({var}_face_explorer.Current());\n        std::string {var}_target_id = direct_occt_face_target_id({:?}, {var}_face_index, {var}_face);\n        std::string {var}_stable_id = direct_occt_stable_face_target_id({var}_target_id);\n        {var}_faces.push_back({var}_face);\n        {var}_face_target_ids.push_back({var}_target_id);\n        {var}_face_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_face_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_face_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_face_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_face_indexes.begin(), {var}_matched_face_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_face_indexes.end()) {{\n                {var}_closing_faces.Append({var}_faces[{var}_candidate_index]);\n                {var}_matched_face_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_face_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ return 11; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_face_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_face_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_face_indexes.begin(), {var}_matched_face_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_face_indexes.end()) {{\n                {var}_closing_faces.Append({var}_faces[{var}_candidate_index]);\n                {var}_matched_face_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ return 10; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ return 11; }}\n    if ({var}_matched_face_indexes.empty()) {{ return 10; }}\n    BRepOffsetAPI_MakeThickSolid {var}_thick;\n    {var}_thick.MakeThickSolidByJoin({input_var}, {var}_closing_faces, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n    TopoDS_Shape {var} = {var}_thick.Shape();\n",
+            "    TopTools_ListOfShape {var}_closing_faces;\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<TopoDS_Face> {var}_faces;\n    std::vector<std::string> {var}_face_target_ids;\n    std::vector<std::string> {var}_face_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    int {var}_face_index = 0;\n    for (TopExp_Explorer {var}_face_explorer({input_var}, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next(), ++{var}_face_index) {{\n        TopoDS_Face {var}_face = TopoDS::Face({var}_face_explorer.Current());\n{created_by_filter}        std::string {var}_target_id = direct_occt_face_target_id({:?}, {var}_face_index, {var}_face);\n        std::string {var}_stable_id = direct_occt_stable_face_target_id({var}_target_id);\n        {var}_faces.push_back({var}_face);\n        {var}_face_target_ids.push_back({var}_target_id);\n        {var}_face_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_face_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_face_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_face_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_face_indexes.begin(), {var}_matched_face_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_face_indexes.end()) {{\n                {var}_closing_faces.Append({var}_faces[{var}_candidate_index]);\n                {var}_matched_face_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_face_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ std::cerr << {face_ambiguous_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 11; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_face_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_face_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_face_indexes.begin(), {var}_matched_face_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_face_indexes.end()) {{\n                {var}_closing_faces.Append({var}_faces[{var}_candidate_index]);\n                {var}_matched_face_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ std::cerr << {face_no_match_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 10; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ std::cerr << {face_ambiguous_message} << std::endl; return 11; }}\n    if ({var}_matched_face_indexes.empty()) {{ std::cerr << {face_no_match_message} << std::endl; return 10; }}\n    BRepOffsetAPI_MakeThickSolid {var}_thick;\n    {var}_thick.MakeThickSolidByJoin({input_var}, {var}_closing_faces, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n    TopoDS_Shape {var} = {var}_thick.Shape();\n",
             part_key
         ));
         return;
     }
-    if let Some(ShellFaceSelector::Clauses(clauses)) = selector {
+    if let Some(ShellFaceSelector {
+        kind: ShellFaceSelectorKind::Clauses(clauses),
+        created_by_slot_index,
+    }) = selector
+    {
+        let created_by_filter = emit_created_by_subshape_filter(
+            var,
+            "face",
+            "TopAbs_FACE",
+            &slot_var(OcctSlot(
+                created_by_slot_index.as_ref().copied().unwrap_or_default(),
+            )),
+            &format!("{var}_face"),
+            *created_by_slot_index,
+        );
         let clause_checks = clauses
             .iter()
             .map(|clause| {
@@ -1941,7 +2423,7 @@ fn emit_shell_operation(
             })
             .collect::<String>();
         body.push_str(&format!(
-            "    TopTools_ListOfShape {var}_closing_faces;\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax;\n    {var}_shape_box.Get({var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax);\n    Standard_Real {var}_tol = std::max({var}_xmax - {var}_xmin, std::max({var}_ymax - {var}_ymin, std::max({var}_zmax - {var}_zmin, 1.0))) * 1.0e-6;\n    Standard_Real {var}_area_tol = 1.0e-6;\n    std::vector<TopoDS_Face> {var}_faces;\n    std::vector<Standard_Real> {var}_face_areas;\n    std::vector<int> {var}_candidate_indexes;\n    for (TopExp_Explorer {var}_face_explorer({input_var}, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next()) {{\n        TopoDS_Face {var}_face = TopoDS::Face({var}_face_explorer.Current());\n        BRepAdaptor_Surface {var}_surface({var}_face);\n        bool {var}_is_planar = {var}_surface.GetType() == GeomAbs_Plane;\n        Bnd_Box {var}_face_box;\n        BRepBndLib::Add({var}_face, {var}_face_box);\n        Standard_Real {var}_face_xmin, {var}_face_ymin, {var}_face_zmin, {var}_face_xmax, {var}_face_ymax, {var}_face_zmax;\n        {var}_face_box.Get({var}_face_xmin, {var}_face_ymin, {var}_face_zmin, {var}_face_xmax, {var}_face_ymax, {var}_face_zmax);\n        GProp_GProps {var}_props;\n        BRepGProp::SurfaceProperties({var}_face, {var}_props);\n        Standard_Real {var}_area = {var}_props.Mass();\n        bool {var}_matches = true;\n{clause_checks}        if ({var}_matches) {{\n            {var}_faces.push_back({var}_face);\n            {var}_face_areas.push_back({var}_area);\n            {var}_candidate_indexes.push_back(static_cast<int>({var}_faces.size()) - 1);\n        }}\n    }}\n    if ({var}_candidate_indexes.empty()) {{ return 10; }}\n{area_filters}    if ({var}_candidate_indexes.empty()) {{ return 10; }}\n    for (int {var}_index : {var}_candidate_indexes) {{\n        {var}_closing_faces.Append({var}_faces[static_cast<std::size_t>({var}_index)]);\n    }}\n    BRepOffsetAPI_MakeThickSolid {var}_thick;\n    {var}_thick.MakeThickSolidByJoin({input_var}, {var}_closing_faces, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n    TopoDS_Shape {var} = {var}_thick.Shape();\n"
+            "    TopTools_ListOfShape {var}_closing_faces;\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax;\n    {var}_shape_box.Get({var}_xmin, {var}_ymin, {var}_zmin, {var}_xmax, {var}_ymax, {var}_zmax);\n    Standard_Real {var}_tol = std::max({var}_xmax - {var}_xmin, std::max({var}_ymax - {var}_ymin, std::max({var}_zmax - {var}_zmin, 1.0))) * 1.0e-6;\n    Standard_Real {var}_area_tol = 1.0e-6;\n    std::vector<TopoDS_Face> {var}_faces;\n    std::vector<Standard_Real> {var}_face_areas;\n    std::vector<int> {var}_candidate_indexes;\n    for (TopExp_Explorer {var}_face_explorer({input_var}, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next()) {{\n        TopoDS_Face {var}_face = TopoDS::Face({var}_face_explorer.Current());\n{created_by_filter}        BRepAdaptor_Surface {var}_surface({var}_face);\n        bool {var}_is_planar = {var}_surface.GetType() == GeomAbs_Plane;\n        Bnd_Box {var}_face_box;\n        BRepBndLib::Add({var}_face, {var}_face_box);\n        Standard_Real {var}_face_xmin, {var}_face_ymin, {var}_face_zmin, {var}_face_xmax, {var}_face_ymax, {var}_face_zmax;\n        {var}_face_box.Get({var}_face_xmin, {var}_face_ymin, {var}_face_zmin, {var}_face_xmax, {var}_face_ymax, {var}_face_zmax);\n        GProp_GProps {var}_props;\n        BRepGProp::SurfaceProperties({var}_face, {var}_props);\n        Standard_Real {var}_area = {var}_props.Mass();\n        bool {var}_matches = true;\n{clause_checks}        if ({var}_matches) {{\n            {var}_faces.push_back({var}_face);\n            {var}_face_areas.push_back({var}_area);\n            {var}_candidate_indexes.push_back(static_cast<int>({var}_faces.size()) - 1);\n        }}\n    }}\n    if ({var}_candidate_indexes.empty()) {{ return 10; }}\n{area_filters}    if ({var}_candidate_indexes.empty()) {{ return 10; }}\n    for (int {var}_index : {var}_candidate_indexes) {{\n        {var}_closing_faces.Append({var}_faces[static_cast<std::size_t>({var}_index)]);\n    }}\n    BRepOffsetAPI_MakeThickSolid {var}_thick;\n    {var}_thick.MakeThickSolidByJoin({input_var}, {var}_closing_faces, {offset}, 0.05, BRepOffset_Skin, false, false, GeomAbs_Intersection, true);\n    TopoDS_Shape {var} = {var}_thick.Shape();\n"
         ));
         return;
     }
@@ -2060,36 +2542,77 @@ fn emit_bezier_path_wire(body: &mut String, var: &str, points: &[[f64; 3]]) -> A
     Ok(())
 }
 
-fn emit_bspline_face(body: &mut String, var: &str, points: &[[f64; 2]]) -> AppResult<()> {
-    if points.len() < 3 {
-        return Err(AppError::validation(
-            "Direct OCCT executor `bspline` requires at least three 2D points.",
-        ));
-    }
+fn emit_bspline_shape(body: &mut String, var: &str, args: &BsplineArgs) -> AppResult<()> {
+    let first = args.points[0];
+    let last = *args.points.last().expect("checked non-empty");
     body.push_str(&format!(
-        "    TColgp_Array1OfPnt {var}_poles(1, {});\n",
-        points.len()
+        "    BRepBuilderAPI_MakeWire {var}_wire_builder;\n"
     ));
-    for (index, [x, y]) in points.iter().enumerate() {
-        let pole_index = index + 1;
+    if let Some(tangents) = &args.tangents {
+        let first_tangent = tangents[0];
+        let last_tangent = *tangents.last().expect("checked non-empty");
+        let first_scale = args
+            .tangent_scalars
+            .as_ref()
+            .and_then(|items| items.first())
+            .copied()
+            .unwrap_or(1.0);
+        let last_scale = args
+            .tangent_scalars
+            .as_ref()
+            .and_then(|items| items.last())
+            .copied()
+            .unwrap_or(1.0);
+        let p1 = [
+            first[0] + first_tangent[0] * first_scale,
+            first[1] + first_tangent[1] * first_scale,
+        ];
+        let p2 = [
+            last[0] - last_tangent[0] * last_scale,
+            last[1] - last_tangent[1] * last_scale,
+        ];
+        let poles = [first, p1, p2, last];
+        body.push_str(&format!("    TColgp_Array1OfPnt {var}_poles(1, 4);\n"));
+        for (index, [x, y]) in poles.iter().enumerate() {
+            let pole_index = index + 1;
+            body.push_str(&format!(
+                "    {var}_poles.SetValue({pole_index}, gp_Pnt({x}, {y}, 0));\n"
+            ));
+        }
         body.push_str(&format!(
-            "    {var}_poles.SetValue({pole_index}, gp_Pnt({x}, {y}, 0));\n"
+            "    Handle(Geom_BezierCurve) {var}_curve = new Geom_BezierCurve({var}_poles);\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge({var}_curve).Edge());\n"
+        ));
+    } else {
+        body.push_str(&format!(
+            "    TColgp_Array1OfPnt {var}_poles(1, {});\n",
+            args.points.len()
+        ));
+        for (index, [x, y]) in args.points.iter().enumerate() {
+            let pole_index = index + 1;
+            body.push_str(&format!(
+                "    {var}_poles.SetValue({pole_index}, gp_Pnt({x}, {y}, 0));\n"
+            ));
+        }
+        body.push_str(&format!(
+            "    GeomAPI_PointsToBSpline {var}_bspline_builder({var}_poles, 3, 8, GeomAbs_C2, 1.0e-4);\n    Handle(Geom_BSplineCurve) {var}_curve = {var}_bspline_builder.Curve();\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge({var}_curve).Edge());\n"
         ));
     }
-    let first = points[0];
-    let last = *points.last().expect("checked non-empty");
-    body.push_str(&format!(
-        "    GeomAPI_PointsToBSpline {var}_bspline_builder({var}_poles, 3, 8, GeomAbs_C2, 1.0e-4);\n    Handle(Geom_BSplineCurve) {var}_curve = {var}_bspline_builder.Curve();\n    BRepBuilderAPI_MakeWire {var}_wire_builder;\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge({var}_curve).Edge());\n"
-    ));
-    if distance2(first, last) > 1.0e-9 {
+    if args.closed && distance2(first, last) > 1.0e-9 {
         body.push_str(&format!(
             "    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({}, {}, 0), gp_Pnt({}, {}, 0)).Edge());\n",
             last[0], last[1], first[0], first[1]
         ));
     }
     body.push_str(&format!(
-        "    TopoDS_Wire {var}_wire = {var}_wire_builder.Wire();\n    TopoDS_Shape {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n"
+        "    TopoDS_Wire {var}_wire = {var}_wire_builder.Wire();\n"
     ));
+    if args.closed {
+        body.push_str(&format!(
+            "    TopoDS_Shape {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n"
+        ));
+    } else {
+        body.push_str(&format!("    TopoDS_Shape {var} = {var}_wire;\n"));
+    }
     Ok(())
 }
 
@@ -2131,6 +2654,75 @@ fn emit_box_operation(
     ));
 }
 
+fn emit_aligned_shape(body: &mut String, var: &str, raw_expr: &str, tx: f64, ty: f64, tz: f64) {
+    body.push_str(&format!("    TopoDS_Shape {var}_raw = {raw_expr};\n"));
+    if tx == 0.0 && ty == 0.0 && tz == 0.0 {
+        body.push_str(&format!("    TopoDS_Shape {var} = {var}_raw;\n"));
+        return;
+    }
+    body.push_str(&format!(
+        "    gp_Trsf {var}_align_trsf;\n    {var}_align_trsf.SetTranslation(gp_Vec({tx}, {ty}, {tz}));\n    TopoDS_Shape {var} = BRepBuilderAPI_Transform({var}_raw, {var}_align_trsf, true).Shape();\n"
+    ));
+}
+
+fn emit_sphere_operation(body: &mut String, var: &str, radius: f64, align: [AxisAlign; 3]) {
+    let span = radius * 2.0;
+    let tx = centered_axis_align_offset(span, align[0]);
+    let ty = centered_axis_align_offset(span, align[1]);
+    let tz = centered_axis_align_offset(span, align[2]);
+    emit_aligned_shape(
+        body,
+        var,
+        &format!("BRepPrimAPI_MakeSphere({radius}).Shape()"),
+        tx,
+        ty,
+        tz,
+    );
+}
+
+fn emit_cylinder_operation(
+    body: &mut String,
+    var: &str,
+    radius: f64,
+    height: f64,
+    align: [AxisAlign; 3],
+) {
+    let span = radius * 2.0;
+    let tx = centered_axis_align_offset(span, align[0]);
+    let ty = centered_axis_align_offset(span, align[1]);
+    let tz = axis_align_offset(height, align[2]);
+    emit_aligned_shape(
+        body,
+        var,
+        &format!("BRepPrimAPI_MakeCylinder({radius}, {height}).Shape()"),
+        tx,
+        ty,
+        tz,
+    );
+}
+
+fn emit_cone_operation(
+    body: &mut String,
+    var: &str,
+    radius1: f64,
+    radius2: f64,
+    height: f64,
+    align: [AxisAlign; 3],
+) {
+    let span = radius1.max(radius2) * 2.0;
+    let tx = centered_axis_align_offset(span, align[0]);
+    let ty = centered_axis_align_offset(span, align[1]);
+    let tz = axis_align_offset(height, align[2]);
+    emit_aligned_shape(
+        body,
+        var,
+        &format!("BRepPrimAPI_MakeCone({radius1}, {radius2}, {height}).Shape()"),
+        tx,
+        ty,
+        tz,
+    );
+}
+
 fn emit_location_operation(
     body: &mut String,
     var: &str,
@@ -2155,7 +2747,7 @@ fn emit_path_frame_operation(
     let [up_x, up_y, up_z] = up;
     let at_literal = format!("{at:.17}");
     body.push_str(&format!(
-        "    std::vector<TopoDS_Edge> {var}_edges;\n    for (TopExp_Explorer {var}_edge_explorer({path_var}, TopAbs_EDGE); {var}_edge_explorer.More(); {var}_edge_explorer.Next()) {{\n        {var}_edges.push_back(TopoDS::Edge({var}_edge_explorer.Current()));\n    }}\n    if ({var}_edges.empty()) {{ return 17; }}\n    Standard_Real {var}_anchor = std::min(1.0, std::max(0.0, {at_literal}));\n    int {var}_edge_count = static_cast<int>({var}_edges.size());\n    int {var}_edge_index = static_cast<int>(std::floor({var}_anchor * {var}_edge_count));\n    Standard_Real {var}_local_t = {var}_anchor * {var}_edge_count - {var}_edge_index;\n    if ({var}_edge_index >= {var}_edge_count) {{\n        {var}_edge_index = {var}_edge_count - 1;\n        {var}_local_t = 1.0;\n    }}\n    TopoDS_Edge {var}_edge = {var}_edges[static_cast<std::size_t>({var}_edge_index)];\n    BRepAdaptor_Curve {var}_curve({var}_edge);\n    Standard_Real {var}_first = {var}_curve.FirstParameter();\n    Standard_Real {var}_last = {var}_curve.LastParameter();\n    Standard_Real {var}_param = {var}_first + ({var}_last - {var}_first) * {var}_local_t;\n    gp_Pnt {var}_origin;\n    gp_Vec {var}_derivative;\n    {var}_curve.D1({var}_param, {var}_origin, {var}_derivative);\n    if ({var}_derivative.Magnitude() <= 1.0e-9) {{ return 18; }}\n    gp_Vec {var}_z = {var}_derivative;\n    {var}_z.Normalize();\n    gp_Vec {var}_up({up_x}, {up_y}, {up_z});\n    if ({var}_up.Magnitude() <= 1.0e-9) {{ return 19; }}\n    gp_Vec {var}_x = {var}_up - {var}_z.Multiplied({var}_up.Dot({var}_z));\n    if ({var}_x.Magnitude() <= 1.0e-9) {{\n        gp_Vec {var}_fallback(0, 0, 1);\n        {var}_x = {var}_fallback - {var}_z.Multiplied({var}_fallback.Dot({var}_z));\n    }}\n    if ({var}_x.Magnitude() <= 1.0e-9) {{\n        gp_Vec {var}_fallback_y(0, 1, 0);\n        {var}_x = {var}_fallback_y - {var}_z.Multiplied({var}_fallback_y.Dot({var}_z));\n    }}\n    if ({var}_x.Magnitude() <= 1.0e-9) {{ return 20; }}\n    {var}_x.Normalize();\n    gp_Vec {var}_y = {var}_z.Crossed({var}_x);\n    if ({var}_y.Magnitude() <= 1.0e-9) {{ return 21; }}\n    {var}_y.Normalize();\n    {var}_x = {var}_y.Crossed({var}_z);\n    {var}_x.Normalize();\n    gp_Trsf {var};\n    {var}.SetValues(\n        {var}_x.X(), {var}_y.X(), {var}_z.X(), {var}_origin.X(),\n        {var}_x.Y(), {var}_y.Y(), {var}_z.Y(), {var}_origin.Y(),\n        {var}_x.Z(), {var}_y.Z(), {var}_z.Z(), {var}_origin.Z());\n"
+        "    std::vector<TopoDS_Edge> {var}_edges;\n    std::vector<double> {var}_edge_lengths;\n    double {var}_total_length = 0.0;\n    for (TopExp_Explorer {var}_edge_explorer({path_var}, TopAbs_EDGE); {var}_edge_explorer.More(); {var}_edge_explorer.Next()) {{\n        TopoDS_Edge {var}_candidate_edge = TopoDS::Edge({var}_edge_explorer.Current());\n        GProp_GProps {var}_edge_props;\n        BRepGProp::LinearProperties({var}_candidate_edge, {var}_edge_props);\n        double {var}_edge_length = std::max(0.0, {var}_edge_props.Mass());\n        {var}_edges.push_back({var}_candidate_edge);\n        {var}_edge_lengths.push_back({var}_edge_length);\n        {var}_total_length += {var}_edge_length;\n    }}\n    if ({var}_edges.empty() || {var}_total_length <= 1.0e-9) {{ return 17; }}\n    Standard_Real {var}_anchor = std::min(1.0, std::max(0.0, {at_literal}));\n    double {var}_target_length = {var}_anchor * {var}_total_length;\n    std::size_t {var}_edge_index = {var}_edges.size() - 1;\n    double {var}_local_t = 1.0;\n    double {var}_walked_length = 0.0;\n    for (std::size_t {var}_candidate = 0; {var}_candidate < {var}_edges.size(); ++{var}_candidate) {{\n        double {var}_length = {var}_edge_lengths[{var}_candidate];\n        if ({var}_target_length <= {var}_walked_length + {var}_length || {var}_candidate + 1 == {var}_edges.size()) {{\n            {var}_edge_index = {var}_candidate;\n            {var}_local_t = {var}_length <= 1.0e-9 ? 0.0 : ({var}_target_length - {var}_walked_length) / {var}_length;\n            {var}_local_t = std::min(1.0, std::max(0.0, {var}_local_t));\n            break;\n        }}\n        {var}_walked_length += {var}_length;\n    }}\n    TopoDS_Edge {var}_edge = {var}_edges[{var}_edge_index];\n    BRepAdaptor_Curve {var}_curve({var}_edge);\n    Standard_Real {var}_first = {var}_curve.FirstParameter();\n    Standard_Real {var}_last = {var}_curve.LastParameter();\n    Standard_Real {var}_param = {var}_first + ({var}_last - {var}_first) * {var}_local_t;\n    gp_Pnt {var}_origin;\n    gp_Vec {var}_derivative;\n    {var}_curve.D1({var}_param, {var}_origin, {var}_derivative);\n    if ({var}_derivative.Magnitude() <= 1.0e-9) {{ return 18; }}\n    gp_Vec {var}_z = {var}_derivative;\n    {var}_z.Normalize();\n    gp_Vec {var}_up({up_x}, {up_y}, {up_z});\n    if ({var}_up.Magnitude() <= 1.0e-9) {{ return 19; }}\n    gp_Vec {var}_x = {var}_up - {var}_z.Multiplied({var}_up.Dot({var}_z));\n    if ({var}_x.Magnitude() <= 1.0e-9) {{\n        gp_Vec {var}_fallback(0, 0, 1);\n        {var}_x = {var}_fallback - {var}_z.Multiplied({var}_fallback.Dot({var}_z));\n    }}\n    if ({var}_x.Magnitude() <= 1.0e-9) {{\n        gp_Vec {var}_fallback_y(0, 1, 0);\n        {var}_x = {var}_fallback_y - {var}_z.Multiplied({var}_fallback_y.Dot({var}_z));\n    }}\n    if ({var}_x.Magnitude() <= 1.0e-9) {{ return 20; }}\n    {var}_x.Normalize();\n    gp_Vec {var}_y = {var}_z.Crossed({var}_x);\n    if ({var}_y.Magnitude() <= 1.0e-9) {{ return 21; }}\n    {var}_y.Normalize();\n    {var}_x = {var}_y.Crossed({var}_z);\n    {var}_x.Normalize();\n    gp_Trsf {var};\n    {var}.SetValues(\n        {var}_x.X(), {var}_y.X(), {var}_z.X(), {var}_origin.X(),\n        {var}_x.Y(), {var}_y.Y(), {var}_z.Y(), {var}_origin.Y(),\n        {var}_x.Z(), {var}_y.Z(), {var}_z.Z(), {var}_origin.Z());\n"
     ));
 }
 
@@ -2357,14 +2949,14 @@ fn emit_profile_face(body: &mut String, var: &str, profile: ProfileRefs) -> AppR
         ));
     }
     body.push_str(&format!(
-        "    std::vector<TopoDS_Shape> {var}_faces;\n    for (std::size_t {var}_outer_index = 0; {var}_outer_index < {var}_outer_wires.size(); ++{var}_outer_index) {{\n        BRepBuilderAPI_MakeFace {var}_face_builder({var}_outer_wires[{var}_outer_index]);\n        if (!{var}_face_builder.IsDone()) {{ return 32; }}\n        for (const auto& {var}_hole_wire : {var}_hole_wires[{var}_outer_index]) {{\n            {var}_face_builder.Add({var}_hole_wire);\n        }}\n        {var}_faces.push_back({var}_face_builder.Shape());\n    }}\n    TopoDS_Shape {var};\n    if ({var}_faces.size() == 1) {{\n        {var} = {var}_faces.front();\n    }} else {{\n        BRep_Builder {var}_profile_builder;\n        TopoDS_Compound {var}_profile_compound;\n        {var}_profile_builder.MakeCompound({var}_profile_compound);\n        for (const auto& {var}_face : {var}_faces) {{\n            {var}_profile_builder.Add({var}_profile_compound, {var}_face);\n        }}\n        {var} = {var}_profile_compound;\n    }}\n"
+        "    std::vector<TopoDS_Shape> {var}_faces;\n    for (std::size_t {var}_outer_index = 0; {var}_outer_index < {var}_outer_wires.size(); ++{var}_outer_index) {{\n        BRepBuilderAPI_MakeFace {var}_face_builder({var}_outer_wires[{var}_outer_index]);\n        if (!{var}_face_builder.IsDone()) {{ return 32; }}\n        for (const auto& {var}_hole_wire : {var}_hole_wires[{var}_outer_index]) {{\n            {var}_face_builder.Add(TopoDS::Wire({var}_hole_wire.Reversed()));\n        }}\n        {var}_faces.push_back({var}_face_builder.Shape());\n    }}\n    TopoDS_Shape {var};\n    if ({var}_faces.size() == 1) {{\n        {var} = {var}_faces.front();\n    }} else {{\n        BRep_Builder {var}_profile_builder;\n        TopoDS_Compound {var}_profile_compound;\n        {var}_profile_builder.MakeCompound({var}_profile_compound);\n        for (const auto& {var}_face : {var}_faces) {{\n            {var}_profile_builder.Add({var}_profile_compound, {var}_face);\n        }}\n        {var} = {var}_profile_compound;\n    }}\n"
     ));
     Ok(())
 }
 
 fn emit_make_face_operation(body: &mut String, var: &str, input_var: String) {
     body.push_str(&format!(
-        "    TopoDS_Wire {var}_make_face_wire;\n    for (TopExp_Explorer {var}_make_face_wire_explorer({input_var}, TopAbs_WIRE); {var}_make_face_wire_explorer.More(); {var}_make_face_wire_explorer.Next()) {{\n        {var}_make_face_wire = TopoDS::Wire({var}_make_face_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_make_face_wire.IsNull()) {{ return 14; }}\n    BRepBuilderAPI_MakeFace {var}_make_face_face({var}_make_face_wire);\n    TopoDS_Shape {var} = {var}_make_face_face.Shape();\n"
+        "    BRepBuilderAPI_MakeWire {var}_make_face_wire_builder;\n    bool {var}_make_face_has_profile_edge = false;\n    for (TopExp_Explorer {var}_make_face_wire_explorer({input_var}, TopAbs_WIRE); {var}_make_face_wire_explorer.More(); {var}_make_face_wire_explorer.Next()) {{\n        {var}_make_face_wire_builder.Add(TopoDS::Wire({var}_make_face_wire_explorer.Current()));\n        {var}_make_face_has_profile_edge = true;\n    }}\n    if (!{var}_make_face_has_profile_edge) {{\n        for (TopExp_Explorer {var}_make_face_edge_explorer({input_var}, TopAbs_EDGE); {var}_make_face_edge_explorer.More(); {var}_make_face_edge_explorer.Next()) {{\n            {var}_make_face_wire_builder.Add(TopoDS::Edge({var}_make_face_edge_explorer.Current()));\n            {var}_make_face_has_profile_edge = true;\n        }}\n    }}\n    if (!{var}_make_face_has_profile_edge) {{ return 14; }}\n    if (!{var}_make_face_wire_builder.IsDone()) {{ return 33; }}\n    BRepBuilderAPI_MakeFace {var}_make_face_face({var}_make_face_wire_builder.Wire());\n    if (!{var}_make_face_face.IsDone()) {{ return 34; }}\n    TopoDS_Shape {var} = {var}_make_face_face.Shape();\n"
     ));
 }
 
@@ -2429,7 +3021,7 @@ fn emit_polygon_face(body: &mut String, var: &str, points: &[[f64; 2]]) -> AppRe
 
 fn emit_rounded_rectangle_face(body: &mut String, var: &str, width: f64, height: f64, radius: f64) {
     body.push_str(&format!(
-        "    Standard_Real {var}_w = {width};\n    Standard_Real {var}_h = {height};\n    Standard_Real {var}_radius = {radius};\n    Standard_Real {var}_r = std::min(std::abs({var}_radius), std::min(std::abs({var}_w) / 2.0, std::abs({var}_h) / 2.0));\n    Standard_Real {var}_x0 = -{var}_w / 2.0;\n    Standard_Real {var}_y0 = -{var}_h / 2.0;\n    Standard_Real {var}_x1 = {var}_w / 2.0;\n    Standard_Real {var}_y1 = {var}_h / 2.0;\n    TopoDS_Shape {var};\n    if ({var}_r <= 1.0e-12) {{\n        BRepBuilderAPI_MakePolygon {var}_polygon;\n        {var}_polygon.Add(gp_Pnt({var}_x0, {var}_y0, 0));\n        {var}_polygon.Add(gp_Pnt({var}_x1, {var}_y0, 0));\n        {var}_polygon.Add(gp_Pnt({var}_x1, {var}_y1, 0));\n        {var}_polygon.Add(gp_Pnt({var}_x0, {var}_y1, 0));\n        {var}_polygon.Close();\n        TopoDS_Wire {var}_wire = {var}_polygon.Wire();\n        {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n    }} else {{\n        BRepBuilderAPI_MakeWire {var}_wire_builder;\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x0 + {var}_r, {var}_y0, 0), gp_Pnt({var}_x1 - {var}_r, {var}_y0, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x1 - {var}_r, {var}_y0, 0), gp_Pnt({var}_x1, {var}_y0, 0), gp_Pnt({var}_x1, {var}_y0 + {var}_r, 0)).Value()).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x1, {var}_y0 + {var}_r, 0), gp_Pnt({var}_x1, {var}_y1 - {var}_r, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x1, {var}_y1 - {var}_r, 0), gp_Pnt({var}_x1, {var}_y1, 0), gp_Pnt({var}_x1 - {var}_r, {var}_y1, 0)).Value()).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x1 - {var}_r, {var}_y1, 0), gp_Pnt({var}_x0 + {var}_r, {var}_y1, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x0 + {var}_r, {var}_y1, 0), gp_Pnt({var}_x0, {var}_y1, 0), gp_Pnt({var}_x0, {var}_y1 - {var}_r, 0)).Value()).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x0, {var}_y1 - {var}_r, 0), gp_Pnt({var}_x0, {var}_y0 + {var}_r, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x0, {var}_y0 + {var}_r, 0), gp_Pnt({var}_x0, {var}_y0, 0), gp_Pnt({var}_x0 + {var}_r, {var}_y0, 0)).Value()).Edge());\n        TopoDS_Wire {var}_wire = {var}_wire_builder.Wire();\n        {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n    }}\n"
+        "    Standard_Real {var}_w = {width};\n    Standard_Real {var}_h = {height};\n    Standard_Real {var}_radius = {radius};\n    Standard_Real {var}_r = std::min(std::abs({var}_radius), std::min(std::abs({var}_w) / 2.0, std::abs({var}_h) / 2.0));\n    Standard_Real {var}_x0 = -{var}_w / 2.0;\n    Standard_Real {var}_y0 = -{var}_h / 2.0;\n    Standard_Real {var}_x1 = {var}_w / 2.0;\n    Standard_Real {var}_y1 = {var}_h / 2.0;\n    TopoDS_Shape {var};\n    if ({var}_r <= 1.0e-12) {{\n        BRepBuilderAPI_MakePolygon {var}_polygon;\n        {var}_polygon.Add(gp_Pnt({var}_x0, {var}_y0, 0));\n        {var}_polygon.Add(gp_Pnt({var}_x1, {var}_y0, 0));\n        {var}_polygon.Add(gp_Pnt({var}_x1, {var}_y1, 0));\n        {var}_polygon.Add(gp_Pnt({var}_x0, {var}_y1, 0));\n        {var}_polygon.Close();\n        TopoDS_Wire {var}_wire = {var}_polygon.Wire();\n        {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n    }} else {{\n        Standard_Real {var}_arc_mid = {var}_r * std::sqrt(0.5);\n        BRepBuilderAPI_MakeWire {var}_wire_builder;\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x0 + {var}_r, {var}_y0, 0), gp_Pnt({var}_x1 - {var}_r, {var}_y0, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x1 - {var}_r, {var}_y0, 0), gp_Pnt({var}_x1 - {var}_r + {var}_arc_mid, {var}_y0 + {var}_r - {var}_arc_mid, 0), gp_Pnt({var}_x1, {var}_y0 + {var}_r, 0)).Value()).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x1, {var}_y0 + {var}_r, 0), gp_Pnt({var}_x1, {var}_y1 - {var}_r, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x1, {var}_y1 - {var}_r, 0), gp_Pnt({var}_x1 - {var}_r + {var}_arc_mid, {var}_y1 - {var}_r + {var}_arc_mid, 0), gp_Pnt({var}_x1 - {var}_r, {var}_y1, 0)).Value()).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x1 - {var}_r, {var}_y1, 0), gp_Pnt({var}_x0 + {var}_r, {var}_y1, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x0 + {var}_r, {var}_y1, 0), gp_Pnt({var}_x0 + {var}_r - {var}_arc_mid, {var}_y1 - {var}_r + {var}_arc_mid, 0), gp_Pnt({var}_x0, {var}_y1 - {var}_r, 0)).Value()).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({var}_x0, {var}_y1 - {var}_r, 0), gp_Pnt({var}_x0, {var}_y0 + {var}_r, 0)).Edge());\n        {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({var}_x0, {var}_y0 + {var}_r, 0), gp_Pnt({var}_x0 + {var}_r - {var}_arc_mid, {var}_y0 + {var}_r - {var}_arc_mid, 0), gp_Pnt({var}_x0 + {var}_r, {var}_y0, 0)).Value()).Edge());\n        TopoDS_Wire {var}_wire = {var}_wire_builder.Wire();\n        {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n    }}\n"
     ));
 }
 
@@ -2765,6 +3357,7 @@ mod tests {
         assert!(source.contains("30"));
         assert!(source.contains("STEPControl_Writer"));
         assert!(source.contains("StlAPI_Writer"));
+        assert!(source.contains("BRepMesh_IncrementalMesh mesh(shape, 0.05, false, 0.15, true);"));
         assert!(source.contains("/tmp/model.step"));
         assert!(source.contains("/tmp/preview.stl"));
     }
@@ -2812,6 +3405,89 @@ mod tests {
     }
 
     #[test]
+    fn emits_round_primitive_align_plan_as_native_occt_source() {
+        let plan = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![super::super::direct_occt::OcctPartPlan {
+                key: "body".to_string(),
+                label: "Body".to_string(),
+                root: OcctSlot(3),
+                commands: vec![
+                    OcctCommand {
+                        output: OcctSlot(1),
+                        op: OcctOp::Cylinder,
+                        args: vec![OcctArg::Number(2.0), OcctArg::Number(10.0)],
+                        keywords: vec![OcctKeyword::arg(
+                            "align".to_string(),
+                            OcctArg::List(vec![
+                                OcctArg::Symbol("min".to_string()),
+                                OcctArg::Symbol("center".to_string()),
+                                OcctArg::Symbol("max".to_string()),
+                            ]),
+                        )],
+                    },
+                    OcctCommand {
+                        output: OcctSlot(2),
+                        op: OcctOp::Sphere,
+                        args: vec![OcctArg::Number(3.0)],
+                        keywords: vec![OcctKeyword::arg(
+                            "align".to_string(),
+                            OcctArg::List(vec![
+                                OcctArg::Symbol("max".to_string()),
+                                OcctArg::Symbol("center".to_string()),
+                                OcctArg::Symbol("min".to_string()),
+                            ]),
+                        )],
+                    },
+                    OcctCommand {
+                        output: OcctSlot(3),
+                        op: OcctOp::Cone,
+                        args: vec![
+                            OcctArg::Number(4.0),
+                            OcctArg::Number(1.0),
+                            OcctArg::Number(12.0),
+                        ],
+                        keywords: vec![OcctKeyword::arg(
+                            "align".to_string(),
+                            OcctArg::List(vec![
+                                OcctArg::Symbol("center".to_string()),
+                                OcctArg::Symbol("min".to_string()),
+                                OcctArg::Symbol("center".to_string()),
+                            ]),
+                        )],
+                    },
+                ],
+            }],
+        };
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(
+            source.contains("BRepPrimAPI_MakeCylinder(2, 10"),
+            "{source}"
+        );
+        assert!(
+            source.contains("shape_1_align_trsf.SetTranslation(gp_Vec(2, 0, -10))"),
+            "{source}"
+        );
+        assert!(source.contains("BRepPrimAPI_MakeSphere(3"), "{source}");
+        assert!(
+            source.contains("shape_2_align_trsf.SetTranslation(gp_Vec(-3, 0, 3))"),
+            "{source}"
+        );
+        assert!(source.contains("BRepPrimAPI_MakeCone(4, 1, 12"), "{source}");
+        assert!(
+            source.contains("shape_3_align_trsf.SetTranslation(gp_Vec(0, 4, -6))"),
+            "{source}"
+        );
+    }
+
+    #[test]
     fn emits_topology_report_writer_for_native_occt_faces() {
         let program = compile("(model (part body (box 10 20 30)))");
         let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
@@ -2849,6 +3525,62 @@ mod tests {
         assert!(source.contains("\\\"edges\\\""), "{source}");
         assert!(source.contains("\\\"edgeIndex\\\""), "{source}");
         assert!(source.contains("BRepAdaptor_Curve curve(edge)"), "{source}");
+    }
+
+    #[test]
+    fn emits_originating_slot_indexes_in_topology_report() {
+        let plan = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![super::super::direct_occt::OcctPartPlan {
+                key: "body".to_string(),
+                label: "Body".to_string(),
+                root: OcctSlot(2),
+                commands: vec![
+                    OcctCommand {
+                        output: OcctSlot(1),
+                        op: OcctOp::Box,
+                        args: vec![
+                            OcctArg::Number(10.0),
+                            OcctArg::Number(20.0),
+                            OcctArg::Number(30.0),
+                        ],
+                        keywords: Vec::new(),
+                    },
+                    OcctCommand {
+                        output: OcctSlot(2),
+                        op: OcctOp::Translate,
+                        args: vec![
+                            OcctArg::Number(0.0),
+                            OcctArg::Number(0.0),
+                            OcctArg::Number(5.0),
+                            OcctArg::Ref(OcctSlot(1)),
+                        ],
+                        keywords: Vec::new(),
+                    },
+                ],
+            }],
+        };
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("\\\"originatingSlotIndex\\\""), "{source}");
+        assert!(
+            source.contains("std::vector<std::uint64_t>{1, 2}"),
+            "{source}"
+        );
+        assert!(
+            source.contains("std::vector<TopoDS_Shape>{shape_1, shape_2}"),
+            "{source}"
+        );
+        assert!(
+            source.contains("direct_occt_originating_slot_index("),
+            "{source}"
+        );
     }
 
     #[test]
@@ -2930,6 +3662,30 @@ mod tests {
         assert!(source.contains("BRepBuilderAPI_MakeWire"), "{source}");
         assert!(source.contains("BRepBuilderAPI_MakeFace"), "{source}");
         assert!(source.contains("BRepPrimAPI_MakePrism"), "{source}");
+    }
+
+    #[test]
+    fn rounded_rectangle_arcs_use_trimmed_corner_midpoints() {
+        let mut source = String::new();
+
+        emit_rounded_rectangle_face(&mut source, "rr", 20.0, 10.0, 2.0);
+
+        assert!(
+            source.contains("Standard_Real rr_arc_mid = rr_r * std::sqrt(0.5);"),
+            "{source}"
+        );
+        assert!(
+            source.contains(
+                "GC_MakeArcOfCircle(gp_Pnt(rr_x1 - rr_r, rr_y0, 0), gp_Pnt(rr_x1 - rr_r + rr_arc_mid, rr_y0 + rr_r - rr_arc_mid, 0), gp_Pnt(rr_x1, rr_y0 + rr_r, 0))"
+            ),
+            "{source}"
+        );
+        assert!(
+            !source.contains(
+                "GC_MakeArcOfCircle(gp_Pnt(rr_x1 - rr_r, rr_y0, 0), gp_Pnt(rr_x1, rr_y0, 0), gp_Pnt(rr_x1, rr_y0 + rr_r, 0))"
+            ),
+            "{source}"
+        );
     }
 
     #[test]
@@ -3142,6 +3898,34 @@ mod tests {
     }
 
     #[test]
+    fn emits_open_bspline_with_tangents_as_native_occt_wire() {
+        let program = compile(
+            r#"
+            (model
+              (part cup
+                (make-face
+                  (union
+                    (bspline ((30 10) (69 105)) #f
+                      :tangents ((1 0.5) (0.7 1))
+                      :tangent-scalars (1.75 1))
+                    (path (30 10 0) (40 0 0) (0 0 0) (0 105 0) (69 105 0))))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("Geom_BezierCurve"), "{source}");
+        assert!(source.contains("TopoDS_Shape shape_"), "{source}");
+        assert!(source.contains("_make_face_face"), "{source}");
+    }
+
+    #[test]
     fn emits_helical_ridge_as_native_occt_sweep() {
         let program = compile(
             r#"
@@ -3234,6 +4018,8 @@ mod tests {
 
         assert!(source.contains("BRepBuilderAPI_MakeFace"), "{source}");
         assert!(source.contains("_hole_wires["), "{source}");
+        assert!(source.contains(".Add(TopoDS::Wire("), "{source}");
+        assert!(source.contains(".Reversed())"), "{source}");
         assert!(source.contains("BRepPrimAPI_MakePrism"), "{source}");
     }
 
@@ -3571,6 +4357,12 @@ mod tests {
             source.contains("direct_occt_edge_target_id(\"body\""),
             "{source}"
         );
+        assert!(
+            source.contains(
+                "Direct OCCT edge selector target ids did not match current topology for part `body`."
+            ),
+            "{source}"
+        );
     }
 
     #[test]
@@ -3724,6 +4516,12 @@ mod tests {
             "{source}"
         );
         assert!(source.contains("BRepOffsetAPI_MakeThickSolid"), "{source}");
+        assert!(
+            source.contains(
+                "Direct OCCT shell face selector target ids did not match current topology for part `body`."
+            ),
+            "{source}"
+        );
     }
 
     #[test]
@@ -3900,6 +4698,38 @@ mod tests {
     }
 
     #[test]
+    fn emits_created_by_filter_for_native_occt_edge_selector_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape blank (box 10 10 10))
+                  (shape pocket (box 4 4 4))
+                  (shape solid (difference blank pocket))
+                  (result
+                    (fillet 0.5
+                      :edges "left+vertical"
+                      :created-by pocket
+                      solid)))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("created_by_edge_map"), "{source}");
+        assert!(source.contains("created_by_edge_matches"), "{source}");
+        assert!(source.contains("TopExp::MapShapes(shape_"), "{source}");
+        assert!(source.contains("TopAbs_EDGE"), "{source}");
+        assert!(source.contains(".IsSame("), "{source}");
+    }
+
+    #[test]
     fn rejects_unknown_edge_selector_with_shared_selector_help() {
         let err = crate::ecky_scheme::compile_to_core_program(
             r#"
@@ -4004,6 +4834,38 @@ mod tests {
             "unexpected source: {}",
             source
         );
+    }
+
+    #[test]
+    fn emits_created_by_filter_for_native_occt_shell_selector_source() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape blank (box 10 10 10))
+                  (shape pocket (box 4 4 4))
+                  (shape solid (difference blank pocket))
+                  (result
+                    (shell 0.8
+                      :faces "planar+normal-z+area-max"
+                      :created-by pocket
+                      solid)))))
+            "#,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("created_by_face_map"), "{source}");
+        assert!(source.contains("created_by_face_matches"), "{source}");
+        assert!(source.contains("TopExp::MapShapes(shape_"), "{source}");
+        assert!(source.contains("TopAbs_FACE"), "{source}");
+        assert!(source.contains(".IsSame("), "{source}");
     }
 
     #[test]

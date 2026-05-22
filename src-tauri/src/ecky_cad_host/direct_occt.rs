@@ -221,12 +221,14 @@ fn plan_expanded_core_program(
             kind: param.kind.into(),
         })
         .collect::<Vec<_>>();
+    let scalar_env = crate::ecky_ir::build_core_program_param_env_for_eval(program, parameters)?;
 
     let parts = program
         .parts
         .iter()
         .map(|part| {
-            let mut planner = PartPlanner::new(&param_names, parameters);
+            let mut planner =
+                PartPlanner::new(&param_names, &scalar_env, max_node_id(&part.root) + 1);
             let root = planner.plan_node(&part.root)?;
             Ok(OcctPartPlan {
                 key: part.key.clone(),
@@ -253,6 +255,7 @@ fn expand_core_program_for_direct_occt(
         .map(|param| (param.id.raw(), param.key.clone()))
         .collect::<BTreeMap<_, _>>();
     let env = crate::ecky_ir::build_core_program_param_env_for_eval(program, parameters)?;
+    let node_env = BTreeMap::new();
     let mut next_node_id = next_program_node_id(program);
     let parts = program
         .parts
@@ -266,6 +269,7 @@ fn expand_core_program_for_direct_occt(
                     &part.root,
                     &param_names,
                     &env,
+                    &node_env,
                     &mut next_node_id,
                 )?,
             })
@@ -282,33 +286,59 @@ fn expand_node_for_direct_occt(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     match &node.kind {
         CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => Ok(node.clone()),
         CoreNodeKind::Build { bindings, result } => {
-            let bindings = bindings
-                .iter()
-                .map(|binding| {
-                    Ok(CoreShapeBinding {
-                        name: binding.name.clone(),
-                        value: expand_node_for_direct_occt(
-                            &binding.value,
-                            param_names,
-                            env,
-                            next_node_id,
-                        )?,
-                    })
-                })
-                .collect::<AppResult<Vec<_>>>()?;
+            let mut nested_env = env.clone();
+            let mut nested_node_env = node_env.clone();
+            let mut expanded_bindings = Vec::with_capacity(bindings.len());
+            for binding in bindings {
+                let value = expand_node_for_direct_occt(
+                    &binding.value,
+                    param_names,
+                    &nested_env,
+                    &nested_node_env,
+                    next_node_id,
+                )?;
+                if let Some(param_value) = eval_scalar_binding_for_direct_occt(
+                    &value,
+                    param_names,
+                    &nested_env,
+                    &nested_node_env,
+                )
+                .map_err(|err| {
+                    AppError::validation(format!(
+                        "Direct OCCT expander could not evaluate build binding `{}`: {err}",
+                        binding.name
+                    ))
+                })? {
+                    nested_env.insert(binding.name.clone(), param_value.clone());
+                    nested_node_env.insert(binding.value.id.raw(), param_value.clone());
+                    nested_node_env.insert(value.id.raw(), param_value);
+                    record_scalar_node_values_for_direct_occt(
+                        &value,
+                        param_names,
+                        &nested_env,
+                        &mut nested_node_env,
+                    );
+                }
+                expanded_bindings.push(CoreShapeBinding {
+                    name: binding.name.clone(),
+                    value,
+                });
+            }
             Ok(rebuild_node(
                 node,
                 CoreNodeKind::Build {
-                    bindings,
+                    bindings: expanded_bindings,
                     result: Box::new(expand_node_for_direct_occt(
                         result,
                         param_names,
-                        env,
+                        &nested_env,
+                        &nested_node_env,
                         next_node_id,
                     )?),
                 },
@@ -316,18 +346,37 @@ fn expand_node_for_direct_occt(
         }
         CoreNodeKind::Let { bindings, body } => {
             let mut nested_env = env.clone();
+            let mut nested_node_env = node_env.clone();
             let mut expanded_bindings = Vec::with_capacity(bindings.len());
             for binding in bindings {
                 let value = expand_node_for_direct_occt(
                     &binding.value,
                     param_names,
                     &nested_env,
+                    &nested_node_env,
                     next_node_id,
                 )?;
-                if let Some(param_value) =
-                    eval_scalar_binding_for_direct_occt(&value, param_names, &nested_env)?
-                {
-                    nested_env.insert(binding.name.clone(), param_value);
+                if let Some(param_value) = eval_scalar_binding_for_direct_occt(
+                    &value,
+                    param_names,
+                    &nested_env,
+                    &nested_node_env,
+                )
+                .map_err(|err| {
+                    AppError::validation(format!(
+                        "Direct OCCT expander could not evaluate let binding `{}`: {err}",
+                        binding.name
+                    ))
+                })? {
+                    nested_env.insert(binding.name.clone(), param_value.clone());
+                    nested_node_env.insert(binding.value.id.raw(), param_value.clone());
+                    nested_node_env.insert(value.id.raw(), param_value);
+                    record_scalar_node_values_for_direct_occt(
+                        &value,
+                        param_names,
+                        &nested_env,
+                        &mut nested_node_env,
+                    );
                 }
                 expanded_bindings.push(CoreBinding {
                     name: binding.name.clone(),
@@ -342,6 +391,7 @@ fn expand_node_for_direct_occt(
                         body,
                         param_names,
                         &nested_env,
+                        &nested_node_env,
                         next_node_id,
                     )?),
                 },
@@ -351,29 +401,46 @@ fn expand_node_for_direct_occt(
             condition,
             then_branch,
             else_branch,
-        } => Ok(rebuild_node(
-            node,
-            CoreNodeKind::If {
-                condition: Box::new(expand_node_for_direct_occt(
-                    condition,
-                    param_names,
-                    env,
-                    next_node_id,
-                )?),
-                then_branch: Box::new(expand_node_for_direct_occt(
+        } => {
+            let expanded_condition =
+                expand_node_for_direct_occt(condition, param_names, env, node_env, next_node_id)?;
+            match eval_bool_for_direct_occt(&expanded_condition, param_names, env, node_env) {
+                Ok(true) => expand_node_for_direct_occt(
                     then_branch,
                     param_names,
                     env,
+                    node_env,
                     next_node_id,
-                )?),
-                else_branch: Box::new(expand_node_for_direct_occt(
+                ),
+                Ok(false) => expand_node_for_direct_occt(
                     else_branch,
                     param_names,
                     env,
+                    node_env,
                     next_node_id,
-                )?),
-            },
-        )),
+                ),
+                Err(_) => Ok(rebuild_node(
+                    node,
+                    CoreNodeKind::If {
+                        condition: Box::new(expanded_condition),
+                        then_branch: Box::new(expand_node_for_direct_occt(
+                            then_branch,
+                            param_names,
+                            env,
+                            node_env,
+                            next_node_id,
+                        )?),
+                        else_branch: Box::new(expand_node_for_direct_occt(
+                            else_branch,
+                            param_names,
+                            env,
+                            node_env,
+                            next_node_id,
+                        )?),
+                    },
+                )),
+            }
+        }
         CoreNodeKind::Call { op, args, keywords }
             if matches!(op, CoreOperation::Surface(CoreSurfaceOp::Shell))
                 && sampled_radial_loft_target(args).is_some() =>
@@ -391,7 +458,9 @@ fn expand_node_for_direct_occt(
             op: CoreOperation::Boolean(CoreBooleanOp::Xor),
             args,
             keywords,
-        } if keywords.is_empty() => expand_xor_node(node, args, param_names, env, next_node_id),
+        } if keywords.is_empty() => {
+            expand_xor_node(node, args, param_names, env, node_env, next_node_id)
+        }
         CoreNodeKind::Call {
             op: CoreOperation::Primitive(CorePrimitive::Text),
             args,
@@ -410,7 +479,15 @@ fn expand_node_for_direct_occt(
             ..
         } => expand_svg_node(node, args, param_names, env, next_node_id),
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "helical-ridge") => {
-            expand_helical_ridge_node(node, args, keywords, param_names, env, next_node_id)
+            expand_helical_ridge_node(
+                node,
+                args,
+                keywords,
+                param_names,
+                env,
+                node_env,
+                next_node_id,
+            )
         }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "sampled-radial-loft") => {
             expand_sampled_radial_loft_node(node, args, keywords, param_names, env, next_node_id)
@@ -421,7 +498,9 @@ fn expand_node_for_direct_occt(
                 op: op.clone(),
                 args: args
                     .iter()
-                    .map(|arg| expand_node_for_direct_occt(arg, param_names, env, next_node_id))
+                    .map(|arg| {
+                        expand_node_for_direct_occt(arg, param_names, env, node_env, next_node_id)
+                    })
                     .collect::<AppResult<Vec<_>>>()?,
                 keywords: keywords
                     .iter()
@@ -430,6 +509,7 @@ fn expand_node_for_direct_occt(
                             keyword.source_node(),
                             param_names,
                             env,
+                            node_env,
                             next_node_id,
                         )?;
                         Ok(match keyword.selector_payload() {
@@ -451,12 +531,14 @@ fn expand_node_for_direct_occt(
                     start,
                     param_names,
                     env,
+                    node_env,
                     next_node_id,
                 )?),
                 end: Box::new(expand_node_for_direct_occt(
                     end,
                     param_names,
                     env,
+                    node_env,
                     next_node_id,
                 )?),
             },
@@ -472,15 +554,16 @@ fn expand_node_for_direct_occt(
                 sources: sources
                     .iter()
                     .map(|source| {
-                        expand_node_for_direct_occt(source, param_names, env, next_node_id)
+                        expand_node_for_direct_occt(
+                            source,
+                            param_names,
+                            env,
+                            node_env,
+                            next_node_id,
+                        )
                     })
                     .collect::<AppResult<Vec<_>>>()?,
-                body: Box::new(expand_node_for_direct_occt(
-                    body,
-                    param_names,
-                    env,
-                    next_node_id,
-                )?),
+                body: Box::new(clone_node_with_fresh_ids(body, next_node_id)),
             },
         )),
         CoreNodeKind::Apply { op, args, list } => Ok(rebuild_node(
@@ -489,12 +572,15 @@ fn expand_node_for_direct_occt(
                 op: op.clone(),
                 args: args
                     .iter()
-                    .map(|arg| expand_node_for_direct_occt(arg, param_names, env, next_node_id))
+                    .map(|arg| {
+                        expand_node_for_direct_occt(arg, param_names, env, node_env, next_node_id)
+                    })
                     .collect::<AppResult<Vec<_>>>()?,
                 list: Box::new(expand_node_for_direct_occt(
                     list,
                     param_names,
                     env,
+                    node_env,
                     next_node_id,
                 )?),
             },
@@ -504,7 +590,9 @@ fn expand_node_for_direct_occt(
             CoreNodeKind::List(
                 items
                     .iter()
-                    .map(|item| expand_node_for_direct_occt(item, param_names, env, next_node_id))
+                    .map(|item| {
+                        expand_node_for_direct_occt(item, param_names, env, node_env, next_node_id)
+                    })
                     .collect::<AppResult<Vec<_>>>()?,
             ),
         )),
@@ -513,7 +601,9 @@ fn expand_node_for_direct_occt(
             CoreNodeKind::Group(
                 items
                     .iter()
-                    .map(|item| expand_node_for_direct_occt(item, param_names, env, next_node_id))
+                    .map(|item| {
+                        expand_node_for_direct_occt(item, param_names, env, node_env, next_node_id)
+                    })
                     .collect::<AppResult<Vec<_>>>()?,
             ),
         )),
@@ -525,6 +615,7 @@ fn expand_xor_node(
     args: &[CoreNode],
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() < 2 {
@@ -533,7 +624,7 @@ fn expand_xor_node(
 
     let normalized_args = args
         .iter()
-        .map(|arg| expand_node_for_direct_occt(arg, param_names, env, next_node_id))
+        .map(|arg| expand_node_for_direct_occt(arg, param_names, env, node_env, next_node_id))
         .collect::<AppResult<Vec<_>>>()?;
 
     let union_node = CoreNode::new(
@@ -707,6 +798,7 @@ fn expand_helical_ridge_node(
     keywords: &[CoreKeywordArg],
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if !args.is_empty() {
@@ -730,16 +822,63 @@ fn expand_helical_ridge_node(
         "helical-ridge",
     )?;
 
-    let radius = positive_keyword_number(keywords, "radius", "helical-ridge", param_names, env)?;
-    let pitch = positive_keyword_number(keywords, "pitch", "helical-ridge", param_names, env)?;
-    let height = positive_keyword_number(keywords, "height", "helical-ridge", param_names, env)?;
-    let base_width =
-        positive_keyword_number(keywords, "base-width", "helical-ridge", param_names, env)?;
-    let crest_width =
-        positive_keyword_number(keywords, "crest-width", "helical-ridge", param_names, env)?;
-    let depth = positive_keyword_number(keywords, "depth", "helical-ridge", param_names, env)?;
-    let female =
-        optional_keyword_bool(keywords, "female", false, "helical-ridge", param_names, env)?;
+    let radius = positive_keyword_number(
+        keywords,
+        "radius",
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let pitch = positive_keyword_number(
+        keywords,
+        "pitch",
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let height = positive_keyword_number(
+        keywords,
+        "height",
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let base_width = positive_keyword_number(
+        keywords,
+        "base-width",
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let crest_width = positive_keyword_number(
+        keywords,
+        "crest-width",
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let depth = positive_keyword_number(
+        keywords,
+        "depth",
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let female = optional_keyword_bool(
+        keywords,
+        "female",
+        false,
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
     let lefthand = optional_keyword_bool(
         keywords,
         "lefthand",
@@ -747,6 +886,7 @@ fn expand_helical_ridge_node(
         "helical-ridge",
         param_names,
         env,
+        node_env,
     )?;
     let clearance = optional_keyword_number(
         keywords,
@@ -755,6 +895,7 @@ fn expand_helical_ridge_node(
         "helical-ridge",
         param_names,
         env,
+        node_env,
     )?
     .max(0.0);
 
@@ -1195,18 +1336,328 @@ fn eval_scalar_binding_for_direct_occt(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
 ) -> AppResult<Option<ParamValue>> {
     match node.value_kind {
-        CoreValueKind::Number => Ok(Some(ParamValue::Number(
-            crate::ecky_ir::eval_core_number_with_locals(node, param_names, env)?,
-        ))),
-        CoreValueKind::Boolean => Ok(Some(ParamValue::Boolean(
-            crate::ecky_ir::eval_core_bool_with_locals(node, param_names, env)?,
-        ))),
-        CoreValueKind::Text => Ok(Some(ParamValue::String(
-            crate::ecky_ir::eval_core_stringish_with_locals(node, param_names, env)?,
-        ))),
+        CoreValueKind::Number => Ok(Some(ParamValue::Number(eval_number_for_direct_occt(
+            node,
+            param_names,
+            env,
+            node_env,
+        )?))),
+        CoreValueKind::Boolean => Ok(Some(ParamValue::Boolean(eval_bool_for_direct_occt(
+            node,
+            param_names,
+            env,
+            node_env,
+        )?))),
+        CoreValueKind::Text => Ok(Some(ParamValue::String(eval_stringish_for_direct_occt(
+            node,
+            param_names,
+            env,
+            node_env,
+        )?))),
+        CoreValueKind::Any => {
+            if let Ok(number) = eval_number_for_direct_occt(node, param_names, env, node_env) {
+                Ok(Some(ParamValue::Number(number)))
+            } else if let Ok(flag) = eval_bool_for_direct_occt(node, param_names, env, node_env) {
+                Ok(Some(ParamValue::Boolean(flag)))
+            } else if let Ok(text) =
+                eval_stringish_for_direct_occt(node, param_names, env, node_env)
+            {
+                Ok(Some(ParamValue::String(text)))
+            } else {
+                Ok(None)
+            }
+        }
         _ => Ok(None),
+    }
+}
+
+fn record_scalar_node_values_for_direct_occt(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &mut BTreeMap<u64, ParamValue>,
+) {
+    let snapshot = node_env.clone();
+    if let Ok(Some(value)) = eval_scalar_binding_for_direct_occt(node, param_names, env, &snapshot)
+    {
+        node_env.insert(node.id.raw(), value);
+    }
+
+    match &node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            for binding in bindings {
+                record_scalar_node_values_for_direct_occt(
+                    &binding.value,
+                    param_names,
+                    env,
+                    node_env,
+                );
+            }
+            record_scalar_node_values_for_direct_occt(result, param_names, env, node_env);
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            for binding in bindings {
+                record_scalar_node_values_for_direct_occt(
+                    &binding.value,
+                    param_names,
+                    env,
+                    node_env,
+                );
+            }
+            record_scalar_node_values_for_direct_occt(body, param_names, env, node_env);
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            record_scalar_node_values_for_direct_occt(condition, param_names, env, node_env);
+            record_scalar_node_values_for_direct_occt(then_branch, param_names, env, node_env);
+            record_scalar_node_values_for_direct_occt(else_branch, param_names, env, node_env);
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                record_scalar_node_values_for_direct_occt(arg, param_names, env, node_env);
+            }
+            for keyword in keywords {
+                record_scalar_node_values_for_direct_occt(
+                    keyword.source_node(),
+                    param_names,
+                    env,
+                    node_env,
+                );
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            record_scalar_node_values_for_direct_occt(start, param_names, env, node_env);
+            record_scalar_node_values_for_direct_occt(end, param_names, env, node_env);
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for source in sources {
+                record_scalar_node_values_for_direct_occt(source, param_names, env, node_env);
+            }
+            record_scalar_node_values_for_direct_occt(body, param_names, env, node_env);
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                record_scalar_node_values_for_direct_occt(arg, param_names, env, node_env);
+            }
+            record_scalar_node_values_for_direct_occt(list, param_names, env, node_env);
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for item in items {
+                record_scalar_node_values_for_direct_occt(item, param_names, env, node_env);
+            }
+        }
+    }
+}
+
+fn eval_number_for_direct_occt(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+) -> AppResult<f64> {
+    let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
+    crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env).map_err(|err| {
+        AppError::validation(format!(
+            "could not evaluate numeric Core node {:?}: {err}",
+            node.id
+        ))
+    })
+}
+
+fn eval_bool_for_direct_occt(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+) -> AppResult<bool> {
+    let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
+    crate::ecky_ir::eval_core_bool_with_locals(&node, param_names, env)
+}
+
+fn eval_stringish_for_direct_occt(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+) -> AppResult<String> {
+    let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
+    crate::ecky_ir::eval_core_stringish_with_locals(&node, param_names, env)
+}
+
+fn rewrite_eval_node_for_direct_occt(
+    node: &CoreNode,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+) -> CoreNode {
+    let node = super::direct_occt_normalize::rewrite_local_aliases_for_eval(node, env);
+    rewrite_scalar_node_refs_for_eval(&node, node_env)
+}
+
+fn rewrite_scalar_node_refs_for_eval(
+    node: &CoreNode,
+    node_env: &BTreeMap<u64, ParamValue>,
+) -> CoreNode {
+    match &node.kind {
+        CoreNodeKind::Reference(crate::ecky_core_ir::CoreReference::Node(id)) => {
+            if let Some(value) = node_env.get(&id.raw()) {
+                return param_value_node_with_id(node.id, value, node.span);
+            }
+            node.clone()
+        }
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => node.clone(),
+        CoreNodeKind::Build { bindings, result } => rebuild_node(
+            node,
+            CoreNodeKind::Build {
+                bindings: bindings
+                    .iter()
+                    .map(|binding| CoreShapeBinding {
+                        name: binding.name.clone(),
+                        value: rewrite_scalar_node_refs_for_eval(&binding.value, node_env),
+                    })
+                    .collect(),
+                result: Box::new(rewrite_scalar_node_refs_for_eval(result, node_env)),
+            },
+        ),
+        CoreNodeKind::Let { bindings, body } => rebuild_node(
+            node,
+            CoreNodeKind::Let {
+                bindings: bindings
+                    .iter()
+                    .map(|binding| CoreBinding {
+                        name: binding.name.clone(),
+                        value: rewrite_scalar_node_refs_for_eval(&binding.value, node_env),
+                    })
+                    .collect(),
+                body: Box::new(rewrite_scalar_node_refs_for_eval(body, node_env)),
+            },
+        ),
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => rebuild_node(
+            node,
+            CoreNodeKind::If {
+                condition: Box::new(rewrite_scalar_node_refs_for_eval(condition, node_env)),
+                then_branch: Box::new(rewrite_scalar_node_refs_for_eval(then_branch, node_env)),
+                else_branch: Box::new(rewrite_scalar_node_refs_for_eval(else_branch, node_env)),
+            },
+        ),
+        CoreNodeKind::Call { op, args, keywords } => rebuild_node(
+            node,
+            CoreNodeKind::Call {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| rewrite_scalar_node_refs_for_eval(arg, node_env))
+                    .collect(),
+                keywords: keywords
+                    .iter()
+                    .map(|keyword| match keyword.selector_payload() {
+                        Some(selector) => CoreKeywordArg::selector(
+                            keyword.name.clone(),
+                            rewrite_scalar_node_refs_for_eval(keyword.source_node(), node_env),
+                            selector.clone(),
+                        ),
+                        None => CoreKeywordArg::expr(
+                            keyword.name.clone(),
+                            rewrite_scalar_node_refs_for_eval(keyword.source_node(), node_env),
+                        ),
+                    })
+                    .collect(),
+            },
+        ),
+        CoreNodeKind::Range { start, end } => rebuild_node(
+            node,
+            CoreNodeKind::Range {
+                start: Box::new(rewrite_scalar_node_refs_for_eval(start, node_env)),
+                end: Box::new(rewrite_scalar_node_refs_for_eval(end, node_env)),
+            },
+        ),
+        CoreNodeKind::Map {
+            params,
+            sources,
+            body,
+        } => rebuild_node(
+            node,
+            CoreNodeKind::Map {
+                params: params.clone(),
+                sources: sources
+                    .iter()
+                    .map(|source| rewrite_scalar_node_refs_for_eval(source, node_env))
+                    .collect(),
+                body: Box::new(rewrite_scalar_node_refs_for_eval(body, node_env)),
+            },
+        ),
+        CoreNodeKind::Apply { op, args, list } => rebuild_node(
+            node,
+            CoreNodeKind::Apply {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| rewrite_scalar_node_refs_for_eval(arg, node_env))
+                    .collect(),
+                list: Box::new(rewrite_scalar_node_refs_for_eval(list, node_env)),
+            },
+        ),
+        CoreNodeKind::List(items) => rebuild_node(
+            node,
+            CoreNodeKind::List(
+                items
+                    .iter()
+                    .map(|item| rewrite_scalar_node_refs_for_eval(item, node_env))
+                    .collect(),
+            ),
+        ),
+        CoreNodeKind::Group(items) => rebuild_node(
+            node,
+            CoreNodeKind::Group(
+                items
+                    .iter()
+                    .map(|item| rewrite_scalar_node_refs_for_eval(item, node_env))
+                    .collect(),
+            ),
+        ),
+    }
+}
+
+fn param_value_node_with_id(
+    id: crate::ecky_core_ir::NodeId,
+    value: &ParamValue,
+    span: Option<crate::ecky_core_ir::SourceSpan>,
+) -> CoreNode {
+    match value {
+        ParamValue::Number(number) => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Number(*number)),
+            value_kind: CoreValueKind::Number,
+            span,
+        },
+        ParamValue::Boolean(flag) => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Boolean(*flag)),
+            value_kind: CoreValueKind::Boolean,
+            span,
+        },
+        ParamValue::String(text) => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Text(text.clone())),
+            value_kind: CoreValueKind::Text,
+            span,
+        },
+        ParamValue::Null => CoreNode {
+            id,
+            kind: CoreNodeKind::Literal(CoreLiteral::Text(String::new())),
+            value_kind: CoreValueKind::Text,
+            span,
+        },
     }
 }
 
@@ -1242,11 +1693,13 @@ fn positive_keyword_number(
     op: &str,
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
 ) -> AppResult<f64> {
-    let value = crate::ecky_ir::eval_core_number_with_locals(
+    let value = eval_number_for_direct_occt(
         required_keyword_node(keywords, name, op)?,
         param_names,
         env,
+        node_env,
     )?;
     if !value.is_finite() || value <= 0.0 {
         return Err(AppError::validation(format!(
@@ -1263,6 +1716,7 @@ fn optional_keyword_number(
     op: &str,
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
 ) -> AppResult<f64> {
     let Some(node) = keywords
         .iter()
@@ -1271,7 +1725,7 @@ fn optional_keyword_number(
     else {
         return Ok(default);
     };
-    crate::ecky_ir::eval_core_number_with_locals(node, param_names, env)
+    eval_number_for_direct_occt(node, param_names, env, node_env)
         .map_err(|err| AppError::validation(format!("`{op}` could not evaluate `:{name}`: {err}")))
 }
 
@@ -1282,6 +1736,7 @@ fn optional_keyword_bool(
     op: &str,
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
 ) -> AppResult<bool> {
     let Some(node) = keywords
         .iter()
@@ -1290,7 +1745,7 @@ fn optional_keyword_bool(
     else {
         return Ok(default);
     };
-    crate::ecky_ir::eval_core_bool_with_locals(node, param_names, env)
+    eval_bool_for_direct_occt(node, param_names, env, node_env)
         .map_err(|err| AppError::validation(format!("`{op}` could not evaluate `:{name}`: {err}")))
 }
 
@@ -1384,6 +1839,104 @@ fn max_node_id(node: &CoreNode) -> u64 {
     node.id.raw().max(child_max)
 }
 
+fn clone_node_with_fresh_ids(node: &CoreNode, next_node_id: &mut u64) -> CoreNode {
+    CoreNode {
+        id: next_id(next_node_id),
+        kind: match &node.kind {
+            CoreNodeKind::Literal(literal) => CoreNodeKind::Literal(literal.clone()),
+            CoreNodeKind::Reference(reference) => CoreNodeKind::Reference(reference.clone()),
+            CoreNodeKind::Build { bindings, result } => CoreNodeKind::Build {
+                bindings: bindings
+                    .iter()
+                    .map(|binding| CoreShapeBinding {
+                        name: binding.name.clone(),
+                        value: clone_node_with_fresh_ids(&binding.value, next_node_id),
+                    })
+                    .collect(),
+                result: Box::new(clone_node_with_fresh_ids(result, next_node_id)),
+            },
+            CoreNodeKind::Let { bindings, body } => CoreNodeKind::Let {
+                bindings: bindings
+                    .iter()
+                    .map(|binding| CoreBinding {
+                        name: binding.name.clone(),
+                        value: clone_node_with_fresh_ids(&binding.value, next_node_id),
+                    })
+                    .collect(),
+                body: Box::new(clone_node_with_fresh_ids(body, next_node_id)),
+            },
+            CoreNodeKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => CoreNodeKind::If {
+                condition: Box::new(clone_node_with_fresh_ids(condition, next_node_id)),
+                then_branch: Box::new(clone_node_with_fresh_ids(then_branch, next_node_id)),
+                else_branch: Box::new(clone_node_with_fresh_ids(else_branch, next_node_id)),
+            },
+            CoreNodeKind::Call { op, args, keywords } => CoreNodeKind::Call {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| clone_node_with_fresh_ids(arg, next_node_id))
+                    .collect(),
+                keywords: keywords
+                    .iter()
+                    .map(|keyword| match keyword.selector_payload() {
+                        Some(selector) => CoreKeywordArg::selector(
+                            keyword.name.clone(),
+                            clone_node_with_fresh_ids(keyword.source_node(), next_node_id),
+                            selector.clone(),
+                        ),
+                        None => CoreKeywordArg::expr(
+                            keyword.name.clone(),
+                            clone_node_with_fresh_ids(keyword.source_node(), next_node_id),
+                        ),
+                    })
+                    .collect(),
+            },
+            CoreNodeKind::Range { start, end } => CoreNodeKind::Range {
+                start: Box::new(clone_node_with_fresh_ids(start, next_node_id)),
+                end: Box::new(clone_node_with_fresh_ids(end, next_node_id)),
+            },
+            CoreNodeKind::Map {
+                params,
+                sources,
+                body,
+            } => CoreNodeKind::Map {
+                params: params.clone(),
+                sources: sources
+                    .iter()
+                    .map(|source| clone_node_with_fresh_ids(source, next_node_id))
+                    .collect(),
+                body: Box::new(clone_node_with_fresh_ids(body, next_node_id)),
+            },
+            CoreNodeKind::Apply { op, args, list } => CoreNodeKind::Apply {
+                op: op.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| clone_node_with_fresh_ids(arg, next_node_id))
+                    .collect(),
+                list: Box::new(clone_node_with_fresh_ids(list, next_node_id)),
+            },
+            CoreNodeKind::List(items) => CoreNodeKind::List(
+                items
+                    .iter()
+                    .map(|item| clone_node_with_fresh_ids(item, next_node_id))
+                    .collect(),
+            ),
+            CoreNodeKind::Group(items) => CoreNodeKind::Group(
+                items
+                    .iter()
+                    .map(|item| clone_node_with_fresh_ids(item, next_node_id))
+                    .collect(),
+            ),
+        },
+        value_kind: node.value_kind,
+        span: node.span,
+    }
+}
+
 fn next_id(next_node_id: &mut u64) -> NodeId {
     let id = *next_node_id;
     *next_node_id += 1;
@@ -1396,23 +1949,42 @@ struct PartPlanner<'a> {
     scalar_node_values: BTreeMap<u64, OcctArg>,
     node_refs: BTreeMap<u64, OcctSlot>,
     locals: BTreeMap<String, OcctArg>,
+    next_node_id: u64,
     commands: Vec<OcctCommand>,
 }
 
 impl<'a> PartPlanner<'a> {
-    fn new(param_names: &'a BTreeMap<u64, String>, parameters: &'a DesignParams) -> Self {
+    fn new(
+        param_names: &'a BTreeMap<u64, String>,
+        scalar_env: &'a BTreeMap<String, ParamValue>,
+        next_node_id: u64,
+    ) -> Self {
         Self {
             param_names,
-            scalar_env: parameters.clone(),
+            scalar_env: scalar_env.clone(),
             scalar_node_values: BTreeMap::new(),
             node_refs: BTreeMap::new(),
             locals: BTreeMap::new(),
+            next_node_id,
             commands: Vec::new(),
         }
     }
 
     fn scalar_env_snapshot(&self) -> BTreeMap<String, ParamValue> {
-        self.scalar_env.clone()
+        let mut env = self.scalar_env.clone();
+        for (name, arg) in &self.locals {
+            if let Some(value) = occt_arg_to_scalar(arg) {
+                env.insert(name.clone(), value);
+            }
+        }
+        env
+    }
+
+    fn scalar_param_node_values(&self) -> BTreeMap<u64, ParamValue> {
+        self.scalar_node_values
+            .iter()
+            .filter_map(|(id, arg)| occt_arg_to_scalar(arg).map(|value| (*id, value)))
+            .collect()
     }
 
     fn plan_node(&mut self, node: &CoreNode) -> AppResult<OcctSlot> {
@@ -1434,7 +2006,14 @@ impl<'a> PartPlanner<'a> {
                 let keywords = keywords
                     .iter()
                     .map(|keyword| {
-                        let value = self.plan_arg(keyword.source_node())?;
+                        let value = if keyword.name == "align" {
+                            self.plan_align_arg(keyword.source_node())?
+                        } else if let Some(selector) = keyword.selector_payload() {
+                            self.plan_arg(keyword.source_node())
+                                .unwrap_or_else(|_| selector_source_placeholder_arg(selector))
+                        } else {
+                            self.plan_arg(keyword.source_node())?
+                        };
                         Ok(match keyword.selector_payload() {
                             Some(selector) => {
                                 OcctKeyword::selector(keyword.name.clone(), value, selector.clone())
@@ -1453,6 +2032,7 @@ impl<'a> PartPlanner<'a> {
             }
             CoreNodeKind::Build { bindings, result } => self.plan_build(bindings, result)?,
             CoreNodeKind::Let { bindings, body } => self.plan_let(bindings, body)?,
+            CoreNodeKind::Apply { op, args, list } => self.plan_apply(op, args, list, node)?,
             CoreNodeKind::If { .. } => {
                 return Err(unsupported(
                     "if",
@@ -1519,6 +2099,35 @@ impl<'a> PartPlanner<'a> {
         root
     }
 
+    fn plan_apply(
+        &mut self,
+        op: &CoreOperation,
+        args: &[CoreNode],
+        list: &CoreNode,
+        node: &CoreNode,
+    ) -> AppResult<OcctSlot> {
+        let output = OcctSlot(node.id.raw());
+        let mut planned_args = args
+            .iter()
+            .map(|arg| self.plan_arg(arg))
+            .collect::<AppResult<Vec<_>>>()?;
+        let list_arg = self.plan_arg(list)?;
+        let OcctArg::List(items) = list_arg else {
+            return Err(AppError::validation(format!(
+                "Direct OCCT adapter `apply` expected list argument, got {:?}.",
+                list_arg
+            )));
+        };
+        planned_args.extend(items);
+        self.commands.push(OcctCommand {
+            output,
+            op: occt_op(op)?,
+            args: planned_args,
+            keywords: Vec::new(),
+        });
+        Ok(output)
+    }
+
     fn plan_arg(&mut self, node: &CoreNode) -> AppResult<OcctArg> {
         match &node.kind {
             CoreNodeKind::Literal(CoreLiteral::Number(number)) => Ok(OcctArg::Number(*number)),
@@ -1564,17 +2173,22 @@ impl<'a> PartPlanner<'a> {
                     .map(|item| self.plan_arg(item))
                     .collect::<AppResult<Vec<_>>>()?,
             )),
-            CoreNodeKind::Call { .. } | CoreNodeKind::Build { .. } | CoreNodeKind::Let { .. } => {
+            CoreNodeKind::Range { start, end } => self.plan_range_arg(start, end),
+            CoreNodeKind::Map {
+                params,
+                sources,
+                body,
+            } => self.plan_map_arg(params, sources, body),
+            CoreNodeKind::Let { bindings, body } => self.plan_let_arg(bindings, body),
+            CoreNodeKind::Build { bindings, result } => self.plan_build_arg(bindings, result),
+            CoreNodeKind::Call { .. } | CoreNodeKind::Apply { .. } => {
                 if let Some(scalar) = self.plan_scalar_arg(node)? {
                     return Ok(scalar);
                 }
                 let slot = self.plan_node(node)?;
                 Ok(OcctArg::Ref(slot))
             }
-            CoreNodeKind::If { .. }
-            | CoreNodeKind::Range { .. }
-            | CoreNodeKind::Map { .. }
-            | CoreNodeKind::Apply { .. } => Err(AppError::validation(format!(
+            CoreNodeKind::If { .. } => Err(AppError::validation(format!(
                 "Direct OCCT adapter cannot plan dynamic expression node {:?} before evaluation.",
                 node.kind
             ))),
@@ -1585,29 +2199,76 @@ impl<'a> PartPlanner<'a> {
         }
     }
 
+    fn plan_align_arg(&mut self, node: &CoreNode) -> AppResult<OcctArg> {
+        let symbols = match &node.kind {
+            CoreNodeKind::List(items) | CoreNodeKind::Group(items) => items
+                .iter()
+                .map(align_axis_arg)
+                .collect::<AppResult<Vec<_>>>()?,
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom(head),
+                args,
+                keywords,
+            } if keywords.is_empty() => {
+                let mut symbols = Vec::with_capacity(args.len() + 1);
+                symbols.push(align_axis_name(head)?);
+                for arg in args {
+                    symbols.push(align_axis_arg(arg)?);
+                }
+                symbols
+            }
+            _ => {
+                return Err(AppError::validation(
+                    "Direct OCCT adapter `:align` expects `(min|center|max)^3`.",
+                ));
+            }
+        };
+        if symbols.len() != 3 {
+            return Err(AppError::validation(
+                "Direct OCCT adapter `:align` expects exactly 3 axes.",
+            ));
+        }
+        Ok(OcctArg::List(
+            symbols
+                .into_iter()
+                .map(|symbol| OcctArg::Symbol(symbol.to_string()))
+                .collect(),
+        ))
+    }
+
     fn plan_scalar_arg(&mut self, node: &CoreNode) -> AppResult<Option<OcctArg>> {
         let env = self.scalar_env_snapshot();
+        let node_env = self.scalar_param_node_values();
         Ok(match node.value_kind {
-            CoreValueKind::Number => Some(OcctArg::Number(
-                crate::ecky_ir::eval_core_number_with_locals(node, self.param_names, &env)?,
-            )),
-            CoreValueKind::Boolean => Some(OcctArg::Boolean(
-                crate::ecky_ir::eval_core_bool_with_locals(node, self.param_names, &env)?,
-            )),
-            CoreValueKind::Text => Some(OcctArg::Text(
-                crate::ecky_ir::eval_core_stringish_with_locals(node, self.param_names, &env)?,
-            )),
+            CoreValueKind::Number => Some(OcctArg::Number(eval_number_for_direct_occt(
+                node,
+                self.param_names,
+                &env,
+                &node_env,
+            )?)),
+            CoreValueKind::Boolean => Some(OcctArg::Boolean(eval_bool_for_direct_occt(
+                node,
+                self.param_names,
+                &env,
+                &node_env,
+            )?)),
+            CoreValueKind::Text => Some(OcctArg::Text(eval_stringish_for_direct_occt(
+                node,
+                self.param_names,
+                &env,
+                &node_env,
+            )?)),
             CoreValueKind::Any => {
                 if let Ok(number) =
-                    crate::ecky_ir::eval_core_number_with_locals(node, self.param_names, &env)
+                    eval_number_for_direct_occt(node, self.param_names, &env, &node_env)
                 {
                     Some(OcctArg::Number(number))
                 } else if let Ok(flag) =
-                    crate::ecky_ir::eval_core_bool_with_locals(node, self.param_names, &env)
+                    eval_bool_for_direct_occt(node, self.param_names, &env, &node_env)
                 {
                     Some(OcctArg::Boolean(flag))
                 } else if let Ok(text) =
-                    crate::ecky_ir::eval_core_stringish_with_locals(node, self.param_names, &env)
+                    eval_stringish_for_direct_occt(node, self.param_names, &env, &node_env)
                 {
                     Some(OcctArg::Text(text))
                 } else {
@@ -1617,6 +2278,126 @@ impl<'a> PartPlanner<'a> {
             _ => None,
         })
     }
+
+    fn plan_range_arg(&mut self, start: &CoreNode, end: &CoreNode) -> AppResult<OcctArg> {
+        let env = self.scalar_env_snapshot();
+        let node_env = self.scalar_param_node_values();
+        let start = eval_number_for_direct_occt(start, self.param_names, &env, &node_env)?;
+        let end = eval_number_for_direct_occt(end, self.param_names, &env, &node_env)?;
+        let start = start.floor() as i64;
+        let end = end.floor() as i64;
+        let items = if start <= end {
+            (start..end)
+                .map(|value| OcctArg::Number(value as f64))
+                .collect()
+        } else {
+            (end + 1..=start)
+                .rev()
+                .map(|value| OcctArg::Number(value as f64))
+                .collect()
+        };
+        Ok(OcctArg::List(items))
+    }
+
+    fn plan_map_arg(
+        &mut self,
+        params: &[String],
+        sources: &[CoreNode],
+        body: &CoreNode,
+    ) -> AppResult<OcctArg> {
+        if params.len() != sources.len() {
+            return Err(AppError::validation(format!(
+                "Direct OCCT adapter map expected {} source list(s), got {}.",
+                params.len(),
+                sources.len()
+            )));
+        }
+        let source_values = sources
+            .iter()
+            .map(|source| match self.plan_arg(source)? {
+                OcctArg::List(items) => Ok(items),
+                other => Err(AppError::validation(format!(
+                    "Direct OCCT adapter map expected list source, got {:?}.",
+                    other
+                ))),
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        let Some(first_source) = source_values.first() else {
+            return Ok(OcctArg::List(Vec::new()));
+        };
+        let count = first_source.len();
+        if source_values.iter().any(|source| source.len() != count) {
+            return Err(AppError::validation(
+                "Direct OCCT adapter map source lists must have matching lengths.",
+            ));
+        }
+
+        let saved_locals = self.locals.clone();
+        let mut items = Vec::with_capacity(count);
+        let result = (|| {
+            for index in 0..count {
+                self.locals = saved_locals.clone();
+                for (param, source) in params.iter().zip(source_values.iter()) {
+                    self.locals.insert(param.clone(), source[index].clone());
+                }
+                let iteration_body = clone_node_with_fresh_ids(body, &mut self.next_node_id);
+                items.push(self.plan_arg(&iteration_body)?);
+            }
+            Ok(OcctArg::List(items))
+        })();
+        self.locals = saved_locals;
+        result
+    }
+
+    fn plan_let_arg(&mut self, bindings: &[CoreBinding], body: &CoreNode) -> AppResult<OcctArg> {
+        let saved_locals = self.locals.clone();
+        let saved_scalar_env = self.scalar_env.clone();
+        let saved_scalar_node_values = self.scalar_node_values.clone();
+        for binding in bindings {
+            let value = self.plan_arg(&binding.value)?;
+            if let Some(scalar) = occt_arg_to_scalar(&value) {
+                self.scalar_env.insert(binding.name.clone(), scalar);
+                self.scalar_node_values
+                    .insert(binding.value.id.raw(), value.clone());
+            }
+            self.locals.insert(binding.name.clone(), value.clone());
+            if let OcctArg::Ref(slot) = value {
+                self.node_refs.insert(binding.value.id.raw(), slot);
+            }
+        }
+        let result = self.plan_arg(body);
+        self.locals = saved_locals;
+        self.scalar_env = saved_scalar_env;
+        self.scalar_node_values = saved_scalar_node_values;
+        result
+    }
+
+    fn plan_build_arg(
+        &mut self,
+        bindings: &[CoreShapeBinding],
+        result: &CoreNode,
+    ) -> AppResult<OcctArg> {
+        let saved_locals = self.locals.clone();
+        let saved_scalar_env = self.scalar_env.clone();
+        let saved_scalar_node_values = self.scalar_node_values.clone();
+        for binding in bindings {
+            let value = self.plan_arg(&binding.value)?;
+            if let Some(scalar) = occt_arg_to_scalar(&value) {
+                self.scalar_env.insert(binding.name.clone(), scalar);
+                self.scalar_node_values
+                    .insert(binding.value.id.raw(), value.clone());
+            }
+            self.locals.insert(binding.name.clone(), value.clone());
+            if let OcctArg::Ref(slot) = value {
+                self.node_refs.insert(binding.value.id.raw(), slot);
+            }
+        }
+        let planned = self.plan_arg(result);
+        self.locals = saved_locals;
+        self.scalar_env = saved_scalar_env;
+        self.scalar_node_values = saved_scalar_node_values;
+        planned
+    }
 }
 
 fn occt_arg_to_scalar(arg: &OcctArg) -> Option<ParamValue> {
@@ -1625,6 +2406,31 @@ fn occt_arg_to_scalar(arg: &OcctArg) -> Option<ParamValue> {
         OcctArg::Boolean(flag) => Some(ParamValue::Boolean(*flag)),
         OcctArg::Text(text) => Some(ParamValue::String(text.clone())),
         _ => None,
+    }
+}
+
+fn align_axis_arg(node: &CoreNode) -> AppResult<&'static str> {
+    match &node.kind {
+        CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => Ok(symbol_name(symbol)),
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom(name),
+            args,
+            keywords,
+        } if args.is_empty() && keywords.is_empty() => align_axis_name(name),
+        _ => Err(AppError::validation(
+            "Direct OCCT adapter `:align` axes must be `min`, `center`, or `max`.",
+        )),
+    }
+}
+
+fn align_axis_name(name: &str) -> AppResult<&'static str> {
+    match name {
+        "min" => Ok("min"),
+        "center" => Ok("center"),
+        "max" => Ok("max"),
+        _ => Err(AppError::validation(format!(
+            "Direct OCCT adapter `:align` axis `{name}` is not supported."
+        ))),
     }
 }
 
@@ -1779,6 +2585,25 @@ fn operation_name(op: &CoreOperation) -> String {
     .to_string()
 }
 
+fn selector_source_placeholder_arg(selector: &CoreSelectorPayload) -> OcctArg {
+    match selector {
+        CoreSelectorPayload::EdgeAll => OcctArg::Text("all".to_string()),
+        CoreSelectorPayload::EdgeTargetIds(target_ids)
+        | CoreSelectorPayload::FaceTargetIds(target_ids) => OcctArg::Text(
+            target_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "selector".to_string()),
+        ),
+        CoreSelectorPayload::EdgeTag(tag_name) | CoreSelectorPayload::FaceTag(tag_name) => {
+            OcctArg::Text(format!("tag:{tag_name}"))
+        }
+        CoreSelectorPayload::EdgeClauses(_) | CoreSelectorPayload::FaceClauses(_) => {
+            OcctArg::Text("selector".to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1898,6 +2723,34 @@ mod tests {
     }
 
     #[test]
+    fn plans_scalar_build_bindings_referencing_prior_shape_scalars() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape frame_w 84)
+                  (shape extra 4)
+                  (shape holder_w (+ frame_w extra))
+                  (result (box holder_w 2 2)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts[0].commands.len(), 1);
+        assert_eq!(plan.parts[0].commands[0].op, OcctOp::Box);
+        assert_eq!(
+            plan.parts[0].commands[0].args,
+            vec![
+                OcctArg::Number(88.0),
+                OcctArg::Number(2.0),
+                OcctArg::Number(2.0)
+            ]
+        );
+    }
+
+    #[test]
     fn plans_exact_edge_selector_payload_into_direct_occt_keywords() {
         let program = compile(
             r#"
@@ -1956,6 +2809,49 @@ mod tests {
     }
 
     #[test]
+    fn plans_created_by_keyword_into_direct_occt_slot_reference() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape blank (box 10 10 10))
+                  (shape pocket (box 4 4 4))
+                  (shape solid (difference blank pocket))
+                  (result
+                    (fillet 0.5
+                      :edges "left+vertical"
+                      :created-by pocket
+                      solid)))))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("plan");
+        let pocket_slot = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| {
+                command.op == OcctOp::Box
+                    && command.args
+                        == vec![
+                            OcctArg::Number(4.0),
+                            OcctArg::Number(4.0),
+                            OcctArg::Number(4.0),
+                        ]
+            })
+            .map(|command| command.output)
+            .expect("pocket slot");
+        let fillet = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        assert_eq!(fillet.keywords.len(), 2);
+        assert_eq!(fillet.keywords[0].name, "edges");
+        assert_eq!(fillet.keywords[1].name, "created-by");
+        assert_eq!(fillet.keywords[1].source_arg(), &OcctArg::Ref(pocket_slot));
+    }
+
+    #[test]
     fn plans_exact_face_selector_payload_into_direct_occt_keywords() {
         let program = compile(
             r#"
@@ -1976,6 +2872,33 @@ mod tests {
             shell.keywords[0].selector_payload(),
             Some(CoreSelectorPayload::FaceTargetIds(vec![
                 "body:face:0:0-0-10:400".into()
+            ]))
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn plans_tagged_face_selector_payload_into_direct_occt_keywords() {
+        let program = compile(
+            r#"
+            (model
+              (tag-face mounting_top :faces "top" body)
+              (part body
+                (shell 0.8
+                  :faces (tag mounting_top)
+                  (box 10 10 10))))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("plan");
+        let shell = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Shell)
+            .expect("shell");
+        assert_eq!(
+            shell.keywords[0].selector_payload(),
+            Some(CoreSelectorPayload::FaceTargetIds(vec![
+                "tag:mounting_top".into()
             ]))
             .as_ref()
         );
@@ -2152,6 +3075,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![OcctOp::Bspline, OcctOp::Extrude]
         );
+    }
+
+    #[test]
+    fn plans_mapped_bspline_points_for_direct_occt() {
+        let program = compile(
+            r#"
+            (define control-points
+              (map
+                (lambda (angle)
+                  (list
+                    (* 26 (cos (* pi (/ angle 180.0))))
+                    (* 16 (sin (* pi (/ angle 180.0))))))
+                (linspace 0 315 8)))
+
+            (model
+              (part body
+                (extrude (bspline control-points :closed #t) 10)))
+            "#,
+        );
+        assert_eq!(program.parts.len(), 1, "{:?}", program.parts);
+        let plan = plan_core_program(&program).expect("plan");
+        let bspline = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Bspline)
+            .expect("bspline command");
+        assert!(matches!(bspline.args[0], OcctArg::List(_)));
     }
 
     #[test]
@@ -2609,6 +3559,162 @@ mod tests {
         assert_eq!(ops.last(), Some(&OcctOp::Difference));
         assert!(ops.iter().filter(|op| **op == OcctOp::Cylinder).count() >= 12);
         assert!(ops.iter().any(|op| *op == OcctOp::Union));
+    }
+
+    #[test]
+    fn plans_parameterized_map_body_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (params (number cell-count 4 :min 1 :max 8 :step 1))
+              (part panel
+                (build
+                  (shape panel (box 72 48 4 :align '(center center min)))
+                  (result
+                    (difference
+                      panel
+                      (apply union
+                        (map
+                          (lambda (cell)
+                            (let* ((col (- cell (* 4 (floor (/ cell 4)))))
+                                   (x (* (- col 1.5) 14)))
+                              (translate x 0 0
+                                (cylinder 2 8 24))))
+                          (range 0 cell-count))))))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("parameterized map planned");
+        let cylinder_count = plan.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Cylinder)
+            .count();
+
+        assert_eq!(cylinder_count, 4);
+    }
+
+    #[test]
+    fn plans_map_range_count_from_build_scalar_binding_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (params (number chamber_cols 5 :min 3 :max 7 :step 1))
+              (part panel
+                (build
+                  (shape wall 3)
+                  (shape count (* chamber_cols 3))
+                  (shape panel (box 72 48 4 :align '(center center min)))
+                  (shape cutters
+                    (apply union
+                      (map
+                        (lambda (cell)
+                          (translate cell 0 0
+                            (cylinder 2 8 24)))
+                        (range 0 count))))
+                  (result
+                    (difference panel cutters)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("build-bound range count planned");
+        let cylinder_count = plan.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Cylinder)
+            .count();
+
+        assert_eq!(cylinder_count, 15);
+    }
+
+    #[test]
+    fn plans_map_body_box_align_tuple_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape dividers
+                    (apply union
+                      (map
+                        (lambda (divider)
+                          (translate divider 0 0
+                            (box 1 2 3 :align '(center center center))))
+                        (range 1 4))))
+                  (result dividers))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("map body box align planned");
+        let box_count = plan.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Box)
+            .count();
+
+        assert_eq!(box_count, 3);
+    }
+
+    #[test]
+    fn plans_parametric_map_with_build_scalars_and_align_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (params
+                (number hotel_w 74 :min 50 :max 110 :step 1)
+                (number hotel_d 34 :min 24 :max 54 :step 1)
+                (number hotel_h 42 :min 28 :max 70 :step 1)
+                (number chamber_cols 5 :min 3 :max 7 :step 1))
+              (part body
+                (build
+                  (shape wall 3)
+                  (shape col_gap (/ (- hotel_w (* 2 wall)) chamber_cols))
+                  (shape dividers
+                    (apply union
+                      (map
+                        (lambda (divider)
+                          (translate (+ (* -0.5 hotel_w) wall (* divider col_gap)) 0 (/ hotel_h 2)
+                            (box 1.4 (+ hotel_d 2) (- hotel_h (* 2 wall)) :align '(center center center))))
+                        (range 1 chamber_cols))))
+                  (result dividers))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("parametric aligned dividers planned");
+        let box_count = plan.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Box)
+            .count();
+
+        assert_eq!(box_count, 4);
+    }
+
+    #[test]
+    fn plans_repeat_pick_binding_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape marker
+                    (repeat-pick i 4 (= i 3)
+                      (translate (+ (* i 10) 5) 0 12 (sphere 3))))
+                  (result (compound marker)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("repeat-pick planned");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ops,
+            vec![OcctOp::Sphere, OcctOp::Translate, OcctOp::Compound]
+        );
     }
 
     #[test]

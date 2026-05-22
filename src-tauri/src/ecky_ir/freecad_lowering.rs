@@ -178,16 +178,19 @@ fn core_selector_payload_to_ir_expr_local(payload: &CoreSelectorPayload) -> AppR
     match payload {
         CoreSelectorPayload::EdgeAll
         | CoreSelectorPayload::EdgeClauses(_)
+        | CoreSelectorPayload::EdgeTag(_)
         | CoreSelectorPayload::EdgeTargetIds(_) => Ok(IrExpr::Selector(
             crate::ecky_ir::model::IrSelectorExpr::Edge(edge_selector_spec_from_core_payload(
                 payload,
             )?),
         )),
-        CoreSelectorPayload::FaceClauses(_) | CoreSelectorPayload::FaceTargetIds(_) => Ok(
-            IrExpr::Selector(crate::ecky_ir::model::IrSelectorExpr::Face(
-                face_selector_spec_from_core_payload(payload)?,
-            )),
-        ),
+        CoreSelectorPayload::FaceClauses(_)
+        | CoreSelectorPayload::FaceTag(_)
+        | CoreSelectorPayload::FaceTargetIds(_) => Ok(IrExpr::Selector(
+            crate::ecky_ir::model::IrSelectorExpr::Face(face_selector_spec_from_core_payload(
+                payload,
+            )?),
+        )),
     }
 }
 
@@ -343,6 +346,12 @@ fn core_node_to_ir_expr_local(
             for keyword in keywords {
                 items.push(IrExpr::keyword(keyword.name.clone()));
                 items.push(match (keyword.name.as_str(), keyword.selector_payload()) {
+                    ("created-by", None) => {
+                        return Err(validation(format!(
+                            "`{}` does not recognize option `:created-by`.",
+                            core_operation_name_local(op)
+                        )))
+                    }
                     ("edges", None) => {
                         return Err(validation(
                             "CoreProgram `:edges` keyword requires selector payload.",
@@ -4866,6 +4875,34 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("CoreProgram `:edges` keyword requires edge selector payload"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn lower_core_program_to_freecad_rejects_created_by_selector_option() {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape blank (box 10 10 10))
+                  (shape pocket (box 4 4 4))
+                  (shape solid (difference blank pocket))
+                  (result
+                    (fillet 1
+                      :edges "left+vertical"
+                      :created-by pocket
+                      solid)))))
+            "#,
+        )
+        .expect("program");
+
+        let err = lower_core_program_to_freecad(&program)
+            .expect_err("created-by should fail in freecad lowering");
+        assert!(
+            err.to_string()
+                .contains("`fillet` does not recognize option `:created-by`"),
             "{err}"
         );
     }

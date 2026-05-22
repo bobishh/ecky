@@ -1,0 +1,22 @@
+(model
+  (params
+    (number cell-count 12 :label "Cell count" :min 4 :max 24 :step 1))
+  (part panel
+    (build
+      (shape panel (box 72 48 4 :align '(center center min)))
+      (result
+        (difference
+          panel
+          (apply union
+            (map
+              (lambda (cell)
+                (let* ((col (- cell (* 4 (floor (/ cell 4)))))
+                       (row (floor (/ cell 4)))
+                       (x (* (- col 1.5) 14))
+                       (y (* (- row 1.0) 12))
+                       (jx (+ x (* 2.4 (hash-signed col row 23))))
+                       (jy (+ y (* 2.4 (hash-signed (+ col 19.19) (+ row 7.73) 54))))
+                       (r (+ 2.2 (* 1.1 (voronoi2 (/ jx 14.0) (/ jy 12.0) 23)))))
+                  (translate jx jy 0
+                    (cylinder r 8 24))))
+              (range 0 cell-count))))))))

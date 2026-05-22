@@ -57,6 +57,7 @@ test('buildMacroAstSceneLayout places nodes and connectors for a source-backed s
   assert.ok(param);
   assert.ok(connector);
   assert.equal(root?.syntaxLabel, 'MODEL');
+  assert.equal(root!.h <= 48, true, 'root is a slim title bar');
   assert.equal(part?.syntaxVariant, 'solid');
   assert.equal(param?.controlAnchor.x > param!.x, true);
   assert.equal(connector?.path.startsWith('M '), true);
@@ -103,9 +104,14 @@ test('buildMacroAstSceneLayout keeps a single part compact and uses multiple por
 
   const layout = buildMacroAstSceneLayout(projection, { width: 1400 });
   const part = layout.nodes.find((node) => node.kind === 'part');
-  const portXs = layout.nodes.filter((node) => node.kind === 'port').map((node) => node.x);
+  const paramXs = layout.nodes.filter((node) => node.kind === 'param').map((node) => node.x);
 
   assert.ok(part);
   assert.equal(part!.w < layout.width * 0.9, true);
-  assert.equal(new Set(portXs).size > 1, true);
+  assert.equal(new Set(paramXs).size > 1, true);
+  // Every param module carries a port anchor on its left edge.
+  for (const node of layout.nodes.filter((entry) => entry.kind === 'param')) {
+    assert.equal(node.portAnchors.length, 1);
+    assert.equal(node.portAnchors[0]!.x, node.x);
+  }
 });

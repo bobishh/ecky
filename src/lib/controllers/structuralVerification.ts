@@ -4,7 +4,14 @@
  * Kept framework-free so it can be unit-tested without Tauri or Svelte.
  */
 
-import type { StructuralVerificationResult, StructuralMetrics } from '../types/domain';
+import type {
+  AuthoredVerifyCheck,
+  AuthoredVerifyCheckStatus,
+  AuthoredVerifyValue,
+  StructuralVerificationResult,
+  StructuralIssue,
+  StructuralMetrics,
+} from '../types/domain';
 
 export type StructuralVerifyFn = (
   modelId: string,
@@ -12,10 +19,25 @@ export type StructuralVerifyFn = (
 ) => Promise<StructuralVerificationResult>;
 
 export type StructuralCheckResult =
-  | { kind: 'structural_passed'; metrics: StructuralMetrics }
+  | {
+      kind: 'structural_passed';
+      metrics: StructuralMetrics;
+      verification: StructuralVerificationResult;
+    }
   | { kind: 'structural_skipped'; reason: string }
-  | { kind: 'failed_terminal'; issues: string }
-  | { kind: 'repair_needed'; repairPrompt: string };
+  | { kind: 'failed_terminal'; issues: string; verification: StructuralVerificationResult }
+  | { kind: 'repair_needed'; repairPrompt: string; verification: StructuralVerificationResult };
+
+export type AuthoredVerifyChipTone = 'green' | 'red';
+
+export type AuthoredVerifyChip = {
+  id: string;
+  label: string;
+  status: AuthoredVerifyCheckStatus;
+  tone: AuthoredVerifyChipTone;
+  message: string;
+  stableNodeId: string | null;
+};
 
 export interface StructuralCheckOptions {
   modelId: string;
@@ -49,7 +71,7 @@ export async function runStructuralCheck(
   }
 
   if (result.passed) {
-    return { kind: 'structural_passed', metrics: result.metrics };
+    return { kind: 'structural_passed', metrics: result.metrics, verification: result };
   }
 
   const authoredVerifyFailed = hasAuthoredVerifyIssues(result);
@@ -70,6 +92,7 @@ export async function runStructuralCheck(
 
   if (hasMoreAttempts) {
     const metricsBlock = formatMetricsBlock(result.metrics);
+    const authoredVerifyFeedback = formatAuthoredVerifyFeedback(result.issues);
     const repairPrompt = [
       ...(authoredVerifyFailed ? ['Authored verify requirements failed.'] : []),
       `Structural verification failed (source: ${result.verifierSource ?? 'unknown'}):`,
@@ -82,6 +105,9 @@ export async function runStructuralCheck(
         return `- [${i.code}] ${i.message}${partRef}${metric}`;
       }),
       ``,
+      ...(authoredVerifyFeedback.length > 0
+        ? ['Authored verify retry feedback:', ...authoredVerifyFeedback, '']
+        : []),
       ...(authoredVerifyFailed
         ? [
             'Authored verify guidance:',
@@ -96,10 +122,62 @@ export async function runStructuralCheck(
       `Please fix the geometry code to resolve the structural issues.`,
     ].join('\n');
 
-    return { kind: 'repair_needed', repairPrompt };
+    return { kind: 'repair_needed', repairPrompt, verification: result };
   }
 
-  return { kind: 'failed_terminal', issues: issuesSummary };
+  return { kind: 'failed_terminal', issues: issuesSummary, verification: result };
+}
+
+export function deriveAuthoredVerifyChips(
+  result: StructuralVerificationResult | null | undefined,
+): AuthoredVerifyChip[] {
+  const checks = result?.authoredVerifyChecks ?? [];
+  return checks.map((check) => {
+    const label = normalizeAuthoredVerifyTag(check);
+    const stableNodeId = check.stableNodeId ?? null;
+    return {
+      id: stableNodeId ?? `authored-verify:${label}`,
+      label,
+      status: check.status,
+      tone: check.status === 'passed' ? 'green' : 'red',
+      message: formatAuthoredVerifyChipMessage(check),
+      stableNodeId,
+    };
+  });
+}
+
+function normalizeAuthoredVerifyTag(check: AuthoredVerifyCheck): string {
+  const tag = `${check.tag ?? ''}`.trim();
+  return tag || 'verify';
+}
+
+function formatAuthoredVerifyChipMessage(check: AuthoredVerifyCheck): string {
+  const expected = formatAuthoredVerifyValue(check.expected);
+  const actual = formatAuthoredVerifyValue(check.actual);
+  const comparator = `${check.comparator ?? ''}`.trim();
+
+  if (!expected || !actual || !comparator) {
+    return check.message;
+  }
+
+  const metricParts = [`${check.metricSource ?? ''}`.trim(), `${check.metricKey ?? ''}`.trim()]
+    .filter((part) => part.length > 0);
+  const prefix = metricParts.length > 0 ? `${metricParts.join(' ')} ` : '';
+  return `${prefix}expected ${comparator} ${expected}; actual ${actual}`;
+}
+
+function formatAuthoredVerifyValue(value: AuthoredVerifyValue | null | undefined): string | null {
+  if (!value) return null;
+  switch (value.kind) {
+    case 'number':
+      return Number.isFinite(value.value) ? `${value.value}` : null;
+    case 'boolean':
+      return value.value ? 'true' : 'false';
+    case 'text':
+      return value.value;
+    default:
+      return null;
+  }
 }
 
 function formatMetricsBlock(metrics: StructuralMetrics): string | null {
@@ -120,6 +198,16 @@ function formatMetricsBlock(metrics: StructuralMetrics): string | null {
   if (metrics.previewStlOverhangRatio != null)
     lines.push(`  overhang ratio: ${metrics.previewStlOverhangRatio.toFixed(3)}`);
   return lines.length > 1 ? lines.join('\n') : null;
+}
+
+function formatAuthoredVerifyFeedback(issues: StructuralIssue[]): string[] {
+  return issues
+    .filter((issue) => issue.code.startsWith('AUTHORED_VERIFY_'))
+    .map((issue) => {
+      const tag = issue.partId ?? 'model';
+      const value = issue.numericPayload != null ? ` (value: ${issue.numericPayload})` : '';
+      return `- verify ${tag}: ${issue.message}${value}`;
+    });
 }
 
 function hasAuthoredVerifyIssues(result: StructuralVerificationResult): boolean {

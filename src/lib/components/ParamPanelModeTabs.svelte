@@ -9,6 +9,7 @@
     macroCode = '',
     onActiveTabChange,
     onShowCode,
+    onOpenInEditor,
     onViewerDisplayChange,
     onViewerSelectionModeChange,
   }: {
@@ -19,6 +20,7 @@
     macroCode?: string;
     onActiveTabChange?: (tab: 'views' | 'raw' | 'litho' | 'newParams') => void;
     onShowCode?: () => void;
+    onOpenInEditor?: () => void;
     onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
     onViewerSelectionModeChange?: (mode: 'orbit' | 'select' | 'measure') => void;
   } = $props();
@@ -99,6 +101,15 @@
   {#if macroCode && onShowCode}
     <button class="panel-mode-tab panel-code-btn" onclick={onShowCode} title="View macro code">
       CODE
+    </button>
+  {/if}
+  {#if macroCode && onOpenInEditor}
+    <button
+      class="panel-mode-tab panel-code-btn panel-file-btn"
+      onclick={onOpenInEditor}
+      title="Open model.ecky in your editor; saved edits come back as new versions"
+    >
+      FILE ↗
     </button>
   {/if}
 </div>
