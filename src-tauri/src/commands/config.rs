@@ -2,10 +2,34 @@ use std::{
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Command,
 };
 use tauri::{AppHandle, Manager, State};
 
 use crate::models::{AppResult, AppState, Config};
+
+fn open_path_in_system_editor(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(path).status()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .status()?;
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open").arg(path).status()?;
+        Ok(())
+    }
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -374,15 +398,13 @@ pub async fn open_project_in_editor(
     }
 
     let file = dir.join(project_mirror::PROJECT_SOURCE_FILE_NAME);
-    tauri_plugin_shell::ShellExt::shell(&app)
-        .open(file.to_string_lossy().as_ref(), None)
-        .map_err(|err| {
-            crate::models::AppError::internal(format!(
-                "Failed to open '{}' in the system editor: {}",
-                file.display(),
-                err
-            ))
-        })?;
+    open_path_in_system_editor(&file).map_err(|err| {
+        crate::models::AppError::internal(format!(
+            "Failed to open '{}' in the system editor: {}",
+            file.display(),
+            err
+        ))
+    })?;
 
     Ok(ProjectEditorLink {
         slug,

@@ -312,7 +312,15 @@ endsolid mock
           return nodes;
         }
         if (cmd === 'render_model' && String(args?.macroCode ?? '').includes('boom')) {
-          throw { code: 'validation', message: 'mock render exploded: boom op unsupported' };
+          throw {
+            code: 'validation',
+            message: 'mock render exploded: boom op unsupported',
+            details: 'mock kernel body mismatch\npart=body op=boom width=12 depth=20',
+            stableNodeKey: 'part:body',
+            startLine: 2,
+            endLine: 2,
+            operation: 'boom',
+          };
         }
         if (cmd === 'render_model') {
           return {
@@ -1203,7 +1211,41 @@ endsolid mock
 
     await expect(pane.locator('.macro-source-pane__error')).toBeVisible();
     await expect(pane.locator('.macro-source-pane__error')).toContainText('boom');
+    await expect(pane.locator('.macro-source-pane__error')).toContainText(
+      'Context: part=body | op=boom | width=12 | depth=20 | lines=2',
+    );
     await expect(pane).toBeVisible();
+  });
+
+  test('Given model-scope source edit When backend returns responsible node Then pane retargets that node and keeps structured context', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make an editable macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    const modelNode = page.locator('.macro-ast-node-root[data-node-id="macro-root"]');
+    await expect(modelNode).toBeVisible();
+    await modelNode.locator('.macro-ast-node__header').first().dblclick();
+
+    const pane = page.getByTestId('macro-source-pane');
+    await expect(pane).toContainText('EDIT SOURCE / MACRO ROOT');
+
+    await pane.locator('.cm-content').fill('(model\n  (part body (boom 12 20 5)))');
+    await pane.getByRole('button', { name: 'APPLY' }).click();
+
+    await expect(pane.locator('.macro-source-pane__error')).toBeVisible();
+    await expect(pane).toContainText('EDIT SOURCE / BODY');
+    await expect(pane.locator('.macro-source-pane__error')).toContainText(
+      'Context: part=body | op=boom | width=12 | depth=20 | lines=2',
+    );
   });
 
   test('Given editable macro When ADD PART opens the pane Then the template scope applies as a new part', async ({

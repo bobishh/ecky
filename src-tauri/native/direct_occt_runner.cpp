@@ -21,6 +21,7 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
@@ -37,16 +38,18 @@
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
+#include <Poly_Triangulation.hxx>
 #include <StlAPI_Reader.hxx>
 #include <STEPControl_Writer.hxx>
 #include <Standard_Failure.hxx>
-#include <StlAPI_Writer.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+#include <TopAbs_Orientation.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -1027,6 +1030,24 @@ struct BoxArgs {
     std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Min};
 };
 
+struct SphereArgs {
+    double radius = 0.0;
+    std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Center};
+};
+
+struct CylinderArgs {
+    double radius = 0.0;
+    double height = 0.0;
+    std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Min};
+};
+
+struct ConeArgs {
+    double radius1 = 0.0;
+    double radius2 = 0.0;
+    double height = 0.0;
+    std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Min};
+};
+
 AlignMode require_align_mode(const Arg& arg, const std::string& label) {
     if (arg.kind != Arg::Kind::Symbol && arg.kind != Arg::Kind::Text) {
         throw EvalError(label + " expects `min`, `center`, or `max` symbols");
@@ -1067,6 +1088,18 @@ double align_offset(double size, AlignMode align) {
     return 0.0;
 }
 
+double centered_align_offset(double size, AlignMode align) {
+    switch (align) {
+        case AlignMode::Min:
+            return size * 0.5;
+        case AlignMode::Center:
+            return 0.0;
+        case AlignMode::Max:
+            return -size * 0.5;
+    }
+    return 0.0;
+}
+
 BoxArgs box_args(const Command& command) {
     if (command.args.size() != 3) {
         throw EvalError("box expects width, depth, and height");
@@ -1085,6 +1118,56 @@ BoxArgs box_args(const Command& command) {
         }
         throw EvalError("box does not recognize `:" + keyword.name + "`");
     }
+    return args;
+}
+
+void apply_align_keywords(
+    const std::string& op,
+    const std::vector<Keyword>& keywords,
+    std::array<AlignMode, 3>& align
+) {
+    for (const auto& keyword : keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError(op + " keywords expect arg values only");
+        }
+        if (keyword.name == "align") {
+            align = require_align_tuple(keyword.value, op + " :align");
+            continue;
+        }
+        throw EvalError(op + " does not recognize `:" + keyword.name + "`");
+    }
+}
+
+SphereArgs sphere_args(const Command& command) {
+    if (command.args.empty()) {
+        throw EvalError("sphere expects radius");
+    }
+    SphereArgs args;
+    args.radius = require_number_arg(command.args, 0, "sphere");
+    apply_align_keywords("sphere", command.keywords, args.align);
+    return args;
+}
+
+CylinderArgs cylinder_args(const Command& command) {
+    if (command.args.size() < 2) {
+        throw EvalError("cylinder expects radius and height");
+    }
+    CylinderArgs args;
+    args.radius = require_number_arg(command.args, 0, "cylinder");
+    args.height = require_number_arg(command.args, 1, "cylinder");
+    apply_align_keywords("cylinder", command.keywords, args.align);
+    return args;
+}
+
+ConeArgs cone_args(const Command& command) {
+    if (command.args.size() < 3) {
+        throw EvalError("cone expects two radii and height");
+    }
+    ConeArgs args;
+    args.radius1 = require_number_arg(command.args, 0, "cone");
+    args.radius2 = require_number_arg(command.args, 1, "cone");
+    args.height = require_number_arg(command.args, 2, "cone");
+    apply_align_keywords("cone", command.keywords, args.align);
     return args;
 }
 
@@ -1609,16 +1692,51 @@ TopoDS_Shape make_box(double width, double depth, double height, const std::arra
     return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
 }
 
-TopoDS_Shape make_sphere(double radius) {
-    return BRepPrimAPI_MakeSphere(radius).Shape();
+TopoDS_Shape make_sphere(double radius, const std::array<AlignMode, 3>& align) {
+    TopoDS_Shape shape = BRepPrimAPI_MakeSphere(radius).Shape();
+    double span = radius * 2.0;
+    double tx = centered_align_offset(span, align[0]);
+    double ty = centered_align_offset(span, align[1]);
+    double tz = centered_align_offset(span, align[2]);
+    if (std::abs(tx) <= 1.0e-12 && std::abs(ty) <= 1.0e-12 && std::abs(tz) <= 1.0e-12) {
+        return shape;
+    }
+    gp_Trsf trsf;
+    trsf.SetTranslation(gp_Vec(tx, ty, tz));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
 }
 
-TopoDS_Shape make_cylinder(double radius, double height) {
-    return BRepPrimAPI_MakeCylinder(radius, height).Shape();
+TopoDS_Shape make_cylinder(double radius, double height, const std::array<AlignMode, 3>& align) {
+    TopoDS_Shape shape = BRepPrimAPI_MakeCylinder(radius, height).Shape();
+    double span = radius * 2.0;
+    double tx = centered_align_offset(span, align[0]);
+    double ty = centered_align_offset(span, align[1]);
+    double tz = align_offset(height, align[2]);
+    if (std::abs(tx) <= 1.0e-12 && std::abs(ty) <= 1.0e-12 && std::abs(tz) <= 1.0e-12) {
+        return shape;
+    }
+    gp_Trsf trsf;
+    trsf.SetTranslation(gp_Vec(tx, ty, tz));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
 }
 
-TopoDS_Shape make_cone(double radius1, double radius2, double height) {
-    return BRepPrimAPI_MakeCone(radius1, radius2, height).Shape();
+TopoDS_Shape make_cone(
+    double radius1,
+    double radius2,
+    double height,
+    const std::array<AlignMode, 3>& align
+) {
+    TopoDS_Shape shape = BRepPrimAPI_MakeCone(radius1, radius2, height).Shape();
+    double span = std::max(radius1, radius2) * 2.0;
+    double tx = centered_align_offset(span, align[0]);
+    double ty = centered_align_offset(span, align[1]);
+    double tz = align_offset(height, align[2]);
+    if (std::abs(tx) <= 1.0e-12 && std::abs(ty) <= 1.0e-12 && std::abs(tz) <= 1.0e-12) {
+        return shape;
+    }
+    gp_Trsf trsf;
+    trsf.SetTranslation(gp_Vec(tx, ty, tz));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
 }
 
 TopoDS_Shape extrude_shape(const TopoDS_Shape& shape, double height) {
@@ -2774,7 +2892,8 @@ SlotValue evaluate_command(
         return lookup_frame(slots, arg.ref_value, op);
     };
 
-    if (!command.keywords.empty() && op != "box" && op != "profile" && op != "plane" &&
+    if (!command.keywords.empty() && op != "box" && op != "sphere" && op != "cylinder" &&
+        op != "cone" && op != "profile" && op != "plane" &&
         op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline") {
         throw EvalError(op + " keywords unsupported yet");
     }
@@ -2784,15 +2903,18 @@ SlotValue evaluate_command(
         return SlotValue::shape_value(make_box(args.width, args.depth, args.height, args.align));
     }
     if (op == "sphere") {
-        return make_sphere(require_number_arg(command.args, 0, op));
+        SphereArgs args = sphere_args(command);
+        return SlotValue::shape_value(make_sphere(args.radius, args.align));
     }
     if (op == "cylinder") {
-        return make_cylinder(require_number_arg(command.args, 0, op),
-                             require_number_arg(command.args, 1, op));
+        CylinderArgs args = cylinder_args(command);
+        return SlotValue::shape_value(make_cylinder(args.radius, args.height, args.align));
     }
     if (op == "cone") {
-        return make_cone(require_number_arg(command.args, 0, op), require_number_arg(command.args, 1, op),
-                         require_number_arg(command.args, 2, op));
+        ConeArgs args = cone_args(command);
+        return SlotValue::shape_value(
+            make_cone(args.radius1, args.radius2, args.height, args.align)
+        );
     }
     if (op == "rectangle") {
         const double width = require_number_arg(command.args, 0, op);
@@ -3081,9 +3203,53 @@ void write_step_file(const fs::path& path, const TopoDS_Shape& shape) {
 
 void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
     BRepMesh_IncrementalMesh mesh(shape, 0.2);
-    StlAPI_Writer writer;
-    if (!writer.Write(shape, path.string().c_str())) {
+    std::ofstream out(path);
+    if (!out) {
         throw IoError("failed to write STL");
+    }
+    out << "solid ecky\n";
+    bool wrote_triangle = false;
+    for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
+        TopoDS_Face face = TopoDS::Face(face_explorer.Current());
+        TopLoc_Location location;
+        Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) {
+            continue;
+        }
+        gp_Trsf transform = location.Transformation();
+        const Poly_Array1OfTriangle& triangles = triangulation->Triangles();
+        for (Standard_Integer triangle_index = triangles.Lower(); triangle_index <= triangles.Upper();
+             ++triangle_index) {
+            Standard_Integer n1 = 0;
+            Standard_Integer n2 = 0;
+            Standard_Integer n3 = 0;
+            triangles(triangle_index).Get(n1, n2, n3);
+            gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
+            gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
+            gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
+            if (face.Orientation() == TopAbs_REVERSED) {
+                std::swap(p2, p3);
+            }
+            gp_Vec edge_a(p1, p2);
+            gp_Vec edge_b(p1, p3);
+            gp_Vec normal = edge_a.Crossed(edge_b);
+            if (normal.SquareMagnitude() <= 1.0e-18) {
+                continue;
+            }
+            normal.Normalize();
+            out << "facet normal " << normal.X() << " " << normal.Y() << " " << normal.Z() << "\n";
+            out << "  outer loop\n";
+            out << "    vertex " << p1.X() << " " << p1.Y() << " " << p1.Z() << "\n";
+            out << "    vertex " << p2.X() << " " << p2.Y() << " " << p2.Z() << "\n";
+            out << "    vertex " << p3.X() << " " << p3.Y() << " " << p3.Z() << "\n";
+            out << "  endloop\n";
+            out << "endfacet\n";
+            wrote_triangle = true;
+        }
+    }
+    out << "endsolid ecky\n";
+    if (!wrote_triangle || !out.good()) {
+        throw IoError("failed to write STL: shape produced no triangulated faces");
     }
 }
 

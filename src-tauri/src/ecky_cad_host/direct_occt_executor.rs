@@ -170,6 +170,7 @@ pub fn emit_plan_export_source_with_params(
     };
     let topology_path = step_path.with_file_name("topology.json");
     let topology_writer_source = direct_occt_topology_writer_source();
+    let stl_writer_source = direct_occt_stl_writer_source();
     let topology_writer_calls = direct_occt_topology_writer_calls(&part_topology_roots);
 
     Ok(format!(
@@ -204,6 +205,7 @@ pub fn emit_plan_export_source_with_params(
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepOffset_Mode.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepTools.hxx>
 #include <GeomAbs_JoinType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
@@ -216,14 +218,16 @@ pub fn emit_plan_export_source_with_params(
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <IFSelect_ReturnStatus.hxx>
+#include <Poly_Triangulation.hxx>
 #include <STEPControl_Writer.hxx>
 #include <StlAPI_Reader.hxx>
-#include <StlAPI_Writer.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+#include <TopAbs_Orientation.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -254,6 +258,7 @@ pub fn emit_plan_export_source_with_params(
 #include <vector>
 
 {topology_writer_source}
+{stl_writer_source}
 
 int main() {{
 {body}    TopoDS_Shape shape = {root_var};
@@ -273,8 +278,8 @@ int main() {{
         return 4;
     }}
     BRepMesh_IncrementalMesh mesh(shape, {PREVIEW_MESH_LINEAR_DEFLECTION_MM}, false, {PREVIEW_MESH_ANGULAR_DEFLECTION_RAD}, true);
-    StlAPI_Writer stl_writer;
-    if (!stl_writer.Write(shape, "{}")) {{
+    if (!write_ascii_stl_mesh(shape, "{}")) {{
+        std::cerr << "Direct OCCT preview STL write failed: shape produced no triangulated faces.\n";
         return 3;
     }}
     return 0;
@@ -313,6 +318,57 @@ fn direct_occt_topology_writer_calls(
             )
         })
         .collect::<String>()
+}
+
+fn direct_occt_stl_writer_source() -> &'static str {
+    r#"bool write_ascii_stl_mesh(const TopoDS_Shape& shape, const char* path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "solid ecky\n";
+    bool wrote_triangle = false;
+    for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
+        TopoDS_Face face = TopoDS::Face(face_explorer.Current());
+        TopLoc_Location location;
+        Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) {
+            continue;
+        }
+        gp_Trsf transform = location.Transformation();
+        const Poly_Array1OfTriangle& triangles = triangulation->Triangles();
+        for (Standard_Integer triangle_index = triangles.Lower(); triangle_index <= triangles.Upper(); ++triangle_index) {
+            Standard_Integer n1 = 0;
+            Standard_Integer n2 = 0;
+            Standard_Integer n3 = 0;
+            triangles(triangle_index).Get(n1, n2, n3);
+            gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
+            gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
+            gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
+            if (face.Orientation() == TopAbs_REVERSED) {
+                std::swap(p2, p3);
+            }
+            gp_Vec edge_a(p1, p2);
+            gp_Vec edge_b(p1, p3);
+            gp_Vec normal = edge_a.Crossed(edge_b);
+            if (normal.SquareMagnitude() <= 1.0e-18) {
+                continue;
+            }
+            normal.Normalize();
+            out << "facet normal " << normal.X() << " " << normal.Y() << " " << normal.Z() << "\n";
+            out << "  outer loop\n";
+            out << "    vertex " << p1.X() << " " << p1.Y() << " " << p1.Z() << "\n";
+            out << "    vertex " << p2.X() << " " << p2.Y() << " " << p2.Z() << "\n";
+            out << "    vertex " << p3.X() << " " << p3.Y() << " " << p3.Z() << "\n";
+            out << "  endloop\n";
+            out << "endfacet\n";
+            wrote_triangle = true;
+        }
+    }
+    out << "endsolid ecky\n";
+    return wrote_triangle && out.good();
+}
+"#
 }
 
 fn cpp_string_literal(value: &str) -> String {
@@ -3356,7 +3412,7 @@ mod tests {
         assert!(source.contains("20"));
         assert!(source.contains("30"));
         assert!(source.contains("STEPControl_Writer"));
-        assert!(source.contains("StlAPI_Writer"));
+        assert!(source.contains("write_ascii_stl_mesh"));
         assert!(source.contains("BRepMesh_IncrementalMesh mesh(shape, 0.05, false, 0.15, true);"));
         assert!(source.contains("/tmp/model.step"));
         assert!(source.contains("/tmp/preview.stl"));

@@ -36,9 +36,9 @@ test('parseDocsDocument reads markdown corpus into title and sections', () => {
   assert.ok(parsed.sections.some((section) => section.title === 'Verify Clauses'));
 });
 
-test('parseDocsDocument marks pending sections and extracts snippets', () => {
+test('parseDocsDocument reads section status and extracts snippets', () => {
   const parsed = parseDocsDocument(docsFixture());
-  const pending = resolveSection(parsed.sections, 'constraint-dojo');
+  const constraintDojo = resolveSection(parsed.sections, 'constraint-dojo');
   const forms = resolveSection(parsed.sections, 'forms-and-structure');
   const params = resolveSection(parsed.sections, 'params-and-controls');
   const repetition = resolveSection(parsed.sections, 'repetition-ribs-slots-and-patterns');
@@ -46,8 +46,8 @@ test('parseDocsDocument marks pending sections and extracts snippets', () => {
   const verificationChapter = resolveSection(parsed.sections, 'verification-state-what-must-stay-true');
   const selectors = resolveSection(parsed.sections, 'round-chamfer-shell-select-edges-and-faces');
 
-  assert.equal(pending?.status, 'pending');
-  assert.ok(pending?.bodyHtml.includes('fit/tolerance tutorial'));
+  assert.equal(constraintDojo?.status, 'ready');
+  assert.ok(constraintDojo?.bodyHtml.includes('fit/tolerance checklist'));
   assert.match(forms?.snippet ?? '', /\(model/);
   assert.match(forms?.bodyHtml ?? '', /top-level authoring grammar/i);
   assert.match(forms?.bodyHtml ?? '', /<code>assembly<\/code> \(planned\)/i);

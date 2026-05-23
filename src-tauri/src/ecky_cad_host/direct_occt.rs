@@ -710,7 +710,7 @@ fn expand_svg_node(
         .get(3)
         .map(|arg| {
             let value = crate::ecky_ir::eval_core_stringish_with_locals(arg, param_names, env)?;
-            SvgFitMode::from_str(&value).ok_or_else(|| {
+            value.parse::<SvgFitMode>().map_err(|()| {
                 AppError::validation(format!(
                     "`svg` fit mode must be `contain`, `cover`, or `stretch`, got {value}",
                 ))
@@ -3239,7 +3239,7 @@ mod tests {
     fn plans_svg_profile_for_direct_occt_extrusion() {
         let svg_path = std::path::Path::new("/tmp/ecky-direct-occt-svg-profile.svg");
         {
-            let mut file = std::fs::File::create(&svg_path).expect("create svg");
+            let mut file = std::fs::File::create(svg_path).expect("create svg");
             file.write_all(
                 b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">\n  <path d=\"M2 2h6v6h-6z\"/>\n</svg>\n",
             )
@@ -3558,7 +3558,7 @@ mod tests {
         assert_eq!(ops.first(), Some(&OcctOp::Box));
         assert_eq!(ops.last(), Some(&OcctOp::Difference));
         assert!(ops.iter().filter(|op| **op == OcctOp::Cylinder).count() >= 12);
-        assert!(ops.iter().any(|op| *op == OcctOp::Union));
+        assert!(ops.contains(&OcctOp::Union));
     }
 
     #[test]

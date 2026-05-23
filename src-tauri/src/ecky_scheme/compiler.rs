@@ -159,52 +159,215 @@ fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProg
 fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     bootstrap::validate_user_source(source)
         .map_err(|err| CompilerError::new(CompilerErrorKind::Parse, err))?;
-    let (normalized_source, literal_dimensions) = normalize_unit_literals_source(source)?;
-    let strict_units = source_enables_strict_units(&normalized_source);
-
-    if source == normalized_source {
+    let strict_units = source_enables_strict_units(source);
+    if !source_contains_suffixed_unit_literals(source) {
         let legacy_source = rewrite_sequence_destructuring_source(source)?;
         reject_model_level_sequence_forms(&legacy_source)?;
         let legacy_source = lower_component_definitions_source(&legacy_source)?;
 
         if can_use_expanded_ast(&legacy_source) {
             if let Ok(program) = compile_to_core_program_from_expanded_ast_legacy(&legacy_source) {
-                return verify_compiled_core_program(program, strict_units, &literal_dimensions);
+                return verify_compiled_core_program(program, source, strict_units);
             }
         }
 
-        return compile_to_core_program_via_runtime_legacy(&legacy_source).and_then(|program| {
-            verify_compiled_core_program(program, strict_units, &literal_dimensions)
-        });
+        return compile_to_core_program_via_runtime(&legacy_source)
+            .and_then(|program| verify_compiled_core_program(program, source, strict_units));
     }
 
-    let expanded_source = normalized_source.clone();
-    let runtime_source = rewrite_sequence_destructuring_source(&normalized_source)?;
+    let expanded_source = source.to_string();
+    let runtime_source = rewrite_sequence_destructuring_source(source)?;
     reject_model_level_sequence_forms(&runtime_source)?;
     let runtime_source = lower_component_definitions_source(&runtime_source)?;
 
     if can_use_expanded_ast(&expanded_source) {
         if let Ok(program) = compile_to_core_program_from_expanded_ast(&expanded_source) {
-            return verify_compiled_core_program(program, strict_units, &literal_dimensions);
+            return verify_compiled_core_program(program, source, strict_units);
         }
     }
 
-    compile_to_core_program_via_runtime(&runtime_source).and_then(|program| {
-        verify_compiled_core_program(program, strict_units, &literal_dimensions)
-    })
+    compile_to_core_program_via_runtime(&runtime_source)
+        .and_then(|program| verify_compiled_core_program(program, source, strict_units))
+}
+
+fn source_contains_suffixed_unit_literals(source: &str) -> bool {
+    let mut found = false;
+    visit_runtime_source_tokens(source, |token| {
+        if parse_suffixed_unit_literal(token).is_some() {
+            found = true;
+        }
+    });
+    found
 }
 
 fn verify_compiled_core_program(
-    program: CoreProgram,
+    mut program: CoreProgram,
+    source: &str,
     strict_units: bool,
-    literal_dimensions: &HashMap<SourceSpan, String>,
 ) -> CoreResult<CoreProgram> {
+    apply_authored_part_root_spans(&mut program, source);
+    let literal_dimensions = literal_dimensions_from_program_source(&program, source);
     let _warnings = crate::ecky_core_ir::verify_core_program_with_literal_dimensions(
         &program,
-        literal_dimensions,
+        &literal_dimensions,
         strict_units,
     )?;
     Ok(program)
+}
+
+fn apply_authored_part_root_spans(program: &mut CoreProgram, source: &str) {
+    let Ok(forms) = Parser::parse_without_lowering(source) else {
+        return;
+    };
+    let mut spans = BTreeMap::new();
+    collect_authored_part_root_spans(&forms, &mut spans);
+    for part in &mut program.parts {
+        if let Some(span) = spans.get(&part.key).copied() {
+            part.root.span = Some(span);
+        }
+    }
+}
+
+fn collect_authored_part_root_spans(forms: &[ExprKind], spans: &mut BTreeMap<String, SourceSpan>) {
+    for form in forms {
+        collect_authored_model_clause_spans(form, spans);
+    }
+}
+
+fn collect_authored_model_clause_spans(expr: &ExprKind, spans: &mut BTreeMap<String, SourceSpan>) {
+    let Ok(items) = expr_list_items(expr, "model clause") else {
+        return;
+    };
+    let Some(head) = items.first().and_then(expr_head_name) else {
+        return;
+    };
+    match head.as_str() {
+        "model" | "begin" => {
+            for item in items.iter().skip(1) {
+                collect_authored_model_clause_spans(item, spans);
+            }
+        }
+        "let" | "let*" if items.len() >= 3 => {
+            for item in items.iter().skip(2) {
+                collect_authored_model_clause_spans(item, spans);
+            }
+        }
+        "part" => {
+            let Some(key) = items.get(1).and_then(expr_identifier) else {
+                return;
+            };
+            let body = if items.len() >= 4
+                && matches!(&items[2], ExprKind::Atom(Atom { syn }) if matches!(syn.ty, TokenType::StringLiteral(_) | TokenType::Identifier(_) | TokenType::Keyword(_)))
+            {
+                items.get(3)
+            } else {
+                items.get(2)
+            };
+            if let Some(span) = body.and_then(expr_source_span) {
+                spans.insert(key, span);
+            }
+        }
+        "feature" => {
+            let Some(key) = items.get(1).and_then(expr_identifier) else {
+                return;
+            };
+            if let Some(span) = items.last().and_then(expr_source_span) {
+                spans.insert(key, span);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn literal_dimensions_from_program_source(
+    program: &CoreProgram,
+    source: &str,
+) -> HashMap<SourceSpan, String> {
+    let mut literal_dimensions = HashMap::new();
+    for part in &program.parts {
+        collect_literal_dimensions_from_node(&part.root, source, &mut literal_dimensions);
+    }
+    literal_dimensions
+}
+
+fn collect_literal_dimensions_from_node(
+    node: &CoreNode,
+    source: &str,
+    literal_dimensions: &mut HashMap<SourceSpan, String>,
+) {
+    if let CoreNodeKind::Literal(CoreLiteral::Number(_)) = &node.kind {
+        if let Some(span) = node.span {
+            let start = span.start as usize;
+            let end = span.end as usize;
+            if start < end
+                && end <= source.len()
+                && source.is_char_boundary(start)
+                && source.is_char_boundary(end)
+            {
+                if let Some((_, dimension)) = parse_suffixed_unit_literal(&source[start..end]) {
+                    literal_dimensions.insert(span, dimension.to_string());
+                }
+            }
+        }
+    }
+
+    match &node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            for binding in bindings {
+                collect_literal_dimensions_from_node(&binding.value, source, literal_dimensions);
+            }
+            collect_literal_dimensions_from_node(result, source, literal_dimensions);
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            for binding in bindings {
+                collect_literal_dimensions_from_node(&binding.value, source, literal_dimensions);
+            }
+            collect_literal_dimensions_from_node(body, source, literal_dimensions);
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_literal_dimensions_from_node(condition, source, literal_dimensions);
+            collect_literal_dimensions_from_node(then_branch, source, literal_dimensions);
+            collect_literal_dimensions_from_node(else_branch, source, literal_dimensions);
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                collect_literal_dimensions_from_node(arg, source, literal_dimensions);
+            }
+            for keyword in keywords {
+                collect_literal_dimensions_from_node(
+                    keyword.source_node(),
+                    source,
+                    literal_dimensions,
+                );
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            collect_literal_dimensions_from_node(start, source, literal_dimensions);
+            collect_literal_dimensions_from_node(end, source, literal_dimensions);
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for item in sources {
+                collect_literal_dimensions_from_node(item, source, literal_dimensions);
+            }
+            collect_literal_dimensions_from_node(body, source, literal_dimensions);
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                collect_literal_dimensions_from_node(arg, source, literal_dimensions);
+            }
+            collect_literal_dimensions_from_node(list, source, literal_dimensions);
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for item in items {
+                collect_literal_dimensions_from_node(item, source, literal_dimensions);
+            }
+        }
+    }
 }
 
 fn source_enables_strict_units(source: &str) -> bool {
@@ -305,12 +468,6 @@ fn can_use_expanded_ast(source: &str) -> bool {
 }
 
 fn compile_to_core_program_via_runtime(source: &str) -> CoreResult<CoreProgram> {
-    let source = normalize_unit_literals_source(source)?.0;
-    let source = lower_component_definitions_source(&source)?;
-    compile_to_core_program_via_runtime_legacy(&source)
-}
-
-fn compile_to_core_program_via_runtime_legacy(source: &str) -> CoreResult<CoreProgram> {
     let mut engine = bootstrap::new_engine();
     let runtime_source = rewrite_runtime_model_clause_wrappers(&source)?;
     seed_symbol_bindings(&mut engine, &runtime_source);
@@ -336,118 +493,6 @@ fn compile_to_core_program_via_runtime_legacy(source: &str) -> CoreResult<CorePr
     parse_program(&root)
 }
 
-fn normalize_unit_literals_source(
-    source: &str,
-) -> CoreResult<(String, HashMap<SourceSpan, String>)> {
-    let source = inject_param_units_from_suffixed_defaults(source)?;
-    let mut out = String::with_capacity(source.len());
-    let mut literal_dimensions = HashMap::new();
-    let mut token = String::new();
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut in_comment = false;
-
-    let flush_token = |token: &mut String,
-                       out: &mut String,
-                       literal_dimensions: &mut HashMap<SourceSpan, String>| {
-        if token.is_empty() {
-            return;
-        }
-        if let Some((value, dimension)) = parse_suffixed_unit_literal(token) {
-            let start = out.len() as u32;
-            out.push_str(&format_normalized_number(value));
-            let end = out.len() as u32;
-            literal_dimensions.insert(SourceSpan::new(None, start, end), dimension.to_string());
-        } else {
-            out.push_str(token);
-        }
-        token.clear();
-    };
-
-    for ch in source.chars() {
-        if in_comment {
-            flush_token(&mut token, &mut out, &mut literal_dimensions);
-            out.push(ch);
-            if ch == '\n' {
-                in_comment = false;
-            }
-            continue;
-        }
-        if in_string {
-            flush_token(&mut token, &mut out, &mut literal_dimensions);
-            out.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => {
-                flush_token(&mut token, &mut out, &mut literal_dimensions);
-                in_string = true;
-                out.push(ch);
-            }
-            ';' => {
-                flush_token(&mut token, &mut out, &mut literal_dimensions);
-                in_comment = true;
-                out.push(ch);
-            }
-            '(' | ')' | '[' | ']' | '\'' | '`' | ',' if !token.is_empty() => {
-                flush_token(&mut token, &mut out, &mut literal_dimensions);
-                out.push(ch);
-            }
-            ch if ch.is_whitespace() => {
-                flush_token(&mut token, &mut out, &mut literal_dimensions);
-                out.push(ch);
-            }
-            _ => token.push(ch),
-        }
-    }
-    flush_token(&mut token, &mut out, &mut literal_dimensions);
-    Ok((out, literal_dimensions))
-}
-
-fn inject_param_units_from_suffixed_defaults(source: &str) -> CoreResult<String> {
-    let param_re = Regex::new(
-        r#"\(number(\s+)([A-Za-z_][A-Za-z0-9_-]*)(\s+)([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?(?:mm|cm|m|in|deg|rad))([^)]*)\)"#,
-    )
-    .expect("param unit literal regex");
-    Ok(param_re
-        .replace_all(source, |caps: &regex::Captures<'_>| {
-            let default = caps.get(4).map(|m| m.as_str()).unwrap_or_default();
-            let tail = caps.get(5).map(|m| m.as_str()).unwrap_or_default();
-            if tail.contains(":unit") || tail.contains("#:unit") {
-                return caps
-                    .get(0)
-                    .map(|m| m.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-            }
-            let Some((_value, dimension)) = parse_suffixed_unit_literal(default) else {
-                return caps
-                    .get(0)
-                    .map(|m| m.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-            };
-            format!(
-                "(number{}{}{}{} :unit \"{}\"{})",
-                caps.get(1).map(|m| m.as_str()).unwrap_or(" "),
-                caps.get(2).map(|m| m.as_str()).unwrap_or_default(),
-                caps.get(3).map(|m| m.as_str()).unwrap_or(" "),
-                default,
-                dimension,
-                tail
-            )
-        })
-        .into_owned())
-}
-
 fn parse_suffixed_unit_literal(token: &str) -> Option<(f64, &'static str)> {
     for (suffix, multiplier, dimension) in [
         ("deg", 1.0, "angle"),
@@ -471,15 +516,11 @@ fn parse_suffixed_unit_literal(token: &str) -> Option<(f64, &'static str)> {
     None
 }
 
-fn format_normalized_number(value: f64) -> String {
-    if value.is_finite() && (value.fract().abs() < 1e-12) {
-        return format!("{}", value.trunc() as i64);
+fn parse_numeric_text_with_optional_unit(token: &str) -> Option<(f64, Option<&'static str>)> {
+    if let Some((value, dimension)) = parse_suffixed_unit_literal(token) {
+        return Some((value, Some(dimension)));
     }
-    let formatted = format!("{value:.12}");
-    formatted
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+    token.parse::<f64>().ok().map(|value| (value, None))
 }
 
 fn rewrite_runtime_model_clause_wrappers(source: &str) -> CoreResult<String> {
@@ -2680,7 +2721,7 @@ fn parse_expanded_relation_constraint(value: &ExprKind) -> CoreResult<PendingRel
 }
 
 fn parse_expanded_relation_operand(value: &ExprKind) -> CoreResult<PendingRelationOperand> {
-    if matches!(value, ExprKind::Atom(atom) if matches!(atom.syn.ty, TokenType::Number(_))) {
+    if expr_numeric_literal(value).is_some() {
         return Ok(PendingRelationOperand::Number(expr_number_value(
             value,
             "relation operand",
@@ -2896,6 +2937,7 @@ fn parse_expanded_param_decl(
     }
     let key = expr_value_symbol_or_text(&items[1], "param key")?;
     let default_expr = expand_helper_value_expr(&items[2], helpers, &BTreeSet::new())?;
+    let inferred_default_unit = expr_numeric_literal(&default_expr).and_then(|(_, unit)| unit);
     let default_value = match kind_name.as_str() {
         "number" => CoreParameterValue::Number(expr_number_value(&default_expr, "number default")?),
         "toggle" => CoreParameterValue::Boolean(expr_bool_value(&default_expr, "toggle default")?),
@@ -2916,6 +2958,9 @@ fn parse_expanded_param_decl(
     let mut constraints = CoreParameterConstraints::default();
     let mut label = humanize(&key);
     let mut frozen = false;
+    if kind_name == "number" {
+        constraints.unit = inferred_default_unit.map(str::to_string);
+    }
 
     let mut index = 3usize;
     while index < items.len() {
@@ -2931,30 +2976,36 @@ fn parse_expanded_param_decl(
                 index += 2;
             }
             ":min" => {
-                constraints.min = Some(expr_number_value(
-                    items.get(index + 1).ok_or_else(|| {
-                        CompilerError::new(CompilerErrorKind::Parse, "`:min` missing value.")
-                    })?,
-                    "param min",
-                )?);
+                let value = items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(CompilerErrorKind::Parse, "`:min` missing value.")
+                })?;
+                constraints.min = Some(expr_number_value(value, "param min")?);
+                if constraints.unit.is_none() {
+                    constraints.unit =
+                        expr_numeric_literal(value).and_then(|(_, unit)| unit.map(str::to_string));
+                }
                 index += 2;
             }
             ":max" => {
-                constraints.max = Some(expr_number_value(
-                    items.get(index + 1).ok_or_else(|| {
-                        CompilerError::new(CompilerErrorKind::Parse, "`:max` missing value.")
-                    })?,
-                    "param max",
-                )?);
+                let value = items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(CompilerErrorKind::Parse, "`:max` missing value.")
+                })?;
+                constraints.max = Some(expr_number_value(value, "param max")?);
+                if constraints.unit.is_none() {
+                    constraints.unit =
+                        expr_numeric_literal(value).and_then(|(_, unit)| unit.map(str::to_string));
+                }
                 index += 2;
             }
             ":step" => {
-                constraints.step = Some(expr_number_value(
-                    items.get(index + 1).ok_or_else(|| {
-                        CompilerError::new(CompilerErrorKind::Parse, "`:step` missing value.")
-                    })?,
-                    "param step",
-                )?);
+                let value = items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(CompilerErrorKind::Parse, "`:step` missing value.")
+                })?;
+                constraints.step = Some(expr_number_value(value, "param step")?);
+                if constraints.unit.is_none() {
+                    constraints.unit =
+                        expr_numeric_literal(value).and_then(|(_, unit)| unit.map(str::to_string));
+                }
                 index += 2;
             }
             ":unit" => {
@@ -3031,11 +3082,10 @@ fn parse_expanded_choice(value: &ExprKind) -> CoreResult<crate::ecky_core_ir::Co
     }
     Ok(crate::ecky_core_ir::CoreChoice {
         label: expr_value_symbol_or_text(&items[0], "option label")?,
-        value: match &items[1] {
-            ExprKind::Atom(atom) if matches!(atom.syn.ty, TokenType::Number(_)) => {
-                CoreParameterValue::Number(expr_number_value(&items[1], "option number")?)
-            }
-            _ => CoreParameterValue::Choice(expr_value_symbol_or_text(&items[1], "option value")?),
+        value: if expr_numeric_literal(&items[1]).is_some() {
+            CoreParameterValue::Number(expr_number_value(&items[1], "option number")?)
+        } else {
+            CoreParameterValue::Choice(expr_value_symbol_or_text(&items[1], "option value")?)
         },
     })
 }
@@ -3220,88 +3270,98 @@ fn parse_expanded_node(
                 CoreValueKind::Text,
             ),
             TokenType::Identifier(symbol) | TokenType::Keyword(symbol) => {
-                match symbol.to_string().as_str() {
-                    "start" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Start)),
-                        CoreValueKind::Any,
-                    ),
-                    "end" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::End)),
-                        CoreValueKind::Any,
-                    ),
-                    "xy" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xy)),
-                        CoreValueKind::Any,
-                    ),
-                    "yz" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Yz)),
-                        CoreValueKind::Any,
-                    ),
-                    "xz" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xz)),
-                        CoreValueKind::Any,
-                    ),
-                    "min" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Min)),
-                        CoreValueKind::Any,
-                    ),
-                    "center" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Center)),
-                        CoreValueKind::Any,
-                    ),
-                    "max" => (
-                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Max)),
-                        CoreValueKind::Any,
-                    ),
-                    "true" => (
-                        CoreNodeKind::Literal(CoreLiteral::Boolean(true)),
-                        CoreValueKind::Boolean,
-                    ),
-                    "false" => (
-                        CoreNodeKind::Literal(CoreLiteral::Boolean(false)),
-                        CoreValueKind::Boolean,
-                    ),
-                    name if local_names.contains(name) => (
-                        CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
-                        CoreValueKind::Any,
-                    ),
-                    name if node_refs.contains_key(name) => (
-                        CoreNodeKind::Reference(CoreReference::Node(*node_refs.get(name).unwrap())),
-                        CoreValueKind::Any,
-                    ),
-                    name if param_ids.contains_key(name) => (
-                        CoreNodeKind::Reference(CoreReference::Parameter(
-                            *param_ids.get(name).unwrap(),
-                        )),
-                        CoreValueKind::Any,
-                    ),
-                    name => {
-                        if let Some(ExpandedHelper::Value(helper_expr)) = helpers.get(name) {
-                            if helper_stack.contains(name) {
-                                return Err(CompilerError::new(
+                let symbol = symbol.to_string();
+                if let Some((number, _)) = parse_numeric_text_with_optional_unit(&symbol) {
+                    (
+                        CoreNodeKind::Literal(CoreLiteral::Number(number)),
+                        CoreValueKind::Number,
+                    )
+                } else {
+                    match symbol.as_str() {
+                        "start" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Start)),
+                            CoreValueKind::Any,
+                        ),
+                        "end" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::End)),
+                            CoreValueKind::Any,
+                        ),
+                        "xy" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xy)),
+                            CoreValueKind::Any,
+                        ),
+                        "yz" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Yz)),
+                            CoreValueKind::Any,
+                        ),
+                        "xz" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xz)),
+                            CoreValueKind::Any,
+                        ),
+                        "min" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Min)),
+                            CoreValueKind::Any,
+                        ),
+                        "center" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Center)),
+                            CoreValueKind::Any,
+                        ),
+                        "max" => (
+                            CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Max)),
+                            CoreValueKind::Any,
+                        ),
+                        "true" => (
+                            CoreNodeKind::Literal(CoreLiteral::Boolean(true)),
+                            CoreValueKind::Boolean,
+                        ),
+                        "false" => (
+                            CoreNodeKind::Literal(CoreLiteral::Boolean(false)),
+                            CoreValueKind::Boolean,
+                        ),
+                        name if local_names.contains(name) => (
+                            CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
+                            CoreValueKind::Any,
+                        ),
+                        name if node_refs.contains_key(name) => (
+                            CoreNodeKind::Reference(CoreReference::Node(
+                                *node_refs.get(name).unwrap(),
+                            )),
+                            CoreValueKind::Any,
+                        ),
+                        name if param_ids.contains_key(name) => (
+                            CoreNodeKind::Reference(CoreReference::Parameter(
+                                *param_ids.get(name).unwrap(),
+                            )),
+                            CoreValueKind::Any,
+                        ),
+                        name => {
+                            if let Some(ExpandedHelper::Value(helper_expr)) = helpers.get(name) {
+                                if helper_stack.contains(name) {
+                                    return Err(CompilerError::new(
                                     CompilerErrorKind::UnsupportedFeature,
                                     format!(
                                         "Recursive helper value `{}` is not supported by expanded AST compile.",
                                         name
                                     ),
                                 ));
+                                }
+                                let mut next_stack = helper_stack.clone();
+                                next_stack.insert(name.to_string());
+                                return parse_expanded_node(
+                                    helper_expr,
+                                    next_node,
+                                    param_ids,
+                                    helpers,
+                                    node_refs,
+                                    local_names,
+                                    &next_stack,
+                                );
                             }
-                            let mut next_stack = helper_stack.clone();
-                            next_stack.insert(name.to_string());
-                            return parse_expanded_node(
-                                helper_expr,
-                                next_node,
-                                param_ids,
-                                helpers,
-                                node_refs,
-                                local_names,
-                                &next_stack,
-                            );
+                            (
+                                CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
+                                CoreValueKind::Any,
+                            )
                         }
-                        (
-                            CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
-                            CoreValueKind::Any,
-                        )
                     }
                 }
             }
@@ -7112,25 +7172,28 @@ fn expr_value_symbol_or_text(value: &ExprKind, context: &str) -> CoreResult<Stri
 }
 
 fn expr_number_value(value: &ExprKind, context: &str) -> CoreResult<f64> {
+    expr_numeric_literal(value)
+        .map(|(number, _)| number)
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                format!("{} expected a number, received {:?}", context, value),
+            )
+        })
+}
+
+fn expr_numeric_literal(value: &ExprKind) -> Option<(f64, Option<&'static str>)> {
     match value {
         ExprKind::Atom(atom) => match &atom.syn.ty {
             TokenType::Number(number) => {
-                number.resolve().to_string().parse::<f64>().map_err(|_| {
-                    CompilerError::new(
-                        CompilerErrorKind::TypeMismatch,
-                        format!("{} expected a number, received {:?}", context, atom.syn.ty),
-                    )
-                })
+                parse_numeric_text_with_optional_unit(&number.resolve().to_string())
             }
-            other => Err(CompilerError::new(
-                CompilerErrorKind::TypeMismatch,
-                format!("{} expected a number, received {:?}", context, other),
-            )),
+            TokenType::Identifier(name) | TokenType::Keyword(name) => {
+                parse_numeric_text_with_optional_unit(&name.to_string())
+            }
+            _ => None,
         },
-        other => Err(CompilerError::new(
-            CompilerErrorKind::TypeMismatch,
-            format!("{} expected a number, received {:?}", context, other),
-        )),
+        _ => None,
     }
 }
 
@@ -7154,9 +7217,66 @@ fn expr_bool_value(value: &ExprKind, context: &str) -> CoreResult<bool> {
 
 fn is_point_literal_expr(items: &[ExprKind]) -> bool {
     matches!(items.len(), 2 | 3)
-        && items.iter().all(|item| {
-            matches!(item, ExprKind::Atom(atom) if matches!(atom.syn.ty, TokenType::Number(_)))
-        })
+        && items
+            .iter()
+            .all(|item| expr_numeric_literal(item).is_some())
+}
+
+fn visit_runtime_source_tokens(source: &str, mut visit: impl FnMut(&str)) {
+    let mut token_start = None;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    let flush = |token_start: &mut Option<usize>, token_end: usize, visit: &mut dyn FnMut(&str)| {
+        if let Some(start) = token_start.take() {
+            if start < token_end {
+                visit(&source[start..token_end]);
+            }
+        }
+    };
+
+    for (offset, ch) in source.char_indices() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            ';' => {
+                flush(&mut token_start, offset, &mut visit);
+                in_comment = true;
+            }
+            '"' => {
+                flush(&mut token_start, offset, &mut visit);
+                in_string = true;
+            }
+            '(' | ')' | '[' | ']' | '\'' | '`' | ',' => {
+                flush(&mut token_start, offset, &mut visit);
+            }
+            ch if ch.is_whitespace() => {
+                flush(&mut token_start, offset, &mut visit);
+            }
+            _ => {
+                token_start.get_or_insert(offset);
+            }
+        }
+    }
+
+    flush(&mut token_start, source.len(), &mut visit);
 }
 
 fn seed_symbol_bindings(engine: &mut steel_core::steel_vm::engine::Engine, source: &str) {
@@ -7168,6 +7288,12 @@ fn seed_symbol_bindings(engine: &mut steel_core::steel_vm::engine::Engine, sourc
             engine.register_value(name, SteelVal::SymbolV(name.into()));
         }
     }
+    visit_runtime_source_tokens(source, |token| {
+        if parse_suffixed_unit_literal(token).is_some() {
+            let name = token;
+            engine.register_value(name, SteelVal::SymbolV(name.into()));
+        }
+    });
 }
 
 fn compiler_error(kind: CompilerErrorKind, err: impl std::fmt::Display) -> CompilerError {
@@ -7537,7 +7663,7 @@ fn parse_relation_constraint(value: &SteelVal) -> CoreResult<PendingRelationCons
 }
 
 fn parse_relation_operand(value: &SteelVal) -> CoreResult<PendingRelationOperand> {
-    if matches!(value, SteelVal::IntV(_) | SteelVal::NumV(_)) {
+    if steel_numeric_literal(value).is_some() {
         return Ok(PendingRelationOperand::Number(number_value(
             value,
             "relation operand",
@@ -7564,6 +7690,7 @@ fn parse_param_decl(value: &SteelVal, next_param: &mut u64) -> CoreResult<CorePa
         ));
     }
     let key = value_symbol_or_text(&items[1], "param key")?;
+    let inferred_default_unit = steel_numeric_literal(&items[2]).and_then(|(_, unit)| unit);
     let default_value = match kind_name.as_str() {
         "number" => CoreParameterValue::Number(number_value(&items[2], "number default")?),
         "toggle" => CoreParameterValue::Boolean(bool_value(&items[2], "toggle default")?),
@@ -7580,6 +7707,9 @@ fn parse_param_decl(value: &SteelVal, next_param: &mut u64) -> CoreResult<CorePa
     let mut constraints = CoreParameterConstraints::default();
     let mut label = humanize(&key);
     let mut frozen = false;
+    if kind_name == "number" {
+        constraints.unit = inferred_default_unit.map(str::to_string);
+    }
 
     let mut index = 3usize;
     while index < items.len() {
@@ -7595,30 +7725,36 @@ fn parse_param_decl(value: &SteelVal, next_param: &mut u64) -> CoreResult<CorePa
                 index += 2;
             }
             ":min" => {
-                constraints.min = Some(number_value(
-                    items.get(index + 1).ok_or_else(|| {
-                        CompilerError::new(CompilerErrorKind::Parse, "`:min` missing value.")
-                    })?,
-                    "param min",
-                )?);
+                let value = items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(CompilerErrorKind::Parse, "`:min` missing value.")
+                })?;
+                constraints.min = Some(number_value(value, "param min")?);
+                if constraints.unit.is_none() {
+                    constraints.unit =
+                        steel_numeric_literal(value).and_then(|(_, unit)| unit.map(str::to_string));
+                }
                 index += 2;
             }
             ":max" => {
-                constraints.max = Some(number_value(
-                    items.get(index + 1).ok_or_else(|| {
-                        CompilerError::new(CompilerErrorKind::Parse, "`:max` missing value.")
-                    })?,
-                    "param max",
-                )?);
+                let value = items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(CompilerErrorKind::Parse, "`:max` missing value.")
+                })?;
+                constraints.max = Some(number_value(value, "param max")?);
+                if constraints.unit.is_none() {
+                    constraints.unit =
+                        steel_numeric_literal(value).and_then(|(_, unit)| unit.map(str::to_string));
+                }
                 index += 2;
             }
             ":step" => {
-                constraints.step = Some(number_value(
-                    items.get(index + 1).ok_or_else(|| {
-                        CompilerError::new(CompilerErrorKind::Parse, "`:step` missing value.")
-                    })?,
-                    "param step",
-                )?);
+                let value = items.get(index + 1).ok_or_else(|| {
+                    CompilerError::new(CompilerErrorKind::Parse, "`:step` missing value.")
+                })?;
+                constraints.step = Some(number_value(value, "param step")?);
+                if constraints.unit.is_none() {
+                    constraints.unit =
+                        steel_numeric_literal(value).and_then(|(_, unit)| unit.map(str::to_string));
+                }
                 index += 2;
             }
             ":unit" => {
@@ -7703,11 +7839,10 @@ fn parse_choice(value: &SteelVal) -> CoreResult<crate::ecky_core_ir::CoreChoice>
     }
     Ok(crate::ecky_core_ir::CoreChoice {
         label: value_symbol_or_text(&items[0], "option label")?,
-        value: match &items[1] {
-            SteelVal::IntV(_) | SteelVal::NumV(_) => {
-                CoreParameterValue::Number(number_value(&items[1], "option number")?)
-            }
-            _ => CoreParameterValue::Choice(value_symbol_or_text(&items[1], "option value")?),
+        value: if steel_numeric_literal(&items[1]).is_some() {
+            CoreParameterValue::Number(number_value(&items[1], "option number")?)
+        } else {
+            CoreParameterValue::Choice(value_symbol_or_text(&items[1], "option value")?)
         },
     })
 }
@@ -7875,44 +8010,56 @@ fn parse_node(
             CoreNodeKind::Literal(CoreLiteral::Text(text.to_string())),
             CoreValueKind::Text,
         ),
-        SteelVal::SymbolV(symbol) => match symbol.to_string().as_str() {
-            "start" => (
-                CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Start)),
-                CoreValueKind::Any,
-            ),
-            "end" => (
-                CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::End)),
-                CoreValueKind::Any,
-            ),
-            "xy" => (
-                CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xy)),
-                CoreValueKind::Any,
-            ),
-            "yz" => (
-                CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Yz)),
-                CoreValueKind::Any,
-            ),
-            "xz" => (
-                CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xz)),
-                CoreValueKind::Any,
-            ),
-            name if local_names.contains(name) => (
-                CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
-                CoreValueKind::Any,
-            ),
-            name if node_refs.contains_key(name) => (
-                CoreNodeKind::Reference(CoreReference::Node(*node_refs.get(name).unwrap())),
-                CoreValueKind::Any,
-            ),
-            name if param_ids.contains_key(name) => (
-                CoreNodeKind::Reference(CoreReference::Parameter(*param_ids.get(name).unwrap())),
-                CoreValueKind::Any,
-            ),
-            name => (
-                CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
-                CoreValueKind::Any,
-            ),
-        },
+        SteelVal::SymbolV(symbol) => {
+            let symbol = symbol.to_string();
+            if let Some((number, _)) = parse_numeric_text_with_optional_unit(&symbol) {
+                (
+                    CoreNodeKind::Literal(CoreLiteral::Number(number)),
+                    CoreValueKind::Number,
+                )
+            } else {
+                match symbol.as_str() {
+                    "start" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Start)),
+                        CoreValueKind::Any,
+                    ),
+                    "end" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::End)),
+                        CoreValueKind::Any,
+                    ),
+                    "xy" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xy)),
+                        CoreValueKind::Any,
+                    ),
+                    "yz" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Yz)),
+                        CoreValueKind::Any,
+                    ),
+                    "xz" => (
+                        CoreNodeKind::Literal(CoreLiteral::Symbol(CoreSymbol::Xz)),
+                        CoreValueKind::Any,
+                    ),
+                    name if local_names.contains(name) => (
+                        CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
+                        CoreValueKind::Any,
+                    ),
+                    name if node_refs.contains_key(name) => (
+                        CoreNodeKind::Reference(CoreReference::Node(*node_refs.get(name).unwrap())),
+                        CoreValueKind::Any,
+                    ),
+                    name if param_ids.contains_key(name) => (
+                        CoreNodeKind::Reference(CoreReference::Parameter(
+                            *param_ids.get(name).unwrap(),
+                        )),
+                        CoreValueKind::Any,
+                    ),
+                    name => (
+                        CoreNodeKind::Reference(CoreReference::Local(name.to_string())),
+                        CoreValueKind::Any,
+                    ),
+                }
+            }
+        }
         SteelVal::ListV(_) | SteelVal::VectorV(_) => {
             let items = list_items(value, "node expression")?;
             if is_point_literal(&items) {
@@ -8346,13 +8493,22 @@ fn value_symbol_or_text(value: &SteelVal, context: &str) -> CoreResult<String> {
 }
 
 fn number_value(value: &SteelVal, context: &str) -> CoreResult<f64> {
+    steel_numeric_literal(value)
+        .map(|(number, _)| number)
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                format!("{} expected a number, received {:?}", context, value),
+            )
+        })
+}
+
+fn steel_numeric_literal(value: &SteelVal) -> Option<(f64, Option<&'static str>)> {
     match value {
-        SteelVal::IntV(n) => Ok(*n as f64),
-        SteelVal::NumV(n) => Ok(*n),
-        other => Err(CompilerError::new(
-            CompilerErrorKind::TypeMismatch,
-            format!("{} expected a number, received {:?}", context, other),
-        )),
+        SteelVal::IntV(n) => Some((*n as f64, None)),
+        SteelVal::NumV(n) => Some((*n, None)),
+        SteelVal::SymbolV(symbol) => parse_numeric_text_with_optional_unit(&symbol.to_string()),
+        _ => None,
     }
 }
 
@@ -8370,7 +8526,7 @@ fn is_point_literal(items: &[SteelVal]) -> bool {
     matches!(items.len(), 2 | 3)
         && items
             .iter()
-            .all(|item| matches!(item, SteelVal::IntV(_) | SteelVal::NumV(_)))
+            .all(|item| steel_numeric_literal(item).is_some())
 }
 
 fn map_operation(name: &str) -> CoreOperation {
@@ -8974,6 +9130,15 @@ mod tests {
         CoreArrayOp, CoreFrameOp, CoreNodeKind, CoreOperation, CorePathOp, CorePrimitive,
         CoreReference, CoreSurfaceOp, CoreSymbol,
     };
+
+    static SOURCE_FILE_ID_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"SourceFileId\(\s*\d+,?\s*\)").unwrap());
+    static SOURCE_SPAN_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(
+            r"SourceSpan\s*\{\s*file:\s*(?:Some\(SourceFileId\(_\)\)|None),\s*start:\s*\d+,\s*end:\s*\d+,\s*\}",
+        )
+        .unwrap()
+    });
 
     #[test]
     fn blocks_mutation_surface() {
@@ -12125,11 +12290,14 @@ mod tests {
             match compile_to_core_program(&source) {
                 Ok(program) => {
                     // SourceFileId comes from Steel's process-global source registry and
-                    // depends on how many sources other tests parsed first; mask it so the
+                    // depends on how many sources other tests parsed first; authored span
+                    // injection also rewrites source-location metadata. Mask both so the
                     // digest only locks program structure.
-                    let debug_repr = Regex::new(r"SourceFileId\(\s*\d+,?\s*\)")
-                        .unwrap()
+                    let debug_repr = SOURCE_FILE_ID_RE
                         .replace_all(&format!("{:#?}", program), "SourceFileId(_)")
+                        .into_owned();
+                    let debug_repr = SOURCE_SPAN_RE
+                        .replace_all(&debug_repr, "SourceSpan { file: _, start: _, end: _ }")
                         .into_owned();
                     use sha2::{Digest, Sha256};
                     let mut hasher = Sha256::new();

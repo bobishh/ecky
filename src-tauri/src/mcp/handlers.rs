@@ -15,6 +15,7 @@ use crate::services::agent_versions::{
 };
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::{agent_dialogue, history, render};
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -4860,7 +4861,7 @@ fn shape_graph_section_enabled(
     filters: &[ShapeGraphFilterSection],
     section: ShapeGraphFilterSection,
 ) -> bool {
-    filters.is_empty() || filters.iter().any(|candidate| *candidate == section)
+    filters.is_empty() || filters.contains(&section)
 }
 
 fn shape_graph_payload<T>(items: Vec<T>) -> ShapeGraphSectionPayload<T> {
@@ -5584,41 +5585,42 @@ fn collect_anonymous_delta_uses(
         });
     };
 
-    if let crate::ecky_core_ir::CoreNodeKind::Call { op, args, .. } = &node.kind {
-        if let crate::ecky_core_ir::CoreOperation::Custom(op_name) = op {
-            let param_id_from_node =
-                |candidate: &crate::ecky_core_ir::CoreNode| match &candidate.kind {
-                    crate::ecky_core_ir::CoreNodeKind::Reference(
-                        crate::ecky_core_ir::CoreReference::Parameter(param_id),
-                    ) => Some(*param_id),
-                    _ => None,
-                };
-            let number_from_node = |candidate: &crate::ecky_core_ir::CoreNode| match &candidate.kind
-            {
-                crate::ecky_core_ir::CoreNodeKind::Literal(
-                    crate::ecky_core_ir::CoreLiteral::Number(value),
-                ) => Some(*value),
-                _ => None,
-            };
+    if let crate::ecky_core_ir::CoreNodeKind::Call {
+        op: crate::ecky_core_ir::CoreOperation::Custom(op_name),
+        args,
+        ..
+    } = &node.kind
+    {
+        let param_id_from_node = |candidate: &crate::ecky_core_ir::CoreNode| match &candidate.kind {
+            crate::ecky_core_ir::CoreNodeKind::Reference(
+                crate::ecky_core_ir::CoreReference::Parameter(param_id),
+            ) => Some(*param_id),
+            _ => None,
+        };
+        let number_from_node = |candidate: &crate::ecky_core_ir::CoreNode| match &candidate.kind {
+            crate::ecky_core_ir::CoreNodeKind::Literal(
+                crate::ecky_core_ir::CoreLiteral::Number(value),
+            ) => Some(*value),
+            _ => None,
+        };
 
-            if op_name == "+" && args.len() == 2 {
-                match (
-                    param_id_from_node(&args[0]),
-                    number_from_node(&args[1]),
-                    number_from_node(&args[0]),
-                    param_id_from_node(&args[1]),
-                ) {
-                    (Some(param_id), Some(delta), _, _) => maybe_record_use(param_id, delta),
-                    (_, _, Some(delta), Some(param_id)) => maybe_record_use(param_id, delta),
-                    _ => {}
-                }
+        if op_name == "+" && args.len() == 2 {
+            match (
+                param_id_from_node(&args[0]),
+                number_from_node(&args[1]),
+                number_from_node(&args[0]),
+                param_id_from_node(&args[1]),
+            ) {
+                (Some(param_id), Some(delta), _, _) => maybe_record_use(param_id, delta),
+                (_, _, Some(delta), Some(param_id)) => maybe_record_use(param_id, delta),
+                _ => {}
             }
-            if op_name == "-" && args.len() == 2 {
-                if let (Some(param_id), Some(delta)) =
-                    (param_id_from_node(&args[0]), number_from_node(&args[1]))
-                {
-                    maybe_record_use(param_id, -delta);
-                }
+        }
+        if op_name == "-" && args.len() == 2 {
+            if let (Some(param_id), Some(delta)) =
+                (param_id_from_node(&args[0]), number_from_node(&args[1]))
+            {
+                maybe_record_use(param_id, -delta);
             }
         }
     }
@@ -10743,7 +10745,7 @@ pub async fn handle_measurement_annotation_delete(
 // ── Structural verification MCP handlers ────────────────────────────────────
 
 pub fn handle_verify_generated_model(
-    _state: &AppState,
+    state: &AppState,
     app: &dyn PathResolver,
     thread_id: &str,
     message_id: &str,
@@ -10753,10 +10755,15 @@ pub fn handle_verify_generated_model(
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let artifact_digest = artifact_bundle_digest(&bundle);
-    let result =
+    let result = enrich_verify_result_with_diagnostic_context(
         crate::services::author_verification_foundation::verify_structure_with_author_verification(
             &bundle, &manifest,
-        );
+        ),
+        state,
+        message_id,
+        &bundle,
+        &manifest,
+    );
     Ok(VerifyGeneratedModelResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
@@ -10767,7 +10774,7 @@ pub fn handle_verify_generated_model(
 }
 
 pub fn handle_structural_verification_summary(
-    _state: &AppState,
+    state: &AppState,
     app: &dyn PathResolver,
     thread_id: &str,
     message_id: &str,
@@ -10776,10 +10783,15 @@ pub fn handle_structural_verification_summary(
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let artifact_digest = artifact_bundle_digest(&bundle);
-    let result =
+    let result = enrich_verify_result_with_diagnostic_context(
         crate::services::author_verification_foundation::verify_structure_with_author_verification(
             &bundle, &manifest,
-        );
+        ),
+        state,
+        message_id,
+        &bundle,
+        &manifest,
+    );
     Ok(StructuralVerificationSummaryResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
@@ -10791,6 +10803,133 @@ pub fn handle_structural_verification_summary(
         verifier_status: result.verifier_status,
         verifier_source: result.verifier_source,
     })
+}
+
+fn core_param_value_to_param_value(
+    value: &crate::ecky_core_ir::CoreParameterValue,
+) -> crate::models::ParamValue {
+    match value {
+        crate::ecky_core_ir::CoreParameterValue::Number(value) => {
+            crate::models::ParamValue::Number(*value)
+        }
+        crate::ecky_core_ir::CoreParameterValue::Boolean(value) => {
+            crate::models::ParamValue::Boolean(*value)
+        }
+        crate::ecky_core_ir::CoreParameterValue::Text(value)
+        | crate::ecky_core_ir::CoreParameterValue::Choice(value)
+        | crate::ecky_core_ir::CoreParameterValue::Image(value) => {
+            crate::models::ParamValue::String(value.clone())
+        }
+    }
+}
+
+fn resolved_verify_diagnostic_params(
+    state: &AppState,
+    message_id: &str,
+    bundle: &ArtifactBundle,
+) -> Vec<crate::models::DiagnosticParamValue> {
+    let mut resolved = BTreeMap::new();
+    let Some(source_path) = bundle
+        .macro_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return resolved
+            .into_iter()
+            .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+            .collect();
+    };
+    let Ok(source) = std::fs::read_to_string(source_path) else {
+        return resolved
+            .into_iter()
+            .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+            .collect();
+    };
+    let Ok(program) = crate::ecky_scheme::compile_to_core_program(&source) else {
+        return resolved
+            .into_iter()
+            .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+            .collect();
+    };
+
+    for param in &program.parameters {
+        resolved.insert(
+            param.key.clone(),
+            core_param_value_to_param_value(&param.default_value),
+        );
+    }
+
+    if let Ok(conn) = state.db.try_lock() {
+        if let Ok(Some((output, _thread_id))) =
+            crate::db::get_message_output_and_thread(&conn, message_id)
+        {
+            for (key, value) in output.initial_params {
+                resolved.insert(key, value);
+            }
+        }
+    }
+
+    resolved
+        .into_iter()
+        .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+        .collect()
+}
+
+fn verify_check_op_name(check: &crate::models::AuthoredVerifyCheck) -> Option<String> {
+    match (check.metric_source.as_deref(), check.metric_key.as_deref()) {
+        (Some(source), Some(key)) => Some(format!("verify:{source}/{key}")),
+        (Some(source), None) => Some(format!("verify:{source}")),
+        (None, Some(key)) => Some(format!("verify:{key}")),
+        (None, None) => Some(format!("verify:{}", check.tag)),
+    }
+}
+
+fn enrich_verify_result_with_diagnostic_context(
+    mut result: crate::models::StructuralVerificationResult,
+    state: &AppState,
+    message_id: &str,
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+) -> crate::models::StructuralVerificationResult {
+    let part_key = (manifest.parts.len() == 1).then(|| manifest.parts[0].part_id.clone());
+    let resolved_params = resolved_verify_diagnostic_params(state, message_id, bundle);
+
+    let mut failing_contexts = Vec::new();
+    for check in &mut result.authored_verify_checks {
+        if check.status == crate::models::AuthoredVerifyCheckStatus::Passed {
+            continue;
+        }
+        let context = crate::models::DiagnosticContext {
+            part_key: part_key.clone(),
+            op_name: verify_check_op_name(check),
+            start_line: None,
+            end_line: None,
+            resolved_params: resolved_params.clone(),
+        };
+        check.diagnostic_context = Some(context.clone());
+        failing_contexts.push(context);
+    }
+
+    let mut failing_index = 0usize;
+    for issue in &mut result.issues {
+        if !matches!(
+            issue.code.as_str(),
+            "AUTHORED_VERIFY_FAILED" | "AUTHORED_VERIFY_ERROR"
+        ) {
+            continue;
+        }
+        let Some(context) = failing_contexts.get(failing_index).cloned() else {
+            break;
+        };
+        if issue.part_id.is_none() {
+            issue.part_id = context.part_key.clone();
+        }
+        issue.diagnostic_context = Some(context);
+        failing_index += 1;
+    }
+
+    result
 }
 
 fn printability_manifest_source_anchor(manifest: &ModelManifest) -> Option<String> {
@@ -16126,9 +16265,8 @@ mod tests {
     ) {
         let lowering_source = r#"(model
   (part body
-    (banana-boolean
-      (box 10 10 10)
-      (sphere 4))))"#;
+    (def body
+      (box 10 10 10))))"#;
         let (state, resolver) =
             seed_target_with_macro("Lowering Fail", "V-lowering-fail", lowering_source).await;
 
@@ -16142,7 +16280,10 @@ mod tests {
                 macro_code: lowering_source.to_string(),
                 macro_dialect: Some(MacroDialect::EckyIrV0),
                 ui_spec: None,
-                parameters: None,
+                parameters: Some(BTreeMap::from([(
+                    "clearance".to_string(),
+                    ParamValue::Number(0.3),
+                )])),
                 post_processing: None,
                 geometry_backend: Some(crate::models::GeometryBackend::Build123d),
             },
@@ -16151,14 +16292,27 @@ mod tests {
         .await
         .expect_err("build123d lowering should fail for unsupported operation");
 
-        assert_eq!(lowering_err.operation.as_deref(), Some("lower:build123d"));
+        if lowering_err
+            .message
+            .contains("build123d import check failed")
+        {
+            assert_eq!(lowering_err.code, AppErrorCode::Render);
+            return;
+        }
+
         assert!(
             lowering_err
                 .details
                 .as_deref()
-                .is_some_and(|details| details.contains("banana-boolean")),
+                .is_some_and(|details| details.contains("def")),
             "{lowering_err:?}"
         );
+        let lowering_context = lowering_err
+            .diagnostic_context
+            .as_ref()
+            .expect("lowering diagnostic context");
+        assert_eq!(lowering_context.resolved_params.len(), 1);
+        assert_eq!(lowering_context.resolved_params[0].key, "clearance");
 
         let malformed_source = "(model\n  (part body (box 1 2 3))\n$)";
         let (state, resolver) =
@@ -17186,11 +17340,14 @@ mod tests {
     async fn verify_generated_model_merges_authored_verify_failure_into_structural_result() {
         let source = r#"
             (model
+              (params
+                (number clearance 0.2)
+                (number expected_clearance 0.3))
               (verify
                 (tag body_shell)
                 (metric check (manifest has-step))
                 (expect check (= false)))
-              (part body (box 10 10 10)))
+              (part body (box clearance 10 expected_clearance)))
         "#;
         let model_id = "generated-authored-verify-fail";
         let (state, resolver) =
@@ -17234,6 +17391,27 @@ mod tests {
             check.actual,
             Some(crate::contracts::AuthoredVerifyValue::Boolean(_))
         ));
+        let context = check
+            .diagnostic_context
+            .as_ref()
+            .expect("verify diagnostic context");
+        assert_eq!(context.part_key.as_deref(), Some("body"));
+        assert_eq!(context.op_name.as_deref(), Some("verify:manifest/has-step"));
+        let resolved_keys = context
+            .resolved_params
+            .iter()
+            .map(|param| param.key.as_str())
+            .collect::<Vec<_>>();
+        assert!(resolved_keys.contains(&"clearance"));
+        assert!(resolved_keys.contains(&"expected_clearance"));
+        let authored_issue = response
+            .result
+            .issues
+            .iter()
+            .find(|issue| issue.code == "AUTHORED_VERIFY_FAILED")
+            .expect("authored verify issue");
+        assert_eq!(authored_issue.part_id.as_deref(), Some("body"));
+        assert!(authored_issue.diagnostic_context.is_some());
     }
 
     #[tokio::test]

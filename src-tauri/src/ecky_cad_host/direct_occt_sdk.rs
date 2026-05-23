@@ -1093,10 +1093,69 @@ fn native_box_export_probe_source(step_path: &Path, stl_path: &Path) -> String {
     format!(
         r#"#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRep_Tool.hxx>
 #include <IFSelect_ReturnStatus.hxx>
+#include <Poly_Triangulation.hxx>
 #include <STEPControl_Writer.hxx>
-#include <StlAPI_Writer.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <fstream>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+
+bool write_ascii_stl_mesh(const TopoDS_Shape& shape, const char* path) {{
+    std::ofstream out(path);
+    if (!out) {{
+        return false;
+    }}
+    out << "solid ecky\n";
+    bool wrote_triangle = false;
+    for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {{
+        TopoDS_Face face = TopoDS::Face(face_explorer.Current());
+        TopLoc_Location location;
+        Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) {{
+            continue;
+        }}
+        gp_Trsf transform = location.Transformation();
+        const Poly_Array1OfTriangle& triangles = triangulation->Triangles();
+        for (Standard_Integer triangle_index = triangles.Lower(); triangle_index <= triangles.Upper(); ++triangle_index) {{
+            Standard_Integer n1 = 0;
+            Standard_Integer n2 = 0;
+            Standard_Integer n3 = 0;
+            triangles(triangle_index).Get(n1, n2, n3);
+            gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
+            gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
+            gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
+            if (face.Orientation() == TopAbs_REVERSED) {{
+                std::swap(p2, p3);
+            }}
+            gp_Vec edge_a(p1, p2);
+            gp_Vec edge_b(p1, p3);
+            gp_Vec normal = edge_a.Crossed(edge_b);
+            if (normal.SquareMagnitude() <= 1.0e-18) {{
+                continue;
+            }}
+            normal.Normalize();
+            out << "facet normal " << normal.X() << " " << normal.Y() << " " << normal.Z() << "\n";
+            out << "  outer loop\n";
+            out << "    vertex " << p1.X() << " " << p1.Y() << " " << p1.Z() << "\n";
+            out << "    vertex " << p2.X() << " " << p2.Y() << " " << p2.Z() << "\n";
+            out << "    vertex " << p3.X() << " " << p3.Y() << " " << p3.Z() << "\n";
+            out << "  endloop\n";
+            out << "endfacet\n";
+            wrote_triangle = true;
+        }}
+    }}
+    out << "endsolid ecky\n";
+    return wrote_triangle && out.good();
+}}
 
 int main() {{
     TopoDS_Shape shape = BRepPrimAPI_MakeBox(10.0, 20.0, 30.0).Shape();
@@ -1106,8 +1165,8 @@ int main() {{
         return 2;
     }}
     BRepMesh_IncrementalMesh mesh(shape, 0.2);
-    StlAPI_Writer stl_writer;
-    if (!stl_writer.Write(shape, "{}")) {{
+    if (!write_ascii_stl_mesh(shape, "{}")) {{
+        std::cerr << "Direct OCCT preview STL write failed: shape produced no triangulated faces.\n";
         return 3;
     }}
     return 0;
@@ -1385,7 +1444,7 @@ mod tests {
 
         assert!(source.contains("BRepPrimAPI_MakeBox"));
         assert!(source.contains("STEPControl_Writer"));
-        assert!(source.contains("StlAPI_Writer"));
+        assert!(source.contains("write_ascii_stl_mesh"));
         assert!(source.contains("/tmp/box.step"));
         assert!(source.contains("/tmp/box.stl"));
     }
@@ -1458,7 +1517,7 @@ mod tests {
         let _guard =
             test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
-        let layout = inspect_build123d_ocp_runtime(&temp_root("ignored"));
+        let layout = inspect_build123d_ocp_runtime(temp_root("ignored"));
 
         assert_eq!(layout.ocp_root.as_deref(), Some(manifest_root.as_path()));
         assert_eq!(layout.include_dir.as_deref(), Some(include_dir.as_path()));
@@ -1529,7 +1588,7 @@ mod tests {
         let _guard =
             test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
-        let layout = inspect_build123d_ocp_runtime(&temp_root("ignored"));
+        let layout = inspect_build123d_ocp_runtime(temp_root("ignored"));
         assert_eq!(layout.missing_libs, vec![REQUIRED_OCCT_LIBS[0].to_string()]);
         let blocker = layout
             .blocker_summary()
@@ -1564,7 +1623,7 @@ mod tests {
         let _guard =
             test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
-        let blockers = inspect_build123d_ocp_runtime(&temp_root("ignored")).blocker_summary();
+        let blockers = inspect_build123d_ocp_runtime(temp_root("ignored")).blocker_summary();
         let blocker = blockers
             .into_iter()
             .find_map(|blocker| serde_json::from_str::<serde_json::Value>(&blocker).ok())
@@ -1584,7 +1643,7 @@ mod tests {
         let _guard =
             test_env::ThreadEnvGuard::set(ECKY_OCCT_ROOT, env_root.to_string_lossy().as_ref());
 
-        let blockers = inspect_build123d_ocp_runtime(&temp_root("ignored"))
+        let blockers = inspect_build123d_ocp_runtime(temp_root("ignored"))
             .blocker_summary()
             .into_iter()
             .filter_map(|blocker| serde_json::from_str::<serde_json::Value>(&blocker).ok())

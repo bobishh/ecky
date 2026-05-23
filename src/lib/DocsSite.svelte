@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import {
     docsSourcePath,
@@ -7,6 +8,13 @@
     type DocsDocument,
     type DocsSection,
   } from './docs/eckyIrGuide';
+  import {
+    ECKY_IR_EPUB_FILENAME,
+    ECKY_IR_EPUB_PATH,
+    hasTauriInvokeBridge,
+    saveBookEpubNative,
+    triggerBrowserDownload,
+  } from './docs/downloadBook';
 
   let {
     showHead = true,
@@ -22,6 +30,8 @@
   let loading = $state(true);
   let error = $state('');
   let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
+  let epubState = $state<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  let epubError = $state('');
 
   onMount(() => {
     void loadDocs();
@@ -83,6 +93,29 @@
     if (!activeSection?.snippet) return;
     onOpenSnippet?.(activeSection.snippet, activeSection.title);
   }
+
+  async function downloadEpub() {
+    epubState = 'saving';
+    epubError = '';
+
+    try {
+      if (!hasTauriInvokeBridge()) {
+        triggerBrowserDownload(document, ECKY_IR_EPUB_PATH, ECKY_IR_EPUB_FILENAME);
+        epubState = 'saved';
+        return;
+      }
+
+      const [{ save }] = await Promise.all([import('@tauri-apps/plugin-dialog')]);
+      const result = await saveBookEpubNative({
+        saveDialog: save,
+        exportNativeFile: (targetPath) => invoke('export_docs_book_epub', { targetPath }),
+      });
+      epubState = result === 'saved' ? 'saved' : 'idle';
+    } catch (nextError) {
+      epubError = nextError instanceof Error ? nextError.message : String(nextError);
+      epubState = 'failed';
+    }
+  }
 </script>
 
 <svelte:head>
@@ -103,6 +136,14 @@
       <div class="docs-header__summary">
         {@html documentData.summaryHtml}
       </div>
+      <div class="docs-actions docs-actions--header">
+        <button type="button" class="docs-action docs-action--primary" onclick={() => void downloadEpub()}>
+          {epubState === 'saving' ? 'SAVING EPUB...' : 'DOWNLOAD EPUB'}
+        </button>
+      </div>
+      {#if epubError}
+        <div class="docs-inline-error">{epubError}</div>
+      {/if}
     </header>
 
     <div class="docs-layout">
@@ -209,6 +250,14 @@
     max-width: 90ch;
   }
 
+  .docs-inline-error {
+    margin-top: 10px;
+    color: #f2a3a3;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
   .docs-layout {
     min-height: 0;
     display: grid;
@@ -279,6 +328,10 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+  }
+
+  .docs-actions--header {
+    margin-top: 14px;
   }
 
   .docs-action,

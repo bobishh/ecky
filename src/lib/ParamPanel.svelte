@@ -7,6 +7,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
+    getAppErrorDiagnosticContext,
     macroAstSourceMap,
     parseMacroParams,
     saveModelManifest,
@@ -681,6 +682,17 @@
     });
   }
 
+  function focusDiagnosticMacroNode(error: unknown) {
+    const diagnostic = getAppErrorDiagnosticContext(error);
+    if (diagnostic?.partKey) {
+      focusMacroSceneNode(`part:${diagnostic.partKey}`);
+      return;
+    }
+    if (diagnostic?.stableNodeKey) {
+      focusMacroSceneNode(diagnostic.stableNodeKey);
+    }
+  }
+
   $effect(() => {
     if (activeTab !== 'newParams' || !pendingMacroFocusNodeId) return;
     const target = macroScene.nodes.find((node) => node.id === pendingMacroFocusNodeId);
@@ -1091,11 +1103,13 @@
       }
       macroSourcePane = null;
     } catch (applyError) {
+      const formattedError = formatBackendError(applyError);
       macroSourcePane = {
         ...pane,
         busy: false,
-        error: formatBackendError(applyError),
+        error: formattedError,
       };
+      focusDiagnosticMacroNode(applyError);
     }
   }
 
@@ -1570,6 +1584,7 @@
       } catch (e: unknown) {
         console.error('ParamPanel: onchange failed', e);
         session.setError(`Apply Failed: ${formatBackendError(e)}`);
+        focusDiagnosticMacroNode(e);
       } finally {
         applying = false;
       }
@@ -1601,6 +1616,7 @@
       suppressNextIncomingHistory = false;
       console.error('ParamPanel: undo apply failed', e);
       session.setError(`Undo Failed: ${formatBackendError(e)}`);
+      focusDiagnosticMacroNode(e);
     } finally {
       applying = false;
     }
@@ -1620,6 +1636,7 @@
       } catch (e: unknown) {
         console.error('ParamPanel: oncommit failed', e);
         session.setError(`Commit Failed: ${formatBackendError(e)}`);
+        focusDiagnosticMacroNode(e);
       } finally {
         committing = false;
       }

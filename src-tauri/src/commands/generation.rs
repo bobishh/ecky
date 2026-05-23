@@ -139,6 +139,12 @@ Current fileExtension: `.ecky`.\n\
 Current sourceLanguage: `ecky`.\n\
 {target_line}\
 Start every renderable answer with `(model ...)`.\n\n\
+API MODE ONE-PROMPT WORKFLOW\n\
+- Treat this target-language guide as the complete source of truth for `.ecky`; API mode cannot call MCP tools, fetch web docs, or inspect external resources.\n\
+- First derive named params and fit-critical bindings from the request; then write geometry; then write top-level verification clauses for measurable promises.\n\
+- Author verification clauses, but do not claim you ran them. The app runs compile, render, structural verification, and authored verify after `macro_code` returns.\n\
+- If repairing a failed generation, keep existing verify intent and strengthen geometry/params until checks pass; never delete the check to hide failure.\n\
+- Return JSON only per the outer contract, with complete Ecky source in `macro_code`.\n\n\
 AUTHORING RULES\n\
 - Output finished renderable geometry unless user explicitly asks for a placeholder. {typed_hole_policy}\n\
 - Top-level model clauses: {model_clauses}. Use `params`, `part`, and `meta` directly under `model`.\n\
@@ -148,7 +154,7 @@ AUTHORING RULES\n\
 - Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}.\n\
 - Keywords are not callable nodes: write `(box 10 10 2 :align '(center center min))`, never `(align ...)`.\n\
 - Name fit-critical bindings before use: `wall`, `clearance`, `bore-r`, `top-z`. No anonymous offsets for fit-critical geometry.\n\
-- For generated Ecky models, write top-level `(verify ...)` clauses in the same `(model ...)` from the user's requirements before trusting geometry; a red first render is expected repair input.\n\
+- For generated Ecky models, write top-level `(verify ...)` clauses in the same `(model ...)` from the user's measurable requirements before trusting geometry; a red first render is expected repair input.\n\
 - Verify with typed/static errors first, structural checks second, screenshots last.\n\
 {backend_note}{wall_patterns}\n\
 PARAMS\n\
@@ -156,6 +162,57 @@ PARAMS\n\
 - `(select key \"default\" :label \"...\" :options ((\"Label\" \"value\") ...))`\n\
 - `(toggle key #t :label \"...\")`\n\
 - `(image key \"\" :label \"...\")`\n\n\
+VERIFY CLAUSES\n\
+- Purpose: make source carry machine-checkable intent. The model writes `(verify ...)`; app verification evaluates it later.\n\
+- Put `verify` directly under `model`, before or after `part` clauses. Never nest `verify` inside geometry, params, `build`, `let`, or components.\n\
+- Clause grammar: `(verify (tag stable-name optional.selector ...) (metric alias (namespace key optional.args ...)) (expect alias (operator literal)))`.\n\
+- Required section order: `tag`, then `metric`, then `expect`. Empty `(verify)` is invalid.\n\
+- `tag` carries authored labels or selectors for diagnostics; use stable names like `mesh_clean`, `lid_gap`, `preview_exists`.\n\
+- `metric` first item is a local alias; second item is a metric expression. `expect` alias must match the metric alias exactly.\n\
+- Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`.\n\
+- Manifest metrics: `(manifest has-step)`, `(manifest has-preview-stl)`, `(manifest edge-target-count)`, `(manifest face-target-count)`, `(manifest export-format-count)`, `(manifest part-count)`.\n\
+- STL metrics: `(stl triangle-count)`, `(stl connected-component-count)`, `(stl non-manifold-edge-count)`, `(stl overhang-face-count)`.\n\
+- Clearance metric: `(clearance min-distance selector-a selector-b)`. Selectors may be part names such as `body` and `lid`, or stable target ids when known.\n\
+- Selector metrics: `(selector axis selector)`, `(selector extent-x selector)`, `(selector extent-y selector)`, `(selector extent-z selector)`, `(selector center-x selector)`, `(selector center-y selector)`, `(selector center-z selector)`. Axis returns text: `x`, `y`, or `z`; extents and centers are millimeters.\n\
+- Relation metrics: `(relation axis-angle selector-a selector-b)`, `(relation center-delta-x selector-a selector-b)`, `(relation center-delta-y selector-a selector-b)`, `(relation center-delta-z selector-a selector-b)`. Axis angle is unsigned degrees; center deltas are signed millimeters: selector-a center minus selector-b center.\n\
+- Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`. Literals may be boolean, number, or text; do not use params or computed expressions in `expect` literals.\n\
+- Good default checks for generated `.ecky`: preview STL exists, part count is positive, STL triangle count is positive, non-manifold edge count is zero.\n\
+- Use clearance verification when the request names a fit/gap/clearance. Use numeric literals matching the promised clearance.\n\
+- Use selector/relation verification when the request names orientation, fit axis, length, width, thickness, center offset, or perpendicular/parallel relation.\n\
+- Do not remove or weaken existing `(verify ...)` clauses during repair; change geometry or params until they pass.\n\
+```ecky\n\
+(model\n\
+  (verify\n\
+    (tag preview_exists)\n\
+    (metric check (manifest has-preview-stl))\n\
+    (expect check (= true)))\n\
+  (verify\n\
+    (tag mesh_clean)\n\
+    (metric bad_edges (stl non-manifold-edge-count))\n\
+    (expect bad_edges (= 0)))\n\
+  (verify\n\
+    (tag lid_clearance body lid)\n\
+    (metric gap (clearance min-distance body lid))\n\
+    (expect gap (>= 0.3)))\n\
+  (verify\n\
+    (tag part_count)\n\
+    (metric parts (manifest part-count))\n\
+    (expect parts (>= 2)))\n\
+  (verify\n\
+    (tag joint_axis joint_tongue)\n\
+    (metric axis (selector axis joint_tongue))\n\
+    (expect axis (= \"y\")))\n\
+  (verify\n\
+    (tag joint_width joint_tongue)\n\
+    (metric width (selector extent-x joint_tongue))\n\
+    (expect width (>= 11.8)))\n\
+  (verify\n\
+    (tag tube_joint_perpendicular tube_axis joint_tongue)\n\
+    (metric angle (relation axis-angle tube_axis joint_tongue))\n\
+    (expect angle (>= 85)))\n\
+  (part body (box 30 20 10))\n\
+  (part lid (translate 0 0 10.4 (box 30 20 2))))\n\
+```\n\n\
 PROGRESSIVE ECKY EXAMPLES\n\n\
 1. First solid:\n\
 ```ecky\n\
@@ -235,7 +292,7 @@ PROGRESSIVE ECKY EXAMPLES\n\n\
       (result (union carrier socket thread-a thread-b ribs)))))\n\
 ```\n\n\
 READING ORDER FOR GENERATED CODE\n\
-Start primitive or sketch. Add params. Add named `build` stages. Add booleans. Add repetition/placement. Add verification clauses only when model invariants matter.\n",
+Start primitive or sketch. Add params. Add named `build` stages. Add booleans. Add repetition/placement. Add verification clauses for measurable model invariants before final JSON.\n",
         typed_hole_policy = surface.typed_hole_policy,
     )
 }
@@ -1239,6 +1296,44 @@ mod tests {
         assert!(build123d.contains("Use `let*` when later bindings depend on earlier ones"));
         assert!(build123d.contains("Use `map`, `range`, `repeat-union`, and `repeat-compound`"));
         assert!(build123d.contains("Name fit-critical bindings"));
+        assert!(build123d.contains("API MODE ONE-PROMPT WORKFLOW"));
+        assert!(build123d.contains("API mode cannot call MCP tools"));
+        assert!(build123d.contains("do not claim you ran them"));
+        assert!(build123d.contains("VERIFY CLAUSES"));
+        assert!(build123d.contains("(verify"));
+        assert!(build123d.contains("Clause grammar"));
+        assert!(build123d
+            .contains("Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`"));
+        assert!(build123d.contains("(manifest has-preview-stl)"));
+        assert!(build123d.contains("(manifest part-count)"));
+        assert!(build123d.contains("(stl non-manifold-edge-count)"));
+        assert!(build123d.contains("(stl triangle-count)"));
+        assert!(build123d.contains("(clearance min-distance selector-a selector-b)"));
+        assert!(build123d.contains("(selector axis selector)"));
+        assert!(build123d.contains("(selector extent-x selector)"));
+        assert!(build123d.contains("(selector center-z selector)"));
+        assert!(build123d.contains("(relation axis-angle selector-a selector-b)"));
+        assert!(build123d.contains("(relation center-delta-x selector-a selector-b)"));
+        assert!(build123d.contains("(relation center-delta-y selector-a selector-b)"));
+        assert!(build123d.contains("(relation center-delta-z selector-a selector-b)"));
+        assert!(build123d.contains("Axis returns text: `x`, `y`, or `z`"));
+        assert!(build123d.contains("Axis angle is unsigned degrees"));
+        assert!(build123d.contains("Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`"));
+        assert!(build123d.contains("(metric check (manifest has-preview-stl))"));
+        assert!(build123d.contains("(expect check (= true))"));
+        assert!(build123d.contains("(metric bad_edges (stl non-manifold-edge-count))"));
+        assert!(build123d.contains("(expect bad_edges (= 0))"));
+        assert!(build123d.contains("(metric gap (clearance min-distance body lid))"));
+        assert!(build123d.contains("(expect gap (>= 0.3))"));
+        assert!(build123d.contains("(metric parts (manifest part-count))"));
+        assert!(build123d.contains("(metric axis (selector axis joint_tongue))"));
+        assert!(build123d.contains("(expect axis (= \"y\"))"));
+        assert!(build123d.contains("(metric width (selector extent-x joint_tongue))"));
+        assert!(build123d.contains("(expect width (>= 11.8))"));
+        assert!(build123d.contains("(metric angle (relation axis-angle tube_axis joint_tongue))"));
+        assert!(build123d.contains("(expect angle (>= 85))"));
+        assert!(!build123d.contains("(min_wall_thickness"));
+        assert!(build123d.contains("Do not remove or weaken existing `(verify ...)` clauses"));
         assert!(build123d.contains("`offset-rounded`"));
         assert!(build123d.contains("`grid-array`"));
         assert!(build123d.contains("`arc-array`"));

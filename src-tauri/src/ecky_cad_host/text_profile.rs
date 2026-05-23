@@ -56,12 +56,6 @@ struct LoopEntry {
     area: f64,
 }
 
-#[derive(Debug, Clone)]
-struct FaceLoops {
-    outer: Vec<[f64; 2]>,
-    holes: Vec<Vec<[f64; 2]>>,
-}
-
 impl GlyphLoopBuilder {
     fn new(scale: f64, offset: [f64; 2]) -> Self {
         Self {

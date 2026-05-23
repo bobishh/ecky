@@ -29,15 +29,27 @@ test('Given docs route When page opens Then manifest-driven docs index and artic
   await expect(page.locator('pre').first()).toContainText('clearance min-distance');
 });
 
-test('Given docs route When pending article opens Then pending state stays visible', async ({ page }) => {
+test('Given docs route When constraint dojo opens Then no pending state leaks into docs chrome', async ({ page }) => {
   await page.goto('/docs/ecky-ir');
 
-  const pendingArticle = page.getByRole('button', { name: /Constraint Dojo/i });
-  await expect(pendingArticle).toBeVisible();
-  await expect(pendingArticle).toContainText(/pending/i);
+  const article = page.getByRole('button', { name: /Constraint Dojo/i });
+  await expect(article).toBeVisible();
+  await expect(article).not.toContainText(/pending/i);
 
-  await pendingArticle.click();
+  await article.click();
 
   await expect(page.getByRole('heading', { name: 'Constraint Dojo' })).toBeVisible();
-  await expect(page.locator('.docs-status--pending')).toContainText('Pending');
+  await expect(page.locator('.docs-status--pending')).toHaveCount(0);
+  await expect(page.locator('.docs-article')).not.toContainText(/pending/i);
+});
+
+test('Given docs route When epub action pressed Then book download starts', async ({ page }) => {
+  await page.goto('/docs/ecky-ir');
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'DOWNLOAD EPUB' }).click();
+  const download = await downloadPromise;
+
+  await expect(page.getByRole('button', { name: 'DOWNLOAD EPUB' })).toBeVisible();
+  expect(download.suggestedFilename()).toBe('ecky-ir-field-guide.epub');
 });

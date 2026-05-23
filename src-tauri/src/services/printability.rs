@@ -392,7 +392,7 @@ fn find_top_level_form(source: &str, head: &str) -> Option<usize> {
     None
 }
 
-fn list_head<'a>(source: &'a str, open: usize, close: usize) -> Result<Option<&'a str>, String> {
+fn list_head(source: &str, open: usize, close: usize) -> Result<Option<&str>, String> {
     let mut index = skip_ws_and_comments(source, open + 1);
     if index >= close {
         return Ok(None);

@@ -2198,9 +2198,9 @@ What to notice:
 - repetition lives in one source block
 - final boolean/compound intent stays obvious
 
-## Constraint Dojo [pending]
+## Constraint Dojo
 
-Pending. This section should become fit/tolerance tutorial:
+Use this section as fit/tolerance checklist when a model crosses from “looks right” into “must assemble”:
 
 - named clearances
 - relation constraints

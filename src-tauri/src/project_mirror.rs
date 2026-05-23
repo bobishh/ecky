@@ -236,6 +236,30 @@ pub fn folder_status(
     })
 }
 
+/// Slugs of all project folders under the projects root that look like
+/// mirrors (have a manifest). Used by the folder watcher.
+pub fn list_project_slugs(app: &dyn PathResolver) -> AppResult<Vec<String>> {
+    let root = projects_root(app);
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut slugs = Vec::new();
+    let entries = fs::read_dir(&root).map_err(|err| {
+        AppError::persistence(format!("Failed to read '{}': {}", root.display(), err))
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join(PROJECT_MANIFEST_FILE_NAME).is_file() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            slugs.push(name.to_string());
+        }
+    }
+    slugs.sort();
+    Ok(slugs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,7 +400,6 @@ mod tests {
             classify_sync_state(Some(&edited), Some(&manifest), Some("msg-2")),
             ProjectSyncState::Conflict
         );
-        // Unknown thread head (e.g. thread deleted) never blocks: digest rules.
         assert_eq!(
             classify_sync_state(Some(&edited), Some(&manifest), None),
             ProjectSyncState::FileChanged
@@ -415,28 +438,4 @@ mod tests {
         let err = folder_status(&resolver, "../escape", None).expect_err("unsafe slug");
         assert!(err.message.contains("not a safe"), "{}", err.message);
     }
-}
-
-/// Slugs of all project folders under the projects root that look like
-/// mirrors (have a manifest). Used by the folder watcher.
-pub fn list_project_slugs(app: &dyn PathResolver) -> AppResult<Vec<String>> {
-    let root = projects_root(app);
-    if !root.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut slugs = Vec::new();
-    let entries = fs::read_dir(&root).map_err(|err| {
-        AppError::persistence(format!("Failed to read '{}': {}", root.display(), err))
-    })?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() || !path.join(PROJECT_MANIFEST_FILE_NAME).is_file() {
-            continue;
-        }
-        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            slugs.push(name.to_string());
-        }
-    }
-    slugs.sort();
-    Ok(slugs)
 }

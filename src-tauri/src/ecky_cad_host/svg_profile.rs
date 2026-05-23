@@ -1,4 +1,5 @@
 use crate::contracts::{AppError, AppResult};
+use std::str::FromStr;
 use usvg::tiny_skia_path::{PathSegment, Point};
 use usvg::{self, Node, Transform, Tree, Visibility};
 
@@ -34,13 +35,15 @@ pub enum SvgFitMode {
     Stretch,
 }
 
-impl SvgFitMode {
-    pub fn from_str(value: &str) -> Option<Self> {
+impl FromStr for SvgFitMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "contain" | "fit" => Some(Self::Contain),
-            "cover" => Some(Self::Cover),
-            "stretch" | "fill" => Some(Self::Stretch),
-            _ => None,
+            "contain" | "fit" => Ok(Self::Contain),
+            "cover" => Ok(Self::Cover),
+            "stretch" | "fill" => Ok(Self::Stretch),
+            _ => Err(()),
         }
     }
 }
@@ -394,11 +397,9 @@ fn classify_loops(
             if candidate_area <= signed_area(&loops[i]).abs() {
                 continue;
             }
-            if point_in_polygon(rep, &loops[j]) {
-                if candidate_area < parent_area {
-                    parent_area = candidate_area;
-                    parent_index = Some(j);
-                }
+            if point_in_polygon(rep, &loops[j]) && candidate_area < parent_area {
+                parent_area = candidate_area;
+                parent_index = Some(j);
             }
         }
 
@@ -474,13 +475,13 @@ fn is_descendant(mut index: usize, target: usize, parent: &[Option<usize>]) -> b
 }
 
 fn compute_fit(
-    outer_loop: &Vec<[f64; 2]>,
-    holes: &Vec<Vec<[f64; 2]>>,
+    outer_loop: &[[f64; 2]],
+    holes: &[Vec<[f64; 2]>],
     target_width: Option<f64>,
     target_height: Option<f64>,
     fit_mode: SvgFitMode,
 ) -> AppResult<SvgProfileFit> {
-    let mut all_points = outer_loop.clone();
+    let mut all_points = outer_loop.to_vec();
     for points in holes {
         all_points.extend(points.iter().copied());
     }

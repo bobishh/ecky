@@ -66,6 +66,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::render::get_default_macro,
         crate::commands::render::get_mess_stl_path,
         crate::commands::render::export_file,
+        crate::commands::render::export_docs_book_epub,
         crate::commands::render::export_multipart_stl_zip,
         crate::commands::render::export_multipart_3mf,
         crate::commands::sketch::generate_sketch_draft_source,

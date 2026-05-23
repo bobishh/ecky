@@ -918,7 +918,7 @@ vtStream?: string;
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
-export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null }
+export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
@@ -939,13 +939,15 @@ export type AuthoredVerifyCheck = { tag: string; status: AuthoredVerifyCheckStat
  * the expected vs actual values. Lets the agent fix a red check without
  * re-parsing `message`.
  */
-metricSource?: string | null; metricKey?: string | null; comparator?: string | null; expected?: AuthoredVerifyValue | null; actual?: AuthoredVerifyValue | null }
+metricSource?: string | null; metricKey?: string | null; comparator?: string | null; expected?: AuthoredVerifyValue | null; actual?: AuthoredVerifyValue | null; diagnosticContext?: DiagnosticContext | null }
 export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error"
 /**
  * A resolved verify value (expected or actual). Boundary-typed so MCP agents
  * and UI chips read machine values instead of parsing the message string.
  */
 export type AuthoredVerifyValue = { kind: "number"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string }
+export type DiagnosticContext = { partKey?: string | null; opName?: string | null; startLine?: number | null; endLine?: number | null; resolvedParams?: DiagnosticParamValue[] }
+export type DiagnosticParamValue = { key: string; value: ParamValue }
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
  */
@@ -1158,7 +1160,7 @@ export type StructuralIssue = { code: string; message: string;
 /**
  * ID of the affected part, when the issue is part-specific.
  */
-partId?: string | null; numericPayload?: number | null }
+partId?: string | null; numericPayload?: number | null; diagnosticContext?: DiagnosticContext | null }
 export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; previewStlTriangleCount?: number | null; previewStlComponentCount?: number | null; previewStlNonManifoldEdgeCount?: number | null; previewStlOverhangTriangleCount?: number | null; previewStlOverhangRatio?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
 export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; authoredVerifyChecks?: AuthoredVerifyCheck[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
 export type TaggedAnchorBinding = { kind: TaggedAnchorKind; authoredSelector: string; target: string; targetIds: string[]; durableTargetIds: string[]; canonicalTargetIds: string[]; aliasIds: string[] }

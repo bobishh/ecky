@@ -34,6 +34,25 @@ fn print_usage() {
     eprintln!("  ecky lower --backend <build123d|freecad> <input.ecky> --out <output>");
 }
 
+fn lower_to_build123d_text(source: &str) -> Result<(), String> {
+    ecky_cad_lib::ecky_ir::lower_to_build123d(source)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
+fn lower_backend_text(backend: &str, source: &str) -> Result<String, String> {
+    let lower: fn(&str) -> ecky_cad_lib::models::AppResult<String> = match backend {
+        "build123d" => ecky_cad_lib::ecky_ir::lower_to_build123d,
+        "freecad" => ecky_cad_lib::ecky_ir::lower_to_freecad,
+        other => {
+            return Err(format!(
+                "Unsupported backend `{other}`. Use `build123d` or `freecad`."
+            ));
+        }
+    };
+    lower(source).map_err(|err| err.to_string())
+}
+
 fn run_check(args: &[String]) -> ExitCode {
     let Some(input) = args.first() else {
         eprintln!("`ecky check` needs an input file.");
@@ -50,7 +69,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // surface the runtime accepts and reports authoring-grade errors.
     let outcome = std::thread::Builder::new()
         .stack_size(LOWER_STACK_SIZE)
-        .spawn(move || ecky_cad_lib::ecky_ir::lower_to_build123d(&source).map(|_| ()))
+        .spawn(move || lower_to_build123d_text(&source))
         .expect("spawn check thread")
         .join();
     match outcome {
@@ -125,18 +144,11 @@ fn run_lower(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let lower: fn(&str) -> ecky_cad_lib::models::AppResult<String> = match parsed.backend.as_str() {
-        "build123d" => ecky_cad_lib::ecky_ir::lower_to_build123d,
-        "freecad" => ecky_cad_lib::ecky_ir::lower_to_freecad,
-        other => {
-            eprintln!("Unsupported backend `{other}`. Use `build123d` or `freecad`.");
-            return ExitCode::from(2);
-        }
-    };
     // Lowering recurses deeply on large models; match the app's guarded stack.
+    let backend = parsed.backend.clone();
     let lowered = std::thread::Builder::new()
         .stack_size(LOWER_STACK_SIZE)
-        .spawn(move || lower(&source))
+        .spawn(move || lower_backend_text(&backend, &source))
         .expect("spawn lowering thread")
         .join();
     match lowered {

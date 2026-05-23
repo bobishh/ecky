@@ -1291,7 +1291,7 @@ fn wrap_bindings_around_item(
     next_node_id: &mut u64,
 ) -> CoreNode {
     let value_kind = item.value_kind;
-    let span = item.span.clone();
+    let span = item.span;
     CoreNode {
         id: next_id(next_node_id),
         kind: CoreNodeKind::Let {
@@ -1465,7 +1465,7 @@ fn normalize_svg_node(
         .get(3)
         .map(|arg| {
             let value = crate::ecky_ir::eval_core_stringish_with_locals(arg, param_names, env)?;
-            SvgFitMode::from_str(&value).ok_or_else(|| {
+            value.parse::<SvgFitMode>().map_err(|()| {
                 AppError::validation(format!(
                     "`svg` fit mode must be `contain`, `cover`, or `stretch`, got {value}",
                 ))
@@ -1510,7 +1510,7 @@ fn normalize_svg_node(
     ))
 }
 
-fn normalized_svg_polygon_node(points: &Vec<[f64; 2]>, next_node_id: &mut u64) -> CoreNode {
+fn normalized_svg_polygon_node(points: &[[f64; 2]], next_node_id: &mut u64) -> CoreNode {
     let point_nodes = points
         .iter()
         .map(|point| {
@@ -2097,7 +2097,7 @@ mod tests {
     fn normalizes_svg_profile_for_direct_occt() {
         let svg_path = std::path::Path::new("/tmp/ecky-direct-occt-svg-normalize-profile.svg");
         {
-            let mut file = std::fs::File::create(&svg_path).expect("create svg");
+            let mut file = std::fs::File::create(svg_path).expect("create svg");
             use std::io::Write;
             file.write_all(
                 b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">\n  <path d=\"M1 1h8v8h-8z\"/>\n</svg>\n",

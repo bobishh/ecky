@@ -379,7 +379,7 @@ fn runner_box_keywords_supported(command: &OcctCommand) -> bool {
 }
 
 fn runner_primitive_align_keywords_supported(command: &OcctCommand, arg_count: usize) -> bool {
-    if command.args.len() != arg_count
+    if command.args.len() < arg_count
         || !command
             .args
             .iter()
@@ -1135,6 +1135,100 @@ mod tests {
         }
     }
 
+    fn user_honjo_stay_clamp_program() -> crate::ecky_core_ir::CoreProgram {
+        crate::ecky_scheme::compile_to_core_program(
+            r#"
+            (model
+              (params
+                (number tube_od 14.5 :label "Feather Tube OD" :min 11 :max 24 :step 0.1)
+                (number clamp_clearance 0.20 :label "Slicing Fit Clearance" :min 0.05 :max 0.5 :step 0.05)
+                (number clamp_wall 3.5 :label "Clamp Wall Thickness" :min 2.5 :max 5.5 :step 0.1)
+                (number part_width 16.0 :label "Print Width along Stay" :min 12 :max 24 :step 0.5)
+                (number honjo_wire_d 5.2 :label "Honjo Wire Diameter" :min 4.8 :max 5.5 :step 0.05)
+                (number hardware_m4_d 4.2 :label "M4 Clearance Bolt Diameter" :min 3.8 :max 4.5 :step 0.05)
+                (number nut_flat 7.2 :label "M4 Hex Nut Flat Width" :min 6.8 :max 7.6 :step 0.05)
+                (number nut_thick 3.2 :label "M4 Hex Nut Depth" :min 2.5 :max 4.0 :step 0.1)
+                (number boss_offset 12.0 :label "Stay Extension Offset" :min 8 :max 20 :step 0.5))
+
+              (part honjo_stay_clamp_v2
+                (let* ((inner_r (/ (+ tube_od clamp_clearance) 2))
+                       (outer_r (+ inner_r clamp_wall))
+                       (ear_w (* clamp_wall 2))
+                       (ear_l 12.0)
+                       (boss_r (+ (/ honjo_wire_d 2) clamp_wall))
+                       (z_center (/ part_width 2)))
+                  (build
+                    (shape collar_shell
+                      (cylinder outer_r part_width 64 :align '(center center min)))
+                    (shape clamping_ear_left
+                      (translate (- 0 outer_r (/ ear_l 2)) 0 0
+                        (box ear_l ear_w part_width :align '(center center min))))
+                    (shape clamping_ear_right
+                      (translate (+ outer_r (/ ear_l 2)) 0 0
+                        (box ear_l ear_w part_width :align '(center center min))))
+                    (shape neck_bridge
+                      (translate 0 (+ outer_r (/ boss_offset 2)) 0
+                        (box (* boss_r 1.6) boss_offset part_width :align '(center center min))))
+                    (shape wire_boss
+                      (translate 0 (+ outer_r boss_offset) 0
+                        (cylinder boss_r part_width 48 :align '(center center min))))
+                    (shape full_blank
+                      (union collar_shell clamping_ear_left clamping_ear_right neck_bridge wire_boss))
+                    (shape tube_void
+                      (translate 0 0 -1
+                        (cylinder inner_r (+ part_width 2) 64 :align '(center center min))))
+                    (shape bolt_void_L
+                      (translate (- 0 outer_r (/ ear_l 2)) 0 z_center
+                        (rotate 90 0 0
+                          (cylinder (/ hardware_m4_d 2) (+ ear_w 4) 32 :align '(center center center)))))
+                    (shape bolt_void_R
+                      (translate (+ outer_r (/ ear_l 2)) 0 z_center
+                        (rotate 90 0 0
+                          (cylinder (/ hardware_m4_d 2) (+ ear_w 4) 32 :align '(center center center)))))
+                    (shape honjo_stay_void
+                      (translate 0 (+ outer_r boss_offset) -1
+                        (cylinder (/ honjo_wire_d 2) (+ part_width 2) 48 :align '(center center min))))
+                    (shape nut_trap_L
+                      (translate (- 0 outer_r 4.5) (- 0 (/ ear_w 2) 0.1) z_center
+                        (box nut_thick nut_flat nut_flat :align '(center min center))))
+                    (shape nut_trap_R
+                      (translate (+ outer_r 4.5) (- 0 (/ ear_w 2) 0.1) z_center
+                        (box nut_thick nut_flat nut_flat :align '(center min center))))
+                    (shape split_line_cutter
+                      (translate 0 (+ (/ boss_offset 2) 5) -1
+                        (box (+ (* outer_r 2) (* ear_l 2) 20) (+ (* outer_r 2) boss_offset 30) (+ part_width 2) :align '(center center min))))
+                    (result
+                      (difference full_blank
+                                  tube_void
+                                  bolt_void_L
+                                  bolt_void_R
+                                  honjo_stay_void
+                                  nut_trap_L
+                                  nut_trap_R
+                                  split_line_cutter))))))
+            "#,
+        )
+        .expect("program")
+    }
+
+    fn user_honjo_stay_clamp_params() -> crate::models::DesignParams {
+        use crate::models::ParamValue;
+
+        [
+            ("tube_od".to_string(), ParamValue::Number(14.5)),
+            ("clamp_clearance".to_string(), ParamValue::Number(0.2)),
+            ("clamp_wall".to_string(), ParamValue::Number(3.5)),
+            ("part_width".to_string(), ParamValue::Number(16.0)),
+            ("honjo_wire_d".to_string(), ParamValue::Number(5.2)),
+            ("hardware_m4_d".to_string(), ParamValue::Number(4.2)),
+            ("nut_flat".to_string(), ParamValue::Number(7.2)),
+            ("nut_thick".to_string(), ParamValue::Number(3.2)),
+            ("boss_offset".to_string(), ParamValue::Number(12.0)),
+        ]
+        .into_iter()
+        .collect()
+    }
+
     fn unsupported_resolved_selector_plan() -> OcctPlan {
         OcctPlan {
             parameters: Vec::new(),
@@ -1627,6 +1721,51 @@ mod tests {
         )
     }
 
+    fn supported_round_primitives_with_align_and_extra_numeric_args_plan() -> OcctPlan {
+        let align = || {
+            vec![OcctKeyword {
+                name: "align".to_string(),
+                value: OcctKeywordValue::Arg(OcctArg::List(vec![
+                    OcctArg::Symbol("min".to_string()),
+                    OcctArg::Symbol("center".to_string()),
+                    OcctArg::Symbol("max".to_string()),
+                ])),
+            }]
+        };
+        sample_plan_for_commands(
+            OcctSlot(3),
+            vec![
+                OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Sphere,
+                    args: vec![OcctArg::Number(4.0), OcctArg::Number(48.0)],
+                    keywords: align(),
+                },
+                OcctCommand {
+                    output: OcctSlot(2),
+                    op: OcctOp::Cylinder,
+                    args: vec![
+                        OcctArg::Number(2.0),
+                        OcctArg::Number(8.0),
+                        OcctArg::Number(64.0),
+                    ],
+                    keywords: align(),
+                },
+                OcctCommand {
+                    output: OcctSlot(3),
+                    op: OcctOp::Cone,
+                    args: vec![
+                        OcctArg::Number(3.0),
+                        OcctArg::Number(1.0),
+                        OcctArg::Number(7.0),
+                        OcctArg::Number(48.0),
+                    ],
+                    keywords: align(),
+                },
+            ],
+        )
+    }
+
     fn keyword_profile_holes_plan() -> OcctPlan {
         sample_plan_for_commands(
             OcctSlot(4),
@@ -2046,6 +2185,9 @@ mod tests {
         assert!(runner_supports_plan(
             &supported_round_primitives_with_align_plan()
         ));
+        assert!(runner_supports_plan(
+            &supported_round_primitives_with_align_and_extra_numeric_args_plan()
+        ));
         assert!(runner_supports_plan(&keyworded_plane_plan()));
         assert!(runner_supports_plan(&keyword_profile_holes_plan()));
         assert!(runner_supports_plan(&keyword_clip_box_plan()));
@@ -2085,6 +2227,76 @@ mod tests {
             runner_supports_plan(&plan),
             "helical-ridge plan must be runner-safe"
         );
+    }
+
+    #[test]
+    fn user_honjo_stay_clamp_routes_through_runner_when_available() {
+        let root = temp_root("user-honjo-runner");
+        let runner = root
+            .join("resources")
+            .join("bin")
+            .join("direct-occt-runner");
+        let output_dir = root.join("bundle");
+        fs::create_dir_all(runner.parent().expect("runner parent")).expect("mkdir");
+        write_executable(
+            &runner,
+            r#"#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --out)
+      out="$2"
+      shift 2
+      ;;
+    --plan)
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+mkdir -p "$out"
+: > "$out/model.step"
+: > "$out/preview.stl"
+printf '{"parts":[{"partId":"honjo_stay_clamp_v2","label":"Honjo Stay Clamp V2","edges":[],"faces":[]}]}' > "$out/topology.json"
+exit 0
+"#,
+        );
+        let resolver = TestResolver { root: root.clone() };
+        let layout = crate::ecky_cad_host::direct_occt_sdk::DirectOcctSdkLayout {
+            runtime_root: root.join("runtime").join("occt"),
+            ocp_root: None,
+            dylib_dir: None,
+            include_dir: None,
+            missing_headers: Vec::new(),
+            missing_libs: Vec::new(),
+            install_name_prefix: "/DLC/OCP/.dylibs",
+        };
+
+        let outcome =
+            crate::ecky_cad_host::direct_occt_executor::export_core_program_step_stl_with_params_runner_first(
+                &user_honjo_stay_clamp_program(),
+                &user_honjo_stay_clamp_params(),
+                &layout,
+                &output_dir,
+                &resolver,
+            )
+            .expect("runner export");
+
+        let crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+        } = outcome
+        else {
+            panic!("expected runner export for user honjo stay clamp");
+        };
+
+        assert!(output_dir.join(PLAN_FILE_NAME).is_file());
+        assert!(output_dir.join("topology.json").is_file());
+        assert!(step_path.is_file());
+        assert!(stl_path.is_file());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

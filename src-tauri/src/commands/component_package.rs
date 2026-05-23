@@ -268,6 +268,7 @@ fn write_artifact_bundle_component_package_project_impl(
     Ok(package)
 }
 
+#[cfg(test)]
 fn normalize_packaged_component_ports(
     ports: &[ComponentPort],
     artifact_bundle: &ArtifactBundle,

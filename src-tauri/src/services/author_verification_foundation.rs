@@ -17,10 +17,12 @@ pub(crate) struct CoverageStats {
 }
 
 impl CoverageStats {
+    #[cfg(test)]
     pub(crate) fn ratio(self) -> Option<f64> {
         (self.total > 0).then_some(self.present as f64 / self.total as f64)
     }
 
+    #[cfg(test)]
     pub(crate) fn is_complete(self) -> bool {
         self.total > 0 && self.present == self.total
     }
@@ -44,6 +46,7 @@ pub(crate) struct ManifestAuthorMetrics {
 }
 
 impl ManifestAuthorMetrics {
+    #[cfg(test)]
     pub(crate) fn geometric_coverage_complete(&self) -> bool {
         self.part_count > 0
             && self.bounds_coverage.is_complete()
@@ -51,6 +54,7 @@ impl ManifestAuthorMetrics {
             && self.area_coverage.is_complete()
     }
 
+    #[cfg(test)]
     pub(crate) fn viewer_asset_coverage_complete(&self) -> bool {
         self.viewer_asset_coverage.is_complete()
     }
@@ -73,6 +77,7 @@ pub(crate) struct StructuralAuthorMetrics {
 }
 
 impl StructuralAuthorMetrics {
+    #[cfg(test)]
     pub(crate) fn is_passing(&self) -> bool {
         self.passed && self.issue_count == 0
     }
@@ -85,6 +90,7 @@ pub(crate) struct AuthorVerificationMetrics {
 }
 
 impl AuthorVerificationMetrics {
+    #[cfg(test)]
     pub(crate) fn ready_for_author_verification(&self) -> bool {
         self.manifest.geometric_coverage_complete()
             && self
@@ -110,19 +116,10 @@ struct ParsedVerifyMetricRef<'a> {
 
 #[derive(Debug, Clone)]
 enum DistanceAnchor {
-    Point {
-        label: String,
-        point: [f64; 3],
-    },
-    Segment {
-        label: String,
-        start: [f64; 3],
-        end: [f64; 3],
-    },
-    Bounds {
-        label: String,
-        bounds: ManifestBounds,
-    },
+    Point { point: [f64; 3] },
+    Face { point: [f64; 3], normal: [f64; 3] },
+    Segment { start: [f64; 3], end: [f64; 3] },
+    Bounds { bounds: ManifestBounds },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +243,7 @@ pub(crate) fn merge_author_verification_into_structural_result(
                 ),
                 part_id: None,
                 numeric_payload: None,
+                diagnostic_context: None,
             });
             return finalize_structural_verification_result(result);
         }
@@ -288,6 +286,7 @@ pub(crate) fn merge_author_verification_into_structural_result(
                 Some(AuthorVerifyResolvedValue::Number(value)) => Some(value),
                 _ => None,
             },
+            diagnostic_context: None,
         });
     }
 
@@ -318,6 +317,7 @@ fn authored_verify_check_contract(
         comparator: check.comparator.clone(),
         expected: check.expected.as_ref().map(authored_verify_value_contract),
         actual: check.actual.as_ref().map(authored_verify_value_contract),
+        diagnostic_context: None,
     }
 }
 
@@ -610,6 +610,8 @@ fn resolve_metric_value(
             resolve_stl_metric_value(key, metrics)
         }
         "clearance" => resolve_clearance_metric_value(key, args, bundle, manifest),
+        "selector" => resolve_selector_metric_value(key, args, bundle, manifest),
+        "relation" => resolve_relation_metric_value(key, args, bundle, manifest),
         other => Err(format!("Unsupported verify metric namespace `{other}`.")),
     }
 }
@@ -640,6 +642,82 @@ fn resolve_clearance_metric_value(
     }
 }
 
+fn resolve_selector_metric_value(
+    key: &str,
+    args: &[CoreVerifyValue],
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+) -> Result<AuthorVerifyResolvedValue, String> {
+    if args.len() != 1 {
+        return Err("Selector metrics expect exactly one selector argument.".to_string());
+    }
+    let selector = verify_symbol_like(&args[0])
+        .ok_or_else(|| "Selector metric argument must be symbol or text.".to_string())?;
+    let anchors = resolve_distance_selector_anchors(selector, bundle, manifest)?;
+
+    match key {
+        "axis" => Ok(AuthorVerifyResolvedValue::Text(axis_name(selector_axis(
+            selector, &anchors,
+        )?)?)),
+        "extent-x" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_extents(selector, &anchors)?[0],
+        )),
+        "extent-y" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_extents(selector, &anchors)?[1],
+        )),
+        "extent-z" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_extents(selector, &anchors)?[2],
+        )),
+        "center-x" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_center(selector, &anchors)?[0],
+        )),
+        "center-y" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_center(selector, &anchors)?[1],
+        )),
+        "center-z" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_center(selector, &anchors)?[2],
+        )),
+        other => Err(format!("Unsupported selector verify metric `{other}`.")),
+    }
+}
+
+fn resolve_relation_metric_value(
+    key: &str,
+    args: &[CoreVerifyValue],
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+) -> Result<AuthorVerifyResolvedValue, String> {
+    if args.len() != 2 {
+        return Err("Relation metrics expect exactly two selector arguments.".to_string());
+    }
+    let left_selector = verify_symbol_like(&args[0])
+        .ok_or_else(|| "Relation selector A must be symbol or text.".to_string())?;
+    let right_selector = verify_symbol_like(&args[1])
+        .ok_or_else(|| "Relation selector B must be symbol or text.".to_string())?;
+    let left = resolve_distance_selector_anchors(left_selector, bundle, manifest)?;
+    let right = resolve_distance_selector_anchors(right_selector, bundle, manifest)?;
+
+    match key {
+        "axis-angle" => {
+            let left_axis = selector_axis(left_selector, &left)?;
+            let right_axis = selector_axis(right_selector, &right)?;
+            Ok(AuthorVerifyResolvedValue::Number(axis_angle_degrees(
+                left_axis, right_axis,
+            )?))
+        }
+        "center-delta-x" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_center(left_selector, &left)?[0] - selector_center(right_selector, &right)?[0],
+        )),
+        "center-delta-y" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_center(left_selector, &left)?[1] - selector_center(right_selector, &right)?[1],
+        )),
+        "center-delta-z" => Ok(AuthorVerifyResolvedValue::Number(
+            selector_center(left_selector, &left)?[2] - selector_center(right_selector, &right)?[2],
+        )),
+        other => Err(format!("Unsupported relation verify metric `{other}`.")),
+    }
+}
+
 fn resolve_distance_selector_anchors(
     selector: &str,
     bundle: &ArtifactBundle,
@@ -659,7 +737,6 @@ fn resolve_distance_selector_anchors(
                 if let Some(bounds) = &part.bounds {
                     if bounds_are_finite(bounds) {
                         anchors.push(DistanceAnchor::Bounds {
-                            label: part.label.clone(),
                             bounds: bounds.clone(),
                         });
                     } else {
@@ -705,7 +782,6 @@ fn resolve_distance_selector_anchors(
                     .any(|alias| selector_matches_token(&current, alias))
             {
                 anchors.push(DistanceAnchor::Segment {
-                    label: edge.label.clone(),
                     start: [edge.start.x, edge.start.y, edge.start.z],
                     end: [edge.end.x, edge.end.y, edge.end.z],
                 });
@@ -727,10 +803,16 @@ fn resolve_distance_selector_anchors(
                     .iter()
                     .any(|alias| selector_matches_token(&current, alias))
             {
-                anchors.push(DistanceAnchor::Point {
-                    label: face.label.clone(),
-                    point: [face.center.x, face.center.y, face.center.z],
-                });
+                if let Some(normal) = face.normal {
+                    anchors.push(DistanceAnchor::Face {
+                        point: [face.center.x, face.center.y, face.center.z],
+                        normal,
+                    });
+                } else {
+                    anchors.push(DistanceAnchor::Point {
+                        point: [face.center.x, face.center.y, face.center.z],
+                    });
+                }
             }
         }
 
@@ -804,7 +886,6 @@ fn collect_selection_target_geometry(
         crate::contracts::SelectionTargetKind::Edge => {
             if let Some(edge) = matched_edge {
                 anchors.push(DistanceAnchor::Segment {
-                    label: edge.label.clone(),
                     start: [edge.start.x, edge.start.y, edge.start.z],
                     end: [edge.end.x, edge.end.y, edge.end.z],
                 });
@@ -818,10 +899,16 @@ fn collect_selection_target_geometry(
         }
         crate::contracts::SelectionTargetKind::Face => {
             if let Some(face) = matched_face {
-                anchors.push(DistanceAnchor::Point {
-                    label: face.label.clone(),
-                    point: [face.center.x, face.center.y, face.center.z],
-                });
+                if let Some(normal) = face.normal {
+                    anchors.push(DistanceAnchor::Face {
+                        point: [face.center.x, face.center.y, face.center.z],
+                        normal,
+                    });
+                } else {
+                    anchors.push(DistanceAnchor::Point {
+                        point: [face.center.x, face.center.y, face.center.z],
+                    });
+                }
                 Ok(())
             } else {
                 Err(format!(
@@ -854,7 +941,6 @@ fn collect_selection_target_geometry(
                 ));
             }
             anchors.push(DistanceAnchor::Bounds {
-                label: target.viewer_node_id.clone(),
                 bounds: bounds.clone(),
             });
             Ok(())
@@ -903,6 +989,174 @@ fn min_pairwise_distance(left: &[DistanceAnchor], right: &[DistanceAnchor]) -> f
     best
 }
 
+fn selector_axis(selector: &str, anchors: &[DistanceAnchor]) -> Result<[f64; 3], String> {
+    let mut axis: Option<[f64; 3]> = None;
+    for anchor in anchors {
+        let candidate = match anchor_axis(anchor)? {
+            Some(candidate) => candidate,
+            None => continue,
+        };
+        let candidate = normalize_axis(candidate).ok_or_else(|| {
+            format!("Verify selector `{selector}` has zero-length axis evidence.")
+        })?;
+        if let Some(existing) = axis {
+            let alignment = dot(existing, candidate).abs();
+            if alignment < 0.999 {
+                return Err(format!(
+                    "Verify selector `{selector}` matched inconsistent axis evidence."
+                ));
+            }
+        } else {
+            axis = Some(candidate);
+        }
+    }
+    axis.ok_or_else(|| format!("Verify selector `{selector}` has no axis evidence."))
+}
+
+fn anchor_axis(anchor: &DistanceAnchor) -> Result<Option<[f64; 3]>, String> {
+    match anchor {
+        DistanceAnchor::Point { .. } => Ok(None),
+        DistanceAnchor::Face { normal, .. } => Ok(Some(*normal)),
+        DistanceAnchor::Segment { start, end } => Ok(Some(subtract(*end, *start))),
+        DistanceAnchor::Bounds { bounds } => bounds_axis(bounds).map(Some),
+    }
+}
+
+fn bounds_axis(bounds: &ManifestBounds) -> Result<[f64; 3], String> {
+    let extents = bounds_extents(bounds);
+    let axis = dominant_axis_index(extents)?;
+    Ok(match axis {
+        0 => [1.0, 0.0, 0.0],
+        1 => [0.0, 1.0, 0.0],
+        2 => [0.0, 0.0, 1.0],
+        _ => unreachable!(),
+    })
+}
+
+fn axis_name(axis: [f64; 3]) -> Result<String, String> {
+    let index = dominant_axis_index([axis[0].abs(), axis[1].abs(), axis[2].abs()])?;
+    Ok(match index {
+        0 => "x",
+        1 => "y",
+        2 => "z",
+        _ => unreachable!(),
+    }
+    .to_string())
+}
+
+fn dominant_axis_index(values: [f64; 3]) -> Result<usize, String> {
+    let mut order = [
+        (0usize, values[0]),
+        (1usize, values[1]),
+        (2usize, values[2]),
+    ];
+    order.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if !order[0].1.is_finite() || order[0].1 <= f64::EPSILON {
+        return Err("Axis evidence has no finite positive extent.".to_string());
+    }
+    if (order[0].1 - order[1].1).abs() <= 1.0e-9 {
+        return Err("Axis evidence is ambiguous; top two extents tie.".to_string());
+    }
+    Ok(order[0].0)
+}
+
+fn selector_extents(selector: &str, anchors: &[DistanceAnchor]) -> Result<[f64; 3], String> {
+    let bounds = union_anchor_bounds(selector, anchors)?;
+    Ok(bounds_extents(&bounds))
+}
+
+fn selector_center(selector: &str, anchors: &[DistanceAnchor]) -> Result<[f64; 3], String> {
+    let bounds = union_anchor_bounds(selector, anchors)?;
+    Ok(bounds_center(&bounds))
+}
+
+fn union_anchor_bounds(
+    selector: &str,
+    anchors: &[DistanceAnchor],
+) -> Result<ManifestBounds, String> {
+    let mut bounds_iter = anchors.iter().map(anchor_bounds);
+    let Some(first) = bounds_iter.next() else {
+        return Err(format!(
+            "Verify selector `{selector}` has no geometry evidence."
+        ));
+    };
+    let bounds = bounds_iter.fold(first, |acc, bounds| union_two_bounds(&acc, &bounds));
+    if !bounds_are_finite(&bounds) {
+        return Err(format!(
+            "Verify selector `{selector}` resolved non-finite bounds evidence."
+        ));
+    }
+    Ok(bounds)
+}
+
+fn anchor_bounds(anchor: &DistanceAnchor) -> ManifestBounds {
+    match anchor {
+        DistanceAnchor::Point { point } | DistanceAnchor::Face { point, .. } => ManifestBounds {
+            x_min: point[0],
+            y_min: point[1],
+            z_min: point[2],
+            x_max: point[0],
+            y_max: point[1],
+            z_max: point[2],
+        },
+        DistanceAnchor::Segment { start, end } => ManifestBounds {
+            x_min: start[0].min(end[0]),
+            y_min: start[1].min(end[1]),
+            z_min: start[2].min(end[2]),
+            x_max: start[0].max(end[0]),
+            y_max: start[1].max(end[1]),
+            z_max: start[2].max(end[2]),
+        },
+        DistanceAnchor::Bounds { bounds } => bounds.clone(),
+    }
+}
+
+fn union_two_bounds(left: &ManifestBounds, right: &ManifestBounds) -> ManifestBounds {
+    ManifestBounds {
+        x_min: left.x_min.min(right.x_min),
+        y_min: left.y_min.min(right.y_min),
+        z_min: left.z_min.min(right.z_min),
+        x_max: left.x_max.max(right.x_max),
+        y_max: left.y_max.max(right.y_max),
+        z_max: left.z_max.max(right.z_max),
+    }
+}
+
+fn bounds_extents(bounds: &ManifestBounds) -> [f64; 3] {
+    [
+        bounds.x_max - bounds.x_min,
+        bounds.y_max - bounds.y_min,
+        bounds.z_max - bounds.z_min,
+    ]
+}
+
+fn bounds_center(bounds: &ManifestBounds) -> [f64; 3] {
+    [
+        (bounds.x_min + bounds.x_max) * 0.5,
+        (bounds.y_min + bounds.y_max) * 0.5,
+        (bounds.z_min + bounds.z_max) * 0.5,
+    ]
+}
+
+fn normalize_axis(value: [f64; 3]) -> Option<[f64; 3]> {
+    let length = norm(value);
+    (length > f64::EPSILON && length.is_finite()).then_some(scale(value, 1.0 / length))
+}
+
+fn axis_angle_degrees(left: [f64; 3], right: [f64; 3]) -> Result<f64, String> {
+    let left =
+        normalize_axis(left).ok_or_else(|| "Left selector axis is zero-length.".to_string())?;
+    let right =
+        normalize_axis(right).ok_or_else(|| "Right selector axis is zero-length.".to_string())?;
+    let cosine = dot(left, right).abs().clamp(0.0, 1.0);
+    Ok(cosine.acos().to_degrees())
+}
+
 fn distance_between_anchors(left: &DistanceAnchor, right: &DistanceAnchor) -> f64 {
     match (left, right) {
         (
@@ -912,8 +1166,19 @@ fn distance_between_anchors(left: &DistanceAnchor, right: &DistanceAnchor) -> f6
         (DistanceAnchor::Point { point: left, .. }, DistanceAnchor::Point { point: right, .. }) => {
             point_distance(*left, *right)
         }
+        (DistanceAnchor::Face { point: left, .. }, DistanceAnchor::Face { point: right, .. }) => {
+            point_distance(*left, *right)
+        }
+        (DistanceAnchor::Point { point: left, .. }, DistanceAnchor::Face { point: right, .. })
+        | (DistanceAnchor::Face { point: left, .. }, DistanceAnchor::Point { point: right, .. }) => {
+            point_distance(*left, *right)
+        }
         (DistanceAnchor::Point { point, .. }, DistanceAnchor::Segment { start, end, .. })
+        | (DistanceAnchor::Face { point, .. }, DistanceAnchor::Segment { start, end, .. })
         | (DistanceAnchor::Segment { start, end, .. }, DistanceAnchor::Point { point, .. }) => {
+            point_segment_distance(*point, *start, *end)
+        }
+        (DistanceAnchor::Segment { start, end, .. }, DistanceAnchor::Face { point, .. }) => {
             point_segment_distance(*point, *start, *end)
         }
         (
@@ -929,7 +1194,9 @@ fn distance_between_anchors(left: &DistanceAnchor, right: &DistanceAnchor) -> f6
             },
         ) => segment_segment_distance(*left_start, *left_end, *right_start, *right_end),
         (DistanceAnchor::Bounds { bounds, .. }, DistanceAnchor::Point { point, .. })
-        | (DistanceAnchor::Point { point, .. }, DistanceAnchor::Bounds { bounds, .. }) => {
+        | (DistanceAnchor::Bounds { bounds, .. }, DistanceAnchor::Face { point, .. })
+        | (DistanceAnchor::Point { point, .. }, DistanceAnchor::Bounds { bounds, .. })
+        | (DistanceAnchor::Face { point, .. }, DistanceAnchor::Bounds { bounds, .. }) => {
             point_aabb_distance(*point, bounds)
         }
         (DistanceAnchor::Bounds { bounds, .. }, DistanceAnchor::Segment { start, end, .. })
@@ -1594,12 +1861,14 @@ mod tests {
                         message: "cap disconnected".to_string(),
                         part_id: Some("cap".to_string()),
                         numeric_payload: Some(42.0),
+                        diagnostic_context: None,
                     },
                     StructuralIssue {
                         code: "PART_DISCONNECTED".to_string(),
                         message: "cap still disconnected".to_string(),
                         part_id: Some("cap".to_string()),
                         numeric_payload: Some(43.0),
+                        diagnostic_context: None,
                     },
                 ]
             },
@@ -1667,6 +1936,7 @@ mod tests {
         assert_eq!(metrics.manifest.warning_count, 1);
         assert_eq!(metrics.manifest.viewer_asset_coverage.present, 1);
         assert_eq!(metrics.manifest.viewer_asset_coverage.total, 2);
+        assert!(!metrics.manifest.viewer_asset_coverage_complete());
         assert_eq!(metrics.manifest.total_volume_mm3, Some(410.0));
         assert_eq!(metrics.manifest.total_area_mm2, Some(350.0));
         assert_eq!(
@@ -1952,6 +2222,107 @@ mod tests {
         assert!(!result.passed);
         assert_eq!(result.checks[0].status, AuthorVerifyCheckStatus::Error);
         assert!(result.checks[0].message.contains("missing_selector"));
+    }
+
+    #[test]
+    fn authored_verify_checks_selector_axis_extent_and_center_from_part_bounds() {
+        let result = evaluate_author_verify_clauses(
+            &[
+                verify_clause(
+                    CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol("selector".to_string()),
+                        CoreVerifyValue::Symbol("axis".to_string()),
+                        CoreVerifyValue::Symbol("base".to_string()),
+                    ]),
+                    CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol("=".to_string()),
+                        CoreVerifyValue::Text("x".to_string()),
+                    ]),
+                ),
+                verify_clause(
+                    CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol("selector".to_string()),
+                        CoreVerifyValue::Symbol("extent-y".to_string()),
+                        CoreVerifyValue::Symbol("base".to_string()),
+                    ]),
+                    CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol("=".to_string()),
+                        CoreVerifyValue::Number(8.0),
+                    ]),
+                ),
+                verify_clause(
+                    CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol("selector".to_string()),
+                        CoreVerifyValue::Symbol("center-z".to_string()),
+                        CoreVerifyValue::Symbol("base".to_string()),
+                    ]),
+                    CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol("=".to_string()),
+                        CoreVerifyValue::Number(2.0),
+                    ]),
+                ),
+            ],
+            &sample_bundle(),
+            &sample_manifest(),
+            Some(&sample_structural_result(true)),
+        );
+
+        assert!(result.passed);
+        assert_eq!(result.checks.len(), 3);
+    }
+
+    #[test]
+    fn authored_verify_checks_axis_angle_between_edge_and_face_selectors() {
+        let result = evaluate_author_verify_clauses(
+            &[verify_clause(
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol("relation".to_string()),
+                    CoreVerifyValue::Symbol("axis-angle".to_string()),
+                    CoreVerifyValue::Symbol("edge-1".to_string()),
+                    CoreVerifyValue::Symbol("face-1".to_string()),
+                ]),
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol("=".to_string()),
+                    CoreVerifyValue::Number(90.0),
+                ]),
+            )],
+            &sample_bundle(),
+            &sample_manifest(),
+            Some(&sample_structural_result(true)),
+        );
+
+        assert!(result.passed);
+        assert_eq!(
+            result.checks[0].actual,
+            Some(AuthorVerifyResolvedValue::Number(90.0))
+        );
+    }
+
+    #[test]
+    fn authored_verify_checks_signed_center_delta_between_selectors() {
+        let result = evaluate_author_verify_clauses(
+            &[verify_clause(
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol("relation".to_string()),
+                    CoreVerifyValue::Symbol("center-delta-y".to_string()),
+                    CoreVerifyValue::Symbol("cap".to_string()),
+                    CoreVerifyValue::Symbol("base".to_string()),
+                ]),
+                CoreVerifyValue::List(vec![
+                    CoreVerifyValue::Symbol("=".to_string()),
+                    CoreVerifyValue::Number(-0.5),
+                ]),
+            )],
+            &sample_bundle(),
+            &sample_manifest(),
+            Some(&sample_structural_result(true)),
+        );
+
+        assert!(result.passed);
+        assert_eq!(
+            result.checks[0].actual,
+            Some(AuthorVerifyResolvedValue::Number(-0.5))
+        );
     }
 
     #[test]

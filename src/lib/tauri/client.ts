@@ -84,6 +84,22 @@ import type {
 
 export type { ThreadAgentState };
 
+export type AppErrorDiagnosticField = {
+  key: string;
+  value: string;
+};
+
+export type AppErrorDiagnosticContext = {
+  detailText: string | null;
+  rawTail: string | null;
+  stableNodeKey: string | null;
+  partKey: string | null;
+  operation: string | null;
+  startLine: number | null;
+  endLine: number | null;
+  fields: AppErrorDiagnosticField[];
+};
+
 function unwrapResult<T>(result: Result<T, AppError>): T {
   if (result.status === 'ok') {
     return result.data;
@@ -114,9 +130,99 @@ function isBackendError(error: unknown): error is AppError {
   );
 }
 
+function parseDiagnosticTail(rawDetails: string | null | undefined): {
+  detailText: string | null;
+  rawTail: string | null;
+  fields: AppErrorDiagnosticField[];
+} {
+  const details = `${rawDetails ?? ''}`.trim();
+  if (!details) {
+    return { detailText: null, rawTail: null, fields: [] };
+  }
+  const lines = details
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const rawTail = lines.at(-1) ?? null;
+  if (!rawTail) {
+    return { detailText: details, rawTail: null, fields: [] };
+  }
+  const fields = rawTail
+    .split(/\s+/)
+    .map((token) => {
+      const equalIndex = token.indexOf('=');
+      if (equalIndex <= 0 || equalIndex === token.length - 1) return null;
+      return {
+        key: token.slice(0, equalIndex),
+        value: token.slice(equalIndex + 1),
+      } satisfies AppErrorDiagnosticField;
+    })
+    .filter((field): field is AppErrorDiagnosticField => Boolean(field));
+  if (fields.length === 0 || fields.length !== rawTail.split(/\s+/).length) {
+    return { detailText: details, rawTail: null, fields: [] };
+  }
+  const detailText = lines.slice(0, -1).join('\n').trim() || null;
+  return { detailText, rawTail, fields };
+}
+
+function formatDiagnosticLine(context: AppErrorDiagnosticContext): string | null {
+  const parts = [...context.fields.map((field) => `${field.key}=${field.value}`)];
+  if (context.partKey && !context.fields.some((field) => field.key === 'part')) {
+    parts.unshift(`part=${context.partKey}`);
+  }
+  if (context.operation && !context.fields.some((field) => field.key === 'op')) {
+    parts.push(`op=${context.operation}`);
+  }
+  if (context.startLine !== null && !context.fields.some((field) => field.key === 'lines')) {
+    parts.push(
+      context.endLine !== null && context.endLine !== context.startLine
+        ? `lines=${context.startLine}-${context.endLine}`
+        : `lines=${context.startLine}`,
+    );
+  }
+  return parts.length > 0 ? parts.join(' | ') : null;
+}
+
+export function getAppErrorDiagnosticContext(error: unknown): AppErrorDiagnosticContext | null {
+  if (!isBackendError(error)) return null;
+  const parsed = parseDiagnosticTail(error.details);
+  const resolvedParamFields = (error.diagnosticContext?.resolvedParams ?? []).map((param) => ({
+    key: param.key,
+    value:
+      typeof param.value === 'number' || typeof param.value === 'boolean'
+        ? `${param.value}`
+        : param.value === null
+          ? 'null'
+          : `${param.value}`,
+  }));
+  return {
+    detailText: parsed.detailText,
+    rawTail: parsed.rawTail,
+    stableNodeKey: error.stableNodeKey ?? null,
+    partKey: error.diagnosticContext?.partKey ?? null,
+    operation: error.diagnosticContext?.opName ?? error.operation ?? null,
+    startLine: error.diagnosticContext?.startLine ?? error.startLine ?? null,
+    endLine: error.diagnosticContext?.endLine ?? error.endLine ?? null,
+    fields: resolvedParamFields.length > 0 ? resolvedParamFields : parsed.fields,
+  };
+}
+
 export function formatBackendError(error: unknown): string {
   if (isBackendError(error)) {
-    return error.details ? `${error.message}\n${error.details}` : error.message;
+    const context = getAppErrorDiagnosticContext(error);
+    const sections = [error.message];
+    if (context?.detailText) {
+      sections.push(context.detailText);
+    } else if (error.details && !context) {
+      sections.push(error.details);
+    }
+    const diagnosticLine = context ? formatDiagnosticLine(context) : null;
+    if (diagnosticLine) {
+      sections.push(`Context: ${diagnosticLine}`);
+    } else if (error.details && !context?.detailText) {
+      sections.push(error.details);
+    }
+    return sections.join('\n');
   }
   if (error instanceof Error) {
     return error.message;

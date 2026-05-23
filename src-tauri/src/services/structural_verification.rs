@@ -34,6 +34,7 @@ pub fn verify_structure(
                     message: "Preview STL file is empty (0 bytes).".into(),
                     part_id: None,
                     numeric_payload: Some(0.0),
+                    diagnostic_context: None,
                 });
             } else {
                 match preview_stl_triangles(stl_path) {
@@ -48,6 +49,7 @@ pub fn verify_structure(
                             message: "Preview STL file contains no triangles.".into(),
                             part_id: None,
                             numeric_payload: Some(0.0),
+                            diagnostic_context: None,
                         });
                     }
                     Ok(StlPreview::Parsed(triangles)) => {
@@ -71,6 +73,7 @@ pub fn verify_structure(
                             message: "Preview STL file could not be parsed as valid STL.".into(),
                             part_id: None,
                             numeric_payload: None,
+                            diagnostic_context: None,
                         });
                     }
                 }
@@ -82,6 +85,7 @@ pub fn verify_structure(
                 message: format!("Preview STL file not found: {}", bundle.preview_stl_path),
                 part_id: None,
                 numeric_payload: None,
+                diagnostic_context: None,
             });
         }
     }
@@ -93,6 +97,7 @@ pub fn verify_structure(
             message: "Manifest contains no parts.".into(),
             part_id: None,
             numeric_payload: None,
+            diagnostic_context: None,
         });
     }
 
@@ -111,6 +116,7 @@ pub fn verify_structure(
                     ),
                     part_id: Some(part.part_id.clone()),
                     numeric_payload: None,
+                    diagnostic_context: None,
                 });
             }
         }
@@ -123,6 +129,7 @@ pub fn verify_structure(
                     message: format!("Part '{}' has degenerate or non-finite bounds.", part.label),
                     part_id: Some(part.part_id.clone()),
                     numeric_payload: None,
+                    diagnostic_context: None,
                 });
             }
         }
@@ -135,6 +142,7 @@ pub fn verify_structure(
                     message: format!("Part '{}' has non-positive volume: {}", part.label, vol),
                     part_id: Some(part.part_id.clone()),
                     numeric_payload: Some(vol),
+                    diagnostic_context: None,
                 });
             }
         }
@@ -150,6 +158,7 @@ pub fn verify_structure(
                     ),
                     part_id: Some(part.part_id.clone()),
                     numeric_payload: Some(area),
+                    diagnostic_context: None,
                 });
             }
         }
@@ -178,6 +187,7 @@ pub fn verify_structure(
                     ),
                     part_id: None,
                     numeric_payload: Some(assembly_z_min),
+                    diagnostic_context: None,
                 });
             }
         }
@@ -230,6 +240,7 @@ pub fn verify_structure(
                         ),
                         part_id: Some(part.part_id.clone()),
                         numeric_payload: Some(min_dist),
+                        diagnostic_context: None,
                     });
                 }
 
@@ -244,6 +255,7 @@ pub fn verify_structure(
                             ),
                             part_id: Some(part.part_id.clone()),
                             numeric_payload: Some(vol),
+                            diagnostic_context: None,
                         });
                     }
                 }
@@ -262,6 +274,7 @@ pub fn verify_structure(
                 ),
                 part_id: Some(asset.part_id.clone()),
                 numeric_payload: None,
+                diagnostic_context: None,
             });
         }
     }
@@ -590,6 +603,7 @@ fn add_preview_stl_topology_issues(
             ),
             part_id: None,
             numeric_payload: Some(non_manifold_edges as f64),
+            diagnostic_context: None,
         });
     }
 
@@ -603,6 +617,7 @@ fn add_preview_stl_topology_issues(
             ),
             part_id: None,
             numeric_payload: Some(component_count as f64),
+            diagnostic_context: None,
         });
     }
 }

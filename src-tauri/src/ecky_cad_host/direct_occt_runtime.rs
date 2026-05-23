@@ -2701,10 +2701,7 @@ echo "fake runner plan: $plan"
             return;
         }
 
-        assert_eq!(
-            layout.ocp_root.as_ref().map(|path| path.as_path()),
-            Some(runtime_root.as_path())
-        );
+        assert_eq!(layout.ocp_root.as_deref(), Some(runtime_root.as_path()));
 
         let root = temp_root("direct-occt-standalone-live-bundle");
         let resolver = TestResolver { root: root.clone() };

@@ -722,6 +722,7 @@ mod tests {
                     message: "Preview STL not found.".to_string(),
                     part_id: None,
                     numeric_payload: None,
+                    diagnostic_context: None,
                 }]
             },
             authored_verify_checks: Vec::new(),

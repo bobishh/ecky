@@ -433,10 +433,10 @@ fn edge_target_matches_boundary(
     (start - boundary).abs() <= extrema.tol && (end - boundary).abs() <= extrema.tol
 }
 
-fn filter_face_targets_by_area<'a>(
-    face_targets: Vec<&'a ViewerFaceTarget>,
+fn filter_face_targets_by_area(
+    face_targets: Vec<&ViewerFaceTarget>,
     rank: FaceAreaRank,
-) -> Vec<&'a ViewerFaceTarget> {
+) -> Vec<&ViewerFaceTarget> {
     let areas = face_targets
         .iter()
         .filter_map(|target| target.area)

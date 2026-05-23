@@ -1,13 +1,24 @@
 use crate::contracts::infer_macro_dialect_from_code;
 use crate::freecad;
 use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, DesignParams, GeometryBackend, MacroDialect,
-    ModelManifest, PathResolver,
+    AppError, AppResult, AppState, ArtifactBundle, DesignParams, DiagnosticContext,
+    DiagnosticParamValue, GeometryBackend, MacroDialect, ModelManifest, PathResolver,
 };
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const ECKY_LOWERING_STACK_SIZE: usize = 32 * 1024 * 1024;
+const ECKY_DIRECT_OCCT_DEFAULT_STACK_SIZE: usize = 64 * 1024 * 1024;
+const ECKY_DIRECT_OCCT_STACK_MB_ENV: &str = "ECKY_DIRECT_OCCT_STACK_MB";
+const DIRECT_OCCT_RESOURCE_SNAPSHOT_PATHS: &[&str] = &[
+    "runtime/occt",
+    "runtime/build123d",
+    "runtime/build123d/bin/python3",
+    "runtime/build123d/bin/python",
+    "runtime/occt/bin/direct-occt-runner",
+    "bin/direct-occt-runner",
+];
 
 fn source_line_for_offset(source: &str, offset: usize) -> Option<usize> {
     if offset > source.len() {
@@ -70,7 +81,198 @@ fn stable_node_key_for_span(source: &str, span: crate::ecky_core_ir::SourceSpan)
     Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
-fn annotate_lowering_error(mut error: AppError, source: &str, operation: &str) -> AppError {
+fn core_operation_name(op: &crate::ecky_core_ir::CoreOperation) -> String {
+    use crate::ecky_core_ir::{
+        CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreMetaOp, CoreOperation, CorePathOp,
+        CorePrimitive, CoreSurfaceOp, CoreTransformOp,
+    };
+
+    match op {
+        CoreOperation::Primitive(CorePrimitive::Box) => "box".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Cone) => "cone".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Circle) => "circle".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle".to_string(),
+        CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect".to_string(),
+        CoreOperation::Primitive(CorePrimitive::RoundedPolygon) => "rounded-polygon".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Polygon) => "polygon".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Profile) => "profile".to_string(),
+        CoreOperation::Primitive(CorePrimitive::MakeFace) => "make-face".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Text) => "text".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Svg) => "svg".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Stl) => "import-stl".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Union) => "union".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Difference) => "difference".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Intersection) => "intersection".to_string(),
+        CoreOperation::Boolean(CoreBooleanOp::Xor) => "xor".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Translate) => "translate".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Rotate) => "rotate".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Scale) => "scale".to_string(),
+        CoreOperation::Transform(CoreTransformOp::Mirror) => "mirror".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Extrude) => "extrude".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Revolve) => "revolve".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Loft) => "loft".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Sweep) => "sweep".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Shell) => "shell".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Offset) => "offset".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => "offset-rounded".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Fillet) => "fillet".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
+        CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
+        CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
+        CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
+        CoreOperation::Array(CoreArrayOp::LinearArray) => "linear-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::RadialArray) => "radial-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::GridArray) => "grid-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::ArcArray) => "arc-array".to_string(),
+        CoreOperation::Array(CoreArrayOp::Repeat) => "repeat".to_string(),
+        CoreOperation::Array(CoreArrayOp::RepeatUnion) => "repeat-union".to_string(),
+        CoreOperation::Array(CoreArrayOp::RepeatCompound) => "repeat-compound".to_string(),
+        CoreOperation::Array(CoreArrayOp::RepeatPick) => "repeat-pick".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Plane) => "plane".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Location) => "location".to_string(),
+        CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
+        CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
+        CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
+        CoreOperation::Meta(CoreMetaOp::Group) => "compound".to_string(),
+        CoreOperation::Meta(CoreMetaOp::Comment) => "meta".to_string(),
+        CoreOperation::Meta(CoreMetaOp::Annotate) => "build".to_string(),
+        CoreOperation::Custom(name) => name.clone(),
+    }
+}
+
+fn diagnostic_param_values(parameters: &DesignParams) -> Vec<DiagnosticParamValue> {
+    parameters
+        .iter()
+        .map(|(key, value)| DiagnosticParamValue {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+fn best_matching_node_context(
+    node: &crate::ecky_core_ir::CoreNode,
+    part_key: &str,
+    start_line: usize,
+    end_line: usize,
+    best: &mut Option<(usize, String, String)>,
+    source: &str,
+) {
+    let Some(span) = node.span else {
+        return;
+    };
+    let Some((node_start, node_end)) = source_line_range_for_span(source, span) else {
+        return;
+    };
+    if node_start > start_line || node_end < end_line {
+        return;
+    }
+    let score = span.end.saturating_sub(span.start) as usize;
+    let op_name = match &node.kind {
+        crate::ecky_core_ir::CoreNodeKind::Call { op, .. } => Some(core_operation_name(op)),
+        _ => None,
+    };
+    if let Some(op_name) = op_name {
+        let replace = best
+            .as_ref()
+            .map(|(best_score, _, _)| score < *best_score)
+            .unwrap_or(true);
+        if replace {
+            *best = Some((score, part_key.to_string(), op_name));
+        }
+    }
+    if let crate::ecky_core_ir::CoreNodeKind::Call { args, .. } = &node.kind {
+        for arg in args {
+            best_matching_node_context(arg, part_key, start_line, end_line, best, source);
+        }
+    }
+}
+
+fn diagnostic_context_from_source(
+    source: &str,
+    parameters: &DesignParams,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    fallback_op_name: Option<&str>,
+) -> Option<DiagnosticContext> {
+    let resolved_params = diagnostic_param_values(parameters);
+    let mut part_key = None;
+    let mut op_name = fallback_op_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if let (Some(start_line), Some(end_line)) = (start_line, end_line) {
+        if let Ok(program) = crate::ecky_scheme::compile_to_core_program(source) {
+            let mut best = None;
+            for part in &program.parts {
+                best_matching_node_context(
+                    &part.root, &part.key, start_line, end_line, &mut best, source,
+                );
+            }
+            if let Some((_, resolved_part_key, resolved_op_name)) = best {
+                part_key = Some(resolved_part_key);
+                if op_name.is_none() {
+                    op_name = Some(resolved_op_name);
+                }
+            }
+        }
+    }
+
+    if part_key.is_none() && op_name.is_none() && resolved_params.is_empty() {
+        return None;
+    }
+
+    Some(DiagnosticContext {
+        part_key,
+        op_name,
+        start_line,
+        end_line,
+        resolved_params,
+    })
+}
+
+fn attach_diagnostic_context(
+    mut error: AppError,
+    source: Option<&str>,
+    parameters: &DesignParams,
+    default_operation: Option<&str>,
+) -> AppError {
+    if error.operation.is_none() {
+        if let Some(operation) = default_operation
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            error = error.with_operation(operation.to_string());
+        }
+    }
+    if error.diagnostic_context.is_none() {
+        let context = source.and_then(|source| {
+            diagnostic_context_from_source(
+                source,
+                parameters,
+                error.start_line,
+                error.end_line,
+                error.operation.as_deref(),
+            )
+        });
+        if let Some(context) = context {
+            error = error.with_diagnostic_context(context);
+        }
+    }
+    error
+}
+
+fn annotate_lowering_error(
+    mut error: AppError,
+    source: &str,
+    operation: &str,
+    parameters: &DesignParams,
+) -> AppError {
     if let Some(kind) = classify_lowering_diagnostic_kind(&error.message, error.details.as_deref())
     {
         error.message = format!("lowering_diagnostic[{kind}] {}", error.message);
@@ -90,7 +292,7 @@ fn annotate_lowering_error(mut error: AppError, source: &str, operation: &str) -
             }
         }
     }
-    error
+    attach_diagnostic_context(error, Some(source), parameters, Some(operation))
 }
 
 fn classify_lowering_diagnostic_kind(message: &str, details: Option<&str>) -> Option<&'static str> {
@@ -134,6 +336,7 @@ fn classify_lowering_diagnostic_kind(message: &str, details: Option<&str>) -> Op
 fn lower_ecky_with_large_stack(
     label: &'static str,
     macro_code: &str,
+    parameters: &DesignParams,
     lower: impl FnOnce(&str) -> AppResult<String> + Send + 'static,
 ) -> AppResult<String> {
     let source = macro_code.to_string();
@@ -146,8 +349,81 @@ fn lower_ecky_with_large_stack(
         .join()
         .map_err(|_| AppError::internal(format!("Ecky {label} lowerer panicked.")))?;
     lowered.map_err(|err| {
-        annotate_lowering_error(err, &source_for_diagnostics, &format!("lower:{label}"))
+        annotate_lowering_error(
+            err,
+            &source_for_diagnostics,
+            &format!("lower:{label}"),
+            parameters,
+        )
     })
+}
+
+fn run_direct_occt_with_large_stack<T: Send + 'static>(
+    label: &'static str,
+    task: impl FnOnce() -> AppResult<T> + Send + 'static,
+) -> AppResult<T> {
+    std::thread::Builder::new()
+        .name(format!("ecky-direct-occt-{label}"))
+        .stack_size(direct_occt_stack_size())
+        .spawn(task)
+        .map_err(|err| {
+            AppError::internal(format!("Failed to spawn Direct OCCT {label} worker: {err}"))
+        })?
+        .join()
+        .map_err(|_| AppError::internal(format!("Direct OCCT {label} worker panicked.")))?
+}
+
+fn direct_occt_stack_size() -> usize {
+    match std::env::var(ECKY_DIRECT_OCCT_STACK_MB_ENV) {
+        Ok(raw) => direct_occt_stack_size_from_mb(raw.trim())
+            .unwrap_or(ECKY_DIRECT_OCCT_DEFAULT_STACK_SIZE),
+        Err(_) => ECKY_DIRECT_OCCT_DEFAULT_STACK_SIZE,
+    }
+}
+
+fn direct_occt_stack_size_from_mb(raw: &str) -> Option<usize> {
+    let mb = raw.parse::<usize>().ok()?;
+    if mb == 0 {
+        return None;
+    }
+    mb.checked_mul(1024)?.checked_mul(1024)
+}
+
+#[derive(Clone)]
+struct DirectOcctThreadResolver {
+    config_dir: PathBuf,
+    data_dir: PathBuf,
+    resources: BTreeMap<String, PathBuf>,
+}
+
+impl DirectOcctThreadResolver {
+    fn from_resolver(app: &dyn PathResolver) -> Self {
+        Self {
+            config_dir: app.app_config_dir(),
+            data_dir: app.app_data_dir(),
+            resources: DIRECT_OCCT_RESOURCE_SNAPSHOT_PATHS
+                .iter()
+                .filter_map(|path| {
+                    app.resource_path(path)
+                        .map(|resolved| ((*path).to_string(), resolved))
+                })
+                .collect(),
+        }
+    }
+}
+
+impl PathResolver for DirectOcctThreadResolver {
+    fn app_config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
+
+    fn app_data_dir(&self) -> PathBuf {
+        self.data_dir.clone()
+    }
+
+    fn resource_path(&self, path: &str) -> Option<PathBuf> {
+        self.resources.get(path).cloned()
+    }
 }
 
 fn load_manifest_for_bundle(bundle: &ArtifactBundle) -> AppResult<Option<ModelManifest>> {
@@ -322,7 +598,9 @@ fn finalize_render_bundle(
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
-    apply_requested_post_processing(&mut bundle, parameters, post_processing)?;
+    apply_requested_post_processing(&mut bundle, parameters, post_processing).map_err(|err| {
+        attach_diagnostic_context(err, None, parameters, Some("export:post-processing"))
+    })?;
     let runtime_cache_dir = freecad::runtime_cache_dir(app)?;
     freecad::evict_cache_if_needed(&runtime_cache_dir);
     Ok(bundle)
@@ -381,38 +659,80 @@ fn try_render_direct_occt_ecky_ir(
     if *effective_dialect != MacroDialect::EckyIrV0 {
         return Ok(None);
     }
-    let program = match crate::ecky_scheme::compile_to_core_program(macro_code) {
-        Ok(program) => program,
-        Err(_) => return Ok(None),
-    };
-    let program =
-        crate::topology_target_ids::rebind_program_tagged_selectors(&program, previous_manifest)?;
-    let runtime_root = match crate::runtime_capabilities::resolve_direct_occt_runtime_root(app) {
-        Ok(runtime_root) => runtime_root,
-        Err(_) => return Ok(None),
-    };
-    let layout =
-        crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
-    let (bundle, _manifest) =
-        crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
+    let macro_code = macro_code.to_string();
+    let parameters = parameters.clone();
+    let previous_manifest = previous_manifest.cloned();
+    let app = DirectOcctThreadResolver::from_resolver(app);
+    let cad_text_font_path = configured_cad_text_font_path(state);
+    run_direct_occt_with_large_stack("render", move || {
+        let program = match crate::ecky_scheme::compile_to_core_program(&macro_code) {
+            Ok(program) => program,
+            Err(_) => return Ok(None),
+        };
+        let program = crate::topology_target_ids::rebind_program_tagged_selectors(
             &program,
-            macro_code,
-            parameters,
-            &layout,
-            app,
-            configured_cad_text_font_path(state).as_deref(),
+            previous_manifest.as_ref(),
         )?;
-    Ok(Some(bundle))
+        let runtime_root = match crate::runtime_capabilities::resolve_direct_occt_runtime_root(&app)
+        {
+            Ok(runtime_root) => runtime_root,
+            Err(_) => return Ok(None),
+        };
+        let layout =
+            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+        let (bundle, _manifest) =
+            crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
+                &program,
+                &macro_code,
+                &parameters,
+                &layout,
+                &app,
+                cad_text_font_path.as_deref(),
+            )?;
+        Ok(Some(bundle))
+    })
 }
 
-fn source_plans_for_direct_occt(macro_code: &str, parameters: &DesignParams) -> bool {
-    let Some(program) = crate::ecky_scheme::try_compile_to_core_program(macro_code) else {
-        return false;
-    };
-    let Ok(program) = program else {
-        return false;
-    };
-    crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, parameters).is_ok()
+fn format_nested_app_error(err: &AppError) -> String {
+    let mut text = err.to_string();
+    if let Some(extra) = err.details.as_deref() {
+        let extra = extra.trim();
+        if !extra.is_empty() && extra != text {
+            text.push(' ');
+            text.push_str(extra);
+        }
+    }
+    text
+}
+
+fn direct_occt_plan_diagnostic(macro_code: &str, parameters: &DesignParams) -> Result<(), String> {
+    let macro_code = macro_code.to_string();
+    let parameters = parameters.clone();
+    run_direct_occt_with_large_stack("plan", move || {
+        let Some(program) = crate::ecky_scheme::try_compile_to_core_program(&macro_code) else {
+            return Err(AppError::validation(
+                "Source did not compile to Core IR before Direct OCCT planning.",
+            ));
+        };
+        let program = program.map_err(|err| {
+            AppError::validation(format!(
+                "Core IR compile failed before Direct OCCT planning. {}",
+                format_nested_app_error(&err)
+            ))
+        })?;
+        crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, &parameters)
+            .map(|_| ())
+    })
+    .map_err(|err| {
+        let message = format_nested_app_error(&err);
+        if message.starts_with("Source did not compile")
+            || message.starts_with("Core IR compile failed")
+        {
+            message
+        } else {
+            format!("Direct OCCT planner rejected model. {}", message)
+        }
+    })
 }
 
 fn unsupported_exact_only_direct_occt_error(details: String) -> AppError {
@@ -552,7 +872,7 @@ fn render_model_unlocked(
     // Legacy Python and Build123d sources stay as-is.
     let lowered = match (dispatch_backend, effective_dialect.clone()) {
         (GeometryBackend::Build123d, MacroDialect::EckyIrV0) => {
-            Some(lower_ecky_with_large_stack("build123d", macro_code, {
+            lower_ecky_with_large_stack("build123d", macro_code, parameters, {
                 let previous_manifest = previous_manifest.cloned();
                 move |source| {
                     crate::ecky_ir::lower_to_build123d_with_previous_manifest(
@@ -560,10 +880,19 @@ fn render_model_unlocked(
                         previous_manifest.as_ref(),
                     )
                 }
-            })?)
+            })
+            .map(Some)
+            .map_err(|err| {
+                attach_diagnostic_context(
+                    err,
+                    Some(macro_code),
+                    parameters,
+                    Some("lower:build123d"),
+                )
+            })?
         }
         (GeometryBackend::Freecad, MacroDialect::EckyIrV0) => {
-            Some(lower_ecky_with_large_stack("freecad", macro_code, {
+            lower_ecky_with_large_stack("freecad", macro_code, parameters, {
                 let previous_manifest = previous_manifest.cloned();
                 move |source| {
                     crate::ecky_ir::lower_to_freecad_with_previous_manifest(
@@ -571,7 +900,11 @@ fn render_model_unlocked(
                         previous_manifest.as_ref(),
                     )
                 }
-            })?)
+            })
+            .map(Some)
+            .map_err(|err| {
+                attach_diagnostic_context(err, Some(macro_code), parameters, Some("lower:freecad"))
+            })?
         }
         _ => None,
     };
@@ -596,8 +929,12 @@ fn render_model_unlocked(
                 && crate::ecky_ir::source_uses_exact_backend_only_cad_ops(macro_code);
             let uses_direct_occt_required = effective_dialect == MacroDialect::EckyIrV0
                 && crate::ecky_ir::source_uses_direct_occt_required_cad_ops(macro_code);
-            let direct_occt_plannable = effective_dialect == MacroDialect::EckyIrV0
-                && source_plans_for_direct_occt(macro_code, parameters);
+            let direct_occt_plan_detail = if effective_dialect == MacroDialect::EckyIrV0 {
+                direct_occt_plan_diagnostic(macro_code, parameters).err()
+            } else {
+                Some("Direct OCCT planner runs only for `.ecky` source.".to_string())
+            };
+            let direct_occt_plannable = direct_occt_plan_detail.is_none();
             let direct_occt_ready = direct_occt_capability
                 .as_ref()
                 .is_some_and(|capability| capability.available);
@@ -620,18 +957,28 @@ fn render_model_unlocked(
                 Ok(Some(bundle)) => Ok(bundle),
                 Ok(None) => {
                     if uses_exact_only {
-                        Err(unsupported_exact_only_direct_occt_error(
+                        Err(attach_diagnostic_context(
+                            unsupported_exact_only_direct_occt_error(
                             "EckyRust/direct OCCT did not produce a native bundle for exact-backend-only CAD ops."
                                 .to_string(),
+                            ),
+                            Some(macro_code),
+                            parameters,
+                            Some("export:direct-occt"),
                         ))
                     } else if uses_direct_occt_required {
-                        Err(unsupported_required_direct_occt_error(format!(
+                        Err(attach_diagnostic_context(
+                            unsupported_required_direct_occt_error(format!(
                             "EckyRust/direct OCCT did not produce a native bundle for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`. {}",
                             direct_occt_capability
                                 .as_ref()
                                 .map(|capability| capability.detail.as_str())
                                 .unwrap_or("Direct OCCT availability not probed.")
-                        )))
+                            )),
+                            Some(macro_code),
+                            parameters,
+                            Some("export:direct-occt"),
+                        ))
                     } else if mesh_only_redirect {
                         crate::ecky_ir::render_model_with_previous_manifest(
                             macro_code,
@@ -640,21 +987,34 @@ fn render_model_unlocked(
                             app,
                         )
                     } else if direct_occt_ready && direct_occt_plannable {
-                        Err(blocked_direct_occt_native_error(format!(
+                        Err(attach_diagnostic_context(
+                            blocked_direct_occt_native_error(format!(
                             "Direct OCCT runtime reported ready and planned this model, but native export returned no bundle. {}",
                             direct_occt_capability
                                 .as_ref()
                                 .map(|capability| capability.detail.as_str())
                                 .unwrap_or("Direct OCCT availability not probed.")
-                        )))
+                            )),
+                            Some(macro_code),
+                            parameters,
+                            Some("export:direct-occt"),
+                        ))
                     } else {
-                        Err(blocked_direct_occt_native_error(format!(
-                            "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}. {}",
+                        let planner_detail = direct_occt_plan_detail
+                            .as_deref()
+                            .unwrap_or("Direct OCCT planner reason unavailable.");
+                        Err(attach_diagnostic_context(
+                            blocked_direct_occt_native_error(format!(
+                            "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}. Planner blocker: {planner_detail} Next step: switch backend away from native for unsupported ops or rewrite source to a Direct OCCT-supported shape plan. {}",
                             direct_occt_capability
                                 .as_ref()
                                 .map(|capability| capability.detail.as_str())
                                 .unwrap_or("Direct OCCT availability not probed.")
-                        )))
+                            )),
+                            Some(macro_code),
+                            parameters,
+                            Some("plan:direct-occt"),
+                        ))
                     }
                 }
                 Err(err) => {
@@ -670,7 +1030,12 @@ fn render_model_unlocked(
                                 details.push_str(extra);
                             }
                         }
-                        Err(unsupported_exact_only_direct_occt_error(details))
+                        Err(attach_diagnostic_context(
+                            unsupported_exact_only_direct_occt_error(details),
+                            Some(macro_code),
+                            parameters,
+                            Some("export:direct-occt"),
+                        ))
                     } else if uses_direct_occt_required {
                         let mut details =
                             String::from("EckyRust/direct OCCT failed on native-required CAD ops.");
@@ -682,7 +1047,12 @@ fn render_model_unlocked(
                                 details.push_str(extra);
                             }
                         }
-                        Err(unsupported_required_direct_occt_error(details))
+                        Err(attach_diagnostic_context(
+                            unsupported_required_direct_occt_error(details),
+                            Some(macro_code),
+                            parameters,
+                            Some("export:direct-occt"),
+                        ))
                     } else if mesh_only_redirect {
                         crate::ecky_ir::render_model_with_previous_manifest(
                             macro_code,
@@ -696,8 +1066,11 @@ fn render_model_unlocked(
                                 "Direct OCCT runtime reported ready and planned this model, but native export failed.",
                             )
                         } else {
+                            let planner_detail = direct_occt_plan_detail
+                                .as_deref()
+                                .unwrap_or("Direct OCCT planner reason unavailable.");
                             format!(
-                                "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}."
+                                "Native backend requires Direct OCCT. No mesh fallback is used. ready={direct_occt_ready}; plannable={direct_occt_plannable}. Planner blocker: {planner_detail} Next step: switch backend away from native for unsupported ops or rewrite source to a Direct OCCT-supported shape plan."
                             )
                         };
                         details.push(' ');
@@ -708,7 +1081,12 @@ fn render_model_unlocked(
                                 details.push_str(extra);
                             }
                         }
-                        Err(blocked_direct_occt_native_error(details))
+                        Err(attach_diagnostic_context(
+                            blocked_direct_occt_native_error(details),
+                            Some(macro_code),
+                            parameters,
+                            Some("export:direct-occt"),
+                        ))
                     }
                 }
             }
@@ -752,7 +1130,9 @@ fn render_model_unlocked(
             )
         }
     };
-    result.and_then(|bundle| finalize_render_bundle(bundle, parameters, post_processing, app))
+    result
+        .map_err(|err| attach_diagnostic_context(err, Some(macro_code), parameters, Some("render")))
+        .and_then(|bundle| finalize_render_bundle(bundle, parameters, post_processing, app))
 }
 
 fn source_has_selector_tags(source: &str) -> bool {
@@ -1157,6 +1537,7 @@ endsolid sample
             AppError::validation("compile failed"),
             source,
             "lower:build123d",
+            &DesignParams::new(),
         );
 
         assert_eq!(error.operation.as_deref(), Some("lower:build123d"));
@@ -1172,6 +1553,7 @@ endsolid sample
             AppError::validation("Null TopoDS_Shape while resolving boolean difference"),
             source,
             "lower:build123d",
+            &DesignParams::new(),
         );
 
         assert!(
@@ -1211,6 +1593,46 @@ endsolid sample
     }
 
     #[test]
+    fn attach_diagnostic_context_maps_part_op_and_resolved_params_from_lines() {
+        let source = "(model\n  (part body\n    (fillet 1 (box width 2 3))))";
+        let params =
+            std::collections::BTreeMap::from([("width".to_string(), ParamValue::Number(12.0))]);
+        let error = super::attach_diagnostic_context(
+            AppError::validation("fillet failed").with_line_range(3, 3),
+            Some(source),
+            &params,
+            Some("render"),
+        );
+
+        let context = error
+            .diagnostic_context
+            .as_ref()
+            .expect("diagnostic context");
+        assert_eq!(context.part_key.as_deref(), Some("body"));
+        assert_eq!(context.op_name.as_deref(), Some("render"));
+        assert_eq!(context.start_line, Some(3));
+        assert_eq!(context.end_line, Some(3));
+        assert_eq!(context.resolved_params.len(), 1);
+        assert_eq!(context.resolved_params[0].key, "width");
+        assert_eq!(context.resolved_params[0].value, ParamValue::Number(12.0));
+    }
+
+    #[test]
+    fn direct_occt_stack_size_defaults_to_64_mb() {
+        assert_eq!(super::ECKY_DIRECT_OCCT_DEFAULT_STACK_SIZE, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn direct_occt_stack_size_parses_env_mb() {
+        assert_eq!(
+            super::direct_occt_stack_size_from_mb("128"),
+            Some(128 * 1024 * 1024)
+        );
+        assert_eq!(super::direct_occt_stack_size_from_mb("0"), None);
+        assert_eq!(super::direct_occt_stack_size_from_mb("nope"), None);
+    }
+
+    #[test]
     fn broken_helical_ridge_lowering_surfaces_operation_and_diagnostic_kind() {
         let source = r#"(model
   (part body
@@ -1221,6 +1643,7 @@ endsolid sample
         let err = super::lower_ecky_with_large_stack(
             "build123d",
             source,
+            &DesignParams::new(),
             crate::ecky_ir::lower_to_build123d,
         )
         .expect_err("wall-pattern should fail for build123d lowering");
@@ -1734,6 +2157,12 @@ endsolid sample
             "unexpected error: {err:?}"
         );
         assert!(
+            diagnostic.contains("wall-pattern")
+                || diagnostic.contains("Planner blocker")
+                || diagnostic.contains("Direct OCCT adapter first surface does not support"),
+            "planner reason must be surfaced: {err:?}"
+        );
+        assert!(
             !diagnostic.contains("not supported by current `.ecky` runtime"),
             "must not fall through to mesh runtime: {err:?}"
         );
@@ -2240,6 +2669,7 @@ exit 5
             let lowered = super::lower_ecky_with_large_stack(
                 "build123d",
                 &source,
+                &DesignParams::new(),
                 crate::ecky_ir::lower_to_build123d,
             )
             .expect("build123d lower");
@@ -2334,6 +2764,7 @@ exit 5
             let lowered = super::lower_ecky_with_large_stack(
                 "build123d",
                 &source,
+                &DesignParams::new(),
                 crate::ecky_ir::lower_to_build123d,
             )
             .expect("build123d lower");

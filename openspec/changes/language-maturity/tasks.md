@@ -58,11 +58,11 @@
 
 ## 5. G5 - Diagnostics (M)
 
-- [ ] 5.1 Enrichment struct (part, op, span, resolved params) attached at
+- [x] 5.1 Enrichment struct (part, op, span, resolved params) attached at
   normalize/plan failures.
-- [ ] 5.2 Native export/runner failures map to the same shape.
-- [ ] 5.3 Verify failures echo involved parameter values.
-- [ ] 5.4 UI surfaces the structured tail at the responsible node (map +
+- [x] 5.2 Native export/runner failures map to the same shape.
+- [x] 5.3 Verify failures echo involved parameter values.
+- [x] 5.4 UI surfaces the structured tail at the responsible node (map +
   status); agents get it verbatim in MCP errors.
 
 ## 6. G6 - Verify-TDD (REALITY: loop already exists; remaining is one seam) (S)
@@ -104,7 +104,7 @@ UI chips parse text instead of reading machine values.
 
 ## Proof Gates
 
-- [ ] G-LOCKS component-unification key/emit/core/render locks stay green.
+- [x] G-LOCKS component-unification key/emit/core/render locks stay green.
 - [x] G-UNIT permissive mode leaves every existing fixture untouched.
 - [x] G-VIEW views never change export digests.
 - [x] G-TDD a seeded red-verify model goes green within the retry cap in e2e.
