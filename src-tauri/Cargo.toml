@@ -1,6 +1,6 @@
 [package]
 name = "ecky_cad"
-version = "0.0.1"
+version = "0.0.1" # x-release-please-version
 description = "Prompt-driven 3D CAD designer"
 authors = ["Bogdan"]
 edition = "2021"

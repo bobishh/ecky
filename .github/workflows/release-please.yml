@@ -1,0 +1,22 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Maintains a release PR that accumulates every conventional commit since
+      # the last release and keeps CHANGELOG.md + the three version files
+      # (package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json) in sync.
+      # Merge the PR to cut a release; CI gates run on that PR, not on commits.
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

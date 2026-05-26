@@ -1,8 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [ main ]
+  # Gate on pull requests — including the Release Please PR. Merging a release
+  # is blocked until these checks pass. Direct pushes to main always produce or
+  # update a release PR, so they get gated there rather than on every commit.
   pull_request:
     branches: [ main ]
 

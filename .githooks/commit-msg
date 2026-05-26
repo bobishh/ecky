@@ -1,0 +1,3 @@
+#!/bin/sh
+# Validate the commit message against Conventional Commits.
+npx --no -- commitlint --edit "$1"
