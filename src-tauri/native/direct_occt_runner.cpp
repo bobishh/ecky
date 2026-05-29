@@ -3201,8 +3201,16 @@ void write_step_file(const fs::path& path, const TopoDS_Shape& shape) {
     }
 }
 
+// Preview/export STL tessellation quality. The previous 0.2 mm linear-only
+// deflection left visibly faceted cylinders (coarse on print). Use a finer
+// linear deflection plus an angular deflection so curved surfaces (cylinders,
+// fillets, lofts) stay smooth regardless of radius.
+static constexpr double kStlLinearDeflection = 0.04;   // mm chord error
+static constexpr double kStlAngularDeflection = 0.25;  // rad (~14 deg) per facet
+
 void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
-    BRepMesh_IncrementalMesh mesh(shape, 0.2);
+    BRepMesh_IncrementalMesh mesh(
+        shape, kStlLinearDeflection, Standard_False, kStlAngularDeflection, Standard_True);
     std::ofstream out(path);
     if (!out) {
         throw IoError("failed to write STL");
