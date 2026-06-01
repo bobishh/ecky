@@ -11,10 +11,10 @@
 
 ## 1. T1 - Split contracts.rs (S/M)
 
-- [ ] 1.1 Create `contracts/` module; move `AppError`/`AppErrorCode`/`AppResult`
+- [x] 1.1 Create `contracts/` module; move `AppError`/`AppErrorCode`/`AppResult`
   into `contracts/error.rs`; `mod.rs` re-exports so `crate::contracts::AppError`
   resolves unchanged.
-- [ ] 1.2 Move render/manifest types -> `contracts/render.rs`; verify types ->
+- [x] 1.2 Move render/manifest types -> `contracts/render.rs`; verify types ->
   `contracts/verify.rs`; component types -> `contracts/component.rs`; mcp
   request/response -> `contracts/mcp.rs`; config -> `contracts/config.rs`;
   core enums (GeometryBackend/MacroDialect/SourceLanguage) -> `contracts/geometry.rs`.
@@ -37,19 +37,19 @@
 
 ## 3. T3 - Backend capability table (M)
 
-- [ ] 3.1 Define `BackendCapability { backend, ops, role }`; native OCCT =
+- [x] 3.1 Define `BackendCapability { backend, ops, role }`; native OCCT =
   primary (full op set), build123d/freecad = export/interop (declared subset).
-- [ ] 3.2 Completeness test: enumerate every `CoreOperation`; assert native
+- [x] 3.2 Completeness test: enumerate every `CoreOperation`; assert native
   covers each (or explicit unsupported marker) and text-backend subsets match
   reality.
-- [ ] 3.3 Document the demotion direction (native primary) in the change so a
+- [x] 3.3 Document the demotion direction (native primary) in the change so a
   later removal change has a recorded decision. No removal here.
 
 ## 4. Hygiene (S)
 
-- [ ] 4.1 `DocsSite.svelte`: route its direct `invoke` through a `tauri/client`
+- [x] 4.1 `DocsSite.svelte`: route its direct `invoke` through a `tauri/client`
   wrapper.
-- [ ] 4.2 Extract `MacroAstMap.svelte` from `ParamPanel.svelte` (projection
+- [x] 4.2 Extract `MacroAstMap.svelte` from `ParamPanel.svelte` (projection
   wiring, camera, minimap, source-pane mount); ParamPanel keeps the tab shell.
   Preserve e2e selectors; map specs (19) stay green. ParamPanel < ~3k LOC.
 

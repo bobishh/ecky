@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { formatBackendError } from './client';
+import { exportDocsBookEpub, formatBackendError } from './client';
+import { commands, type AppError, type Result } from './contracts';
 
 test('formatBackendError includes raw backend details', () => {
   const message = formatBackendError({
@@ -47,4 +48,21 @@ test('formatBackendError prefers diagnosticContext span without duplicating line
   assert.match(message, /Fillet failed\./);
   assert.match(message, /Context: part=body \| width=12 \| op=fillet \| lines=3/);
   assert.doesNotMatch(message, /lines=3 \| lines=3/);
+});
+
+test('exportDocsBookEpub routes through generated Tauri command wrapper', async () => {
+  const original = commands.exportDocsBookEpub;
+  const calls: string[] = [];
+  commands.exportDocsBookEpub = async (targetPath: string): Promise<Result<null, AppError>> => {
+    calls.push(targetPath);
+    return { status: 'ok', data: null };
+  };
+
+  try {
+    await exportDocsBookEpub('/tmp/ecky-ir.epub');
+  } finally {
+    commands.exportDocsBookEpub = original;
+  }
+
+  assert.deepEqual(calls, ['/tmp/ecky-ir.epub']);
 });

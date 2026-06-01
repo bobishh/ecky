@@ -1,3 +1,4 @@
+pub mod backend_capabilities;
 mod build123d_lowering;
 pub(crate) mod edge_ops;
 mod eval_scalar;

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import { exportDocsBookEpub } from './tauri/client';
   import {
     docsSourcePath,
     parseDocsDocument,
@@ -108,7 +108,7 @@
       const [{ save }] = await Promise.all([import('@tauri-apps/plugin-dialog')]);
       const result = await saveBookEpubNative({
         saveDialog: save,
-        exportNativeFile: (targetPath) => invoke('export_docs_book_epub', { targetPath }),
+        exportNativeFile: exportDocsBookEpub,
       });
       epubState = result === 'saved' ? 'saved' : 'idle';
     } catch (nextError) {

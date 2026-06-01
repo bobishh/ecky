@@ -539,6 +539,10 @@ export async function exportEckyMcpSkillZip(targetPath: string): Promise<void> {
   await invokeCommand(commands.exportEckyMcpSkillZip(targetPath));
 }
 
+export async function exportDocsBookEpub(targetPath: string): Promise<void> {
+  await invokeCommand(commands.exportDocsBookEpub(targetPath));
+}
+
 export async function installComponentPackageArchive(
   archivePath: string,
 ): Promise<InstalledComponentPackage> {

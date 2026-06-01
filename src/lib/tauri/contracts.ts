@@ -522,6 +522,14 @@ async exportFile(sourcePath: string, targetPath: string) : Promise<Result<null, 
     else return { status: "error", error: e  as any };
 }
 },
+async exportDocsBookEpub(targetPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_docs_book_epub", { targetPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async exportMultipartStlZip(parts: ExportPartInput[], targetPath: string, modelName: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_multipart_stl_zip", { parts, targetPath, modelName }) };
@@ -946,8 +954,6 @@ export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error"
  * and UI chips read machine values instead of parsing the message string.
  */
 export type AuthoredVerifyValue = { kind: "number"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string }
-export type DiagnosticContext = { partKey?: string | null; opName?: string | null; startLine?: number | null; endLine?: number | null; resolvedParams?: DiagnosticParamValue[] }
-export type DiagnosticParamValue = { key: string; value: ParamValue }
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
  */
@@ -990,6 +996,8 @@ export type CorrespondenceEdge = { edgeId: string; source: FeatureOutputRef; tar
 export type CorrespondenceGraph = { edges: CorrespondenceEdge[] }
 export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; structuralVerification?: StructuralVerificationResult | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
 export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
+export type DiagnosticContext = { partKey?: string | null; opName?: string | null; startLine?: number | null; endLine?: number | null; resolvedParams: DiagnosticParamValue[] }
+export type DiagnosticParamValue = { key: string; value: ParamValue }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
 export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; enabled?: boolean }
@@ -1103,9 +1111,9 @@ export type PortReference = { instanceId: string; portId: string }
 export type PortTypeDefinition = { typeId: string; displayName: string; base?: string | null; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[]; params?: ComponentParam[] }
 export type PostProcessingSpec = { displacement?: DisplacementSpec | null; lithophaneAttachments?: LithophaneAttachment[] }
 export type PreparePromptWorkspaceCaptureInput = { dataUrl: string; threadId?: string | null; name?: string | null; explanation?: string | null }
-export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
 export type PreviewView = { viewId: string; label: string; offsets?: PreviewViewOffset[] }
 export type PreviewViewOffset = { partId: string; dx: number; dy: number; dz: number }
+export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
 export type ProjectEditorLink = { slug: string; folder: string; file: string }
 export type ProjectionType = "planar" | "auto" | "cylindrical" | "spherical"
 export type PromptTranscription = { text: string; provider: string; model: string }

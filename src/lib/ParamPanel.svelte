@@ -2,20 +2,18 @@
   import { get } from 'svelte/store';
   import { tick } from 'svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
-  import Dropdown from './Dropdown.svelte';
   import { uiHighlightStore } from './stores/uiHighlightStore';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
     getAppErrorDiagnosticContext,
-    macroAstSourceMap,
     parseMacroParams,
     saveModelManifest,
     updateParameters,
     updateUiSpec,
   } from './tauri/client';
   import { buildImportedSyntheticDesign } from './modelRuntime/importedRuntime';
-  import MacroSourcePane from './MacroSourcePane.svelte';
+  import MacroAstMap from './MacroAstMap.svelte';
   import {
     filterFieldsBySearch,
     resolveContextSections,
@@ -35,15 +33,11 @@
   import { liveApply } from './stores/paramPanelState';
   import ParamPanelToolbar from './components/ParamPanelToolbar.svelte';
   import ParamPanelModeTabs from './components/ParamPanelModeTabs.svelte';
-  import ParamPanelControlField from './components/ParamPanelControlField.svelte';
-  import ParamPanelAdvisoryList from './components/ParamPanelAdvisoryList.svelte';
-  import ParamPanelContextStrip from './components/ParamPanelContextStrip.svelte';
-  import ParamPanelPrimitiveComposer from './components/ParamPanelPrimitiveComposer.svelte';
-  import ParamPanelAdvisoryComposer from './components/ParamPanelAdvisoryComposer.svelte';
-  import ParamPanelRelationComposer from './components/ParamPanelRelationComposer.svelte';
-  import ParamPanelViewComposer from './components/ParamPanelViewComposer.svelte';
-  import { buildMacroAstMapProjection } from './macroAstMap';
-  import { buildMacroAstSceneLayout } from './macroAstSceneLayout';
+  import ParamPanelEditFields from './components/ParamPanelEditFields.svelte';
+  import ParamPanelImportedProposals from './components/ParamPanelImportedProposals.svelte';
+  import ParamPanelLithophaneTab from './components/ParamPanelLithophaneTab.svelte';
+  import ParamPanelRawTab from './components/ParamPanelRawTab.svelte';
+  import ParamPanelViewsTab from './components/ParamPanelViewsTab.svelte';
   import { session } from './stores/sessionStore';
   import type {
     CheckboxField,
@@ -61,8 +55,6 @@
     EnrichmentProposal,
     EnrichmentStatus,
     LithophaneAttachment,
-    LithophaneSide,
-    OverflowMode,
     PostProcessingSpec,
     ProjectionType,
     NumberField,
@@ -198,152 +190,6 @@
   let activeTab = $state<'views' | 'raw' | 'litho' | 'newParams'>('views');
   let highlightedParamKey = $state<string | null>(null);
   let highlightTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  let macroSceneViewportElement = $state<HTMLElement | null>(null);
-  let macroSceneWidth = $state(1120);
-  let macroViewportW = $state(1120);
-  let macroViewportH = $state(560);
-  // Scene camera: pan/zoom over the SVG+HTML layer, Figma-style.
-  let macroCamera = $state({ x: 0, y: 0, k: 1 });
-  let macroCameraManual = $state(false);
-  const MACRO_ZOOM_MIN = 0.3;
-  const MACRO_ZOOM_MAX = 1.6;
-  const MACRO_ZOOM_FAR_TIER = 0.62;
-
-  let macroCameraTweenFrame: number | null = null;
-
-  function macroCameraAnimateTo(
-    target: { x: number; y: number; k: number },
-    durationMs = 280,
-    onComplete?: () => void,
-  ) {
-    if (macroCameraTweenFrame !== null) cancelAnimationFrame(macroCameraTweenFrame);
-    const from = { ...macroCamera };
-    const startedAt = performance.now();
-    const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
-    const step = (now: number) => {
-      const t = Math.min(1, (now - startedAt) / durationMs);
-      const e = easeOutCubic(t);
-      macroCamera = {
-        x: from.x + (target.x - from.x) * e,
-        y: from.y + (target.y - from.y) * e,
-        k: from.k + (target.k - from.k) * e,
-      };
-      if (t < 1) {
-        macroCameraTweenFrame = requestAnimationFrame(step);
-      } else {
-        macroCameraTweenFrame = null;
-        onComplete?.();
-      }
-    };
-    macroCameraTweenFrame = requestAnimationFrame(step);
-  }
-
-  function macroCameraFit(scene: { width: number; height: number }) {
-    const pad = 24;
-    const k = Math.min(
-      1,
-      Math.max(
-        MACRO_ZOOM_MIN,
-        Math.min((macroViewportW - pad) / scene.width, (macroViewportH - pad) / scene.height),
-      ),
-    );
-    const target = {
-      k,
-      x: Math.max(0, (macroViewportW - scene.width * k) / 2),
-      y: Math.max(0, (macroViewportH - scene.height * k) / 2),
-    };
-    if (macroCameraManual) {
-      macroCameraAnimateTo(target);
-    } else {
-      macroCamera = target;
-    }
-  }
-
-  function macroCameraZoomBy(factor: number, cx?: number, cy?: number, animate = false) {
-    const { x, y, k } = macroCamera;
-    const nextK = Math.min(MACRO_ZOOM_MAX, Math.max(MACRO_ZOOM_MIN, k * factor));
-    const px = cx ?? macroViewportW / 2;
-    const py = cy ?? macroViewportH / 2;
-    const target = {
-      k: nextK,
-      x: px - ((px - x) / k) * nextK,
-      y: py - ((py - y) / k) * nextK,
-    };
-    if (animate) {
-      macroCameraAnimateTo(target, 180);
-    } else {
-      macroCamera = target;
-    }
-    macroCameraManual = true;
-  }
-
-  function macroViewportWheel(event: WheelEvent) {
-    event.preventDefault();
-    const rect = macroSceneViewportElement?.getBoundingClientRect();
-    const cx = rect ? event.clientX - rect.left : undefined;
-    const cy = rect ? event.clientY - rect.top : undefined;
-    if (event.ctrlKey || event.metaKey) {
-      macroCameraZoomBy(Math.exp(-event.deltaY * 0.01), cx, cy);
-    } else {
-      macroCamera = {
-        ...macroCamera,
-        x: macroCamera.x - event.deltaX,
-        y: macroCamera.y - event.deltaY,
-      };
-      macroCameraManual = true;
-    }
-  }
-
-  const MACRO_MINIMAP_W = 150;
-  const macroMinimapScale = $derived.by(() =>
-    Math.min(MACRO_MINIMAP_W / macroScene.width, 110 / macroScene.height),
-  );
-  let macroMinimapDragging = $state(false);
-
-  function macroMinimapCenterAt(event: PointerEvent, animate: boolean) {
-    const rect = (event.currentTarget as Element).getBoundingClientRect();
-    const sceneX = (event.clientX - rect.left) / macroMinimapScale;
-    const sceneY = (event.clientY - rect.top) / macroMinimapScale;
-    const target = {
-      k: macroCamera.k,
-      x: macroViewportW / 2 - sceneX * macroCamera.k,
-      y: macroViewportH / 2 - sceneY * macroCamera.k,
-    };
-    if (animate) {
-      macroCameraAnimateTo(target, 200);
-    } else {
-      macroCamera = target;
-    }
-    macroCameraManual = true;
-  }
-
-  let macroPan = $state<{ startX: number; startY: number; camX: number; camY: number } | null>(null);
-
-  function macroViewportPointerDown(event: PointerEvent) {
-    const target = event.target as HTMLElement | null;
-    if (target?.closest('.macro-ast-node, .macro-ast-node-editor, .macro-ast-insert-slot, .macro-ast-minimap')) return;
-    macroPan = {
-      startX: event.clientX,
-      startY: event.clientY,
-      camX: macroCamera.x,
-      camY: macroCamera.y,
-    };
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-  }
-
-  function macroViewportPointerMove(event: PointerEvent) {
-    if (!macroPan) return;
-    macroCamera = {
-      ...macroCamera,
-      x: macroPan.camX + (event.clientX - macroPan.startX),
-      y: macroPan.camY + (event.clientY - macroPan.startY),
-    };
-    macroCameraManual = true;
-  }
-
-  function macroViewportPointerUp() {
-    macroPan = null;
-  }
 
   $effect(() => {
     const highlight = $uiHighlightStore;
@@ -572,19 +418,6 @@
     return null;
   }
 
-  function getSelectValue(key: string): string | number | null {
-    const value = effectiveLocalParams[key];
-    return typeof value === 'string' || typeof value === 'number' ? value : null;
-  }
-
-  function getInputValue(event: Event): string {
-    return (event.currentTarget as HTMLInputElement).value;
-  }
-
-  function getInputChecked(event: Event): boolean {
-    return (event.currentTarget as HTMLInputElement).checked;
-  }
-
   function setFocusedControl(primitiveId: string | null, parameterKey: string | null) {
     onControlFocusChange?.({ primitiveId, parameterKey });
   }
@@ -603,116 +436,16 @@
     });
   }
 
-  function macroCameraFocusNode(
-    node: { x: number; y: number; w: number; h: number },
-    onArrived?: () => void,
-  ) {
-    macroCameraAnimateTo(
-      {
-        k: 1,
-        x: macroViewportW / 2 - (node.x + node.w / 2),
-        y: macroViewportH / 2 - (node.y + node.h / 2),
-      },
-      280,
-      onArrived,
-    );
-    macroCameraManual = true;
-  }
-
-  function focusSceneFieldControl(fieldKey: string) {
-    requestAnimationFrame(() => {
-      const field = macroSceneViewportElement?.querySelector(`[data-param-key="${fieldKey}"]`) as HTMLElement | null;
-      const focusTarget = field?.querySelector<HTMLElement>(
-        'input:not([type="hidden"]), button, textarea, select, [tabindex]:not([tabindex="-1"])',
-      );
-      focusTarget?.focus();
-    });
-  }
-
-  function selectSceneFieldControlValue(fieldKey: string) {
-    requestAnimationFrame(() => {
-      const input = document.getElementById(`macro-${fieldKey}`);
-      if (input instanceof HTMLInputElement) {
-        input.focus();
-        input.select();
-      }
-    });
-  }
-
-  function selectSceneFieldValue(fieldKey: string | undefined) {
-    if (!fieldKey) return;
-    // One gesture: dblclick a knob -> caret in the value with it selected,
-    // flying the camera in first when zoomed out.
-    if (macroCamera.k < MACRO_ZOOM_FAR_TIER) {
-      const target = macroScene.nodes.find(
-        (node) => node.kind === 'param' && node.fieldKey === fieldKey,
-      );
-      if (target) {
-        macroCameraFocusNode(target, () => selectSceneFieldControlValue(fieldKey));
-        return;
-      }
-    }
-    selectSceneFieldControlValue(fieldKey);
-  }
-
-  function focusSceneField(fieldKey: string | undefined) {
-    if (!fieldKey || !macroSceneViewportElement) return;
-    // Zoomed out, controls are collapsed to chips: fly the camera to the
-    // module first, then focus its live control once the flight lands.
-    if (macroCamera.k < MACRO_ZOOM_FAR_TIER) {
-      const target = macroScene.nodes.find(
-        (node) => node.kind === 'param' && node.fieldKey === fieldKey,
-      );
-      if (target) {
-        macroCameraFocusNode(target, () => focusSceneFieldControl(fieldKey));
-        return;
-      }
-    }
-    focusSceneFieldControl(fieldKey);
-  }
-
-  function focusMacroSceneNode(nodeId: string | undefined) {
-    if (!nodeId) return;
-    const target = macroScene.nodes.find((node) => node.id === nodeId);
-    if (!target) return;
-    macroCameraFocusNode(target, () => {
-      if (target.sourceRange && onApplyMacroCode) {
-        openMacroNodeEditor(target);
-      }
-    });
-  }
-
   function focusDiagnosticMacroNode(error: unknown) {
     const diagnostic = getAppErrorDiagnosticContext(error);
     if (diagnostic?.partKey) {
-      focusMacroSceneNode(`part:${diagnostic.partKey}`);
+      pendingMacroFocusNodeId = `part:${diagnostic.partKey}`;
       return;
     }
     if (diagnostic?.stableNodeKey) {
-      focusMacroSceneNode(diagnostic.stableNodeKey);
+      pendingMacroFocusNodeId = diagnostic.stableNodeKey;
     }
   }
-
-  $effect(() => {
-    if (activeTab !== 'newParams' || !pendingMacroFocusNodeId) return;
-    const target = macroScene.nodes.find((node) => node.id === pendingMacroFocusNodeId);
-    if (!target) return;
-    focusMacroSceneNode(pendingMacroFocusNodeId);
-    pendingMacroFocusNodeId = null;
-  });
-
-  $effect(() => {
-    const element = macroSceneViewportElement;
-    if (!element) return;
-    const syncWidth = () => {
-      macroSceneWidth = Math.max(960, Math.floor(element.clientWidth));
-    };
-    syncWidth();
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(() => syncWidth());
-    observer.observe(element);
-    return () => observer.disconnect();
-  });
 
   $effect(() => {
     const code = `${macroCode ?? ''}`.trim();
@@ -883,6 +616,12 @@
     ];
   }
 
+  function updateEditField(index: number, patch: Partial<EditableUiField>) {
+    editFields = editFields.map((field, i) =>
+      i === index ? ({ ...field, ...patch } as EditableUiField) : field,
+    );
+  }
+
   function removeField(index: number) {
     editFields = editFields.filter((_, i) => i !== index);
   }
@@ -919,6 +658,19 @@
     field.options = (field.options || []).filter((_, index) => index !== optionIndex);
   }
 
+  function updateSelectOption(
+    fieldIndex: number,
+    optionIndex: number,
+    patch: { label?: string; value?: string | number },
+  ) {
+    const field = editFields[fieldIndex];
+    if (!field || field.type !== 'select') return;
+    field.options = (field.options || []).map((option, index) =>
+      index === optionIndex ? { ...option, ...patch } : option,
+    );
+    updateEditField(fieldIndex, { options: field.options } as Partial<EditableUiField>);
+  }
+
   let reading = $state(false);
   let applying = $state(false);
   let committing = $state(false);
@@ -930,6 +682,13 @@
   const filteredEditFields = $derived.by(() => {
     return filterFieldsBySearch(editFields, searchQuery);
   });
+
+  const filteredEditFieldEntries = $derived.by(() =>
+    filteredEditFields.map((field) => ({
+      field,
+      index: editFields.indexOf(field),
+    })),
+  );
 
   const isSelectMode = $derived(selectionMode === 'select');
 
@@ -992,135 +751,6 @@
     if (!attachment) return exports;
     return exports.filter((item) => item.label.includes(attachment.id));
   });
-
-  let macroSourceNodes = $state<Awaited<ReturnType<typeof macroAstSourceMap>> | null>(null);
-  $effect(() => {
-    const code = macroCode;
-    if (activeTab !== 'newParams' || !code || !code.trim()) {
-      macroSourceNodes = null;
-      return;
-    }
-    let cancelled = false;
-    macroAstSourceMap(code)
-      .then((nodes) => {
-        if (!cancelled) macroSourceNodes = nodes;
-      })
-      .catch(() => {
-        if (!cancelled) macroSourceNodes = null;
-      });
-    return () => {
-      cancelled = true;
-    };
-  });
-
-  const macroAstMap = $derived.by(() =>
-    buildMacroAstMapProjection({
-      macroCode,
-      modelManifest,
-      uiSpec,
-      parameters: effectiveLocalParams,
-      sourceNodes: macroSourceNodes,
-    }),
-  );
-
-  type MacroSourcePaneState = {
-    label: string;
-    code: string;
-    scopeStart: number;
-    scopeEnd: number;
-    busy: boolean;
-    error: string | null;
-    /** Forces the CodeMirror doc to rebuild when a template insert opens. */
-    revision: number;
-  };
-  let macroSourcePane = $state<MacroSourcePaneState | null>(null);
-
-  function openMacroNodeEditor(node: {
-    id: string;
-    label: string;
-    sourceRange?: { startByte: number; endByte: number };
-  }) {
-    if (!node.sourceRange || !onApplyMacroCode) return;
-    if (macroSourcePane) {
-      // Scope navigation: keep the pane (and any draft) and move the highlight.
-      macroSourcePane = {
-        ...macroSourcePane,
-        label: node.label,
-        scopeStart: node.sourceRange.startByte,
-        scopeEnd: node.sourceRange.endByte,
-      };
-      return;
-    }
-    macroSourcePane = {
-      label: node.label,
-      code: macroCode,
-      scopeStart: node.sourceRange.startByte,
-      scopeEnd: node.sourceRange.endByte,
-      busy: false,
-      error: null,
-      revision: 0,
-    };
-  }
-
-  function openMacroAddPart() {
-    const modelRange = macroAstMap.root.sourceRange;
-    if (!modelRange || !onApplyMacroCode) return;
-    const existing = new Set(
-      (macroSourceNodes ?? [])
-        .filter((node) => node.kind === 'part' || node.kind === 'feature')
-        .map((node) => node.label),
-    );
-    let index = existing.size + 1;
-    while (existing.has(`part_${index}`)) index += 1;
-    const template = `(part part_${index} (box 10 10 10))`;
-    const insertAt = modelRange.endByte - 1;
-    const draft = `${macroCode.slice(0, insertAt)}\n  ${template}${macroCode.slice(insertAt)}`;
-    const scopeStart = insertAt + 3;
-    macroSourcePane = {
-      label: `new part part_${index}`,
-      code: draft,
-      scopeStart,
-      scopeEnd: scopeStart + template.length,
-      busy: false,
-      error: null,
-      revision: (macroSourcePane?.revision ?? 0) + 1,
-    };
-  }
-
-  async function applyMacroSourcePane(nextCode: string) {
-    const pane = macroSourcePane;
-    if (!pane || !onApplyMacroCode) return;
-    macroSourcePane = { ...pane, busy: true, error: null };
-    try {
-      const outcome = await onApplyMacroCode(nextCode);
-      if (outcome === null || outcome === false) {
-        macroSourcePane = {
-          ...pane,
-          busy: false,
-          error: 'Apply failed. See app status for the raw backend error.',
-        };
-        return;
-      }
-      macroSourcePane = null;
-    } catch (applyError) {
-      const formattedError = formatBackendError(applyError);
-      macroSourcePane = {
-        ...pane,
-        busy: false,
-        error: formattedError,
-      };
-      focusDiagnosticMacroNode(applyError);
-    }
-  }
-
-  const macroFieldByKey = $derived.by(() => new Map(mergedFields.map((field) => [field.key, field])));
-  const macroScene = $derived.by(() => buildMacroAstSceneLayout(macroAstMap, { width: macroSceneWidth }));
-  $effect(() => {
-    const scene = macroScene;
-    if (activeTab !== 'newParams' || macroCameraManual) return;
-    macroCameraFit(scene);
-  });
-  const macroSceneNodeByIdMap = $derived.by(() => new Map(macroScene.nodes.map((node) => [node.id, node])));
 
   const manifestWarnings = $derived.by(() => {
     const warnings = new Set<string>();
@@ -1767,28 +1397,6 @@
     return { tone: 'neutral', tag: 'CTRL', glyph: '::', note: 'tunable value' };
   }
 
-  function getMacroNodeShapePath(kind: string, syntaxVariant?: string | null): string {
-    switch (kind) {
-      case 'model':
-        return 'M10,8 C22,1 38,1 48,5 C58,9 72,0 84,7 C95,13 98,26 95,36 C92,49 80,57 66,59 C49,61 32,56 21,58 C10,60 2,50 2,39 C2,27 1,15 10,8 Z';
-      case 'part':
-        return 'M8,10 C18,2 35,1 46,5 C56,9 68,2 80,7 C91,12 97,22 95,34 C93,46 86,57 72,59 C58,61 42,56 31,58 C19,60 7,55 4,43 C1,30 2,18 8,10 Z';
-      case 'port':
-        return 'M10,12 C18,6 29,4 40,6 C51,8 62,4 74,6 C84,8 92,15 94,27 C96,39 92,49 83,53 C73,58 60,55 48,56 C35,57 20,58 11,50 C2,42 2,21 10,12 Z';
-      case 'param':
-        switch (syntaxVariant) {
-          case 'checkbox':
-            return 'M8,14 C14,7 24,4 36,5 C50,6 63,2 77,6 C88,9 95,18 96,29 C97,41 91,50 80,55 C68,60 53,56 41,57 C27,58 13,58 7,48 C1,38 1,23 8,14 Z';
-          case 'select':
-            return 'M7,13 C13,6 24,3 36,5 C48,7 62,3 76,6 C88,9 95,18 95,30 C95,42 89,51 79,55 C66,60 52,57 40,58 C26,59 12,58 6,48 C0,38 1,21 7,13 Z';
-          default:
-            return 'M6,12 C12,5 24,4 35,5 C48,7 61,3 74,6 C86,8 94,17 95,28 C96,40 91,50 82,55 C70,61 55,57 43,58 C28,59 14,58 7,49 C1,39 0,21 6,12 Z';
-        }
-      default:
-        return 'M8,10 C18,2 34,1 46,5 C58,9 71,1 83,7 C94,13 97,25 95,36 C93,48 84,58 71,59 C56,60 40,56 29,58 C17,60 6,54 3,42 C1,30 2,18 8,10 Z';
-    }
-  }
-
   function selectPart(partId: string | null) {
     localSelectedPartId = partId;
     session.setSelectedPartId(partId);
@@ -1867,6 +1475,33 @@
       }),
       'Lithophane image cleared. Apply to rerender.',
     );
+  }
+
+  async function pickLithophaneImage(attachmentId: string) {
+    const file = await open({
+      multiple: false,
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }],
+    });
+    const selected = firstSelectedPath(file);
+    if (selected) setLithophaneImage(attachmentId, selected);
+  }
+
+  async function pickRawImage(parameterKey: string) {
+    const file = await open({
+      multiple: false,
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }],
+    });
+    const selected = firstSelectedPath(file);
+    if (selected) update(parameterKey, selected);
+  }
+
+  async function pickSemanticControlImage(control: MaterializedSemanticControl) {
+    const file = await open({
+      multiple: false,
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }],
+    });
+    const selected = firstSelectedPath(file);
+    if (selected && control.rawField) updateSemanticControl(control, selected);
   }
 
   function setLithophaneProjection(
@@ -2690,68 +2325,16 @@
 
   <div class="param-panel-body">
     {#if editing}
-      <div class="edit-list">
-      {#each filteredEditFields as field}
-        {@const i = editFields.indexOf(field)}
-        <div class="edit-field" class:is-freezed={field.frozen}>
-          <div class="edit-row">
-            <input class="input-mono edit-input" placeholder="key" bind:value={field.key} />
-            <input class="input-mono edit-input flex-2" placeholder="Label" bind:value={field.label} />
-            <div class="edit-select-wrap">
-              <Dropdown
-                options={getAvailableTypes(field).map(t => ({ id: t, name: t }))}
-                bind:value={field.type}
-                placeholder="Field Type"
-              />
-            </div>
-            <label class="freeze-toggle" title="Freeze value and move to bottom">
-              <input class="ui-checkbox ui-checkbox-sm" type="checkbox" bind:checked={field.frozen} />
-              <span>❄️</span>
-            </label>
-            <button class="btn btn-xs btn-ghost" onclick={() => removeField(i)}>✕</button>
-          </div>
-          {#if field.type === 'range' || field.type === 'number'}
-            <div class="edit-row edit-bounds">
-              <input class="input-mono edit-input-sm" type="number" placeholder="min" bind:value={field.min} />
-              <input class="input-mono edit-input-sm" type="number" placeholder="max" bind:value={field.max} />
-              <input class="input-mono edit-input-sm" type="number" placeholder="step" bind:value={field.step} />
-              <input class="input-mono edit-input-sm flex-1" placeholder="min from (key)" bind:value={field.minFrom} />
-              <input class="input-mono edit-input-sm flex-1" placeholder="max from (key)" bind:value={field.maxFrom} />
-            </div>
-          {/if}
-          {#if field.type === 'select'}
-            <div class="edit-select-options">
-              <div class="edit-row edit-info">
-                <span class="info-tag">OPTIONS: {field.options?.length || 0}</span>
-                <button class="btn btn-xs btn-ghost" onclick={() => addSelectOption(i)}>+ ADD OPTION</button>
-              </div>
-              {#if (field.options?.length || 0) > 0}
-                {#each field.options || [] as option, optionIndex}
-                  <div class="edit-row edit-select-option-row">
-                    <input
-                      class="input-mono edit-input flex-1"
-                      placeholder="Option label"
-                      bind:value={option.label}
-                    />
-                    <input
-                      class="input-mono edit-input flex-1"
-                      placeholder="Option value"
-                      bind:value={option.value}
-                    />
-                    <button class="btn btn-xs btn-ghost" onclick={() => removeSelectOption(i, optionIndex)}>✕</button>
-                  </div>
-                {/each}
-              {:else}
-                <div class="edit-row edit-info">
-                  <span class="info-tag">No options yet. Add them manually.</span>
-                </div>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/each}
-      <button class="btn btn-xs add-field-btn" onclick={addField}>+ ADD FIELD</button>
-      </div>
+      <ParamPanelEditFields
+        fieldEntries={filteredEditFieldEntries}
+        {getAvailableTypes}
+        onFieldChange={updateEditField}
+        onAddSelectOption={addSelectOption}
+        onRemoveSelectOption={removeSelectOption}
+        onOptionChange={updateSelectOption}
+        onRemoveField={removeField}
+        onAddField={addField}
+      />
     {:else}
       {#if modelManifest}
         {#if manifestWarnings.length > 0}
@@ -2797,633 +2380,99 @@
     />
 
     {#if enrichmentProposals.length > 0 && modelManifest?.sourceKind === 'importedFcstd'}
-      <div class="proposal-section">
-        <div class="section-label">BINDING PROPOSALS</div>
-        <div class="proposal-list">
-          {#each enrichmentProposals as proposal}
-            <div class="proposal-card" class:proposal-card-pending={proposal.status === 'pending'}>
-              <div class="proposal-head">
-                <div class="proposal-label-row">
-                  <span class="proposal-label">{proposal.label}</span>
-                  <span class="proposal-confidence">{Math.round(proposal.confidence * 100)}%</span>
-                </div>
-                <span class="proposal-status proposal-status-{proposal.status}">
-                  {proposal.status.toUpperCase()}
-                </span>
-              </div>
-              <div class="proposal-meta">
-                PARTS: {labelPartIds(proposal.partIds)}
-              </div>
-              <div class="proposal-meta">
-                PARAMS: {proposal.parameterKeys?.length ? proposal.parameterKeys.join(', ') : 'No parameter keys'}
-              </div>
-              <div class="proposal-meta">SOURCE: {proposal.provenance}</div>
-              <div class="proposal-actions">
-                <button
-                  class="btn btn-xs btn-primary"
-                  onclick={() => updateProposalStatus(proposal.proposalId, 'accepted')}
-                  disabled={proposalMutationId !== null || proposal.status === 'accepted'}
-                >
-                  ACCEPT
-                </button>
-                <button
-                  class="btn btn-xs btn-ghost"
-                  onclick={() => updateProposalStatus(proposal.proposalId, 'rejected')}
-                  disabled={proposalMutationId !== null || proposal.status === 'rejected'}
-                >
-                  REJECT
-                </button>
-                {#if proposal.status !== 'pending'}
-                  <button
-                    class="btn btn-xs btn-ghost"
-                    onclick={() => updateProposalStatus(proposal.proposalId, 'pending')}
-                    disabled={proposalMutationId !== null}
-                  >
-                    RESET
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-      </div>
+      <ParamPanelImportedProposals
+        proposals={enrichmentProposals}
+        mutationId={proposalMutationId}
+        {labelPartIds}
+        onUpdateProposalStatus={updateProposalStatus}
+      />
     {/if}
 
     {#if activeTab === 'newParams'}
-      <div class="macro-ast-map-shell">
-        <div class="controls-head">
-          <div class="section-label">MACRO AST</div>
-          <div class="context-strip-actions">
-            {#if onApplyMacroCode && macroAstMap.root.sourceRange}
-              <button class="btn btn-xs btn-ghost macro-ast-add-part" onclick={openMacroAddPart}>
-                + PART
-              </button>
-            {/if}
-            <button class="btn btn-xs btn-ghost" aria-label="Zoom out" onclick={() => macroCameraZoomBy(1 / 1.25, undefined, undefined, true)}>−</button>
-            <button class="btn btn-xs btn-ghost macro-ast-fit" onclick={() => { macroCameraManual = false; macroCameraFit(macroScene); }}>
-              FIT {Math.round(macroCamera.k * 100)}%
-            </button>
-            <button class="btn btn-xs btn-ghost" aria-label="Zoom in" onclick={() => macroCameraZoomBy(1.25, undefined, undefined, true)}>+</button>
-            <div class="macro-ast-shell-meta">SOURCE BACKED / EDIT IN PLACE</div>
-          </div>
-        </div>
-
-        <div class="macro-ast-split" class:macro-ast-split-open={Boolean(macroSourcePane)}>
-        <div
-          bind:this={macroSceneViewportElement}
-          bind:clientWidth={macroViewportW}
-          bind:clientHeight={macroViewportH}
-          class="macro-ast-map-viewport macro-ast-scene"
-          data-zoom-tier={macroCamera.k < MACRO_ZOOM_FAR_TIER ? 'far' : 'near'}
-          onwheel={macroViewportWheel}
-          onpointerdown={macroViewportPointerDown}
-          onpointermove={macroViewportPointerMove}
-          onpointerup={macroViewportPointerUp}
-          onpointercancel={macroViewportPointerUp}
-        >
-          <div
-            class="macro-ast-camera"
-            style={`width:${macroScene.width}px; height:${macroScene.height}px; transform: translate(${macroCamera.x}px, ${macroCamera.y}px) scale(${macroCamera.k});`}
-          >
-          <svg
-            class="macro-ast-scene__svg"
-            viewBox={`0 0 ${macroScene.width} ${macroScene.height}`}
-            preserveAspectRatio="none"
-            aria-hidden="true"
-          >
-            {#each macroScene.connectors as connector}
-              <path class="macro-ast-connector" d={connector.path} data-connector-id={connector.id} />
-            {/each}
-          </svg>
-
-          {#each macroScene.nodes as node}
-            {@const sceneNode = macroSceneNodeByIdMap.get(node.id)}
-            {#if sceneNode}
-              <section
-                class="macro-ast-node"
-                class:macro-ast-node-root={sceneNode.kind === 'model'}
-                class:macro-ast-node-editable={(sceneNode.kind === 'part' || sceneNode.kind === 'model' || sceneNode.kind === 'verify') && Boolean(sceneNode.sourceRange) && Boolean(onApplyMacroCode)}
-                class:macro-ast-node-part={sceneNode.kind === 'part'}
-                class:macro-ast-node-port={sceneNode.kind === 'port'}
-                class:macro-ast-node-param={sceneNode.kind === 'param'}
-                class:macro-ast-node-verify={sceneNode.kind === 'verify'}
-                data-node-id={sceneNode.id}
-                data-node-kind={sceneNode.kind}
-                data-syntax-variant={sceneNode.syntaxVariant}
-                onclick={() => sceneNode.kind === 'param' && focusSceneField(sceneNode.fieldKey)}
-                ondblclick={() => {
-                  if (sceneNode.kind === 'param') {
-                    selectSceneFieldValue(sceneNode.fieldKey);
-                  } else if (sceneNode.kind === 'part' || sceneNode.kind === 'model' || sceneNode.kind === 'verify') {
-                    openMacroNodeEditor(sceneNode);
-                  }
-                }}
-                style={`left:${sceneNode.x}px; top:${sceneNode.y}px; width:${sceneNode.w}px; height:${sceneNode.h}px;`}
-              >
-                <svg
-                  class="macro-ast-node__shape"
-                  viewBox={`0 0 ${sceneNode.w} ${sceneNode.h}`}
-                  preserveAspectRatio="none"
-                  aria-hidden="true"
-                >
-                  <path d={sceneNode.shapePath} />
-                </svg>
-
-                <div class="macro-ast-node__header">
-                  <div class="macro-ast-node__label">{sceneNode.label.toLowerCase()}</div>
-                  <span class="macro-ast-syntax-badge">{sceneNode.syntaxLabel}</span>
-                </div>
-
-                {#if (sceneNode.kind === 'model' || sceneNode.kind === 'part' || sceneNode.kind === 'verify') && sceneNode.sourceRange && onApplyMacroCode}
-                  <div class="macro-ast-node__hint" aria-hidden="true">dblclick: source</div>
-                {/if}
-                {#if sceneNode.kind === 'param'}
-                  <div class="macro-ast-value-chip" aria-hidden="true">{sceneNode.value ?? '—'}</div>
-                {/if}
-
-                {#if sceneNode.kind === 'param'}
-                  {@const field = sceneNode.fieldKey ? macroFieldByKey.get(sceneNode.fieldKey) : null}
-                  {#if field}
-                    <div class="macro-ast-node__overlay">
-                      <ParamPanelControlField
-                        elementId={`macro-${field.key}`}
-                        field={field}
-                        value={effectiveLocalParams[field.key]}
-                        rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
-                        editable={!field.frozen}
-                        frozen={field.frozen}
-                        autoField={field._auto}
-                        highlighted={highlightedParamKey === field.key}
-                        cadTone={getCadHint(field).tone}
-                        liveApply={$liveApply}
-                        compact={true}
-                        onDraftValue={(nextValue) => stageParamDraft(field.key, nextValue)}
-                        onUpdate={(nextValue) => update(field.key, nextValue)}
-                        onPickImage={async () => {
-                          const file = await open({
-                            multiple: false,
-                            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
-                          });
-                          const selected = firstSelectedPath(file);
-                          if (selected) update(field.key, selected);
-                        }}
-                        onMouseEnter={() => setFocusedControl(null, field.key)}
-                        onMouseLeave={clearFocusedControl}
-                        onFocusIn={() => setFocusedControl(null, field.key)}
-                        onFocusOut={clearFocusedControl}
-                      />
-                    </div>
-                    <span class="macro-ast-control-anchor" aria-hidden="true"></span>
-                  {/if}
-                {/if}
-              </section>
-            {/if}
-          {/each}
-
-          {#if onApplyMacroCode && macroAstMap.root.sourceRange}
-            <div
-              class="macro-ast-insert-slot"
-              style={`left:${macroScene.insertSlot.x}px; top:${macroScene.insertSlot.y}px; width:${macroScene.insertSlot.w}px; min-height:${macroScene.insertSlot.h}px;`}
-            >
-              <button class="macro-ast-insert-trigger" onclick={openMacroAddPart}>
-                + ADD PART
-              </button>
-            </div>
-          {/if}
-
-          </div>
-
-          <svg
-            class="macro-ast-minimap"
-            data-testid="macro-ast-minimap"
-            width={MACRO_MINIMAP_W}
-            height={Math.max(56, Math.round(macroScene.height * macroMinimapScale))}
-            onpointerdown={(event) => {
-              macroMinimapDragging = true;
-              (event.currentTarget as Element).setPointerCapture(event.pointerId);
-              macroMinimapCenterAt(event, true);
-            }}
-            onpointermove={(event) => macroMinimapDragging && macroMinimapCenterAt(event, false)}
-            onpointerup={() => (macroMinimapDragging = false)}
-            onpointercancel={() => (macroMinimapDragging = false)}
-            role="presentation"
-          >
-            {#each macroScene.nodes.filter((node) => node.kind === 'model' || node.kind === 'part' || node.kind === 'verify') as miniNode (miniNode.id)}
-              <rect
-                class="minimap-node"
-                class:minimap-node-model={miniNode.kind === 'model'}
-                x={miniNode.x * macroMinimapScale}
-                y={miniNode.y * macroMinimapScale}
-                width={Math.max(2, miniNode.w * macroMinimapScale)}
-                height={Math.max(2, miniNode.h * macroMinimapScale)}
-              />
-            {/each}
-            <rect
-              class="minimap-view"
-              x={(-macroCamera.x / macroCamera.k) * macroMinimapScale}
-              y={(-macroCamera.y / macroCamera.k) * macroMinimapScale}
-              width={(macroViewportW / macroCamera.k) * macroMinimapScale}
-              height={(macroViewportH / macroCamera.k) * macroMinimapScale}
-            />
-          </svg>
-        </div>
-
-        {#if macroSourcePane}
-          {#key macroSourcePane.revision}
-            <MacroSourcePane
-              code={macroSourcePane.code}
-              scopeLabel={macroSourcePane.label}
-              scopeStart={macroSourcePane.scopeStart}
-              scopeEnd={macroSourcePane.scopeEnd}
-              busy={macroSourcePane.busy}
-              error={macroSourcePane.error}
-              onApply={(nextCode) => void applyMacroSourcePane(nextCode)}
-              onCancel={() => (macroSourcePane = null)}
-            />
-          {/key}
-        {/if}
-        </div>
-      </div>
+      <MacroAstMap
+        {macroCode}
+        {modelManifest}
+        {uiSpec}
+        parameters={effectiveLocalParams}
+        fields={mergedFields}
+        {highlightedParamKey}
+        liveApply={$liveApply}
+        focusNodeId={pendingMacroFocusNodeId}
+        onFocusNodeHandled={() => (pendingMacroFocusNodeId = null)}
+        {onApplyMacroCode}
+        onDraftValue={(key, value) => stageParamDraft(key, value)}
+        onUpdate={(key, value) => update(key, value)}
+        onControlFocusChange={(primitiveId, parameterKey) => setFocusedControl(primitiveId, parameterKey)}
+      />
     {:else if activeTab === 'litho'}
-      <div class="controls-head">
-        <div class="section-label">LITHOPHANE ATTACHMENTS</div>
-        <div class="context-strip-actions">
-          <button class="btn btn-xs btn-ghost" onclick={addLithophane}>
-            + PATCH
-          </button>
-          {#if selectedLithophaneAttachment}
-            <button
-              class="btn btn-xs btn-ghost"
-              onclick={() => duplicateLithophane(selectedLithophaneAttachment)}
-            >
-              DUPLICATE
-            </button>
-            <button
-              class="btn btn-xs btn-ghost"
-              onclick={() => deleteLithophane(selectedLithophaneAttachment.id)}
-            >
-              DELETE
-            </button>
-          {/if}
-        </div>
-      </div>
-
-      {#if lithophaneAttachments.length > 0}
-        <div class="part-strip">
-          <div class="part-strip-list">
-            {#each lithophaneAttachments as attachment}
-              <button
-                class="view-chip"
-                class:view-chip-active={attachment.id === selectedLithoId}
-                onclick={() => selectedLithoId = attachment.id}
-              >
-                <span>{attachment.source.kind === 'file' && attachment.source.imagePath
-                  ? attachment.source.imagePath.split(/[/\\]/).pop()
-                  : attachment.id}</span>
-                <span class="semantic-source-badge">{attachment.enabled === false ? 'OFF' : attachment.color?.mode === 'cmyk' ? 'CMYK' : 'MONO'}</span>
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        {#if selectedLithophaneAttachment}
-          {@const activeLitho = selectedLithophaneAttachment}
-          {@const planarOnlyColor = activeLitho.placement?.projection === 'planar'}
-          <div class="view-composer">
-            <div class="composer-grid">
-              <label class="primitive-picker">
-                <input
-                  class="ui-checkbox"
-                  type="checkbox"
-                  checked={activeLitho.enabled !== false}
-                  onchange={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      enabled: getInputChecked(event),
-                    }), getInputChecked(event) ? 'Lithophane enabled.' : 'Lithophane disabled.')}
-                />
-                <div class="primitive-picker__body">
-                  <div class="primitive-picker__label">Attachment enabled</div>
-                  <div class="primitive-picker__meta">Disabled patches stay saved but skip render.</div>
-                </div>
-              </label>
-              <div class="composer-field">
-                <div class="composer-label">TARGET PART</div>
-                <Dropdown
-                  options={(modelManifest?.parts || []).map((part) => ({ id: part.partId, name: part.label }))}
-                  value={activeLitho.targetPartId || null}
-                  onchange={(value) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      targetPartId: typeof value === 'string' ? value : '',
-                    }))}
-                  placeholder="Choose part..."
-                />
-              </div>
-              <div class="composer-field">
-                <div class="composer-label">IMAGE</div>
-                <div class="composer-inline-actions">
-                  <button
-                    class="btn param-btn composer-image-select"
-                    onclick={async () => {
-                      const file = await open({
-                        multiple: false,
-                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
-                      });
-                      const selected = firstSelectedPath(file);
-                      if (selected) setLithophaneImage(activeLitho.id, selected);
-                    }}
-                  >
-                    {activeLitho.source.kind === 'file' && activeLitho.source.imagePath
-                      ? activeLitho.source.imagePath.split(/[/\\]/).pop()
-                      : 'Select Image...'}
-                  </button>
-                  {#if activeLitho.source.kind === 'file' && activeLitho.source.imagePath}
-                    <button
-                      class="btn btn-xs btn-ghost"
-                      onclick={() => clearLithophaneImage(activeLitho.id)}
-                    >
-                      CLEAR
-                    </button>
-                  {/if}
-                </div>
-              </div>
-            </div>
-
-            {#if activeLitho.source.kind === 'file' && activeLitho.source.imagePath}
-              <div class="litho-preview">
-                <img
-                  src={previewImageUrl(activeLitho.source.imagePath) ?? ''}
-                  alt="Lithophane source"
-                  class="litho-preview__image"
-                />
-              </div>
-            {/if}
-
-            <div class="composer-grid">
-              <div class="composer-field">
-                <div class="composer-label">SIDE</div>
-                <Dropdown
-                  options={[
-                    { id: 'front', name: 'Front' },
-                    { id: 'back', name: 'Back' },
-                    { id: 'left', name: 'Left' },
-                    { id: 'right', name: 'Right' },
-                    { id: 'top', name: 'Top' },
-                    { id: 'bottom', name: 'Bottom' },
-                  ]}
-                  value={activeLitho.placement?.side}
-                  onchange={(value) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        side: (typeof value === 'string' ? value : 'front') as LithophaneSide,
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <div class="composer-label">PROJECTION</div>
-                <Dropdown
-                  options={[
-                    { id: 'auto', name: 'Auto' },
-                    { id: 'planar', name: 'Planar' },
-                    { id: 'cylindrical', name: 'Cylindrical' },
-                    { id: 'spherical', name: 'Spherical' },
-                  ]}
-                  value={activeLitho.placement?.projection}
-                  onchange={(value) =>
-                    setLithophaneProjection(activeLitho.id, (typeof value === 'string' ? value : 'auto') as ProjectionType)}
-                />
-              </div>
-              <div class="composer-field">
-                <div class="composer-label">OVERFLOW</div>
-                <Dropdown
-                  options={[
-                    { id: 'contain', name: 'Contain' },
-                    { id: 'cover', name: 'Cover' },
-                    { id: 'clamp', name: 'Clamp' },
-                    { id: 'bleed', name: 'Bleed' },
-                  ]}
-                  value={activeLitho.placement?.overflowMode}
-                  onchange={(value) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        overflowMode: (typeof value === 'string' ? value : 'contain') as OverflowMode,
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <div class="composer-label">COLOR MODE</div>
-                <Dropdown
-                  options={[
-                    { id: 'mono', name: 'Mono' },
-                    ...(planarOnlyColor ? [{ id: 'cmyk', name: 'CMYK' }] : []),
-                  ]}
-                  value={planarOnlyColor ? activeLitho.color?.mode : 'mono'}
-                  onchange={(value) => setLithophaneColorMode(activeLitho.id, (typeof value === 'string' ? value : 'mono') as 'mono' | 'cmyk')}
-                />
-              </div>
-            </div>
-
-            {#if !planarOnlyColor}
-              <div class="composer-note">
-                CMYK export is only available for planar flat patches. Switch projection to PLANAR to unlock it.
-              </div>
-            {/if}
-
-            <div class="composer-grid">
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-width-${activeLitho.id}`}>WIDTH (MM)</label>
-                <input
-                  id={`litho-width-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.1"
-                  value={activeLitho.placement?.widthMm ?? 0}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        widthMm: Number(getInputValue(event)) || 0,
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-height-${activeLitho.id}`}>HEIGHT (MM)</label>
-                <input
-                  id={`litho-height-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.1"
-                  value={activeLitho.placement?.heightMm ?? 0}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        heightMm: Number(getInputValue(event)) || 0,
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-offset-x-${activeLitho.id}`}>OFFSET X (MM)</label>
-                <input
-                  id={`litho-offset-x-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.1"
-                  value={activeLitho.placement?.offsetXMm ?? 0}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        offsetXMm: Number(getInputValue(event)) || 0,
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-offset-y-${activeLitho.id}`}>OFFSET Y (MM)</label>
-                <input
-                  id={`litho-offset-y-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.1"
-                  value={activeLitho.placement?.offsetYMm ?? 0}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        offsetYMm: Number(getInputValue(event)) || 0,
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-rotation-${activeLitho.id}`}>ROTATION</label>
-                <input
-                  id={`litho-rotation-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="1"
-                  value={activeLitho.placement?.rotationDeg ?? 0}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        rotationDeg: Number(getInputValue(event)) || 0,
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-bleed-${activeLitho.id}`}>BLEED (MM)</label>
-                <input
-                  id={`litho-bleed-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.1"
-                  value={activeLitho.placement?.bleedMarginMm ?? 0}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      placement: {
-                        ...attachment.placement,
-                        bleedMarginMm: Math.max(0, Number(getInputValue(event)) || 0),
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-depth-${activeLitho.id}`}>DEPTH (MM)</label>
-                <input
-                  id={`litho-depth-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.1"
-                  value={activeLitho.relief?.depthMm ?? 2}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      relief: {
-                        ...attachment.relief,
-                        depthMm: Math.max(0.1, Number(getInputValue(event)) || 2),
-                      },
-                    }))}
-                />
-              </div>
-              <div class="composer-field">
-                <label class="composer-label" for={`litho-channel-${activeLitho.id}`}>CHANNEL THICKNESS</label>
-                <input
-                  id={`litho-channel-${activeLitho.id}`}
-                  class="input-mono composer-input"
-                  type="number"
-                  step="0.05"
-                  value={activeLitho.color?.channelThicknessMm ?? 0.4}
-                  oninput={(event) =>
-                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                      ...attachment,
-                      color: {
-                        ...attachment.color,
-                        channelThicknessMm: Math.max(0.05, Number(getInputValue(event)) || 0.4),
-                      },
-                    }))}
-                />
-              </div>
-            </div>
-
-            <label class="primitive-picker">
-              <input
-                class="ui-checkbox"
-                type="checkbox"
-                checked={activeLitho.relief?.invert ?? false}
-                onchange={(event) =>
-                  patchLithophaneAttachment(activeLitho.id, (attachment) => ({
-                    ...attachment,
-                    relief: {
-                      ...attachment.relief,
-                      invert: getInputChecked(event),
-                    },
-                  }), getInputChecked(event) ? 'Lithophane inversion enabled.' : 'Lithophane inversion disabled.')}
-              />
-              <div class="primitive-picker__body">
-                <div class="primitive-picker__label">Invert relief</div>
-                <div class="primitive-picker__meta">Bright pixels become shallow instead of deep.</div>
-              </div>
-            </label>
-
-            {#if selectedLithophaneExportArtifacts.length > 0}
-              <div class="warning-stack">
-                {#each selectedLithophaneExportArtifacts as exportArtifact}
-                  <div class="warning-chip">
-                    <span>{exportArtifact.role.toUpperCase()}: {exportArtifact.label}</span>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-      {:else}
-        <div class="no-params">
-          Add a lithophane patch to attach an image to the current model. It will render on Apply.
-        </div>
-      {/if}
+      <ParamPanelLithophaneTab
+        {modelManifest}
+        attachments={lithophaneAttachments}
+        selectedAttachment={selectedLithophaneAttachment}
+        selectedAttachmentId={selectedLithoId}
+        exportArtifacts={selectedLithophaneExportArtifacts}
+        {previewImageUrl}
+        onSelectAttachment={(attachmentId) => selectedLithoId = attachmentId}
+        onAddAttachment={addLithophane}
+        onDuplicateAttachment={duplicateLithophane}
+        onDeleteAttachment={deleteLithophane}
+        onPatchAttachment={patchLithophaneAttachment}
+        onPickImage={pickLithophaneImage}
+        onClearImage={clearLithophaneImage}
+        onSetProjection={setLithophaneProjection}
+        onSetColorMode={setLithophaneColorMode}
+      />
     {:else if activeTab === 'views'}
-      <ParamPanelContextStrip
+      <ParamPanelViewsTab
         {controlViews}
         {activeControlViewId}
         {activeSemanticView}
+        {advisoryComposerOpen}
+        {advisoryLabel}
+        {advisoryMessage}
+        {advisorySeverity}
+        {advisoryCondition}
+        {advisoryThreshold}
+        {advisoryCandidateControls}
+        {advisoryPrimitiveIds}
+        {advisoryCanSave}
+        {relationComposerOpen}
+        {relationSourcePrimitiveId}
+        {relationTargetPrimitiveId}
+        {relationMode}
+        {relationScale}
+        {relationOffset}
+        {relationCanSave}
+        {primitiveComposerOpen}
+        {primitiveComposerMode}
+        {primitiveEditingId}
+        {primitiveLabel}
+        {primitiveScope}
+        {primitivePartId}
+        {primitiveAttachToView}
+        modelParts={modelManifest?.parts || []}
+        {primitiveCandidateFields}
+        {primitiveParameterKeys}
+        {selectedPrimitiveFields}
+        {primitiveBindingDrafts}
+        {primitiveKindPreview}
+        {primitiveCanSave}
+        {composerOpen}
+        {composerMode}
+        {composerViewLabel}
+        {composerViewScope}
+        {composerViewPartId}
+        {composerVisiblePrimitives}
+        {composerPrimitiveIds}
+        {composerCanSave}
+        advisories={activeSemanticView?.advisories || []}
+        {activeViewRelations}
+        {filteredSemanticSections}
+        {selectedPart}
+        {isSelectMode}
+        selectionTargetCount={modelManifest?.selectionTargets?.length ?? 0}
+        {highlightedParamKey}
+        liveApply={$liveApply}
         onSelectControlView={onSelectControlView}
         onOpenCreateViewComposer={openCreateViewComposer}
         onOpenPrimitiveComposer={openPrimitiveComposer}
@@ -3433,286 +2482,79 @@
         onDeleteManualView={deleteManualView}
         {shouldShowSemanticSource}
         {semanticSourceLabel}
-      />
-
-      {#if advisoryComposerOpen}
-        <ParamPanelAdvisoryComposer
-          label={advisoryLabel}
-          message={advisoryMessage}
-          severity={advisorySeverity}
-          condition={advisoryCondition}
-          threshold={advisoryThreshold}
-          candidateControls={advisoryCandidateControls}
-          selectedPrimitiveIds={advisoryPrimitiveIds}
-          canSave={advisoryCanSave}
-          onLabelChange={(value) => advisoryLabel = value}
-          onMessageChange={(value) => advisoryMessage = value}
-          onSeverityChange={(value) => advisorySeverity = value}
-          onConditionChange={(value) => advisoryCondition = value}
-          onThresholdChange={(value) => advisoryThreshold = value}
-          onTogglePrimitive={toggleAdvisoryPrimitive}
-          onCancel={resetAdvisoryComposer}
-          onSave={saveManualAdvisory}
-        />
-      {/if}
-
-      {#if relationComposerOpen}
-        <ParamPanelRelationComposer
-          controls={advisoryCandidateControls}
-          sourcePrimitiveId={relationSourcePrimitiveId}
-          targetPrimitiveId={relationTargetPrimitiveId}
-          mode={relationMode}
-          scale={relationScale}
-          offset={relationOffset}
-          canSave={relationCanSave}
-          onSourceChange={(value) => relationSourcePrimitiveId = value}
-          onTargetChange={(value) => relationTargetPrimitiveId = value}
-          onModeChange={(value) => relationMode = value}
-          onScaleChange={(value) => relationScale = value}
-          onOffsetChange={(value) => relationOffset = value}
-          onCancel={resetRelationComposer}
-          onSave={saveControlRelation}
-        />
-      {/if}
-
-      {#if primitiveComposerOpen}
-        <ParamPanelPrimitiveComposer
-          mode={primitiveComposerMode}
-          editingId={primitiveEditingId}
-          label={primitiveLabel}
-          scope={primitiveScope}
-          partId={primitivePartId}
-          attachToView={primitiveAttachToView}
-          activeSemanticView={activeSemanticView
-            ? {
-                label: activeSemanticView.label,
-                source: activeSemanticView.source,
-              }
-            : null}
-          modelParts={modelManifest?.parts || []}
-          candidateFields={primitiveCandidateFields}
-          selectedParameterKeys={primitiveParameterKeys}
-          selectedFields={selectedPrimitiveFields}
-          bindingDrafts={primitiveBindingDrafts}
-          kindPreview={primitiveKindPreview}
-          canSave={primitiveCanSave}
-          onLabelChange={(value) => primitiveLabel = value}
-          onScopeChange={(value) => {
-            primitiveScope = value;
-            if (primitiveScope !== 'part') {
-              primitivePartId = null;
-            } else if (!primitivePartId) {
-              primitivePartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
-            }
-          }}
-          onPartIdChange={(value) => primitivePartId = value}
-          onAttachToViewChange={(value) => primitiveAttachToView = value}
-          onToggleParameter={togglePrimitiveParameter}
-          onUpdateDraft={updatePrimitiveDraft}
-          onCancel={resetPrimitiveComposer}
-          onDelete={deleteManualPrimitive}
-          onSave={saveManualPrimitive}
-        />
-      {/if}
-
-      {#if composerOpen}
-        <ParamPanelViewComposer
-          mode={composerMode}
-          label={composerViewLabel}
-          scope={composerViewScope}
-          partId={composerViewPartId}
-          modelParts={modelManifest?.parts || []}
-          visiblePrimitives={composerVisiblePrimitives}
-          selectedPrimitiveIds={composerPrimitiveIds}
-          canSave={composerCanSave}
-          onLabelChange={(value) => composerViewLabel = value}
-          onScopeChange={(value) => {
-            composerViewScope = value;
-            if (composerViewScope !== 'part') {
-              composerViewPartId = null;
-            } else if (!composerViewPartId) {
-              composerViewPartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
-            }
-          }}
-          onPartIdChange={(value) => composerViewPartId = value}
-          onTogglePrimitive={toggleComposerPrimitive}
-          onCancel={resetComposer}
-          onSave={saveManualView}
-        />
-      {/if}
-
-      <ParamPanelAdvisoryList
-        advisories={activeSemanticView?.advisories || []}
+        onAdvisoryLabelChange={(value) => advisoryLabel = value}
+        onAdvisoryMessageChange={(value) => advisoryMessage = value}
+        onAdvisorySeverityChange={(value) => advisorySeverity = value}
+        onAdvisoryConditionChange={(value) => advisoryCondition = value}
+        onAdvisoryThresholdChange={(value) => advisoryThreshold = value}
+        onToggleAdvisoryPrimitive={toggleAdvisoryPrimitive}
+        onCancelAdvisory={resetAdvisoryComposer}
+        onSaveAdvisory={saveManualAdvisory}
+        onRelationSourceChange={(value) => relationSourcePrimitiveId = value}
+        onRelationTargetChange={(value) => relationTargetPrimitiveId = value}
+        onRelationModeChange={(value) => relationMode = value}
+        onRelationScaleChange={(value) => relationScale = value}
+        onRelationOffsetChange={(value) => relationOffset = value}
+        onCancelRelation={resetRelationComposer}
+        onSaveRelation={saveControlRelation}
+        onPrimitiveLabelChange={(value) => primitiveLabel = value}
+        onPrimitiveScopeChange={(value) => {
+          primitiveScope = value;
+          if (primitiveScope !== 'part') {
+            primitivePartId = null;
+          } else if (!primitivePartId) {
+            primitivePartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
+          }
+        }}
+        onPrimitivePartIdChange={(value) => primitivePartId = value}
+        onPrimitiveAttachToViewChange={(value) => primitiveAttachToView = value}
+        onTogglePrimitiveParameter={togglePrimitiveParameter}
+        onUpdatePrimitiveDraft={updatePrimitiveDraft}
+        onCancelPrimitive={resetPrimitiveComposer}
+        onDeletePrimitive={deleteManualPrimitive}
+        onSavePrimitive={saveManualPrimitive}
+        onComposerLabelChange={(value) => composerViewLabel = value}
+        onComposerScopeChange={(value) => {
+          composerViewScope = value;
+          if (composerViewScope !== 'part') {
+            composerViewPartId = null;
+          } else if (!composerViewPartId) {
+            composerViewPartId = selectedPart?.partId || modelManifest?.parts?.[0]?.partId || null;
+          }
+        }}
+        onComposerPartIdChange={(value) => composerViewPartId = value}
+        onToggleComposerPrimitive={toggleComposerPrimitive}
+        onCancelComposer={resetComposer}
+        onSaveComposer={saveManualView}
         onDeleteManualAdvisory={deleteManualAdvisory}
+        onDeleteControlRelation={deleteControlRelation}
+        {isSectionExpanded}
+        {toggleSection}
+        {getRangeProps}
+        {isManualPrimitive}
+        onUpdateSemanticControl={updateSemanticControl}
+        onEditPrimitiveComposer={openEditPrimitiveComposer}
+        onPickSemanticControlImage={pickSemanticControlImage}
+        onSetFocusedControl={setFocusedControl}
+        onClearFocusedControl={clearFocusedControl}
       />
-
-      {#if activeViewRelations.length > 0}
-        <div class="warning-stack">
-          {#each activeViewRelations as relation}
-            <div class="warning-chip">
-              <span>
-                LINK: {relation.sourceLabel} -> {relation.targetLabel}
-                {#if relation.mode === 'scale'}
-                  (x{relation.scale})
-                {:else if relation.mode === 'offset'}
-                  (+{relation.offset})
-                {:else}
-                  (mirror)
-                {/if}
-              </span>
-              <button
-                class="btn btn-xs btn-ghost warning-chip-action"
-                onclick={() => deleteControlRelation(relation.relationId)}
-              >
-                DELETE
-              </button>
-            </div>
-          {/each}
-        </div>
-      {/if}
-
-      {#if filteredSemanticSections.length > 0}
-        {#each filteredSemanticSections as section}
-          <div class="controls-head">
-            <div class="section-label">{section.label}</div>
-            {#if section.controls.length > 0}
-              <button
-                class="btn btn-xs btn-ghost"
-                onclick={() => toggleSection(section.sectionId, section.collapsed)}
-              >
-                {isSectionExpanded(section.sectionId, section.collapsed) ? 'HIDE' : 'SHOW'}
-              </button>
-            {/if}
-          </div>
-
-          {#if isSectionExpanded(section.sectionId, section.collapsed)}
-            <div class="param-list">
-              {#each section.controls as control}
-                {@const field = control.rawField}
-                {#if field}
-                  <ParamPanelControlField
-                    elementId={control.primitiveId}
-                    field={field}
-                    value={control.value}
-                    rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
-                    editable={control.editable}
-                    highlighted={highlightedParamKey === field.key}
-                    liveApply={$liveApply}
-                    semanticSource={control.source}
-                    showSemanticSource={shouldShowSemanticSource(control.source)}
-                    canEdit={isManualPrimitive(control)}
-                    onUpdate={(nextValue) => updateSemanticControl(control, nextValue)}
-                    onEdit={() => openEditPrimitiveComposer(control)}
-                    onPickImage={async () => {
-                      const file = await open({
-                        multiple: false,
-                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
-                      });
-                      const selected = firstSelectedPath(file);
-                      if (selected) updateSemanticControl(control, selected);
-                    }}
-                    onMouseEnter={() => setFocusedControl(control.primitiveId, field.key)}
-                    onMouseLeave={clearFocusedControl}
-                    onFocusIn={() => setFocusedControl(control.primitiveId, field.key)}
-                    onFocusOut={clearFocusedControl}
-                  />
-                {/if}
-              {/each}
-            </div>
-          {/if}
-        {/each}
       {:else}
-        <div class="no-params">
-          {selectedPart
-            ? 'No semantic controls are mapped to this part yet. Open RAW for fallback.'
-            : isSelectMode && (modelManifest?.selectionTargets?.length ?? 0) > 1
-              ? 'Multiple face targets found. Select one in viewport; fallback waits for explicit target.'
-              : 'No semantic controls match your search.'}
-        </div>
-      {/if}
-      {:else}
-      {#if filteredFields.length > 0 && focusedFields.length > 0}
-        <div class="focused-section">
-          <div class="controls-head">
-            <div class="section-label">{selectedPart ? `${selectedPart.label} RAW` : 'RAW PART'}</div>
-          </div>
-          <div class="param-list">
-            {#each focusedFields as field}
-              <ParamPanelControlField
-                elementId={field.key}
-                field={field}
-                value={effectiveLocalParams[field.key]}
-                rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
-                editable={!field.frozen}
-                frozen={field.frozen}
-                autoField={field._auto}
-                focused={true}
-                highlighted={highlightedParamKey === field.key}
-                cadTone={getCadHint(field).tone}
-                liveApply={$liveApply}
-                onDraftValue={(nextValue) => stageParamDraft(field.key, nextValue)}
-                onUpdate={(nextValue) => update(field.key, nextValue)}
-                onPickImage={async () => {
-                  const file = await open({
-                    multiple: false,
-                    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
-                  });
-                  const selected = firstSelectedPath(file);
-                  if (selected) update(field.key, selected);
-                }}
-                onMouseEnter={() => setFocusedControl(null, field.key)}
-                onMouseLeave={clearFocusedControl}
-                onFocusIn={() => setFocusedControl(null, field.key)}
-                onFocusOut={clearFocusedControl}
-              />
-            {/each}
-          </div>
-        </div>
-      {/if}
-
-      {#if filteredFields.length > 0 && remainingFields.length > 0}
-        {#if focusedFields.length > 0}
-          <div class="controls-head controls-head-secondary">
-            <div class="section-label">OTHER RAW</div>
-          </div>
-        {/if}
-        <div class="param-list">
-          {#each remainingFields as field}
-          <ParamPanelControlField
-            elementId={field.key}
-            field={field}
-            value={effectiveLocalParams[field.key]}
-            rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
-            editable={!field.frozen}
-            frozen={field.frozen}
-            autoField={field._auto}
-            highlighted={highlightedParamKey === field.key}
-            cadTone={getCadHint(field).tone}
-            liveApply={$liveApply}
-            onDraftValue={(nextValue) => stageParamDraft(field.key, nextValue)}
-            onUpdate={(nextValue) => update(field.key, nextValue)}
-            onPickImage={async () => {
-              const file = await open({
-                multiple: false,
-                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }]
-              });
-              const selected = firstSelectedPath(file);
-              if (selected) update(field.key, selected);
-            }}
-            onMouseEnter={() => setFocusedControl(null, field.key)}
-            onMouseLeave={clearFocusedControl}
-            onFocusIn={() => setFocusedControl(null, field.key)}
-            onFocusOut={clearFocusedControl}
-          />
-          {/each}
-        </div>
-      {:else if filteredFields.length === 0}
-        <div class="no-params">
-          {selectedPart
-            ? 'This part has no raw controls that match your search.'
-            : 'No raw controls match your search.'}
-        </div>
-      {/if}
+      <ParamPanelRawTab
+        {filteredFields}
+        {focusedFields}
+        {remainingFields}
+        {selectedPart}
+        parameters={effectiveLocalParams}
+        {highlightedParamKey}
+        liveApply={$liveApply}
+        getRangeProps={(field) => getRangeProps(field as RangeLikeField)}
+        getCadTone={(field) => getCadHint(field).tone}
+        onDraftValue={stageParamDraft}
+        onUpdate={update}
+        onPickImage={pickRawImage}
+        onSetFocusedControl={setFocusedControl}
+        onClearFocusedControl={clearFocusedControl}
+      />
       {/if}
     {/if}
   </div>
@@ -3746,121 +2588,10 @@
     scrollbar-gutter: stable;
   }
 
-  .panel-toolbar {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    border-bottom: 1px solid var(--bg-300);
-    padding-bottom: 10px;
-    margin-bottom: 4px;
-  }
-
-  .search-box {
-    position: relative;
-    width: 100%;
-  }
-
-  .search-input {
-    width: 100%;
-    min-height: 42px;
-    padding: 10px 36px 10px 12px;
-    background: var(--bg-100);
-    border: 1px solid var(--bg-300);
-    color: var(--text);
-    font-size: 0.86rem;
-    font-weight: 600;
-    line-height: 1.2;
-    outline: none;
-    transition:
-      border-color 0.2s,
-      background-color 0.2s;
-  }
-
-  .search-input:focus {
-    border-color: var(--primary);
-    background: color-mix(in srgb, var(--bg-100) 88%, var(--primary) 12%);
-  }
-
-  .panel-mode-tab-compact {
-    white-space: nowrap;
-  }
-
-  .clear-search {
-    position: absolute;
-    right: 10px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 0.95rem;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .clear-search:hover {
-    color: var(--text);
-  }
-
-  .panel-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .proposal-card {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    overflow: hidden;
-  }
-
-  .warning-stack,
-  .proposal-actions,
-  .proposal-list {
+  .warning-stack {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-  }
-
-  .proposal-head {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    align-items: flex-start;
-  }
-
-  .proposal-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .proposal-list {
-    flex-direction: column;
-  }
-
-  .warning-chip,
-  .proposal-status {
-    padding: 3px 6px;
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    color: var(--text-dim);
-    font-size: 0.58rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  .warning-chip,
-  .proposal-status-pending {
-    border-color: color-mix(in srgb, var(--primary) 45%, var(--bg-300));
-    color: var(--primary);
   }
 
   .warning-chip {
@@ -3872,106 +2603,10 @@
     font-weight: 500;
   }
 
-  .proposal-status-accepted {
-    border-color: color-mix(in srgb, var(--secondary) 45%, var(--bg-300));
-    color: var(--secondary);
-  }
-
-  .proposal-status-rejected {
-    border-color: color-mix(in srgb, var(--text-dim) 45%, var(--bg-300));
-    color: var(--text-dim);
-  }
-
-  .warning-chip-action {
-    flex-shrink: 0;
-  }
-
-  .proposal-card {
-    border: 1px solid var(--bg-300);
-    background: var(--bg-100);
-  }
-
-  .proposal-card-pending {
-    border-color: color-mix(in srgb, var(--primary) 35%, var(--bg-300));
-  }
-
-  .proposal-label-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .proposal-label {
-    color: var(--text);
-    font-size: 0.74rem;
-    font-weight: 700;
-  }
-
-  .proposal-confidence,
-  .proposal-meta {
-    color: var(--text-dim);
-    font-size: 0.64rem;
-  }
-
   .part-strip {
     display: flex;
     flex-direction: column;
     gap: 8px;
-  }
-
-  .context-strip-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .context-strip-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    min-width: 0;
-  }
-
-  .panel-mode-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    overflow: visible;
-    align-items: stretch;
-    min-width: 0;
-  }
-
-  .panel-mode-tab {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 100%;
-    padding: 5px 10px;
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    color: var(--text-dim);
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    line-height: 1.3;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .panel-mode-tab-active {
-    border-color: var(--secondary);
-    background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
-    color: var(--text);
-  }
-
-  .panel-code-btn {
-    margin-left: auto;
-    border-color: color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
-    color: var(--secondary);
   }
 
   .part-strip-list {
@@ -3980,150 +2615,7 @@
     gap: 6px;
   }
 
-  .view-composer {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 10px;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-200) 88%, var(--secondary) 12%);
-    overflow: hidden;
-  }
-
-  .composer-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 10px;
-  }
-
-  .litho-preview {
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    padding: 8px;
-    overflow: hidden;
-  }
-
-  .litho-preview__image {
-    display: block;
-    width: 100%;
-    max-height: 180px;
-    object-fit: contain;
-    border: 1px solid var(--primary);
-    background: var(--bg-100);
-  }
-
-  .composer-field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .composer-label {
-    color: var(--text-dim);
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-  }
-
-  .composer-input {
-    width: 100%;
-  }
-
-  .composer-inline-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    min-width: 0;
-  }
-
-  .composer-image-select {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
-  .composer-note {
-    color: var(--text-dim);
-    font-size: 0.68rem;
-    line-height: 1.4;
-  }
-
-  .binding-editor {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    overflow: hidden;
-  }
-
-  .binding-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1.5fr) repeat(4, minmax(0, 0.7fr));
-    gap: 8px;
-    align-items: center;
-  }
-
-  .binding-row__label {
-    color: var(--text);
-    font-size: 0.7rem;
-    font-weight: 700;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .binding-input {
-    min-width: 0;
-    padding: 6px 8px;
-    font-size: 0.7rem;
-  }
-
-  .composer-list {
-    display: grid;
-    gap: 8px;
-    max-height: 220px;
-    overflow: auto;
-    padding-right: 4px;
-  }
-
-  .primitive-picker {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 8px 10px;
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    cursor: pointer;
-  }
-
-  .primitive-picker__body {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-  }
-
-  .primitive-picker__label {
-    color: var(--text);
-    font-size: 0.78rem;
-    font-weight: 700;
-  }
-
-  .primitive-picker__meta {
-    color: var(--text-dim);
-    font-size: 0.64rem;
-    line-height: 1.35;
-  }
-
-  .composer-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  .part-chip,
-  .view-chip {
+  .part-chip {
     padding: 4px 8px;
     border: 1px solid var(--bg-300);
     background: var(--bg-200);
@@ -4139,15 +2631,7 @@
     text-align: left;
   }
 
-  .view-chip {
-    display: inline-flex;
-    align-items: flex-start;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .part-chip-active,
-  .view-chip-active {
+  .part-chip-active {
     border-color: var(--secondary);
     background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
     color: var(--text);
@@ -4157,7 +2641,6 @@
     opacity: 0.8;
   }
 
-  .selection-kicker,
   .section-label {
     color: var(--secondary);
     font-size: 0.58rem;
@@ -4166,829 +2649,4 @@
     text-transform: uppercase;
   }
 
-  .selection-name {
-    font-size: 0.82rem;
-    font-weight: 700;
-    color: var(--text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .focused-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    overflow: visible;
-  }
-
-  .controls-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .controls-head-secondary {
-    margin-top: 2px;
-  }
-
-  .field-action-btn {
-    flex-shrink: 0;
-  }
-
-  .live-apply-group {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .edit-toolbar-left {
-    display: flex;
-    gap: 4px;
-    align-items: center;
-  }
-
-  .apply-btn {
-    min-width: 50px;
-  }
-
-  .param-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
-    gap: 12px;
-    overflow: visible;
-  }
-
-  .param-field {
-    --cad-tone-color: var(--cad-accent);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    position: relative;
-    padding: 6px;
-    overflow: hidden;
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--bg-100) 76%, transparent) 0%,
-        color-mix(in srgb, var(--bg-200) 88%, #000 12%) 100%
-      );
-    border: 1px solid color-mix(in srgb, var(--bg-300) 82%, #000 18%);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 28%, transparent);
-    transition: all 0.2s;
-  }
-
-  .param-field.field-select {
-    overflow: visible;
-    z-index: 4;
-  }
-
-  .param-field.field-select:has(:global(.custom-select.is-open)) {
-    z-index: 12;
-  }
-
-  .param-field-focus {
-    border-color: color-mix(in srgb, var(--primary) 55%, var(--bg-300));
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--cad-tone-color) 10%, var(--bg-100)) 0%,
-        color-mix(in srgb, var(--primary) 12%, var(--bg-200)) 100%
-      );
-  }
-
-  .param-field:hover {
-    border-color: color-mix(in srgb, var(--cad-tone-color) 35%, var(--bg-300));
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--cad-tone-color) 8%, var(--bg-100)) 0%,
-        color-mix(in srgb, var(--bg-200) 82%, #000 18%) 100%
-      );
-  }
-
-  .field-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 8px;
-  }
-
-  .field-title {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    flex-wrap: wrap;
-  }
-
-  .semantic-source-badge {
-    padding: 1px 5px;
-    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
-    color: var(--primary);
-    font-family: var(--font-mono);
-    font-size: 0.52rem;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    flex-shrink: 0;
-  }
-
-  .param-label {
-    font-size: 0.72rem;
-    color: var(--primary);
-    text-transform: uppercase;
-    font-weight: bold;
-    white-space: normal;
-    overflow: hidden;
-    text-overflow: clip;
-    overflow-wrap: anywhere;
-    line-height: 1.25;
-    letter-spacing: 0.01em;
-  }
-
-  .frozen-badge {
-    font-size: 0.6rem;
-    cursor: help;
-  }
-
-  .range-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .cad-range {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-    gap: 7px;
-  }
-
-  .range-value {
-    font-size: 0.75rem;
-    color: var(--cad-tone-color);
-    font-weight: bold;
-    min-width: 36px;
-    text-align: right;
-  }
-
-  .cad-readout {
-    padding: 2px 6px;
-    border: 1px solid color-mix(in srgb, var(--cad-tone-color) 46%, var(--bg-300));
-    background: color-mix(in srgb, var(--cad-tone-color) 12%, var(--bg-100));
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 25%, transparent);
-  }
-
-  .param-input {
-    width: 100%;
-    padding: 4px 6px;
-    background: var(--bg-100);
-    border: 1px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 22%, transparent);
-  }
-
-  .param-input-compact {
-    width: 86px;
-    min-width: 86px;
-  }
-
-  .param-input:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, #000 22%, transparent),
-      0 0 0 1px color-mix(in srgb, var(--primary) 18%, transparent);
-  }
-
-  .field-control {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .checkbox-wrapper {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    width: 100%;
-    min-height: 42px;
-    padding: 8px 10px;
-    border: 1px solid color-mix(in srgb, var(--cad-tone-color) 28%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-100) 82%, #000 18%);
-    cursor: pointer;
-  }
-
-  .checkbox-wrapper-checked {
-    background: color-mix(in srgb, var(--cad-tone-color) 12%, var(--bg-100));
-  }
-
-  .checkbox-status {
-    font-size: 0.68rem;
-    color: var(--primary);
-    font-weight: bold;
-    letter-spacing: 0.06em;
-  }
-
-  .ui-checkbox {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 18px;
-    height: 18px;
-    border: 1px solid color-mix(in srgb, var(--cad-tone-color) 36%, var(--bg-300));
-    background: var(--bg-100);
-    display: inline-grid;
-    place-content: center;
-    cursor: pointer;
-    margin: 0;
-  }
-
-  .ui-checkbox::after {
-    content: '';
-    width: 10px;
-    height: 10px;
-    background: var(--cad-tone-color);
-    transform: scale(0);
-    transition: transform 0.12s ease-in-out;
-  }
-
-  .ui-checkbox:checked::after {
-    transform: scale(1);
-  }
-
-  .auto-field {
-    border-left: 0;
-  }
-
-  .param-field :global(.select-trigger) {
-    background: var(--bg-100);
-    border-color: color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    color: var(--text);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 22%, transparent);
-  }
-
-  .param-field :global(.custom-select.is-open .select-trigger) {
-    border-color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
-  }
-
-  .param-field :global(.select-arrow) {
-    color: var(--primary);
-  }
-
-  .param-field :global(.select-dropdown) {
-    background: var(--bg-100);
-    border-color: var(--primary);
-  }
-
-  .param-field :global(.select-option:hover) {
-    background: color-mix(in srgb, var(--primary) 16%, var(--bg-200));
-    color: var(--text);
-  }
-
-  .param-field :global(.select-option.is-selected) {
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
-    color: var(--primary);
-    border-left: 0;
-    padding-left: 12px;
-  }
-
-  .param-freezed {
-    opacity: 0.5;
-  }
-
-  .macro-ast-map-shell {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    overflow: hidden;
-    min-height: 0;
-  }
-
-  .macro-ast-shell-meta {
-    font-size: 0.6rem;
-    font-weight: 700;
-    letter-spacing: 0.16em;
-    color: var(--secondary);
-    text-transform: uppercase;
-  }
-
-  .macro-ast-map-viewport {
-    position: relative;
-    overflow: hidden;
-    height: clamp(420px, 58vh, 720px);
-    border: 1px solid color-mix(in srgb, var(--secondary) 40%, var(--bg-300));
-    background:
-      radial-gradient(color-mix(in srgb, var(--secondary) 16%, transparent) 1px, transparent 1px),
-      radial-gradient(circle at top right, color-mix(in srgb, var(--secondary) 10%, transparent), transparent 44%),
-      linear-gradient(180deg, color-mix(in srgb, var(--bg-100) 92%, var(--secondary) 8%), var(--bg-100));
-    background-size: 22px 22px, auto, auto;
-    padding: 0;
-    cursor: grab;
-    touch-action: none;
-  }
-
-  .macro-ast-map-viewport:active {
-    cursor: grabbing;
-  }
-
-  .macro-ast-camera {
-    position: absolute;
-    left: 0;
-    top: 0;
-    transform-origin: 0 0;
-    will-change: transform;
-  }
-
-  /* Semantic zoom: zoomed out, controls give way to dense value chips. */
-  .macro-ast-map-viewport[data-zoom-tier='far'] .macro-ast-node__overlay,
-  .macro-ast-map-viewport[data-zoom-tier='far'] .macro-ast-node__hint {
-    display: none;
-  }
-
-  .macro-ast-value-chip {
-    display: none;
-    position: relative;
-    z-index: 1;
-    margin-top: 2px;
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: var(--primary);
-    letter-spacing: 0.02em;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .macro-ast-map-viewport[data-zoom-tier='far'] .macro-ast-value-chip {
-    display: block;
-  }
-
-  .macro-ast-scene {
-    position: relative;
-    overflow: hidden;
-    min-height: 0;
-  }
-
-  .macro-ast-scene__svg {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  .macro-ast-connector {
-    fill: none;
-    stroke: color-mix(in srgb, var(--secondary) 48%, var(--primary) 10%);
-    stroke-width: 1.6;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    opacity: 0.68;
-    filter: drop-shadow(0 0 8px color-mix(in srgb, var(--secondary) 22%, transparent));
-  }
-
-  .macro-ast-split {
-    display: flex;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .macro-ast-split > .macro-ast-map-viewport {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .macro-ast-split :global(.macro-source-pane) {
-    width: 44%;
-    min-width: 320px;
-    height: clamp(420px, 58vh, 720px);
-  }
-
-  .macro-ast-insert-slot {
-    position: absolute;
-    z-index: 2;
-    display: flex;
-    flex-direction: column;
-    border: 1px dashed color-mix(in srgb, var(--secondary) 45%, transparent);
-    background: color-mix(in srgb, var(--bg-200) 40%, transparent);
-    transition: border-color 140ms ease, background 140ms ease;
-  }
-
-  .macro-ast-insert-slot:hover {
-    border-color: var(--primary);
-    background: color-mix(in srgb, var(--bg-200) 70%, var(--secondary) 8%);
-  }
-
-  .macro-ast-insert-slot-open {
-    border-style: solid;
-    border-color: var(--primary);
-    background: color-mix(in srgb, var(--bg-primary, #0b0e13) 92%, transparent);
-  }
-
-  .macro-ast-insert-trigger {
-    flex: 1;
-    background: transparent;
-    border: 0;
-    color: color-mix(in srgb, var(--text-dim) 85%, var(--secondary));
-    font-family: var(--font-mono);
-    font-size: 0.66rem;
-    font-weight: 800;
-    letter-spacing: 0.16em;
-    cursor: pointer;
-  }
-
-  .macro-ast-insert-trigger:hover {
-    color: var(--primary);
-  }
-
-  .macro-ast-minimap {
-    position: absolute;
-    right: 10px;
-    bottom: 10px;
-    z-index: 6;
-    border: 1px solid color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-primary, #0b0e13) 86%, transparent);
-    cursor: crosshair;
-    display: block;
-  }
-
-  .macro-ast-minimap rect.minimap-node {
-    fill: color-mix(in srgb, var(--secondary) 38%, var(--bg-300));
-    stroke: none;
-  }
-
-  .macro-ast-minimap rect.minimap-node-model {
-    fill: color-mix(in srgb, var(--primary) 45%, var(--bg-300));
-  }
-
-  .macro-ast-minimap rect.minimap-view {
-    fill: none;
-    stroke: var(--primary);
-    stroke-width: 1.2;
-  }
-
-  .macro-ast-node {
-    transition: box-shadow 140ms ease, border-color 140ms ease;
-  }
-
-  .macro-ast-node:hover {
-    border-color: color-mix(in srgb, var(--macro-variant-accent) 70%, var(--bg-300));
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--primary) 18%, transparent),
-      0 0 14px color-mix(in srgb, var(--macro-variant-accent) 22%, transparent);
-  }
-
-  .macro-ast-node-editor {
-    position: absolute;
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
-    z-index: 5;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 10px;
-    background: color-mix(in srgb, var(--bg-primary, #0b0e13) 92%, transparent);
-    border: 1px solid var(--primary);
-    overflow: hidden;
-  }
-
-  .macro-ast-node-editor__head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .macro-ast-node-editor__input {
-    width: 100%;
-    min-height: 110px;
-    resize: vertical;
-    background: transparent;
-    color: var(--text-primary, #e6e1d6);
-    border: 1px solid color-mix(in srgb, var(--secondary) 55%, transparent);
-    font-family: var(--font-mono, monospace);
-    font-size: 12px;
-    line-height: 1.45;
-    padding: 8px;
-  }
-
-  .macro-ast-node-editor__error {
-    color: var(--error, #e06c5a);
-    font-size: 11px;
-    white-space: pre-wrap;
-  }
-
-  .macro-ast-node-editor__actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .macro-ast-node {
-    --macro-variant-accent: var(--secondary);
-    position: absolute;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--macro-variant-accent) 30%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-200) 84%, var(--macro-variant-accent) 16%);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 12%, transparent);
-    padding: 8px 10px;
-    z-index: 1;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .macro-ast-node__shape {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    display: block;
-    pointer-events: none;
-    opacity: 0.88;
-    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--macro-variant-accent) 24%, transparent));
-  }
-
-  .macro-ast-node__shape path {
-    fill: color-mix(in srgb, var(--macro-variant-accent) 10%, var(--bg-200));
-    stroke: color-mix(in srgb, var(--macro-variant-accent) 70%, var(--bg-300));
-    stroke-width: 1.1;
-  }
-
-  .macro-ast-node-root {
-    --macro-variant-accent: var(--secondary);
-    background: color-mix(in srgb, var(--bg-200) 76%, var(--secondary) 24%);
-    border-color: color-mix(in srgb, var(--secondary) 55%, var(--bg-300));
-  }
-
-  .macro-ast-node-root {
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 12px;
-  }
-
-  .macro-ast-node-root .macro-ast-node__header {
-    flex: 1;
-  }
-
-  .macro-ast-node-param {
-    background: color-mix(in srgb, var(--bg-200) 92%, var(--secondary) 8%);
-    cursor: text;
-    padding: 5px 8px 5px 14px;
-  }
-
-  /* devtools-style: any editable scope region invites a text caret. */
-  .macro-ast-node-editable {
-    cursor: text;
-  }
-
-  /* Input port: a dot on the module's left edge instead of a nested block. */
-  .macro-ast-node-param::before {
-    content: '';
-    position: absolute;
-    left: -1px;
-    top: calc(50% - 5px);
-    width: 9px;
-    height: 9px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--primary) 70%, var(--bg-300));
-    background: color-mix(in srgb, var(--secondary) 45%, var(--bg-200));
-    box-shadow: 0 0 8px color-mix(in srgb, var(--secondary) 30%, transparent);
-    z-index: 2;
-  }
-
-  .macro-ast-node-param:focus-within {
-    outline: 1px solid color-mix(in srgb, var(--primary) 55%, transparent);
-    outline-offset: 1px;
-  }
-
-  .macro-ast-node[data-syntax-variant='number'],
-  .macro-ast-node[data-syntax-variant='range'] {
-    --macro-variant-accent: var(--cad-axis-x);
-  }
-
-  .macro-ast-node[data-syntax-variant='checkbox'] {
-    --macro-variant-accent: var(--cad-axis-y);
-  }
-
-  .macro-ast-node[data-syntax-variant='select'] {
-    --macro-variant-accent: var(--cad-axis-z);
-  }
-
-  .macro-ast-node[data-syntax-variant='image'] {
-    --macro-variant-accent: var(--primary);
-  }
-
-  .macro-ast-node[data-syntax-variant='solid'],
-  .macro-ast-node[data-syntax-variant='shell'],
-  .macro-ast-node[data-syntax-variant='feature'],
-  .macro-ast-node[data-syntax-variant='assembly'],
-  .macro-ast-node[data-syntax-variant='group'] {
-    --macro-variant-accent: var(--secondary);
-  }
-
-  .macro-ast-node__header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 8px;
-    min-width: 0;
-    position: relative;
-    z-index: 1;
-  }
-
-  .macro-ast-node__header-param {
-    align-items: center;
-  }
-
-  .macro-ast-syntax-badge {
-    flex-shrink: 0;
-    padding: 1px 6px;
-    border: 1px solid color-mix(in srgb, var(--macro-variant-accent) 42%, var(--bg-400));
-    background: color-mix(in srgb, var(--macro-variant-accent) 14%, var(--bg-200));
-    color: var(--macro-variant-accent);
-    font-family: var(--font-mono);
-    font-size: 0.52rem;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .macro-ast-node__label {
-    font-size: 0.72rem;
-    font-weight: 700;
-    color: var(--text);
-    letter-spacing: 0.04em;
-  }
-
-  .macro-ast-node__hint {
-    margin-top: 2px;
-    font-size: 0.52rem;
-    font-weight: 600;
-    letter-spacing: 0.1em;
-    color: color-mix(in srgb, var(--text-dim) 70%, transparent);
-    text-transform: uppercase;
-    position: relative;
-    z-index: 1;
-  }
-
-  .macro-ast-node-root .macro-ast-node__hint {
-    margin-top: 0;
-  }
-
-  .macro-ast-node__overlay {
-    position: relative;
-    z-index: 1;
-    margin-top: 2px;
-  }
-
-  .macro-ast-control-anchor {
-    position: absolute;
-    right: 10px;
-    top: calc(50% - 5px);
-    width: 10px;
-    height: 10px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--primary) 65%, var(--bg-300));
-    background: color-mix(in srgb, var(--secondary) 40%, var(--primary) 35%);
-    box-shadow: 0 0 10px color-mix(in srgb, var(--secondary) 35%, transparent);
-    z-index: 2;
-    pointer-events: none;
-  }
-
-  .macro-ast-node :global(.param-field) {
-    position: relative;
-    z-index: 1;
-  }
-
-  .no-params {
-    font-size: 0.7rem;
-    color: var(--text-dim);
-    font-style: italic;
-    padding: 20px;
-    text-align: center;
-  }
-
-  /* Edit mode */
-  .edit-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .edit-field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px;
-    background: var(--bg-200);
-    border: 1px solid var(--bg-300);
-  }
-
-  .edit-row {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-  }
-
-  .edit-input {
-    flex: 1;
-    padding: 4px 6px;
-    background: var(--bg);
-    border: 1px solid var(--bg-300);
-    color: var(--text);
-    font-size: 0.7rem;
-  }
-
-  .edit-input:focus, .edit-input-sm:focus {
-    border-color: var(--primary);
-    outline: none;
-  }
-
-  .flex-2 { flex: 2; }
-
-  .edit-select-wrap {
-    width: 132px;
-  }
-
-  .edit-bounds {
-    padding-left: 4px;
-  }
-
-  .edit-input-sm {
-    width: 60px;
-    padding: 3px 5px;
-    background: var(--bg);
-    border: 1px solid var(--bg-300);
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-    font-size: 0.65rem;
-  }
-
-  .freeze-toggle {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    cursor: pointer;
-    font-size: 0.8rem;
-    user-select: none;
-  }
-
-  .freeze-toggle input {
-    margin: 0;
-  }
-
-  .edit-info {
-    font-size: 0.6rem;
-    color: var(--text-dim);
-    padding-left: 4px;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .edit-select-options {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding-left: 4px;
-  }
-
-  .edit-select-option-row {
-    align-items: center;
-  }
-
-  .info-tag {
-    background: var(--bg-300);
-    padding: 1px 4px;
-    border-radius: 2px;
-  }
-
-  .add-field-btn {
-    align-self: flex-start;
-  }
-
-  .btn-xs {
-    padding: 2px 6px;
-    font-size: 0.6rem;
-  }
-
-  @keyframes highlightPulse {
-    0% { background-color: transparent; }
-    50% { background-color: var(--primary); color: var(--bg-100); }
-    100% { background-color: transparent; }
-  }
-  .highlight-pulse {
-    animation: highlightPulse 2s ease-in-out;
-  }
 </style>
