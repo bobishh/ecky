@@ -27,6 +27,7 @@ pub mod db;
 pub mod displacement;
 pub mod ecky_cad_host;
 pub mod ecky_core_ir;
+pub mod agent_prompt;
 pub mod ecky_deterministic;
 pub mod ecky_ir;
 pub mod ecky_ir_patterns;
