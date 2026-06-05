@@ -1119,6 +1119,7 @@ mod tests {
             default_geometry_backend: crate::models::GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
+            projects_root: None,
         }
     }
 

@@ -416,14 +416,27 @@ fn normalize_node_for_direct_occt(
                     CoreOperation::Custom(name) if name == "hole" => {
                         Err(AppError::validation(typed_hole_error(&normalized_keywords)))
                     }
-                    CoreOperation::Custom(name) if name == "helical-ridge" => Ok(rebuild_node(
-                        node,
-                        CoreNodeKind::Call {
-                            op: op.clone(),
-                            args: normalized_args,
-                            keywords: normalized_keywords,
-                        },
-                    )),
+                    CoreOperation::Custom(name)
+                        if name == "helical-ridge"
+                            || name == "thread"
+                            || name == "rib"
+                            || name == "groove"
+                            || name == "regular-polygon"
+                            || name == "trapezoid"
+                            || name == "slot-center-to-center"
+                            || name == "slot_center_to_center"
+                            || name == "slot-center-point"
+                            || name == "slot_center_point" =>
+                    {
+                        Ok(rebuild_node(
+                            node,
+                            CoreNodeKind::Call {
+                                op: op.clone(),
+                                args: normalized_args,
+                                keywords: normalized_keywords,
+                            },
+                        ))
+                    }
                     CoreOperation::Custom(name) if is_scalar_eval_custom_op(name) => {
                         Ok(rebuild_node(
                             node,

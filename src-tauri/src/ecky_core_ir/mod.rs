@@ -507,7 +507,12 @@ pub enum CorePrimitive {
     Sphere,
     Cylinder,
     Cone,
+    Torus,
+    Wedge,
     Circle,
+    Ellipse,
+    Slot,
+    SlotArc,
     Rectangle,
     RoundedRectangle,
     RoundedPolygon,
@@ -548,6 +553,7 @@ pub enum CoreSurfaceOp {
     Chamfer,
     Taper,
     Twist,
+    Draft,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -662,9 +668,78 @@ impl CoreNode {
     }
 }
 
+/// Vertices of a regular polygon, circumradius `radius`, first vertex at
+/// `rotation_deg` measured CCW from +X. Shared by every backend lowering and the
+/// native planner so `regular-polygon` is geometrically identical everywhere
+/// (parity by construction). Open ring — callers close it as needed.
+pub fn regular_polygon_vertices(sides: u32, radius: f64, rotation_deg: f64) -> Vec<[f64; 2]> {
+    let rotation = rotation_deg.to_radians();
+    (0..sides)
+        .map(|i| {
+            let angle = rotation + std::f64::consts::TAU * (i as f64) / (sides as f64);
+            [radius * angle.cos(), radius * angle.sin()]
+        })
+        .collect()
+}
+
+/// Vertices of a trapezoid centered at the origin: `bottom` edge at `y = -height/2`,
+/// `top` edge at `y = +height/2`, each centered on x; `skew` shifts the top edge
+/// along +x. Shared by every backend lowering and the native planner so `trapezoid`
+/// is geometrically identical everywhere (parity by construction). CCW order:
+/// bottom-left, bottom-right, top-right, top-left. Open ring — callers close it.
+pub fn trapezoid_vertices(bottom: f64, top: f64, height: f64, skew: f64) -> Vec<[f64; 2]> {
+    let half_h = height / 2.0;
+    vec![
+        [-bottom / 2.0, -half_h],
+        [bottom / 2.0, -half_h],
+        [top / 2.0 + skew, half_h],
+        [-top / 2.0 + skew, half_h],
+    ]
+}
+
+/// Decode an ISO metric coarse-pitch thread designation (e.g. `"M6"`) into the
+/// parametric thread core `(radius, pitch, depth)` used by the `thread` op. The
+/// crest (major) diameter is the nominal `D`; external thread depth uses the ISO
+/// height of engagement `H1 = 0.6134 * P`, and the path/core radius is
+/// `D/2 - depth` so the ridge crest lands at the nominal major diameter. Shared by
+/// every backend so an ISO designation decodes to identical geometry. Returns
+/// `None` for unknown designations.
+pub fn iso_metric_thread_core(designation: &str) -> Option<(f64, f64, f64)> {
+    // (designation, nominal major diameter D, coarse pitch P)
+    const TABLE: &[(&str, f64, f64)] = &[
+        ("M2", 2.0, 0.4),
+        ("M2.5", 2.5, 0.45),
+        ("M3", 3.0, 0.5),
+        ("M4", 4.0, 0.7),
+        ("M5", 5.0, 0.8),
+        ("M6", 6.0, 1.0),
+        ("M8", 8.0, 1.25),
+        ("M10", 10.0, 1.5),
+        ("M12", 12.0, 1.75),
+        ("M16", 16.0, 2.0),
+        ("M20", 20.0, 2.5),
+        ("M24", 24.0, 3.0),
+    ];
+    let key = designation.trim().to_ascii_uppercase();
+    let (_, major, pitch) = TABLE.iter().find(|(name, _, _)| *name == key)?;
+    let depth = pitch * 0.6134;
+    let radius = major / 2.0 - depth;
+    Some((radius, *pitch, depth))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso_metric_thread_core_decodes_known_and_rejects_unknown() {
+        let (r, p, d) = iso_metric_thread_core("M6").expect("M6");
+        assert_eq!(p, 1.0);
+        assert!((d - 0.6134).abs() < 1e-9);
+        assert!((r - (3.0 - 0.6134)).abs() < 1e-9);
+        assert!(iso_metric_thread_core("m6").is_some(), "case-insensitive");
+        assert!(iso_metric_thread_core("M7").is_none(), "unknown designation");
+    }
 
     #[test]
     fn program_clones_cleanly() {

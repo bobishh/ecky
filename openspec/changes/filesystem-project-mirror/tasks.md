@@ -22,7 +22,13 @@ Write scope: new `src-tauri/src/project_mirror.rs`, `src-tauri/src/lib.rs`
 - [x] 1.3 Status classification: missing / clean / fileChanged /
   threadAdvanced / conflict, pure function over (file digest, manifest,
   thread head id).
-- [ ] 1.4 `projectsRoot` config field with `<app_data>/projects` default.
+- [x] 1.4 `projectsRoot` config field with `<app_data>/projects` default.
+  (Added `Config.projects_root: Option<String>` (camelCase `projectsRoot`,
+  serde default None); `projects_root()` honors a non-blank override and
+  otherwise falls back to `<app_data>/projects`; threaded through
+  `project_dir`/`folder_status`/`list_project_slugs`/`export_project` and all
+  handlers, the watcher, and `open_project_in_editor`. BDD:
+  `projects_root_honors_config_override_else_defaults`.)
 
 ## 2. T2 - Apply Flow (MCP handlers)
 

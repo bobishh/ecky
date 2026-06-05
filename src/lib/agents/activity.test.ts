@@ -295,3 +295,24 @@ test('resolveGenieBubblePresentation keeps prompt priority over preview repair s
   assert.equal(bubble.badge, null);
   assert.equal(bubble.text, 'Need tolerance target before I rerun the preview.');
 });
+
+test('resolveGenieBubblePresentation surfaces session error text in the bubble', () => {
+  const bubble = resolveGenieBubblePresentation({
+    sessionError: 'Render Error: mock render exploded',
+  });
+
+  assert.equal(bubble.source, 'sessionError');
+  assert.equal(bubble.text, 'Render Error: mock render exploded');
+});
+
+test('resolveGenieBubblePresentation prioritizes session error over other sources', () => {
+  const bubble = resolveGenieBubblePresentation({
+    sessionError: 'Export Error: disk full',
+    assistantBubble: 'Here is your part.',
+    cookingPhrase: 'Thinking…',
+    threadError: 'Agent Queue Error',
+  });
+
+  assert.equal(bubble.source, 'sessionError');
+  assert.equal(bubble.text, 'Export Error: disk full');
+});

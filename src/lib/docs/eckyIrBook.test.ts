@@ -18,7 +18,10 @@ test('buildEckyIrBook assembles source docs and complex model walkthrough into b
 
   assert.equal(book.title, 'Ecky IR Field Guide');
   assert.match(book.html, /Table of Contents/i);
-  assert.equal(book.chapters[0]?.title, 'First Solid: Ball on a Base');
+  assert.equal(book.chapters[0]?.title, 'How Ecky Thinks');
+  assert.ok(book.chapters.some((chapter) => chapter.title === 'First Solid: Ball on a Base'));
+  assert.match(book.html, /lowers to a finite Core IR/i);
+  assert.match(book.html, /native OCCT kernel/i);
   assert.ok(book.chapters.some((chapter) => chapter.title === 'Final Model: Integrated Film Adapter Open Helicoid v9'));
   assert.ok(book.chapters.some((chapter) => chapter.title === 'Appendix: Language Reference'));
   assert.match(book.html, /Sketch to Solid: Plate from a Profile/);
@@ -61,6 +64,18 @@ test('buildEckyIrBook assembles source docs and complex model walkthrough into b
   assert.match(book.html, /Tag any fit-critical selector\./);
   assert.match(book.html, /:created-by pocket/);
   assert.match(book.html, /limits face candidates to the cavity created from <code>pocket<\/code>/);
+  assert.match(book.html, /resolves only on the native backend/i);
+  assert.ok(book.chapters.some((chapter) => chapter.title === 'Components and Reuse: Lift a Proven Part'));
+  assert.match(book.html, /Closedness is the whole contract/i);
+  assert.match(book.html, /Proof travels with the part/i);
+  assert.match(book.html, /component_extract/);
+  assert.ok(book.chapters.some((chapter) => chapter.title === 'Projects as Folders: Edit Anywhere, Stay Canonical'));
+  assert.match(book.html, /Two-tick settle/i);
+  assert.match(book.html, /the folder is a mirror, not a second database/i);
+  assert.match(book.html, /lengths are millimeters, angles are degrees/i);
+  assert.match(book.html, /Ecky does not police dimensions/i);
+  assert.match(book.html, /Every model is a tree/i);
+  assert.match(book.html, /booleans rebuild topology/i);
   assert.doesNotMatch(book.html, /render-source/);
   assert.ok(book.assets.length > 0);
   assert.match(book.html, /assets\/01-first-solid-01\.png/);

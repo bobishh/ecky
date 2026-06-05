@@ -1,60 +1,99 @@
 # Ecky CAD
 
-Prompt-driven CAD iterator using LLMs to generate and execute FreeCAD Python macros.
+**Describe a part in words. Get an exact, editable, manufacturable solid — not a triangle blob.**
 
-<img width="1520" height="1008" alt="Screenshot 2026-03-05 at 23 25 54" src="https://github.com/user-attachments/assets/7476e9ac-bd47-4d8c-b8b5-148cdcfa95e6" />
+Ecky is a desktop CAD tool where you talk to an LLM and it builds real geometry. Instead of emitting a one-shot mesh or an opaque script, the model produces **Ecky IR** — a small, readable, verifiable language that compiles to an exact B-rep solid on a native OCCT kernel. You can read what the AI wrote, edit it by hand, fork it, re-render it, and trust that the same source always builds the same part.
 
-## Prerequisites
+## Why Ecky is different
 
-- **FreeCAD:** `freecadcmd` must be installed and accessible.
-- **Python:** 3.10+ (used by FreeCAD and for the runner script).
-- **Node.js:** For the Tauri/Svelte frontend.
-- **Rust:** For the Tauri backend.
+Most "AI CAD" tools hand the model a Python API or a mesh generator and hope for the best. The output is hard to read, impossible to diff, and breaks the moment you tweak it. Ecky puts a **finite intermediate language** between the LLM and the kernel:
 
-## Installation
+- **Readable surface.** An `.ecky` file is parenthesized Scheme — `(model (part ...))`. Friendly to read, friendly to edit, friendly to diff in git.
+- **Finite Core IR.** The surface lowers to a small, fixed vocabulary of operations: primitives, booleans, selectors, placements, repeats. The kernel never sees arbitrary code — only this closed set. That's what makes a model reproducible, verifiable, and portable.
+- **Exact B-rep output.** The default backend is a native OCCT kernel: real faces and edges with stable identities you can select and tag — not a triangle soup. **build123d** and **FreeCAD** are supported as follower backends for cross-checking and import.
 
-1. Clone the repository and `cd` into it.
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Configure the application via the in-app settings (⚙️ icon).
+The payoff: the AI's output is something a human can actually own.
 
-## Execution
+## What it looks like
 
-### Development
+The smallest model that renders — a ball on a base:
 
-Run the Tauri application in development mode:
-```bash
-npm run tauri dev
+```scheme
+(model
+  (part marker
+    (union
+      (box 28 28 4)
+      (translate 0 0 10
+        (sphere 10)))))
 ```
 
-### Headless Engine
+`model` is the root. `part` gives the geometry a stable id. `box` is the base, `translate` lifts the `sphere` so it sits on top, and `union` fuses them into one solid. Everything else in the language is this same tree with more branches — parameters, sketches, fillets, shells, selectors, repeats, and reusable components.
 
-The backend executes Python macros in a headless FreeCAD environment. It injects a global `params` dictionary into the macro scope based on the UI specification returned by the LLM.
+New to the language? Read the [**Ecky IR Field Guide**](docs/books/ecky-ir/index.md) — it builds up real models chapter by chapter.
 
 ## Features
 
-- **Multi-version History:** Persistence via SQLite.
-- **Visual Context:** Current viewport screenshots are sent to the LLM for visual feedback during iterations.
-- **Design Forking:** Start new threads from existing designs to mutate geometry.
-- **Manual Commits:** Edit generated Python code directly and commit as new versions.
-- **BRep Modeling:** Focuses on OCCT/Part operations for manifold output (customizable via system prompt).
+- **Exact modeling, not meshes.** Native OCCT B-rep kernel with selectable faces/edges; build123d and FreeCAD as interop backends.
+- **Readable, diffable source.** Scheme-surface `.ecky` files that lower to a finite Core IR.
+- **Multi-version history.** Every render is versioned and persisted in SQLite.
+- **Visual feedback loop.** Viewport screenshots are fed back to the LLM so it can see what it built and correct course.
+- **Design forking.** Branch a new thread off any existing design to mutate geometry without losing the original.
+- **Manual commits.** Edit the generated IR directly and commit it as a new version.
+- **Pluggable LLMs.** Works with Gemini, OpenAI-compatible providers, and local Ollama models.
+- **Agent-native (MCP).** A built-in MCP server lets external agents inspect, validate, preview, and commit models through a typed protocol.
 
-## Contributor MCP CAD Workflow
+## Getting started
 
-For CAD model updates, use MCP-only state mutations:
+### Prerequisites
+
+- **Node.js** and **Rust** — for the Tauri/Svelte app.
+- **Python 3.10+** — used by the interop backends and runtime tooling.
+- **FreeCAD** (optional) — only needed for the FreeCAD interop backend; `freecadcmd` must be on your `PATH`.
+
+The native OCCT kernel and build123d/speech runtimes are built locally by the prepare scripts below — you don't need a system FreeCAD for the default backend.
+
+### Install and run
+
+```bash
+# 1. Clone, then install JS dependencies
+npm install
+
+# 2. Build the native CAD runtimes (OCCT kernel, build123d, speech)
+npm run runtimes:prepare
+
+# 3. Launch the desktop app in dev mode
+npm run tauri dev
+```
+
+Then open the in-app settings (⚙️) to pick an LLM provider and add your API key. Start typing what you want to build.
+
+> Want just the web frontend without the desktop shell? `npm run dev` runs the Vite frontend and the Node server side by side.
+
+## For agents: the MCP authoring loop
+
+Ecky exposes a local MCP server so AI agents can drive the modeler safely. **Never write `history.sqlite` directly** — all state changes flow through MCP. Follow `inspect → validate → preview → commit`:
 
 1. `thread_borrow` (or `thread_create` for new work).
-2. `macro_preview_render` with `.ecky` source.
-3. Verify `artifactDigest` in the preview response.
+2. `macro_preview_render` with your `.ecky` source.
+3. Verify the `artifactDigest` in the preview response.
 4. `commit_preview_version` to persist the draft.
-5. Record returned `threadId`, `messageId`, `modelId`, and artifact digest in change notes.
+5. Record the returned `threadId`, `messageId`, `modelId`, and artifact digest in your change notes.
 
-Do not write `history.sqlite` directly from scripts or agents.
-
-Smoke command:
+Smoke-test the full preview→commit path:
 
 ```bash
 npm run mcp:smoke -- <thread-id> <path-to-model.ecky> [mcp-url]
 ```
+
+## Development
+
+Ecky follows a BDD dual-loop workflow — see [AGENTS.md](AGENTS.md) for the full protocol. Key commands:
+
+```bash
+npm run test:unit      # Svelte/TS unit tests
+npm run test:e2e       # Playwright end-to-end tests
+npm run typecheck      # svelte-check + tsc
+cd src-tauri && cargo test   # Rust backend tests
+```
+
+The Rust backend owns the Tauri boundary: frontend payloads are `camelCase`, backend structs are `snake_case`, and the contract layer translates between them.

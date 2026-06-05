@@ -195,6 +195,8 @@ pub fn emit_plan_export_source_with_params(
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
+#include <BRepPrimAPI_MakeWedge.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRep_Builder.hxx>
@@ -203,6 +205,8 @@ pub fn emit_plan_export_source_with_params(
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepGProp_Face.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepOffset_Mode.hxx>
 #include <BRep_Tool.hxx>
@@ -240,6 +244,7 @@ pub fn emit_plan_export_source_with_params(
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
 #include <gp_Dir.hxx>
 #include <gp_GTrsf.hxx>
 #include <gp_Pnt2d.hxx>
@@ -722,6 +727,8 @@ fn emit_command(
                 | OcctOp::Sphere
                 | OcctOp::Cylinder
                 | OcctOp::Cone
+                | OcctOp::Torus
+                | OcctOp::Wedge
                 | OcctOp::Profile
                 | OcctOp::Plane
                 | OcctOp::Location
@@ -731,6 +738,7 @@ fn emit_command(
                 | OcctOp::Fillet
                 | OcctOp::Chamfer
                 | OcctOp::Shell
+                | OcctOp::Draft
                 | OcctOp::Bspline
         )
     {
@@ -763,10 +771,59 @@ fn emit_command(
                 args.align,
             );
         }
+        OcctOp::Torus => {
+            let args = torus_args(&command.args, &command.keywords)?;
+            emit_torus_operation(body, &var, args.major, args.minor, args.align);
+        }
         OcctOp::Circle => {
             let [radius] = numeric_args(&command.args)?;
             body.push_str(&format!(
                 "    gp_Circ {var}_circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), {radius});\n    TopoDS_Wire {var}_wire = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge({var}_circle).Edge()).Wire();\n    TopoDS_Shape {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n"
+            ));
+        }
+        OcctOp::Wedge => {
+            let args = wedge_args(&command.args, &command.keywords)?;
+            emit_wedge_operation(body, &var, args.dims, args.align);
+        }
+        OcctOp::Slot => {
+            let [length, width] = numeric_args(&command.args)?;
+            let r = width / 2.0;
+            let half = (length - width) / 2.0;
+            body.push_str(&format!(
+                "    BRepBuilderAPI_MakeWire {var}_wire_builder;\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({nh}, {nr}, 0), gp_Pnt({half}, {nr}, 0)).Edge());\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({half}, {nr}, 0), gp_Pnt({hr}, 0, 0), gp_Pnt({half}, {r}, 0)).Value()).Edge());\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt({half}, {r}, 0), gp_Pnt({nh}, {r}, 0)).Edge());\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({nh}, {r}, 0), gp_Pnt({nhr}, 0, 0), gp_Pnt({nh}, {nr}, 0)).Value()).Edge());\n    TopoDS_Wire {var}_wire = {var}_wire_builder.Wire();\n    TopoDS_Shape {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n",
+                nh = -half,
+                nr = -r,
+                hr = half + r,
+                nhr = -half - r,
+            ));
+        }
+        OcctOp::SlotArc => {
+            let [radius, start_deg, end_deg, width] = numeric_args(&command.args)?;
+            let r = width / 2.0;
+            let ro = radius + r;
+            let ri = radius - r;
+            let a0 = start_deg.to_radians();
+            let a1 = end_deg.to_radians();
+            let am = (a0 + a1) / 2.0;
+            let pt = |rad: f64, ang: f64| (rad * ang.cos(), rad * ang.sin());
+            let (ox0, oy0) = pt(ro, a0);
+            let (oxm, oym) = pt(ro, am);
+            let (ox1, oy1) = pt(ro, a1);
+            let (ix0, iy0) = pt(ri, a0);
+            let (ixm, iym) = pt(ri, am);
+            let (ix1, iy1) = pt(ri, a1);
+            let cap1x = radius * a1.cos() - r * a1.sin();
+            let cap1y = radius * a1.sin() + r * a1.cos();
+            let cap0x = radius * a0.cos() + r * a0.sin();
+            let cap0y = radius * a0.sin() - r * a0.cos();
+            body.push_str(&format!(
+                "    BRepBuilderAPI_MakeWire {var}_wire_builder;\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({ox0}, {oy0}, 0), gp_Pnt({oxm}, {oym}, 0), gp_Pnt({ox1}, {oy1}, 0)).Value()).Edge());\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({ox1}, {oy1}, 0), gp_Pnt({cap1x}, {cap1y}, 0), gp_Pnt({ix1}, {iy1}, 0)).Value()).Edge());\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({ix1}, {iy1}, 0), gp_Pnt({ixm}, {iym}, 0), gp_Pnt({ix0}, {iy0}, 0)).Value()).Edge());\n    {var}_wire_builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt({ix0}, {iy0}, 0), gp_Pnt({cap0x}, {cap0y}, 0), gp_Pnt({ox0}, {oy0}, 0)).Value()).Edge());\n    TopoDS_Wire {var}_wire = {var}_wire_builder.Wire();\n    TopoDS_Shape {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n"
+            ));
+        }
+        OcctOp::Ellipse => {
+            let [rx, ry] = numeric_args(&command.args)?;
+            body.push_str(&format!(
+                "    gp_Ax2 {var}_axes = (static_cast<double>({rx}) >= static_cast<double>({ry})) ? gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)) : gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(0, 1, 0));\n    gp_Elips {var}_ellipse({var}_axes, std::max(static_cast<double>({rx}), static_cast<double>({ry})), std::min(static_cast<double>({rx}), static_cast<double>({ry})));\n    TopoDS_Wire {var}_wire = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge({var}_ellipse).Edge()).Wire();\n    TopoDS_Shape {var} = BRepBuilderAPI_MakeFace({var}_wire).Shape();\n"
             ));
         }
         OcctOp::Rectangle => {
@@ -847,6 +904,14 @@ fn emit_command(
         OcctOp::Taper => {
             let (height, scale_x, scale_y, profile) = taper_args(&command.args)?;
             emit_taper_operation(body, &var, height, scale_x, scale_y, slot_var(profile));
+        }
+        OcctOp::Draft => {
+            let angle_radians = numeric_arg(&command.args, 0)?.to_radians();
+            let input = ref_arg(&command.args, 1)?;
+            let neutral_z =
+                optional_numeric_keyword(&command.keywords, &["neutral-z", "neutral_z"])
+                    .unwrap_or(0.0);
+            emit_draft_operation(body, &var, slot_var(input), angle_radians, neutral_z);
         }
         OcctOp::Path => {
             let points = point3_sequence_args(&command.args)?;
@@ -944,6 +1009,7 @@ fn emit_command(
             let radius = positive_radius_arg(&command.args, 0, "fillet")?;
             let input = ref_arg(&command.args, 1)?;
             let selector = edge_selector(&command.keywords, "fillet")?;
+            let to_radius = optional_numeric_keyword(&command.keywords, &["to-radius", "to_radius"]);
             emit_edge_radius_operation(
                 body,
                 &var,
@@ -951,6 +1017,7 @@ fn emit_command(
                 "BRepFilletAPI_MakeFillet",
                 slot_var(input),
                 radius,
+                to_radius,
                 part_key,
                 selector.as_ref(),
             );
@@ -966,6 +1033,7 @@ fn emit_command(
                 "BRepFilletAPI_MakeChamfer",
                 slot_var(input),
                 distance,
+                None,
                 part_key,
                 selector.as_ref(),
             );
@@ -1254,6 +1322,17 @@ fn selector_created_by_slot_index(
     Ok(created_by_slot_index)
 }
 
+fn optional_numeric_keyword(keywords: &[OcctKeyword], names: &[&str]) -> Option<f64> {
+    keywords.iter().find_map(|keyword| {
+        if names.contains(&keyword.name.as_str()) {
+            if let OcctArg::Number(value) = keyword.source_arg() {
+                return Some(*value);
+            }
+        }
+        None
+    })
+}
+
 fn selector_keyword<'a>(
     keywords: &'a [OcctKeyword],
     op_name: &str,
@@ -1270,6 +1349,8 @@ fn selector_keyword<'a>(
                 }
             }
             "created-by" => {}
+            // Tapered fillet radius rides alongside the edge selector.
+            "to-radius" | "to_radius" => {}
             other => {
                 return Err(AppError::validation(format!(
                     "Direct OCCT executor `{op_name}` does not support keyword `:{other}`.",
@@ -1571,6 +1652,19 @@ struct ConeArgs {
     align: [AxisAlign; 3],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TorusArgs {
+    major: f64,
+    minor: f64,
+    align: [AxisAlign; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WedgeArgs {
+    dims: [f64; 7],
+    align: [AxisAlign; 3],
+}
+
 fn box_args(args: &[OcctArg], keywords: &[super::direct_occt::OcctKeyword]) -> AppResult<BoxArgs> {
     let [width, depth, height] = numeric_args(args)?;
     let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Min];
@@ -1629,6 +1723,30 @@ fn cone_args(
         height,
         align,
     })
+}
+
+fn torus_args(
+    args: &[OcctArg],
+    keywords: &[super::direct_occt::OcctKeyword],
+) -> AppResult<TorusArgs> {
+    let [major, minor] = numeric_prefix_args::<2>(args)?;
+    let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Center];
+    apply_align_keywords("torus", keywords, &mut align)?;
+    Ok(TorusArgs {
+        major,
+        minor,
+        align,
+    })
+}
+
+fn wedge_args(
+    args: &[OcctArg],
+    keywords: &[super::direct_occt::OcctKeyword],
+) -> AppResult<WedgeArgs> {
+    let dims = numeric_prefix_args::<7>(args)?;
+    let mut align = [AxisAlign::Center, AxisAlign::Center, AxisAlign::Center];
+    apply_align_keywords("wedge", keywords, &mut align)?;
+    Ok(WedgeArgs { dims, align })
 }
 
 fn apply_align_keywords(
@@ -2230,9 +2348,16 @@ fn emit_edge_radius_operation(
     builder_type: &str,
     input_var: String,
     radius: f64,
+    to_radius: Option<f64>,
     part_key: &str,
     selector: Option<&EdgeSelector>,
 ) {
+    // Tapered (variable-radius) fillet uses OCCT's two-radius `Add(r1, r2, edge)`;
+    // uniform stays `Add(r, edge)`.
+    let radius_args = match to_radius {
+        Some(r2) => format!("{radius}, {r2}"),
+        None => format!("{radius}"),
+    };
     if let Some(EdgeSelector {
         kind: EdgeSelectorKind::TargetIds(target_ids),
         created_by_slot_index,
@@ -2267,7 +2392,7 @@ fn emit_edge_radius_operation(
             )
         };
         body.push_str(&format!(
-            "    {builder_type} {var}_{label}({input_var});\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<std::string> {var}_edge_target_ids;\n    std::vector<std::string> {var}_edge_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n{created_by_filter}        std::string {var}_target_id = direct_occt_edge_target_id({part_id}, {var}_edge_index, {var}_edge);\n        std::string {var}_stable_id = direct_occt_stable_edge_target_id({var}_target_id);\n        {var}_edge_target_ids.push_back({var}_target_id);\n        {var}_edge_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_edge_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_edge_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ std::cerr << {edge_ambiguous_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 7; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ std::cerr << {edge_no_match_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 4; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ std::cerr << {edge_ambiguous_message} << std::endl; return 7; }}\n    if ({var}_matched_edge_indexes.empty()) {{ std::cerr << {edge_no_match_message} << std::endl; return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n",
+            "    {builder_type} {var}_{label}({input_var});\n    std::vector<std::string> {var}_target_ids = {target_id_vector};\n    std::vector<std::string> {var}_edge_target_ids;\n    std::vector<std::string> {var}_edge_stable_ids;\n    std::map<std::string, int> {var}_stable_counts;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n{created_by_filter}        std::string {var}_target_id = direct_occt_edge_target_id({part_id}, {var}_edge_index, {var}_edge);\n        std::string {var}_stable_id = direct_occt_stable_edge_target_id({var}_target_id);\n        {var}_edge_target_ids.push_back({var}_target_id);\n        {var}_edge_stable_ids.push_back({var}_stable_id);\n        {var}_stable_counts[{var}_stable_id] += 1;\n    }}\n    std::vector<std::string> {var}_matched_target_ids;\n    std::vector<int> {var}_matched_edge_indexes;\n    for (const std::string& {var}_requested_target_id : {var}_target_ids) {{\n        bool {var}_matched = false;\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_target_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_target_ids[{var}_candidate_index] != {var}_requested_target_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if ({var}_matched) {{\n            continue;\n        }}\n        std::string {var}_requested_stable_id = direct_occt_stable_edge_target_id({var}_requested_target_id);\n        if ({var}_stable_counts[{var}_requested_stable_id] > 1) {{ std::cerr << {edge_ambiguous_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 7; }}\n        for (std::size_t {var}_candidate_index = 0; {var}_candidate_index < {var}_edge_stable_ids.size(); ++{var}_candidate_index) {{\n            if ({var}_edge_stable_ids[{var}_candidate_index] != {var}_requested_stable_id) {{\n                continue;\n            }}\n            if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), static_cast<int>({var}_candidate_index)) == {var}_matched_edge_indexes.end()) {{\n                {var}_matched_edge_indexes.push_back(static_cast<int>({var}_candidate_index));\n            }}\n            {var}_matched_target_ids.push_back({var}_requested_target_id);\n            {var}_matched = true;\n            break;\n        }}\n        if (!{var}_matched) {{ std::cerr << {edge_no_match_message} << \" requested=\" << {var}_requested_target_id << std::endl; return 4; }}\n    }}\n    if ({var}_matched_target_ids.size() != {var}_target_ids.size()) {{ std::cerr << {edge_ambiguous_message} << std::endl; return 7; }}\n    if ({var}_matched_edge_indexes.empty()) {{ std::cerr << {edge_no_match_message} << std::endl; return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius_args}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n",
             part_id = cpp_string_literal(part_key)
         ));
     } else if let Some(EdgeSelector {
@@ -2350,11 +2475,11 @@ fn emit_edge_radius_operation(
             })
             .collect::<String>();
         body.push_str(&format!(
-            "    {builder_type} {var}_{label}({input_var});\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax;\n    {var}_shape_box.Get({var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax);\n    Standard_Real {var}_edge_tol = std::max({var}_shape_xmax - {var}_shape_xmin, std::max({var}_shape_ymax - {var}_shape_ymin, std::max({var}_shape_zmax - {var}_shape_zmin, 1.0))) * 1.0e-6;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    std::vector<int> {var}_matched_edge_indexes;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n{created_by_filter}        Bnd_Box {var}_edge_box;\n        BRepBndLib::Add({var}_edge, {var}_edge_box);\n        Standard_Real {var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax;\n        {var}_edge_box.Get({var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax);\n        bool {var}_edge_matches = true;\n{clause_checks}        if ({var}_edge_matches) {{\n            {var}_matched_edge_indexes.push_back({var}_edge_index);\n        }}\n    }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
+            "    {builder_type} {var}_{label}({input_var});\n    Bnd_Box {var}_shape_box;\n    BRepBndLib::Add({input_var}, {var}_shape_box);\n    Standard_Real {var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax;\n    {var}_shape_box.Get({var}_shape_xmin, {var}_shape_ymin, {var}_shape_zmin, {var}_shape_xmax, {var}_shape_ymax, {var}_shape_zmax);\n    Standard_Real {var}_edge_tol = std::max({var}_shape_xmax - {var}_shape_xmin, std::max({var}_shape_ymax - {var}_shape_ymin, std::max({var}_shape_zmax - {var}_shape_zmin, 1.0))) * 1.0e-6;\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    std::vector<int> {var}_matched_edge_indexes;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        TopoDS_Edge {var}_edge = TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal));\n{created_by_filter}        Bnd_Box {var}_edge_box;\n        BRepBndLib::Add({var}_edge, {var}_edge_box);\n        Standard_Real {var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax;\n        {var}_edge_box.Get({var}_edge_xmin, {var}_edge_ymin, {var}_edge_zmin, {var}_edge_xmax, {var}_edge_ymax, {var}_edge_zmax);\n        bool {var}_edge_matches = true;\n{clause_checks}        if ({var}_edge_matches) {{\n            {var}_matched_edge_indexes.push_back({var}_edge_index);\n        }}\n    }}\n    if ({var}_matched_edge_indexes.empty()) {{ return 4; }}\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        int {var}_edge_index = {var}_edge_ordinal - 1;\n        if (std::find({var}_matched_edge_indexes.begin(), {var}_matched_edge_indexes.end(), {var}_edge_index) == {var}_matched_edge_indexes.end()) {{\n            continue;\n        }}\n        {var}_{label}.Add({radius_args}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n    }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
         ));
     } else {
         body.push_str(&format!(
-            "    {builder_type} {var}_{label}({input_var});\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    int {var}_edge_count = 0;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        {var}_{label}.Add({radius}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n        ++{var}_edge_count;\n    }}\n    if ({var}_edge_count == 0) {{ return 4; }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
+            "    {builder_type} {var}_{label}({input_var});\n    TopTools_IndexedMapOfShape {var}_edge_map;\n    TopExp::MapShapes({input_var}, TopAbs_EDGE, {var}_edge_map);\n    int {var}_edge_count = 0;\n    for (int {var}_edge_ordinal = 1; {var}_edge_ordinal <= {var}_edge_map.Extent(); ++{var}_edge_ordinal) {{\n        {var}_{label}.Add({radius_args}, TopoDS::Edge({var}_edge_map.FindKey({var}_edge_ordinal)));\n        ++{var}_edge_count;\n    }}\n    if ({var}_edge_count == 0) {{ return 4; }}\n    TopoDS_Shape {var} = {var}_{label}.Shape();\n"
         ));
     }
 }
@@ -2773,6 +2898,56 @@ fn emit_cone_operation(
         body,
         var,
         &format!("BRepPrimAPI_MakeCone({radius1}, {radius2}, {height}).Shape()"),
+        tx,
+        ty,
+        tz,
+    );
+}
+
+fn emit_torus_operation(
+    body: &mut String,
+    var: &str,
+    major: f64,
+    minor: f64,
+    align: [AxisAlign; 3],
+) {
+    let span = (major + minor) * 2.0;
+    let tx = centered_axis_align_offset(span, align[0]);
+    let ty = centered_axis_align_offset(span, align[1]);
+    let tz = centered_axis_align_offset(minor * 2.0, align[2]);
+    emit_aligned_shape(
+        body,
+        var,
+        &format!("BRepPrimAPI_MakeTorus({major}, {minor}).Shape()"),
+        tx,
+        ty,
+        tz,
+    );
+}
+
+fn emit_draft_operation(
+    body: &mut String,
+    var: &str,
+    input_var: String,
+    angle_radians: f64,
+    neutral_z: f64,
+) {
+    // MVP: taper every vertical (side) face about the z = neutral plane, pulling +Z.
+    // Faces whose normal is perpendicular to the pull direction are the side walls.
+    body.push_str(&format!(
+        "    BRepOffsetAPI_DraftAngle {var}_draft({input_var});\n    gp_Dir {var}_pull(0, 0, 1);\n    gp_Pln {var}_neutral(gp_Pnt(0, 0, {neutral_z}), {var}_pull);\n    for (TopExp_Explorer {var}_fx({input_var}, TopAbs_FACE); {var}_fx.More(); {var}_fx.Next()) {{\n        TopoDS_Face {var}_f = TopoDS::Face({var}_fx.Current());\n        BRepGProp_Face {var}_props({var}_f);\n        Standard_Real {var}_u1, {var}_u2, {var}_v1, {var}_v2;\n        {var}_props.Bounds({var}_u1, {var}_u2, {var}_v1, {var}_v2);\n        gp_Pnt {var}_pnt; gp_Vec {var}_nrm;\n        {var}_props.Normal(({var}_u1 + {var}_u2) / 2.0, ({var}_v1 + {var}_v2) / 2.0, {var}_pnt, {var}_nrm);\n        if ({var}_nrm.Magnitude() < 1.0e-12) {{ continue; }}\n        gp_Dir {var}_nd({var}_nrm);\n        if (std::abs({var}_nd.Z()) < 1.0e-6) {{\n            {var}_draft.Add({var}_f, {var}_pull, {angle_radians}, {var}_neutral);\n        }}\n    }}\n    {var}_draft.Build();\n    if (!{var}_draft.IsDone()) {{ std::cerr << \"draft failed\" << std::endl; return 12; }}\n    TopoDS_Shape {var} = {var}_draft.Shape();\n"
+    ));
+}
+
+fn emit_wedge_operation(body: &mut String, var: &str, dims: [f64; 7], align: [AxisAlign; 3]) {
+    let [dx, dy, dz, xmin, zmin, xmax, zmax] = dims;
+    let tx = axis_align_offset(dx, align[0]);
+    let ty = axis_align_offset(dy, align[1]);
+    let tz = axis_align_offset(dz, align[2]);
+    emit_aligned_shape(
+        body,
+        var,
+        &format!("BRepPrimAPI_MakeWedge({dx}, {dy}, {dz}, {xmin}, {zmin}, {xmax}, {zmax}).Shape()"),
         tx,
         ty,
         tz,
@@ -3299,6 +3474,11 @@ fn op_name(op: OcctOp) -> &'static str {
         OcctOp::Sphere => "sphere",
         OcctOp::Cylinder => "cylinder",
         OcctOp::Cone => "cone",
+        OcctOp::Torus => "torus",
+        OcctOp::Wedge => "wedge",
+        OcctOp::Ellipse => "ellipse",
+        OcctOp::Slot => "slot-overall",
+        OcctOp::SlotArc => "slot-arc",
         OcctOp::Circle => "circle",
         OcctOp::Rectangle => "rectangle",
         OcctOp::RoundedRectangle => "rounded-rect",
@@ -3313,6 +3493,7 @@ fn op_name(op: OcctOp) -> &'static str {
         OcctOp::Sweep => "sweep",
         OcctOp::Twist => "twist",
         OcctOp::Taper => "taper",
+        OcctOp::Draft => "draft",
         OcctOp::Offset => "offset",
         OcctOp::Path => "path",
         OcctOp::HelixPath => "helix-path",
@@ -5651,6 +5832,73 @@ mod tests {
         );
         assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
         assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+    }
+
+    // Regression: a `clip-box` over a `helical-ridge` used to collapse to an
+    // empty shape on the native runner (BRepAlgoAPI_Common silently emptied the
+    // faceted swept solid), so threads silently vanished from any part that
+    // clipped them before a fuse/difference. The Cut-based clip must keep the
+    // thread: the fused result has far more facets than the bare cylinder.
+    #[test]
+    fn live_runner_first_keeps_clipped_helical_ridge_thread_when_runner_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(
+            r#"
+            (model
+              (part carrier
+                (build
+                  (shape body (cylinder 31.8 20 96))
+                  (shape thread_raw
+                    (translate 0 0 -0.8
+                      (helical-ridge
+                        :radius 31.5 :pitch 6.25 :height 21.6
+                        :base-width 1.45 :crest-width 0.84 :depth 1.42)))
+                  (shape thread
+                    (clip-box thread_raw :x (-35 35) :y (-35 35) :z (0 20)))
+                  (result (fuse body thread)))))
+            "#,
+        );
+        let output_dir = temp_root("direct-occt-runner-clipped-helical-ridge");
+
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export");
+
+        let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
+            panic!("expected direct OCCT runner-first clipped helical-ridge export");
+        };
+        let stl = std::fs::read_to_string(&stl_path).expect("read stl");
+        let facets = stl.matches("facet normal").count();
+        // A bare r=31.8 96-segment cylinder is ~380 facets. With the clipped
+        // thread fused on it the count is far higher; if the clip emptied the
+        // thread we would fall back to roughly the bare cylinder.
+        assert!(
+            facets > 1000,
+            "clipped helical-ridge thread missing from native export: only {facets} facets"
+        );
     }
 
     #[test]

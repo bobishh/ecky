@@ -1567,8 +1567,9 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await expect(page.getByRole('button', { name: 'QUEUE' })).toBeVisible();
     await page.locator('.prompt-input').press('Meta+Enter');
 
-    await expect(page.locator('[data-testid="error-banner"]')).toContainText('Agent Queue Error');
-    await expect(page.locator('[data-testid="error-banner"]')).not.toContainText('Generation Failed');
+    await expect(page.locator('[data-testid="error-banner"]')).toHaveCount(0);
+    await expect(page.getByTestId('genie-session-bubble')).toContainText('Agent Queue Error');
+    await expect(page.getByTestId('genie-session-bubble')).not.toContainText('Generation Failed');
   });
 
   test('Given drawn annotations and unchecked workspace toggle When queueing message Then annotation capture stays one-shot and checkbox stays unchecked', async ({ page }) => {

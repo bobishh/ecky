@@ -140,6 +140,7 @@ pub const REQUIRED_OCCT_LIBS: &[&str] = &[
     "TKGeomAlgo",
     "TKBRep",
     "TKTopAlgo",
+    "TKShHealing",
     "TKBO",
     "TKBool",
     "TKPrim",

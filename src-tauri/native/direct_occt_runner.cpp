@@ -17,6 +17,8 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
+#include <BRepPrimAPI_MakeWedge.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
@@ -24,6 +26,12 @@
 #include <BRep_Tool.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepBuilderAPI_TransitionMode.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepLib.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
@@ -81,6 +89,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
 #include <gp_Dir.hxx>
 #include <gp_GTrsf.hxx>
 #include <gp_Pnt2d.hxx>
@@ -1048,6 +1057,17 @@ struct ConeArgs {
     std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Min};
 };
 
+struct TorusArgs {
+    double major = 0.0;
+    double minor = 0.0;
+    std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Center};
+};
+
+struct WedgeArgs {
+    std::array<double, 7> dims{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    std::array<AlignMode, 3> align{AlignMode::Center, AlignMode::Center, AlignMode::Center};
+};
+
 AlignMode require_align_mode(const Arg& arg, const std::string& label) {
     if (arg.kind != Arg::Kind::Symbol && arg.kind != Arg::Kind::Text) {
         throw EvalError(label + " expects `min`, `center`, or `max` symbols");
@@ -1168,6 +1188,29 @@ ConeArgs cone_args(const Command& command) {
     args.radius2 = require_number_arg(command.args, 1, "cone");
     args.height = require_number_arg(command.args, 2, "cone");
     apply_align_keywords("cone", command.keywords, args.align);
+    return args;
+}
+
+TorusArgs torus_args(const Command& command) {
+    if (command.args.size() < 2) {
+        throw EvalError("torus expects major and minor radius");
+    }
+    TorusArgs args;
+    args.major = require_number_arg(command.args, 0, "torus");
+    args.minor = require_number_arg(command.args, 1, "torus");
+    apply_align_keywords("torus", command.keywords, args.align);
+    return args;
+}
+
+WedgeArgs wedge_args(const Command& command) {
+    if (command.args.size() < 7) {
+        throw EvalError("wedge expects dx, dy, dz, xmin, zmin, xmax, zmax");
+    }
+    WedgeArgs args;
+    for (std::size_t i = 0; i < 7; ++i) {
+        args.dims[i] = require_number_arg(command.args, i, "wedge");
+    }
+    apply_align_keywords("wedge", command.keywords, args.align);
     return args;
 }
 
@@ -1521,6 +1564,48 @@ TopoDS_Shape make_circle_face(double radius) {
     return BRepBuilderAPI_MakeFace(wire).Shape();
 }
 
+TopoDS_Shape make_slot_face(double length, double width) {
+    double r = width / 2.0;
+    double half = (length - width) / 2.0;
+    BRepBuilderAPI_MakeWire builder;
+    builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(-half, -r, 0), gp_Pnt(half, -r, 0)).Edge());
+    builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt(half, -r, 0), gp_Pnt(half + r, 0, 0), gp_Pnt(half, r, 0)).Value()).Edge());
+    builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(half, r, 0), gp_Pnt(-half, r, 0)).Edge());
+    builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt(-half, r, 0), gp_Pnt(-half - r, 0, 0), gp_Pnt(-half, -r, 0)).Value()).Edge());
+    TopoDS_Wire wire = builder.Wire();
+    return BRepBuilderAPI_MakeFace(wire).Shape();
+}
+
+TopoDS_Shape make_slot_arc_face(double radius, double start_deg, double end_deg, double width) {
+    double r = width / 2.0;
+    double ro = radius + r;
+    double ri = radius - r;
+    double a0 = start_deg * M_PI / 180.0;
+    double a1 = end_deg * M_PI / 180.0;
+    double am = (a0 + a1) / 2.0;
+    auto pt = [](double rad, double ang) {
+        return gp_Pnt(rad * std::cos(ang), rad * std::sin(ang), 0);
+    };
+    gp_Pnt cap1(radius * std::cos(a1) - r * std::sin(a1), radius * std::sin(a1) + r * std::cos(a1), 0);
+    gp_Pnt cap0(radius * std::cos(a0) + r * std::sin(a0), radius * std::sin(a0) - r * std::cos(a0), 0);
+    BRepBuilderAPI_MakeWire builder;
+    builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(pt(ro, a0), pt(ro, am), pt(ro, a1)).Value()).Edge());
+    builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(pt(ro, a1), cap1, pt(ri, a1)).Value()).Edge());
+    builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(pt(ri, a1), pt(ri, am), pt(ri, a0)).Value()).Edge());
+    builder.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(pt(ri, a0), cap0, pt(ro, a0)).Value()).Edge());
+    TopoDS_Wire wire = builder.Wire();
+    return BRepBuilderAPI_MakeFace(wire).Shape();
+}
+
+TopoDS_Shape make_ellipse_face(double rx, double ry) {
+    gp_Ax2 axes = (rx >= ry)
+        ? gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0))
+        : gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(0, 1, 0));
+    gp_Elips ellipse(axes, std::max(rx, ry), std::min(rx, ry));
+    TopoDS_Wire wire = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(ellipse).Edge()).Wire();
+    return BRepBuilderAPI_MakeFace(wire).Shape();
+}
+
 TopoDS_Shape make_rounded_rect_face(double width, double height, double radius) {
     double r = std::min(std::abs(radius), std::min(std::abs(width) / 2.0, std::abs(height) / 2.0));
     double x0 = -width / 2.0;
@@ -1739,6 +1824,42 @@ TopoDS_Shape make_cone(
     return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
 }
 
+TopoDS_Shape make_torus(
+    double major,
+    double minor,
+    const std::array<AlignMode, 3>& align
+) {
+    TopoDS_Shape shape = BRepPrimAPI_MakeTorus(major, minor).Shape();
+    double span = (major + minor) * 2.0;
+    double tx = centered_align_offset(span, align[0]);
+    double ty = centered_align_offset(span, align[1]);
+    double tz = centered_align_offset(minor * 2.0, align[2]);
+    if (std::abs(tx) <= 1.0e-12 && std::abs(ty) <= 1.0e-12 && std::abs(tz) <= 1.0e-12) {
+        return shape;
+    }
+    gp_Trsf trsf;
+    trsf.SetTranslation(gp_Vec(tx, ty, tz));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
+}
+
+TopoDS_Shape make_wedge(
+    const std::array<double, 7>& dims,
+    const std::array<AlignMode, 3>& align
+) {
+    double dx = dims[0], dy = dims[1], dz = dims[2];
+    double xmin = dims[3], zmin = dims[4], xmax = dims[5], zmax = dims[6];
+    TopoDS_Shape shape = BRepPrimAPI_MakeWedge(dx, dy, dz, xmin, zmin, xmax, zmax).Shape();
+    double tx = align_offset(dx, align[0]);
+    double ty = align_offset(dy, align[1]);
+    double tz = align_offset(dz, align[2]);
+    if (std::abs(tx) <= 1.0e-12 && std::abs(ty) <= 1.0e-12 && std::abs(tz) <= 1.0e-12) {
+        return shape;
+    }
+    gp_Trsf trsf;
+    trsf.SetTranslation(gp_Vec(tx, ty, tz));
+    return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
+}
+
 TopoDS_Shape extrude_shape(const TopoDS_Shape& shape, double height) {
     return BRepPrimAPI_MakePrism(shape, gp_Vec(0, 0, height)).Shape();
 }
@@ -1771,15 +1892,81 @@ TopoDS_Shape loft_shapes(double distance, const std::vector<TopoDS_Shape>& profi
     return loft.Shape();
 }
 
+// True when the shape contains at least one TopAbs_SOLID. Booleans
+// (BRepAlgoAPI_Common/Cut/Fuse) only behave on solids; an open shell that
+// slips through silently produces empty results downstream.
+bool shape_has_solid(const TopoDS_Shape& shape) {
+    TopExp_Explorer it(shape, TopAbs_SOLID);
+    return it.More();
+}
+
+// Best-effort conversion of a closed-but-unmarked shell into a solid: sew the
+// faces, then wrap each resulting closed shell in a solid. Returns the original
+// shape if no shell could be solidified.
+TopoDS_Shape solidify_swept_shell(const TopoDS_Shape& shape) {
+    BRepBuilderAPI_Sewing sewer(1.0e-6);
+    int face_count = 0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        sewer.Add(it.Current());
+        ++face_count;
+    }
+    if (face_count == 0) {
+        return shape;
+    }
+    sewer.Perform();
+    TopoDS_Shape sewn = sewer.SewedShape();
+
+    BRepBuilderAPI_MakeSolid maker;
+    bool added = false;
+    for (TopExp_Explorer it(sewn, TopAbs_SHELL); it.More(); it.Next()) {
+        maker.Add(TopoDS::Shell(it.Current()));
+        added = true;
+    }
+    if (!added) {
+        return shape;
+    }
+    return maker.Solid();
+}
+
 TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path) {
     BRepOffsetAPI_MakePipeShell pipe(first_wire(path, "sweep"));
-    pipe.Add(first_wire(profile, "sweep"));
+    // Match build123d's `Solid.sweep` configuration so both backends produce the
+    // same swept geometry: corrected-Frenet trihedron (is_frenet=False),
+    // Transformed transition, and Add(profile, withContact=False,
+    // withCorrection=False). Without an explicit SetMode the builder has no
+    // trihedron and throws Standard_NullObject on a curved (helix) spine.
+    pipe.SetMode(Standard_False);
+    pipe.SetTransitionMode(BRepBuilderAPI_Transformed);
+    pipe.Add(first_wire(profile, "sweep"), Standard_False, Standard_False);
     pipe.Build();
     if (!pipe.IsDone()) {
         throw EvalError("sweep failed to build");
     }
+    // MakeSolid caps the swept tube into a solid. Its boolean return is the
+    // difference between "renders as a tube" and "can be clipped/cut": a helix
+    // whose ends will not auto-cap leaves an open shell here, which later
+    // BRepAlgoAPI_Common (clip-box) silently reduces to nothing.
     pipe.MakeSolid();
-    return pipe.Shape();
+    TopoDS_Shape swept = pipe.Shape();
+    // Defensive: if the pipe-shell did not cap into a solid, sew + close it so
+    // downstream booleans have a solid to operate on.
+    if (!shape_has_solid(swept)) {
+        swept = solidify_swept_shell(swept);
+    }
+    if (!shape_has_solid(swept)) {
+        throw EvalError("sweep did not produce a closed solid");
+    }
+    // Heal an invalid (self-intersecting / out-of-tolerance) swept solid so it
+    // can be intersected and subtracted like any other solid.
+    if (!BRepCheck_Analyzer(swept).IsValid()) {
+        ShapeFix_Shape fixer(swept);
+        fixer.Perform();
+        TopoDS_Shape fixed = fixer.Shape();
+        if (shape_has_solid(fixed)) {
+            swept = fixed;
+        }
+    }
+    return swept;
 }
 
 TopoDS_Shape offset_shape(const TopoDS_Shape& profile, double amount) {
@@ -1842,6 +2029,53 @@ TopoDS_Shape common_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
     return BRepAlgoAPI_Common(lhs, rhs).Shape();
 }
 
+// Clip by subtracting the six half-slabs outside [x,y,z] with BRepAlgoAPI_Cut.
+// BRepAlgoAPI_Common silently returns an empty shape on some valid faceted
+// swept solids (notably the polyline-spine `helical-ridge`), while Cut/Fuse on
+// the same solid succeed. Removing the outside material with Cut is the robust
+// equivalent of intersecting with the box.
+TopoDS_Shape clip_by_cut(
+    const TopoDS_Shape& shape,
+    const std::array<double, 2>& x,
+    const std::array<double, 2>& y,
+    const std::array<double, 2>& z
+) {
+    Bnd_Box bounds;
+    BRepBndLib::Add(shape, bounds);
+    if (bounds.IsVoid()) {
+        return shape;
+    }
+    double bx0, by0, bz0, bx1, by1, bz1;
+    bounds.Get(bx0, by0, bz0, bx1, by1, bz1);
+    const double pad = 1.0;
+    const double X0 = std::min(bx0, x[0]) - pad;
+    const double X1 = std::max(bx1, x[1]) + pad;
+    const double Y0 = std::min(by0, y[0]) - pad;
+    const double Y1 = std::max(by1, y[1]) + pad;
+    const double Z0 = std::min(bz0, z[0]) - pad;
+    const double Z1 = std::max(bz1, z[1]) + pad;
+
+    TopoDS_Shape result = shape;
+    auto cut_away = [&](double ax, double ay, double az, double bx, double by, double bz) {
+        if (ax >= bx || ay >= by || az >= bz) {
+            return;
+        }
+        TopoDS_Shape tool = BRepPrimAPI_MakeBox(gp_Pnt(ax, ay, az), gp_Pnt(bx, by, bz)).Shape();
+        BRepAlgoAPI_Cut cut(result, tool);
+        cut.Build();
+        if (cut.IsDone()) {
+            result = cut.Shape();
+        }
+    };
+    cut_away(X0, Y0, Z0, x[0], Y1, Z1);  // x below
+    cut_away(x[1], Y0, Z0, X1, Y1, Z1);  // x above
+    cut_away(X0, Y0, Z0, X1, y[0], Z1);  // y below
+    cut_away(X0, y[1], Z0, X1, Y1, Z1);  // y above
+    cut_away(X0, Y0, Z0, X1, Y1, z[0]);  // z below
+    cut_away(X0, Y0, z[1], X1, Y1, Z1);  // z above
+    return result;
+}
+
 TopoDS_Shape clip_box_shape(
     const TopoDS_Shape& shape,
     const std::array<double, 2>& x,
@@ -1850,7 +2084,24 @@ TopoDS_Shape clip_box_shape(
 ) {
     TopoDS_Shape clip_box =
         BRepPrimAPI_MakeBox(gp_Pnt(x[0], y[0], z[0]), gp_Pnt(x[1], y[1], z[1])).Shape();
-    return BRepAlgoAPI_Common(shape, clip_box).Shape();
+    TopoDS_Shape result = BRepAlgoAPI_Common(shape, clip_box).Shape();
+    // BRepAlgoAPI_Common can silently collapse a valid solid to nothing
+    // (faceted swept helixes are the common offender). Fall back to carving the
+    // outside material away with Cut before treating it as truly empty.
+    if (!shape_has_solid(result) && shape_has_solid(shape)) {
+        TopoDS_Shape carved = clip_by_cut(shape, x, y, z);
+        if (shape_has_solid(carved)) {
+            result = carved;
+        }
+    }
+    // A clip that still keeps no solid is a real error (non-solid input or a box
+    // that misses the shape). Fail loudly instead of letting the empty shape
+    // vanish silently through a later fuse/cut.
+    if (!shape_has_solid(result) && shape_has_solid(shape)) {
+        throw EvalError(
+            "clip-box removed all geometry: the clip box keeps no solid of the input shape");
+    }
+    return result;
 }
 
 std::vector<int> resolve_edge_target_indexes(
@@ -2260,19 +2511,37 @@ std::vector<TopoDS_Face> resolve_face_clauses(
     return matched_faces;
 }
 
+std::optional<double> optional_number_keyword(const Command& command, const std::string& name) {
+    for (const auto& keyword : command.keywords) {
+        if (keyword.name == name && keyword.kind == Keyword::Kind::Arg
+            && keyword.value.kind == Arg::Kind::Number) {
+            return keyword.value.number_value;
+        }
+    }
+    return std::nullopt;
+}
+
 TopoDS_Shape fillet_shape(
     const std::string& part_id,
     const TopoDS_Shape& shape,
     double radius,
+    std::optional<double> radius2,
     const std::optional<SelectorPayload>& selector
 ) {
     BRepFilletAPI_MakeFillet fillet(shape);
+    auto add_edge = [&](const TopoDS_Edge& edge) {
+        if (radius2.has_value()) {
+            fillet.Add(radius, *radius2, edge);
+        } else {
+            fillet.Add(radius, edge);
+        }
+    };
     if (!selector.has_value()) {
         TopTools_IndexedMapOfShape edge_map;
         TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
         int edge_count = 0;
         for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
-            fillet.Add(radius, TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
+            add_edge(TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
             ++edge_count;
         }
         if (edge_count == 0) {
@@ -2294,7 +2563,7 @@ TopoDS_Shape fillet_shape(
             if (std::find(matched_indexes.begin(), matched_indexes.end(), edge_index) == matched_indexes.end()) {
                 continue;
             }
-            fillet.Add(radius, TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
+            add_edge(TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
         }
     }
     return fillet.Shape();
@@ -2511,6 +2780,10 @@ TopoDS_Shape make_helix_path_wire(double radius, double pitch, double height, bo
     Handle(Geom2d_TrimmedCurve) curve2d =
         GCE2d_MakeSegment(gp_Pnt2d(0, 0), gp_Pnt2d(end_angle, height)).Value();
     TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(curve2d, surface).Edge();
+    // The edge so far only carries a pcurve on the cylinder; sweeping (and other
+    // 3D consumers) need an explicit 3D curve or MakePipeShell throws
+    // Standard_NullObject. Build it the way build123d's Edge.make_helix does.
+    BRepLib::BuildCurves3d(edge);
     return BRepBuilderAPI_MakeWire(edge).Wire();
 }
 
@@ -2893,7 +3166,7 @@ SlotValue evaluate_command(
     };
 
     if (!command.keywords.empty() && op != "box" && op != "sphere" && op != "cylinder" &&
-        op != "cone" && op != "profile" && op != "plane" &&
+        op != "cone" && op != "torus" && op != "wedge" && op != "profile" && op != "plane" &&
         op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline") {
         throw EvalError(op + " keywords unsupported yet");
     }
@@ -2916,6 +3189,14 @@ SlotValue evaluate_command(
             make_cone(args.radius1, args.radius2, args.height, args.align)
         );
     }
+    if (op == "torus") {
+        TorusArgs args = torus_args(command);
+        return SlotValue::shape_value(make_torus(args.major, args.minor, args.align));
+    }
+    if (op == "wedge") {
+        WedgeArgs args = wedge_args(command);
+        return SlotValue::shape_value(make_wedge(args.dims, args.align));
+    }
     if (op == "rectangle") {
         const double width = require_number_arg(command.args, 0, op);
         const double height = require_number_arg(command.args, 1, op);
@@ -2925,6 +3206,26 @@ SlotValue evaluate_command(
             {width / 2.0, height / 2.0},
             {-width / 2.0, height / 2.0},
         });
+    }
+    if (op == "ellipse") {
+        return SlotValue::shape_value(make_ellipse_face(
+            require_number_arg(command.args, 0, op),
+            require_number_arg(command.args, 1, op)
+        ));
+    }
+    if (op == "slot-overall") {
+        return SlotValue::shape_value(make_slot_face(
+            require_number_arg(command.args, 0, op),
+            require_number_arg(command.args, 1, op)
+        ));
+    }
+    if (op == "slot-arc") {
+        return SlotValue::shape_value(make_slot_arc_face(
+            require_number_arg(command.args, 0, op),
+            require_number_arg(command.args, 1, op),
+            require_number_arg(command.args, 2, op),
+            require_number_arg(command.args, 3, op)
+        ));
     }
     if (op == "circle") {
         return make_circle_face(require_number_arg(command.args, 0, op));
@@ -3142,10 +3443,15 @@ SlotValue evaluate_command(
         return clip_box_shape(lookup_shape(slots, args.shape_ref, op), args.x, args.y, args.z);
     }
     if (op == "fillet") {
+        std::optional<double> to_radius = optional_number_keyword(command, "to-radius");
+        if (!to_radius.has_value()) {
+            to_radius = optional_number_keyword(command, "to_radius");
+        }
         return fillet_shape(
             part_id,
             get_ref_shape(1),
             require_number_arg(command.args, 0, op),
+            to_radius,
             exact_edge_selector(command, op)
         );
     }

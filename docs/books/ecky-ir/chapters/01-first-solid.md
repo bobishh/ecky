@@ -1,6 +1,6 @@
 ## First Solid: Ball on a Base
 
-Start with the smallest complete `.ecky` program: one `model`, one `part`, one primitive.
+Every model is a tree, and the fastest way to feel that is to grow the smallest one that renders. One `model`, one `part`, one primitive — three nested forms and you have a solid on screen. Everything later in this book is this same tree with more branches.
 
 ```scheme
 (model
@@ -28,3 +28,5 @@ Add another primitive with `union` when two solids should become one part.
 `box` makes the base. `translate` moves the ball up so it sits on the base instead of overlapping the center.
 
 Use this pattern for first tests: primitive first, then one transform, then one boolean.
+
+> **Watch for:** every primitive is born centered on the origin, so two solids written at the same spot interpenetrate instead of stacking. The `translate` above is not decoration — delete it and the ball swallows the base. When a union looks fused-but-wrong, the first question is always "did I move the second solid before combining it?"

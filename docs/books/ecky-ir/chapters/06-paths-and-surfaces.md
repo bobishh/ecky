@@ -36,3 +36,18 @@ Use `sweep` when a profile follows a path.
 The circle is the cross-section. The bezier path is the centerline. Sweep keeps those responsibilities separate.
 
 Use `loft` when one profile needs to become another profile across height or distance.
+
+### Ribs and grooves
+
+`rib` and `groove` are the two-step "sweep a profile, then combine" move rolled into one op. Both take a solid, a profile, and a path: `rib` sweeps the profile along the path and fuses the result onto the solid (a reinforcing rib); `groove` sweeps it and cuts it away (a channel).
+
+```scheme
+(model
+  (part p
+    (rib
+      (box 20 20 20)
+      (circle 3)
+      (path (0 0 0) (0 0 30)))))
+```
+
+Swap `rib` for `groove` to subtract the same swept run instead of adding it. They lower to `sweep` + `union`/`difference`, so they render on every backend.

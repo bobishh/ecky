@@ -49,7 +49,7 @@
   import { session } from './lib/stores/sessionStore';
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
   import { handleGenerate, isQuestionIntent } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange, applyManualCodeDraft } from './lib/controllers/manualController';
+  import { handleParamChange, commitManualVersion, stageParamChange, applyManualCodeDraft } from './lib/controllers/manualController';
   import { openProjectInEditor } from './lib/tauri/client';
   import {
     loadFromHistory,
@@ -187,14 +187,12 @@
     getStepExportPath,
     type ExportMode,
   } from './lib/exportOptions';
-  import { buildDirectOcctStepStatus } from './lib/directOcctStepStatus';
   import { deriveContextState } from './lib/composables/contextState';
   import { deriveViewportState } from './lib/composables/viewportState';
   import { deriveAgentOpsState, type PendingViewportScreenshotChoice } from './lib/composables/agentOps';
   import { deriveExportState } from './lib/composables/exportOps';
   import {
     composeBubbleEvent,
-    composeCodeDiffView,
     composeSessionActivity,
     type SessionEvent,
   } from './lib/sessionActivity';
@@ -550,8 +548,6 @@
   const phase = $derived($session.phase);
   const status = $derived($session.status);
   const error = $derived($session.error);
-  let errorCopied = $state(false);
-  let errorCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
   const stlUrl = $derived($session.stlUrl);
   const runtimeRevision = $derived($session.runtimeRevision);
   const activeArtifactBundle = $derived($session.artifactBundle);
@@ -870,9 +866,6 @@
   const hasMultipartExportModel = $derived.by(() => exportState.hasMultipartExportModel);
   const multipartExportParts = $derived.by(() => exportState.multipartExportParts);
   const canExportModel = $derived.by(() => exportState.canExportModel);
-  const directOcctStepStatus = $derived.by(() =>
-    buildDirectOcctStepStatus(activeArtifactBundle, $runtimeCapabilities),
-  );
   const viewportCodeWorkingCopyAligned = $derived.by(
     () =>
       Boolean(
@@ -2605,6 +2598,7 @@
 
   const genieBubbleState = $derived.by(() =>
     resolveGenieBubblePresentation({
+      sessionError: error,
       onboardingText: $onboarding.isActive ? $onboarding.text : null,
       viewportScreenshotMessage: activeViewportScreenshotChoice?.message ?? null,
       confirmMessage: activeConfirm?.message ?? null,
@@ -2710,7 +2704,6 @@
     composeSessionActivity(sessionActivityEvents, $activeThreadId ?? null, $activeVersionId ?? null),
   );
   const sessionBubbleEvent = $derived.by(() => composeBubbleEvent(sessionActivity));
-  const sessionCodeDiffView = $derived.by(() => composeCodeDiffView(sessionActivity, $selectedCode));
 
   function openSessionActivityFromBubble() {
     const event = sessionBubbleEvent.event ?? bubbleSessionEvent;
@@ -3043,29 +3036,7 @@
     stopEckySpeech();
   }
 
-  function dismissError() {
-    session.setError(null);
-    errorCopied = false;
-  }
-
-  async function copyError(event: Event) {
-    event.stopPropagation();
-    if (!error) return;
-    try {
-      await navigator.clipboard.writeText(error);
-      errorCopied = true;
-      if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer);
-      errorCopyResetTimer = setTimeout(() => {
-        errorCopied = false;
-        errorCopyResetTimer = null;
-      }, 1600);
-    } catch (copyError) {
-      console.error('Failed to copy error text:', copyError);
-    }
-  }
-
   onDestroy(() => {
-    if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer);
     if (liveApplyTimer) clearTimeout(liveApplyTimer);
   });
 
@@ -3627,44 +3598,6 @@
               />
             </div>
 
-            {#if error}
-              <div
-                class="error-banner"
-                data-testid="error-banner"
-                role="button"
-                tabindex="0"
-                aria-label="Dismiss error"
-                onclick={dismissError}
-                onkeydown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    dismissError();
-                  }
-                }}
-              >
-                <div class="error-banner__label">ERROR</div>
-                <div class="error-banner__body">{error}</div>
-                <button
-                  class="error-banner__copy"
-                  data-testid="error-banner-copy"
-                  onclick={copyError}
-                  title={errorCopied ? 'Copied' : 'Copy error'}
-                >
-                  {errorCopied ? 'COPIED' : 'COPY'}
-                </button>
-                <button
-                  class="error-banner__dismiss"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    dismissError();
-                  }}
-                  title="Dismiss error"
-                >
-                  ✕
-                </button>
-              </div>
-            {/if}
-
             {#if $activeThreadRequests.length > 0}
               <div class="cafeteria-strip">
                 {#each $activeThreadRequests as req (req.id)}
@@ -3721,20 +3654,6 @@
 
             {#if $activeThreadId && ($workingCopy.macroCode || stlUrl)}
               <div class="viewport-overlay">
-                {#if directOcctStepStatus && !hasSketchPreview}
-                  <div
-                    class="direct-occt-step-status"
-                    class:direct-occt-step-status--ready={directOcctStepStatus.tone === 'ready'}
-                    class:direct-occt-step-status--blocked={directOcctStepStatus.tone === 'blocked'}
-                    aria-label="Direct OCCT STEP status"
-                  >
-                    <div class="direct-occt-step-status__head">
-                      <span>{directOcctStepStatus.label}</span>
-                      <strong>{directOcctStepStatus.status}</strong>
-                    </div>
-                    <div class="direct-occt-step-status__detail">{directOcctStepStatus.detail}</div>
-                  </div>
-                {/if}
                 <div class="export-actions">
                   <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
                   {#if activeArtifactBundle}
@@ -4200,13 +4119,8 @@
       title={$selectedTitle}
       defaultTitle={$workingCopy.title}
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
-      diffBefore={sessionCodeDiffView.hasDiff ? sessionCodeDiffView.previousCode : null}
-      diffAfter={sessionCodeDiffView.hasDiff ? sessionCodeDiffView.nextCode : null}
-      diffTitle={sessionCodeDiffView.title || 'LAST MACRO DIFF'}
-      diffSummary={sessionCodeDiffView.summary}
       onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
       onCommit={codeModalMode === 'version' ? commitManualVersion : undefined}
-      onFork={codeModalMode === 'version' ? forkManualVersion : undefined}
       z={codeWindowState.z}
       hidden={!codeWindowState.visible}
       focused={codeWindowState.active}
@@ -4487,62 +4401,6 @@
   .terminal-overlay-btn { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; }
   .terminal-overlay-btn-attention { border-color: var(--secondary); color: var(--secondary); box-shadow: 0 0 10px color-mix(in srgb, var(--secondary) 50%, transparent); }
   .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 120; pointer-events: auto; max-width: min(56vw, 380px); }
-  .error-banner {
-    position: absolute;
-    top: 56px;
-    right: 12px;
-    z-index: 1800;
-    max-width: min(52vw, 760px);
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    gap: 10px;
-    align-items: start;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--red) 72%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
-    box-shadow: var(--shadow);
-    overflow: hidden;
-    cursor: pointer;
-  }
-  .error-banner:focus-visible {
-    outline: 1px solid var(--red);
-    outline-offset: 1px;
-  }
-  .error-banner__label {
-    color: var(--red);
-    font-size: 0.62rem;
-    font-weight: bold;
-    letter-spacing: 0.12em;
-  }
-  .error-banner__body {
-    color: var(--text);
-    font-size: 0.78rem;
-    line-height: 1.4;
-    white-space: pre-wrap;
-    word-break: break-word;
-    min-width: 0;
-  }
-  .error-banner__copy,
-  .error-banner__dismiss {
-    border: 1px solid var(--bg-400);
-    background: var(--bg-200);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .error-banner__copy {
-    min-width: 58px;
-    height: 24px;
-    padding: 0 8px;
-    font-family: var(--font-mono);
-    font-size: 0.6rem;
-    letter-spacing: 0.08em;
-  }
-  .error-banner__dismiss {
-    width: 24px;
-    height: 24px;
-  }
-  .error-banner__copy:hover { border-color: var(--secondary); color: var(--text); }
-  .error-banner__dismiss:hover { border-color: var(--red); color: var(--text); }
 
   /* STL Cafeteria — multi-microwave strip */
   .cafeteria-strip { position: absolute; bottom: 48px; left: 12px; right: 12px; z-index: 100; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
@@ -4608,58 +4466,6 @@
     overflow: hidden;
   }
   .viewport-overlay { position: absolute; bottom: 12px; right: 12px; max-width: min(420px, calc(100vw - 24px)); background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; overflow: hidden; }
-  .direct-occt-step-status {
-    width: 100%;
-    min-width: min(330px, 100%);
-    max-width: 100%;
-    padding: 7px 8px;
-    border: 1px solid var(--secondary);
-    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-    overflow: hidden;
-  }
-  .direct-occt-step-status--ready {
-    border-color: var(--primary);
-  }
-  .direct-occt-step-status--blocked {
-    border-color: #b96868;
-  }
-  .direct-occt-step-status__head {
-    display: flex;
-    min-width: 0;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    overflow: hidden;
-  }
-  .direct-occt-step-status__head span,
-  .direct-occt-step-status__head strong,
-  .direct-occt-step-status__detail {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .direct-occt-step-status__head span {
-    color: var(--secondary);
-    font-size: 0.58rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-  }
-  .direct-occt-step-status__head strong {
-    color: var(--primary);
-    font-size: 0.6rem;
-    letter-spacing: 0.1em;
-  }
-  .direct-occt-step-status--blocked .direct-occt-step-status__head strong {
-    color: #e3a3a3;
-  }
-  .direct-occt-step-status__detail {
-    margin-top: 4px;
-    font-size: 0.62rem;
-    color: var(--text-dim);
-  }
   .export-actions { display: flex; gap: 4px; }
   .export-chooser {
     display: flex;

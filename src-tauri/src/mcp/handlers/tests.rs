@@ -92,6 +92,7 @@ fn test_config() -> Config {
         default_source_language: crate::models::SourceLanguage::LegacyPython,
         max_generation_attempts: 3,
         max_verify_attempts: 0,
+        projects_root: None,
     }
 }
 

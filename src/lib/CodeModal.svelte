@@ -23,17 +23,12 @@
     title,
     defaultTitle = '',
     defaultVersionName = '',
-    diffBefore = null,
-    diffAfter = null,
-    diffTitle = 'LAST MACRO DIFF',
-    diffSummary = '',
     z = 0,
     hidden = false,
     focused = true,
     onclose,
     onApply,
     onCommit,
-    onFork,
   }: {
     code?: string;
     mode?: CodeModalMode;
@@ -41,17 +36,12 @@
     title: string;
     defaultTitle?: string;
     defaultVersionName?: string;
-    diffBefore?: string | null;
-    diffAfter?: string | null;
-    diffTitle?: string;
-    diffSummary?: string;
     z?: number;
     hidden?: boolean;
     focused?: boolean;
     onclose: () => void;
     onApply?: (code: string) => Promise<unknown> | unknown;
     onCommit?: (payload: CodeModalCommitPayload) => Promise<void> | void;
-    onFork?: (payload: CodeModalCommitPayload) => Promise<void> | void;
   } = $props();
 
   let x = $state(60);
@@ -61,7 +51,7 @@
 
   let copyState = $state<'idle' | 'copied'>('idle');
   let verifyState = $state<'idle' | 'inserted' | 'exists'>('idle');
-  let commitState = $state<'idle' | 'applying' | 'committing' | 'forking'>('idle');
+  let commitState = $state<'idle' | 'applying' | 'committing'>('idle');
   let commitError = $state('');
   let draftTitle = $state('');
   let draftVersionName = $state('');
@@ -134,20 +124,6 @@
     }
   }
 
-  async function handleFork() {
-    if (!onFork || commitState !== 'idle') return;
-    commitState = 'forking';
-    commitError = '';
-    try {
-      await onFork(commitPayload());
-    } catch (e: unknown) {
-      console.error('Failed to fork code:', e);
-      commitError = formatCommitError(e);
-    } finally {
-      commitState = 'idle';
-    }
-  }
-
   function handleCodeChange(nextCode: string) {
     code = nextCode;
     verifyState = 'idle';
@@ -183,10 +159,6 @@
         code={code}
         {sourceLanguage}
         onchange={handleCodeChange}
-        {diffBefore}
-        {diffAfter}
-        {diffTitle}
-        {diffSummary}
       />
     </div>
     <div class="code-modal-footer">
@@ -217,20 +189,24 @@
       <div class="footer-actions">
         {#if canMutateVersion}
           <div class="commit-fields">
-            <input
-              class="commit-input"
-              aria-label="Version title"
-              bind:value={draftTitle}
-              placeholder="Title"
-              disabled={commitState !== 'idle'}
-            />
-            <input
-              class="commit-input commit-input-version"
-              aria-label="Version name"
-              bind:value={draftVersionName}
-              placeholder="Version"
-              disabled={commitState !== 'idle'}
-            />
+            <label class="commit-field">
+              <span class="commit-field__label">Title</span>
+              <input
+                class="commit-input"
+                bind:value={draftTitle}
+                placeholder="Title"
+                disabled={commitState !== 'idle'}
+              />
+            </label>
+            <label class="commit-field">
+              <span class="commit-field__label">Version</span>
+              <input
+                class="commit-input commit-input-version"
+                bind:value={draftVersionName}
+                placeholder="Version"
+                disabled={commitState !== 'idle'}
+              />
+            </label>
           </div>
         {/if}
         {#if canMutateVersion}
@@ -244,18 +220,6 @@
               APPLYING...
             {:else}
               APPLY
-            {/if}
-          </button>
-          <button
-            class="btn btn-secondary"
-            onclick={handleFork}
-            disabled={!onFork || commitState !== 'idle'}
-            title="Fork these code changes into a new thread"
-          >
-            {#if commitState === 'forking'}
-              FORKING...
-            {:else}
-              FORK TO NEW THREAD
             {/if}
           </button>
           <button
@@ -331,8 +295,26 @@
 
   .commit-fields {
     display: flex;
-    gap: 8px;
+    gap: 10px;
     min-width: 260px;
+    padding-right: 12px;
+    margin-right: 4px;
+    border-right: 1px solid var(--bg-300);
+  }
+
+  .commit-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .commit-field__label {
+    color: var(--text-dim);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
 
   .commit-input {

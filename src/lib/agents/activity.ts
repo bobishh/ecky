@@ -3,6 +3,7 @@ import type { ThreadAgentState } from '../tauri/client';
 
 export type GenieBubbleSource =
   | 'none'
+  | 'sessionError'
   | 'onboarding'
   | 'viewportScreenshot'
   | 'confirm'
@@ -59,6 +60,7 @@ function previewBadgeFor(input: {
 }
 
 export function resolveGenieBubblePresentation(input: {
+  sessionError?: string | null;
   onboardingText?: string | null;
   viewportScreenshotMessage?: string | null;
   confirmMessage?: string | null;
@@ -80,7 +82,10 @@ export function resolveGenieBubblePresentation(input: {
   let source: GenieBubbleSource = 'none';
   let raw = '';
 
-  if (input.onboardingText) {
+  if (input.sessionError) {
+    source = 'sessionError';
+    raw = input.sessionError;
+  } else if (input.onboardingText) {
     source = 'onboarding';
     raw = input.onboardingText;
   } else if (input.viewportScreenshotMessage) {

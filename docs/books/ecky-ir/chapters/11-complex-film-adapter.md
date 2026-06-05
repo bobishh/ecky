@@ -4,7 +4,7 @@ The last model is `Ecky integrated film adapter open helicoid v9`. It is not a s
 
 <!-- render-source: ../examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky -->
 
-![Rendered output for Final Model: Integrated Film Adapter Open Helicoid v9, example 1](assets/10-complex-film-adapter-01.png)
+![Rendered output for Final Model: Integrated Film Adapter Open Helicoid v9, example 1](assets/11-complex-film-adapter-01.png)
 
 The source is stored as `docs/books/ecky-ir/examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky`. The chapter reads it in layers instead of dumping all 493 lines at once.
 

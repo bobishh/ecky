@@ -46,6 +46,10 @@ server/test_env.py
 tmp/
 public/docs/assets/
 docs/books/ecky-ir/assets/
+# Generated book artifacts published by `npm run build:book` (source is
+# public/docs/ecky-ir.md); regenerable, not committed.
+public/docs/ecky-ir-field-guide.epub
+public/docs/ecky-ir-field-guide.html
 
 # Python
 __pycache__/

@@ -349,6 +349,8 @@ fn runner_command_supported(command: &OcctCommand) -> bool {
         OcctOp::Sphere => runner_primitive_align_keywords_supported(command, 1),
         OcctOp::Cylinder => runner_primitive_align_keywords_supported(command, 2),
         OcctOp::Cone => runner_primitive_align_keywords_supported(command, 3),
+        OcctOp::Torus => runner_primitive_align_keywords_supported(command, 2),
+        OcctOp::Wedge => runner_primitive_align_keywords_supported(command, 7),
         OcctOp::Profile => runner_profile_keywords_supported(command),
         OcctOp::Plane => runner_plane_keywords_supported(command),
         OcctOp::PathFrame => runner_path_frame_keywords_supported(command),
@@ -588,19 +590,20 @@ fn runner_exact_edge_selector_supported(command: &OcctCommand) -> bool {
     if command.keywords.is_empty() {
         return true;
     }
-    if command.keywords.len() != 1 {
-        return false;
-    }
-    let keyword = &command.keywords[0];
-    if keyword.name != "edges" {
-        return false;
-    }
-    matches!(
-        keyword.selector_payload(),
-        Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeAll)
-            | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeTargetIds(_))
-            | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeClauses(_))
-    )
+    command.keywords.iter().all(|keyword| match keyword.name.as_str() {
+        "edges" => matches!(
+            keyword.selector_payload(),
+            Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeAll)
+                | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeTargetIds(_))
+                | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeClauses(_))
+        ),
+        // Tapered fillet: `:to-radius` rides alongside the edge selector and is
+        // consumed by the cpp runner's `fillet_shape`.
+        "to-radius" | "to_radius" => {
+            matches!(keyword.source_arg(), OcctArg::Number(_))
+        }
+        _ => false,
+    })
 }
 
 fn runner_exact_face_selector_supported(command: &OcctCommand) -> bool {
@@ -646,7 +649,12 @@ fn runner_op_supported(op: OcctOp) -> bool {
             | OcctOp::Sphere
             | OcctOp::Cylinder
             | OcctOp::Cone
+            | OcctOp::Torus
+            | OcctOp::Wedge
             | OcctOp::Circle
+            | OcctOp::Ellipse
+            | OcctOp::Slot
+            | OcctOp::SlotArc
             | OcctOp::Rectangle
             | OcctOp::RoundedRectangle
             | OcctOp::RoundedPolygon
@@ -935,7 +943,12 @@ fn runner_op_token(op: OcctOp) -> &'static str {
         OcctOp::Sphere => "sphere",
         OcctOp::Cylinder => "cylinder",
         OcctOp::Cone => "cone",
+        OcctOp::Torus => "torus",
+        OcctOp::Wedge => "wedge",
         OcctOp::Circle => "circle",
+        OcctOp::Ellipse => "ellipse",
+        OcctOp::Slot => "slot-overall",
+        OcctOp::SlotArc => "slot-arc",
         OcctOp::Rectangle => "rectangle",
         OcctOp::RoundedRectangle => "rounded-rect",
         OcctOp::RoundedPolygon => "rounded-polygon",
@@ -949,6 +962,7 @@ fn runner_op_token(op: OcctOp) -> &'static str {
         OcctOp::Sweep => "sweep",
         OcctOp::Twist => "twist",
         OcctOp::Taper => "taper",
+        OcctOp::Draft => "draft",
         OcctOp::Offset => "offset",
         OcctOp::Path => "path",
         OcctOp::HelixPath => "helix-path",
@@ -2122,7 +2136,12 @@ mod tests {
             (OcctOp::Sphere, true),
             (OcctOp::Cylinder, true),
             (OcctOp::Cone, true),
+            (OcctOp::Torus, true),
+            (OcctOp::Wedge, true),
             (OcctOp::Circle, true),
+            (OcctOp::Ellipse, true),
+            (OcctOp::Slot, true),
+            (OcctOp::SlotArc, true),
             (OcctOp::Rectangle, true),
             (OcctOp::RoundedRectangle, true),
             (OcctOp::RoundedPolygon, true),

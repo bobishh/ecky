@@ -536,6 +536,7 @@ pub fn run() {
         default_geometry_backend: crate::models::GeometryBackend::Freecad,
         max_generation_attempts: 3,
         max_verify_attempts: 2,
+        projects_root: None,
     };
 
     let app = tauri::Builder::default()

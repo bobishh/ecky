@@ -570,6 +570,18 @@ fn lower_to_build123d_polygon_reports_wrong_bound_list_kind() {
 }
 
 #[test]
+fn lower_to_build123d_regular_polygon_emits_helper_with_sides_radius_rotation() {
+    let src = r#"(model
+        (part hex
+          (extrude (regular-polygon 6 10 :rotation 30) 5)))"#;
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("_ecky_regular_polygon(6.0, 10.0, 30.0)"),
+        "regular-polygon should lower to the helper with sides/radius/rotation: {code}"
+    );
+}
+
+#[test]
 fn lower_to_build123d_bspline_reports_wrong_bound_list_kind() {
     let src = r#"(model
         (part body
@@ -3097,6 +3109,157 @@ fn lower_to_build123d_primitives_support_align_keyword() {
     assert!(
         code.contains("align=(Align.CENTER, Align.MAX, Align.MIN)"),
         "cone align: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_wedge_emits_wedge_with_seven_dims() {
+    let src = "(model (part body (wedge 20 10 20 5 5 15 15)))";
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("Wedge(20.0, 10.0, 20.0, 5.0, 5.0, 15.0, 15.0,"),
+        "wedge call: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_slot_overall_and_center_to_center_emit_slot_calls() {
+    let overall = lower_to_build123d("(model (part body (extrude (slot-overall 40 10) 5)))")
+        .expect("lower overall");
+    assert!(
+        overall.contains("SlotOverall(40.0, 10.0)"),
+        "slot-overall call: {}",
+        overall
+    );
+    let c2c = lower_to_build123d("(model (part body (extrude (slot-center-to-center 30 10) 5)))")
+        .expect("lower c2c");
+    assert!(
+        c2c.contains("SlotCenterToCenter(30.0, 10.0)"),
+        "slot-center-to-center call: {}",
+        c2c
+    );
+}
+
+#[test]
+fn lower_to_build123d_rib_and_groove_emit_sweep_booleans() {
+    let rib = lower_to_build123d(
+        "(model (part p (rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
+    )
+    .expect("rib");
+    assert!(rib.contains("sweep(") && rib.contains(" + "), "rib sweep+fuse: {}", rib);
+    let groove = lower_to_build123d(
+        "(model (part p (groove (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
+    )
+    .expect("groove");
+    assert!(
+        groove.contains("sweep(") && groove.contains(" - "),
+        "groove sweep+cut: {}",
+        groove
+    );
+}
+
+#[test]
+fn lower_to_build123d_draft_emits_draft_helper() {
+    let code = lower_to_build123d("(model (part p (draft 10 (box 20 20 20))))").expect("lower");
+    assert!(code.contains("_ecky_draft("), "draft call: {}", code);
+    assert!(code.contains("def _ecky_draft("), "draft helper: {}", code);
+}
+
+#[test]
+fn lower_to_build123d_tapered_fillet_is_rejected_with_clear_error() {
+    let err = lower_to_build123d("(model (part p (fillet 3 :to-radius 1 (box 20 20 20))))")
+        .expect_err("tapered fillet unsupported on build123d");
+    assert!(
+        err.to_string().contains("not supported on the build123d backend"),
+        "expected build123d taper caveat, got {err}"
+    );
+    // uniform fillet still lowers fine
+    lower_to_build123d("(model (part p (fillet 2 (box 20 20 20))))").expect("uniform fillet ok");
+}
+
+#[test]
+fn lower_to_build123d_thread_emits_thread_helper() {
+    let code = lower_to_build123d("(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1)))")
+        .expect("lower");
+    assert!(
+        code.contains("_ecky_thread(8.0, 2.0, 16.0, 1.0,"),
+        "thread call: {}",
+        code
+    );
+    assert!(code.contains("def _ecky_thread("), "thread helper: {}", code);
+}
+
+#[test]
+fn lower_to_build123d_thread_iso_decodes_designation() {
+    let code = lower_to_build123d("(model (part bolt (thread :iso \"M6\" :length 18)))")
+        .expect("lower");
+    // M6 → radius 2.3866, pitch 1, depth 0.6134 (D/2 - 0.6134*P).
+    assert!(
+        code.contains("_ecky_thread(2.3866, 1, 18.0, 0.6134,"),
+        "iso thread call: {}",
+        code
+    );
+    let err = lower_to_build123d("(model (part bad (thread :iso \"M7\" :length 18)))")
+        .expect_err("unknown designation should fail");
+    assert!(
+        err.to_string().contains("unknown ISO designation"),
+        "expected unknown-designation diagnostic, got {err}"
+    );
+}
+
+#[test]
+fn lower_to_build123d_slot_arc_emits_slot_arc_with_center_arc() {
+    let code = lower_to_build123d("(model (part body (extrude (slot-arc 20 0 90 10) 5)))")
+        .expect("lower");
+    assert!(
+        code.contains("SlotArc(CenterArc((0, 0), 20.0, 0.0, (90.0) - (0.0)), 10.0)"),
+        "slot-arc call: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_slot_center_point_emits_slot_center_point() {
+    let code = lower_to_build123d("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))")
+        .expect("lower");
+    assert!(
+        code.contains("SlotCenterPoint((0.0, 0.0), (15.0, 0.0), 10.0)"),
+        "slot-center-point call: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_torus_emits_torus_with_major_minor() {
+    let src = "(model (part body (torus 10 3)))";
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("Torus(10.0, 3.0,"),
+        "torus call: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_ellipse_emits_ellipse_with_x_y_radius() {
+    let src = "(model (part body (extrude (ellipse 10 4) 5)))";
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("Ellipse(10.0, 4.0)"),
+        "ellipse call: {}",
+        code
+    );
+}
+
+#[test]
+fn lower_to_build123d_trapezoid_emits_helper_with_bottom_top_height_skew() {
+    let src = "(model (part body (extrude (trapezoid 20 10 8 :skew 3) 5)))";
+    let code = lower_to_build123d(src).expect("lower");
+    assert!(
+        code.contains("_ecky_trapezoid(20.0, 10.0, 8.0, 3.0)"),
+        "trapezoid call: {}",
         code
     );
 }

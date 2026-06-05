@@ -115,6 +115,27 @@ const CONE_DIMS: &[Option<UnitDimension>] = &[
     Some(UnitDimension::Length),
     Some(UnitDimension::Scalar),
 ];
+const TORUS_DIMS: &[Option<UnitDimension>] =
+    &[Some(UnitDimension::Length), Some(UnitDimension::Length)];
+const ELLIPSE_DIMS: &[Option<UnitDimension>] =
+    &[Some(UnitDimension::Length), Some(UnitDimension::Length)];
+const SLOT_DIMS: &[Option<UnitDimension>] =
+    &[Some(UnitDimension::Length), Some(UnitDimension::Length)];
+const SLOT_ARC_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Angle),
+    Some(UnitDimension::Angle),
+    Some(UnitDimension::Length),
+];
+const WEDGE_DIMS: &[Option<UnitDimension>] = &[
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+    Some(UnitDimension::Length),
+];
 const ROUNDED_RECTANGLE_DIMS: &[Option<UnitDimension>] = &[
     Some(UnitDimension::Length),
     Some(UnitDimension::Length),
@@ -158,6 +179,7 @@ const TWIST_DIMS: &[Option<UnitDimension>] = &[
     Some(UnitDimension::Angle),
     None,
 ];
+const DRAFT_DIMS: &[Option<UnitDimension>] = &[Some(UnitDimension::Angle), None];
 const LINEAR_ARRAY_DIMS: &[Option<UnitDimension>] = &[
     Some(UnitDimension::Scalar),
     Some(UnitDimension::Length),
@@ -540,6 +562,49 @@ fn verify_primitive(
             verify_optional(name, args, 3, num("segments"), env)?;
             verify_result(name, ExpectedKind::Solid, node, env)
         }
+        CorePrimitive::Torus => {
+            verify_exact(name, args, &[num("major_radius"), num("minor_radius")], env)?;
+            verify_result(name, ExpectedKind::Solid, node, env)
+        }
+        CorePrimitive::Ellipse => {
+            verify_exact(name, args, &[num("x_radius"), num("y_radius")], env)?;
+            verify_result(name, ExpectedKind::Sketch, node, env)
+        }
+        CorePrimitive::Slot => {
+            verify_exact(name, args, &[num("length"), num("width")], env)?;
+            verify_result(name, ExpectedKind::Sketch, node, env)
+        }
+        CorePrimitive::SlotArc => {
+            verify_exact(
+                name,
+                args,
+                &[
+                    num("radius"),
+                    num("start_angle"),
+                    num("end_angle"),
+                    num("width"),
+                ],
+                env,
+            )?;
+            verify_result(name, ExpectedKind::Sketch, node, env)
+        }
+        CorePrimitive::Wedge => {
+            verify_exact(
+                name,
+                args,
+                &[
+                    num("dx"),
+                    num("dy"),
+                    num("dz"),
+                    num("xmin"),
+                    num("zmin"),
+                    num("xmax"),
+                    num("zmax"),
+                ],
+                env,
+            )?;
+            verify_result(name, ExpectedKind::Solid, node, env)
+        }
         CorePrimitive::Circle => {
             verify_between(name, args, 1, 2, "radius and optional segments")?;
             verify_prefix(name, args, &[num("radius")], env)?;
@@ -710,6 +775,9 @@ fn verify_surface(
                 &[num("height"), num("angle"), sketch("profile")],
                 env,
             )?;
+        }
+        CoreSurfaceOp::Draft => {
+            verify_exact(name, args, &[num("angle"), solid("solid")], env)?;
         }
     }
     verify_result(name, ExpectedKind::Solid, node, env)
@@ -1510,6 +1578,11 @@ fn op_dimension_signature(op: &CoreOperation) -> Option<OpDimensionSignature> {
         CoreOperation::Primitive(CorePrimitive::Sphere) => DimensionSlots::Fixed(ONE_LENGTH_DIM),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => DimensionSlots::Fixed(CYLINDER_DIMS),
         CoreOperation::Primitive(CorePrimitive::Cone) => DimensionSlots::Fixed(CONE_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Torus) => DimensionSlots::Fixed(TORUS_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Wedge) => DimensionSlots::Fixed(WEDGE_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => DimensionSlots::Fixed(ELLIPSE_DIMS),
+        CoreOperation::Primitive(CorePrimitive::Slot) => DimensionSlots::Fixed(SLOT_DIMS),
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => DimensionSlots::Fixed(SLOT_ARC_DIMS),
         CoreOperation::Primitive(CorePrimitive::Circle) => DimensionSlots::Fixed(CIRCLE_DIMS),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => {
             DimensionSlots::Fixed(TWO_LENGTH_DIMS)
@@ -1553,6 +1626,7 @@ fn op_dimension_signature(op: &CoreOperation) -> Option<OpDimensionSignature> {
         }
         CoreOperation::Surface(CoreSurfaceOp::Taper) => DimensionSlots::Fixed(TAPER_DIMS),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => DimensionSlots::Fixed(TWIST_DIMS),
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => DimensionSlots::Fixed(DRAFT_DIMS),
         CoreOperation::Path(_) => DimensionSlots::Fixed(NO_DIMS),
         CoreOperation::Array(CoreArrayOp::LinearArray) => DimensionSlots::Fixed(LINEAR_ARRAY_DIMS),
         CoreOperation::Array(CoreArrayOp::RadialArray) => DimensionSlots::Fixed(RADIAL_ARRAY_DIMS),
@@ -1767,6 +1841,11 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cone) => "cone".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Torus) => "torus".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Wedge) => "wedge".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => "ellipse".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Slot) => "slot-overall".to_string(),
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => "slot-arc".to_string(),
         CoreOperation::Primitive(CorePrimitive::Circle) => "circle".to_string(),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle".to_string(),
         CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect".to_string(),
@@ -1796,6 +1875,7 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => "draft".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
@@ -2098,6 +2178,11 @@ mod tests {
             CoreOperation::Primitive(CorePrimitive::Sphere),
             CoreOperation::Primitive(CorePrimitive::Cylinder),
             CoreOperation::Primitive(CorePrimitive::Cone),
+            CoreOperation::Primitive(CorePrimitive::Torus),
+            CoreOperation::Primitive(CorePrimitive::Wedge),
+            CoreOperation::Primitive(CorePrimitive::Ellipse),
+            CoreOperation::Primitive(CorePrimitive::Slot),
+            CoreOperation::Primitive(CorePrimitive::SlotArc),
             CoreOperation::Primitive(CorePrimitive::Circle),
             CoreOperation::Primitive(CorePrimitive::Rectangle),
             CoreOperation::Primitive(CorePrimitive::RoundedRectangle),
@@ -2127,6 +2212,7 @@ mod tests {
             CoreOperation::Surface(CoreSurfaceOp::Chamfer),
             CoreOperation::Surface(CoreSurfaceOp::Taper),
             CoreOperation::Surface(CoreSurfaceOp::Twist),
+            CoreOperation::Surface(CoreSurfaceOp::Draft),
             CoreOperation::Path(CorePathOp::Polyline),
             CoreOperation::Path(CorePathOp::BezierPath),
             CoreOperation::Path(CorePathOp::Bspline),

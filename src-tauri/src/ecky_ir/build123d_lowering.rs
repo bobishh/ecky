@@ -780,6 +780,11 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
         CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cone) => "cone".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Torus) => "torus".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Wedge) => "wedge".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => "ellipse".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Slot) => "slot-overall".to_string(),
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => "slot-arc".to_string(),
         CoreOperation::Primitive(CorePrimitive::Circle) => "circle".to_string(),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle".to_string(),
         CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect".to_string(),
@@ -809,6 +814,7 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => "draft".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
@@ -1114,6 +1120,59 @@ struct HelicalRidgeCall {
     female: Option<Value>,
     clearance: Option<Value>,
     lefthand: Option<Value>,
+}
+
+struct ThreadCall {
+    iso: Option<Value>,
+    radius: Option<Value>,
+    pitch: Option<Value>,
+    length: Value,
+    depth: Option<Value>,
+    base_width: Option<Value>,
+    crest_width: Option<Value>,
+    female: Option<Value>,
+    clearance: Option<Value>,
+    lefthand: Option<Value>,
+}
+
+fn parse_thread_call(args: &[Value]) -> AppResult<ThreadCall> {
+    let parsed = ParsedCallArgs::parse(
+        "thread",
+        args,
+        &[
+            "iso",
+            "radius",
+            "pitch",
+            "length",
+            "depth",
+            "base-width",
+            "crest-width",
+            "female",
+            "clearance",
+            "lefthand",
+        ],
+    )?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`thread` expects keyword options: either `:iso \"M6\"` or `:radius`/`:pitch`/`:depth`, plus `:length` and optional `:base-width`, `:crest-width`, `:female`, `:clearance`, `:lefthand`.",
+        ));
+    }
+    Ok(ThreadCall {
+        iso: parsed.keywords.get("iso").map(Value::dup),
+        radius: parsed.keywords.get("radius").map(Value::dup),
+        pitch: parsed.keywords.get("pitch").map(Value::dup),
+        length: parsed
+            .keywords
+            .get("length")
+            .map(Value::dup)
+            .ok_or_else(|| validation("`thread` requires `:length`."))?,
+        depth: parsed.keywords.get("depth").map(Value::dup),
+        base_width: parsed.keywords.get("base_width").map(Value::dup),
+        crest_width: parsed.keywords.get("crest_width").map(Value::dup),
+        female: parsed.keywords.get("female").map(Value::dup),
+        clearance: parsed.keywords.get("clearance").map(Value::dup),
+        lefthand: parsed.keywords.get("lefthand").map(Value::dup),
+    })
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -1551,6 +1610,10 @@ fn b123d_preamble() -> Vec<String> {
         "def _ecky_voronoi2(x, y, seed):\n    return max(0.0, min(1.0, 1.0 - _ecky_cell_distance2(x, y, seed)))".into(),
         "def _ecky_signed_pow(value, exponent):\n    value = float(value); exponent = float(exponent)\n    return math.copysign(abs(value) ** exponent, value)".into(),
         "def _ecky_helical_ridge(radius, pitch, height, base_width, crest_width, depth, female=False, clearance=0.0, lefthand=False):\n    radius = float(radius); pitch = float(pitch); height = float(height)\n    base_width = float(base_width); crest_width = float(crest_width); depth = float(depth)\n    clearance = max(0.0, float(clearance))\n    female = bool(female); lefthand = bool(lefthand)\n    if radius <= 0.0: raise ValueError('helical-ridge radius must be positive')\n    if pitch <= 0.0: raise ValueError('helical-ridge pitch must be positive')\n    if height <= 0.0: raise ValueError('helical-ridge height must be positive')\n    if base_width <= 0.0: raise ValueError('helical-ridge base-width must be positive')\n    if crest_width <= 0.0: raise ValueError('helical-ridge crest-width must be positive')\n    if depth <= 0.0: raise ValueError('helical-ridge depth must be positive')\n    envelope_clearance = clearance if female else 0.0\n    path_radius = radius\n    base_half = (base_width + 2.0 * envelope_clearance) * 0.5\n    crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5\n    ridge_depth = depth + envelope_clearance\n    path = Edge.make_helix(pitch=pitch, height=height, radius=path_radius, center=(0, 0, 0), normal=(0, 0, 1), lefthand=lefthand)\n    profile = Polyline((path_radius, 0, -base_half), (path_radius + ridge_depth, 0, -crest_half), (path_radius + ridge_depth, 0, crest_half), (path_radius, 0, base_half), close=True)\n    return _ecky_solid(sweep(_ecky_face(profile), path=path))".into(),
+        "def _ecky_thread(radius, pitch, length, depth, base_width, crest_width, female=False, clearance=0.0, lefthand=False):\n    ridge = _ecky_helical_ridge(radius, pitch, length, base_width, crest_width, depth, female=female, clearance=clearance, lefthand=lefthand)\n    if bool(female):\n        return ridge\n    core = Cylinder(float(radius), float(length), align=(Align.CENTER, Align.CENTER, Align.MIN))\n    return _ecky_solid(core + ridge)".into(),
+        "def _ecky_draft(solid, angle, neutral_z=0.0):\n    solid = _ecky_solid(solid)\n    faces = [f for f in solid.faces() if abs(float(f.normal_at().Z)) < 1.0e-6]\n    if not faces:\n        return solid\n    plane = Plane(origin=(0, 0, float(neutral_z)), z_dir=(0, 0, 1))\n    return _ecky_solid(draft(faces, neutral_plane=plane, angle=float(angle)))".into(),
+        "def _ecky_regular_polygon(sides, radius, rotation=0.0):\n    sides = int(round(float(sides))); radius = float(radius); rot = math.radians(float(rotation))\n    if sides < 3: raise ValueError('regular-polygon needs at least 3 sides')\n    if radius <= 0.0: raise ValueError('regular-polygon radius must be positive')\n    pts = [(radius * math.cos(rot + 2.0 * math.pi * i / sides), radius * math.sin(rot + 2.0 * math.pi * i / sides)) for i in range(sides)]\n    return Polygon(*pts, align=None)".into(),
+        "def _ecky_trapezoid(bottom, top, height, skew=0.0):\n    bottom = float(bottom); top = float(top); height = float(height); skew = float(skew)\n    if bottom <= 0.0 or top <= 0.0: raise ValueError('trapezoid bottom and top must be positive')\n    if height <= 0.0: raise ValueError('trapezoid height must be positive')\n    half_h = height / 2.0\n    pts = [(-bottom / 2.0, -half_h), (bottom / 2.0, -half_h), (top / 2.0 + skew, half_h), (-top / 2.0 + skew, half_h)]\n    return Polygon(*pts, align=None)".into(),
         String::new(),
     ]
 }
@@ -3872,6 +3935,55 @@ impl<'a> ExprLowerer<'a> {
                     B123dGeomKind::Solid3d,
                 )
             }
+            "wedge" => {
+                let parsed = ParsedCallArgs::parse("wedge", args, &["align"])?;
+                if parsed.positional.len() != 7 {
+                    return Err(validation(
+                        "`wedge` expects dx, dy, dz, xmin, zmin, xmax, zmax.",
+                    ));
+                }
+                let dims = parsed
+                    .positional
+                    .iter()
+                    .map(|expr| lower_num_expr(expr, scope))
+                    .collect::<AppResult<Vec<_>>>()?;
+                let align = parse_align_tuple(
+                    parsed.keywords.get("align"),
+                    "wedge",
+                    "(Align.CENTER, Align.CENTER, Align.CENTER)",
+                )?;
+                (
+                    PyExpr::Call {
+                        func: "Wedge".into(),
+                        args: dims.into_iter().map(PyExpr::Inline).collect(),
+                        kwargs: vec![("align".into(), PyExpr::Inline(align))],
+                    },
+                    B123dGeomKind::Solid3d,
+                )
+            }
+            "torus" => {
+                let parsed = ParsedCallArgs::parse("torus", args, &["align"])?;
+                if parsed.positional.len() != 2 {
+                    return Err(validation(
+                        "`torus` expects major radius and minor radius.",
+                    ));
+                }
+                let major = lower_num_expr(&parsed.positional[0], scope)?;
+                let minor = lower_num_expr(&parsed.positional[1], scope)?;
+                let align = parse_align_tuple(
+                    parsed.keywords.get("align"),
+                    "torus",
+                    "(Align.CENTER, Align.CENTER, Align.CENTER)",
+                )?;
+                (
+                    PyExpr::Call {
+                        func: "Torus".into(),
+                        args: vec![PyExpr::Inline(major), PyExpr::Inline(minor)],
+                        kwargs: vec![("align".into(), PyExpr::Inline(align))],
+                    },
+                    B123dGeomKind::Solid3d,
+                )
+            }
             "circle" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(validation("`circle` expects radius and optional segments."));
@@ -3881,6 +3993,101 @@ impl<'a> ExprLowerer<'a> {
                     PyExpr::Call {
                         func: "Circle".into(),
                         args: vec![PyExpr::Inline(r)],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
+            "slot-overall" | "slot_overall" => {
+                if args.len() != 2 {
+                    return Err(validation("`slot-overall` expects length and width."));
+                }
+                let length = lower_num_expr(&args[0], scope)?;
+                let width = lower_num_expr(&args[1], scope)?;
+                (
+                    PyExpr::Call {
+                        func: "SlotOverall".into(),
+                        args: vec![PyExpr::Inline(length), PyExpr::Inline(width)],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
+            "slot-center-to-center" | "slot_center_to_center" => {
+                if args.len() != 2 {
+                    return Err(validation(
+                        "`slot-center-to-center` expects center separation and width.",
+                    ));
+                }
+                let sep = lower_num_expr(&args[0], scope)?;
+                let width = lower_num_expr(&args[1], scope)?;
+                (
+                    PyExpr::Call {
+                        func: "SlotCenterToCenter".into(),
+                        args: vec![PyExpr::Inline(sep), PyExpr::Inline(width)],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
+            "slot-arc" | "slot_arc" => {
+                if args.len() != 4 {
+                    return Err(validation(
+                        "`slot-arc` expects radius, start angle, end angle, width.",
+                    ));
+                }
+                let radius = lower_num_expr(&args[0], scope)?;
+                let start = lower_num_expr(&args[1], scope)?;
+                let end = lower_num_expr(&args[2], scope)?;
+                let width = lower_num_expr(&args[3], scope)?;
+                (
+                    PyExpr::Call {
+                        func: "SlotArc".into(),
+                        args: vec![
+                            PyExpr::Inline(format!(
+                                "CenterArc((0, 0), {radius}, {start}, ({end}) - ({start}))"
+                            )),
+                            PyExpr::Inline(width),
+                        ],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
+            "slot-center-point" | "slot_center_point" => {
+                if args.len() != 5 {
+                    return Err(validation(
+                        "`slot-center-point` expects cx, cy, px, py, width.",
+                    ));
+                }
+                let cx = lower_num_expr(&args[0], scope)?;
+                let cy = lower_num_expr(&args[1], scope)?;
+                let px = lower_num_expr(&args[2], scope)?;
+                let py = lower_num_expr(&args[3], scope)?;
+                let width = lower_num_expr(&args[4], scope)?;
+                (
+                    PyExpr::Call {
+                        func: "SlotCenterPoint".into(),
+                        args: vec![
+                            PyExpr::Inline(format!("({cx}, {cy})")),
+                            PyExpr::Inline(format!("({px}, {py})")),
+                            PyExpr::Inline(width),
+                        ],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
+            "ellipse" => {
+                if args.len() != 2 {
+                    return Err(validation("`ellipse` expects x radius and y radius."));
+                }
+                let rx = lower_num_expr(&args[0], scope)?;
+                let ry = lower_num_expr(&args[1], scope)?;
+                (
+                    PyExpr::Call {
+                        func: "Ellipse".into(),
+                        args: vec![PyExpr::Inline(rx), PyExpr::Inline(ry)],
                         kwargs: vec![],
                     },
                     B123dGeomKind::Sketch2d,
@@ -3928,6 +4135,60 @@ impl<'a> ExprLowerer<'a> {
                     PyExpr::Call {
                         func: "_ecky_polygon".into(),
                         args: vec![PyExpr::Inline(points)],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
+            "regular-polygon" | "regular_polygon" => {
+                let parsed = ParsedCallArgs::parse("regular-polygon", args, &["rotation"])?;
+                if parsed.positional.len() != 2 {
+                    return Err(validation(
+                        "`regular-polygon` expects sides and radius, plus optional `:rotation`.",
+                    ));
+                }
+                let sides = lower_num_expr(&parsed.positional[0], scope)?;
+                let radius = lower_num_expr(&parsed.positional[1], scope)?;
+                let rotation = match parsed.keywords.get("rotation") {
+                    Some(value) => lower_num_expr(value, scope)?,
+                    None => "0.0".to_string(),
+                };
+                (
+                    PyExpr::Call {
+                        func: "_ecky_regular_polygon".into(),
+                        args: vec![
+                            PyExpr::Inline(sides),
+                            PyExpr::Inline(radius),
+                            PyExpr::Inline(rotation),
+                        ],
+                        kwargs: vec![],
+                    },
+                    B123dGeomKind::Sketch2d,
+                )
+            }
+            "trapezoid" => {
+                let parsed = ParsedCallArgs::parse("trapezoid", args, &["skew"])?;
+                if parsed.positional.len() != 3 {
+                    return Err(validation(
+                        "`trapezoid` expects bottom, top, and height, plus optional `:skew`.",
+                    ));
+                }
+                let bottom = lower_num_expr(&parsed.positional[0], scope)?;
+                let top = lower_num_expr(&parsed.positional[1], scope)?;
+                let height = lower_num_expr(&parsed.positional[2], scope)?;
+                let skew = match parsed.keywords.get("skew") {
+                    Some(value) => lower_num_expr(value, scope)?,
+                    None => "0.0".to_string(),
+                };
+                (
+                    PyExpr::Call {
+                        func: "_ecky_trapezoid".into(),
+                        args: vec![
+                            PyExpr::Inline(bottom),
+                            PyExpr::Inline(top),
+                            PyExpr::Inline(height),
+                            PyExpr::Inline(skew),
+                        ],
                         kwargs: vec![],
                     },
                     B123dGeomKind::Sketch2d,
@@ -4317,6 +4578,28 @@ impl<'a> ExprLowerer<'a> {
                     B123dGeomKind::Solid3d,
                 )
             }
+            "draft" => {
+                let (pos_args, properties) = self.parse_properties(args)?;
+                if pos_args.len() != 2 {
+                    return Err(validation(
+                        "`draft` expects an angle and a solid (plus optional `:neutral-z`).",
+                    ));
+                }
+                let angle = lower_num_expr(&pos_args[0], scope)?;
+                let neutral_z = match properties.get("neutral-z").or_else(|| properties.get("neutral_z")) {
+                    Some(value) => lower_num_expr(value, scope)?,
+                    None => "0.0".to_string(),
+                };
+                let solid = self.lower_solid_expr(&pos_args[1], scope)?;
+                (
+                    PyExpr::Call {
+                        func: "_ecky_draft".into(),
+                        args: vec![solid.expr, PyExpr::Inline(angle)],
+                        kwargs: vec![("neutral_z".into(), PyExpr::Inline(neutral_z))],
+                    },
+                    B123dGeomKind::Solid3d,
+                )
+            }
             "taper" => {
                 if !(args.len() == 3 || args.len() == 4) {
                     return Err(validation(
@@ -4500,6 +4783,82 @@ impl<'a> ExprLowerer<'a> {
                     B123dGeomKind::Solid3d,
                 )
             }
+            "thread" => {
+                let call = parse_thread_call(args)?;
+                let len = lower_num_expr(&call.length, scope)?;
+                let (r, p, d) = if let Some(iso) = call.iso.as_ref() {
+                    let designation = iso
+                        .as_str()
+                        .ok_or_else(|| validation("`thread :iso` expects a string like \"M6\"."))?;
+                    let (radius, pitch, depth) =
+                        crate::ecky_core_ir::iso_metric_thread_core(designation).ok_or_else(|| {
+                            validation(format!(
+                                "`thread` unknown ISO designation `{designation}` (try M3, M4, M5, M6, M8, M10, M12, M16, M20)."
+                            ))
+                        })?;
+                    (format!("{radius}"), format!("{pitch}"), format!("{depth}"))
+                } else {
+                    let radius = call
+                        .radius
+                        .as_ref()
+                        .ok_or_else(|| validation("`thread` requires `:radius` (or `:iso`)."))?;
+                    let pitch = call
+                        .pitch
+                        .as_ref()
+                        .ok_or_else(|| validation("`thread` requires `:pitch` (or `:iso`)."))?;
+                    let depth = call
+                        .depth
+                        .as_ref()
+                        .ok_or_else(|| validation("`thread` requires `:depth` (or `:iso`)."))?;
+                    (
+                        lower_num_expr(radius, scope)?,
+                        lower_num_expr(pitch, scope)?,
+                        lower_num_expr(depth, scope)?,
+                    )
+                };
+                let bw = match call.base_width.as_ref() {
+                    Some(v) => lower_num_expr(v, scope)?,
+                    None => format!("({p}) * 0.75"),
+                };
+                let cw = match call.crest_width.as_ref() {
+                    Some(v) => lower_num_expr(v, scope)?,
+                    None => format!("({p}) * 0.25"),
+                };
+                let mut kwargs = Vec::new();
+                if let Some(female) = call.female.as_ref() {
+                    kwargs.push((
+                        "female".into(),
+                        PyExpr::Inline(lower_bool_expr(female, scope)?),
+                    ));
+                }
+                if let Some(clearance) = call.clearance.as_ref() {
+                    kwargs.push((
+                        "clearance".into(),
+                        PyExpr::Inline(lower_num_expr(clearance, scope)?),
+                    ));
+                }
+                if let Some(lefthand) = call.lefthand.as_ref() {
+                    kwargs.push((
+                        "lefthand".into(),
+                        PyExpr::Inline(lower_bool_expr(lefthand, scope)?),
+                    ));
+                }
+                (
+                    PyExpr::Call {
+                        func: "_ecky_thread".into(),
+                        args: vec![
+                            PyExpr::Inline(r),
+                            PyExpr::Inline(p),
+                            PyExpr::Inline(len),
+                            PyExpr::Inline(d),
+                            PyExpr::Inline(bw),
+                            PyExpr::Inline(cw),
+                        ],
+                        kwargs,
+                    },
+                    B123dGeomKind::Solid3d,
+                )
+            }
             "sweep" => {
                 if args.len() != 2 {
                     return Err(validation("`sweep` expects a sketch and a path."));
@@ -4515,6 +4874,33 @@ impl<'a> ExprLowerer<'a> {
                             kwargs: vec![],
                         }],
                         kwargs: vec![("path".into(), path_geom.expr)],
+                    },
+                    B123dGeomKind::Solid3d,
+                )
+            }
+            "rib" | "groove" => {
+                if args.len() != 3 {
+                    return Err(validation(format!(
+                        "`{node}` expects a solid, a profile, and a path."
+                    )));
+                }
+                let solid = self.lower_solid_expr(&args[0], scope)?;
+                let section = self.lower_sketch_expr(&args[1], scope)?;
+                let path_geom = self.lower_path_expr(&args[2], scope)?;
+                let swept = PyExpr::Call {
+                    func: "sweep".into(),
+                    args: vec![PyExpr::Call {
+                        func: "_ecky_face".into(),
+                        args: vec![section.expr],
+                        kwargs: vec![],
+                    }],
+                    kwargs: vec![("path".into(), path_geom.expr)],
+                };
+                let op = if node == "rib" { "+" } else { "-" };
+                (
+                    PyExpr::BinOp {
+                        op,
+                        operands: vec![solid.expr, swept],
                     },
                     B123dGeomKind::Solid3d,
                 )
@@ -4725,6 +5111,11 @@ impl<'a> ExprLowerer<'a> {
                         "`{}` expects radius and a geometry node.",
                         node
                     )));
+                }
+                if properties.contains_key("to-radius") || properties.contains_key("to_radius") {
+                    return Err(validation(
+                        "`fillet :to-radius` (tapered, variable-radius fillet) is not supported on the build123d backend — build123d `fillet()` takes a single radius. Use the native or freecad backend for tapered fillets.",
+                    ));
                 }
                 let radius = lower_num_expr(&pos_args[0], scope)?;
                 let selector = if let Some(value) = properties.get("edges") {

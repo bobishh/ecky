@@ -92,6 +92,11 @@ fn core_operation_name(op: &crate::ecky_core_ir::CoreOperation) -> String {
         CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cone) => "cone".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Torus) => "torus".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Wedge) => "wedge".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => "ellipse".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Slot) => "slot-overall".to_string(),
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => "slot-arc".to_string(),
         CoreOperation::Primitive(CorePrimitive::Circle) => "circle".to_string(),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle".to_string(),
         CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect".to_string(),
@@ -121,6 +126,7 @@ fn core_operation_name(op: &crate::ecky_core_ir::CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => "draft".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
@@ -1434,6 +1440,7 @@ endsolid sample
             default_geometry_backend: GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
+            projects_root: None,
         }
     }
 

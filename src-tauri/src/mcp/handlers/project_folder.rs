@@ -84,6 +84,7 @@ pub async fn handle_project_folder_export(
         .artifact_bundle
         .as_ref()
         .map(|bundle| bundle.model_id.clone());
+    let projects_root = configured_projects_root(state);
     let (dir, manifest) = crate::project_mirror::export_project(
         app,
         &crate::project_mirror::ExportProjectRequest {
@@ -92,6 +93,7 @@ pub async fn handle_project_folder_export(
             message_id: &target.message_id,
             model_id: model_id.as_deref(),
             source: &target.design_output.macro_code,
+            projects_root: projects_root.as_deref(),
         },
     )?;
     Ok(ProjectFolderExportResponse {
@@ -101,12 +103,18 @@ pub async fn handle_project_folder_export(
     })
 }
 
+/// Configured `projectsRoot` override; `None` falls back to `<app_data>/projects`.
+fn configured_projects_root(state: &AppState) -> Option<String> {
+    state.config.lock().unwrap().projects_root.clone()
+}
+
 async fn project_thread_head(
     state: &AppState,
     slug: &str,
     app: &dyn PathResolver,
 ) -> AppResult<Option<String>> {
-    let dir = crate::project_mirror::project_dir(app, slug)?;
+    let root = configured_projects_root(state);
+    let dir = crate::project_mirror::project_dir(app, root.as_deref(), slug)?;
     let Some(manifest) = crate::project_mirror::read_manifest(&dir)? else {
         return Ok(None);
     };
@@ -121,7 +129,8 @@ pub async fn handle_project_folder_status(
     req: ProjectFolderStatusRequest,
 ) -> AppResult<crate::project_mirror::ProjectFolderStatus> {
     let head = project_thread_head(state, &req.slug, app).await?;
-    crate::project_mirror::folder_status(app, &req.slug, head.as_deref())
+    let root = configured_projects_root(state);
+    crate::project_mirror::folder_status(app, root.as_deref(), &req.slug, head.as_deref())
 }
 
 pub async fn handle_project_folder_apply(
@@ -179,7 +188,8 @@ pub async fn handle_project_folder_apply(
         _ => {}
     }
 
-    let dir = crate::project_mirror::project_dir(app, &req.slug)?;
+    let root = configured_projects_root(state);
+    let dir = crate::project_mirror::project_dir(app, root.as_deref(), &req.slug)?;
     let source = crate::project_mirror::read_project_source(&dir)?.ok_or_else(|| {
         AppError::validation(format!(
             "Project folder `{}` lost its model.ecky during apply.",
@@ -283,11 +293,12 @@ impl ProjectFolderWatcher {
         ctx: &AgentContext,
     ) -> Vec<ProjectFolderWatchEvent> {
         let mut events = Vec::new();
-        let Ok(slugs) = crate::project_mirror::list_project_slugs(app) else {
+        let root = configured_projects_root(state);
+        let Ok(slugs) = crate::project_mirror::list_project_slugs(app, root.as_deref()) else {
             return events;
         };
         for slug in slugs {
-            let Ok(dir) = crate::project_mirror::project_dir(app, &slug) else {
+            let Ok(dir) = crate::project_mirror::project_dir(app, root.as_deref(), &slug) else {
                 continue;
             };
             let Ok(Some(manifest)) = crate::project_mirror::read_manifest(&dir) else {

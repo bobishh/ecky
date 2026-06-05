@@ -122,6 +122,11 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
         CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cone) => "cone".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Torus) => "torus".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Wedge) => "wedge".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => "ellipse".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Slot) => "slot-overall".to_string(),
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => "slot-arc".to_string(),
         CoreOperation::Primitive(CorePrimitive::Circle) => "circle".to_string(),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle".to_string(),
         CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect".to_string(),
@@ -151,6 +156,7 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => "draft".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),
@@ -587,6 +593,59 @@ struct HelicalRidgeCall {
     female: Option<IrExpr>,
     clearance: Option<IrExpr>,
     lefthand: Option<IrExpr>,
+}
+
+struct ThreadCall {
+    iso: Option<IrExpr>,
+    radius: Option<IrExpr>,
+    pitch: Option<IrExpr>,
+    length: IrExpr,
+    depth: Option<IrExpr>,
+    base_width: Option<IrExpr>,
+    crest_width: Option<IrExpr>,
+    female: Option<IrExpr>,
+    clearance: Option<IrExpr>,
+    lefthand: Option<IrExpr>,
+}
+
+fn parse_thread_call(args: &[IrExpr]) -> AppResult<ThreadCall> {
+    let parsed = ParsedCallArgs::parse(
+        "thread",
+        args,
+        &[
+            "iso",
+            "radius",
+            "pitch",
+            "length",
+            "depth",
+            "base-width",
+            "crest-width",
+            "female",
+            "clearance",
+            "lefthand",
+        ],
+    )?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`thread` expects keyword options: either `:iso \"M6\"` or `:radius`/`:pitch`/`:depth`, plus `:length` and optional `:base-width`, `:crest-width`, `:female`, `:clearance`, `:lefthand`.",
+        ));
+    }
+    Ok(ThreadCall {
+        iso: parsed.keywords.get("iso").cloned(),
+        radius: parsed.keywords.get("radius").cloned(),
+        pitch: parsed.keywords.get("pitch").cloned(),
+        length: parsed
+            .keywords
+            .get("length")
+            .cloned()
+            .ok_or_else(|| validation("`thread` requires `:length`."))?,
+        depth: parsed.keywords.get("depth").cloned(),
+        base_width: parsed.keywords.get("base_width").cloned(),
+        crest_width: parsed.keywords.get("crest_width").cloned(),
+        female: parsed.keywords.get("female").cloned(),
+        clearance: parsed.keywords.get("clearance").cloned(),
+        lefthand: parsed.keywords.get("lefthand").cloned(),
+    })
 }
 
 impl ParsedCallArgs {
@@ -2276,6 +2335,54 @@ impl FreecadLowerer {
                     kind: GeomKind::Solid3d,
                 });
             }
+            "wedge" => {
+                let parsed = ParsedCallArgs::parse("wedge", args, &["align"])?;
+                if parsed.positional.len() != 7 {
+                    return Err(validation(
+                        "`wedge` expects dx, dy, dz, xmin, zmin, xmax, zmax.",
+                    ));
+                }
+                let dims = parsed
+                    .positional
+                    .iter()
+                    .map(|expr| self.lower_num_expr(expr, scope))
+                    .collect::<AppResult<Vec<_>>>()?;
+                let align = self.lower_align_tuple(
+                    parsed.keywords.get("align"),
+                    "wedge",
+                    ("center", "center", "center"),
+                )?;
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_wedge({}, {align})",
+                    dims.join(", ")
+                ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Solid3d,
+                });
+            }
+            "torus" => {
+                let parsed = ParsedCallArgs::parse("torus", args, &["align"])?;
+                if parsed.positional.len() != 2 {
+                    return Err(validation(
+                        "`torus` expects major radius and minor radius.",
+                    ));
+                }
+                let major = self.lower_num_expr(&parsed.positional[0], scope)?;
+                let minor = self.lower_num_expr(&parsed.positional[1], scope)?;
+                let align = self.lower_align_tuple(
+                    parsed.keywords.get("align"),
+                    "torus",
+                    ("center", "center", "center"),
+                )?;
+                let result = self.next_var();
+                self.emit(format!("{result} = _ecky_torus({major}, {minor}, {align})"));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Solid3d,
+                });
+            }
             "circle" => {
                 if args.is_empty() {
                     return Err(validation("`circle` expects radius."));
@@ -2283,6 +2390,86 @@ impl FreecadLowerer {
                 let r = self.lower_num_expr(&args[0], scope)?;
                 let result = self.next_var();
                 self.emit(format!("{result} = _ecky_circle({r})"));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Sketch2d,
+                });
+            }
+            "slot-overall" | "slot_overall" => {
+                if args.len() != 2 {
+                    return Err(validation("`slot-overall` expects length and width."));
+                }
+                let length = self.lower_num_expr(&args[0], scope)?;
+                let width = self.lower_num_expr(&args[1], scope)?;
+                let result = self.next_var();
+                self.emit(format!("{result} = _ecky_slot({length}, {width})"));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Sketch2d,
+                });
+            }
+            "slot-center-to-center" | "slot_center_to_center" => {
+                if args.len() != 2 {
+                    return Err(validation(
+                        "`slot-center-to-center` expects center separation and width.",
+                    ));
+                }
+                let sep = self.lower_num_expr(&args[0], scope)?;
+                let width = self.lower_num_expr(&args[1], scope)?;
+                let result = self.next_var();
+                self.emit(format!("{result} = _ecky_slot_c2c({sep}, {width})"));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Sketch2d,
+                });
+            }
+            "slot-arc" | "slot_arc" => {
+                if args.len() != 4 {
+                    return Err(validation(
+                        "`slot-arc` expects radius, start angle, end angle, width.",
+                    ));
+                }
+                let radius = self.lower_num_expr(&args[0], scope)?;
+                let start = self.lower_num_expr(&args[1], scope)?;
+                let end = self.lower_num_expr(&args[2], scope)?;
+                let width = self.lower_num_expr(&args[3], scope)?;
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_slot_arc({radius}, {start}, {end}, {width})"
+                ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Sketch2d,
+                });
+            }
+            "slot-center-point" | "slot_center_point" => {
+                if args.len() != 5 {
+                    return Err(validation(
+                        "`slot-center-point` expects cx, cy, px, py, width.",
+                    ));
+                }
+                let cx = self.lower_num_expr(&args[0], scope)?;
+                let cy = self.lower_num_expr(&args[1], scope)?;
+                let px = self.lower_num_expr(&args[2], scope)?;
+                let py = self.lower_num_expr(&args[3], scope)?;
+                let width = self.lower_num_expr(&args[4], scope)?;
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_slot_center_point({cx}, {cy}, {px}, {py}, {width})"
+                ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Sketch2d,
+                });
+            }
+            "ellipse" => {
+                if args.len() != 2 {
+                    return Err(validation("`ellipse` expects x radius and y radius."));
+                }
+                let rx = self.lower_num_expr(&args[0], scope)?;
+                let ry = self.lower_num_expr(&args[1], scope)?;
+                let result = self.next_var();
+                self.emit(format!("{result} = _ecky_ellipse({rx}, {ry})"));
                 return Ok(LoweredNode {
                     expr: result,
                     kind: GeomKind::Sketch2d,
@@ -2328,6 +2515,55 @@ impl FreecadLowerer {
                 let points = self.lower_point_list(&args[0], scope, false)?;
                 let result = self.next_var();
                 self.emit(format!("{result} = _ecky_polygon([{points}])"));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Sketch2d,
+                });
+            }
+            "regular-polygon" | "regular_polygon" => {
+                let parsed = ParsedCallArgs::parse(op, args, &["rotation"])?;
+                if parsed.positional.len() != 2 {
+                    return Err(validation(
+                        "`regular-polygon` expects sides and radius, plus optional `:rotation`.",
+                    ));
+                }
+                let sides = self.lower_num_expr(&parsed.positional[0], scope)?;
+                let radius = self.lower_num_expr(&parsed.positional[1], scope)?;
+                let rotation = parsed
+                    .keywords
+                    .get("rotation")
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "0.0".to_string());
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_regular_polygon({sides}, {radius}, {rotation})"
+                ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Sketch2d,
+                });
+            }
+            "trapezoid" => {
+                let parsed = ParsedCallArgs::parse(op, args, &["skew"])?;
+                if parsed.positional.len() != 3 {
+                    return Err(validation(
+                        "`trapezoid` expects bottom, top, and height, plus optional `:skew`.",
+                    ));
+                }
+                let bottom = self.lower_num_expr(&parsed.positional[0], scope)?;
+                let top = self.lower_num_expr(&parsed.positional[1], scope)?;
+                let height = self.lower_num_expr(&parsed.positional[2], scope)?;
+                let skew = parsed
+                    .keywords
+                    .get("skew")
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "0.0".to_string());
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_trapezoid({bottom}, {top}, {height}, {skew})"
+                ));
                 return Ok(LoweredNode {
                     expr: result,
                     kind: GeomKind::Sketch2d,
@@ -2918,6 +3154,78 @@ impl FreecadLowerer {
                     kind: GeomKind::Solid3d,
                 });
             }
+            "thread" => {
+                let call = parse_thread_call(args)?;
+                let length = self.lower_num_expr(&call.length, scope)?;
+                let (radius, pitch, depth) = if let Some(iso) = call.iso.as_ref() {
+                    let designation = iso
+                        .as_str()
+                        .ok_or_else(|| validation("`thread :iso` expects a string like \"M6\"."))?;
+                    let (r, p, d) = crate::ecky_core_ir::iso_metric_thread_core(designation)
+                        .ok_or_else(|| {
+                            validation(format!(
+                                "`thread` unknown ISO designation `{designation}` (try M3, M4, M5, M6, M8, M10, M12, M16, M20)."
+                            ))
+                        })?;
+                    (format!("{r}"), format!("{p}"), format!("{d}"))
+                } else {
+                    let radius = call
+                        .radius
+                        .as_ref()
+                        .ok_or_else(|| validation("`thread` requires `:radius` (or `:iso`)."))?;
+                    let pitch = call
+                        .pitch
+                        .as_ref()
+                        .ok_or_else(|| validation("`thread` requires `:pitch` (or `:iso`)."))?;
+                    let depth = call
+                        .depth
+                        .as_ref()
+                        .ok_or_else(|| validation("`thread` requires `:depth` (or `:iso`)."))?;
+                    (
+                        self.lower_num_expr(radius, scope)?,
+                        self.lower_num_expr(pitch, scope)?,
+                        self.lower_num_expr(depth, scope)?,
+                    )
+                };
+                let base_width = call
+                    .base_width
+                    .as_ref()
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| format!("({pitch}) * 0.75"));
+                let crest_width = call
+                    .crest_width
+                    .as_ref()
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| format!("({pitch}) * 0.25"));
+                let female = call
+                    .female
+                    .as_ref()
+                    .map(|value| self.lower_bool_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "False".to_string());
+                let clearance = call
+                    .clearance
+                    .as_ref()
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "0.0".to_string());
+                let lefthand = call
+                    .lefthand
+                    .as_ref()
+                    .map(|value| self.lower_bool_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "False".to_string());
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_thread({radius}, {pitch}, {length}, {depth}, {base_width}, {crest_width}, female={female}, clearance={clearance}, lefthand={lefthand})"
+                ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Solid3d,
+                });
+            }
             "helical-ridge" => {
                 let call = parse_helical_ridge_call(args)?;
                 let radius = self.lower_num_expr(&call.radius, scope)?;
@@ -2990,6 +3298,29 @@ impl FreecadLowerer {
                     "{result} = _ecky_sweep({}, {})",
                     profile.expr, path.expr
                 ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Solid3d,
+                });
+            }
+            "rib" | "groove" => {
+                if args.len() != 3 {
+                    return Err(validation(format!(
+                        "`{op}` expects a solid, a profile, and a path."
+                    )));
+                }
+                let solid = self.lower_geom_expr(&args[0], scope)?;
+                let profile = self.lower_geom_expr(&args[1], scope)?;
+                let path = self.lower_geom_expr(&args[2], scope)?;
+                let swept = self.next_var();
+                self.emit(format!("{swept} = _ecky_sweep({}, {})", profile.expr, path.expr));
+                let helper = if op == "rib" {
+                    "_ecky_fuse_many"
+                } else {
+                    "_ecky_cut_many"
+                };
+                let result = self.next_var();
+                self.emit(format!("{result} = {helper}({}, {swept})", solid.expr));
                 return Ok(LoweredNode {
                     expr: result,
                     kind: GeomKind::Solid3d,
@@ -3087,14 +3418,29 @@ impl FreecadLowerer {
                     kind: GeomKind::Solid3d,
                 });
             }
+            "draft" => {
+                return Err(validation(
+                    "`draft` is not supported on the FreeCAD backend (no Part draft API); use the native or build123d backend.",
+                ));
+            }
             "fillet" | "chamfer" => {
-                let parsed = ParsedCallArgs::parse(op, args, &["edges"])?;
+                let parsed = ParsedCallArgs::parse(op, args, &["edges", "to-radius"])?;
                 if parsed.positional.len() != 2 {
                     return Err(validation(
                         "`fillet` and `chamfer` expect radius and a geometry node.",
                     ));
                 }
                 let radius = self.lower_num_expr(&parsed.positional[0], scope)?;
+                let to_radius = parsed
+                    .keywords
+                    .get("to_radius")
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?;
+                if to_radius.is_some() && op == "chamfer" {
+                    return Err(validation(
+                        "`:to-radius` (tapered) is only supported on `fillet`, not `chamfer`.",
+                    ));
+                }
                 let selector = self.lower_edge_selector(parsed.keywords.get("edges"))?;
                 let solid = self.lower_geom_expr(&parsed.positional[1], scope)?;
                 let result = self.next_var();
@@ -3106,9 +3452,13 @@ impl FreecadLowerer {
                 let object_name = self.current_part_id.clone().ok_or_else(|| {
                     validation("FreeCAD lowerer lost current part id for edge selector.")
                 })?;
+                let to_radius_arg = match to_radius.as_deref() {
+                    Some(v) => format!(", to_radius={v}"),
+                    None => String::new(),
+                };
                 self.emit(format!(
-                    "{result} = {}({}, {}, {}, {:?})",
-                    helper, solid.expr, radius, selector, object_name
+                    "{result} = {}({}, {}, {}, {:?}{})",
+                    helper, solid.expr, radius, selector, object_name, to_radius_arg
                 ));
                 return Ok(LoweredNode {
                     expr: result,
@@ -3577,13 +3927,29 @@ fn freecad_preamble() -> Vec<String> {
         String::new(),
         "def _ecky_cone(br, tr, height, align=(\"center\", \"center\", \"min\")):\n    span = max(float(br), float(tr)) * 2.0\n    shape = Part.makeCone(float(br), float(tr), float(height), App.Vector(\n        _ecky_center_offset(span, align[0]),\n        _ecky_center_offset(span, align[1]),\n        _ecky_axis_offset(float(height), align[2]),\n    ))\n    return shape".into(),
         String::new(),
+        "def _ecky_torus(major, minor, align=(\"center\", \"center\", \"center\")):\n    span = (float(major) + float(minor)) * 2.0\n    shape = Part.makeTorus(float(major), float(minor), App.Vector(\n        _ecky_center_offset(span, align[0]),\n        _ecky_center_offset(span, align[1]),\n        _ecky_center_offset(float(minor) * 2.0, align[2]),\n    ))\n    return shape".into(),
+        String::new(),
+        "def _ecky_wedge(dx, dy, dz, xmin, zmin, xmax, zmax, align=(\"center\", \"center\", \"center\")):\n    dx = float(dx)\n    dy = float(dy)\n    dz = float(dz)\n    shape = Part.makeWedge(0.0, 0.0, 0.0, float(zmin), float(xmin), dx, dy, dz, float(zmax), float(xmax))\n    shape.Placement = App.Placement(App.Vector(\n        _ecky_axis_offset(dx, align[0]),\n        _ecky_axis_offset(dy, align[1]),\n        _ecky_axis_offset(dz, align[2]),\n    ), App.Rotation())\n    return shape".into(),
+        String::new(),
         "def _ecky_circle(radius):\n    circle = Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), float(radius))\n    return Part.Wire(circle.toShape())".into(),
+        String::new(),
+        "def _ecky_slot(length, width):\n    length = float(length)\n    width = float(width)\n    r = width / 2.0\n    half = (length - width) / 2.0\n    edges = [\n        Part.LineSegment(App.Vector(-half, -r, 0), App.Vector(half, -r, 0)).toShape(),\n        Part.Arc(App.Vector(half, -r, 0), App.Vector(half + r, 0, 0), App.Vector(half, r, 0)).toShape(),\n        Part.LineSegment(App.Vector(half, r, 0), App.Vector(-half, r, 0)).toShape(),\n        Part.Arc(App.Vector(-half, r, 0), App.Vector(-half - r, 0, 0), App.Vector(-half, -r, 0)).toShape(),\n    ]\n    return Part.Wire(edges)".into(),
+        String::new(),
+        "def _ecky_slot_c2c(separation, width):\n    return _ecky_slot(float(separation) + float(width), float(width))".into(),
+        String::new(),
+        "def _ecky_slot_center_point(cx, cy, px, py, width):\n    cx = float(cx)\n    cy = float(cy)\n    px = float(px)\n    py = float(py)\n    width = float(width)\n    d = math.hypot(px - cx, py - cy)\n    wire = _ecky_slot(2.0 * d + width, width)\n    angle = math.degrees(math.atan2(py - cy, px - cx))\n    wire.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), angle)\n    wire.translate(App.Vector(cx, cy, 0))\n    return wire".into(),
+        String::new(),
+        "def _ecky_slot_arc(radius, start_deg, end_deg, width):\n    R = float(radius)\n    a0 = math.radians(float(start_deg))\n    a1 = math.radians(float(end_deg))\n    w = float(width)\n    r = w / 2.0\n    ro = R + r\n    ri = R - r\n    am = (a0 + a1) / 2.0\n    def pt(rad, ang):\n        return App.Vector(rad * math.cos(ang), rad * math.sin(ang), 0)\n    cap1 = App.Vector(R * math.cos(a1) - r * math.sin(a1), R * math.sin(a1) + r * math.cos(a1), 0)\n    cap0 = App.Vector(R * math.cos(a0) + r * math.sin(a0), R * math.sin(a0) - r * math.cos(a0), 0)\n    edges = [\n        Part.Arc(pt(ro, a0), pt(ro, am), pt(ro, a1)).toShape(),\n        Part.Arc(pt(ro, a1), cap1, pt(ri, a1)).toShape(),\n        Part.Arc(pt(ri, a1), pt(ri, am), pt(ri, a0)).toShape(),\n        Part.Arc(pt(ri, a0), cap0, pt(ro, a0)).toShape(),\n    ]\n    return Part.Wire(edges)".into(),
+        String::new(),
+        "def _ecky_ellipse(rx, ry):\n    rx = float(rx)\n    ry = float(ry)\n    major = max(rx, ry)\n    minor = min(rx, ry)\n    ellipse = Part.Ellipse(App.Vector(0, 0, 0), major, minor)\n    wire = Part.Wire(ellipse.toShape())\n    if ry > rx:\n        wire.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 90.0)\n    return wire".into(),
         String::new(),
         "def _ecky_rounded_rect(width, height, radius):\n    w = float(width)\n    h = float(height)\n    r = min(float(radius), abs(w) / 2.0, abs(h) / 2.0)\n    x0 = -w / 2.0\n    y0 = -h / 2.0\n    x1 = w / 2.0\n    y1 = h / 2.0\n    if r <= 1e-12:\n        return _ecky_polygon([App.Vector(x0, y0, 0), App.Vector(x1, y0, 0), App.Vector(x1, y1, 0), App.Vector(x0, y1, 0)])\n    edges = [\n        Part.LineSegment(App.Vector(x0 + r, y0, 0), App.Vector(x1 - r, y0, 0)).toShape(),\n        Part.Arc(App.Vector(x1 - r, y0, 0), App.Vector(x1, y0, 0), App.Vector(x1, y0 + r, 0)).toShape(),\n        Part.LineSegment(App.Vector(x1, y0 + r, 0), App.Vector(x1, y1 - r, 0)).toShape(),\n        Part.Arc(App.Vector(x1, y1 - r, 0), App.Vector(x1, y1, 0), App.Vector(x1 - r, y1, 0)).toShape(),\n        Part.LineSegment(App.Vector(x1 - r, y1, 0), App.Vector(x0 + r, y1, 0)).toShape(),\n        Part.Arc(App.Vector(x0 + r, y1, 0), App.Vector(x0, y1, 0), App.Vector(x0, y1 - r, 0)).toShape(),\n        Part.LineSegment(App.Vector(x0, y1 - r, 0), App.Vector(x0, y0 + r, 0)).toShape(),\n        Part.Arc(App.Vector(x0, y0 + r, 0), App.Vector(x0, y0, 0), App.Vector(x0 + r, y0, 0)).toShape(),\n    ]\n    return Part.Wire(edges)".into(),
         String::new(),
         "def _ecky_rounded_polygon(points, radius):\n    pts = list(points)\n    if len(pts) >= 2 and pts[0] == pts[-1]:\n        pts = pts[:-1]\n    if len(pts) < 3:\n        raise ValueError('`rounded-polygon` expects at least three points.')\n    req_r = abs(float(radius))\n    if req_r <= 1e-12:\n        return _ecky_polygon(pts)\n    def _xy(v):\n        return (float(v.x), float(v.y))\n    def _sub(a, b):\n        return (a[0] - b[0], a[1] - b[1])\n    def _add(a, b):\n        return (a[0] + b[0], a[1] + b[1])\n    def _mul(a, scalar):\n        return (a[0] * scalar, a[1] * scalar)\n    def _len(a):\n        return math.hypot(a[0], a[1])\n    def _norm(a):\n        length = _len(a)\n        if length <= 1e-12:\n            raise ValueError('`rounded-polygon` got a zero-length edge.')\n        return (a[0] / length, a[1] / length)\n    corners = []\n    count = len(pts)\n    for index in range(count):\n        prev = _xy(pts[index - 1])\n        curr = _xy(pts[index])\n        nxt = _xy(pts[(index + 1) % count])\n        in_vec = _sub(prev, curr)\n        out_vec = _sub(nxt, curr)\n        len_in = _len(in_vec)\n        len_out = _len(out_vec)\n        if len_in <= 1e-12 or len_out <= 1e-12:\n            raise ValueError('`rounded-polygon` got a zero-length edge.')\n        in_dir = _norm(in_vec)\n        out_dir = _norm(out_vec)\n        dot = max(-1.0, min(1.0, in_dir[0] * out_dir[0] + in_dir[1] * out_dir[1]))\n        theta = math.acos(dot)\n        tan_half = math.tan(theta / 2.0) if theta > 1e-12 else 0.0\n        bisector = _add(in_dir, out_dir)\n        bisector_len = _len(bisector)\n        if tan_half <= 1e-12 or bisector_len <= 1e-12:\n            corners.append((curr, curr, curr, False))\n            continue\n        corner_r = min(req_r, min(len_in, len_out) * tan_half)\n        if corner_r <= 1e-12:\n            corners.append((curr, curr, curr, False))\n            continue\n        tangent = corner_r / tan_half\n        bisector = _mul(bisector, 1.0 / bisector_len)\n        center_dist = corner_r / math.sin(theta / 2.0)\n        p_in = _add(curr, _mul(in_dir, tangent))\n        p_out = _add(curr, _mul(out_dir, tangent))\n        center = _add(curr, _mul(bisector, center_dist))\n        mid_dir = _sub(curr, center)\n        mid_len = _len(mid_dir)\n        if mid_len <= 1e-12:\n            corners.append((curr, curr, curr, False))\n            continue\n        mid = _add(center, _mul(mid_dir, corner_r / mid_len))\n        corners.append((p_in, p_out, mid, True))\n    edges = []\n    for index in range(count):\n        _, p_out, _, _ = corners[index]\n        p_in_next, p_out_next, mid_next, rounded_next = corners[(index + 1) % count]\n        line_start = App.Vector(p_out[0], p_out[1], 0)\n        line_end = App.Vector(p_in_next[0], p_in_next[1], 0)\n        if line_start.distanceToPoint(line_end) > 1e-9:\n            edges.append(Part.LineSegment(line_start, line_end).toShape())\n        if rounded_next:\n            edges.append(\n                Part.Arc(\n                    App.Vector(p_in_next[0], p_in_next[1], 0),\n                    App.Vector(mid_next[0], mid_next[1], 0),\n                    App.Vector(p_out_next[0], p_out_next[1], 0),\n                ).toShape()\n            )\n    if not edges:\n        return _ecky_polygon(pts)\n    return Part.Wire(edges)".into(),
         String::new(),
         "def _ecky_polygon(points):\n    pts = list(points)\n    if len(pts) >= 2 and pts[0] != pts[-1]:\n        pts.append(pts[0])\n    return Part.makePolygon(pts)".into(),
+        "def _ecky_regular_polygon(sides, radius, rotation=0.0):\n    sides = int(round(float(sides))); radius = float(radius); rot = math.radians(float(rotation))\n    if sides < 3: raise ValueError('regular-polygon needs at least 3 sides')\n    if radius <= 0.0: raise ValueError('regular-polygon radius must be positive')\n    pts = [App.Vector(radius * math.cos(rot + 2.0 * math.pi * i / sides), radius * math.sin(rot + 2.0 * math.pi * i / sides), 0.0) for i in range(sides)]\n    pts.append(pts[0])\n    return Part.makePolygon(pts)".into(),
+        "def _ecky_trapezoid(bottom, top, height, skew=0.0):\n    bottom = float(bottom); top = float(top); height = float(height); skew = float(skew)\n    if bottom <= 0.0 or top <= 0.0: raise ValueError('trapezoid bottom and top must be positive')\n    if height <= 0.0: raise ValueError('trapezoid height must be positive')\n    half_h = height / 2.0\n    pts = [App.Vector(-bottom / 2.0, -half_h, 0.0), App.Vector(bottom / 2.0, -half_h, 0.0), App.Vector(top / 2.0 + skew, half_h, 0.0), App.Vector(-top / 2.0 + skew, half_h, 0.0)]\n    pts.append(pts[0])\n    return Part.makePolygon(pts)".into(),
         String::new(),
         "def _ecky_path(points):\n    return Part.makePolygon(list(points))".into(),
         String::new(),
@@ -3636,6 +4002,8 @@ fn freecad_preamble() -> Vec<String> {
         "def _ecky_sweep(profile, path):\n    profile = _ecky_as_wire(profile)\n    path = _ecky_as_wire(path)\n    return path.makePipeShell([profile], True, False)".into(),
         String::new(),
         "def _ecky_helical_ridge(radius, pitch, height, base_width, crest_width, depth, female=False, clearance=0.0, lefthand=False):\n    radius = float(radius); pitch = float(pitch); height = float(height)\n    base_width = float(base_width); crest_width = float(crest_width); depth = float(depth)\n    clearance = max(0.0, float(clearance))\n    female = bool(female); lefthand = bool(lefthand)\n    if radius <= 0.0: raise ValueError('helical-ridge radius must be positive')\n    if pitch <= 0.0: raise ValueError('helical-ridge pitch must be positive')\n    if height <= 0.0: raise ValueError('helical-ridge height must be positive')\n    if base_width <= 0.0: raise ValueError('helical-ridge base-width must be positive')\n    if crest_width <= 0.0: raise ValueError('helical-ridge crest-width must be positive')\n    if depth <= 0.0: raise ValueError('helical-ridge depth must be positive')\n    envelope_clearance = clearance if female else 0.0\n    path_radius = radius\n    base_half = (base_width + 2.0 * envelope_clearance) * 0.5\n    crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5\n    ridge_depth = depth + envelope_clearance\n    helix = Part.makeHelix(pitch, height, path_radius)\n    if lefthand:\n        helix.mirror(App.Vector(0, 0, 0), App.Vector(0, 1, 0))\n    points = [\n        App.Vector(path_radius, 0, -base_half),\n        App.Vector(path_radius + ridge_depth, 0, -crest_half),\n        App.Vector(path_radius + ridge_depth, 0, crest_half),\n        App.Vector(path_radius, 0, base_half),\n        App.Vector(path_radius, 0, -base_half),\n    ]\n    profile = Part.Wire(Part.makePolygon(points))\n    return Part.Wire(helix).makePipeShell([profile], True, False)".into(),
+        String::new(),
+        "def _ecky_thread(radius, pitch, length, depth, base_width, crest_width, female=False, clearance=0.0, lefthand=False):\n    ridge = _ecky_helical_ridge(radius, pitch, length, base_width, crest_width, depth, female=female, clearance=clearance, lefthand=lefthand)\n    if bool(female):\n        return ridge\n    core = _ecky_cylinder(float(radius), float(length))\n    return core.fuse(ridge)".into(),
         String::new(),
         "def _ecky_offset(shape, amount, openings=None):\n    base = shape\n    if openings:\n        base = _ecky_face_with_holes(shape, openings)\n    if getattr(base, 'ShapeType', '') == 'Face':\n        return base.makeOffset2D(float(amount))\n    return _ecky_as_wire(base).makeOffset2D(float(amount))".into(),
         String::new(),
@@ -3693,9 +4061,9 @@ fn freecad_preamble() -> Vec<String> {
         String::new(),
         "def _ecky_match_edge(shape, signature):\n    best = None\n    best_score = None\n    for edge in list(getattr(shape, 'Edges', []) or []):\n        candidate = _ecky_edge_signature(edge)\n        if candidate is None:\n            continue\n        score = 0.0\n        for a, b in zip(candidate['point'], signature['point']):\n            score += abs(float(a) - float(b))\n        for a, b in zip(candidate['span'], signature['span']):\n            score += abs(float(a) - float(b))\n        if best_score is None or score < best_score:\n            best = edge\n            best_score = score\n    return best".into(),
         String::new(),
-        "def _ecky_apply_edge_op(shape, amount, selector, op_name, object_name=None):\n    selected = _ecky_select_edges(shape, selector, object_name)\n    direct = shape.makeFillet if op_name == 'fillet' else shape.makeChamfer\n    try:\n        return direct(amount, selected)\n    except Exception as exc:\n        failure = exc\n    result = shape.copy()\n    applied = 0\n    for signature in [_ecky_edge_signature(edge) for edge in selected]:\n        if signature is None:\n            continue\n        edge = _ecky_match_edge(result, signature)\n        if edge is None:\n            continue\n        try:\n            direct = result.makeFillet if op_name == 'fillet' else result.makeChamfer\n            result = direct(amount, [edge])\n            applied += 1\n        except Exception:\n            continue\n    if applied > 0:\n        return result\n    raise ValueError(f'{op_name} failed for selector `{selector}`: {failure}')".into(),
+        "def _ecky_apply_edge_op(shape, amount, selector, op_name, object_name=None, to_amount=None):\n    selected = _ecky_select_edges(shape, selector, object_name)\n    def apply(target, edges):\n        if op_name == 'fillet':\n            if to_amount is not None:\n                return target.makeFillet(amount, to_amount, edges)\n            return target.makeFillet(amount, edges)\n        return target.makeChamfer(amount, edges)\n    try:\n        return apply(shape, selected)\n    except Exception as exc:\n        failure = exc\n    result = shape.copy()\n    applied = 0\n    for signature in [_ecky_edge_signature(edge) for edge in selected]:\n        if signature is None:\n            continue\n        edge = _ecky_match_edge(result, signature)\n        if edge is None:\n            continue\n        try:\n            result = apply(result, [edge])\n            applied += 1\n        except Exception:\n            continue\n    if applied > 0:\n        return result\n    raise ValueError(f'{op_name} failed for selector `{selector}`: {failure}')".into(),
         String::new(),
-        "def _ecky_fillet(shape, radius, selector=None, object_name=None):\n    amount = abs(float(radius))\n    if amount <= 1e-12:\n        return shape.copy()\n    return _ecky_apply_edge_op(shape, amount, selector, 'fillet', object_name)".into(),
+        "def _ecky_fillet(shape, radius, selector=None, object_name=None, to_radius=None):\n    amount = abs(float(radius))\n    if amount <= 1e-12:\n        return shape.copy()\n    to_amount = None if to_radius is None else abs(float(to_radius))\n    return _ecky_apply_edge_op(shape, amount, selector, 'fillet', object_name, to_amount=to_amount)".into(),
         String::new(),
         "def _ecky_chamfer(shape, distance, selector=None, object_name=None):\n    amount = abs(float(distance))\n    if amount <= 1e-12:\n        return shape.copy()\n    return _ecky_apply_edge_op(shape, amount, selector, 'chamfer', object_name)".into(),
         String::new(),
@@ -3895,6 +4263,189 @@ mod tests {
         assert!(
             code.contains("_ecky_box"),
             "missing FreeCAD primitive: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_wedge_helper_with_seven_dims() {
+        let src = r#"(model (part body (wedge 20 10 20 5 5 15 15)))"#;
+        let code = lower_to_freecad(src).expect("lower");
+        assert!(
+            code.contains("_ecky_wedge(20.0, 10.0, 20.0, 5.0, 5.0, 15.0, 15.0"),
+            "missing wedge call: {}",
+            code
+        );
+        assert!(
+            code.contains("Part.makeWedge("),
+            "missing wedge helper: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_slot_helpers() {
+        let overall = lower_to_freecad("(model (part body (extrude (slot-overall 40 10) 5)))")
+            .expect("lower overall");
+        assert!(
+            overall.contains("_ecky_slot(40.0, 10.0)"),
+            "slot-overall call: {}",
+            overall
+        );
+        assert!(
+            overall.contains("def _ecky_slot("),
+            "slot helper: {}",
+            overall
+        );
+        let c2c = lower_to_freecad("(model (part body (extrude (slot-center-to-center 30 10) 5)))")
+            .expect("lower c2c");
+        assert!(
+            c2c.contains("_ecky_slot_c2c(30.0, 10.0)"),
+            "slot-c2c call: {}",
+            c2c
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_rib_and_groove() {
+        let rib = lower_to_freecad(
+            "(model (part p (rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
+        )
+        .expect("rib");
+        assert!(
+            rib.contains("_ecky_sweep(") && rib.contains("_ecky_fuse_many("),
+            "rib sweep+fuse: {}",
+            rib
+        );
+        let groove = lower_to_freecad(
+            "(model (part p (groove (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
+        )
+        .expect("groove");
+        assert!(
+            groove.contains("_ecky_sweep(") && groove.contains("_ecky_cut_many("),
+            "groove sweep+cut: {}",
+            groove
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_rejects_draft_with_clear_error() {
+        let err = lower_to_freecad("(model (part p (draft 10 (box 20 20 20))))")
+            .expect_err("draft unsupported on freecad");
+        assert!(
+            err.to_string().contains("not supported on the FreeCAD backend"),
+            "expected freecad draft caveat, got {err}"
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_tapered_fillet() {
+        let code = lower_to_freecad("(model (part p (fillet 3 :to-radius 1 (box 20 20 20))))")
+            .expect("lower");
+        assert!(
+            code.contains("to_radius=1"),
+            "tapered fillet call: {}",
+            code
+        );
+        assert!(
+            code.contains("target.makeFillet(amount, to_amount, edges)"),
+            "helper should use two-radius makeFillet: {}",
+            code
+        );
+        // chamfer rejects taper
+        let err = lower_to_freecad("(model (part p (chamfer 3 :to-radius 1 (box 20 20 20))))")
+            .expect_err("chamfer taper rejected");
+        assert!(err.to_string().contains("only supported on `fillet`"), "got {err}");
+    }
+
+    #[test]
+    fn freecad_lowering_emits_thread_helper() {
+        let code = lower_to_freecad("(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1)))")
+            .expect("lower");
+        assert!(
+            code.contains("_ecky_thread(8.0, 2.0, 16.0, 1.0,"),
+            "thread call: {}",
+            code
+        );
+        assert!(code.contains("def _ecky_thread("), "thread helper: {}", code);
+    }
+
+    #[test]
+    fn freecad_lowering_emits_slot_arc_helper() {
+        let code = lower_to_freecad("(model (part body (extrude (slot-arc 20 0 90 10) 5)))")
+            .expect("lower");
+        assert!(
+            code.contains("_ecky_slot_arc(20.0, 0.0, 90.0, 10.0)"),
+            "slot-arc call: {}",
+            code
+        );
+        assert!(
+            code.contains("def _ecky_slot_arc("),
+            "slot-arc helper: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_slot_center_point_helper() {
+        let code = lower_to_freecad("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))")
+            .expect("lower");
+        assert!(
+            code.contains("_ecky_slot_center_point(0.0, 0.0, 15.0, 0.0, 10.0)"),
+            "slot-center-point call: {}",
+            code
+        );
+        assert!(
+            code.contains("def _ecky_slot_center_point("),
+            "slot-center-point helper: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_torus_helper_with_major_minor() {
+        let src = r#"(model (part body (torus 10 3)))"#;
+        let code = lower_to_freecad(src).expect("lower");
+        assert!(
+            code.contains("_ecky_torus(10.0, 3.0"),
+            "missing torus call: {}",
+            code
+        );
+        assert!(
+            code.contains("Part.makeTorus("),
+            "missing torus helper: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_ellipse_helper_with_x_y_radius() {
+        let src = r#"(model (part body (extrude (ellipse 10 4) 5)))"#;
+        let code = lower_to_freecad(src).expect("lower");
+        assert!(
+            code.contains("_ecky_ellipse(10.0, 4.0"),
+            "missing ellipse call: {}",
+            code
+        );
+        assert!(
+            code.contains("Part.Ellipse("),
+            "missing ellipse helper: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_trapezoid_helper_with_bottom_top_height_skew() {
+        let src = r#"(model (part body (extrude (trapezoid 20 10 8 :skew 3) 5)))"#;
+        let code = lower_to_freecad(src).expect("lower");
+        assert!(
+            code.contains("_ecky_trapezoid(20.0, 10.0, 8.0, 3.0)"),
+            "missing trapezoid call: {}",
+            code
+        );
+        assert!(
+            code.contains("def _ecky_trapezoid("),
+            "missing trapezoid helper: {}",
             code
         );
     }
@@ -4660,9 +5211,8 @@ mod tests {
             fillet
         );
         assert!(
-            fillet.contains(
-                "direct = shape.makeFillet if op_name == 'fillet' else shape.makeChamfer"
-            ),
+            fillet.contains("return target.makeChamfer(amount, edges)")
+                && fillet.contains("return target.makeFillet(amount, edges)"),
             "fillet helper should dispatch through FreeCAD edge op helper: {}",
             fillet
         );
@@ -4681,9 +5231,7 @@ mod tests {
             chamfer
         );
         assert!(
-            chamfer.contains(
-                "direct = shape.makeFillet if op_name == 'fillet' else shape.makeChamfer"
-            ),
+            chamfer.contains("return target.makeChamfer(amount, edges)"),
             "chamfer helper should dispatch through FreeCAD edge op helper: {}",
             chamfer
         );
@@ -4822,10 +5370,11 @@ mod tests {
             code
         );
         assert!(
-            code.contains("def _ecky_fillet(shape, radius, selector=None, object_name=None):")
-                && code.contains(
-                    "def _ecky_chamfer(shape, distance, selector=None, object_name=None):"
-                ),
+            code.contains(
+                "def _ecky_fillet(shape, radius, selector=None, object_name=None, to_radius=None):"
+            ) && code.contains(
+                "def _ecky_chamfer(shape, distance, selector=None, object_name=None):"
+            ),
             "selector defaults not normalized: {}",
             code
         );

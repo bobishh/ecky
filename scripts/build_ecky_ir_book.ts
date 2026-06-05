@@ -11,6 +11,11 @@ const htmlPath = path.join(outputDir, 'ecky-ir-field-guide.html');
 const epubPath = path.join(outputDir, 'ecky-ir-field-guide.epub');
 const epubWorkDir = path.join(outputDir, 'ecky-ir-field-guide-epub');
 const docsSourcePath = path.join(root, 'public', 'docs', 'ecky-ir.md');
+// The app serves the reader markdown, the EPUB download, and chapter images
+// from `public/docs` (Vite static root). Publish the freshly built artifacts
+// there so a single `build:book` keeps both the in-app reader and the EPUB
+// download current — no manual second copy.
+const publicDocsDir = path.join(root, 'public', 'docs');
 
 const docsMarkdown = fs.readFileSync(docsSourcePath, 'utf8');
 
@@ -23,9 +28,11 @@ fs.mkdirSync(outputDir, { recursive: true });
 fs.writeFileSync(htmlPath, book.html);
 copyHtmlAssets(book);
 writeEpub(book);
+publishToPublicDocs(book);
 
 console.log(`HTML: ${htmlPath}`);
 console.log(`EPUB: ${epubPath}`);
+console.log(`Published EPUB/HTML + assets to: ${publicDocsDir}`);
 
 function writeEpub(book: ReturnType<typeof buildEckyIrBook>) {
   const metaInfDir = path.join(epubWorkDir, 'META-INF');
@@ -260,6 +267,23 @@ figcaption {
   font-size: 0.92rem;
   color: #5a4731;
 }`;
+}
+
+// Publish the built artifacts into the Vite static root so the in-app reader
+// (markdown + images) and the EPUB download both serve fresh content from one
+// build. The reader markdown itself is the source (`public/docs/ecky-ir.md`)
+// and is left untouched; only the generated EPUB/HTML and chapter images are
+// copied here.
+function publishToPublicDocs(book: ReturnType<typeof buildEckyIrBook>) {
+  fs.mkdirSync(publicDocsDir, { recursive: true });
+  fs.copyFileSync(epubPath, path.join(publicDocsDir, 'ecky-ir-field-guide.epub'));
+  fs.copyFileSync(htmlPath, path.join(publicDocsDir, 'ecky-ir-field-guide.html'));
+  for (const asset of book.assets) {
+    const source = path.join(root, asset.sourcePath);
+    const target = path.join(publicDocsDir, asset.outputPath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
 }
 
 function copyHtmlAssets(book: ReturnType<typeof buildEckyIrBook>) {

@@ -131,7 +131,7 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   expect(await numericZIndex(codeModal)).toBeGreaterThan(await numericZIndex(docsWindow));
   await expect(codeModal.locator('.cm-content')).toContainText('(sphere 10)');
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
-  await expect(codeModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toBeVisible();
+  await expect(codeModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toHaveCount(0);
   await expect(codeModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'INSERT VERIFY' })).toBeVisible();
   await expect(codeModal.getByText('ECKY SOURCE')).toHaveCount(0);
@@ -166,7 +166,7 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(verifyModal).toBeVisible();
   await expect(verifyModal.locator('.cm-content')).toContainText('clearance min-distance');
   await expect(verifyModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
-  await expect(verifyModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toBeVisible();
+  await expect(verifyModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toHaveCount(0);
   await expect(verifyModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();
   await expect(verifyModal.getByRole('button', { name: 'VERIFY EXISTS' })).toBeDisabled();
   await expect(verifyModal.getByText('ECKY SOURCE')).toHaveCount(0);

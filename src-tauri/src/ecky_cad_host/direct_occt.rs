@@ -60,7 +60,12 @@ pub enum OcctOp {
     Sphere,
     Cylinder,
     Cone,
+    Torus,
+    Wedge,
     Circle,
+    Ellipse,
+    Slot,
+    SlotArc,
     Rectangle,
     RoundedRectangle,
     RoundedPolygon,
@@ -74,6 +79,7 @@ pub enum OcctOp {
     Sweep,
     Twist,
     Taper,
+    Draft,
     Offset,
     Path,
     HelixPath,
@@ -489,8 +495,27 @@ fn expand_node_for_direct_occt(
                 next_node_id,
             )
         }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "thread") => {
+            expand_thread_node(node, args, keywords, param_names, env, node_env, next_node_id)
+        }
+        CoreNodeKind::Call { op, args, .. } if matches!(op, CoreOperation::Custom(name) if name == "rib" || name == "groove") => {
+            let is_rib = matches!(op, CoreOperation::Custom(name) if name == "rib");
+            expand_rib_groove_node(node, is_rib, args, param_names, env, node_env, next_node_id)
+        }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "sampled-radial-loft") => {
             expand_sampled_radial_loft_node(node, args, keywords, param_names, env, next_node_id)
+        }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "regular-polygon") => {
+            expand_regular_polygon_node(node, args, keywords, param_names, env, node_env, next_node_id)
+        }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "trapezoid") => {
+            expand_trapezoid_node(node, args, keywords, param_names, env, node_env, next_node_id)
+        }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "slot-center-to-center" || name == "slot_center_to_center") => {
+            expand_slot_center_to_center_node(node, args, keywords, param_names, env, next_node_id)
+        }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "slot-center-point" || name == "slot_center_point") => {
+            expand_slot_center_point_node(node, args, keywords, param_names, env, next_node_id)
         }
         CoreNodeKind::Call { op, args, keywords } => Ok(rebuild_node(
             node,
@@ -903,12 +928,16 @@ fn expand_helical_ridge_node(
     let base_half = (base_width + 2.0 * envelope_clearance) * 0.5;
     let crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5;
     let ridge_depth = depth + envelope_clearance;
+    // Profile trapezoid: wide base (`base_width`) at `radius`, narrow crest
+    // (`crest_width`) at `radius + ridge_depth`. Must match the build123d
+    // lowering profile exactly for backend parity (note the final point uses
+    // `base_half`, not `crest_half`).
     let profile_wire = path3_node(
         &[
             [radius, 0.0, -base_half],
             [radius + ridge_depth, 0.0, -crest_half],
             [radius + ridge_depth, 0.0, crest_half],
-            [radius, 0.0, crest_half],
+            [radius, 0.0, base_half],
             [radius, 0.0, -base_half],
         ],
         next_node_id,
@@ -922,9 +951,25 @@ fn expand_helical_ridge_node(
         },
         CoreValueKind::Sketch,
     );
-    let path = path3_node(
-        &sampled_helix_points(radius, pitch, height, lefthand),
-        next_node_id,
+    // Sweep along a true helix (`helix-path` -> Geom_CylindricalSurface helix),
+    // matching build123d's `Edge.make_helix`. A sampled polyline spine here
+    // produced a faceted, gapped thread with the wrong apparent pitch.
+    let lefthand_node = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Literal(CoreLiteral::Boolean(lefthand)),
+        CoreValueKind::Boolean,
+    );
+    let radius_node = number_node(next_node_id, radius);
+    let pitch_node = number_node(next_node_id, pitch);
+    let height_node = number_node(next_node_id, height);
+    let path = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom("helix-path".to_string()),
+            args: vec![radius_node, pitch_node, height_node, lefthand_node],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Path,
     );
 
     Ok(rebuild_node(
@@ -932,6 +977,426 @@ fn expand_helical_ridge_node(
         CoreNodeKind::Call {
             op: CoreOperation::Surface(CoreSurfaceOp::Sweep),
             args: vec![profile, path],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_thread_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if !args.is_empty() {
+        return Err(AppError::validation("`thread` expects keyword options only."));
+    }
+    reject_unknown_keywords(
+        keywords,
+        &[
+            "iso",
+            "radius",
+            "pitch",
+            "length",
+            "depth",
+            "base-width",
+            "crest-width",
+            "female",
+            "clearance",
+            "lefthand",
+        ],
+        "thread",
+    )?;
+
+    let length = positive_keyword_number(keywords, "length", "thread", param_names, env, node_env)?;
+    let (radius, pitch, depth) = if let Some(designation) = keyword_text(keywords, "iso") {
+        crate::ecky_core_ir::iso_metric_thread_core(&designation).ok_or_else(|| {
+            AppError::validation(format!(
+                "`thread` unknown ISO designation `{designation}` (try M3, M4, M5, M6, M8, M10, M12, M16, M20)."
+            ))
+        })?
+    } else {
+        (
+            positive_keyword_number(keywords, "radius", "thread", param_names, env, node_env)?,
+            positive_keyword_number(keywords, "pitch", "thread", param_names, env, node_env)?,
+            positive_keyword_number(keywords, "depth", "thread", param_names, env, node_env)?,
+        )
+    };
+    let base_width =
+        optional_keyword_number(keywords, "base-width", pitch * 0.75, "thread", param_names, env, node_env)?;
+    let crest_width =
+        optional_keyword_number(keywords, "crest-width", pitch * 0.25, "thread", param_names, env, node_env)?;
+    let female =
+        optional_keyword_bool(keywords, "female", false, "thread", param_names, env, node_env)?;
+    let lefthand =
+        optional_keyword_bool(keywords, "lefthand", false, "thread", param_names, env, node_env)?;
+    let clearance =
+        optional_keyword_number(keywords, "clearance", 0.0, "thread", param_names, env, node_env)?.max(0.0);
+
+    // Compose: the canonical thread is the union of a core cylinder with a helical
+    // ridge (or just the ridge cutter when female). Building from the existing
+    // helical-ridge + cylinder ops keeps native and build123d identical by
+    // construction (both already parity-matched).
+    let bool_node = |next: &mut u64, value: bool| {
+        CoreNode::new(
+            next_id(next),
+            CoreNodeKind::Literal(CoreLiteral::Boolean(value)),
+            CoreValueKind::Boolean,
+        )
+    };
+    let mut ridge_keywords = vec![
+        CoreKeywordArg::expr("radius".to_string(), number_node(next_node_id, radius)),
+        CoreKeywordArg::expr("pitch".to_string(), number_node(next_node_id, pitch)),
+        CoreKeywordArg::expr("height".to_string(), number_node(next_node_id, length)),
+        CoreKeywordArg::expr("base-width".to_string(), number_node(next_node_id, base_width)),
+        CoreKeywordArg::expr("crest-width".to_string(), number_node(next_node_id, crest_width)),
+        CoreKeywordArg::expr("depth".to_string(), number_node(next_node_id, depth)),
+        CoreKeywordArg::expr("lefthand".to_string(), bool_node(next_node_id, lefthand)),
+    ];
+    if female {
+        ridge_keywords.push(CoreKeywordArg::expr(
+            "female".to_string(),
+            bool_node(next_node_id, true),
+        ));
+        ridge_keywords.push(CoreKeywordArg::expr(
+            "clearance".to_string(),
+            number_node(next_node_id, clearance),
+        ));
+    }
+    let ridge = expand_helical_ridge_node(
+        node,
+        &[],
+        &ridge_keywords,
+        param_names,
+        env,
+        node_env,
+        next_node_id,
+    )?;
+
+    if female {
+        return Ok(ridge);
+    }
+
+    let core = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Cylinder),
+            args: vec![
+                number_node(next_node_id, radius),
+                number_node(next_node_id, length),
+            ],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Solid,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(CoreBooleanOp::Union),
+            args: vec![core, ridge],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_rib_groove_node(
+    node: &CoreNode,
+    is_rib: bool,
+    args: &[CoreNode],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    let op_name = if is_rib { "rib" } else { "groove" };
+    if args.len() != 3 {
+        return Err(AppError::validation(format!(
+            "`{op_name}` expects a solid, a profile, and a path."
+        )));
+    }
+    let solid = expand_node_for_direct_occt(&args[0], param_names, env, node_env, next_node_id)?;
+    let profile = expand_node_for_direct_occt(&args[1], param_names, env, node_env, next_node_id)?;
+    let path = expand_node_for_direct_occt(&args[2], param_names, env, node_env, next_node_id)?;
+    // A rib/groove is a profile swept along a path, then fused (rib) or cut (groove).
+    let swept = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Surface(CoreSurfaceOp::Sweep),
+            args: vec![profile, path],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Solid,
+    );
+    let bool_op = if is_rib {
+        CoreBooleanOp::Union
+    } else {
+        CoreBooleanOp::Difference
+    };
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(bool_op),
+            args: vec![solid, swept],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_regular_polygon_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.len() != 2 {
+        return Err(AppError::validation(
+            "`regular-polygon` expects sides and radius (plus optional `:rotation`).",
+        ));
+    }
+    reject_unknown_keywords(keywords, &["rotation"], "regular-polygon")?;
+
+    let sides = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
+    let radius = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
+    let rotation = optional_keyword_number(
+        keywords,
+        "rotation",
+        0.0,
+        "regular-polygon",
+        param_names,
+        env,
+        node_env,
+    )?;
+
+    let sides = sides.round();
+    if sides < 3.0 {
+        return Err(AppError::validation(
+            "`regular-polygon` needs at least 3 sides.",
+        ));
+    }
+    if !(radius > 0.0) {
+        return Err(AppError::validation(
+            "`regular-polygon` radius must be positive.",
+        ));
+    }
+
+    let points = crate::ecky_core_ir::regular_polygon_vertices(sides as u32, radius, rotation);
+    let point_nodes = points
+        .iter()
+        .map(|point| {
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::Literal(CoreLiteral::Point2(*point)),
+                CoreValueKind::Point2,
+            )
+        })
+        .collect::<Vec<_>>();
+    let list = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::List(point_nodes),
+        CoreValueKind::List,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Polygon),
+            args: vec![list],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_trapezoid_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.len() != 3 {
+        return Err(AppError::validation(
+            "`trapezoid` expects bottom, top, and height (plus optional `:skew`).",
+        ));
+    }
+    reject_unknown_keywords(keywords, &["skew"], "trapezoid")?;
+
+    let bottom = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
+    let top = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
+    let height = crate::ecky_ir::eval_core_number_with_locals(&args[2], param_names, env)?;
+    let skew = optional_keyword_number(
+        keywords,
+        "skew",
+        0.0,
+        "trapezoid",
+        param_names,
+        env,
+        node_env,
+    )?;
+
+    if !(bottom > 0.0) || !(top > 0.0) {
+        return Err(AppError::validation(
+            "`trapezoid` bottom and top must be positive.",
+        ));
+    }
+    if !(height > 0.0) {
+        return Err(AppError::validation(
+            "`trapezoid` height must be positive.",
+        ));
+    }
+
+    let points = crate::ecky_core_ir::trapezoid_vertices(bottom, top, height, skew);
+    let point_nodes = points
+        .iter()
+        .map(|point| {
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::Literal(CoreLiteral::Point2(*point)),
+                CoreValueKind::Point2,
+            )
+        })
+        .collect::<Vec<_>>();
+    let list = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::List(point_nodes),
+        CoreValueKind::List,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Polygon),
+            args: vec![list],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_slot_center_to_center_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.len() != 2 {
+        return Err(AppError::validation(
+            "`slot-center-to-center` expects center separation and width.",
+        ));
+    }
+    reject_unknown_keywords(keywords, &[], "slot-center-to-center")?;
+
+    let separation = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
+    let width = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
+    if !(width > 0.0) {
+        return Err(AppError::validation(
+            "`slot-center-to-center` width must be positive.",
+        ));
+    }
+    if !(separation >= 0.0) {
+        return Err(AppError::validation(
+            "`slot-center-to-center` separation must be non-negative.",
+        ));
+    }
+
+    let length = separation + width;
+    let length_node = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Literal(CoreLiteral::Number(length)),
+        CoreValueKind::Number,
+    );
+    let width_node = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Literal(CoreLiteral::Number(width)),
+        CoreValueKind::Number,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Slot),
+            args: vec![length_node, width_node],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_slot_center_point_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    next_node_id: &mut u64,
+) -> AppResult<CoreNode> {
+    if args.len() != 5 {
+        return Err(AppError::validation(
+            "`slot-center-point` expects cx, cy, px, py, width.",
+        ));
+    }
+    reject_unknown_keywords(keywords, &[], "slot-center-point")?;
+
+    let cx = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
+    let cy = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
+    let px = crate::ecky_ir::eval_core_number_with_locals(&args[2], param_names, env)?;
+    let py = crate::ecky_ir::eval_core_number_with_locals(&args[3], param_names, env)?;
+    let width = crate::ecky_ir::eval_core_number_with_locals(&args[4], param_names, env)?;
+    if !(width > 0.0) {
+        return Err(AppError::validation(
+            "`slot-center-point` width must be positive.",
+        ));
+    }
+
+    let d = (px - cx).hypot(py - cy);
+    let length = 2.0 * d + width;
+    let angle_deg = (py - cy).atan2(px - cx).to_degrees();
+
+    let slot = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Slot),
+            args: vec![
+                number_node(next_node_id, length),
+                number_node(next_node_id, width),
+            ],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Sketch,
+    );
+    let rotated = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Transform(CoreTransformOp::Rotate),
+            args: vec![
+                number_node(next_node_id, 0.0),
+                number_node(next_node_id, 0.0),
+                number_node(next_node_id, angle_deg),
+                slot,
+            ],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Sketch,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Transform(CoreTransformOp::Translate),
+            args: vec![
+                number_node(next_node_id, cx),
+                number_node(next_node_id, cy),
+                number_node(next_node_id, 0.0),
+                rotated,
+            ],
             keywords: Vec::new(),
         },
     ))
@@ -1023,20 +1488,6 @@ fn path3_node(points: &[[f64; 3]], next_node_id: &mut u64) -> CoreNode {
         },
         CoreValueKind::Path,
     )
-}
-
-fn sampled_helix_points(radius: f64, pitch: f64, height: f64, lefthand: bool) -> Vec<[f64; 3]> {
-    let turns = (height / pitch).abs();
-    let segments = (turns * 48.0).ceil().max(48.0) as usize;
-    let angle_sign = if lefthand { -1.0 } else { 1.0 };
-
-    (0..=segments)
-        .map(|index| {
-            let t = index as f64 / segments as f64;
-            let angle = angle_sign * 2.0 * std::f64::consts::PI * turns * t;
-            [radius * angle.cos(), radius * angle.sin(), height * t]
-        })
-        .collect()
 }
 
 fn expand_sampled_radial_loft_node(
@@ -2440,6 +2891,11 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Primitive(CorePrimitive::Sphere) => Ok(OcctOp::Sphere),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => Ok(OcctOp::Cylinder),
         CoreOperation::Primitive(CorePrimitive::Cone) => Ok(OcctOp::Cone),
+        CoreOperation::Primitive(CorePrimitive::Torus) => Ok(OcctOp::Torus),
+        CoreOperation::Primitive(CorePrimitive::Wedge) => Ok(OcctOp::Wedge),
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => Ok(OcctOp::Ellipse),
+        CoreOperation::Primitive(CorePrimitive::Slot) => Ok(OcctOp::Slot),
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => Ok(OcctOp::SlotArc),
         CoreOperation::Primitive(CorePrimitive::Circle) => Ok(OcctOp::Circle),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => Ok(OcctOp::Rectangle),
         CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => Ok(OcctOp::RoundedRectangle),
@@ -2453,6 +2909,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Surface(CoreSurfaceOp::Loft) => Ok(OcctOp::Loft),
         CoreOperation::Surface(CoreSurfaceOp::Sweep) => Ok(OcctOp::Sweep),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => Ok(OcctOp::Twist),
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => Ok(OcctOp::Draft),
         CoreOperation::Surface(CoreSurfaceOp::Taper) => Ok(OcctOp::Taper),
         CoreOperation::Surface(CoreSurfaceOp::Offset) => Ok(OcctOp::Offset),
         CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => Ok(OcctOp::Offset),
@@ -2532,6 +2989,11 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere",
         CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder",
         CoreOperation::Primitive(CorePrimitive::Cone) => "cone",
+        CoreOperation::Primitive(CorePrimitive::Torus) => "torus",
+        CoreOperation::Primitive(CorePrimitive::Wedge) => "wedge",
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => "ellipse",
+        CoreOperation::Primitive(CorePrimitive::Slot) => "slot-overall",
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => "slot-arc",
         CoreOperation::Primitive(CorePrimitive::Circle) => "circle",
         CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle",
         CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect",
@@ -2561,6 +3023,7 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer",
         CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper",
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist",
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => "draft",
         CoreOperation::Path(CorePathOp::Polyline) => "path",
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path",
         CoreOperation::Path(CorePathOp::Bspline) => "bspline",
@@ -2951,6 +3414,240 @@ mod tests {
                 OcctArg::Number(4.0),
                 OcctArg::Number(30.0)
             ]
+        );
+    }
+
+    #[test]
+    fn plans_torus_primitive_for_direct_occt() {
+        let program = compile("(model (part body (torus 10 3)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts[0].commands.len(), 1);
+        assert_eq!(plan.parts[0].commands[0].op, OcctOp::Torus);
+        assert_eq!(
+            plan.parts[0].commands[0].args[..2],
+            [OcctArg::Number(10.0), OcctArg::Number(3.0)]
+        );
+    }
+
+    #[test]
+    fn plans_slot_overall_primitive_for_direct_occt() {
+        let program = compile("(model (part body (extrude (slot-overall 40 10) 5)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Slot, OcctOp::Extrude]
+        );
+        assert_eq!(
+            plan.parts[0].commands[0].args[..2],
+            [OcctArg::Number(40.0), OcctArg::Number(10.0)]
+        );
+    }
+
+    #[test]
+    fn plans_slot_center_to_center_as_slot_for_direct_occt() {
+        // Custom op expands to the canonical Slot primitive with length = sep + width.
+        let program = compile("(model (part body (extrude (slot-center-to-center 30 10) 5)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts[0].commands[0].op, OcctOp::Slot);
+        assert_eq!(
+            plan.parts[0].commands[0].args[..2],
+            [OcctArg::Number(40.0), OcctArg::Number(10.0)]
+        );
+    }
+
+    #[test]
+    fn plans_rib_and_groove_as_sweep_booleans_for_direct_occt() {
+        let rib = plan_core_program(&compile(
+            "(model (part p (rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
+        ))
+        .expect("rib plan");
+        let rib_ops: Vec<_> = rib.parts[0].commands.iter().map(|c| c.op).collect();
+        assert!(
+            rib_ops.contains(&OcctOp::Union) && rib_ops.contains(&OcctOp::Sweep),
+            "rib should be union(solid, sweep), got {rib_ops:?}"
+        );
+
+        let groove = plan_core_program(&compile(
+            "(model (part p (groove (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
+        ))
+        .expect("groove plan");
+        let groove_ops: Vec<_> = groove.parts[0].commands.iter().map(|c| c.op).collect();
+        assert!(
+            groove_ops.contains(&OcctOp::Difference) && groove_ops.contains(&OcctOp::Sweep),
+            "groove should be difference(solid, sweep), got {groove_ops:?}"
+        );
+    }
+
+    #[test]
+    fn plans_draft_as_draft_op_for_direct_occt() {
+        let program = compile("(model (part p (draft 10 (box 20 20 20))))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        let ops: Vec<_> = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect();
+        assert!(
+            ops.contains(&OcctOp::Draft) && ops.contains(&OcctOp::Box),
+            "expected draft over a box, got {ops:?}"
+        );
+    }
+
+    #[test]
+    fn plans_thread_as_union_of_cylinder_and_ridge_for_direct_occt() {
+        let program =
+            compile("(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        let ops: Vec<_> = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect();
+        assert!(
+            ops.contains(&OcctOp::Union) && ops.contains(&OcctOp::Cylinder),
+            "expected thread to expand into union(cylinder, ridge), got {ops:?}"
+        );
+    }
+
+    #[test]
+    fn plans_female_thread_as_ridge_cutter_for_direct_occt() {
+        let program = compile(
+            "(model (part cut (thread :radius 8 :pitch 2 :length 16 :depth 1 :female #t :clearance 0.2)))",
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        let ops: Vec<_> = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect();
+        assert!(
+            !ops.contains(&OcctOp::Union) && !ops.contains(&OcctOp::Cylinder),
+            "female thread should be a bare ridge cutter (no core cylinder/union), got {ops:?}"
+        );
+    }
+
+    #[test]
+    fn plans_slot_arc_primitive_for_direct_occt() {
+        let program =
+            compile("(model (part body (extrude (slot-arc 20 0 90 10) 5)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::SlotArc, OcctOp::Extrude]
+        );
+        assert_eq!(
+            plan.parts[0].commands[0].args[..4],
+            [
+                OcctArg::Number(20.0),
+                OcctArg::Number(0.0),
+                OcctArg::Number(90.0),
+                OcctArg::Number(10.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_slot_center_point_as_transformed_slot_for_direct_occt() {
+        // Custom op expands to Slot wrapped in rotate + translate.
+        let program =
+            compile("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        let ops: Vec<_> = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect();
+        assert!(
+            ops.contains(&OcctOp::Slot)
+                && ops.contains(&OcctOp::Rotate)
+                && ops.contains(&OcctOp::Translate),
+            "expected slot+rotate+translate, got {ops:?}"
+        );
+    }
+
+    #[test]
+    fn plans_wedge_primitive_for_direct_occt() {
+        let program = compile("(model (part body (wedge 20 10 20 5 5 15 15)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts[0].commands.len(), 1);
+        assert_eq!(plan.parts[0].commands[0].op, OcctOp::Wedge);
+        assert_eq!(
+            plan.parts[0].commands[0].args[..7],
+            [
+                OcctArg::Number(20.0),
+                OcctArg::Number(10.0),
+                OcctArg::Number(20.0),
+                OcctArg::Number(5.0),
+                OcctArg::Number(5.0),
+                OcctArg::Number(15.0),
+                OcctArg::Number(15.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_ellipse_profile_for_direct_occt() {
+        let program = compile("(model (part body (extrude (ellipse 10 4) 5)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::Ellipse, OcctOp::Extrude]
+        );
+        assert_eq!(
+            plan.parts[0].commands[0].args[..2],
+            [OcctArg::Number(10.0), OcctArg::Number(4.0)]
+        );
+    }
+
+    #[test]
+    fn plans_trapezoid_as_polygon_for_direct_occt() {
+        // `trapezoid` is a Custom op that expands to a `polygon` of four vertices
+        // computed by the shared `trapezoid_vertices` builder.
+        let program = compile("(model (part body (extrude (trapezoid 20 10 8) 5)))");
+
+        let plan = plan_core_program(&program).expect("trapezoid planned");
+
+        let ops: Vec<_> = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect();
+        assert_eq!(
+            ops,
+            vec![OcctOp::Polygon, OcctOp::Extrude],
+            "expected trapezoid to expand into a polygon + extrude plan, got {ops:?}"
         );
     }
 
@@ -3760,9 +4457,35 @@ mod tests {
             .map(|command| command.op)
             .collect::<Vec<_>>();
 
+        // Profile is a polyline (`Path`), but the spine is a true `HelixPath`
+        // (Geom helix), matching build123d's `Edge.make_helix` — not a sampled
+        // polyline. A faceted polyline spine rendered the wrong pitch and gaps.
         assert_eq!(
             ops,
-            vec![OcctOp::Path, OcctOp::MakeFace, OcctOp::Path, OcctOp::Sweep]
+            vec![OcctOp::Path, OcctOp::MakeFace, OcctOp::HelixPath, OcctOp::Sweep]
+        );
+    }
+
+    #[test]
+    fn plans_regular_polygon_as_polygon_for_direct_occt() {
+        // `regular-polygon` is a Custom op that expands to a `polygon` of the
+        // shared computed vertices, so native matches build123d by construction.
+        let program = compile(
+            r#"
+            (model
+              (part hex
+                (extrude (regular-polygon 6 10) 5)))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("regular-polygon planned");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+        assert!(
+            ops.contains(&OcctOp::Polygon) && ops.contains(&OcctOp::Extrude),
+            "expected regular-polygon to expand into a polygon + extrude plan, got {ops:?}"
         );
     }
 

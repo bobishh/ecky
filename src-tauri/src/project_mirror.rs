@@ -67,9 +67,13 @@ pub fn source_digest(source: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(source.as_bytes()))
 }
 
-/// Projects root: `<app_data>/projects` until a config override lands.
-pub fn projects_root(app: &dyn PathResolver) -> PathBuf {
-    app.app_data_dir().join(PROJECTS_DIR_NAME)
+/// Projects root: the configured `projectsRoot` override when set to a
+/// non-blank path, otherwise `<app_data>/projects`.
+pub fn projects_root(app: &dyn PathResolver, configured: Option<&str>) -> PathBuf {
+    match configured {
+        Some(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
+        _ => app.app_data_dir().join(PROJECTS_DIR_NAME),
+    }
 }
 
 /// Deterministic folder slug: human prefix from the title plus a stable
@@ -101,7 +105,11 @@ pub fn project_slug(title: &str, thread_id: &str) -> String {
     }
 }
 
-pub fn project_dir(app: &dyn PathResolver, slug: &str) -> AppResult<PathBuf> {
+pub fn project_dir(
+    app: &dyn PathResolver,
+    configured_root: Option<&str>,
+    slug: &str,
+) -> AppResult<PathBuf> {
     if slug.is_empty()
         || !slug
             .chars()
@@ -111,7 +119,7 @@ pub fn project_dir(app: &dyn PathResolver, slug: &str) -> AppResult<PathBuf> {
             "Project slug `{slug}` is not a safe directory name."
         )));
     }
-    Ok(projects_root(app).join(slug))
+    Ok(projects_root(app, configured_root).join(slug))
 }
 
 pub fn read_manifest(dir: &Path) -> AppResult<Option<ProjectManifest>> {
@@ -152,6 +160,8 @@ pub struct ExportProjectRequest<'a> {
     pub message_id: &'a str,
     pub model_id: Option<&'a str>,
     pub source: &'a str,
+    /// Configured `projectsRoot` override; `None` uses `<app_data>/projects`.
+    pub projects_root: Option<&'a str>,
 }
 
 /// Writes/refreshes the mirror folder from a bound version. Keeps the
@@ -160,7 +170,7 @@ pub fn export_project(
     app: &dyn PathResolver,
     request: &ExportProjectRequest<'_>,
 ) -> AppResult<(PathBuf, ProjectManifest)> {
-    let dir = project_dir(app, request.slug)?;
+    let dir = project_dir(app, request.projects_root, request.slug)?;
     fs::create_dir_all(&dir).map_err(|err| {
         AppError::persistence(format!("Failed to create '{}': {}", dir.display(), err))
     })?;
@@ -216,10 +226,11 @@ pub fn classify_sync_state(
 /// own history lookups).
 pub fn folder_status(
     app: &dyn PathResolver,
+    configured_root: Option<&str>,
     slug: &str,
     thread_head_message_id: Option<&str>,
 ) -> AppResult<ProjectFolderStatus> {
-    let dir = project_dir(app, slug)?;
+    let dir = project_dir(app, configured_root, slug)?;
     let manifest = read_manifest(&dir)?;
     let file_digest = read_project_source(&dir)?.map(|source| source_digest(&source));
     let state = classify_sync_state(
@@ -238,8 +249,11 @@ pub fn folder_status(
 
 /// Slugs of all project folders under the projects root that look like
 /// mirrors (have a manifest). Used by the folder watcher.
-pub fn list_project_slugs(app: &dyn PathResolver) -> AppResult<Vec<String>> {
-    let root = projects_root(app);
+pub fn list_project_slugs(
+    app: &dyn PathResolver,
+    configured_root: Option<&str>,
+) -> AppResult<Vec<String>> {
+    let root = projects_root(app, configured_root);
     if !root.is_dir() {
         return Ok(Vec::new());
     }
@@ -300,7 +314,27 @@ mod tests {
             message_id: "msg-1",
             model_id: Some("model-1"),
             source,
+            projects_root: None,
         }
+    }
+
+    #[test]
+    fn projects_root_honors_config_override_else_defaults() {
+        let resolver = temp_resolver("root");
+        let default_root = resolver.app_data_dir().join(PROJECTS_DIR_NAME);
+
+        // No override -> `<app_data>/projects`.
+        assert_eq!(projects_root(&resolver, None), default_root);
+
+        // Configured override wins.
+        let custom = std::env::temp_dir().join("ecky-custom-projects-root");
+        assert_eq!(
+            projects_root(&resolver, Some(custom.to_str().unwrap())),
+            custom
+        );
+
+        // Blank/whitespace override is ignored, falling back to the default.
+        assert_eq!(projects_root(&resolver, Some("   ")), default_root);
     }
 
     #[test]
@@ -409,12 +443,12 @@ mod tests {
     #[test]
     fn folder_status_reports_missing_then_clean() {
         let resolver = temp_resolver("status");
-        let status = folder_status(&resolver, "ghost-abc12345", Some("msg-1")).expect("status");
+        let status = folder_status(&resolver, None, "ghost-abc12345", Some("msg-1")).expect("status");
         assert_eq!(status.state, ProjectSyncState::Missing);
 
         let source = "(model (part body (box 1 2 3)))";
         export_project(&resolver, &sample_request("live-abc12345", source)).expect("export");
-        let status = folder_status(&resolver, "live-abc12345", Some("msg-1")).expect("status");
+        let status = folder_status(&resolver, None, "live-abc12345", Some("msg-1")).expect("status");
         assert_eq!(status.state, ProjectSyncState::Clean);
         assert_eq!(
             status.file_digest.as_deref(),
@@ -422,20 +456,20 @@ mod tests {
         );
 
         fs::write(
-            projects_root(&resolver)
+            projects_root(&resolver, None)
                 .join("live-abc12345")
                 .join(PROJECT_SOURCE_FILE_NAME),
             "(model (part body (box 9 9 9)))",
         )
         .expect("external edit");
-        let status = folder_status(&resolver, "live-abc12345", Some("msg-1")).expect("status");
+        let status = folder_status(&resolver, None, "live-abc12345", Some("msg-1")).expect("status");
         assert_eq!(status.state, ProjectSyncState::FileChanged);
     }
 
     #[test]
     fn unsafe_slugs_are_rejected() {
         let resolver = temp_resolver("unsafe");
-        let err = folder_status(&resolver, "../escape", None).expect_err("unsafe slug");
+        let err = folder_status(&resolver, None, "../escape", None).expect_err("unsafe slug");
         assert!(err.message.contains("not a safe"), "{}", err.message);
     }
 }

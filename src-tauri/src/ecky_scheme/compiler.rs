@@ -8535,6 +8535,11 @@ fn map_operation(name: &str) -> CoreOperation {
         "sphere" => CoreOperation::Primitive(CorePrimitive::Sphere),
         "cylinder" => CoreOperation::Primitive(CorePrimitive::Cylinder),
         "cone" => CoreOperation::Primitive(CorePrimitive::Cone),
+        "torus" => CoreOperation::Primitive(CorePrimitive::Torus),
+        "wedge" => CoreOperation::Primitive(CorePrimitive::Wedge),
+        "ellipse" => CoreOperation::Primitive(CorePrimitive::Ellipse),
+        "slot-overall" | "slot_overall" => CoreOperation::Primitive(CorePrimitive::Slot),
+        "slot-arc" | "slot_arc" => CoreOperation::Primitive(CorePrimitive::SlotArc),
         "circle" => CoreOperation::Primitive(CorePrimitive::Circle),
         "rectangle" => CoreOperation::Primitive(CorePrimitive::Rectangle),
         "rounded-rect" | "rounded_rect" => {
@@ -8568,6 +8573,7 @@ fn map_operation(name: &str) -> CoreOperation {
         "chamfer" => CoreOperation::Surface(CoreSurfaceOp::Chamfer),
         "taper" => CoreOperation::Surface(CoreSurfaceOp::Taper),
         "twist" => CoreOperation::Surface(CoreSurfaceOp::Twist),
+        "draft" => CoreOperation::Surface(CoreSurfaceOp::Draft),
         "polyline" | "path" => CoreOperation::Path(CorePathOp::Polyline),
         "bezier-path" => CoreOperation::Path(CorePathOp::BezierPath),
         "bspline" => CoreOperation::Path(CorePathOp::Bspline),
@@ -8620,9 +8626,12 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
         | "logistic-bifurcation-points"
         | "henon-points" => CoreValueKind::List,
         "jitter2" | "superellipse-point" => CoreValueKind::Point2,
-        "circle" | "ring" | "rectangle" | "rounded-rect" | "rounded_rect" | "rounded-polygon"
-        | "rounded_polygon" | "polygon" | "profile" | "make-face" | "text" | "svg" | "offset"
-        | "offset-rounded" => CoreValueKind::Sketch,
+        "circle" | "ellipse" | "ring" | "rectangle" | "rounded-rect" | "rounded_rect" | "rounded-polygon"
+        | "rounded_polygon" | "regular-polygon" | "regular_polygon" | "trapezoid"
+        | "slot-overall" | "slot_overall" | "slot-center-to-center" | "slot_center_to_center"
+        | "slot-center-point" | "slot_center_point" | "slot-arc" | "slot_arc"
+        | "polygon" | "profile"
+        | "make-face" | "text" | "svg" | "offset" | "offset-rounded" => CoreValueKind::Sketch,
         "bezier-path" | "path" | "polyline" => CoreValueKind::Path,
         "bspline" => CoreValueKind::Sketch,
         "plane" | "location" | "path-frame" => CoreValueKind::Frame,
@@ -9028,6 +9037,11 @@ fn emit_operation(op: &CoreOperation) -> String {
         CoreOperation::Primitive(CorePrimitive::Sphere) => "sphere".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cylinder) => "cylinder".to_string(),
         CoreOperation::Primitive(CorePrimitive::Cone) => "cone".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Torus) => "torus".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Wedge) => "wedge".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Ellipse) => "ellipse".to_string(),
+        CoreOperation::Primitive(CorePrimitive::Slot) => "slot-overall".to_string(),
+        CoreOperation::Primitive(CorePrimitive::SlotArc) => "slot-arc".to_string(),
         CoreOperation::Primitive(CorePrimitive::Circle) => "circle".to_string(),
         CoreOperation::Primitive(CorePrimitive::Rectangle) => "rectangle".to_string(),
         CoreOperation::Primitive(CorePrimitive::RoundedRectangle) => "rounded-rect".to_string(),
@@ -9057,6 +9071,7 @@ fn emit_operation(op: &CoreOperation) -> String {
         CoreOperation::Surface(CoreSurfaceOp::Chamfer) => "chamfer".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Taper) => "taper".to_string(),
         CoreOperation::Surface(CoreSurfaceOp::Twist) => "twist".to_string(),
+        CoreOperation::Surface(CoreSurfaceOp::Draft) => "draft".to_string(),
         CoreOperation::Path(CorePathOp::Polyline) => "path".to_string(),
         CoreOperation::Path(CorePathOp::BezierPath) => "bezier-path".to_string(),
         CoreOperation::Path(CorePathOp::Bspline) => "bspline".to_string(),

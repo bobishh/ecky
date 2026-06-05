@@ -4,9 +4,21 @@ Learn Ecky IR by building models in order. Each chapter introduces one small ide
 
 Read the main lessons in order. The app sidebar exposes the same book one chapter at a time. Use **OPEN IN CODE** on any chapter to load its first runnable `.ecky` snippet into the code window.
 
+## How Ecky Thinks
+
+Before the first model, the one-screen mental model. Everything in this book sits on three layers, and knowing which layer you are on explains every behavior you will meet.
+
+**You write a Scheme surface.** An `.ecky` file is parenthesized Scheme: `(model (part ...))`. It is friendly to read and write, and it is _not_ the thing that gets built. It is a surface — a convenient skin over the layer below.
+
+**It lowers to a finite Core IR.** Ecky compiles your surface into a small, fixed set of core operations — primitives, booleans, selectors, placements, repeats. "Finite" is the whole point: the kernel never sees arbitrary Scheme, only this closed vocabulary. That is why a model is reproducible, verifiable, and portable. When a feature "exists," it means it exists in the Core IR — not just in the surface syntax.
+
+**The Core IR renders on a backend.** The default backend is the **native OCCT kernel**: an exact boundary-representation (B-rep) solid modeler. Exact means real faces and edges with identities you can select and tag — not a triangle soup. Two interop backends, **build123d** and **FreeCAD**, can also consume the Core IR for cross-checking and import, but they are followers, not the source of truth. Some features (like `:created-by`, later) live only on native because they depend on data only the native kernel tracks.
+
+Keep the three layers in mind: when something compiles but renders oddly, ask which layer owns it. Surface typo, missing Core IR operation, or a backend that does not support it — the answer is almost always one of those three.
+
 ## First Solid: Ball on a Base
 
-Start with the smallest complete `.ecky` program: one `model`, one `part`, one primitive.
+Every model is a tree, and the fastest way to feel that is to grow the smallest one that renders. One `model`, one `part`, one primitive — three nested forms and you have a solid on screen. Everything later in this book is this same tree with more branches.
 
 ```scheme
 (model
@@ -35,9 +47,11 @@ Add another primitive with `union` when two solids should become one part.
 
 Use this pattern for first tests: primitive first, then one transform, then one boolean.
 
+> **Watch for:** every primitive is born centered on the origin, so two solids written at the same spot interpenetrate instead of stacking. The `translate` above is not decoration — delete it and the ball swallows the base. When a union looks fused-but-wrong, the first question is always "did I move the second solid before combining it?"
+
 ## Sketch to Solid: Plate from a Profile
 
-Most useful CAD starts as a 2D outline. In Ecky IR, a sketch/profile becomes a solid with `extrude`.
+Primitives get you a ball or a box, but real parts rarely start as a primitive — they start as a shape someone drew. Most useful CAD begins as a 2D outline that you then give thickness. In Ecky that move is `extrude`: hand it a closed profile, hand it a height, get a solid.
 
 ```scheme
 (model
@@ -69,9 +83,123 @@ The outer profile defines material. The hole profile removes material during the
 
 This is the core move: draw a closed 2D region, then give it height.
 
+> **Watch for:** `extrude` only works on a _closed_ region. An open polyline or a profile whose `:holes` poke through the `:outer` edge has no well-defined inside, and the extrude fails or produces junk. Keep holes strictly inside the outer boundary, and reach for `profile` (not a raw shape) the moment material needs to be removed — the `:outer`/`:holes` split is what tells Ecky which side is solid.
+
+## Convenience Shapes: Stop Hand-Building Common Outlines
+
+`box`, `sphere`, and `extrude` cover a lot, but some outlines come up so often that drawing them by hand wastes time and invites mistakes. Ecky ships them as named shapes. Each one is a true analytic primitive (or expands to one), so it renders identically on every backend — no faceted approximations.
+
+A **torus** is a ring: major radius to the tube centre, minor radius of the tube.
+
+```scheme
+(model
+  (part ring
+    (torus 20 5)))
+```
+
+An **ellipse** is a 2D profile — give it the x and y radii, then `extrude` it like any sketch. When the y radius is larger, the long axis simply swings to y; you do not rotate anything yourself.
+
+```scheme
+(model
+  (part oval
+    (extrude (ellipse 18 10) 4)))
+```
+
+A **regular-polygon** takes a side count and a circumradius (optionally `:rotation`).
+
+```scheme
+(model
+  (part hex
+    (extrude (regular-polygon 6 12) 5)))
+```
+
+A **trapezoid** takes the bottom width, top width, and height; add `:skew` to slide the top sideways.
+
+```scheme
+(model
+  (part wedge_plate
+    (extrude (trapezoid 40 24 18 :skew 4) 5)))
+```
+
+A **wedge** is the 3D ramp: a `dx × dy × dz` box whose top face shrinks to the rectangle `xmin..xmax` by `zmin..zmax`.
+
+```scheme
+(model
+  (part ramp
+    (wedge 40 20 30 10 5 30 25)))
+```
+
+### Slots
+
+A slot is an obround — a rectangle capped by two semicircles. Four front-ends describe the same shape from whatever you happen to know.
+
+`slot-overall` takes the tip-to-tip length and the width.
+
+```scheme
+(model
+  (part track
+    (extrude (slot-overall 50 12) 4)))
+```
+
+`slot-center-to-center` takes the distance between the two end-arc centres and the width.
+
+```scheme
+(model
+  (part track_c2c
+    (extrude (slot-center-to-center 38 12) 4)))
+```
+
+`slot-center-point` takes the slot centre `(cx cy)`, the centre of one end arc `(px py)`, and the width — handy when you already know where the holes go. It orients itself along the line between the two points.
+
+```scheme
+(model
+  (part track_cp
+    (extrude (slot-center-point 0 0 30 0 12) 4)))
+```
+
+`slot-arc` curves the slot along a circular arc: centreline radius, start and end angle (degrees), and width.
+
+```scheme
+(model
+  (part curved_track
+    (extrude (slot-arc 30 0 120 10) 4)))
+```
+
+> **Watch for:** the slot, ellipse, regular-polygon, and trapezoid examples here are 2D profiles — they need an `extrude` (or `revolve`) to become a solid. `torus` and `wedge` are already solids, so they stand alone.
+
+### Threads
+
+`thread` builds a screw thread by sweeping a ridge along a helix around a core cylinder — you do not hand-build the helix. Give it a radius, pitch, length, and depth.
+
+```scheme
+(model
+  (part screw
+    (thread :radius 6 :pitch 1.5 :length 18 :depth 0.9)))
+```
+
+For standard hardware, `:iso "M…"` decodes an ISO metric coarse-pitch designation into the radius, pitch, and depth for you — pass only the length.
+
+```scheme
+(model
+  (part bolt
+    (thread :iso "M8" :length 20)))
+```
+
+`:female #t` makes the matching cutter instead of a solid screw. Subtract it from a bore to tap a hole; `:clearance` widens the envelope so the parts actually mate.
+
+```scheme
+(model
+  (part nut
+    (difference
+      (cylinder 10 8)
+      (thread :iso "M8" :length 8 :female #t :clearance 0.2))))
+```
+
+`:lefthand #t` reverses the helix. Unknown ISO designations (e.g. `"M7"`) fail with a clear error rather than guessing.
+
 ## Parameters: Make the Plate Editable
 
-Once a model works with constants, move design choices into `params`.
+The plate in the last chapter had its size baked in — change the design and you go hunting for four scattered numbers. The moment a model is worth keeping, its dimensions want names. `params` hoists the design choices to the top of the model, where the UI can expose them as labelled sliders and the geometry reads them back by name.
 
 ```scheme
 (model
@@ -98,9 +226,29 @@ Keep parameters physical: widths, heights, clearances, radii. Put derived math n
 
 That line is better than repeating `(/ bore_d 2)` through cuts and selectors.
 
+### Units: bare numbers already have one
+
+Every number you have written so far carried a hidden unit. Ecky has two base units, and a bare number is already expressed in them: **lengths are millimeters, angles are degrees.** `(box 70 42 4)` is 70 mm by 42 mm by 4 mm; `(rotate 90 0 0 ...)` turns 90 degrees. You never have to write a suffix.
+
+When you do write one, the suffix is a **conversion into that base unit** — nothing more:
+
+| Suffix | Family | Becomes |
+| --- | --- | --- |
+| `mm` | length | itself (`12mm` → `12`) |
+| `cm` | length | ×10 (`1cm` → `10`) |
+| `in` | length | ×25.4 (`1in` → `25.4`) |
+| `deg` | angle | itself (`90deg` → `90`) |
+| `rad` | angle | ×(180/π) (`1.5708rad` → `90`) |
+
+So `(box 12mm 1cm 1in)` is exactly `(box 12 10 25.4)`, and `(rotate 1.5708rad 0 0 ...)` is the same 90-degree turn as `(rotate 90 0 0 ...)`. Suffixes exist so you can author in the unit a spec is written in and let Ecky normalize.
+
+**Some numbers stay unitless on purpose.** Counts (`(repeat 5 ...)`), ratios, segment counts on a cylinder (`(cylinder 6 12 96)` — that `96` is facets, not millimeters), and indices are pure numbers. A suffix on them is meaningless; leave them bare.
+
+**One honest caveat: Ecky does not police dimensions.** The suffix only scales a number into its base unit; it does not tag the value as "a length" or "an angle." Put `45deg` where a width is expected and you get a 45 mm width, no warning — the `deg` is just stripped to its base, which for the box slot is read as millimeters. Units are a convenience for _writing_ correct numbers, not a type system that catches mixing them up. That discipline is yours: author lengths in `mm`/`cm`/`in`, angles in `deg`/`rad`, and keep counts and ratios bare.
+
 ## Cut and Join: Mounting Plate
 
-Use `build` when a part needs named intermediate geometry.
+A solid is rarely the end state — you drill it, pocket it, add a boss. Once a part is more than one boolean deep, nesting it all inline becomes unreadable and impossible to point at. `build` is the fix: name each intermediate solid, then combine the names in a final `result`. The geometry is the same; the difference is that every step now has a handle you can reference, cut against, or select later.
 
 ```scheme
 (model
@@ -139,7 +287,11 @@ Add material with `union` or `fuse`.
 
 The result is still one part, but the intent stays readable.
 
+> **Watch for:** two gotchas bite here. First, a cutter that is exactly as tall as the stock leaves a paper-thin film of material at the cut floor (a "coplanar face") — make cutters _overshoot_, which is why the holes above are `(+ thickness 1)` tall and start at `-0.5`. Second, booleans rebuild topology: every face and edge is renumbered afterward, so a selector that pointed at "the top face" before a `difference` may point somewhere else after it. That is exactly the problem the next chapter's `tag-face` and selector strings exist to solve.
+
 ## Round, Chamfer, Shell: Select Edges and Faces
+
+This is the book's first **intermediate** chapter, and it earns the label: it stacks five related ideas — `fillet`, `chamfer`, `shell`, `tag-face`, and the native-only `:created-by` — because they all answer the same question, "now that the solid exists, how do I point at the right edge or face and act on it?" Read it in passes. The finishing operations (`fillet`/`chamfer`/`shell`) come first; the selector machinery (`tag-face`, `:created-by`) is what keeps them aimed at the right topology after booleans renumber everything.
 
 Edge operations happen after the main solid exists.
 
@@ -208,6 +360,39 @@ When a `build` introduces helper solids, use `:created-by <shape>` to keep claus
 
 Here `:created-by pocket` limits face candidates to the cavity created from `pocket`, not every planar top-facing face on `tray`.
 
+> **Native-only.** `:created-by` is a provenance selector: it relies on the
+> originating-slot index that the native OCCT kernel tracks for every face and
+> edge. It resolves only on the native backend (Ecky's default). The build123d
+> and FreeCAD interop backends have no slot-provenance index, so they reject
+> `:created-by` rather than guess. If you lower a model through an interop
+> backend (including `ecky check`, which uses build123d today), drop the
+> `:created-by` clause and lean on the geometric predicates (`planar`,
+> `normal-z`, `area-max`) or a `tag-face` instead.
+
+### Tapered fillets
+
+A normal `fillet` uses one radius. Add `:to-radius` and the radius varies along each selected edge — it starts at the base radius and eases to the second one. Handy for blends that need to grow or shrink along a run.
+
+```scheme
+(model
+  (part p
+    (fillet 4 :to-radius 1 :edges "top" (box 40 40 20))))
+```
+
+> **Backend note:** tapered fillets are an OCCT capability rendered by the native and FreeCAD backends. The build123d backend only does single-radius fillets, so it rejects `:to-radius` with a clear error rather than silently giving you a uniform fillet — render tapered fillets on native or FreeCAD.
+
+### Draft
+
+`draft` tilts the side walls of a solid by an angle so a molded part can release from its tool. It tapers every vertical face about a neutral plane (the level that stays the original size); pass `:neutral-z` to move that plane, otherwise it sits at `z = 0`.
+
+```scheme
+(model
+  (part p
+    (draft 8 (box 30 30 20))))
+```
+
+> **Backend note:** draft is rendered by the native and build123d backends (both OpenCASCADE). The FreeCAD backend has no Part draft API, so it rejects `draft` with a clear error. This first cut drafts *all* vertical faces; targeting specific faces with a `:faces` selector is a planned extension.
+
 ## Paths and Surfaces: Revolve and Sweep
 
 Use `revolve` when a 2D profile turns around an axis.
@@ -246,6 +431,21 @@ Use `sweep` when a profile follows a path.
 The circle is the cross-section. The bezier path is the centerline. Sweep keeps those responsibilities separate.
 
 Use `loft` when one profile needs to become another profile across height or distance.
+
+### Ribs and grooves
+
+`rib` and `groove` are the two-step "sweep a profile, then combine" move rolled into one op. Both take a solid, a profile, and a path: `rib` sweeps the profile along the path and fuses the result onto the solid (a reinforcing rib); `groove` sweeps it and cuts it away (a channel).
+
+```scheme
+(model
+  (part p
+    (rib
+      (box 20 20 20)
+      (circle 3)
+      (path (0 0 0) (0 0 30)))))
+```
+
+Swap `rib` for `groove` to subtract the same swept run instead of adding it. They lower to `sweep` + `union`/`difference`, so they render on every backend.
 
 ## Repetition: Ribs, Slots, and Patterns
 
@@ -317,6 +517,46 @@ Use `repeat-pick` when only some indices should produce geometry.
     (translate 36 0 12
       (sphere 4))))
 ```
+
+## Components and Reuse: Lift a Proven Part
+
+`repeat` solves "the same shape, many times, in one part." It does not solve "the same _proven_ shape, in two different parts, with its checks coming along." The moment you copy a block of geometry from one part into another, you have made a second thing to maintain — and the day you change the wall thickness in one and forget the other is the day a print fails. A **component** is the fix: name the geometry once, reuse it by reference, and let its proof travel with it.
+
+Say you have dialed in a mounting standoff — a bored post whose wall must stay thick enough to survive a screw. Lift it into a `define-component`:
+
+```scheme
+(define-component standoff
+  ((number height 12 :label "Standoff height" :min 6 :max 30)
+   (number bore 3.2))
+  (verify (tag bore_open) (metric min_wall_thickness "body") (expect (>= value 1.2)))
+  (difference
+    (cylinder 6 height 96)
+    (cylinder bore (+ height 2) 96)))
+
+(model
+  (part front_left (standoff :height 16))
+  (part rear_right (translate 40 0 0 (standoff))))
+```
+
+Three ideas earn their keep here.
+
+**Reuse by reference, override by keyword.** `(standoff :height 16)` instantiates the component and overrides one signature key; `(standoff)` takes every default. Omitted keys fall back to the signature, and a missing _required_ key (one with no default) is a compile error that names the component and lists its signature. There is no copy-paste, so there is no drift: change the body once and both parts move together.
+
+**Closedness is the whole contract.** A component body sees only its signature keys plus bindings it makes itself (`let`, `let*`, `repeat` indices, `build` shapes). It cannot reach a model param or an outer `let*` — try it and you get a compile error naming the variable. That restriction is not a nuisance; it is what makes a component _copy-inlineable_. Paste the `define-component` into any other model and it just works, because it never depended on its surroundings.
+
+**Proof travels with the part.** The `verify` clause lives inside the component, so it expands once per instantiation, its tag namespaced by the part key — `front_left/bore_open`, `rear_right/bore_open`. Reuse therefore includes the wall-thickness check at every call site for free. You proved the part once; every future use re-proves itself.
+
+For the exact signature grammar, nesting limits, and verify-travel rules, see **`define-component`** in the language reference appendix.
+
+### The library loop (MCP)
+
+Components do not have to live in one file. Agents lift proven parts into a shared library and pull them back by source:
+
+1. `component_extract` — hand it a model and a `partKey`. Referenced model params become the signature (metadata preserved); scalar outer bindings become plain defaults; any non-scalar free reference is reported as a blocker so you cannot extract something that secretly depends on its context. `save: true` stores it.
+2. `component_search` — compact headers only (name, one-liner, param keys, tags). Bodies never come back from search, so the library stays browsable.
+3. `component_get` — the full, self-contained `define-component` source for one name. Paste it into the model and instantiate.
+
+The loop is copy-inline by design: what you get back is closed source, not a hidden registry link. A part proven in one project becomes a building block in the next, checks and all.
 
 ## Placement and Frames: Put Geometry Where It Belongs
 
@@ -516,13 +756,40 @@ The entrances are generated from one parametric chamber count:
 
 `chamber_cols` drives both cutter count and divider spacing. `col_gap` is derived from `hotel_w` and `chamber_cols`, so openings stay centered when the model is resized.
 
+## Projects as Folders: Edit Anywhere, Stay Canonical
+
+So far every model has lived inside a thread. That is the system of record, but it is not always where you want to type. Sometimes you want to open the source in your own editor, or hand it to an LLM file skill that only knows how to read and write files. A **project folder** is that door: Ecky mirrors one thread's active version onto disk, you edit the plain file, and Ecky picks the change back up — without ever giving up the thread as the canonical history.
+
+`project_folder_export` writes two files:
+
+```text
+<projectsRoot>/<slug>/
+  model.ecky          edit this with anything
+  ecky-project.json   binding manifest, owned by Ecky — never edit by hand
+```
+
+Edit `model.ecky` in any editor. A polling watcher in the app notices the file no longer matches the manifest digest and applies it for you: it compiles the source, renders a preview, and commits a new version (named `folder-sync`) on the bound thread. Two safety details make this trustworthy rather than scary:
+
+- **Two-tick settle.** A changed file must read identical on two consecutive polls before the compiler sees it. A half-written save — the editor flushing in chunks — never reaches Ecky mid-write.
+- **A broken save fails once, loudly, then waits.** If the edited source does not compile, the watcher reports the failure once for that exact content and then goes quiet until you change the file again. It does not re-render the same mistake every tick.
+
+When you need to reason about the folder explicitly, `project_folder_status` classifies it:
+
+- `clean` — file matches the bound version; nothing to do.
+- `fileChanged` — you edited the file; the watcher will apply it (or you can).
+- `threadAdvanced` — the thread moved on without the folder; the folder is stale. Re-export to refresh it.
+- `conflict` — both sides moved. The watcher will **not** auto-resolve this; applying requires an explicit force, and the previous head stays available as a version so nothing is lost.
+- `missing` — no folder or no manifest yet.
+
+The one rule that holds all of this together: **the folder is a mirror, not a second database.** Threads and versions remain the record. A stale folder never silently clobbers the thread, and `ecky-project.json` is Ecky's to write, not yours. Treat the folder as a convenient editing surface and the thread as the truth, and the two stay in sync on their own.
+
 ## Final Model: Integrated Film Adapter Open Helicoid v9
 
 The last model is `Ecky integrated film adapter open helicoid v9`. It is not a single decorative adapter. It is an assembly built from sliding parts: a recessed base with male rails, a lower insert, an upper clamp, a tunnel module with female-bottom and male-top joints, an open top cover with the female helicoid socket, and a separate moving lens carrier with matching male helicoid threads.
 
 <!-- render-source: ../examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky -->
 
-![Rendered output for Final Model: Integrated Film Adapter Open Helicoid v9, example 1](assets/10-complex-film-adapter-01.png)
+![Rendered output for Final Model: Integrated Film Adapter Open Helicoid v9, example 1](assets/11-complex-film-adapter-01.png)
 
 The source is stored as `docs/books/ecky-ir/examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky`. The chapter reads it in layers instead of dumping all 493 lines at once.
 

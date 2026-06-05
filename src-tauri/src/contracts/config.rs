@@ -168,6 +168,10 @@ pub struct Config {
     pub max_generation_attempts: u32,
     #[serde(default)]
     pub max_verify_attempts: u32,
+    /// Filesystem root for exported project folders. Blank/None uses the
+    /// default `<app_data>/projects`. See `filesystem-project-mirror`.
+    #[serde(default)]
+    pub projects_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

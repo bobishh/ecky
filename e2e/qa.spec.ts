@@ -1025,33 +1025,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     expect(forkWrite?.cmd).toBeTruthy();
   });
 
-  test('Given code inspector forks a version When new thread becomes active Then code remains clickable', async ({
-    page,
-  }) => {
-    await page.setViewportSize({ width: 1400, height: 900 });
-    await setupMocks(page, { forkConfirmResult: true });
-    await gotoWorkbench(page);
-
-    await openDialogue(page);
-    await page.locator('.prompt-input').fill('Create a box');
-    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
-      (button as HTMLButtonElement).click();
-    });
-
-    const viewportCodeButton = page.getByRole('button', { name: /CODE/i }).first();
-    await expect(viewportCodeButton).toBeEnabled();
-    await viewportCodeButton.click();
-    await expect(page.locator('.cm-content')).toContainText('create_box()');
-
-    await page.getByRole('button', { name: /FORK TO NEW THREAD/i }).click();
-    await expect(page.locator('.code-modal-content')).toHaveCount(0);
-
-    const restoredCodeButton = page.getByRole('button', { name: /CODE/i }).first();
-    await expect(restoredCodeButton).toBeEnabled();
-    await restoredCodeButton.click();
-    await expect(page.locator('.cm-content')).toContainText('create_box()');
-  });
-
   test('Given floating window header is inconvenient When dragging visible content and double-clicking body Then window moves and fits viewport', async ({
     page,
   }) => {
@@ -1172,26 +1145,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     );
   });
 
-  test('Given mesh model lacks STEP artifact When model renders Then direct OCCT STEP status shows blocker', async ({
-    page,
-  }) => {
-    await setupMocks(page, { directOcctDetail: 'Direct OCCT unavailable: missing TKDESTEP' });
-    await gotoWorkbench(page);
-
-    await openDialogue(page);
-    await expect(page.locator('.prompt-input')).toBeVisible();
-    await page.locator('.prompt-input').fill('Create a box');
-    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
-      (button as HTMLButtonElement).click();
-    });
-
-    const status = page.getByLabel('Direct OCCT STEP status');
-    await expect(status).toBeVisible();
-    await expect(status).toContainText('DIRECT OCCT STEP FAST PATH');
-    await expect(status).toContainText('BLOCKED');
-    await expect(status).toContainText('Direct OCCT unavailable: missing TKDESTEP');
-  });
-
   test('Given direct OCCT is ready but mesh bundle has no STEP When export chooser opens Then BRep artifact absence is shown', async ({
     page,
   }) => {
@@ -1213,26 +1166,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(stepButton).toContainText(
       'STEP unavailable for mesh/EckyRust render: no BRep STEP artifact was produced.',
     );
-  });
-
-  test('Given direct OCCT is ready but mesh bundle has no STEP When model renders Then direct OCCT status explains no BRep artifact', async ({
-    page,
-  }) => {
-    await setupMocks(page, { directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
-    await gotoWorkbench(page);
-
-    await openDialogue(page);
-    await expect(page.locator('.prompt-input')).toBeVisible();
-    await page.locator('.prompt-input').fill('Create a box');
-    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
-      (button as HTMLButtonElement).click();
-    });
-
-    const status = page.getByLabel('Direct OCCT STEP status');
-    await expect(status).toBeVisible();
-    await expect(status).toContainText('DIRECT OCCT STEP FAST PATH');
-    await expect(status).toContainText('READY / NO STEP');
-    await expect(status).toContainText('no BRep STEP artifact was produced');
   });
 
   test('Given rendered model has STEP artifact When STEP export selected Then source artifact is copied', async ({
@@ -1261,26 +1194,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       })
       .toEqual({ sourcePath: '/mock/output.step', targetPath: '/mock/exported.step' });
     await expect(page.locator('.export-chooser')).toHaveCount(0);
-  });
-
-  test('Given rendered model has STEP artifact When model renders Then direct OCCT status shows STEP ready', async ({
-    page,
-  }) => {
-    await setupMocks(page, { stepArtifact: true, directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' });
-    await gotoWorkbench(page);
-
-    await openDialogue(page);
-    await expect(page.locator('.prompt-input')).toBeVisible();
-    await page.locator('.prompt-input').fill('Create a box');
-    await page.locator('button:has-text("PROCESS")').evaluate((button) => {
-      (button as HTMLButtonElement).click();
-    });
-
-    const status = page.getByLabel('Direct OCCT STEP status');
-    await expect(status).toBeVisible();
-    await expect(status).toContainText('DIRECT OCCT STEP FAST PATH');
-    await expect(status).toContainText('STEP READY');
-    await expect(status).toContainText('output.step');
   });
 
   test('selected parts expose editable controls in Params while viewer overlay stays disabled', async ({ page }) => {

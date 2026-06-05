@@ -371,7 +371,8 @@ pub async fn open_project_in_editor(
         crate::services::target::resolve_editable_target(&conn, &app, thread_id, message_id)?
     };
     let slug = project_mirror::project_slug(&target.design_output.title, &target.thread_id);
-    let dir = project_mirror::project_dir(&app, &slug)?;
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let dir = project_mirror::project_dir(&app, projects_root.as_deref(), &slug)?;
 
     let manifest = project_mirror::read_manifest(&dir)?;
     let file_digest = project_mirror::read_project_source(&dir)?
@@ -393,6 +394,7 @@ pub async fn open_project_in_editor(
                 message_id: &target.message_id,
                 model_id: model_id.as_deref(),
                 source: &target.design_output.macro_code,
+                projects_root: projects_root.as_deref(),
             },
         )?;
     }

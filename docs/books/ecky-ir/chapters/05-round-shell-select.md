@@ -1,5 +1,7 @@
 ## Round, Chamfer, Shell: Select Edges and Faces
 
+This is the book's first **intermediate** chapter, and it earns the label: it stacks five related ideas — `fillet`, `chamfer`, `shell`, `tag-face`, and the native-only `:created-by` — because they all answer the same question, "now that the solid exists, how do I point at the right edge or face and act on it?" Read it in passes. The finishing operations (`fillet`/`chamfer`/`shell`) come first; the selector machinery (`tag-face`, `:created-by`) is what keeps them aimed at the right topology after booleans renumber everything.
+
 Edge operations happen after the main solid exists.
 
 ```scheme
@@ -66,3 +68,36 @@ When a `build` introduces helper solids, use `:created-by <shape>` to keep claus
 ```
 
 Here `:created-by pocket` limits face candidates to the cavity created from `pocket`, not every planar top-facing face on `tray`.
+
+> **Native-only.** `:created-by` is a provenance selector: it relies on the
+> originating-slot index that the native OCCT kernel tracks for every face and
+> edge. It resolves only on the native backend (Ecky's default). The build123d
+> and FreeCAD interop backends have no slot-provenance index, so they reject
+> `:created-by` rather than guess. If you lower a model through an interop
+> backend (including `ecky check`, which uses build123d today), drop the
+> `:created-by` clause and lean on the geometric predicates (`planar`,
+> `normal-z`, `area-max`) or a `tag-face` instead.
+
+### Tapered fillets
+
+A normal `fillet` uses one radius. Add `:to-radius` and the radius varies along each selected edge — it starts at the base radius and eases to the second one. Handy for blends that need to grow or shrink along a run.
+
+```scheme
+(model
+  (part p
+    (fillet 4 :to-radius 1 :edges "top" (box 40 40 20))))
+```
+
+> **Backend note:** tapered fillets are an OCCT capability rendered by the native and FreeCAD backends. The build123d backend only does single-radius fillets, so it rejects `:to-radius` with a clear error rather than silently giving you a uniform fillet — render tapered fillets on native or FreeCAD.
+
+### Draft
+
+`draft` tilts the side walls of a solid by an angle so a molded part can release from its tool. It tapers every vertical face about a neutral plane (the level that stays the original size); pass `:neutral-z` to move that plane, otherwise it sits at `z = 0`.
+
+```scheme
+(model
+  (part p
+    (draft 8 (box 30 30 20))))
+```
+
+> **Backend note:** draft is rendered by the native and build123d backends (both OpenCASCADE). The FreeCAD backend has no Part draft API, so it rejects `draft` with a clear error. This first cut drafts *all* vertical faces; targeting specific faces with a `:faces` selector is a planned extension.

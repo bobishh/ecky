@@ -538,7 +538,8 @@ endsolid mock
 
     await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
     await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
-    await expect(page.locator('.error-banner')).toContainText('Render Error: mock render exploded');
+    await expect(page.locator('.error-banner')).toHaveCount(0);
+    await expect(page.getByTestId('genie-session-bubble')).toContainText('Render Error: mock render exploded');
 
     await page
       .locator('[role="dialog"]')
