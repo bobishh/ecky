@@ -10,7 +10,11 @@ endloop
 endfacet
 endsolid genie`;
 
-async function installGenieMocks(page: Page, agentState: Record<string, unknown> = {}) {
+async function installGenieMocks(
+  page: Page,
+  agentState: Record<string, unknown> = {},
+  configOverride: Record<string, unknown> = {},
+) {
   await page.route(/\/mock\/.*\.stl(?:\?.*)?$/, async (route: Route) => {
     await route.fulfill({
       status: 200,
@@ -19,7 +23,9 @@ async function installGenieMocks(page: Page, agentState: Record<string, unknown>
     });
   });
 
-  await page.addInitScript((mockAgentState) => {
+  await page.addInitScript((payload) => {
+    const mockAgentState = (payload.mockAgentState ?? {}) as Record<string, unknown>;
+    const configOverride = (payload.configOverride ?? {}) as Record<string, any>;
     const snapshot = {
       design: {
         title: 'Validation Fixture',
@@ -76,9 +82,10 @@ async function installGenieMocks(page: Page, agentState: Record<string, unknown>
             promptTimeoutSecs: 1800,
             eckyAstAuthoring: false,
             autoAgents: [],
+            ...((configOverride.mcp ?? {}) as Record<string, unknown>),
           },
           hasSeenOnboarding: true,
-          connectionType: 'mcp',
+          connectionType: (configOverride.connectionType as string) ?? 'mcp',
           defaultEngineKind: 'ecky',
           defaultSourceLanguage: 'ecky',
           defaultGeometryBackend: 'mesh',
@@ -127,7 +134,7 @@ async function installGenieMocks(page: Page, agentState: Record<string, unknown>
       }
       return null;
     };
-  }, agentState);
+  }, { mockAgentState: agentState, configOverride });
 }
 
 test.describe('VertexGenie', () => {
@@ -324,5 +331,45 @@ test.describe('VertexGenie', () => {
     const mascot = page.locator('.genie-stone-canvas');
     await expect(mascot).toBeVisible();
     await expect(mascot).toHaveAttribute('data-mode', 'error');
+  });
+
+  test('Given a non-primary agent speaks in MCP When workbench opens Then Ecky relays with agent attribution', async ({ page }) => {
+    await installGenieMocks(
+      page,
+      {},
+      {
+        mcp: {
+          primaryAgentId: 'a1',
+          autoAgents: [{ id: 'a1', label: 'Alpha', cmd: 'codex', args: [], enabled: true }],
+        },
+      },
+    );
+    await page.goto('/');
+
+    const bubble = page.locator('.genie-bubble[data-relay="true"]');
+    await expect(bubble).toBeVisible();
+    await expect(bubble).toHaveAttribute('data-relay-label', 'Codex');
+    const relayTag = bubble.getByTestId('bubble-relay-tag');
+    await expect(relayTag).toContainText('Codex');
+    await expect(relayTag).toContainText('via ECKY');
+  });
+
+  test('Given the primary agent speaks in MCP When workbench opens Then no relay treatment is applied', async ({ page }) => {
+    await installGenieMocks(
+      page,
+      {},
+      {
+        mcp: {
+          primaryAgentId: 'a1',
+          autoAgents: [{ id: 'a1', label: 'Codex', cmd: 'codex', args: [], enabled: true }],
+        },
+      },
+    );
+    await page.goto('/');
+
+    const bubble = page.getByTestId('genie-session-bubble');
+    await expect(bubble).toBeVisible();
+    await expect(bubble).not.toHaveAttribute('data-relay', 'true');
+    await expect(bubble.getByTestId('bubble-relay-tag')).toHaveCount(0);
   });
 });

@@ -98,6 +98,7 @@
     usesMcpConnection,
     usesActiveMcpMode,
   } from './lib/agents/state';
+  import { resolveRelayPresence } from './lib/agents/relayPresence';
   import { deriveDialogueState, type DialogueState } from './lib/composables/dialogueState';
   import {
     buildOptimisticQueuedDialogueMessage,
@@ -2632,6 +2633,15 @@
     }),
   );
   const genieBubble = $derived(genieBubbleState.text);
+  const genieRelay = $derived.by(() =>
+    resolveRelayPresence({
+      source: genieBubbleState.source,
+      connectionType: $config.connectionType,
+      autoAgents: $config.mcp.autoAgents ?? [],
+      primaryAgentId,
+      senderLabel: threadAgentState?.agentLabel ?? null,
+    }),
+  );
   let selectedSessionActivityEventId = $state<string | null>(null);
   let lastBubbleActivityKey = $state('');
   let bubbleActivityTimestamp = $state(0);
@@ -3584,8 +3594,9 @@
                 safeRightInset={genieSafeRightInset}
                 onBubbleClick={openSessionActivityFromBubble}
                 bubbleTestId="genie-session-bubble"
-                onDismiss={dismissGenie} 
-                actions={genieActions} 
+                onDismiss={dismissGenie}
+                actions={genieActions}
+                relay={genieRelay}
                 traits={eckyTraits} 
                 intensity={eckyIntensity} 
                 wakeUp={genieWakeUpCount}

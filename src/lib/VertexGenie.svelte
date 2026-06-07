@@ -21,6 +21,7 @@
 	    pokeStartedAt: number;
 	    userYaw: number;
 	    userPitch: number;
+	    relayHue: number | null;
 	  };
 
   let {
@@ -41,6 +42,7 @@
     agentConnected = true,
     safeRightInset = 360,
     fitToCanvas = false,
+    relay = null,
   }: {
     mode?: GenieMode;
     bubble?: string;
@@ -59,6 +61,7 @@
     agentConnected?: boolean;
     safeRightInset?: number;
     fitToCanvas?: boolean;
+    relay?: { hue: number; label: string } | null;
   } = $props();
 
   let copyFeedback = $state('');
@@ -96,6 +99,7 @@
 	    pokeStartedAt: 0,
 	    userYaw: 0,
 	    userPitch: 0,
+	    relayHue: null,
 	  };
 
   $effect(() => {
@@ -110,6 +114,8 @@
     stoneRuntime.hasSpeech = Boolean(cleanBubble);
     stoneRuntime.motionScale = motionScale;
     stoneRuntime.pokeState = pokeState;
+    stoneRuntime.relayHue =
+      relay && Number.isFinite(relay.hue) ? ((relay.hue % 360) + 360) % 360 : null;
   });
 
   const cleanBubble = $derived.by(() => {
@@ -118,6 +124,10 @@
     return text.length > MAX_BUBBLE_LEN ? `${text.slice(0, MAX_BUBBLE_LEN - 1)}…` : text;
   });
   const cleanQuestion = $derived.by(() => `${question ?? ''}`.replace(/\s+/g, ' ').trim());
+  const relayHue = $derived(
+    relay && Number.isFinite(relay.hue) ? (((relay.hue % 360) + 360) % 360) : null,
+  );
+  const relayLabel = $derived(`${relay?.label ?? ''}`.trim());
 
   function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
@@ -402,6 +412,13 @@
 	      depthWrite: false,
 	      blending: THREE.AdditiveBlending,
 	    });
+	    const relayGlowMaterial = new THREE.MeshBasicMaterial({
+	      color: 0xffffff,
+	      transparent: true,
+	      opacity: 0,
+	      depthWrite: false,
+	      blending: THREE.AdditiveBlending,
+	    });
 	    const faceGroup = new THREE.Group();
 	    const zFace = 1.18;
 	    const { eyeShape, mouthShape, eyeY, mouthY, eyeSpacing, eyeWidth, eyeSlant, mouthWidth, mouthCurve, grooveDepth, grooveHeight } = stone.face;
@@ -454,6 +471,16 @@
 	    const rightEye = addEye(eyeSpacing, eyeY, eyeSlant + seededSigned(currentProfile.seed, 1511) * 0.02);
 	    const leftEyeBaseRotation = leftEye.rotation.z;
 	    const rightEyeBaseRotation = rightEye.rotation.z;
+	    const relayGlowRadius = Math.max(eyeWidth, 0.12) * 1.35;
+	    const makeRelayGlow = (x: number) => {
+	      const glow = new THREE.Mesh(new THREE.SphereGeometry(relayGlowRadius, 14, 10), relayGlowMaterial);
+	      glow.position.set(x, eyeY, zFace - 0.04);
+	      glow.scale.set(1, 1, 0.3);
+	      faceGroup.add(glow);
+	      return glow;
+	    };
+	    const leftRelayGlow = makeRelayGlow(-eyeSpacing);
+	    const rightRelayGlow = makeRelayGlow(eyeSpacing);
 	    const addMouth = () => {
 	      if (mouthShape === 'triangle') {
 	        const shape = new THREE.Shape();
@@ -560,6 +587,19 @@
 	      mouthLine.position.y = mouthY + mouthCurve * 0.5 - talkOpen * 0.018;
 	      mouthLine.scale.x = 1 + talkOpen * 0.06;
 	      mouthLine.scale.y = 1 + talkOpen * 1.8;
+
+	      const relayHue = renderState.relayHue;
+	      const relayActive = relayHue != null && !runtimeAngry;
+	      if (relayActive) {
+	        const relayPulse = 0.5 + 0.5 * Math.sin(t * 3.4);
+	        relayGlowMaterial.color.setHSL((relayHue as number) / 360, 0.85, 0.6);
+	        relayGlowMaterial.opacity = 0.32 + relayPulse * 0.42;
+	        const relayScale = 1 + relayPulse * 0.18;
+	        leftRelayGlow.scale.set(relayScale, relayScale, 0.3);
+	        rightRelayGlow.scale.set(relayScale, relayScale, 0.3);
+	      } else {
+	        relayGlowMaterial.opacity = 0;
+	      }
       renderer.render(scene, camera);
       frameId = requestAnimationFrame(animate);
     };
@@ -576,6 +616,7 @@
       edgeMaterial.dispose();
       grooveMaterial.dispose();
       mouthGlowMaterial.dispose();
+      relayGlowMaterial.dispose();
       renderer.dispose();
     };
   }
@@ -626,11 +667,15 @@
       class="genie-bubble"
       class:genie-bubble--compact={compact}
       class:genie-bubble--clickable={Boolean(onBubbleClick)}
+      class:genie-bubble--relay={relayLabel.length > 0}
       data-bubble-layout={compact ? 'compact' : 'full'}
+      data-relay={relayLabel.length > 0 ? 'true' : undefined}
+      data-relay-label={relayLabel.length > 0 ? relayLabel : undefined}
       data-testid={bubbleTestId}
       role="button"
       tabindex="0"
       aria-label={bubbleAriaLabel}
+      style={relayHue != null ? `--relay-hue: ${relayHue};` : undefined}
       onclick={openBubble}
       onkeydown={handleBubbleKeydown}
     >
@@ -638,6 +683,13 @@
         {copyFeedback || 'COPY'}
       </button>
       <button class="bubble-close" type="button" onclick={dismissBubble} aria-label="Dismiss advisor bubble"></button>
+      {#if relayLabel.length > 0}
+        <div class="bubble-relay-tag" data-testid="bubble-relay-tag">
+          <span class="relay-arrow" aria-hidden="true">⟿</span>
+          <span class="relay-from">{relayLabel}</span>
+          <span class="relay-via">via ECKY</span>
+        </div>
+      {/if}
       <div class="bubble-header">
         {#if compact}
           <div class="bubble-meta">
@@ -922,6 +974,49 @@
     color: var(--secondary);
     letter-spacing: 0.06em;
     font-size: 0.64rem;
+  }
+
+  .genie-bubble--relay {
+    border-color: hsl(var(--relay-hue, 144) 58% 56%);
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--bg-300) 85%, transparent),
+      0 0 14px hsl(var(--relay-hue, 144) 70% 52% / 0.32),
+      var(--shadow);
+  }
+
+  .genie-bubble--relay::before,
+  .genie-bubble--relay::after {
+    border-color: hsl(var(--relay-hue, 144) 58% 56%);
+  }
+
+  .bubble-relay-tag {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid hsl(var(--relay-hue, 144) 45% 50% / 0.45);
+    color: hsl(var(--relay-hue, 144) 60% 62%);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .bubble-relay-tag .relay-arrow {
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+
+  .bubble-relay-tag .relay-from {
+    color: hsl(var(--relay-hue, 144) 65% 70%);
+  }
+
+  .bubble-relay-tag .relay-via {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-weight: 600;
+    letter-spacing: 0.1em;
   }
 
   .bubble-actions {
