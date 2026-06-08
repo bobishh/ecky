@@ -599,7 +599,7 @@ fn gemini_model_rank(model_id: &str) -> usize {
     }
 }
 
-async fn send_openai_request(
+pub async fn send_openai_request(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
@@ -615,7 +615,7 @@ async fn send_openai_request(
     Ok((status, body))
 }
 
-fn extract_openai_message_content(res_json: &serde_json::Value) -> Result<String, String> {
+pub fn extract_openai_message_content(res_json: &serde_json::Value) -> Result<String, String> {
     if let Some(content) = res_json["choices"][0]["message"]["content"].as_str() {
         return Ok(content.to_string());
     }

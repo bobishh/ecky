@@ -219,30 +219,34 @@ build123d bbox+volume) is green.
 ## 3. Phase 2 — Language standard library
 
 > RE-SCOPED: stdlib storage/extract/search/import infra ALREADY EXISTS
-> (component-unification T5). And the components themselves should be SOURCED by
-> translating real FreeCAD library parts into parametric ecky, NOT hand-authored
-> (hand-coding is lossy + busywork). The transpiler + sourcing pipeline live in a
-> dedicated change: `openspec/changes/freecad-component-transpiler`. See its
-> proposal/design for the full pipeline (FreeCAD .fcstd → transpiler →
-> parametric model → `component_extract --save` → versioned package → import).
+> (component-unification T5). Components are HAND-AUTHORED from a curated
+> "gentleman's set" — a few genuinely parametric families — using the FreeCAD
+> library only as a dimensional REFERENCE. Evidence killed the transpile-to-source
+> plan: a 97-part library survey found 0% with Array/expression/spreadsheet
+> parametricity and 45% PartDesign, so a deterministic transpile yields
+> dead-number geometry needing manual re-parametrization anyway, and the library
+> is family-redundant (1034 fastener files = size-variants of ~5 families). A
+> separate LLM-based transpile is a user-facing convenience for importing foreign
+> CAD, NOT the stdlib's source of truth — see
+> `openspec/changes/cad-transpile-engine`.
 
 - [x] 3.1 stdlib storage + manifest format — DONE-by-existing-infra
   (`component_package_runtime.rs`: `component-library/<package_id>/<version>/`
   with `ecky-package.json` + `ecky-header.json`). No new format needed; do NOT
-  change it (shared contract with Phase 3 + the transpiler change).
+  change it (shared contract with Phase 3).
 - [x] 3.2 search/get over the library — DONE-by-existing-infra
   (`component_search` header-only, `component_get` full source).
-- [~] 3.3 Ship fasteners (hex bolt, screw, nut, washer) — MOVED: source via the
-  transpiler change (transpile a fastener from the freecad-library, not by hand).
-- [~] 3.4 Ship mechanical (spur gear, knurled grip, snap-fit clip) — MOVED: same,
-  via transpiler / extract bridge.
-- [~] 3.5 Ship enclosure helpers (screw boss, rounded shell, vent grille) —
-  MOVED: same.
+- [ ] 3.3 Ship fasteners — hand-authored parametric families (not per-size files):
+  `hex-bolt` (d/length/pitch, uses `thread`), `socket-head-cap-screw`, `hex-nut`,
+  `washer`, `threaded-rod`. Library = dimensional reference only.
+- [ ] 3.4 Ship mechanical: `ball-bearing` (608/623/624 family), `gt2-pulley`
+  (teeth/bore), `standoff`, `heat-set-insert-pocket` (FDM-critical).
+- [ ] 3.5 Ship mountings where `repeat-union` earns its keep: `corner-bracket`,
+  `l-bracket`, `hole-plate` (parametric `cols×rows` grid).
 - [x] 3.6 version pinning — DONE-by-existing-infra (storage is version-keyed;
   `resolve_installed_component_source(version)`, version-keyed install/list).
-- [~] 3.7 Tests: every shipped stdlib component compiles + passes its own
-  `verify` — MOVED into the transpiler change's round-trip tests (transpile →
-  extract → instantiate → verify).
+- [ ] 3.7 Tests: every shipped stdlib component compiles + passes its own
+  `verify` (single-solid + manifold at minimum) on the default backend.
 
 ## 4. Phase 3 — Component import
 

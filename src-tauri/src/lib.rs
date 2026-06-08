@@ -18,6 +18,7 @@
 
 pub mod bindings;
 pub mod build123d;
+pub mod cad_transpile;
 pub mod commands;
 pub mod component_extract;
 pub mod component_package_runtime;
