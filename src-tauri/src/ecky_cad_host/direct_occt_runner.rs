@@ -358,8 +358,20 @@ fn runner_command_supported(command: &OcctCommand) -> bool {
         OcctOp::Fillet | OcctOp::Chamfer => runner_exact_edge_selector_supported(command),
         OcctOp::Shell => runner_shell_supported(command),
         OcctOp::Bspline => runner_bspline_keywords_supported(command),
+        OcctOp::Sweep => runner_sweep_keywords_supported(command),
         _ => false,
     }
+}
+
+/// The runner's `sweep_shape` honours a single `:frenet` boolean (the trihedron
+/// mode used for helical thread spines). Any other keyword stays unsupported so
+/// the plan falls back to the executor.
+fn runner_sweep_keywords_supported(command: &OcctCommand) -> bool {
+    command.keywords.iter().all(|keyword| {
+        keyword.name == "frenet"
+            && keyword.selector_payload().is_none()
+            && matches!(keyword.source_arg(), OcctArg::Boolean(_))
+    })
 }
 
 fn runner_box_keywords_supported(command: &OcctCommand) -> bool {

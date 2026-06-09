@@ -972,12 +972,24 @@ fn expand_helical_ridge_node(
         CoreValueKind::Path,
     );
 
+    // A helical spine needs the Frenet trihedron (centripetal normal points at the
+    // axis), keeping the trapezoid section radial. The generic-sweep default
+    // (corrected-Frenet) banks the section, pulling the base off `radius` (the
+    // observed thread defect). Declare the trihedron mode explicitly via `:frenet`.
+    let frenet_kw = CoreKeywordArg::expr(
+        "frenet".to_string(),
+        CoreNode::new(
+            next_id(next_node_id),
+            CoreNodeKind::Literal(CoreLiteral::Boolean(true)),
+            CoreValueKind::Boolean,
+        ),
+    );
     Ok(rebuild_node(
         node,
         CoreNodeKind::Call {
             op: CoreOperation::Surface(CoreSurfaceOp::Sweep),
             args: vec![profile, path],
-            keywords: Vec::new(),
+            keywords: vec![frenet_kw],
         },
     ))
 }
@@ -1066,7 +1078,7 @@ fn expand_thread_node(
             number_node(next_node_id, clearance),
         ));
     }
-    let ridge = expand_helical_ridge_node(
+    let mut ridge = expand_helical_ridge_node(
         node,
         &[],
         &ridge_keywords,
@@ -1079,6 +1091,12 @@ fn expand_thread_node(
     if female {
         return Ok(ridge);
     }
+
+    // `expand_helical_ridge_node` rebuilds onto `node`'s id; the male thread's
+    // `union` below also rebuilds onto `node`'s id. Re-id the ridge so the two
+    // get distinct slots — otherwise the executor emits `fuse(ridge, ridge)`
+    // against a redefined variable (the runner path never exercised this).
+    ridge.id = next_id(next_node_id);
 
     let core = CoreNode::new(
         next_id(next_node_id),

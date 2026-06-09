@@ -13,6 +13,7 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -1928,15 +1929,24 @@ TopoDS_Shape solidify_swept_shell(const TopoDS_Shape& shape) {
     return maker.Solid();
 }
 
-TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path) {
+TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, bool frenet) {
     BRepOffsetAPI_MakePipeShell pipe(first_wire(path, "sweep"));
-    // Match build123d's `Solid.sweep` configuration so both backends produce the
-    // same swept geometry: corrected-Frenet trihedron (is_frenet=False),
-    // Transformed transition, and Add(profile, withContact=False,
-    // withCorrection=False). Without an explicit SetMode the builder has no
-    // trihedron and throws Standard_NullObject on a curved (helix) spine.
-    pipe.SetMode(Standard_False);
-    pipe.SetTransitionMode(BRepBuilderAPI_Transformed);
+    // Match build123d's `Solid.sweep`: corrected-Frenet trihedron
+    // (is_frenet=False) for generic spines, Transformed transition, and
+    // Add(profile, withContact=False, withCorrection=False). A helical spine
+    // instead needs the Frenet trihedron (`frenet=true`): its centripetal normal
+    // points at the axis, keeping a thread section radial. Corrected-Frenet banks
+    // the section off `radius` (the thread defect). Without an explicit SetMode
+    // the builder has no trihedron and throws Standard_NullObject on a curve.
+    // A helical thread spine (`frenet=true`) uses the Frenet trihedron so the
+    // section stays radial (centripetal normal at the axis), with RightCorner
+    // transitions — the proven thread recipe (FreeCAD FastenersWB `screw_maker`).
+    // Corrected-Frenet banks the section off `radius` (the observed defect). The
+    // helix edge already carries a 3D curve (BRepLib::BuildCurves3d) so Frenet
+    // does not hit Standard_NullObject. Generic spines keep corrected-Frenet +
+    // Transformed to match build123d's `Solid.sweep`.
+    pipe.SetMode(frenet ? Standard_True : Standard_False);
+    pipe.SetTransitionMode(frenet ? BRepBuilderAPI_RightCorner : BRepBuilderAPI_Transformed);
     pipe.Add(first_wire(profile, "sweep"), Standard_False, Standard_False);
     pipe.Build();
     if (!pipe.IsDone()) {
@@ -3167,7 +3177,8 @@ SlotValue evaluate_command(
 
     if (!command.keywords.empty() && op != "box" && op != "sphere" && op != "cylinder" &&
         op != "cone" && op != "torus" && op != "wedge" && op != "profile" && op != "plane" &&
-        op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline") {
+        op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline" &&
+        op != "sweep") {
         throw EvalError(op + " keywords unsupported yet");
     }
 
@@ -3298,7 +3309,13 @@ SlotValue evaluate_command(
         return loft_shapes(require_number_arg(command.args, 0, op), profiles);
     }
     if (op == "sweep") {
-        return sweep_shape(get_ref_shape(0), get_ref_shape(1));
+        bool frenet = false;
+        for (const auto& keyword : command.keywords) {
+            if (keyword.name == "frenet" && keyword.value.kind == Arg::Kind::Boolean) {
+                frenet = keyword.value.bool_value;
+            }
+        }
+        return sweep_shape(get_ref_shape(0), get_ref_shape(1), frenet);
     }
     if (op == "twist") {
         return twist_shape(get_ref_shape(2), require_number_arg(command.args, 0, op),

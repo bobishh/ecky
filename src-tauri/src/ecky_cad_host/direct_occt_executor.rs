@@ -740,6 +740,7 @@ fn emit_command(
                 | OcctOp::Shell
                 | OcctOp::Draft
                 | OcctOp::Bspline
+                | OcctOp::Sweep
         )
     {
         return Err(AppError::validation(format!(
@@ -893,7 +894,8 @@ fn emit_command(
         OcctOp::Sweep => {
             let profile = ref_arg(&command.args, 0)?;
             let path = ref_arg(&command.args, 1)?;
-            emit_sweep_operation(body, &var, slot_var(profile), slot_var(path));
+            let frenet = optional_bool_keyword(&command.keywords, &["frenet"]).unwrap_or(false);
+            emit_sweep_operation(body, &var, slot_var(profile), slot_var(path), frenet);
         }
         OcctOp::Twist => {
             let height = numeric_arg(&command.args, 0)?;
@@ -3204,10 +3206,36 @@ fn emit_offset_operation(body: &mut String, var: &str, input_var: String, amount
     ));
 }
 
-fn emit_sweep_operation(body: &mut String, var: &str, profile_var: String, path_var: String) {
+fn emit_sweep_operation(
+    body: &mut String,
+    var: &str,
+    profile_var: String,
+    path_var: String,
+    frenet: bool,
+) {
+    // `frenet` selects the Frenet trihedron (Standard_True) for helical spines so
+    // the section stays radial; generic sweeps keep corrected-Frenet
+    // (Standard_False) to match build123d's default. Without an explicit SetMode
+    // a curved spine has no trihedron.
+    let mode = if frenet {
+        "Standard_True"
+    } else {
+        "Standard_False"
+    };
     body.push_str(&format!(
-        "    TopoDS_Wire {var}_profile_wire;\n    for (TopExp_Explorer {var}_profile_wire_explorer({profile_var}, TopAbs_WIRE); {var}_profile_wire_explorer.More(); {var}_profile_wire_explorer.Next()) {{\n        {var}_profile_wire = TopoDS::Wire({var}_profile_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_profile_wire.IsNull()) {{ return 7; }}\n    TopoDS_Wire {var}_path_wire;\n    for (TopExp_Explorer {var}_path_wire_explorer({path_var}, TopAbs_WIRE); {var}_path_wire_explorer.More(); {var}_path_wire_explorer.Next()) {{\n        {var}_path_wire = TopoDS::Wire({var}_path_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_path_wire.IsNull()) {{ return 8; }}\n    BRepOffsetAPI_MakePipeShell {var}_pipe({var}_path_wire);\n    {var}_pipe.Add({var}_profile_wire);\n    {var}_pipe.Build();\n    if (!{var}_pipe.IsDone()) {{ return 9; }}\n    {var}_pipe.MakeSolid();\n    TopoDS_Shape {var} = {var}_pipe.Shape();\n"
+        "    TopoDS_Wire {var}_profile_wire;\n    for (TopExp_Explorer {var}_profile_wire_explorer({profile_var}, TopAbs_WIRE); {var}_profile_wire_explorer.More(); {var}_profile_wire_explorer.Next()) {{\n        {var}_profile_wire = TopoDS::Wire({var}_profile_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_profile_wire.IsNull()) {{ return 7; }}\n    TopoDS_Wire {var}_path_wire;\n    for (TopExp_Explorer {var}_path_wire_explorer({path_var}, TopAbs_WIRE); {var}_path_wire_explorer.More(); {var}_path_wire_explorer.Next()) {{\n        {var}_path_wire = TopoDS::Wire({var}_path_wire_explorer.Current());\n        break;\n    }}\n    if ({var}_path_wire.IsNull()) {{ return 8; }}\n    BRepOffsetAPI_MakePipeShell {var}_pipe({var}_path_wire);\n    {var}_pipe.SetMode({mode});\n    {var}_pipe.Add({var}_profile_wire);\n    {var}_pipe.Build();\n    if (!{var}_pipe.IsDone()) {{ return 9; }}\n    {var}_pipe.MakeSolid();\n    TopoDS_Shape {var} = {var}_pipe.Shape();\n"
     ));
+}
+
+fn optional_bool_keyword(keywords: &[OcctKeyword], names: &[&str]) -> Option<bool> {
+    keywords.iter().find_map(|keyword| {
+        if names.contains(&keyword.name.as_str()) {
+            if let OcctArg::Boolean(value) = keyword.source_arg() {
+                return Some(*value);
+            }
+        }
+        None
+    })
 }
 
 fn emit_twist_operation(
