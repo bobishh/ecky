@@ -5,6 +5,7 @@ mod eval_scalar;
 mod freecad_lowering;
 mod mesh_ops;
 mod model;
+pub mod op_suggest;
 mod runtime;
 mod shared;
 mod sketch;
