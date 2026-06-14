@@ -926,7 +926,7 @@ vtStream?: string;
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
-export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null }
+export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
@@ -983,7 +983,12 @@ export type ComponentPackageHeader = { schemaVersion: number; packageId: string;
 export type ComponentParam = { key: string; label: string; kind: ComponentParamKind; unit?: string | null }
 export type ComponentParamKind = "number" | "text" | "boolean" | "choice"
 export type ComponentPort = { portId: string; typeId: string; targetIds?: string[]; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number; 
+/**
+ * Filesystem root for exported project folders. Blank/None uses the
+ * default `<app_data>/projects`. See `filesystem-project-mirror`.
+ */
+projectsRoot?: string | null }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
 export type ControlRelation = { relationId: string; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number; enabled?: boolean }
@@ -1004,6 +1009,29 @@ export type Engine = { id: string; name: string; provider: string; apiKey: strin
 export type EngineKind = "freecad" | "ecky" | "build123d"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
+/**
+ * A structured next-action for an error: a one-line hint plus concrete valid
+ * alternatives (e.g. nearest-op "did you mean" suggestions).
+ */
+export type ErrorFix = { hint?: string | null; suggestions: string[] }
+/**
+ * Which authoring layer owns a failure. Orthogonal to `AppErrorCode`: it
+ * answers "which wall did I hit", not "what kind of error". Only populated for
+ * authoring failures (`None` on `AppError` means "not an authoring error").
+ */
+export type ErrorLayer = 
+/**
+ * The parenthesized `.ecky` surface (syntax, references, bad inputs).
+ */
+"surface" | 
+/**
+ * The finite Core IR op vocabulary (op/selector not in the set, arity, types).
+ */
+"coreIr" | 
+/**
+ * The active geometry backend cannot execute a lowered op.
+ */
+"backend"
 export type ExportArtifact = { label: string; format: string; path: string; role: string }
 export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null; placementFrame?: PortFrame | null }
 export type EyeStyle = "dot" | "bar" | "slant"
