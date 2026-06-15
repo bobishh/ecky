@@ -237,8 +237,11 @@ build123d bbox+volume) is green.
 - [x] 3.2 search/get over the library — DONE-by-existing-infra
   (`component_search` header-only, `component_get` full source).
 - [ ] 3.3 Ship fasteners — hand-authored parametric families (not per-size files):
-  `hex-bolt` (d/length/pitch, uses `thread`), `socket-head-cap-screw`, `hex-nut`,
-  `washer`, `threaded-rod`. Library = dimensional reference only.
+  `hex-bolt` (d/length/pitch), `socket-head-cap-screw`, `hex-nut`, `washer`,
+  `threaded-rod`. Threaded parts build on the `thread` + `tapped-hole` primitive
+  (`openspec/changes/parametric-thread-feature`) — do NOT hand-roll
+  core+ridge/bore geometry (it hits the coincident-face/hollow bug). Library =
+  dimensional reference only.
 - [ ] 3.4 Ship mechanical: `ball-bearing` (608/623/624 family), `gt2-pulley`
   (teeth/bore), `standoff`, `heat-set-insert-pocket` (FDM-critical).
 - [ ] 3.5 Ship mountings where `repeat-union` earns its keep: `corner-bracket`,
