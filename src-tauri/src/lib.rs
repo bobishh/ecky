@@ -521,6 +521,7 @@ pub fn run() {
             light_model: "gemini-2.5-flash-lite".to_string(),
             base_url: "".to_string(),
             enabled: false,
+            vision_overrides: std::collections::HashMap::new(),
         }],
         selected_engine_id: "default-gemini".to_string(),
         freecad_cmd: String::new(),

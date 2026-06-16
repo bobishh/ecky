@@ -1367,6 +1367,7 @@ mod tests {
             light_model: "gpt-4.1-nano".to_string(),
             base_url: String::new(),
             enabled: true,
+            vision_overrides: std::collections::HashMap::new(),
         };
 
         assert_eq!(select_classifier_model(&engine, true), "gpt-4o");
@@ -1384,6 +1385,7 @@ mod tests {
             light_model: String::new(),
             base_url: String::new(),
             enabled: true,
+            vision_overrides: std::collections::HashMap::new(),
         };
 
         assert_eq!(select_classifier_model(&engine, false), "gpt-4o");

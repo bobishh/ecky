@@ -352,6 +352,7 @@ mod tests {
             light_model: String::new(),
             base_url: base_url.to_string(),
             enabled,
+            vision_overrides: std::collections::HashMap::new(),
         }
     }
 

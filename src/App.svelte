@@ -82,7 +82,7 @@
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
   import { nowSeconds } from './lib/stores/timeEngine';
   import { liveApply, paramPanelState } from './lib/stores/paramPanelState';
-  import { inferModelCapabilities } from './lib/modelRuntime/modelCapabilities';
+  import { resolveEngineCapabilitySummary } from './lib/modelRuntime/modelCapabilities';
   import { persistLastSessionSnapshot } from './lib/modelRuntime/sessionSnapshot';
   import { getRenderableRuntimeBundle, inspectRuntimeBundle } from './lib/modelRuntime/runtimeBundle';
   import { sameArtifactVersion, shouldPersistVersionPreview } from './lib/versionPreviewPersistence';
@@ -2396,11 +2396,7 @@
     $config.engines.find((engine) => engine.id === $config.selectedEngineId) ?? null,
   );
   const selectedModelCapabilities = $derived.by(() =>
-    inferModelCapabilities(
-      selectedEngine?.provider ?? '',
-      selectedEngine?.baseUrl ?? '',
-      selectedEngine?.model ?? '',
-    ),
+    resolveEngineCapabilitySummary(selectedEngine),
   );
   const imageInputUnavailableReason = $derived.by<string | null>(() =>
     selectedModelCapabilities.supportsVision ? null : selectedModelCapabilities.reason,
@@ -3333,10 +3329,14 @@
         <button
           class="dock-btn"
           class:draw-active={drawMode}
+          class:dock-btn--disabled={!selectedModelCapabilities.supportsVision}
           data-dock-label="DRAW"
+          disabled={!selectedModelCapabilities.supportsVision}
           onclick={() => drawMode = !drawMode}
           aria-label={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
-          title={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
+          title={selectedModelCapabilities.supportsVision
+            ? (drawMode ? 'Exit Draw Mode' : 'Draw Annotations')
+            : (selectedModelCapabilities.reason ?? 'Drawing unavailable for this model')}
         >
           <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="m6 17 1-4 9-9 4 4-9 9-4 1Z" />
@@ -4343,6 +4343,19 @@
     border-color: var(--primary);
     color: var(--primary);
     background: color-mix(in srgb, var(--primary) 16%, var(--bg-100));
+  }
+  .dock-btn:disabled,
+  .dock-btn--disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .dock-btn:disabled:hover,
+  .dock-btn--disabled:hover,
+  .dock-btn:disabled:focus-visible,
+  .dock-btn--disabled:focus-visible {
+    border-color: var(--bg-300);
+    color: var(--text-dim);
+    box-shadow: none;
   }
   .dock-btn[data-dock-label]::after {
     content: attr(data-dock-label);

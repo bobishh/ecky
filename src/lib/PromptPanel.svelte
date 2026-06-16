@@ -320,10 +320,15 @@
   }
 
   async function processPaths(paths: string[]) {
+    const allowImages = !imageAttachmentUnavailableReason;
     const newAttachments = await Promise.all(paths.map(async (path) => {
       const name = path.split(/[\/\\]/).pop() || path;
       const ext = (name.split('.').pop() || '').toLowerCase();
-      if (['png', 'jpg', 'jpeg', 'webp', 'svg'].includes(ext)) {
+      if (IMAGE_EXTENSIONS.includes(ext)) {
+        if (!allowImages) {
+          console.info('[PromptPanel] image attachment dropped (text-only model)', { name });
+          return null;
+        }
         try {
           return await inlineImageAttachmentFromPath(path);
         } catch {
@@ -342,7 +347,7 @@
         type: 'cad',
       };
     }));
-    attachments = [...attachments, ...newAttachments];
+    attachments = [...attachments, ...newAttachments.filter((a): a is Attachment => a !== null)];
   }
 
   onMount(() => {
@@ -453,13 +458,19 @@
     }
   }
 
+  const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'svg'];
+  const CAD_EXTENSIONS = ['stl', 'step', 'stp', 'py', 'fcmacro'];
+
   async function addAttachment() {
     try {
+      const allowImages = !imageAttachmentUnavailableReason;
+      const extensions = allowImages
+        ? [...IMAGE_EXTENSIONS, ...CAD_EXTENSIONS]
+        : [...CAD_EXTENSIONS];
+      const label = allowImages ? 'Images, CAD & Macros' : 'CAD & Macros (text-only model)';
       const selected = await open({
         multiple: true,
-        filters: [
-          { name: 'Images, CAD & Macros', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg', 'stl', 'step', 'stp', 'py', 'fcmacro'] }
-        ]
+        filters: [{ name: label, extensions }]
       });
 
       if (selected) {
@@ -1075,7 +1086,7 @@
             🎙 VOICE
           {/if}
         </button>
-        <button class="btn btn-xs btn-ghost" onclick={addAttachment} title="Attach images or reference CAD files">
+        <button class="btn btn-xs btn-ghost" onclick={addAttachment} title={imageAttachmentUnavailableReason ? `${imageAttachmentUnavailableReason} — image refs will be dropped` : 'Attach images or reference CAD files'}>
           📎 ATTACH REFERENCE
         </button>
         <button

@@ -144,10 +144,9 @@ test('mergeOptimisticQueuedDialogueMessages drops MCP optimistic message after p
   assert.deepEqual(messages, [persisted]);
 });
 
-test('hasLiveApiEngineConnection requires api mode plus enabled selected engine', () => {
+test('hasLiveApiEngineConnection requires api mode plus selected engine with key', () => {
   assert.equal(
     hasLiveApiEngineConnection('api_key', {
-      enabled: true,
       provider: 'openai',
       apiKey: 'sk-live',
     }),
@@ -155,7 +154,6 @@ test('hasLiveApiEngineConnection requires api mode plus enabled selected engine'
   );
   assert.equal(
     hasLiveApiEngineConnection('api_key', {
-      enabled: true,
       provider: 'openai',
       apiKey: '',
     }),
@@ -163,7 +161,6 @@ test('hasLiveApiEngineConnection requires api mode plus enabled selected engine'
   );
   assert.equal(
     hasLiveApiEngineConnection('api_key', {
-      enabled: true,
       provider: 'ollama',
       apiKey: '',
     }),
@@ -171,7 +168,6 @@ test('hasLiveApiEngineConnection requires api mode plus enabled selected engine'
   );
   assert.equal(
     hasLiveApiEngineConnection('mcp', {
-      enabled: true,
       provider: 'openai',
       apiKey: 'sk-live',
     }),

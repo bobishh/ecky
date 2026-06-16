@@ -4,7 +4,8 @@
   import VertexGenie from './VertexGenie.svelte';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { derivePrimaryAgentId, normalizeMcpMode } from './agents/state';
-  import { inferModelCapabilities } from './modelRuntime/modelCapabilities';
+  import { resolveEngineCapabilitySummary, resolveEngineVision } from './modelRuntime/modelCapabilities';
+  import type { VisionCapability } from './tauri/contracts';
   import {
     formatBackendError,
     getAppLogs,
@@ -74,9 +75,17 @@
     if (config.connectionType === 'mcp') return 'mcp';
     if (config.connectionType === 'api_key') return 'api_key';
     // fallback heuristic for configs without persisted connectionType
-    if (config.engines.some(e => e.enabled)) return 'api_key';
+    if (config.engines.some(e => e.id === config.selectedEngineId)) return 'api_key';
     if ((config.mcp?.autoAgents ?? []).length > 0) return 'mcp';
     return null;
+  }
+
+  /** Selection invariant: the selected engine is the sole live engine. */
+  function selectEngine(id: string): void {
+    config.selectedEngineId = id;
+    for (const engine of config.engines) {
+      engine.enabled = engine.id === id;
+    }
   }
 
   function ensurePrimaryAutoAgent() {
@@ -249,13 +258,14 @@
   ];
 
   const selectedEngine = $derived(config.engines.find(e => e.id === config.selectedEngineId));
-  const selectedEngineCapabilities = $derived.by(() => {
-    if (!selectedEngine) return null;
-    return inferModelCapabilities(
-      selectedEngine.provider,
-      selectedEngine.baseUrl,
-      selectedEngine.model,
-    );
+  const selectedEngineCapabilities = $derived.by(() =>
+    resolveEngineCapabilitySummary(selectedEngine),
+  );
+  const selectedEngineVisionOverride = $derived.by<VisionCapability | null>(() => {
+    const engine = selectedEngine;
+    const model = `${engine?.model ?? ''}`.trim();
+    if (!engine || !model) return null;
+    return engine.visionOverrides?.[model] ?? null;
   });
   const freecadCapability = $derived(runtimeCapabilities?.freecad ?? null);
   const build123dCapability = $derived(runtimeCapabilities?.build123d ?? null);
@@ -642,9 +652,10 @@
       lightModel: '',
       baseUrl: '',
       enabled: false,
+      visionOverrides: {},
     };
     config.engines = [...config.engines, newEngine];
-    config.selectedEngineId = id;
+    selectEngine(id);
     setConnectionType('api_key');
     activeSection = 'engines';
   }
@@ -798,7 +809,9 @@
   function removeEngine(id: string) {
     config.engines = config.engines.filter(e => e.id !== id);
     if (config.selectedEngineId === id) {
-      config.selectedEngineId = config.engines.length > 0 ? config.engines[0].id : '';
+      const nextId = config.engines.length > 0 ? config.engines[0].id : '';
+      if (nextId) selectEngine(nextId);
+      else config.selectedEngineId = '';
     }
   }
 
@@ -861,6 +874,24 @@
     } catch (e: unknown) {
       message = `Model fetch failed: ${formatBackendError(e)}`;
     }
+  }
+
+  function cycleVisionOverride(): void {
+    const engine = selectedEngine;
+    if (!engine) return;
+    const model = `${engine.model ?? ''}`.trim();
+    if (!model) return;
+    const current = engine.visionOverrides?.[model] ?? null;
+    // null(Auto) -> vision -> textOnly -> null(Auto)
+    const next: VisionCapability | null =
+      current === null ? 'vision' : current === 'vision' ? 'textOnly' : null;
+    const overrides = { ...(engine.visionOverrides ?? {}) };
+    if (next === null) {
+      delete overrides[model];
+    } else {
+      overrides[model] = next;
+    }
+    engine.visionOverrides = overrides;
   }
 
   async function handleProviderChange() {
@@ -1210,13 +1241,13 @@
               <div class="engine-list">
                 {#each config.engines as engine}
                   <button
-                    class="engine-card {config.selectedEngineId === engine.id ? 'selected' : ''} {engine.enabled ? '' : 'disabled'}"
-                    onclick={() => { config.selectedEngineId = engine.id; activeSection = 'engines'; }}
+                    class="engine-card {config.selectedEngineId === engine.id ? 'selected' : ''}"
+                    onclick={() => { selectEngine(engine.id); activeSection = 'engines'; }}
                   >
                     <span class="engine-card__name">{engine.name || '(unnamed)'}</span>
                     <span class="engine-card__meta">
                       {engine.provider}{engine.model ? ' · ' + engine.model : ''}
-                      {#if !engine.enabled}<span class="engine-card__off">OFF</span>{/if}
+                      {#if config.selectedEngineId === engine.id}<span class="engine-card__active">ACTIVE</span>{/if}
                     </span>
                   </button>
                 {/each}
@@ -1476,16 +1507,6 @@
 
       {:else if activeSection === 'engines' && selectedEngine}
           <button class="back-link" onclick={() => activeSection = 'agents'}>← AGENTS</button>
-          <div class="engine-enabled-row">
-            <label class="engine-enabled-toggle">
-              <input type="checkbox" bind:checked={selectedEngine.enabled} />
-              <span class="tgl-track"></span>
-              <span class="toggle-label">{selectedEngine.enabled ? 'LIVE — API calls enabled' : 'DISABLED — no API calls will be made'}</span>
-            </label>
-            {#if !selectedEngine.enabled}
-              <div class="field-help">Enable to allow this engine to send requests to the provider API.</div>
-            {/if}
-          </div>
           <div class="field-row">
             <div class="field flex-2">
               <label for="e-name">DISPLAY NAME</label>
@@ -1527,12 +1548,25 @@
                   ↻ FETCH MODELS
                 </button>
               </div>
-              <Dropdown 
-                options={availableModels.length > 0 ? availableModels : (selectedEngine.model ? [selectedEngine.model] : [])} 
-                value={selectedEngine.model} 
-                placeholder={isLoadingModels ? "Fetching..." : "Fetch models first..."} 
+              <Dropdown
+                options={availableModels.length > 0 ? availableModels : (selectedEngine.model ? [selectedEngine.model] : [])}
+                value={selectedEngine.model}
+                placeholder={isLoadingModels ? "Fetching..." : "Fetch models first..."}
                 onchange={(val) => selectedEngine.model = asString(val)}
               />
+              <button
+                type="button"
+                class="vision-toggle vision-toggle--{selectedEngineVisionOverride ?? 'auto'}"
+                onclick={cycleVisionOverride}
+                disabled={!selectedEngine || !selectedEngine.model}
+                title={selectedEngineVisionOverride === null
+                  ? `Auto (inferred: ${resolveEngineVision(selectedEngine) ? 'vision' : 'text-only'}). Click to force vision.`
+                  : selectedEngineVisionOverride === 'vision'
+                    ? 'Forced vision-capable. Click to force text-only.'
+                    : 'Forced text-only. Click to reset to auto.'}
+              >
+                {selectedEngineVisionOverride === null ? '👁 AUTO' : selectedEngineVisionOverride === 'vision' ? '👁 VISION' : '✎ TEXT-ONLY'}
+              </button>
             </div>
             <div class="field flex-1">
               <label for="e-light-model">LIGHT REASONING</label>
@@ -1717,17 +1751,17 @@
     color: var(--text);
   }
 
-  .engine-card.disabled {
-    opacity: 0.5;
+  .engine-card.selected {
+    opacity: 1;
   }
 
-  .engine-card__off {
+  .engine-card__active {
     margin-left: 6px;
     font-size: 0.55rem;
     font-weight: bold;
-    color: var(--text-dim);
+    color: var(--primary);
     letter-spacing: 0.08em;
-    border: 1px solid var(--bg-400);
+    border: 1px solid var(--primary);
     padding: 1px 4px;
   }
 
@@ -1838,6 +1872,38 @@
     font-size: 0.65rem;
     line-height: 1.45;
     overflow: hidden;
+  }
+
+  .vision-toggle {
+    margin-top: 6px;
+    padding: 3px 8px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-200) 90%, transparent);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease;
+  }
+  .vision-toggle:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+  .vision-toggle:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .vision-toggle--vision {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, var(--bg-100));
+  }
+  .vision-toggle--textOnly {
+    border-color: var(--danger, #c04);
+    color: var(--danger, #c04);
+    background: color-mix(in srgb, var(--danger, #cc0044) 12%, var(--bg-100));
   }
 
   .system-prompt-preview {

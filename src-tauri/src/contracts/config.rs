@@ -1,6 +1,21 @@
 use super::{EngineKind, GeometryBackend, SourceLanguage};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::collections::HashMap;
+
+/// Per-model vision capability override, keyed by model id on `Engine::vision_overrides`.
+/// `Auto` (or absence) lets name-pattern inference decide; the other two are authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum VisionCapability {
+    /// Infer from model name patterns; optimistic (vision-capable) when unknown.
+    #[default]
+    Auto,
+    /// Force vision-capable regardless of inference.
+    Vision,
+    /// Force text-only. Screenshots, image attachments, and drawing annotations are suppressed.
+    TextOnly,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +32,9 @@ pub struct Engine {
     pub base_url: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Per-model vision capability overrides. Keyed by model id. Absent key = `Auto`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub vision_overrides: HashMap<String, VisionCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

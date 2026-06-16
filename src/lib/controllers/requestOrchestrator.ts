@@ -29,6 +29,10 @@ import { detectFollowUpAnswer } from './followUpGuard';
 import { needsGeneratedQuestionAnswer, pendingQuestionCopy } from './questionAnswer';
 import { runStructuralCheck } from './structuralVerification';
 import { runVerificationRound } from './verificationLoop';
+import {
+  resolveEngineCapabilitySummary,
+  type ModelCapabilitySummary,
+} from '../modelRuntime/modelCapabilities';
 import { buildAuthoringDigest } from '../llmContextDigest';
 import { resolveActiveAuthoringContext } from '../runtimeCapabilities';
 import {
@@ -53,8 +57,8 @@ import {
 // ---------------------------------------------------------------------------
 
 const DUPLICATE_REQUEST_WINDOW_MS = 1500;
-const TEXT_ONLY_NVIDIA_NIM_REASON =
-  'Selected NVIDIA NIM model looks text-only. Image attachments, concept-preview reuse, and screenshot verification are unavailable.';
+const TEXT_ONLY_AFTER_REJECTION_REASON =
+  'Provider rejected image input; model set to text-only for this run. Adjust in Settings → Agents.';
 const MODEL_CAPABILITIES_MODULE_SPECIFIER = '../modelRuntime/modelCapabilities';
 const GENERIC_ROUTING_RESPONSE_MARKERS = [
   'this looks like a geometry change request',
@@ -78,26 +82,7 @@ const REPAIR_PHRASES = [
   "Repairing the macro with the confidence of a forged permit."
 ];
 
-type ModelCapabilitySummary = {
-  supportsVision: boolean;
-  reason: string | null;
-};
-
-type ModelCapabilitiesModule = {
-  inferModelCapabilities?: (
-    provider: string,
-    baseUrl: string,
-    model: string,
-  ) => Partial<ModelCapabilitySummary> | null | undefined;
-  isVisionCapableModel?: (provider: string, baseUrl: string, model: string) => boolean;
-  visionUnavailableReason?: (
-    provider: string,
-    baseUrl: string,
-    model: string,
-  ) => string | null | undefined;
-};
-
-let modelCapabilitiesModulePromise: Promise<ModelCapabilitiesModule | null> | null = null;
+let modelCapabilitiesModulePromise: Promise<typeof import('../modelRuntime/modelCapabilities') | null> | null = null;
 
 function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
   const phrase = REPAIR_PHRASES[Math.floor(Math.random() * REPAIR_PHRASES.length)];
@@ -227,12 +212,11 @@ function isMissingModelCapabilitiesModule(error: unknown): boolean {
   );
 }
 
-async function loadModelCapabilitiesModule(): Promise<ModelCapabilitiesModule | null> {
+async function loadModelCapabilitiesModule(): Promise<typeof import('../modelRuntime/modelCapabilities') | null> {
   if (!modelCapabilitiesModulePromise) {
     modelCapabilitiesModulePromise = (async () => {
       try {
-        const specifier = MODEL_CAPABILITIES_MODULE_SPECIFIER;
-        return await import(/* @vite-ignore */ specifier) as ModelCapabilitiesModule;
+        return await import(/* @vite-ignore */ MODEL_CAPABILITIES_MODULE_SPECIFIER);
       } catch (error) {
         if (!isMissingModelCapabilitiesModule(error)) {
           console.warn('[Orchestrator] modelCapabilities helper unavailable:', error);
@@ -245,48 +229,6 @@ async function loadModelCapabilitiesModule(): Promise<ModelCapabilitiesModule | 
   return modelCapabilitiesModulePromise;
 }
 
-function isNvidiaNimEndpoint(provider: string, baseUrl: string): boolean {
-  if (`${provider ?? ''}`.trim().toLowerCase() !== 'openai') return false;
-  const normalizedBaseUrl = `${baseUrl ?? ''}`.trim();
-  if (!normalizedBaseUrl) return false;
-
-  try {
-    return new URL(normalizedBaseUrl).hostname.toLowerCase() === 'integrate.api.nvidia.com';
-  } catch {
-    return /integrate\.api\.nvidia\.com/i.test(normalizedBaseUrl);
-  }
-}
-
-function isLikelyVisionModel(model: string): boolean {
-  const normalizedModel = `${model ?? ''}`.trim().toLowerCase();
-  if (!normalizedModel) return false;
-  return (
-    normalizedModel.includes('multimodal') ||
-    normalizedModel.includes('multi-modal') ||
-    /(^|[\s/_-])(vision|vl)($|[\s/_-])/.test(normalizedModel)
-  );
-}
-
-function fallbackInferModelCapabilities(
-  provider: string,
-  baseUrl: string,
-  model: string,
-): ModelCapabilitySummary {
-  if (!isNvidiaNimEndpoint(provider, baseUrl)) {
-    return { supportsVision: true, reason: null };
-  }
-  if (!`${model ?? ''}`.trim()) {
-    return { supportsVision: true, reason: null };
-  }
-  if (isLikelyVisionModel(model)) {
-    return { supportsVision: true, reason: null };
-  }
-  return {
-    supportsVision: false,
-    reason: TEXT_ONLY_NVIDIA_NIM_REASON,
-  };
-}
-
 function selectedEngineFromConfig(
   currentConfig: AppConfig,
 ): AppConfig['engines'][number] | null {
@@ -297,30 +239,30 @@ async function inferSelectedModelCapabilities(
   currentConfig: AppConfig,
 ): Promise<ModelCapabilitySummary> {
   const selectedEngine = selectedEngineFromConfig(currentConfig);
-  if (!selectedEngine) return { supportsVision: true, reason: null };
-
-  const { provider, baseUrl, model } = selectedEngine;
-  const fallback = fallbackInferModelCapabilities(provider, baseUrl, model);
+  const fallback = resolveEngineCapabilitySummary(selectedEngine);
   const helper = await loadModelCapabilitiesModule();
   if (!helper) return fallback;
 
-  const inferred =
-    normalizeCapabilitySummary(helper.inferModelCapabilities?.(provider, baseUrl, model)) ??
-    (
-      typeof helper.isVisionCapableModel === 'function'
-        ? {
-            supportsVision: helper.isVisionCapableModel(provider, baseUrl, model),
-            reason: helper.visionUnavailableReason?.(provider, baseUrl, model) ?? null,
-          }
-        : null
-    );
+  const model = selectedEngine?.model ?? '';
+  const resolved =
+    typeof helper.resolveEngineCapabilitySummary === 'function'
+      ? normalizeCapabilitySummary(helper.resolveEngineCapabilitySummary(selectedEngine, model))
+      : null;
+  if (resolved) return resolved;
+  return fallback;
+}
 
-  if (!inferred) return fallback;
-  if (inferred.supportsVision) return { supportsVision: true, reason: null };
-  return {
-    supportsVision: false,
-    reason: inferred.reason ?? fallback.reason ?? TEXT_ONLY_NVIDIA_NIM_REASON,
-  };
+/** Detects provider 400s that mean "this model rejects image inputs". */
+function isVisionRejectedError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    (lower.includes('400') || lower.includes('bad request')) &&
+    (lower.includes('content.type') &&
+      (lower.includes('invalid') || lower.includes('allowed values'))) ||
+    lower.includes("messages.content.type is invalid") ||
+    lower.includes("allowed values: ['text']") ||
+    lower.includes('only supports text')
+  );
 }
 
 function filterModelFacingAttachments(
@@ -556,6 +498,7 @@ class GenerationPipeline {
   preCapture: string | null = null;
   modelCapabilities: ModelCapabilitySummary = { supportsVision: true, reason: null };
   modelFacingAttachments: Attachment[] = [];
+  visionRetried: boolean = false;
   isQuestion: boolean = false;
   forcedQuestionOnly: boolean = false;
   lightResponse: string = '';
@@ -672,7 +615,7 @@ class GenerationPipeline {
     });
   }
 
-  private async stepAnswerQuestion() {
+  private async stepAnswerQuestion(): Promise<void> {
     const pendingCopy = pendingQuestionCopy(this.finalResponse);
     this.updateStatus(pendingCopy);
     requestQueue.patch(this.requestId, { phase: 'answering', lightResponse: pendingCopy });
@@ -703,7 +646,20 @@ class GenerationPipeline {
           'Question answered. Geometry unchanged.';
       } catch (e) {
         this.checkCanceled();
-        await this.handleGenerationFailure(toErrorMessage(e));
+        const errMsg = toErrorMessage(e);
+        if (
+          !this.visionRetried &&
+          this.modelCapabilities.supportsVision &&
+          isVisionRejectedError(errMsg) &&
+          (await this.disableVisionAndPersist())
+        ) {
+          this.visionRetried = true;
+          console.info('[Pipeline] provider rejected image input (question mode); retrying as text-only', {
+            requestId: this.requestId,
+          });
+          return this.stepAnswerQuestion();
+        }
+        await this.handleGenerationFailure(errMsg);
         return;
       }
     }
@@ -948,7 +904,21 @@ class GenerationPipeline {
         }
       } catch (e) {
         this.checkCanceled();
-        await this.handleGenerationFailure(toErrorMessage(e));
+        const errMsg = toErrorMessage(e);
+        if (
+          !this.visionRetried &&
+          this.modelCapabilities.supportsVision &&
+          isVisionRejectedError(errMsg) &&
+          (await this.disableVisionAndPersist())
+        ) {
+          this.visionRetried = true;
+          console.info('[Pipeline] provider rejected image input; retrying as text-only', {
+            requestId: this.requestId,
+          });
+          // Re-run this attempt without images. Do not increment attempt counter.
+          continue;
+        }
+        await this.handleGenerationFailure(errMsg);
         return;
       }
     }
@@ -1332,6 +1302,31 @@ class GenerationPipeline {
     requestQueue.patch(this.requestId, { phase: 'error', error: verificationError });
     this.stopMicrowave(false);
     syncSessionPhaseFromQueue();
+  }
+
+  private async disableVisionAndPersist(): Promise<boolean> {
+    const currentConfig = get(config);
+    const engine = currentConfig.engines.find((e) => e.id === currentConfig.selectedEngineId);
+    if (!engine) return false;
+    const model = `${engine.model ?? ''}`.trim();
+    if (!model) return false;
+
+    const overrides = { ...(engine.visionOverrides ?? {}) };
+    overrides[model] = 'textOnly';
+    engine.visionOverrides = overrides;
+
+    try {
+      await saveConfig(currentConfig);
+    } catch (err) {
+      console.warn('[Pipeline] failed to persist text-only override', err);
+    }
+
+    // Drop all vision inputs for the rest of this pipeline run.
+    this.modelCapabilities = { supportsVision: false, reason: TEXT_ONLY_AFTER_REJECTION_REASON };
+    this.preCapture = null;
+    this.currentScreenshot = null;
+    this.modelFacingAttachments = filterModelFacingAttachments(this.modelFacingAttachments, false);
+    return true;
   }
 
   private async handleGenerationFailure(e: string) {

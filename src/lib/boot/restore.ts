@@ -122,6 +122,14 @@ async function loadConfig() {
       loadedConfig.selectedEngineId = loadedConfig.engines[0].id;
       needsSave = true;
     }
+    // Enforce the single-live-engine invariant: selected = enabled, rest disabled.
+    for (const engine of loadedConfig.engines) {
+      const shouldBeEnabled = engine.id === loadedConfig.selectedEngineId;
+      if (engine.enabled !== shouldBeEnabled) {
+        engine.enabled = shouldBeEnabled;
+        needsSave = true;
+      }
+    }
   }
 
   // Normalize microwave settings

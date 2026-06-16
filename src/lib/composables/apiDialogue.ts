@@ -1,6 +1,6 @@
 import type { Attachment, EngineConfig, Message, Request } from '../types/domain';
 
-type ApiEngineLike = Pick<EngineConfig, 'enabled' | 'provider' | 'apiKey'> | null | undefined;
+type ApiEngineLike = Pick<EngineConfig, 'provider' | 'apiKey'> | null | undefined;
 
 const TERMINAL_PHASES = new Set<Request['phase']>(['canceled']);
 
@@ -151,7 +151,8 @@ export function hasLiveApiEngineConnection(
   selectedEngine: ApiEngineLike,
 ): boolean {
   if (connectionType !== 'api_key') return false;
-  if (!selectedEngine?.enabled) return false;
+  // Selection alone implies live — the selected engine is the sole enabled engine.
+  if (!selectedEngine) return false;
   if (selectedEngine.provider === 'ollama') return true;
   return normalizeText(selectedEngine.apiKey).length > 0;
 }

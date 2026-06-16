@@ -926,7 +926,7 @@ vtStream?: string;
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
-export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
+export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
@@ -954,6 +954,12 @@ export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error"
  * and UI chips read machine values instead of parsing the message string.
  */
 export type AuthoredVerifyValue = { kind: "number"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string }
+/**
+ * What kind of authoring failure occurred, within a layer. Now boundary-typed
+ * because it rides on `StructuralIssue`; the `AuthoringDiagnostic` builder
+ * itself stays internal.
+ */
+export type AuthoringReason = "parseSyntax" | "unknownOp" | "arity" | "type" | "unsupported" | "constrainedValue"
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
  */
@@ -1005,7 +1011,11 @@ export type DiagnosticContext = { partKey?: string | null; opName?: string | nul
 export type DiagnosticParamValue = { key: string; value: ParamValue }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
-export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; enabled?: boolean }
+export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; enabled?: boolean; 
+/**
+ * Per-model vision capability overrides. Keyed by model id. Absent key = `Auto`.
+ */
+visionOverrides: Partial<{ [key in string]: VisionCapability }> }
 export type EngineKind = "freecad" | "ecky" | "build123d"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence: number; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
@@ -1196,7 +1206,22 @@ export type StructuralIssue = { code: string; message: string;
 /**
  * ID of the affected part, when the issue is part-specific.
  */
-partId?: string | null; numericPayload?: number | null; diagnosticContext?: DiagnosticContext | null }
+partId?: string | null; numericPayload?: number | null; diagnosticContext?: DiagnosticContext | null; 
+/**
+ * Which authoring layer owns this issue (surface / coreIr / backend).
+ * `None` for structural (post-render geometry) issues; the existing
+ * population. Authoring diagnostics populate this via
+ * `AuthoringDiagnostic::into_issue`.
+ */
+layer?: ErrorLayer | null; 
+/**
+ * Authoring-specific reason code. `None` for structural issues.
+ */
+reason?: AuthoringReason | null; 
+/**
+ * Structured next-action (hint + suggestions). `None` when not applicable.
+ */
+fix?: ErrorFix | null }
 export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; previewStlTriangleCount?: number | null; previewStlComponentCount?: number | null; previewStlNonManifoldEdgeCount?: number | null; previewStlOverhangTriangleCount?: number | null; previewStlOverhangRatio?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
 export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; authoredVerifyChecks?: AuthoredVerifyCheck[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
 export type TaggedAnchorBinding = { kind: TaggedAnchorKind; authoredSelector: string; target: string; targetIds: string[]; durableTargetIds: string[]; canonicalTargetIds: string[]; aliasIds: string[] }
@@ -1224,6 +1249,23 @@ export type ViewerEdgePoint = { x: number; y: number; z: number }
 export type ViewerEdgeTarget = { targetId: string; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds: string[]; partId: string; viewerNodeId: string; label: string; editable: boolean; start: ViewerEdgePoint; end: ViewerEdgePoint }
 export type ViewerFaceTarget = { targetId: string; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds: string[]; partId: string; viewerNodeId: string; label: string; editable: boolean; center: ViewerEdgePoint; normal?: [number, number, number] | null; area?: number | null }
 export type ViewportCameraState = { position: [number, number, number]; target: [number, number, number]; zoom?: number | null; fov?: number | null }
+/**
+ * Per-model vision capability override, keyed by model id on `Engine::vision_overrides`.
+ * `Auto` (or absence) lets name-pattern inference decide; the other two are authoritative.
+ */
+export type VisionCapability = 
+/**
+ * Infer from model name patterns; optimistic (vision-capable) when unknown.
+ */
+"auto" | 
+/**
+ * Force vision-capable regardless of inference.
+ */
+"vision" | 
+/**
+ * Force text-only. Screenshots, image attachments, and drawing annotations are suppressed.
+ */
+"textOnly"
 export type VisualIssue = { category: VisualIssueCategory; description: string; partLabel?: string | null }
 export type VisualIssueCategory = "missing_part" | "floating_part" | "connector_broken" | "reference_mismatch" | "topology_broken" | "other"
 export type VisualVerificationResult = { passed: boolean; summary: string; issues: VisualIssue[]; usage?: UsageSummary | null }
