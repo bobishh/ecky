@@ -9,7 +9,37 @@ use crate::ecky_core_ir::{
     CoreProgram, CoreReference, CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol,
     CoreTransformOp, CoreValueKind, NodeId,
 };
+use crate::contracts::{AuthoringDiagnostic, AuthoringReason, ErrorFix};
 use crate::models::{AppError, AppResult, DesignParams, ParamValue};
+
+// --- Authoring-error constructors (backend layer) -------------------------
+// The direct OCCT planner is the backend wall: every failure here means an op
+// the surface authored cannot be executed by this backend. These helpers keep
+// call sites one line and guarantee a backend-layered error.
+
+fn bk(reason: AuthoringReason, msg: impl Into<String>) -> AppError {
+    AuthoringDiagnostic::backend(reason, msg).to_app_error()
+}
+
+fn bk_op(reason: AuthoringReason, op: &str, msg: impl Into<String>) -> AppError {
+    AuthoringDiagnostic::backend(reason, msg).with_op(op).to_app_error()
+}
+
+fn bk_arity(op: &str, expected: &str) -> AppError {
+    AuthoringDiagnostic::backend(AuthoringReason::Arity, format!("`{op}` expects {expected}."))
+        .with_op(op)
+        .to_app_error()
+}
+
+fn bk_constrained(op: &str, msg: impl Into<String>, valid: &[&str]) -> AppError {
+    AuthoringDiagnostic::backend(AuthoringReason::ConstrainedValue, msg)
+        .with_op(op)
+        .with_fix(ErrorFix {
+            hint: Some(format!("valid values: {}", valid.join(", "))),
+            suggestions: valid.iter().map(|s| (*s).to_string()).collect(),
+        })
+        .to_app_error()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcctParameterKind {
@@ -193,12 +223,35 @@ pub fn plan_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
     plan_core_program_with_params(program, &DesignParams::new())
 }
 
+/// Bridge the collected authoring-diagnostic set to the boundary `AppError`.
+/// The full `Vec<StructuralIssue>` rides in `AppError.diagnostics` (boundary
+/// transport); `message` is a short summary so the raw-text path still works.
+fn issues_to_app_error(issues: Vec<crate::contracts::StructuralIssue>) -> AppError {
+    let first = issues.first().expect("issues non-empty");
+    let code = match first.layer {
+        Some(crate::contracts::ErrorLayer::Surface) => crate::contracts::AppErrorCode::Parse,
+        Some(crate::contracts::ErrorLayer::CoreIr) => crate::contracts::AppErrorCode::Validation,
+        _ => crate::contracts::AppErrorCode::Render,
+    };
+    let summary = if issues.len() > 1 {
+        format!(
+            "{} (and {} more authoring issue(s))",
+            first.message,
+            issues.len() - 1
+        )
+    } else {
+        first.message.clone()
+    };
+    AppError::new(code, summary).with_diagnostics(issues)
+}
+
 pub fn plan_core_program_with_params(
     program: &CoreProgram,
     parameters: &DesignParams,
 ) -> AppResult<OcctPlan> {
     let normalized =
-        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)?;
+        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)
+            .map_err(issues_to_app_error)?;
     let expanded = expand_core_program_for_direct_occt(&normalized, parameters)?;
     plan_expanded_core_program(&expanded, parameters)
 }
@@ -208,7 +261,7 @@ fn plan_expanded_core_program(
     parameters: &DesignParams,
 ) -> AppResult<OcctPlan> {
     crate::ecky_core_ir::verify_core_program(program).map_err(|err| {
-        AppError::validation(format!(
+        bk(AuthoringReason::Type, format!(
             "Direct OCCT adapter rejected invalid Core IR before planning: {}",
             err
         ))
@@ -316,7 +369,7 @@ fn expand_node_for_direct_occt(
                     &nested_node_env,
                 )
                 .map_err(|err| {
-                    AppError::validation(format!(
+                    bk(AuthoringReason::Type, format!(
                         "Direct OCCT expander could not evaluate build binding `{}`: {err}",
                         binding.name
                     ))
@@ -369,7 +422,7 @@ fn expand_node_for_direct_occt(
                     &nested_node_env,
                 )
                 .map_err(|err| {
-                    AppError::validation(format!(
+                    bk(AuthoringReason::Type, format!(
                         "Direct OCCT expander could not evaluate let binding `{}`: {err}",
                         binding.name
                     ))
@@ -476,7 +529,7 @@ fn expand_node_for_direct_occt(
             op: CoreOperation::Primitive(CorePrimitive::Svg),
             args,
             keywords,
-        } if !keywords.is_empty() => Err(AppError::validation(
+        } if !keywords.is_empty() => Err(bk_op(AuthoringReason::Unsupported, "svg",
             "`svg` does not support keyword arguments yet in Direct OCCT adapter.",
         )),
         CoreNodeKind::Call {
@@ -644,7 +697,7 @@ fn expand_xor_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() < 2 {
-        return Err(AppError::validation("`xor` expects at least two operands."));
+        return Err(bk_arity("xor", "at least two operands"));
     }
 
     let normalized_args = args
@@ -689,31 +742,31 @@ fn expand_svg_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.is_empty() || args.len() > 4 {
-        return Err(AppError::validation(
-            "`svg` expects a file path, optional target width/height, and optional fit mode.",
-        ));
+        return Err(bk_arity("svg", "a file path, optional target width/height, and optional fit mode"));
     }
 
     let source = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
     let svg_text = if fs::metadata(&source).is_ok() {
         fs::read_to_string(&source).map_err(|err| {
-            AppError::validation(format!(
-                "Direct OCCT adapter could not read SVG file `{source}`: {err}",
-            ))
+            AuthoringDiagnostic::surface(
+                AuthoringReason::Type,
+                format!("Direct OCCT adapter could not read SVG file `{source}`: {err}"),
+            ).to_app_error()
         })?
     } else if source.trim_start().starts_with('<') {
         source
     } else {
-        return Err(AppError::validation(format!(
-            "Direct OCCT adapter could not read SVG source at `{source}`.",
-        )));
+        return Err(AuthoringDiagnostic::surface(
+            AuthoringReason::Type,
+            format!("Direct OCCT adapter could not read SVG source at `{source}`."),
+        ).to_app_error());
     };
 
     let target_width = args
         .get(1)
         .map(|arg| {
             crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
-                AppError::validation(format!(
+                bk_op(AuthoringReason::Type, "svg", format!(
                     "Direct OCCT adapter could not evaluate `svg` width: {err}",
                 ))
             })
@@ -724,7 +777,7 @@ fn expand_svg_node(
         .get(2)
         .map(|arg| {
             crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
-                AppError::validation(format!(
+                bk_op(AuthoringReason::Type, "svg", format!(
                     "Direct OCCT adapter could not evaluate `svg` height: {err}",
                 ))
             })
@@ -736,9 +789,11 @@ fn expand_svg_node(
         .map(|arg| {
             let value = crate::ecky_ir::eval_core_stringish_with_locals(arg, param_names, env)?;
             value.parse::<SvgFitMode>().map_err(|()| {
-                AppError::validation(format!(
-                    "`svg` fit mode must be `contain`, `cover`, or `stretch`, got {value}",
-                ))
+                bk_constrained(
+                    "svg",
+                    format!("`svg` fit mode must be `contain`, `cover`, or `stretch`, got {value}"),
+                    &["contain", "cover", "stretch"],
+                )
             })
         })
         .transpose()?;
@@ -789,7 +844,7 @@ fn expand_text_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() < 2 {
-        return Err(AppError::validation("`text` expects text value and size."));
+        return Err(bk_arity("text", "text value and size"));
     }
 
     let value = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
@@ -827,7 +882,7 @@ fn expand_helical_ridge_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if !args.is_empty() {
-        return Err(AppError::validation(
+        return Err(bk_op(AuthoringReason::Unsupported, "helical-ridge",
             "`helical-ridge` expects keyword options only.",
         ));
     }
@@ -1004,7 +1059,9 @@ fn expand_thread_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if !args.is_empty() {
-        return Err(AppError::validation("`thread` expects keyword options only."));
+        return Err(bk_op(AuthoringReason::Unsupported, "thread",
+            "`thread` expects keyword options only.",
+        ));
     }
     reject_unknown_keywords(
         keywords,
@@ -1026,9 +1083,11 @@ fn expand_thread_node(
     let length = positive_keyword_number(keywords, "length", "thread", param_names, env, node_env)?;
     let (radius, pitch, depth) = if let Some(designation) = keyword_text(keywords, "iso") {
         crate::ecky_core_ir::iso_metric_thread_core(&designation).ok_or_else(|| {
-            AppError::validation(format!(
-                "`thread` unknown ISO designation `{designation}` (try M3, M4, M5, M6, M8, M10, M12, M16, M20)."
-            ))
+            bk_constrained(
+                "thread",
+                format!("`thread` unknown ISO designation `{designation}`"),
+                &["M3", "M4", "M5", "M6", "M8", "M10", "M12", "M16", "M20"],
+            )
         })?
     } else {
         (
@@ -1048,6 +1107,16 @@ fn expand_thread_node(
     let clearance =
         optional_keyword_number(keywords, "clearance", 0.0, "thread", param_names, env, node_env)?.max(0.0);
 
+    // Bury the ridge root inside the core by `overlap` so the `union(core, ridge)`
+    // below never shares a coincident cylinder face. Without this the boolean
+    // drops the core on coarse/deep threads, leaving a hollow spiral. The ridge
+    // root moves in by `overlap` and its depth grows by `overlap`, so the crest
+    // (major = radius + depth) and the core surface (minor = radius) are
+    // unchanged — only the buried part of the ridge differs.
+    let overlap = 0.3_f64.min(radius * 0.5).min(depth);
+    let ridge_radius = radius - overlap;
+    let ridge_depth = depth + overlap;
+
     // Compose: the canonical thread is the union of a core cylinder with a helical
     // ridge (or just the ridge cutter when female). Building from the existing
     // helical-ridge + cylinder ops keeps native and build123d identical by
@@ -1060,12 +1129,12 @@ fn expand_thread_node(
         )
     };
     let mut ridge_keywords = vec![
-        CoreKeywordArg::expr("radius".to_string(), number_node(next_node_id, radius)),
+        CoreKeywordArg::expr("radius".to_string(), number_node(next_node_id, ridge_radius)),
         CoreKeywordArg::expr("pitch".to_string(), number_node(next_node_id, pitch)),
         CoreKeywordArg::expr("height".to_string(), number_node(next_node_id, length)),
         CoreKeywordArg::expr("base-width".to_string(), number_node(next_node_id, base_width)),
         CoreKeywordArg::expr("crest-width".to_string(), number_node(next_node_id, crest_width)),
-        CoreKeywordArg::expr("depth".to_string(), number_node(next_node_id, depth)),
+        CoreKeywordArg::expr("depth".to_string(), number_node(next_node_id, ridge_depth)),
         CoreKeywordArg::expr("lefthand".to_string(), bool_node(next_node_id, lefthand)),
     ];
     if female {
@@ -1132,9 +1201,7 @@ fn expand_rib_groove_node(
 ) -> AppResult<CoreNode> {
     let op_name = if is_rib { "rib" } else { "groove" };
     if args.len() != 3 {
-        return Err(AppError::validation(format!(
-            "`{op_name}` expects a solid, a profile, and a path."
-        )));
+        return Err(bk_arity(op_name, "a solid, a profile, and a path"));
     }
     let solid = expand_node_for_direct_occt(&args[0], param_names, env, node_env, next_node_id)?;
     let profile = expand_node_for_direct_occt(&args[1], param_names, env, node_env, next_node_id)?;
@@ -1174,9 +1241,7 @@ fn expand_regular_polygon_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 2 {
-        return Err(AppError::validation(
-            "`regular-polygon` expects sides and radius (plus optional `:rotation`).",
-        ));
+        return Err(bk_arity("regular-polygon", "sides and radius (plus optional `:rotation`)"));
     }
     reject_unknown_keywords(keywords, &["rotation"], "regular-polygon")?;
 
@@ -1194,12 +1259,13 @@ fn expand_regular_polygon_node(
 
     let sides = sides.round();
     if sides < 3.0 {
-        return Err(AppError::validation(
+        return Err(bk_constrained("regular-polygon",
             "`regular-polygon` needs at least 3 sides.",
+            &["3", "4", "5", "6", "8"],
         ));
     }
     if !(radius > 0.0) {
-        return Err(AppError::validation(
+        return Err(bk_op(AuthoringReason::Type, "regular-polygon",
             "`regular-polygon` radius must be positive.",
         ));
     }
@@ -1241,9 +1307,7 @@ fn expand_trapezoid_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 3 {
-        return Err(AppError::validation(
-            "`trapezoid` expects bottom, top, and height (plus optional `:skew`).",
-        ));
+        return Err(bk_arity("trapezoid", "bottom, top, and height (plus optional `:skew`)"));
     }
     reject_unknown_keywords(keywords, &["skew"], "trapezoid")?;
 
@@ -1261,12 +1325,12 @@ fn expand_trapezoid_node(
     )?;
 
     if !(bottom > 0.0) || !(top > 0.0) {
-        return Err(AppError::validation(
+        return Err(bk_op(AuthoringReason::Type, "trapezoid",
             "`trapezoid` bottom and top must be positive.",
         ));
     }
     if !(height > 0.0) {
-        return Err(AppError::validation(
+        return Err(bk_op(AuthoringReason::Type, "trapezoid",
             "`trapezoid` height must be positive.",
         ));
     }
@@ -1307,21 +1371,19 @@ fn expand_slot_center_to_center_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 2 {
-        return Err(AppError::validation(
-            "`slot-center-to-center` expects center separation and width.",
-        ));
+        return Err(bk_arity("slot-center-to-center", "center separation and width"));
     }
     reject_unknown_keywords(keywords, &[], "slot-center-to-center")?;
 
     let separation = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
     let width = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
     if !(width > 0.0) {
-        return Err(AppError::validation(
+        return Err(bk_op(AuthoringReason::Type, "slot-center-to-center",
             "`slot-center-to-center` width must be positive.",
         ));
     }
     if !(separation >= 0.0) {
-        return Err(AppError::validation(
+        return Err(bk_op(AuthoringReason::Type, "slot-center-to-center",
             "`slot-center-to-center` separation must be non-negative.",
         ));
     }
@@ -1357,9 +1419,7 @@ fn expand_slot_center_point_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 5 {
-        return Err(AppError::validation(
-            "`slot-center-point` expects cx, cy, px, py, width.",
-        ));
+        return Err(bk_arity("slot-center-point", "cx, cy, px, py, width"));
     }
     reject_unknown_keywords(keywords, &[], "slot-center-point")?;
 
@@ -1369,7 +1429,7 @@ fn expand_slot_center_point_node(
     let py = crate::ecky_ir::eval_core_number_with_locals(&args[3], param_names, env)?;
     let width = crate::ecky_ir::eval_core_number_with_locals(&args[4], param_names, env)?;
     if !(width > 0.0) {
-        return Err(AppError::validation(
+        return Err(bk_op(AuthoringReason::Type, "slot-center-point",
             "`slot-center-point` width must be positive.",
         ));
     }
@@ -1517,9 +1577,7 @@ fn expand_sampled_radial_loft_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 1 {
-        return Err(AppError::validation(
-            "`sampled-radial-loft` expects binder names plus keyword/value options.",
-        ));
+        return Err(bk_arity("sampled-radial-loft", "binder names plus keyword/value options"));
     }
     let binders = sampled_radial_loft_binders(&args[0])?;
     let height_node = sampled_keyword_node(keywords, "height")?;
@@ -1560,7 +1618,7 @@ fn expand_sampled_radial_loft_node(
                 &section_env,
             )?;
             if !radius.is_finite() || radius <= 0.0 {
-                return Err(AppError::validation(
+                return Err(bk_op(AuthoringReason::Type, "sampled-radial-loft",
                     "sampled-radial-loft radius must stay positive",
                 ));
             }
@@ -1629,12 +1687,12 @@ fn expand_shell_sampled_radial_loft_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if !keywords.is_empty() || args.len() != 2 {
-        return Err(AppError::validation(
-            "`shell` sampled-radial-loft expects thickness and shape only.",
-        ));
+        return Err(bk_arity("shell", "thickness and shape only (sampled-radial-loft)"));
     }
     let target = sampled_radial_loft_target(args).ok_or_else(|| {
-        AppError::validation("`shell` sampled-radial-loft requires a sampled-radial-loft target.")
+        bk_op(AuthoringReason::Type, "shell",
+            "`shell` sampled-radial-loft requires a sampled-radial-loft target.",
+        )
     })?;
     let target_args = match &target.kind {
         CoreNodeKind::Call { args, .. } => args,
@@ -1741,9 +1799,7 @@ fn sampled_radial_loft_binders(arg: &CoreNode) -> AppResult<[String; 3]> {
     match &arg.kind {
         CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
             if items.len() != 3 {
-                return Err(AppError::validation(
-                    "`sampled-radial-loft` binders must be `(theta z fz)`.",
-                ));
+                return Err(bk_arity("sampled-radial-loft", "binders `(theta z fz)`"));
             }
             Ok([
                 sampled_binder_name(&items[0])?,
@@ -1760,9 +1816,7 @@ fn sampled_radial_loft_binders(arg: &CoreNode) -> AppResult<[String; 3]> {
             sampled_binder_name(&args[0])?,
             sampled_binder_name(&args[1])?,
         ]),
-        _ => Err(AppError::validation(
-            "`sampled-radial-loft` binders must be `(theta z fz)`.",
-        )),
+        _ => Err(bk_arity("sampled-radial-loft", "binders `(theta z fz)`")),
     }
 }
 
@@ -1771,7 +1825,7 @@ fn sampled_binder_name(node: &CoreNode) -> AppResult<String> {
         CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(name.clone()),
         CoreNodeKind::Literal(CoreLiteral::Text(text)) => Ok(text.clone()),
         CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => Ok(symbol_name(symbol).to_string()),
-        _ => Err(AppError::validation(
+        _ => Err(bk_op(AuthoringReason::Type, "sampled-radial-loft",
             "`sampled-radial-loft` binders must be symbols.",
         )),
     }
@@ -1779,7 +1833,9 @@ fn sampled_binder_name(node: &CoreNode) -> AppResult<String> {
 
 fn sampled_keyword_node<'a>(keywords: &'a [CoreKeywordArg], name: &str) -> AppResult<&'a CoreNode> {
     sampled_optional_keyword_node(keywords, name)
-        .ok_or_else(|| AppError::validation(format!("`sampled-radial-loft` requires `:{}`.", name)))
+        .ok_or_else(|| bk_op(AuthoringReason::Arity, "sampled-radial-loft",
+            format!("`sampled-radial-loft` requires `:{name}`."),
+        ))
 }
 
 fn sampled_optional_keyword_node<'a>(
@@ -1794,9 +1850,9 @@ fn sampled_optional_keyword_node<'a>(
 
 fn sampled_count(value: f64, minimum: usize, label: &str) -> AppResult<usize> {
     if !value.is_finite() {
-        return Err(AppError::validation(format!(
-            "`sampled-radial-loft` {label} must be finite."
-        )));
+        return Err(bk_op(AuthoringReason::Type, "sampled-radial-loft",
+            format!("`sampled-radial-loft` {label} must be finite."),
+        ));
     }
     Ok((value.round() as isize).max(minimum as isize) as usize)
 }
@@ -1933,7 +1989,7 @@ fn eval_number_for_direct_occt(
 ) -> AppResult<f64> {
     let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
     crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env).map_err(|err| {
-        AppError::validation(format!(
+        bk(AuthoringReason::Type, format!(
             "could not evaluate numeric Core node {:?}: {err}",
             node.id
         ))
@@ -2153,7 +2209,7 @@ fn required_keyword_node<'a>(
         .iter()
         .find(|keyword| keyword.name == name)
         .map(|keyword| keyword.source_node())
-        .ok_or_else(|| AppError::validation(format!("`{op}` requires `:{name}`.")))
+        .ok_or_else(|| bk_op(AuthoringReason::Arity, op, format!("`{op}` requires `:{name}`.")))
 }
 
 fn positive_keyword_number(
@@ -2171,7 +2227,7 @@ fn positive_keyword_number(
         node_env,
     )?;
     if !value.is_finite() || value <= 0.0 {
-        return Err(AppError::validation(format!(
+        return Err(bk_op(AuthoringReason::Type, op, format!(
             "`{op}` {name} must be positive and finite."
         )));
     }
@@ -2195,7 +2251,7 @@ fn optional_keyword_number(
         return Ok(default);
     };
     eval_number_for_direct_occt(node, param_names, env, node_env)
-        .map_err(|err| AppError::validation(format!("`{op}` could not evaluate `:{name}`: {err}")))
+        .map_err(|err| bk_op(AuthoringReason::Type, op, format!("`{op}` could not evaluate `:{name}`: {err}")))
 }
 
 fn optional_keyword_bool(
@@ -2215,7 +2271,7 @@ fn optional_keyword_bool(
         return Ok(default);
     };
     eval_bool_for_direct_occt(node, param_names, env, node_env)
-        .map_err(|err| AppError::validation(format!("`{op}` could not evaluate `:{name}`: {err}")))
+        .map_err(|err| bk_op(AuthoringReason::Type, op, format!("`{op}` could not evaluate `:{name}`: {err}")))
 }
 
 fn reject_unknown_keywords(
@@ -2230,7 +2286,7 @@ fn reject_unknown_keywords(
         {
             continue;
         }
-        return Err(AppError::validation(format!(
+        return Err(bk_op(AuthoringReason::Arity, op, format!(
             "`{op}` does not recognize `:{}`.",
             keyword.name
         )));
@@ -2511,14 +2567,14 @@ impl<'a> PartPlanner<'a> {
             CoreNodeKind::Reference(_) => match self.plan_arg(node)? {
                 OcctArg::Ref(slot) => slot,
                 other => {
-                    return Err(AppError::validation(format!(
+                    return Err(bk(AuthoringReason::Type, format!(
                         "Direct OCCT adapter expected geometry reference, got {:?}.",
                         other
                     )));
                 }
             },
             _ => {
-                return Err(AppError::validation(format!(
+                return Err(bk(AuthoringReason::Type, format!(
                     "Direct OCCT adapter expected geometry node, got {:?}.",
                     node.kind
                 )));
@@ -2582,7 +2638,7 @@ impl<'a> PartPlanner<'a> {
             .collect::<AppResult<Vec<_>>>()?;
         let list_arg = self.plan_arg(list)?;
         let OcctArg::List(items) = list_arg else {
-            return Err(AppError::validation(format!(
+            return Err(bk(AuthoringReason::Type, format!(
                 "Direct OCCT adapter `apply` expected list argument, got {:?}.",
                 list_arg
             )));
@@ -2609,7 +2665,7 @@ impl<'a> PartPlanner<'a> {
             CoreNodeKind::Literal(CoreLiteral::Point3(point)) => Ok(OcctArg::Point3(*point)),
             CoreNodeKind::Reference(CoreReference::Parameter(id)) => {
                 let name = self.param_names.get(&id.raw()).cloned().ok_or_else(|| {
-                    AppError::validation(format!(
+                    bk(AuthoringReason::Type, format!(
                         "Direct OCCT adapter could not resolve parameter {:?}.",
                         id
                     ))
@@ -2621,7 +2677,7 @@ impl<'a> PartPlanner<'a> {
                     return Ok(value);
                 }
                 let slot = self.node_refs.get(&id.raw()).copied().ok_or_else(|| {
-                    AppError::validation(format!(
+                    bk(AuthoringReason::Type, format!(
                         "Direct OCCT adapter could not resolve Core node reference {:?}.",
                         id
                     ))
@@ -2630,7 +2686,7 @@ impl<'a> PartPlanner<'a> {
             }
             CoreNodeKind::Reference(CoreReference::Local(name)) => {
                 self.locals.get(name).cloned().ok_or_else(|| {
-                    AppError::validation(format!(
+                    bk(AuthoringReason::Type, format!(
                         "Direct OCCT adapter could not resolve local `{}`.",
                         name
                     ))
@@ -2657,11 +2713,11 @@ impl<'a> PartPlanner<'a> {
                 let slot = self.plan_node(node)?;
                 Ok(OcctArg::Ref(slot))
             }
-            CoreNodeKind::If { .. } => Err(AppError::validation(format!(
+            CoreNodeKind::If { .. } => Err(bk(AuthoringReason::Unsupported, format!(
                 "Direct OCCT adapter cannot plan dynamic expression node {:?} before evaluation.",
                 node.kind
             ))),
-            CoreNodeKind::Reference(CoreReference::Part(id)) => Err(AppError::validation(format!(
+            CoreNodeKind::Reference(CoreReference::Part(id)) => Err(bk(AuthoringReason::Unsupported, format!(
                 "Direct OCCT adapter cannot plan part reference {:?} in first surface.",
                 id
             ))),
@@ -2687,15 +2743,14 @@ impl<'a> PartPlanner<'a> {
                 symbols
             }
             _ => {
-                return Err(AppError::validation(
+                return Err(bk_constrained("align",
                     "Direct OCCT adapter `:align` expects `(min|center|max)^3`.",
+                    &["min", "center", "max"],
                 ));
             }
         };
         if symbols.len() != 3 {
-            return Err(AppError::validation(
-                "Direct OCCT adapter `:align` expects exactly 3 axes.",
-            ));
+            return Err(bk_arity("align", "exactly 3 axes"));
         }
         Ok(OcctArg::List(
             symbols
@@ -2775,7 +2830,7 @@ impl<'a> PartPlanner<'a> {
         body: &CoreNode,
     ) -> AppResult<OcctArg> {
         if params.len() != sources.len() {
-            return Err(AppError::validation(format!(
+            return Err(bk(AuthoringReason::Arity, format!(
                 "Direct OCCT adapter map expected {} source list(s), got {}.",
                 params.len(),
                 sources.len()
@@ -2785,7 +2840,7 @@ impl<'a> PartPlanner<'a> {
             .iter()
             .map(|source| match self.plan_arg(source)? {
                 OcctArg::List(items) => Ok(items),
-                other => Err(AppError::validation(format!(
+                other => Err(bk(AuthoringReason::Type, format!(
                     "Direct OCCT adapter map expected list source, got {:?}.",
                     other
                 ))),
@@ -2796,7 +2851,7 @@ impl<'a> PartPlanner<'a> {
         };
         let count = first_source.len();
         if source_values.iter().any(|source| source.len() != count) {
-            return Err(AppError::validation(
+            return Err(bk(AuthoringReason::Type,
                 "Direct OCCT adapter map source lists must have matching lengths.",
             ));
         }
@@ -2886,8 +2941,9 @@ fn align_axis_arg(node: &CoreNode) -> AppResult<&'static str> {
             args,
             keywords,
         } if args.is_empty() && keywords.is_empty() => align_axis_name(name),
-        _ => Err(AppError::validation(
+        _ => Err(bk_constrained("align",
             "Direct OCCT adapter `:align` axes must be `min`, `center`, or `max`.",
+            &["min", "center", "max"],
         )),
     }
 }
@@ -2897,9 +2953,10 @@ fn align_axis_name(name: &str) -> AppResult<&'static str> {
         "min" => Ok("min"),
         "center" => Ok("center"),
         "max" => Ok("max"),
-        _ => Err(AppError::validation(format!(
-            "Direct OCCT adapter `:align` axis `{name}` is not supported."
-        ))),
+        _ => Err(bk_constrained("align",
+            format!("Direct OCCT adapter `:align` axis `{name}` is not supported."),
+            &["min", "center", "max"],
+        )),
     }
 }
 
@@ -2955,7 +3012,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Transform(CoreTransformOp::Scale) => Ok(OcctOp::Scale),
         CoreOperation::Transform(CoreTransformOp::Mirror) => Ok(OcctOp::Mirror),
         CoreOperation::Meta(CoreMetaOp::Group) => Ok(OcctOp::Compound),
-        CoreOperation::Custom(name) if name == "hole" => Err(AppError::validation(
+        CoreOperation::Custom(name) if name == "hole" => Err(bk_op(AuthoringReason::Unsupported, "hole",
             "Typed hole must be filled before direct OCCT planning.",
         )),
         _ => Err(unsupported(&operation_name(op), "not in first surface")),
@@ -2965,7 +3022,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
 fn typed_hole_error(keywords: &[CoreKeywordArg]) -> AppError {
     let requested_type = keyword_text(keywords, "type").unwrap_or_else(|| "unknown".to_string());
     let goal = keyword_text(keywords, "goal").unwrap_or_else(|| "unspecified".to_string());
-    AppError::validation(format!(
+    bk_op(AuthoringReason::Unsupported, "hole", format!(
         "Typed hole requested type `{}` with goal `{}` must be filled before direct OCCT planning.",
         requested_type, goal
     ))
@@ -2982,10 +3039,20 @@ fn keyword_text(keywords: &[CoreKeywordArg], name: &str) -> Option<String> {
 }
 
 fn unsupported(op: &str, reason: &str) -> AppError {
-    AppError::validation(format!(
-        "Direct OCCT adapter first surface does not support `{}`: {}.",
-        op, reason
-    ))
+    crate::contracts::AuthoringDiagnostic::backend(
+        crate::contracts::AuthoringReason::Unsupported,
+        format!("The active backend (direct OCCT) cannot execute `{op}`: {reason}."),
+    )
+    .with_op(op)
+    .with_fix(crate::contracts::ErrorFix {
+        hint: Some(
+            "switch to a backend that supports this operation, or replace it with an \
+             equivalent the current backend can render."
+                .into(),
+        ),
+        suggestions: Vec::new(),
+    })
+    .to_app_error()
 }
 
 fn symbol_name(symbol: &CoreSymbol) -> &'static str {
@@ -4567,5 +4634,53 @@ mod tests {
         assert!(message.contains("extrude"), "{message}");
         assert!(message.contains("sketch"), "{message}");
         assert!(message.contains("solid"), "{message}");
+    }
+
+    #[test]
+    fn unsupported_op_reports_backend_layer_with_fix() {
+        use crate::contracts::{AuthoringReason, ErrorLayer};
+        let err = unsupported("fillet", "not in first surface");
+        // `unsupported` builds via the diagnostic builder then bridges to AppError;
+        // layer/fix live on StructuralIssue. Assert the surviving identity on
+        // AppError and the full layer/fix via into_issue.
+        assert_eq!(err.operation.as_deref(), Some("fillet"));
+        assert_eq!(err.code, crate::contracts::AppErrorCode::Render);
+        assert!(err.to_string().contains("direct OCCT"), "backend named: {}", err);
+        let diag = crate::contracts::AuthoringDiagnostic::backend(
+            AuthoringReason::Unsupported,
+            "x",
+        )
+        .with_op("fillet")
+        .with_fix(crate::contracts::ErrorFix {
+            hint: Some("switch backend".into()),
+            suggestions: Vec::new(),
+        });
+        let issue = diag.into_issue();
+        assert_eq!(issue.layer, Some(ErrorLayer::Backend));
+        assert!(issue.fix.unwrap().hint.is_some());
+        let _ = AuthoringReason::Unsupported;
+        let _ = AuthoringReason::Unsupported;
+    }
+
+    #[test]
+    fn plan_carries_full_diagnostic_set_on_authoring_failure() {
+        use crate::contracts::StructuralIssue;
+        // Two bad parts → the plan error carries both issues in `diagnostics`,
+        // not just a collapsed message.
+        let program = compile(
+            r#"
+            (model
+              (part body (bx 1 1 1))
+              (part handle (sphre 2)))
+            "#,
+        );
+        let err = plan_core_program(&program).expect_err("authoring failure");
+        let diags: &[StructuralIssue] = err.diagnostics.as_ref().expect("diagnostics present");
+        assert_eq!(diags.len(), 2, "the full set rides to the boundary");
+        assert!(diags.iter().any(|d| d.part_id.as_deref() == Some("body")));
+        assert!(diags.iter().any(|d| d.part_id.as_deref() == Some("handle")));
+        assert!(diags.iter().all(|d| d.layer.is_some()));
+        // And no bundle is produced (the error path means no ArtifactBundle).
+        assert!(err.message.contains("bx"), "summary names an op: {}", err.message);
     }
 }

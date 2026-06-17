@@ -5,7 +5,7 @@ use crate::ecky_core_ir::{
     CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload,
     CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
 };
-use crate::models::{AppError, AppResult, ParamValue};
+use crate::models::{AppResult, ParamValue};
 
 use super::edge_ops::{
     edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
@@ -126,7 +126,12 @@ pub fn lower_to_build123d(source: &str) -> AppResult<String> {
         Ok(model) => lower_model_to_build123d(&model),
         Err(_) => {
             let program = crate::ecky_scheme::compile_to_core_program(source)
-                .map_err(|err| AppError::parse(err.to_string()))?;
+                .map_err(|err| {
+                    crate::contracts::AuthoringDiagnostic::surface(
+                        crate::contracts::AuthoringReason::ParseSyntax,
+                        err.to_string(),
+                    ).to_app_error()
+                })?;
             lower_core_program_to_build123d(&program)
         }
     }
@@ -1610,7 +1615,7 @@ fn b123d_preamble() -> Vec<String> {
         "def _ecky_voronoi2(x, y, seed):\n    return max(0.0, min(1.0, 1.0 - _ecky_cell_distance2(x, y, seed)))".into(),
         "def _ecky_signed_pow(value, exponent):\n    value = float(value); exponent = float(exponent)\n    return math.copysign(abs(value) ** exponent, value)".into(),
         "def _ecky_helical_ridge(radius, pitch, height, base_width, crest_width, depth, female=False, clearance=0.0, lefthand=False):\n    radius = float(radius); pitch = float(pitch); height = float(height)\n    base_width = float(base_width); crest_width = float(crest_width); depth = float(depth)\n    clearance = max(0.0, float(clearance))\n    female = bool(female); lefthand = bool(lefthand)\n    if radius <= 0.0: raise ValueError('helical-ridge radius must be positive')\n    if pitch <= 0.0: raise ValueError('helical-ridge pitch must be positive')\n    if height <= 0.0: raise ValueError('helical-ridge height must be positive')\n    if base_width <= 0.0: raise ValueError('helical-ridge base-width must be positive')\n    if crest_width <= 0.0: raise ValueError('helical-ridge crest-width must be positive')\n    if depth <= 0.0: raise ValueError('helical-ridge depth must be positive')\n    envelope_clearance = clearance if female else 0.0\n    path_radius = radius\n    base_half = (base_width + 2.0 * envelope_clearance) * 0.5\n    crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5\n    ridge_depth = depth + envelope_clearance\n    path = Edge.make_helix(pitch=pitch, height=height, radius=path_radius, center=(0, 0, 0), normal=(0, 0, 1), lefthand=lefthand)\n    profile = Polyline((path_radius, 0, -base_half), (path_radius + ridge_depth, 0, -crest_half), (path_radius + ridge_depth, 0, crest_half), (path_radius, 0, base_half), close=True)\n    return _ecky_solid(sweep(_ecky_face(profile), path=path, is_frenet=True))".into(),
-        "def _ecky_thread(radius, pitch, length, depth, base_width, crest_width, female=False, clearance=0.0, lefthand=False):\n    ridge = _ecky_helical_ridge(radius, pitch, length, base_width, crest_width, depth, female=female, clearance=clearance, lefthand=lefthand)\n    if bool(female):\n        return ridge\n    core = Cylinder(float(radius), float(length), align=(Align.CENTER, Align.CENTER, Align.MIN))\n    return _ecky_solid(core + ridge)".into(),
+        "def _ecky_thread(radius, pitch, length, depth, base_width, crest_width, female=False, clearance=0.0, lefthand=False):\n    radius = float(radius); depth = float(depth)\n    overlap = min(0.3, radius * 0.5, depth)\n    ridge = _ecky_helical_ridge(radius - overlap, pitch, length, base_width, crest_width, depth + overlap, female=female, clearance=clearance, lefthand=lefthand)\n    if bool(female):\n        return ridge\n    core = Cylinder(radius, float(length), align=(Align.CENTER, Align.CENTER, Align.MIN))\n    return _ecky_solid(core + ridge)".into(),
         "def _ecky_draft(solid, angle, neutral_z=0.0):\n    solid = _ecky_solid(solid)\n    faces = [f for f in solid.faces() if abs(float(f.normal_at().Z)) < 1.0e-6]\n    if not faces:\n        return solid\n    plane = Plane(origin=(0, 0, float(neutral_z)), z_dir=(0, 0, 1))\n    return _ecky_solid(draft(faces, neutral_plane=plane, angle=float(angle)))".into(),
         "def _ecky_regular_polygon(sides, radius, rotation=0.0):\n    sides = int(round(float(sides))); radius = float(radius); rot = math.radians(float(rotation))\n    if sides < 3: raise ValueError('regular-polygon needs at least 3 sides')\n    if radius <= 0.0: raise ValueError('regular-polygon radius must be positive')\n    pts = [(radius * math.cos(rot + 2.0 * math.pi * i / sides), radius * math.sin(rot + 2.0 * math.pi * i / sides)) for i in range(sides)]\n    return Polygon(*pts, align=None)".into(),
         "def _ecky_trapezoid(bottom, top, height, skew=0.0):\n    bottom = float(bottom); top = float(top); height = float(height); skew = float(skew)\n    if bottom <= 0.0 or top <= 0.0: raise ValueError('trapezoid bottom and top must be positive')\n    if height <= 0.0: raise ValueError('trapezoid height must be positive')\n    half_h = height / 2.0\n    pts = [(-bottom / 2.0, -half_h), (bottom / 2.0, -half_h), (top / 2.0 + skew, half_h), (-top / 2.0 + skew, half_h)]\n    return Polygon(*pts, align=None)".into(),

@@ -129,6 +129,8 @@ fn resolve_ecky_mcp_skill_dir() -> AppResult<PathBuf> {
     }
 
     let mut candidates = Vec::new();
+    // Prefer the repo-owned, generated skill when present (dev/source checkout).
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills/ecky-mcp"));
     if let Some(codex_home) = env::var_os("CODEX_HOME").map(PathBuf::from) {
         candidates.push(codex_home.join("skills").join("ecky-mcp"));
     }

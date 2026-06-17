@@ -1,46 +1,61 @@
 # Ecky CAD
 
-**Describe a part in words. Get an exact, editable, manufacturable solid — not a triangle blob.**
+Prompt-driven CAD: describe a part in words, an LLM writes it in a small modeling language, and it renders as an exact B-rep solid you can read, edit, and version.
 
-Ecky is a desktop CAD tool where you talk to an LLM and it builds real geometry. Instead of emitting a one-shot mesh or an opaque script, the model produces **Ecky IR** — a small, readable, verifiable language that compiles to an exact B-rep solid on a native OCCT kernel. You can read what the AI wrote, edit it by hand, fork it, re-render it, and trust that the same source always builds the same part.
+> Early and pre-release (v0.0.1). Expect rough edges and breaking changes.
 
-## Why Ecky is different
+## How it works
 
-Most "AI CAD" tools hand the model a Python API or a mesh generator and hope for the best. The output is hard to read, impossible to diff, and breaks the moment you tweak it. Ecky puts a **finite intermediate language** between the LLM and the kernel:
+The LLM doesn't emit a mesh or a script. It writes `.ecky`, which compiles through three layers:
 
-- **Readable surface.** An `.ecky` file is parenthesized Scheme — `(model (part ...))`. Friendly to read, friendly to edit, friendly to diff in git.
-- **Finite Core IR.** The surface lowers to a small, fixed vocabulary of operations: primitives, booleans, selectors, placements, repeats. The kernel never sees arbitrary code — only this closed set. That's what makes a model reproducible, verifiable, and portable.
-- **Exact B-rep output.** The default backend is a native OCCT kernel: real faces and edges with stable identities you can select and tag — not a triangle soup. **build123d** and **FreeCAD** are supported as follower backends for cross-checking and import.
-
-The payoff: the AI's output is something a human can actually own.
+- **Surface** — parenthesized Scheme: `(model (part ...))`.
+- **Core IR** — the fixed set of operations the surface lowers to: primitives, booleans, selectors, placements, repeats. The kernel only sees this set.
+- **Backend** — native OCCT by default (B-rep, selectable faces and edges). build123d and FreeCAD are follower backends for cross-check and import.
 
 ## What it looks like
 
-The smallest model that renders — a ball on a base:
+A parametric enclosure: named dimensions, a hollow body with a vent bored through it, a filleted top edge, and a `verify` clause that pins the lid clearance to a requirement.
 
 ```scheme
 (model
-  (part marker
-    (union
-      (box 28 28 4)
-      (translate 0 0 10
-        (sphere 10)))))
+  (params
+    (number body_w 80 :label "Body width"  :min 40 :max 120 :step 1)
+    (number body_d 50 :label "Body depth"  :min 30 :max 90  :step 1)
+    (number body_h 20 :label "Body height" :min 10 :max 40  :step 1)
+    (number wall    2 :label "Wall"         :min 1 :max 5    :step 0.5)
+    (number vent_r  3 :label "Vent radius"  :min 1 :max 6    :step 0.5))
+
+  ; the lid must keep at least 0.3 mm clearance above the body
+  (verify
+    (tag lid_clearance body.lid_gap)
+    (metric gap (clearance min-distance body lid))
+    (expect gap (>= 0.3)))
+
+  (part body
+    (build
+      (shape hollow (shell wall :faces "top" (box body_w body_d body_h)))
+      (shape vent   (translate 0 0 -0.5 (cylinder vent_r (+ body_h 1))))
+      (result
+        (fillet 1.5 :edges "top"
+          (difference hollow vent)))))
+
+  (part lid
+    (translate 0 0 (+ body_h 0.4)
+      (box (- body_w (* wall 2)) (- body_d (* wall 2)) 3))))
 ```
 
-`model` is the root. `part` gives the geometry a stable id. `box` is the base, `translate` lifts the `sphere` so it sits on top, and `union` fuses them into one solid. Everything else in the language is this same tree with more branches — parameters, sketches, fillets, shells, selectors, repeats, and reusable components.
+`params` hoists dimensions to labelled sliders. `build` names each intermediate solid; `difference` bores the vent through the shelled body; `fillet` rounds the top edges. `verify` states an invariant — minimum lid clearance — that `verify_generated_model` checks red-to-green, independent of whatever geometry currently renders.
 
-New to the language? Read the [**Ecky IR Field Guide**](docs/books/ecky-ir/index.md) — it builds up real models chapter by chapter.
+Smaller is fine too — `(model (part p (sphere 10)))` renders on its own. The [Ecky IR Field Guide](docs/books/ecky-ir/index.md) builds up from there, chapter by chapter.
 
 ## Features
 
-- **Exact modeling, not meshes.** Native OCCT B-rep kernel with selectable faces/edges; build123d and FreeCAD as interop backends.
-- **Readable, diffable source.** Scheme-surface `.ecky` files that lower to a finite Core IR.
-- **Multi-version history.** Every render is versioned and persisted in SQLite.
-- **Visual feedback loop.** Viewport screenshots are fed back to the LLM so it can see what it built and correct course.
-- **Design forking.** Branch a new thread off any existing design to mutate geometry without losing the original.
-- **Manual commits.** Edit the generated IR directly and commit it as a new version.
-- **Pluggable LLMs.** Works with Gemini, OpenAI-compatible providers, and local Ollama models.
-- **Agent-native (MCP).** A built-in MCP server lets external agents inspect, validate, preview, and commit models through a typed protocol.
+- Version history, persisted in SQLite.
+- Viewport screenshots fed back to the LLM between iterations.
+- Fork a design into a new thread.
+- Edit the generated IR by hand and commit it.
+- LLMs: Gemini, OpenAI-compatible, Ollama.
+- MCP server for external agents (inspect / validate / preview / commit).
 
 ## Getting started
 
@@ -69,17 +84,13 @@ Then open the in-app settings (⚙️) to pick an LLM provider and add your API 
 
 > Want just the web frontend without the desktop shell? `npm run dev` runs the Vite frontend and the Node server side by side.
 
-## For agents: the MCP authoring loop
+## Two ways to drive it
 
-Ecky exposes a local MCP server so AI agents can drive the modeler safely. **Never write `history.sqlite` directly** — all state changes flow through MCP. Follow `inspect → validate → preview → commit`:
+**API mode.** Ecky calls an LLM provider directly with your key and generates `.ecky` from your prompt. Pick the provider and model in settings (⚙️). Gemini, any OpenAI-compatible endpoint, and local Ollama are supported.
 
-1. `thread_borrow` (or `thread_create` for new work).
-2. `macro_preview_render` with your `.ecky` source.
-3. Verify the `artifactDigest` in the preview response.
-4. `commit_preview_version` to persist the draft.
-5. Record the returned `threadId`, `messageId`, `modelId`, and artifact digest in your change notes.
+**Agent mode (MCP).** Point an external coding agent at Ecky's built-in MCP server and it authors models with its own tools, going `inspect → validate → preview → commit` (`workspace_overview` to look around, `macro_preview_render` to preview an `.ecky` source, `commit_preview_version` to persist). Ecky can export a ready-made MCP skill bundle for the agent to load.
 
-Smoke-test the full preview→commit path:
+Smoke-test the MCP preview→commit path:
 
 ```bash
 npm run mcp:smoke -- <thread-id> <path-to-model.ecky> [mcp-url]
@@ -87,7 +98,11 @@ npm run mcp:smoke -- <thread-id> <path-to-model.ecky> [mcp-url]
 
 ## Development
 
-Ecky follows a BDD dual-loop workflow — see [AGENTS.md](AGENTS.md) for the full protocol. Key commands:
+Full conventions are in [AGENTS.md](AGENTS.md). The short version:
+
+- **Test-first (BDD dual-loop).** A change starts from a failing integration test, driven inward through unit red-green-refactor. Run the relevant suite after each step.
+- **Conventional Commits.** `type(scope): description`; release-please reads them to compute versions and the changelog.
+- **Tauri boundary.** Frontend payloads are `camelCase`, Rust structs `snake_case`; the contract layer translates. Regenerate the TS bindings with `npm run generate:contracts`.
 
 ```bash
 npm run test:unit      # Svelte/TS unit tests
@@ -95,5 +110,3 @@ npm run test:e2e       # Playwright end-to-end tests
 npm run typecheck      # svelte-check + tsc
 cd src-tauri && cargo test   # Rust backend tests
 ```
-
-The Rust backend owns the Tauri boundary: frontend payloads are `camelCase`, backend structs are `snake_case`, and the contract layer translates between them.

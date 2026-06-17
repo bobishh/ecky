@@ -1812,6 +1812,12 @@ fn tool_definitions() -> Vec<Value> {
     tool_definitions_with_ast_enabled(false)
 }
 
+/// The full MCP tool catalog (AST authoring enabled), for offline skill
+/// generation. Mirrors what the server returns for `tools/list`.
+pub fn export_mcp_tool_catalog() -> Vec<Value> {
+    tool_definitions_with_ast_enabled(true)
+}
+
 fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
@@ -7286,6 +7292,25 @@ mod tests {
             .any(|step| step.contains("target_meta_get")));
         assert!(brief.rules.len() <= 6, "{:?}", brief.rules);
         assert!(brief.next_steps.len() <= 5, "{:?}", brief.next_steps);
+    }
+
+    #[test]
+    fn export_mcp_tool_catalog_lists_core_tools() {
+        let catalog = export_mcp_tool_catalog();
+        assert!(!catalog.is_empty());
+        let names: std::collections::BTreeSet<String> = catalog
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .map(|name| name.to_string())
+            .collect();
+        for expected in [
+            "health_check",
+            "workspace_overview",
+            "macro_preview_render",
+            "commit_preview_version",
+        ] {
+            assert!(names.contains(expected), "missing tool: {expected}");
+        }
     }
 
     #[test]

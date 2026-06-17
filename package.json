@@ -21,6 +21,8 @@
     "typecheck": "svelte-check --tsconfig ./tsconfig.json && tsc --project tsconfig.node.json --noEmit",
     "generate:contracts": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_contracts",
     "check:contracts": "npm run generate:contracts && git diff --exit-code -- src/lib/tauri/contracts.ts",
+    "generate:skill": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_mcp_skill",
+    "check:skill": "npm run generate:skill && git diff --exit-code -- skills/ecky-mcp/reference",
     "test:unit": "tsx --test src/lib/**/*.test.ts",
     "test:e2e:ci": "playwright test e2e/app.spec.ts e2e/config.spec.ts e2e/layout.spec.ts e2e/genie.spec.ts e2e/params.spec.ts",
     "test:e2e": "playwright test",
