@@ -33,6 +33,10 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepLib.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <BOPAlgo_Builder.hxx>
+#include <BOPAlgo_Tools.hxx>
+#include <ShapeFix_Face.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
@@ -935,6 +939,7 @@ std::array<double, 2> require_point2_arg(const Arg& arg, const std::string& labe
 struct ProfileRefs {
     std::vector<std::uint64_t> outer;
     std::vector<std::uint64_t> holes;
+    bool soup = false;
 };
 
 ProfileRefs profile_refs(const Command& command) {
@@ -968,6 +973,12 @@ ProfileRefs profile_refs(const Command& command) {
             std::vector<std::uint64_t> holes =
                 require_ref_collection_arg(keyword.value, "profile :holes");
             refs.holes.insert(refs.holes.end(), holes.begin(), holes.end());
+            continue;
+        }
+        if (keyword.name == "fill-rule") {
+            // SVG wire-soup contract: marks wires as unclassified soup; holes
+            // are resolved by containment parity at execute time.
+            refs.soup = true;
             continue;
         }
         throw EvalError("profile does not recognize `:" + keyword.name + "`");
@@ -1486,6 +1497,217 @@ double face_area(const TopoDS_Face& face) {
     return std::abs(props.Mass());
 }
 
+// ocpsvg parity (`ensure_face_normal_up`): profile faces must present +Z
+// normals before extrusion, or the prism comes out inverted and silently
+// poisons downstream boolean operations.
+TopoDS_Face ensure_face_normal_up(TopoDS_Face face) {
+    double u_min = 0.0;
+    double u_max = 0.0;
+    double v_min = 0.0;
+    double v_max = 0.0;
+    BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+    if (!std::isfinite(u_min) || !std::isfinite(u_max) ||
+        !std::isfinite(v_min) || !std::isfinite(v_max)) {
+        return face;
+    }
+    BRepAdaptor_Surface surface(face);
+    gp_Pnt point;
+    gp_Vec du;
+    gp_Vec dv;
+    surface.D1((u_min + u_max) / 2.0, (v_min + v_max) / 2.0, point, du, dv);
+    gp_Vec normal = du.Crossed(dv);
+    if (normal.Magnitude() <= 1.0e-9) {
+        return face;
+    }
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    if (normal.Z() < 0.0) {
+        face.Reverse();
+    }
+    return face;
+}
+
+// Whole-wire containment test: every vertex of the wire must classify
+// IN/ON against the candidate face. Uses `theUseBndBox=true` (recommended
+// by OCCT for faces with >10 edges) to keep dense SVG polyline tests fast.
+bool wire_inside_face(const TopoDS_Wire& wire, const TopoDS_Face& face) {
+    bool saw_vertex = false;
+    BRepClass_FaceClassifier classifier;
+    for (TopExp_Explorer explorer(wire, TopAbs_VERTEX); explorer.More(); explorer.Next()) {
+        saw_vertex = true;
+        gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(explorer.Current()));
+        classifier.Perform(face, point, 1.0e-7, Standard_True);
+        TopAbs_State state = classifier.State();
+        if (state != TopAbs_IN && state != TopAbs_ON) {
+            return false;
+        }
+    }
+    return saw_vertex;
+}
+
+// Resolve a raw SVG wire soup into planar faces. First choice is OCCT's
+// canonical BOPAlgo_Tools::WiresToFaces — it splits intersecting/overlapping
+// wires and resolves hole nesting itself, which the hand-rolled per-wire
+// MakeFace + containment-parity below cannot do for self-intersecting artwork
+// (real lineart icons produced thousands of non-manifold edges and swallowed
+// downstream fuses). The hand-rolled path stays as a fallback for soups
+// WiresToFaces cannot face.
+TopoDS_Shape make_faces_from_wire_soup(
+    const std::vector<TopoDS_Shape>& wire_shapes
+) {
+    {
+        // 1. General-fuse every edge against every other: self-intersecting
+        //    and mutually intersecting artwork contours get split at their
+        //    crossing points (lineart icons — the case per-wire MakeFace
+        //    cannot represent).
+        BOPAlgo_Builder splitter;
+        int edge_count = 0;
+        for (const auto& shape : wire_shapes) {
+            for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+                splitter.AddArgument(explorer.Current());
+                ++edge_count;
+            }
+        }
+        if (edge_count > 0) {
+            try {
+                splitter.Perform();
+                if (!splitter.HasErrors()) {
+                    // 2. Chain the split edges back into closed wires and let
+                    //    OCCT build the planar region faces with hole nesting.
+                    TopoDS_Shape wires_shape;
+                    BOPAlgo_Tools::EdgesToWires(splitter.Shape(), wires_shape, Standard_False);
+                    TopoDS_Shape faces_shape;
+                    if (BOPAlgo_Tools::WiresToFaces(wires_shape, faces_shape)) {
+                        // 3. Every returned face is material (holes are inner
+                        //    wires already). Adjacent regions share seam edges
+                        //    from the arrangement; unify them into one face so
+                        //    the per-region prisms don't fight over coincident
+                        //    walls in later booleans. Unify (not fuse!) keeps
+                        //    hole rings intact.
+                        ShapeUpgrade_UnifySameDomain unify(
+                            faces_shape, Standard_True, Standard_True, Standard_False);
+                        unify.Build();
+                        TopoDS_Shape unified = unify.Shape();
+                        if (unified.IsNull()) {
+                            unified = faces_shape;
+                        }
+                        std::vector<TopoDS_Shape> region_faces;
+                        for (TopExp_Explorer explorer(unified, TopAbs_FACE); explorer.More();
+                             explorer.Next()) {
+                            region_faces.push_back(
+                                ensure_face_normal_up(TopoDS::Face(explorer.Current())));
+                        }
+                        if (region_faces.size() == 1) {
+                            return region_faces.front();
+                        }
+                        if (!region_faces.empty()) {
+                            BRep_Builder faces_builder;
+                            TopoDS_Compound face_compound;
+                            faces_builder.MakeCompound(face_compound);
+                            for (const auto& face : region_faces) {
+                                faces_builder.Add(face_compound, face);
+                            }
+                            return face_compound;
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
+    }
+    struct FacedWire {
+        TopoDS_Wire wire;
+        TopoDS_Face face;
+        double area = 0.0;
+    };
+    std::vector<FacedWire> faced;
+    faced.reserve(wire_shapes.size());
+    for (const auto& shape : wire_shapes) {
+        try {
+            TopoDS_Wire wire = first_wire(shape, "profile");
+            BRepBuilderAPI_MakeFace builder(wire, Standard_True);
+            if (!builder.IsDone()) {
+                continue;
+            }
+            TopoDS_Face face = TopoDS::Face(builder.Shape());
+            ShapeFix_Face fixer(face);
+            fixer.Perform();
+            fixer.FixOrientation();
+            face = fixer.Face();
+            FacedWire entry;
+            entry.wire = wire;
+            entry.face = face;
+            entry.area = face_area(face);
+            faced.push_back(entry);
+        } catch (...) {
+            continue;
+        }
+    }
+    if (faced.empty()) {
+        throw EvalError("profile wire soup produced no faceable regions");
+    }
+
+    const std::size_t n = faced.size();
+    std::vector<int> depth(n, 0);
+    std::vector<std::optional<std::size_t>> parent(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        double parent_area = 0.0;
+        for (std::size_t j = 0; j < n; ++j) {
+            if (i == j) {
+                continue;
+            }
+            if (!wire_inside_face(faced[i].wire, faced[j].face)) {
+                continue;
+            }
+            depth[i] += 1;
+            if (!parent[i].has_value() || faced[j].area < parent_area) {
+                parent[i] = j;
+                parent_area = faced[j].area;
+            }
+        }
+    }
+
+    std::vector<TopoDS_Shape> faces;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (depth[i] % 2 != 0) {
+            continue;
+        }
+        try {
+        BRepBuilderAPI_MakeFace face_builder(faced[i].wire, Standard_True);
+        if (!face_builder.IsDone()) {
+            continue;
+        }
+        for (std::size_t j = 0; j < n; ++j) {
+            if (depth[j] % 2 == 0 || !parent[j].has_value() || *parent[j] != i) {
+                continue;
+            }
+            face_builder.Add(TopoDS::Wire(faced[j].wire.Reversed()));
+        }
+        TopoDS_Face region = TopoDS::Face(face_builder.Shape());
+        ShapeFix_Face region_fixer(region);
+        region_fixer.Perform();
+        region_fixer.FixOrientation();
+        faces.push_back(ensure_face_normal_up(region_fixer.Face()));
+        } catch (...) {
+            continue;
+        }
+    }
+    if (faces.empty()) {
+        throw EvalError("profile wire soup produced no regions");
+    }
+    if (faces.size() == 1) {
+        return faces.front();
+    }
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const auto& face : faces) {
+        builder.Add(compound, face);
+    }
+    return compound;
+}
+
 TopoDS_Shape make_profile_face(
     const std::vector<TopoDS_Shape>& outer_shapes,
     const std::vector<TopoDS_Shape>& hole_shapes
@@ -1544,7 +1766,16 @@ TopoDS_Shape make_profile_face(
         for (const auto& hole_wire : hole_wires_by_outer[index]) {
             face_builder.Add(TopoDS::Wire(hole_wire.Reversed()));
         }
-        faces.push_back(face_builder.Shape());
+        // ocpsvg parity: outer/hole wires arrive in arbitrary winding (font
+        // glyph counters are the usual offender). ShapeFix_Face repairs ring
+        // orientation; ensure_face_normal_up keeps the +Z normal so the
+        // extruded prism is not inverted — an inverted prism silently swallows
+        // the other operand of a later fuse.
+        TopoDS_Face oriented_face = TopoDS::Face(face_builder.Shape());
+        ShapeFix_Face face_fixer(oriented_face);
+        face_fixer.Perform();
+        face_fixer.FixOrientation();
+        faces.push_back(ensure_face_normal_up(face_fixer.Face()));
     }
     if (faces.size() == 1) {
         return faces.front();
@@ -1861,7 +2092,63 @@ TopoDS_Shape make_wedge(
     return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
 }
 
+TopoDS_Shape compound_shapes(const std::vector<TopoDS_Shape>& shapes);
+
 TopoDS_Shape extrude_shape(const TopoDS_Shape& shape, double height) {
+    // Multi-region profiles (glyph text, SVG artwork soup) arrive as compounds
+    // whose faces may overlap. Prism of the raw compound keeps the overlapping
+    // solids side by side and poisons downstream booleans; extrude per face
+    // and fuse the prisms into one valid solid instead (build123d parity).
+    std::vector<TopoDS_Shape> profile_faces;
+    if (shape.ShapeType() == TopAbs_COMPOUND) {
+        for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More();
+             face_explorer.Next()) {
+            profile_faces.push_back(face_explorer.Current());
+        }
+    }
+    if (profile_faces.size() > 1) {
+        // Merge overlapping regions in 2D before extruding: fusing overlapping
+        // *prisms* leaves coincident-but-unshared seam edges in the coplanar
+        // cap faces (hairline non-manifold cracks in the STL). Fusing the
+        // planar faces first and unifying the seam (build123d `clean` parity)
+        // gives each merged region a single clean cap.
+        TopoDS_Shape merged = profile_faces.front();
+        for (std::size_t face_index = 1; face_index < profile_faces.size(); ++face_index) {
+            BRepAlgoAPI_Fuse region_fuse(merged, profile_faces[face_index]);
+            if (!region_fuse.IsDone()) {
+                throw EvalError("extrude failed to merge overlapping profile regions");
+            }
+            merged = region_fuse.Shape();
+        }
+        ShapeUpgrade_UnifySameDomain unify(merged, Standard_True, Standard_True, Standard_False);
+        unify.Build();
+        merged = unify.Shape();
+
+        std::vector<TopoDS_Shape> region_faces;
+        for (TopExp_Explorer region_explorer(merged, TopAbs_FACE); region_explorer.More();
+             region_explorer.Next()) {
+            region_faces.push_back(
+                ensure_face_normal_up(TopoDS::Face(region_explorer.Current())));
+        }
+        if (region_faces.empty()) {
+            throw EvalError("extrude found no faces in multi-region profile");
+        }
+        // After the 2D merge the regions are disjoint (overlaps were fused in
+        // the plane). Keep the prisms as a compound: a boolean fuse of the
+        // disjoint prisms rebuilds every face and leaves cap/wall boundary
+        // edges duplicated instead of shared — later transforms drift the
+        // duplicates a few ULPs apart and the STL grows hairline non-manifold
+        // cracks along entire glyph outlines.
+        std::vector<TopoDS_Shape> prisms;
+        prisms.reserve(region_faces.size());
+        for (const auto& region_face : region_faces) {
+            prisms.push_back(BRepPrimAPI_MakePrism(region_face, gp_Vec(0, 0, height)).Shape());
+        }
+        if (prisms.size() == 1) {
+            return prisms.front();
+        }
+        return compound_shapes(prisms);
+    }
     return BRepPrimAPI_MakePrism(shape, gp_Vec(0, 0, height)).Shape();
 }
 
@@ -2801,15 +3088,42 @@ TopoDS_Shape make_bezier_path_wire(const std::vector<std::array<double, 3>>& poi
     if (points.size() < 4 || (points.size() - 1) % 3 != 0) {
         throw EvalError("bezier-path expects 3n+1 control points");
     }
+    // Flatten cubic Bézier segments to a polyline of linear edges.
+    // Rationale: constructing `Geom_BezierCurve` in this translation unit
+    // duplicates its typeinfo against the OCCT dylib, which corrupts
+    // `dynamic_cast` and C++ catch-by-type dispatch across the whole runner
+    // (gp_VectorWithNullMagnitude thrown by OCCT booleans then escapes every
+    // `catch (const Standard_Failure&)`). Linear edges carry their typeinfo in
+    // the OCCT dylib and are already what every other op here produces, so the
+    // wire-soup arrangement and downstream booleans stay stable. The	n    // exact-curve parity feature must wait for the runner to be built inside
+    // OCCT's visibility scope (see openspec/changes/svg-native-exact-curves).
+    constexpr int SAMPLES = 16;
     BRepBuilderAPI_MakeWire wire_builder;
+    gp_Pnt prev;
+    bool have_prev = false;
     for (std::size_t start = 0; start < points.size() - 1; start += 3) {
-        TColgp_Array1OfPnt poles(1, 4);
-        for (int local_index = 0; local_index < 4; ++local_index) {
-            const auto& point = points[start + static_cast<std::size_t>(local_index)];
-            poles.SetValue(local_index + 1, gp_Pnt(point[0], point[1], point[2]));
+        const auto& p0 = points[start];
+        const auto& p1 = points[start + 1];
+        const auto& p2 = points[start + 2];
+        const auto& p3 = points[start + 3];
+        if (!have_prev) {
+            prev = gp_Pnt(p0[0], p0[1], p0[2]);
+            have_prev = true;
         }
-        Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(poles);
-        wire_builder.Add(BRepBuilderAPI_MakeEdge(curve).Edge());
+        for (int step = 1; step <= SAMPLES; ++step) {
+            double t = static_cast<double>(step) / SAMPLES;
+            double mt = 1.0 - t;
+            double a = mt * mt * mt;
+            double b = 3.0 * mt * mt * t;
+            double c = 3.0 * mt * t * t;
+            double d = t * t * t;
+            gp_Pnt next(
+                a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+                a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1],
+                a * p0[2] + b * p1[2] + c * p2[2] + d * p3[2]);
+            wire_builder.Add(BRepBuilderAPI_MakeEdge(prev, next).Edge());
+            prev = next;
+        }
     }
     return wire_builder.Wire();
 }
@@ -3267,6 +3581,9 @@ SlotValue evaluate_command(
         for (std::uint64_t ref : refs.outer) {
             outer_shapes.push_back(lookup_shape(slots, ref, op));
         }
+        if (refs.soup) {
+            return make_faces_from_wire_soup(outer_shapes);
+        }
         std::vector<TopoDS_Shape> hole_shapes;
         hole_shapes.reserve(refs.holes.size());
         for (std::uint64_t ref : refs.holes) {
@@ -3531,6 +3848,59 @@ void write_step_file(const fs::path& path, const TopoDS_Shape& shape) {
 static constexpr double kStlLinearDeflection = 0.04;   // mm chord error
 static constexpr double kStlAngularDeflection = 0.25;  // rad (~14 deg) per facet
 
+// Weld tolerance for STL vertices. Boolean rebuilds and transform round-trips
+// leave duplicated boundary topology whose tessellations drift a few double
+// ULPs apart (e.g. a shared glyph-outline vertex written as two coordinates
+// straddling an f32 rounding boundary). Downstream manifold checks compare
+// exact bits, so even 1e-16 drift reads as a crack. Welding at 1e-6 mm is two
+// orders below the 0.04 mm chord error and far below any modelled clearance.
+constexpr double kStlWeldTolerance = 1.0e-6;
+
+// Snap a point to the coordinates of a previously seen point within the weld
+// tolerance (spatial hash over grid cells, checking neighbor cells so pairs
+// straddling a cell boundary still merge).
+class StlVertexWelder {
+public:
+    gp_Pnt weld(const gp_Pnt& point) {
+        const std::int64_t cx = cell(point.X());
+        const std::int64_t cy = cell(point.Y());
+        const std::int64_t cz = cell(point.Z());
+        for (std::int64_t dx = -1; dx <= 1; ++dx) {
+            for (std::int64_t dy = -1; dy <= 1; ++dy) {
+                for (std::int64_t dz = -1; dz <= 1; ++dz) {
+                    auto bucket = buckets_.find(key(cx + dx, cy + dy, cz + dz));
+                    if (bucket == buckets_.end()) {
+                        continue;
+                    }
+                    for (const gp_Pnt& candidate : bucket->second) {
+                        if (point.SquareDistance(candidate) <=
+                            kStlWeldTolerance * kStlWeldTolerance) {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+        gp_Pnt snapped(
+            point.X() == 0.0 ? 0.0 : point.X(),
+            point.Y() == 0.0 ? 0.0 : point.Y(),
+            point.Z() == 0.0 ? 0.0 : point.Z());
+        buckets_[key(cx, cy, cz)].push_back(snapped);
+        return snapped;
+    }
+
+private:
+    static std::int64_t cell(double value) {
+        return static_cast<std::int64_t>(std::floor(value / kStlWeldTolerance));
+    }
+
+    static std::string key(std::int64_t x, std::int64_t y, std::int64_t z) {
+        return std::to_string(x) + ":" + std::to_string(y) + ":" + std::to_string(z);
+    }
+
+    std::map<std::string, std::vector<gp_Pnt>> buckets_;
+};
+
 void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
     BRepMesh_IncrementalMesh mesh(
         shape, kStlLinearDeflection, Standard_False, kStlAngularDeflection, Standard_True);
@@ -3540,6 +3910,7 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
     }
     out << "solid ecky\n";
     bool wrote_triangle = false;
+    StlVertexWelder welder;
     for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
         TopoDS_Face face = TopoDS::Face(face_explorer.Current());
         TopLoc_Location location;
@@ -3555,9 +3926,9 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
             Standard_Integer n2 = 0;
             Standard_Integer n3 = 0;
             triangles(triangle_index).Get(n1, n2, n3);
-            gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
-            gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
-            gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
+            gp_Pnt p1 = welder.weld(triangulation->Node(n1).Transformed(transform));
+            gp_Pnt p2 = welder.weld(triangulation->Node(n2).Transformed(transform));
+            gp_Pnt p3 = welder.weld(triangulation->Node(n3).Transformed(transform));
             if (face.Orientation() == TopAbs_REVERSED) {
                 std::swap(p2, p3);
             }
