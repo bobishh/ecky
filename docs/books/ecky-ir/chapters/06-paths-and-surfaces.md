@@ -37,6 +37,18 @@ The circle is the cross-section. The bezier path is the centerline. Sweep keeps 
 
 Use `loft` when one profile needs to become another profile across height or distance.
 
+```scheme
+(model
+  (part nozzle
+    (loft 24
+      (circle 14 32)
+      (circle 5 32))))
+```
+
+![Rendered output for Paths and Surfaces: Revolve and Sweep, example 3](assets/06-paths-and-surfaces-03.png)
+
+The first profile is the base, the last is the cap, and `loft` skins a smooth wall between them. The leading number is the total height; profiles stack evenly along it, so the wide circle sits at the bottom and the narrow one at the top.
+
 ### Ribs and grooves
 
 `rib` and `groove` are the two-step "sweep a profile, then combine" move rolled into one op. Both take a solid, a profile, and a path: `rib` sweeps the profile along the path and fuses the result onto the solid (a reinforcing rib); `groove` sweeps it and cuts it away (a channel).
@@ -49,5 +61,7 @@ Use `loft` when one profile needs to become another profile across height or dis
       (circle 3)
       (path (0 0 0) (0 0 30)))))
 ```
+
+![Rendered output for Paths and Surfaces: Revolve and Sweep, example 4](assets/06-paths-and-surfaces-04.png)
 
 Swap `rib` for `groove` to subtract the same swept run instead of adding it. They lower to `sweep` + `union`/`difference`, so they render on every backend.

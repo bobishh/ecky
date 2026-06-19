@@ -51,6 +51,8 @@ Tag any fit-critical selector. The tag records intended topology in the manifest
       (box 70 44 22))))
 ```
 
+![Rendered output for Round, Chamfer, Shell: Select Edges and Faces, example 4](assets/05-round-shell-select-04.png)
+
 When a `build` introduces helper solids, use `:created-by <shape>` to keep clause selectors scoped to topology from that intermediate shape only.
 
 ```scheme
@@ -99,5 +101,7 @@ A normal `fillet` uses one radius. Add `:to-radius` and the radius varies along 
   (part p
     (draft 8 (box 30 30 20))))
 ```
+
+![Rendered output for Round, Chamfer, Shell: Select Edges and Faces, example 7](assets/05-round-shell-select-07.png)
 
 > **Backend note:** draft is rendered by the native and build123d backends (both OpenCASCADE). The FreeCAD backend has no Part draft API, so it rejects `draft` with a clear error. This first cut drafts *all* vertical faces; targeting specific faces with a `:faces` selector is a planned extension.

@@ -48,18 +48,29 @@ def main() -> int:
     PUBLIC_ASSET_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+    rendered = 0
+    skipped = 0
     for example in examples:
         ecky_path = WORK_DIR / f"{example.asset_stem}.ecky"
         render_root = WORK_DIR / example.asset_stem
         ecky_path.write_text(example.code + "\n", encoding="utf-8")
         render_root.mkdir(parents=True, exist_ok=True)
-        stl_path = render_preview_stl(ecky_path, render_root)
-        asset_path = ASSET_DIR / example.asset_name
-        render_stl_png(stl_path, asset_path, example.title)
-        (PUBLIC_ASSET_DIR / example.asset_name).write_bytes(asset_path.read_bytes())
-        ensure_chapter_image(example)
+        try:
+            stl_path = render_preview_stl(ecky_path, render_root)
+            asset_path = ASSET_DIR / example.asset_name
+            render_stl_png(stl_path, asset_path, example.title)
+            (PUBLIC_ASSET_DIR / example.asset_name).write_bytes(asset_path.read_bytes())
+            ensure_chapter_image(example)
+            rendered += 1
+        except Exception as exc:
+            # Some book examples are deliberately backend-specific (e.g. the
+            # native-only `:created-by` selector, which build123d rejects). Skip
+            # those instead of aborting the whole book render, but surface them.
+            first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else repr(exc)
+            print(f"SKIPPED {example.asset_name}: {first_line}", flush=True)
+            skipped += 1
 
-    print(f"rendered examples: {len(examples)}")
+    print(f"rendered examples: {rendered} (skipped: {skipped})")
     return 0
 
 
