@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 use tauri::{AppHandle, State};
@@ -402,60 +402,66 @@ fn indexed_three_mf_mesh(triangles: Vec<[[f32; 3]; 3]>) -> (Vec<[f32; 3]>, Vec<[
     (vertices, indexed_triangles)
 }
 
-fn read_f32<R: Read>(reader: &mut R) -> AppResult<f32> {
-    let mut bytes = [0u8; 4];
-    reader.read_exact(&mut bytes).map_err(|err| {
-        AppError::internal(format!(
-            "Failed to read STL scalar while exporting multipart model: {}",
-            err
-        ))
-    })?;
-    Ok(f32::from_le_bytes(bytes))
-}
-
-fn read_vec3<R: Read>(reader: &mut R) -> AppResult<[f32; 3]> {
-    Ok([read_f32(reader)?, read_f32(reader)?, read_f32(reader)?])
-}
-
 fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
-    let mut file = File::open(path).map_err(|err| {
+    let bytes = fs::read(path).map_err(|err| {
         AppError::not_found(format!(
             "Failed to open STL part '{}' for multipart export: {}",
             path.display(),
             err
         ))
     })?;
-    let mut header = [0u8; 80];
-    file.read_exact(&mut header).map_err(|err| {
-        AppError::internal(format!(
-            "Failed to read STL header from '{}' while exporting multipart model: {}",
+    if bytes.len() < 84 {
+        return Err(AppError::internal(format!(
+            "STL part '{}' is too small ({}) to be a valid binary STL while exporting multipart model.",
             path.display(),
-            err
-        ))
-    })?;
-    let mut count_bytes = [0u8; 4];
-    file.read_exact(&mut count_bytes).map_err(|err| {
-        AppError::internal(format!(
-            "Failed to read STL triangle count from '{}' while exporting multipart model: {}",
+            bytes.len()
+        )));
+    }
+    // ASCII STL starts with "solid". Detect it explicitly so callers get a clear
+    // error instead of the cryptic read_exact EOF ("failed to fill whole buffer")
+    // that results from reading ASCII text as a triangle count.
+    let header_is_ascii = bytes.starts_with(b"solid");
+    let triangle_count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+    let expected_binary_len = 84 + triangle_count * 50;
+    if header_is_ascii && bytes.len() != expected_binary_len {
+        return Err(AppError::internal(format!(
+            "STL part '{}' appears to be ASCII STL. Multipart export requires binary STL. Re-render the model to regenerate binary part files. (path: {})",
+            path.file_name().map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string()),
+            path.display()
+        )));
+    }
+    if bytes.len() != expected_binary_len {
+        return Err(AppError::internal(format!(
+            "STL part '{}' is malformed: header declares {} triangles (expects {} bytes) but the file is {} bytes while exporting multipart model.",
             path.display(),
-            err
-        ))
-    })?;
-    let triangle_count = u32::from_le_bytes(count_bytes) as usize;
+            triangle_count,
+            expected_binary_len,
+            bytes.len()
+        )));
+    }
     let mut triangles = Vec::with_capacity(triangle_count);
+    let mut off = 84usize;
     for _ in 0..triangle_count {
-        let _normal = read_vec3(&mut file)?;
-        let a = read_vec3(&mut file)?;
-        let b = read_vec3(&mut file)?;
-        let c = read_vec3(&mut file)?;
-        let mut attr = [0u8; 2];
-        file.read_exact(&mut attr).map_err(|err| {
-            AppError::internal(format!(
-                "Failed to read STL triangle attributes from '{}' while exporting multipart model: {}",
-                path.display(),
-                err
-            ))
-        })?;
+        off += 12; // normal
+        let a = [
+            f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()),
+            f32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap()),
+            f32::from_le_bytes(bytes[off + 8..off + 12].try_into().unwrap()),
+        ];
+        off += 12;
+        let b = [
+            f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()),
+            f32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap()),
+            f32::from_le_bytes(bytes[off + 8..off + 12].try_into().unwrap()),
+        ];
+        off += 12;
+        let c = [
+            f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()),
+            f32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap()),
+            f32::from_le_bytes(bytes[off + 8..off + 12].try_into().unwrap()),
+        ];
+        off += 12 + 2; // last vertex + attribute
         triangles.push([a, b, c]);
     }
     Ok(triangles)
@@ -1758,6 +1764,134 @@ mod tests {
             error.to_string().contains("Missing Ring"),
             "unexpected error: {}",
             error
+        );
+    }
+
+    fn helper_write_ascii_stl(path: &Path, triangles: &[[[f32; 3]; 3]]) {
+        let mut s = String::from("solid ecky\n");
+        for [a, b, c] in triangles {
+            s.push_str(&format!(
+                "facet normal 0 0 1\n  outer loop\n    vertex {} {} {}\n    vertex {} {} {}\n    vertex {} {} {}\n  endloop\nendfacet\n",
+                a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2],
+            ));
+        }
+        s.push_str("endsolid ecky\n");
+        fs::write(path, s).unwrap();
+    }
+
+    #[test]
+    fn multipart_export_3mf_preserves_distinct_part_geometry() {
+        // Regression: two parts with distinct geometry must survive export as two
+        // separate objects, not collapse into one. The old suite missed this because
+        // write_binary_stl() emits the SAME triangle for every part file.
+        let root = temp_export_dir("multipart-distinct-3mf");
+        let body_path = root.join("body.stl");
+        let lid_path = root.join("lid.stl");
+        write_binary_stl_triangles_to_path(
+            &body_path,
+            &[
+                [[0.0, 0.0, 0.0], [50.0, 0.0, 0.0], [0.0, 40.0, 0.0]],
+                [[50.0, 0.0, 0.0], [50.0, 40.0, 0.0], [0.0, 40.0, 0.0]],
+            ],
+        );
+        write_binary_stl_triangles_to_path(
+            &lid_path,
+            &[
+                [[-78.0, -48.0, 11.0], [55.0, -48.0, 11.0], [-78.0, 48.0, 11.0]],
+                [[55.0, -48.0, 11.0], [55.0, 48.0, 11.0], [-78.0, 48.0, 11.0]],
+            ],
+        );
+        let three_mf_path = root.join("repro.3mf");
+        export_multipart_3mf_impl(
+            &[
+                ExportPartInput {
+                    label: "woodlouse_trap_body".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: Some("woodlouse_trap_body".to_string()),
+                    part_id: Some("part-body".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "woodlouse_trap_slide_lid".to_string(),
+                    path: lid_path.to_string_lossy().to_string(),
+                    object_name: Some("woodlouse_trap_slide_lid".to_string()),
+                    part_id: Some("part-lid".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+            ],
+            three_mf_path.to_string_lossy().as_ref(),
+            "woodlouse".to_string(),
+        )
+        .expect("3MF export must succeed for two valid binary STL parts");
+
+        let file = fs::File::open(&three_mf_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut model_xml = String::new();
+        archive
+            .by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model_xml)
+            .unwrap();
+
+        assert_eq!(
+            model_xml.matches("<object ").count(),
+            2,
+            "expected exactly 2 objects in 3MF\n{}",
+            model_xml
+        );
+        // body spans x=[0,50]; lid (localized) spans x=[0,133]. Distinct geometry
+        // means both span widths must appear as vertex coordinates.
+        assert!(model_xml.contains(r#"x="50.00000""#), "body geometry lost");
+        assert!(
+            model_xml.contains(r#"x="133.00000""#),
+            "lid geometry lost"
+        );
+    }
+
+    #[test]
+    fn multipart_export_rejects_ascii_stl_with_clear_message() {
+        // Defense-in-depth: native backends must never feed ASCII STL here once the
+        // writer is fixed, but if they do, the error must name ASCII explicitly
+        // instead of the cryptic "failed to fill whole buffer".
+        let root = temp_export_dir("multipart-ascii-reject");
+        let body_path = root.join("body.stl");
+        let lid_path = root.join("lid.stl");
+        write_binary_stl_triangles_to_path(&body_path, &[
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+        ]);
+        helper_write_ascii_stl(
+            &lid_path,
+            &[[[-78.0, -48.0, 11.0], [55.0, -48.0, 11.0], [-78.0, 48.0, 11.0]]],
+        );
+        let three_mf_path = root.join("ascii.3mf");
+        let err = export_multipart_3mf_impl(
+            &[
+                ExportPartInput {
+                    label: "body".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: Some("body".to_string()),
+                    part_id: Some("part-body".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "lid".to_string(),
+                    path: lid_path.to_string_lossy().to_string(),
+                    object_name: Some("lid".to_string()),
+                    part_id: Some("part-lid".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+            ],
+            three_mf_path.to_string_lossy().as_ref(),
+            "ascii-model".to_string(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("ascii"),
+            "ASCII STL must be rejected with a message naming ASCII, got: {err}"
         );
     }
 

@@ -3688,6 +3688,15 @@ SlotValue evaluate_command(
     if (op == "bspline") {
         return make_bspline_shape(bspline_args(command));
     }
+    if (op == "hull") {
+        std::vector<Arg> refs = require_ref_list(command.args, op);
+        std::vector<TopoDS_Shape> hull_inputs;
+        hull_inputs.reserve(refs.size());
+        for (const Arg& arg : refs) {
+            hull_inputs.push_back(lookup_shape(slots, arg.ref_value, op));
+        }
+        return convex_hull_shapes(hull_inputs);
+    }
     if (op == "union" || op == "difference" || op == "intersection" || op == "compound") {
         std::vector<Arg> refs = require_ref_list(command.args, op);
         if (op == "compound") {
@@ -3904,12 +3913,13 @@ private:
 void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
     BRepMesh_IncrementalMesh mesh(
         shape, kStlLinearDeflection, Standard_False, kStlAngularDeflection, Standard_True);
-    std::ofstream out(path);
-    if (!out) {
-        throw IoError("failed to write STL");
-    }
-    out << "solid ecky\n";
-    bool wrote_triangle = false;
+    // Collect triangles first (welded, degenerate-skipped), then write as binary
+    // STL. Binary format is required because downstream multipart export
+    // (3MF / zip) parses the binary triangle-count header; ASCII STL makes the
+    // count field read as garbage and the parser fails with "failed to fill
+    // whole buffer".
+    struct Triangle { gp_Pnt p1, p2, p3; };
+    std::vector<Triangle> triangles;
     StlVertexWelder welder;
     for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
         TopoDS_Face face = TopoDS::Face(face_explorer.Current());
@@ -3919,13 +3929,13 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
             continue;
         }
         gp_Trsf transform = location.Transformation();
-        const Poly_Array1OfTriangle& triangles = triangulation->Triangles();
-        for (Standard_Integer triangle_index = triangles.Lower(); triangle_index <= triangles.Upper();
+        const Poly_Array1OfTriangle& tri_arr = triangulation->Triangles();
+        for (Standard_Integer triangle_index = tri_arr.Lower(); triangle_index <= tri_arr.Upper();
              ++triangle_index) {
             Standard_Integer n1 = 0;
             Standard_Integer n2 = 0;
             Standard_Integer n3 = 0;
-            triangles(triangle_index).Get(n1, n2, n3);
+            tri_arr(triangle_index).Get(n1, n2, n3);
             gp_Pnt p1 = welder.weld(triangulation->Node(n1).Transformed(transform));
             gp_Pnt p2 = welder.weld(triangulation->Node(n2).Transformed(transform));
             gp_Pnt p3 = welder.weld(triangulation->Node(n3).Transformed(transform));
@@ -3938,20 +3948,49 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
             if (normal.SquareMagnitude() <= 1.0e-18) {
                 continue;
             }
-            normal.Normalize();
-            out << "facet normal " << normal.X() << " " << normal.Y() << " " << normal.Z() << "\n";
-            out << "  outer loop\n";
-            out << "    vertex " << p1.X() << " " << p1.Y() << " " << p1.Z() << "\n";
-            out << "    vertex " << p2.X() << " " << p2.Y() << " " << p2.Z() << "\n";
-            out << "    vertex " << p3.X() << " " << p3.Y() << " " << p3.Z() << "\n";
-            out << "  endloop\n";
-            out << "endfacet\n";
-            wrote_triangle = true;
+            triangles.push_back({p1, p2, p3});
         }
     }
-    out << "endsolid ecky\n";
-    if (!wrote_triangle || !out.good()) {
+    if (triangles.empty()) {
         throw IoError("failed to write STL: shape produced no triangulated faces");
+    }
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        throw IoError("failed to write STL");
+    }
+    // 80-byte header (blank) + 4-byte little-endian triangle count + 50 bytes
+    // per triangle (12 normal + 3*12 vertices + 2 attribute).
+    std::string header(80, '\0');
+    out.write(header.data(), 80);
+    std::uint32_t count = static_cast<std::uint32_t>(triangles.size());
+    out.write(reinterpret_cast<const char*>(&count), 4);
+    auto write_float = [&](float value) {
+        out.write(reinterpret_cast<const char*>(&value), 4);
+    };
+    for (const auto& tri : triangles) {
+        gp_Vec edge_a(tri.p1, tri.p2);
+        gp_Vec edge_b(tri.p1, tri.p3);
+        gp_Vec normal = edge_a.Crossed(edge_b);
+        if (normal.SquareMagnitude() > 1.0e-18) {
+            normal.Normalize();
+        }
+        write_float(static_cast<float>(normal.X()));
+        write_float(static_cast<float>(normal.Y()));
+        write_float(static_cast<float>(normal.Z()));
+        write_float(static_cast<float>(tri.p1.X()));
+        write_float(static_cast<float>(tri.p1.Y()));
+        write_float(static_cast<float>(tri.p1.Z()));
+        write_float(static_cast<float>(tri.p2.X()));
+        write_float(static_cast<float>(tri.p2.Y()));
+        write_float(static_cast<float>(tri.p2.Z()));
+        write_float(static_cast<float>(tri.p3.X()));
+        write_float(static_cast<float>(tri.p3.Y()));
+        write_float(static_cast<float>(tri.p3.Z()));
+        std::uint16_t attr = 0;
+        out.write(reinterpret_cast<const char*>(&attr), 2);
+    }
+    if (!out.good()) {
+        throw IoError("failed to write STL: I/O error after writing triangles");
     }
 }
 
@@ -4041,6 +4080,23 @@ int run(int argc, char** argv) {
 
     write_step_file(step_path, export_shape);
     write_stl_file(stl_path, export_shape);
+    // Write per-part binary STL files so multipart export (3MF / zip) has
+    // distinct geometry per part instead of duplicating the merged mesh.
+    if (parts.size() > 1) {
+        const fs::path parts_dir = out_dir / "parts";
+        fs::create_directories(parts_dir);
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            std::string name = parts[i].part_id;
+            if (name.empty()) {
+                name = parts[i].label;
+            }
+            if (name.empty()) {
+                name = "part_" + std::to_string(i);
+            }
+            const fs::path part_stl = parts_dir / (name + ".stl");
+            write_stl_file(part_stl, parts[i].shape);
+        }
+    }
     write_topology_report(topology_path, parts);
     return 0;
 }

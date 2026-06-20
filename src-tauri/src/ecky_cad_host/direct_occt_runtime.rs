@@ -152,6 +152,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         NativeExportOutcome::Exported {
             step_path,
             stl_path,
+            part_stl_paths,
         } => {
             if program.parts.is_empty() {
                 return Err(AppError::validation(
@@ -184,6 +185,18 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
                         .map(|stable_node_key| (part.key.clone(), stable_node_key))
                 })
                 .collect::<HashMap<_, _>>();
+            // Build a map of part_key -> bundle-relative STL path. Per-part STL
+            // files are written by the executor into `parts/NNN-label.stl`. When
+            // the backend only produced a merged preview, fall back to that.
+            let part_asset_paths = part_stl_paths
+                .iter()
+                .filter_map(|(key, abs_path)| {
+                    let rel = abs_path
+                        .strip_prefix(&bundle_dir)
+                        .ok()?;
+                    Some((key.clone(), path_to_string(rel).unwrap_or_else(|_| rel.to_string_lossy().to_string())))
+                })
+                .collect::<HashMap<_, _>>();
             let manifest = build_direct_occt_manifest_with_stable_node_keys(
                 &model_id,
                 &source_path,
@@ -193,6 +206,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
                 topology_report,
                 &part_stable_node_keys,
                 &part_root_node_ids,
+                &part_asset_paths,
             )?;
             let bundle = build_direct_occt_bundle(
                 &model_id,
@@ -229,6 +243,7 @@ pub(crate) fn build_direct_occt_manifest(
     part_root_node_ids: &HashMap<String, u64>,
 ) -> AppResult<ModelManifest> {
     let part_stable_node_keys = HashMap::new();
+    let part_asset_paths = HashMap::new();
     build_direct_occt_manifest_with_stable_node_keys(
         model_id,
         source_path,
@@ -238,6 +253,7 @@ pub(crate) fn build_direct_occt_manifest(
         topology_report,
         &part_stable_node_keys,
         part_root_node_ids,
+        &part_asset_paths,
     )
 }
 
@@ -250,8 +266,9 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
     topology_report: Option<&DirectOcctTopologyReport>,
     part_stable_node_keys: &HashMap<String, String>,
     part_root_node_ids: &HashMap<String, u64>,
+    part_asset_paths: &HashMap<String, String>,
 ) -> AppResult<ModelManifest> {
-    let part_bindings = direct_occt_part_bindings(parts, parameter_keys);
+    let part_bindings = direct_occt_part_bindings(parts, parameter_keys, part_asset_paths);
     let part_ids = part_bindings
         .iter()
         .map(|part| part.part_id.clone())
@@ -321,6 +338,7 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
 fn direct_occt_part_bindings(
     parts: &[(String, String)],
     parameter_keys: &[String],
+    part_asset_paths: &HashMap<String, String>,
 ) -> Vec<PartBinding> {
     let specs = if parts.is_empty() {
         vec![("body".to_string(), "Body".to_string())]
@@ -347,13 +365,19 @@ fn direct_occt_part_bindings(
             } else {
                 label
             };
+            // Prefer a per-part STL when the executor wrote one; fall back to the
+            // merged preview so single-part and legacy backends keep working.
+            let viewer_asset_path = part_asset_paths
+                .get(&part_id)
+                .cloned()
+                .unwrap_or_else(|| PREVIEW_STL_FILE_NAME.to_string());
             PartBinding {
                 part_id: part_id.clone(),
                 freecad_object_name: part_id.clone(),
                 label,
                 kind: "solid".to_string(),
                 semantic_role: Some("generated".to_string()),
-                viewer_asset_path: Some(PREVIEW_STL_FILE_NAME.to_string()),
+                viewer_asset_path: Some(viewer_asset_path),
                 viewer_node_ids: vec![part_id.clone()],
                 parameter_keys: parameter_keys.to_vec(),
                 editable: true,
@@ -1196,6 +1220,7 @@ mod tests {
         let NativeExportOutcome::Exported {
             step_path: direct_step_path,
             stl_path: direct_stl_path,
+        ..
         } = direct_outcome
         else {
             panic!("expected generated-source export");
@@ -1237,6 +1262,7 @@ mod tests {
             Some(&direct_topology),
             &direct_part_stable_node_keys,
             &direct_part_root_node_ids,
+            &HashMap::new(),
         )
         .expect("direct manifest");
         let direct_bundle = build_direct_occt_bundle(
@@ -1391,6 +1417,7 @@ echo "fake runner plan: $plan"
         let NativeExportOutcome::Exported {
             step_path: direct_step_path,
             stl_path: direct_stl_path,
+        ..
         } = direct_outcome
         else {
             panic!("expected generated-source export");
@@ -1432,6 +1459,7 @@ echo "fake runner plan: $plan"
             Some(&direct_topology),
             &direct_part_stable_node_keys,
             &direct_part_root_node_ids,
+            &HashMap::new(),
         )
         .expect("direct manifest");
         let direct_bundle = build_direct_occt_bundle(
@@ -2436,6 +2464,7 @@ echo "fake runner plan: $plan"
             Some(&topology),
             &HashMap::from([("body".to_string(), "sha256:abcdef".to_string())]),
             &HashMap::from([(String::from("body"), 42_u64)]),
+            &HashMap::new(),
         )
         .expect("manifest");
 
@@ -3827,5 +3856,50 @@ echo "fake runner plan: $plan"
         }
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_part_bindings_uses_per_part_asset_paths_when_available() {
+        let parts = vec![
+            ("base".to_string(), "Base".to_string()),
+            ("lid".to_string(), "Lid".to_string()),
+        ];
+        let param_keys = vec!["width".to_string()];
+        let mut asset_paths = std::collections::HashMap::new();
+        asset_paths.insert(
+            "base".to_string(),
+            "parts/base.stl".to_string(),
+        );
+        asset_paths.insert(
+            "lid".to_string(),
+            "parts/lid.stl".to_string(),
+        );
+
+        let bindings = direct_occt_part_bindings(&parts, &param_keys, &asset_paths);
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].part_id, "base");
+        assert_eq!(
+            bindings[0].viewer_asset_path,
+            Some("parts/base.stl".to_string())
+        );
+        assert_eq!(bindings[1].part_id, "lid");
+        assert_eq!(
+            bindings[1].viewer_asset_path,
+            Some("parts/lid.stl".to_string())
+        );
+    }
+
+    #[test]
+    fn direct_occt_part_bindings_falls_back_to_preview_stl_without_per_part_paths() {
+        let parts = vec![("body".to_string(), "Body".to_string())];
+        let param_keys = vec![];
+        let asset_paths = std::collections::HashMap::new();
+
+        let bindings = direct_occt_part_bindings(&parts, &param_keys, &asset_paths);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].viewer_asset_path,
+            Some(PREVIEW_STL_FILE_NAME.to_string())
+        );
     }
 }

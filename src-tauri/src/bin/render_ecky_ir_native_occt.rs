@@ -68,6 +68,7 @@ fn run() -> Result<(), String> {
         direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
+            ..
         } => {
             println!("step={}", step_path.display());
             println!("stl={}", stl_path.display());

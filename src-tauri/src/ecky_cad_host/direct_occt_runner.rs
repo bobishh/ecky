@@ -200,10 +200,28 @@ pub(crate) fn run_plan_step_stl_with_mode(
         ));
     }
 
+    // Scan for per-part binary STL files written by the runner into parts/.
+    let mut part_stl_paths = Vec::new();
+    let parts_dir = output_dir.join("parts");
+    if parts_dir.is_dir() {
+        for part in plan.parts.iter() {
+            let key = if part.key.trim().is_empty() {
+                "body".to_string()
+            } else {
+                part.key.clone()
+            };
+            let candidate = parts_dir.join(format!("{}.stl", key));
+            if candidate.is_file() {
+                part_stl_paths.push((key, candidate));
+            }
+        }
+    }
+
     Ok(Some(
         super::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path: output_dir.join(MODEL_STEP_FILE_NAME),
             stl_path: output_dir.join(PREVIEW_STL_FILE_NAME),
+            part_stl_paths,
         },
     ))
 }
@@ -2318,6 +2336,7 @@ exit 0
         let crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
+        ..
         } = outcome
         else {
             panic!("expected runner export for user honjo stay clamp");
@@ -2624,6 +2643,7 @@ echo "fake runner plan: $plan"
         let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
+        ..
         }) = outcome
         else {
             panic!("expected runner export");
@@ -2689,6 +2709,7 @@ exit 0
         let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
+        ..
         }) = outcome
         else {
             panic!("expected frame runner export");
@@ -2744,6 +2765,7 @@ exit 0
             let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             }) = outcome
             else {
                 panic!("expected keyword runner export");
@@ -2811,6 +2833,7 @@ exit 0
             let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             }) = outcome
             else {
                 panic!("expected exact selector runner export");
@@ -2875,6 +2898,7 @@ exit 7
         let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
+        ..
         }) = outcome
         else {
             panic!("expected live runner export");
@@ -2922,6 +2946,7 @@ exit 7
             let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             }) = outcome
             else {
                 panic!("expected live runner export for {label}");

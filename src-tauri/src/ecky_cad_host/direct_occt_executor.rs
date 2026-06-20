@@ -100,7 +100,7 @@ pub fn export_plan_step_stl_with_params(
     let step_path = output_dir.join("model.step");
     let stl_path = output_dir.join("preview.stl");
     let source = emit_plan_export_source_with_params(plan, parameters, &step_path, &stl_path)?;
-    run_native_export_source(
+    let outcome = run_native_export_source(
         layout,
         output_dir,
         "direct_occt_executor.cpp",
@@ -108,7 +108,39 @@ pub fn export_plan_step_stl_with_params(
         step_path,
         stl_path,
         source,
-    )
+    )?;
+    // Scan for per-part binary STL files emitted by the generated C++.
+    let mut part_stl_paths = Vec::new();
+    if plan.parts.len() > 1 {
+        let parts_dir = output_dir.join("parts");
+        if parts_dir.is_dir() {
+            for part in &plan.parts {
+                let key = if part.key.trim().is_empty() {
+                    "body".to_string()
+                } else {
+                    part.key.clone()
+                };
+                let candidate = parts_dir.join(format!("{}.stl", key));
+                if candidate.is_file() {
+                    part_stl_paths.push((key, candidate));
+                }
+            }
+        }
+    }
+    if let NativeExportOutcome::Exported {
+        step_path,
+        stl_path,
+        ..
+    } = outcome
+    {
+        Ok(NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+            part_stl_paths,
+        })
+    } else {
+        Ok(outcome)
+    }
 }
 
 pub fn emit_plan_export_source(
@@ -261,6 +293,8 @@ pub fn emit_plan_export_source_with_params(
 #include <sstream>
 #include <string>
 #include <vector>
+#include <filesystem>
+namespace fs = std::filesystem;
 
 {topology_writer_source}
 {stl_writer_source}
@@ -269,10 +303,10 @@ int main() {{
 {body}    TopoDS_Shape shape = {root_var};
     STEPControl_Writer step_writer;
     step_writer.Transfer(shape, STEPControl_AsIs);
-    if (step_writer.Write("{}") != IFSelect_RetDone) {{
+    if (step_writer.Write("{step_path}") != IFSelect_RetDone) {{
         return 2;
     }}
-    std::ofstream topology_file("{}");
+    std::ofstream topology_file("{topology_path}");
     if (!topology_file) {{
         return 4;
     }}
@@ -283,17 +317,50 @@ int main() {{
         return 4;
     }}
     BRepMesh_IncrementalMesh mesh(shape, {PREVIEW_MESH_LINEAR_DEFLECTION_MM}, false, {PREVIEW_MESH_ANGULAR_DEFLECTION_RAD}, true);
-    if (!write_ascii_stl_mesh(shape, "{}")) {{
+    if (!write_binary_stl_mesh(shape, "{stl_path}")) {{
         std::cerr << "Direct OCCT preview STL write failed: shape produced no triangulated faces.\n";
         return 3;
     }}
-    return 0;
+{per_part_stl_writes}    return 0;
 }}
 "#,
-        step_path.to_string_lossy(),
-        topology_path.to_string_lossy(),
-        stl_path.to_string_lossy()
+        step_path = step_path.to_string_lossy(),
+        topology_path = topology_path.to_string_lossy(),
+        stl_path = stl_path.to_string_lossy(),
+        per_part_stl_writes = direct_occt_per_part_stl_writes(&part_topology_roots, step_path),
     ))
+}
+
+/// Emit C++ that writes each part's root shape to `parts/{key}.stl` as binary
+/// STL, so multipart export has distinct per-part geometry instead of
+/// duplicating the merged preview mesh.
+fn direct_occt_per_part_stl_writes(
+    part_roots: &[(String, String, String, Vec<(u64, String)>)],
+    step_path: &Path,
+) -> String {
+    if part_roots.len() <= 1 {
+        return String::new();
+    }
+    let parts_dir = step_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("parts");
+    let mut calls = format!(
+        "    fs::create_directories(\"{}\");\n",
+        parts_dir.to_string_lossy()
+    );
+    for (key, _label, root_var, _topology_slots) in part_roots {
+        let part_stl = parts_dir.join(format!("{}.stl", key));
+        let root = root_var;
+        let path = part_stl.to_string_lossy();
+        calls.push_str(&format!(
+            "    if (!write_binary_stl_mesh({root}, \"{path}\")) {{\n\
+        std::cerr << \"Direct OCCT per-part STL write failed for part '{key}' ({path}).\\n\";\n\
+        return 5;\n\
+    }}\n"
+        ));
+    }
+    calls
 }
 
 fn direct_occt_topology_writer_calls(
@@ -341,15 +408,15 @@ fn direct_occt_stl_writer_source() -> &'static str {
             continue;
         }
         gp_Trsf transform = location.Transformation();
-        const Poly_Array1OfTriangle& triangles = triangulation->Triangles();
-        for (Standard_Integer triangle_index = triangles.Lower(); triangle_index <= triangles.Upper(); ++triangle_index) {
+        const Poly_Array1OfTriangle& tri_arr = triangulation->Triangles();
+        for (Standard_Integer triangle_index = tri_arr.Lower(); triangle_index <= tri_arr.Upper(); ++triangle_index) {
             Standard_Integer n1 = 0;
             Standard_Integer n2 = 0;
             Standard_Integer n3 = 0;
-            triangles(triangle_index).Get(n1, n2, n3);
-            gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
-            gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
-            gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
+            tri_arr(triangle_index).Get(n1, n2, n3);
+            gp_Pnt p1 = welder.weld(triangulation->Node(n1).Transformed(transform));
+            gp_Pnt p2 = welder.weld(triangulation->Node(n2).Transformed(transform));
+            gp_Pnt p3 = welder.weld(triangulation->Node(n3).Transformed(transform));
             if (face.Orientation() == TopAbs_REVERSED) {
                 std::swap(p2, p3);
             }
@@ -359,19 +426,48 @@ fn direct_occt_stl_writer_source() -> &'static str {
             if (normal.SquareMagnitude() <= 1.0e-18) {
                 continue;
             }
-            normal.Normalize();
-            out << "facet normal " << normal.X() << " " << normal.Y() << " " << normal.Z() << "\n";
-            out << "  outer loop\n";
-            out << "    vertex " << p1.X() << " " << p1.Y() << " " << p1.Z() << "\n";
-            out << "    vertex " << p2.X() << " " << p2.Y() << " " << p2.Z() << "\n";
-            out << "    vertex " << p3.X() << " " << p3.Y() << " " << p3.Z() << "\n";
-            out << "  endloop\n";
-            out << "endfacet\n";
-            wrote_triangle = true;
+            triangles.push_back({p1, p2, p3});
         }
     }
-    out << "endsolid ecky\n";
-    return wrote_triangle && out.good();
+    if (triangles.empty()) {
+        return false;
+    }
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    // 80-byte header (blank) + 4-byte little-endian triangle count + 50 bytes
+    // per triangle (12 normal + 3*12 vertices + 2 attribute).
+    std::string header(80, '\0');
+    out.write(header.data(), 80);
+    std::uint32_t count = static_cast<std::uint32_t>(triangles.size());
+    out.write(reinterpret_cast<const char*>(&count), 4);
+    auto write_float = [&](float value) {
+        out.write(reinterpret_cast<const char*>(&value), 4);
+    };
+    for (const auto& tri : triangles) {
+        gp_Vec edge_a(tri.p1, tri.p2);
+        gp_Vec edge_b(tri.p1, tri.p3);
+        gp_Vec normal = edge_a.Crossed(edge_b);
+        if (normal.SquareMagnitude() > 1.0e-18) {
+            normal.Normalize();
+        }
+        write_float(static_cast<float>(normal.X()));
+        write_float(static_cast<float>(normal.Y()));
+        write_float(static_cast<float>(normal.Z()));
+        write_float(static_cast<float>(tri.p1.X()));
+        write_float(static_cast<float>(tri.p1.Y()));
+        write_float(static_cast<float>(tri.p1.Z()));
+        write_float(static_cast<float>(tri.p2.X()));
+        write_float(static_cast<float>(tri.p2.Y()));
+        write_float(static_cast<float>(tri.p2.Z()));
+        write_float(static_cast<float>(tri.p3.X()));
+        write_float(static_cast<float>(tri.p3.Y()));
+        write_float(static_cast<float>(tri.p3.Z()));
+        std::uint16_t attr = 0;
+        out.write(reinterpret_cast<const char*>(&attr), 2);
+    }
+    return out.good();
 }
 "#
 }
@@ -3621,7 +3717,7 @@ mod tests {
         assert!(source.contains("20"));
         assert!(source.contains("30"));
         assert!(source.contains("STEPControl_Writer"));
-        assert!(source.contains("write_ascii_stl_mesh"));
+        assert!(source.contains("write_binary_stl_mesh"));
         assert!(source.contains("BRepMesh_IncrementalMesh mesh(shape, 0.05, false, 0.15, true);"));
         assert!(source.contains("/tmp/model.step"));
         assert!(source.contains("/tmp/preview.stl"));
@@ -5323,6 +5419,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT box export");
@@ -5381,6 +5478,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT solid ops export");
@@ -5429,6 +5527,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT multipart export");
@@ -5484,6 +5583,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT extrude export");
@@ -5534,6 +5634,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT profile-hole export");
@@ -5590,6 +5691,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT multi-outer profile export");
@@ -5659,6 +5761,7 @@ mod tests {
         let NativeExportOutcome::Exported {
             step_path,
             stl_path,
+        ..
         } = outcome
         else {
             panic!("expected direct OCCT runner-first export");
@@ -5733,6 +5836,7 @@ mod tests {
         let NativeExportOutcome::Exported {
             step_path,
             stl_path,
+        ..
         } = outcome
         else {
             panic!("expected direct OCCT runner-first text export");
@@ -5786,6 +5890,7 @@ mod tests {
         let NativeExportOutcome::Exported {
             step_path,
             stl_path: preview_stl_path,
+        ..
         } = outcome
         else {
             panic!("expected direct OCCT runner-first import-stl export");
@@ -5850,6 +5955,7 @@ mod tests {
         let NativeExportOutcome::Exported {
             step_path,
             stl_path,
+        ..
         } = outcome
         else {
             panic!("expected direct OCCT runner-first helical-ridge export");
@@ -5918,8 +6024,10 @@ mod tests {
         let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
             panic!("expected direct OCCT runner-first clipped helical-ridge export");
         };
-        let stl = std::fs::read_to_string(&stl_path).expect("read stl");
-        let facets = stl.matches("facet normal").count();
+        let stl_bytes = std::fs::read(&stl_path).expect("read stl");
+        // Binary STL: triangle count is at bytes 80-84 (u32 LE).
+        assert!(stl_bytes.len() >= 84);
+        let facets = u32::from_le_bytes([stl_bytes[80], stl_bytes[81], stl_bytes[82], stl_bytes[83]]) as usize;
         // A bare r=31.8 96-segment cylinder is ~380 facets. With the clipped
         // thread fused on it the count is far higher; if the clip emptied the
         // thread we would fall back to roughly the bare cylinder.
@@ -5962,6 +6070,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT SVG profile export");
@@ -6012,6 +6121,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT bspline export");
@@ -6062,6 +6172,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT offset export");
@@ -6117,6 +6228,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT path-frame/place export");
@@ -6174,6 +6286,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT plane/location/clip export");
@@ -6226,6 +6339,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT array export");
@@ -6276,6 +6390,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT revolve export");
@@ -6327,6 +6442,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT loft export");
@@ -6377,6 +6493,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT sweep export");
@@ -6427,6 +6544,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT bezier sweep export");
@@ -6476,6 +6594,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT twist export");
@@ -6532,6 +6651,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT mirror/taper/offset-rounded export");
@@ -6583,6 +6703,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT transform export");
@@ -6637,6 +6758,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT fillet/chamfer export");
@@ -6679,6 +6801,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT shell export");
@@ -6736,6 +6859,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT sampled radial loft export");
@@ -6794,6 +6918,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected direct OCCT shell sampled radial loft export");
@@ -6814,5 +6939,172 @@ mod tests {
             };
             assert!(!blockers.is_empty());
         }
+    }
+
+    // ===== Multipart native export regression tests =====
+    //
+    // The native direct-occt backend used to write a single ASCII `preview.stl`
+    // for the whole model and point every part's viewerAsset at it. That broke
+    // multipart export: the zip duplicated one merged mesh, and 3MF export
+    // choked on ASCII bytes read as a triangle count ("failed to fill whole
+    // buffer"). These tests pin the corrected behavior: binary STL + per-part
+    // files with distinct geometry.
+
+    #[test]
+    fn live_native_preview_stl_is_binary_when_runtime_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+        let program = compile("(model (part body (box 10 20 30)))");
+        let output_dir = temp_root("direct-occt-binary-stl");
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export");
+        let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
+            panic!("expected exported outcome");
+        };
+        let bytes = std::fs::read(&stl_path).expect("read stl");
+        assert!(
+            !bytes.starts_with(b"solid"),
+            "native preview STL must be BINARY, not ASCII. First 20 bytes: {:?}",
+            String::from_utf8_lossy(&bytes[..20.min(bytes.len())])
+        );
+        // Binary STL: 80-byte header + 4-byte triangle count + 50 bytes per triangle.
+        assert!(
+            bytes.len() >= 84,
+            "binary STL too small: {} bytes",
+            bytes.len()
+        );
+        let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+        assert_eq!(
+            bytes.len(),
+            84 + count * 50,
+            "binary STL length mismatch: header says {} triangles, file is {} bytes",
+            count,
+            bytes.len()
+        );
+        assert!(count > 0, "binary STL has zero triangles");
+    }
+
+    #[test]
+    fn live_native_multi_part_writes_distinct_per_part_binary_stl_when_runtime_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+        // Two parts with completely different geometry and bounding boxes.
+        let program = compile(
+            r#"
+            (model
+              (part base (box 100 100 5))
+              (part peg (translate 50 50 5 (cylinder 10 20))))
+            "#,
+        );
+        let output_dir = temp_root("direct-occt-per-part-stl");
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export");
+        let NativeExportOutcome::Exported {
+            stl_path,
+            part_stl_paths,
+            ..
+        } = outcome
+        else {
+            panic!("expected exported outcome");
+        };
+        // Merged preview must still exist and be binary.
+        assert!(stl_path.is_file(), "missing merged preview STL: {stl_path:?}");
+        // Must have exactly 2 per-part STL files.
+        assert_eq!(
+            part_stl_paths.len(),
+            2,
+            "expected 2 per-part STL paths, got {:?}",
+            part_stl_paths
+        );
+        let (key0, path0) = &part_stl_paths[0];
+        let (key1, path1) = &part_stl_paths[1];
+        assert_eq!(key0, "base");
+        assert_eq!(key1, "peg");
+        assert!(path0.is_file(), "missing part STL: {path0:?}");
+        assert!(path1.is_file(), "missing part STL: {path1:?}");
+        assert_ne!(
+            path0, path1,
+            "both part STLs must point to DISTINCT files"
+        );
+
+        // Each per-part file must be a valid binary STL.
+        for (key, path) in &part_stl_paths {
+            let bytes = std::fs::read(path).expect("read part stl");
+            assert!(
+                !bytes.starts_with(b"solid"),
+                "part '{key}' STL must be BINARY, not ASCII"
+            );
+            assert!(bytes.len() >= 84, "part '{key}' STL too small");
+            let count =
+                u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+            assert_eq!(
+                bytes.len(),
+                84 + count * 50,
+                "part '{key}' STL length mismatch"
+            );
+        }
+
+        // The two parts MUST have distinct triangle counts (base slab vs peg
+        // cylinder — completely different tessellation densities).
+        let bytes0 = std::fs::read(&path0).unwrap();
+        let bytes1 = std::fs::read(&path1).unwrap();
+        let count0 = u32::from_le_bytes([bytes0[80], bytes0[81], bytes0[82], bytes0[83]]);
+        let count1 = u32::from_le_bytes([bytes1[80], bytes1[81], bytes1[82], bytes1[83]]);
+        assert_ne!(
+            count0, count1,
+            "base and peg must have distinct triangle counts, both were {count0}"
+        );
     }
 }

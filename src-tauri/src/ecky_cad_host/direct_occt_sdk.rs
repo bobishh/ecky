@@ -143,6 +143,7 @@ pub const REQUIRED_OCCT_LIBS: &[&str] = &[
     "TKShHealing",
     "TKBO",
     "TKBool",
+    "TKFeat",
     "TKPrim",
     "TKOffset",
     "TKFillet",
@@ -342,6 +343,10 @@ pub enum NativeExportOutcome {
     Exported {
         step_path: PathBuf,
         stl_path: PathBuf,
+        /// Per-part binary STL paths keyed by part key. Empty when the backend
+        /// produced only a merged mesh (legacy behavior). When non-empty, each
+        /// entry is `(part_key, absolute_path_to_parts/NNN-label.stl)`.
+        part_stl_paths: Vec<(String, PathBuf)>,
     },
 }
 
@@ -520,6 +525,7 @@ pub fn run_native_export_source(
     Ok(NativeExportOutcome::Exported {
         step_path,
         stl_path,
+        part_stl_paths: Vec::new(),
     })
 }
 
@@ -1110,13 +1116,9 @@ fn native_box_export_probe_source(step_path: &Path, stl_path: &Path) -> String {
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
-bool write_ascii_stl_mesh(const TopoDS_Shape& shape, const char* path) {{
-    std::ofstream out(path);
-    if (!out) {{
-        return false;
-    }}
-    out << "solid ecky\n";
-    bool wrote_triangle = false;
+bool write_binary_stl_mesh(const TopoDS_Shape& shape, const char* path) {{
+    struct Triangle {{ gp_Pnt p1, p2, p3; }};
+    std::vector<Triangle> triangles;
     for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {{
         TopoDS_Face face = TopoDS::Face(face_explorer.Current());
         TopLoc_Location location;
@@ -1125,12 +1127,12 @@ bool write_ascii_stl_mesh(const TopoDS_Shape& shape, const char* path) {{
             continue;
         }}
         gp_Trsf transform = location.Transformation();
-        const Poly_Array1OfTriangle& triangles = triangulation->Triangles();
-        for (Standard_Integer triangle_index = triangles.Lower(); triangle_index <= triangles.Upper(); ++triangle_index) {{
+        const Poly_Array1OfTriangle& tri_arr = triangulation->Triangles();
+        for (Standard_Integer triangle_index = tri_arr.Lower(); triangle_index <= tri_arr.Upper(); ++triangle_index) {{
             Standard_Integer n1 = 0;
             Standard_Integer n2 = 0;
             Standard_Integer n3 = 0;
-            triangles(triangle_index).Get(n1, n2, n3);
+            tri_arr(triangle_index).Get(n1, n2, n3);
             gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
             gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
             gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
@@ -1143,19 +1145,46 @@ bool write_ascii_stl_mesh(const TopoDS_Shape& shape, const char* path) {{
             if (normal.SquareMagnitude() <= 1.0e-18) {{
                 continue;
             }}
-            normal.Normalize();
-            out << "facet normal " << normal.X() << " " << normal.Y() << " " << normal.Z() << "\n";
-            out << "  outer loop\n";
-            out << "    vertex " << p1.X() << " " << p1.Y() << " " << p1.Z() << "\n";
-            out << "    vertex " << p2.X() << " " << p2.Y() << " " << p2.Z() << "\n";
-            out << "    vertex " << p3.X() << " " << p3.Y() << " " << p3.Z() << "\n";
-            out << "  endloop\n";
-            out << "endfacet\n";
-            wrote_triangle = true;
+            triangles.push_back({{p1, p2, p3}});
         }}
     }}
-    out << "endsolid ecky\n";
-    return wrote_triangle && out.good();
+    if (triangles.empty()) {{
+        return false;
+    }}
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {{
+        return false;
+    }}
+    std::string header(80, '\0');
+    out.write(header.data(), 80);
+    std::uint32_t count = static_cast<std::uint32_t>(triangles.size());
+    out.write(reinterpret_cast<const char*>(&count), 4);
+    auto write_float = [&](float value) {{
+        out.write(reinterpret_cast<const char*>(&value), 4);
+    }};
+    for (const auto& tri : triangles) {{
+        gp_Vec edge_a(tri.p1, tri.p2);
+        gp_Vec edge_b(tri.p1, tri.p3);
+        gp_Vec normal = edge_a.Crossed(edge_b);
+        if (normal.SquareMagnitude() > 1.0e-18) {{
+            normal.Normalize();
+        }}
+        write_float(static_cast<float>(normal.X()));
+        write_float(static_cast<float>(normal.Y()));
+        write_float(static_cast<float>(normal.Z()));
+        write_float(static_cast<float>(tri.p1.X()));
+        write_float(static_cast<float>(tri.p1.Y()));
+        write_float(static_cast<float>(tri.p1.Z()));
+        write_float(static_cast<float>(tri.p2.X()));
+        write_float(static_cast<float>(tri.p2.Y()));
+        write_float(static_cast<float>(tri.p2.Z()));
+        write_float(static_cast<float>(tri.p3.X()));
+        write_float(static_cast<float>(tri.p3.Y()));
+        write_float(static_cast<float>(tri.p3.Z()));
+        std::uint16_t attr = 0;
+        out.write(reinterpret_cast<const char*>(&attr), 2);
+    }}
+    return out.good();
 }}
 
 int main() {{
@@ -1166,7 +1195,7 @@ int main() {{
         return 2;
     }}
     BRepMesh_IncrementalMesh mesh(shape, 0.2);
-    if (!write_ascii_stl_mesh(shape, "{}")) {{
+    if (!write_binary_stl_mesh(shape, "{}")) {{
         std::cerr << "Direct OCCT preview STL write failed: shape produced no triangulated faces.\n";
         return 3;
     }}
@@ -1445,7 +1474,7 @@ mod tests {
 
         assert!(source.contains("BRepPrimAPI_MakeBox"));
         assert!(source.contains("STEPControl_Writer"));
-        assert!(source.contains("write_ascii_stl_mesh"));
+        assert!(source.contains("write_binary_stl_mesh"));
         assert!(source.contains("/tmp/box.step"));
         assert!(source.contains("/tmp/box.stl"));
     }
@@ -1745,6 +1774,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
+            ..
             } = outcome
             else {
                 panic!("expected native box export once OCCT headers are bundled");
