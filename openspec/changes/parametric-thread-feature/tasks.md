@@ -5,15 +5,31 @@ Author tests first (BDD red→green) per task; verify native ↔ build123d parit
 
 ## 1. Fix the `thread` coincident-face / hollow bug (highest priority)
 
-- [ ] 1.1 (test) external `thread` with coarse/deep params (e.g. d12 pitch3
+- [x] 1.1 (test) external `thread` with coarse/deep params (e.g. d12 pitch3
   depth1.2) produces ONE solid with the expected solid-core volume — not a
   hollow spiral. Guard against regression: assert `volume` ≈ core+ridge, and
-  `connected-component-count = 1`.
-- [ ] 1.2 Build the core with an internal overlap in `expand_thread_node`
+  `connected-component-count = 1`. DONE 2026-07-06: fix (1.2) landed in
+  `64af169` without an automated test — only manual verification in the
+  commit message. Added
+  `thread_union_stays_solid_on_coarse_deep_params_regression` in
+  `direct_occt_executor.rs` (radius 6/pitch 3/length 10/depth 1.2, matching
+  the bug's repro shape); confirmed it actually catches the regression by
+  temporarily zeroing the fix's `overlap` term (hard failure — runner
+  couldn't even triangulate the degenerate shape) then restoring it (green:
+  1 component, volume 1426 ≥ 0.9× bare-core 1131). STL facet-adjacency
+  non-manifold counting is NOT used as a signal here — helical sweep
+  tessellation produces legitimate seam T-vertices the heuristic flags on a
+  valid solid; volume + component count are the real hollow-vs-solid proof.
+- [x] 1.2 Build the core with an internal overlap in `expand_thread_node`
   (native) and `_ecky_thread` (build123d): `core_radius = radius + overlap`,
-  ridge `:depth = depth + overlap`. No coincident core/ridge face.
+  ridge `:depth = depth + overlap`. No coincident core/ridge face. DONE in
+  `64af169` (both native `direct_occt.rs::expand_thread_node` and
+  `build123d_lowering.rs::_ecky_thread`); now proven by 1.1's test.
 - [ ] 1.3 (test) geometric-sanity verify catches a hollow result (a valid but
   wrong solid): expected-volume / core-present check, not only `IsValid`.
+  Distinct from 1.1: this wants the app's own `verify_core_program`/authored
+  `(verify)` pipeline to catch it as a diagnostic, not an external test
+  harness — still open.
 
 ## 2. Intent-derived profile (`:flank`, derivation)
 

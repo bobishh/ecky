@@ -213,8 +213,9 @@ Tasks:
   offset.
 - [x] 10.7a Replace the hand-rolled runner JSON parser with vendored `yyjson`
   and direct typed decode.
-- [ ] 10.8 Add runner keyword/selector parity proof before routing
-  selector-driven ops through the runner.
+- [x] 10.8 Add runner keyword/selector parity proof before routing
+  selector-driven ops through the runner. CLOSED 2026-07-06: all sub-items
+  10.8a-10.8h are done (10.8h verified this session, 10.8a-g pre-existing).
 - [x] 10.8a Parse runner `keywords` natively and reject unsupported keyword
   shapes with deterministic schema/validation errors.
 - [x] 10.8b Emit runner topology `targetId` values for exact selector replay
@@ -227,10 +228,32 @@ Tasks:
   `chamfer`.
 - [x] 10.8f Add exact face-target selector support for runner `shell`.
 - [x] 10.8g Add clause-filter selector support for runner `shell`.
-- [ ] 10.8h Add clause-filter selector support for runner `fillet` and
-  `chamfer`.
+- [x] 10.8h Add clause-filter selector support for runner `fillet` and
+  `chamfer`. VERIFIED 2026-07-06 (already implemented, checkbox was stale):
+  `runner_exact_edge_selector_supported` accepts `EdgeClauses` (line 615,
+  shared with 10.8e's exact-id path); C++ `fillet_shape`/`chamfer_shape`
+  resolve `SelectorPayloadType::Clauses` via `resolve_edge_clauses`; live
+  proof `live_precompiled_runner_accepts_exact_selector_plans_when_available`
+  exercises `clause_fillet_plan`/`clause_chamfer_plan` through the real
+  runner binary — reran green.
 - [ ] 10.9 Add generated-source vs runner parity fixtures for every remaining
-  Direct OCCT op before removing generated-source fallback.
+  Direct OCCT op before removing generated-source fallback. PROGRESS
+  2026-07-06: `draft` was the only `OcctOp` variant with zero runner dispatch
+  (generated-source-only, C++ `BRepOffsetAPI_DraftAngle` side-wall-face
+  algorithm existed only in `direct_occt_executor.rs`'s emitted-source path).
+  Closed: added `draft_shape` to `direct_occt_runner.cpp` (mirrors
+  `emit_draft_operation`'s neutral-plane/pull-direction logic exactly),
+  `runner_draft_keywords_supported` + `OcctOp::Draft` in
+  `runner_op_supported`/`runner_command_supported`
+  (`direct_occt_runner.rs`), rebuilt+synced the runner binary. Proof: routing
+  gate test, live runner-execution proof (`draft_plan`/`draft_neutral_z_plan`
+  in `live_precompiled_runner_accepts_exact_selector_plans_when_available`),
+  and a real geometric parity test against build123d
+  (`live_draft_matches_build123d_reference`, using the [[5.1 harness]]).
+  REMAINING: the rest of the runner-supported ops (box/sphere/.../compound)
+  have build123d-differential coverage and "faces non-empty" runner-execution
+  proofs, but not a systematic generated-source-vs-runner A/B fixture matrix
+  per op — that full matrix is still open.
 
 ## 11. T11 - Switch Direct OCCT Export Path To Runner
 
@@ -255,8 +278,20 @@ Tasks:
   unsupported/keyword plans until full runner parity is green.
 - [x] 11.6 Expand runner-first default to the proven keyword-free runner subset,
   including frame ops.
-- [ ] 11.7 Expand runner-first default to keyword/selector/exact plans only
-  after native runner implementation and parity proof.
+- [x] 11.7 Expand runner-first default to keyword/selector/exact plans only
+  after native runner implementation and parity proof. VERIFIED 2026-07-06:
+  production entry point
+  `direct_occt_runtime::render_core_program_runtime_bundle_with_font_path`
+  (called from `services/render.rs`) →
+  `direct_occt_executor::export_core_program_step_stl_with_params_runner_first`
+  → `direct_occt_runner::run_plan_step_stl_with_mode`, which gates solely on
+  `runner_supports_plan(plan)` — the same full gate proven by 10.8a-h
+  (target-id/clause/edge-all selectors for fillet/chamfer/shell, profile
+  holes, clip-box, plane/path-frame keywords, bspline, sweep frenet, now
+  draft). No separate keyword-free-only gate exists in the production path;
+  `runner_enabled()` is only an on/off kill-switch
+  (`ECKY_DIRECT_OCCT_RUNNER_DISABLED`), not a scope limiter. Default already
+  is exactly "keyword/selector/exact plans, once proven" as specified.
 
 ## Proof Gates
 
@@ -277,6 +312,12 @@ Tasks:
   default for runner-supported plans; generated C++ stays fallback for
   unsupported/keyword plans.
 - [ ] G13 Full Direct OCCT op set has generated-source vs runner parity proof,
-  including path/array/surface/selector-driven plans.
-- [ ] G14 Runner keyword/selector plans execute without generated-source
-  fallback.
+  including path/array/surface/selector-driven plans. Same remaining scope as
+  10.9: the runner-supported subset works and is proven live, but not every
+  op has a systematic generated-source-vs-runner A/B fixture.
+- [x] G14 Runner keyword/selector plans execute without generated-source
+  fallback. VERIFIED 2026-07-06 (see 11.7): re-ran the 12 live
+  `live_direct_occt_runtime_applies_*_when_{sdk,runner}_ready` tests in
+  `direct_occt_runtime.rs` — each asserts "should not emit generated C++
+  source" for exact/coarse/edge-all edge selectors, shell clause/exact/
+  keywordless selectors, on both fillet and chamfer. All 12 green.

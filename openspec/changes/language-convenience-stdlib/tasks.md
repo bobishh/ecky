@@ -266,7 +266,17 @@ build123d bbox+volume) is green.
 
 ## 5. Cross-cutting
 
-- [ ] 5.1 Parity harness: a reusable test helper that renders a model on native
+- [x] 5.1 Parity harness: a reusable test helper that renders a model on native
   and build123d and asserts bbox + volume agree within tolerance (generalize the
-  `helical-ridge` clip regression).
+  `helical-ridge` clip regression). DONE 2026-07-06: the differential harness
+  from `native-build123d-differential-parity` (`assert_native_matches_reference`
+  + `stl_metrics` + `ParityReference`) was private to
+  `direct_occt_executor.rs::tests` and unusable elsewhere. Extracted to
+  `pub(crate)` `ecky_cad_host::native_parity_harness` (`#[cfg(test)]`-gated
+  module in `mod.rs`). Reusability proven cross-file: new
+  `live_torus_matches_build123d_reference` in `direct_occt.rs` calls it
+  directly — torus parity, previously "verified by hand on a live render" per
+  task 1.1, now has an automated regression. Original 4
+  `live_differential_*` tests in `direct_occt_executor.rs` re-verified green
+  after the extraction (2 pass, 2 pre-existing `#[ignore]` gaps unaffected).
 - [ ] 5.2 `verify_core_program` coverage for every new op's arity/type errors.
