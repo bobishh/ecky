@@ -1,6 +1,9 @@
 <script lang="ts">
   import Window from './Window.svelte';
   import CodePanel from './CodePanel.svelte';
+  import MacroDiffPanel from './MacroDiffPanel.svelte';
+  import { composeMacroDiffPanelModel } from './macroDiffPanel';
+  import type { SessionCodeDiffView } from './sessionActivity';
   import {
     canInsertVerifyTemplate,
     hasVerifyClause,
@@ -20,6 +23,7 @@
     code = $bindable(''),
     mode = 'version',
     sourceLanguage = null,
+    macroDiffView = null,
     title,
     defaultTitle = '',
     defaultVersionName = '',
@@ -33,6 +37,7 @@
     code?: string;
     mode?: CodeModalMode;
     sourceLanguage?: string | null;
+    macroDiffView?: SessionCodeDiffView | null;
     title: string;
     defaultTitle?: string;
     defaultVersionName?: string;
@@ -57,6 +62,9 @@
   let draftVersionName = $state('');
   let initializedDraftFields = $state(false);
   const canMutateVersion = $derived(mode === 'version');
+  const macroDiffModel = $derived.by(() =>
+    canMutateVersion && macroDiffView ? composeMacroDiffPanelModel(macroDiffView) : null,
+  );
 
   $effect(() => {
     if (commitState !== 'idle') return;
@@ -161,6 +169,7 @@
         onchange={handleCodeChange}
       />
     </div>
+    <MacroDiffPanel model={macroDiffModel} />
     <div class="code-modal-footer">
       <div class="footer-left">
         <button class="btn btn-secondary" onclick={copyCode}>
@@ -195,6 +204,7 @@
                 class="commit-input"
                 bind:value={draftTitle}
                 placeholder="Title"
+                aria-label="Version title"
                 disabled={commitState !== 'idle'}
               />
             </label>
@@ -204,6 +214,7 @@
                 class="commit-input commit-input-version"
                 bind:value={draftVersionName}
                 placeholder="Version"
+                aria-label="Version name"
                 disabled={commitState !== 'idle'}
               />
             </label>

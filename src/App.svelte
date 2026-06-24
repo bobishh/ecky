@@ -194,6 +194,7 @@
   import { deriveExportState } from './lib/composables/exportOps';
   import {
     composeBubbleEvent,
+    composeCodeDiffView,
     composeSessionActivity,
     type SessionEvent,
   } from './lib/sessionActivity';
@@ -526,6 +527,15 @@
 
   function closeCodeModal() {
     closeWindowStore('code');
+  }
+
+  // Close the inspector once the core save lands; a failed commit throws
+  // before this and keeps the modal open with the raw error.
+  async function commitManualVersionAndClose(
+    payload: Parameters<typeof commitManualVersion>[0],
+  ) {
+    await commitManualVersion(payload);
+    closeCodeModal();
   }
 
   function openDocsSnippetInCode(snippet: string, title: string) {
@@ -2396,7 +2406,9 @@
     $config.engines.find((engine) => engine.id === $config.selectedEngineId) ?? null,
   );
   const selectedModelCapabilities = $derived.by(() =>
-    resolveEngineCapabilitySummary(selectedEngine),
+    isMcpConnection
+      ? { supportsVision: true, reason: null }
+      : resolveEngineCapabilitySummary(selectedEngine),
   );
   const imageInputUnavailableReason = $derived.by<string | null>(() =>
     selectedModelCapabilities.supportsVision ? null : selectedModelCapabilities.reason,
@@ -2710,6 +2722,7 @@
     composeSessionActivity(sessionActivityEvents, $activeThreadId ?? null, $activeVersionId ?? null),
   );
   const sessionBubbleEvent = $derived.by(() => composeBubbleEvent(sessionActivity));
+  const sessionCodeDiffView = $derived.by(() => composeCodeDiffView(sessionActivity, $selectedCode));
 
   function openSessionActivityFromBubble() {
     const event = sessionBubbleEvent.event ?? bubbleSessionEvent;
@@ -3332,7 +3345,7 @@
           class:dock-btn--disabled={!selectedModelCapabilities.supportsVision}
           data-dock-label="DRAW"
           disabled={!selectedModelCapabilities.supportsVision}
-          onclick={() => drawMode = !drawMode}
+          onclick={() => { if (drawMode) { drawingOverlay?.clear(); } drawMode = !drawMode; }}
           aria-label={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
           title={selectedModelCapabilities.supportsVision
             ? (drawMode ? 'Exit Draw Mode' : 'Draw Annotations')
@@ -3550,6 +3563,7 @@
               onDirtyChange={(dirty) => {
                 drawingOverlayDirty = dirty;
               }}
+              onClearAll={() => { drawMode = false; }}
             />
             <div class="hidden-viewer-host" aria-hidden="true">
               <Viewer
@@ -4127,11 +4141,12 @@
       bind:code={$selectedCode}
       mode={codeModalMode}
       sourceLanguage={codeModalSourceLanguage}
+      macroDiffView={sessionCodeDiffView}
       title={$selectedTitle}
       defaultTitle={$workingCopy.title}
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
       onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
-      onCommit={codeModalMode === 'version' ? commitManualVersion : undefined}
+      onCommit={codeModalMode === 'version' ? commitManualVersionAndClose : undefined}
       z={codeWindowState.z}
       hidden={!codeWindowState.visible}
       focused={codeWindowState.active}

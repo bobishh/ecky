@@ -7,20 +7,24 @@
   } from './tauri/client';
   import MacroSourcePane from './MacroSourcePane.svelte';
   import ParamPanelControlField from './components/ParamPanelControlField.svelte';
-  import { buildMacroAstMapProjection } from './macroAstMap';
-  import { buildMacroAstSceneLayout } from './macroAstSceneLayout';
+  import { buildMacroAstMapProjection, findOwningPartId, spliceMacroSource } from './macroAstMap';
+  import { buildMacroAstSceneLayout, PART_COLLAPSE_THRESHOLD } from './macroAstSceneLayout';
   import type { DesignParams, ModelManifest, ParamValue, ResolvedUiField, UiSpec } from './types/domain';
 
   type MacroSourcePaneState = {
     label: string;
-    code: string;
+    /** Full macro document the slice offsets are valid against (snapshot at open). */
+    baseCode: string;
     scopeStart: number;
     scopeEnd: number;
     busy: boolean;
     error: string | null;
-    /** Forces the CodeMirror doc to rebuild when a template insert opens. */
+    /** Forces the CodeMirror doc to rebuild when the slice swaps. */
     revision: number;
   };
+
+  const MACRO_PANE_UNSAVED_NOTICE =
+    'Draft has unsaved edits — APPLY or CLOSE before editing another node.';
 
   type CadTone = 'neutral' | 'size' | 'x' | 'y' | 'z' | 'angle' | 'state' | 'mode';
   type CadHint = {
@@ -78,6 +82,9 @@
   let macroPan = $state<{ startX: number; startY: number; camX: number; camY: number } | null>(null);
   let macroSourceNodes = $state<Awaited<ReturnType<typeof macroAstSourceMap>> | null>(null);
   let macroSourcePane = $state<MacroSourcePaneState | null>(null);
+  let macroSourcePaneDirty = $state(false);
+  /** Dense-part expansion state: session-only, no persistence (design D5). */
+  let expandedParts = $state(new Set<string>());
 
   $effect(() => {
     const code = macroCode;
@@ -108,7 +115,9 @@
     }),
   );
   const macroFieldByKey = $derived.by(() => new Map(fields.map((field) => [field.key, field])));
-  const macroScene = $derived.by(() => buildMacroAstSceneLayout(macroAstMap, { width: macroSceneWidth }));
+  const macroScene = $derived.by(() =>
+    buildMacroAstSceneLayout(macroAstMap, { width: macroSceneWidth, expandedPartIds: expandedParts }),
+  );
   const macroSceneNodeByIdMap = $derived.by(() => new Map(macroScene.nodes.map((node) => [node.id, node])));
   const macroMinimapScale = $derived.by(() =>
     Math.min(MACRO_MINIMAP_W / macroScene.width, 110 / macroScene.height),
@@ -126,6 +135,16 @@
     if (!target) return;
     focusMacroSceneNode(focusNodeId);
     onFocusNodeHandled?.();
+  });
+
+  // A highlighted param owned by a collapsed dense part is otherwise invisible
+  // (collapsed parts emit no param scene node / overlay control): expand the
+  // owning part so the highlight is actually visible (design D5).
+  $effect(() => {
+    const key = highlightedParamKey;
+    if (!key) return;
+    const partId = findOwningPartId(macroAstMap.root, key);
+    if (partId) expandMacroPart(partId);
   });
 
   $effect(() => {
@@ -283,6 +302,24 @@
     macroCameraManual = true;
   }
 
+  function toggleMacroPartExpanded(partId: string, event?: Event) {
+    event?.stopPropagation();
+    const next = new Set(expandedParts);
+    if (next.has(partId)) {
+      next.delete(partId);
+    } else {
+      next.add(partId);
+    }
+    expandedParts = next;
+  }
+
+  function expandMacroPart(partId: string) {
+    if (expandedParts.has(partId)) return;
+    const next = new Set(expandedParts);
+    next.add(partId);
+    expandedParts = next;
+  }
+
   function focusSceneFieldControl(fieldKey: string) {
     requestAnimationFrame(() => {
       const field = macroSceneViewportElement?.querySelector(`[data-param-key="${fieldKey}"]`) as HTMLElement | null;
@@ -303,8 +340,28 @@
     });
   }
 
+  /**
+   * A collapsed dense part emits no param scene node for its fields, so a
+   * focus flow targeting one of those fields must expand the owning part
+   * first and defer to the next frame — after the scene re-layout has run —
+   * before continuing (design D5 auto-expand).
+   */
+  function expandOwningPartThen(fieldKey: string, continueWith: () => void) {
+    const partId = findOwningPartId(macroAstMap.root, fieldKey);
+    if (partId && !expandedParts.has(partId)) {
+      expandMacroPart(partId);
+      requestAnimationFrame(() => requestAnimationFrame(continueWith));
+      return;
+    }
+    continueWith();
+  }
+
   function selectSceneFieldValue(fieldKey: string | undefined) {
     if (!fieldKey) return;
+    expandOwningPartThen(fieldKey, () => selectSceneFieldValueAfterExpand(fieldKey));
+  }
+
+  function selectSceneFieldValueAfterExpand(fieldKey: string) {
     if (macroCamera.k < MACRO_ZOOM_FAR_TIER) {
       const target = macroScene.nodes.find(
         (node) => node.kind === 'param' && node.fieldKey === fieldKey,
@@ -368,6 +425,10 @@
 
   function focusSceneField(fieldKey: string | undefined) {
     if (!fieldKey || !macroSceneViewportElement) return;
+    expandOwningPartThen(fieldKey, () => focusSceneFieldAfterExpand(fieldKey));
+  }
+
+  function focusSceneFieldAfterExpand(fieldKey: string) {
     if (macroCamera.k < MACRO_ZOOM_FAR_TIER) {
       const target = macroScene.nodes.find(
         (node) => node.kind === 'param' && node.fieldKey === fieldKey,
@@ -380,13 +441,35 @@
     focusSceneFieldControl(fieldKey);
   }
 
+  /**
+   * System-driven jump (diagnostic retarget, focus requests): bypasses the
+   * dirty guard — the draft was already rejected or superseded — and keeps
+   * the pane error so the raw backend message stays visible at the new node.
+   */
+  function retargetMacroSourcePane(node: {
+    label: string;
+    sourceRange?: { startByte: number; endByte: number };
+  }) {
+    if (!node.sourceRange || !onApplyMacroCode) return;
+    macroSourcePaneDirty = false;
+    macroSourcePane = {
+      label: node.label,
+      baseCode: macroCode,
+      scopeStart: node.sourceRange.startByte,
+      scopeEnd: node.sourceRange.endByte,
+      busy: false,
+      error: macroSourcePane?.error ?? null,
+      revision: (macroSourcePane?.revision ?? 0) + 1,
+    };
+  }
+
   function focusMacroSceneNode(nodeId: string | undefined) {
     if (!nodeId) return;
     const target = macroScene.nodes.find((node) => node.id === nodeId);
     if (!target) return;
     macroCameraFocusNode(target, () => {
       if (target.sourceRange && onApplyMacroCode) {
-        openMacroNodeEditor(target);
+        retargetMacroSourcePane(target);
       }
     });
   }
@@ -402,35 +485,36 @@
     }
   }
 
+  /** Guards a slice swap: a dirty draft must be applied or closed first. */
+  function macroPaneBlocksSwitch(): boolean {
+    if (!macroSourcePane || !macroSourcePaneDirty) return false;
+    macroSourcePane = { ...macroSourcePane, error: MACRO_PANE_UNSAVED_NOTICE };
+    return true;
+  }
+
   function openMacroNodeEditor(node: {
     id: string;
     label: string;
     sourceRange?: { startByte: number; endByte: number };
   }) {
     if (!node.sourceRange || !onApplyMacroCode) return;
-    if (macroSourcePane) {
-      macroSourcePane = {
-        ...macroSourcePane,
-        label: node.label,
-        scopeStart: node.sourceRange.startByte,
-        scopeEnd: node.sourceRange.endByte,
-      };
-      return;
-    }
+    if (macroPaneBlocksSwitch()) return;
+    macroSourcePaneDirty = false;
     macroSourcePane = {
       label: node.label,
-      code: macroCode,
+      baseCode: macroCode,
       scopeStart: node.sourceRange.startByte,
       scopeEnd: node.sourceRange.endByte,
       busy: false,
       error: null,
-      revision: 0,
+      revision: (macroSourcePane?.revision ?? 0) + 1,
     };
   }
 
   function openMacroAddPart() {
     const modelRange = macroAstMap.root.sourceRange;
     if (!modelRange || !onApplyMacroCode) return;
+    if (macroPaneBlocksSwitch()) return;
     const existing = new Set(
       (macroSourceNodes ?? [])
         .filter((node) => node.kind === 'part' || node.kind === 'feature')
@@ -442,9 +526,10 @@
     const insertAt = modelRange.endByte - 1;
     const draft = `${macroCode.slice(0, insertAt)}\n  ${template}${macroCode.slice(insertAt)}`;
     const scopeStart = insertAt + 3;
+    macroSourcePaneDirty = false;
     macroSourcePane = {
       label: `new part part_${index}`,
-      code: draft,
+      baseCode: draft,
       scopeStart,
       scopeEnd: scopeStart + template.length,
       busy: false,
@@ -453,10 +538,16 @@
     };
   }
 
-  async function applyMacroSourcePane(nextCode: string) {
+  function closeMacroSourcePane() {
+    macroSourcePane = null;
+    macroSourcePaneDirty = false;
+  }
+
+  async function applyMacroSourcePane(nextSlice: string) {
     const pane = macroSourcePane;
     if (!pane || !onApplyMacroCode) return;
     macroSourcePane = { ...pane, busy: true, error: null };
+    const nextCode = spliceMacroSource(pane.baseCode, pane.scopeStart, pane.scopeEnd, nextSlice);
     try {
       const outcome = await onApplyMacroCode(nextCode);
       if (outcome === null || outcome === false) {
@@ -467,7 +558,7 @@
         };
         return;
       }
-      macroSourcePane = null;
+      closeMacroSourcePane();
     } catch (applyError) {
       const formattedError = formatBackendError(applyError);
       macroSourcePane = {
@@ -665,6 +756,16 @@
                 <span class="macro-ast-syntax-badge">{sceneNode.syntaxLabel}</span>
               </div>
 
+              {#if sceneNode.kind === 'part' && (sceneNode.paramCount ?? 0) > PART_COLLAPSE_THRESHOLD}
+                <button
+                  class="macro-ast-part-collapse-chip"
+                  data-testid="macro-ast-part-collapse-chip"
+                  onclick={(event) => toggleMacroPartExpanded(sceneNode.id, event)}
+                >
+                  {sceneNode.paramCount} PARAMS
+                </button>
+              {/if}
+
               {#if (sceneNode.kind === 'model' || sceneNode.kind === 'part' || sceneNode.kind === 'verify') && sceneNode.sourceRange && onApplyMacroCode}
                 <div class="macro-ast-node__hint" aria-hidden="true">dblclick: source</div>
               {/if}
@@ -761,14 +862,13 @@
     {#if macroSourcePane}
       {#key macroSourcePane.revision}
         <MacroSourcePane
-          code={macroSourcePane.code}
+          code={macroSourcePane.baseCode.slice(macroSourcePane.scopeStart, macroSourcePane.scopeEnd)}
           scopeLabel={macroSourcePane.label}
-          scopeStart={macroSourcePane.scopeStart}
-          scopeEnd={macroSourcePane.scopeEnd}
           busy={macroSourcePane.busy}
           error={macroSourcePane.error}
-          onApply={(nextCode) => void applyMacroSourcePane(nextCode)}
-          onCancel={() => (macroSourcePane = null)}
+          onApply={(nextSlice) => void applyMacroSourcePane(nextSlice)}
+          onCancel={closeMacroSourcePane}
+          onDirtyChange={(dirty) => (macroSourcePaneDirty = dirty)}
         />
       {/key}
     {/if}
@@ -1112,6 +1212,28 @@
     text-transform: uppercase;
     position: relative;
     z-index: 1;
+  }
+
+  .macro-ast-part-collapse-chip {
+    position: relative;
+    z-index: 1;
+    margin-top: 4px;
+    align-self: flex-start;
+    padding: 2px 8px;
+    border: 1px solid color-mix(in srgb, var(--secondary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-200));
+    color: color-mix(in srgb, var(--text-dim) 80%, var(--secondary));
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .macro-ast-part-collapse-chip:hover {
+    border-color: var(--primary);
+    color: var(--primary);
   }
 
   .macro-ast-node-root .macro-ast-node__hint {

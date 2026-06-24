@@ -2,6 +2,9 @@ import type { MacroAstMapNode, MacroAstMapProjection } from './macroAstMap';
 
 export type MacroAstScenePoint = { x: number; y: number };
 
+/** Parts with more param children than this collapse by default (design D5). */
+export const PART_COLLAPSE_THRESHOLD = 6;
+
 export type MacroAstSceneNodeLayout = {
   id: string;
   kind: MacroAstMapNode['kind'];
@@ -18,6 +21,10 @@ export type MacroAstSceneNodeLayout = {
   controlAnchor: MacroAstScenePoint;
   portAnchors: MacroAstScenePoint[];
   shapePath: string;
+  /** Present on part nodes: total param children, regardless of collapse state. */
+  paramCount?: number;
+  /** True when a dense part is rendered collapsed (no param nodes emitted). */
+  collapsed?: boolean;
 };
 
 export type MacroAstSceneConnector = {
@@ -40,6 +47,8 @@ export type MacroAstSceneLayoutHints = {
   width?: number;
   minPartWidth?: number;
   maxColumns?: number;
+  /** Part ids that render expanded even past the density threshold. */
+  expandedPartIds?: ReadonlySet<string>;
 };
 
 type BalancedColumn = {
@@ -112,9 +121,13 @@ export function buildMacroAstSceneLayout(
   const partPadBottom = 10;
   const moduleH = 58;
   const moduleGap = 8;
+  const collapsedChipRowH = 20;
+  const collapsedPartH = partHeaderH + collapsedChipRowH + partPadBottom;
+  const expandedPartIds = hints.expandedPartIds;
 
   const partLayouts = parts.map((part) => {
     const paramCount = part.children?.length ?? 0;
+    const collapsed = paramCount > PART_COLLAPSE_THRESHOLD && !expandedPartIds?.has(part.id);
     const paramColumns = paramCount > 0 ? resolvePartColumns(cellWidth, paramCount) : 1;
     const paramColumnGap = 10;
     const preferredColumnWidth = clamp(Math.floor(cellWidth / 3), 210, 290);
@@ -126,14 +139,17 @@ export function buildMacroAstSceneLayout(
       Math.floor((partW - partPadX * 2 - paramColumnGap * Math.max(0, paramColumns - 1)) / paramColumns),
     );
     const rows = paramColumns > 0 ? Math.ceil(paramCount / paramColumns) : 0;
-    const height =
+    const expandedHeight =
       partHeaderH + (rows > 0 ? rows * (moduleH + moduleGap) : 8) + partPadBottom;
+    const height = collapsed ? collapsedPartH : expandedHeight;
     return {
       width: partW,
       height,
       paramColumns,
       paramColumnGap,
       paramColumnWidth,
+      paramCount,
+      collapsed,
     };
   });
 
@@ -197,6 +213,8 @@ export function buildMacroAstSceneLayout(
         controlAnchor: { x: x + w / 2, y: y + 16 },
         portAnchors: [],
         shapePath: formatLocalBlobPath(w, h),
+        paramCount: layout.paramCount,
+        collapsed: layout.collapsed,
       });
       connectors.push({
         id: `${root.id}->${part.id}`,
@@ -205,7 +223,7 @@ export function buildMacroAstSceneLayout(
         path: connectorPath(rootAnchor, { x: x + w / 2, y }),
       });
 
-      const params = part.children || [];
+      const params = layout.collapsed ? [] : part.children || [];
       if (params.length > 0) {
         const paramColumns = layout.paramColumns;
         const paramColumnGap = layout.paramColumnGap;

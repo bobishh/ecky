@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildMacroAstMapProjection } from './macroAstMap';
+import { buildMacroAstMapProjection, findOwningPartId, spliceMacroSource } from './macroAstMap';
 
 test('buildMacroAstMapProjection projects a stable source-backed tree', () => {
   const input = {
@@ -166,4 +166,94 @@ test('Given verify source nodes When projecting New Params map Then verify claus
   assert.equal(verifyNode?.label, 'step_export');
   assert.equal(verifyNode?.syntaxLabel, 'VERIFY');
   assert.deepEqual(verifyNode?.sourceRange, { startByte: 7, endByte: 47 });
+});
+
+test('spliceMacroSource replaces a middle range with the edited slice', () => {
+  const base = '(model\n  (part body (box 10 20 5)))';
+  const start = base.indexOf('(part body');
+  const end = start + '(part body (box 10 20 5))'.length;
+  const result = spliceMacroSource(base, start, end, '(part body (box 12 20 5))');
+  assert.equal(result, '(model\n  (part body (box 12 20 5)))');
+});
+
+test('spliceMacroSource replaces a range at the very start of the document', () => {
+  const base = '(model (part a) (part b))';
+  const result = spliceMacroSource(base, 0, '(model'.length, '(mod3l');
+  assert.equal(result, '(mod3l (part a) (part b))');
+});
+
+test('spliceMacroSource replaces a range at the very end of the document', () => {
+  const base = '(model (part a) (part b))';
+  const start = base.length - '(part b)'.length - 1;
+  const end = base.length - 1;
+  const result = spliceMacroSource(base, start, end, '(part c)');
+  assert.equal(result, '(model (part a) (part c))');
+});
+
+test('spliceMacroSource supports replacing a range with an empty slice', () => {
+  const base = '(model (part a) (part b))';
+  const start = base.indexOf('(part a) ');
+  const end = start + '(part a) '.length;
+  const result = spliceMacroSource(base, start, end, '');
+  assert.equal(result, '(model (part b))');
+});
+
+test('spliceMacroSource treats a degenerate zero-width range as a pure insertion', () => {
+  const base = '(model (part a))';
+  const insertAt = '(model '.length;
+  const result = spliceMacroSource(base, insertAt, insertAt, '(part b) ');
+  assert.equal(result, '(model (part b) (part a))');
+});
+
+test('spliceMacroSource clamps an inverted range (start > end) instead of throwing', () => {
+  const base = '(model (part a))';
+  // start > end is degenerate input; clamp to a zero-width point at `start`
+  // rather than reordering or throwing, so callers get a sane insertion.
+  const result = spliceMacroSource(base, 10, 3, 'X');
+  assert.equal(result, base.slice(0, 10) + 'X' + base.slice(10));
+});
+
+test('spliceMacroSource clamps out-of-bounds offsets to the document length', () => {
+  const base = '(model)';
+  const result = spliceMacroSource(base, 2, 999, 'X');
+  assert.equal(result, '(mX');
+});
+
+test('findOwningPartId locates the part node that owns a param fieldKey', () => {
+  const projection = buildMacroAstMapProjection({
+    modelManifest: {
+      modelId: 'owning-part',
+      sourceKind: 'generated',
+      document: { documentName: 'Owning Part', documentLabel: 'Owning Part', objectCount: 1, warnings: [] },
+      parts: [
+        {
+          partId: 'part-a',
+          freecadObjectName: 'part_a',
+          label: 'Part A',
+          kind: 'solid',
+          editable: true,
+          parameterKeys: ['width_mm'],
+        },
+        {
+          partId: 'part-b',
+          freecadObjectName: 'part_b',
+          label: 'Part B',
+          kind: 'solid',
+          editable: true,
+          parameterKeys: ['depth_mm'],
+        },
+      ],
+    },
+    uiSpec: {
+      fields: [
+        { type: 'number', key: 'width_mm', label: 'Width' },
+        { type: 'number', key: 'depth_mm', label: 'Depth' },
+      ],
+    },
+    parameters: { width_mm: 1, depth_mm: 2 },
+  });
+
+  assert.equal(findOwningPartId(projection.root, 'depth_mm'), 'part:part-b');
+  assert.equal(findOwningPartId(projection.root, 'width_mm'), 'part:part-a');
+  assert.equal(findOwningPartId(projection.root, 'missing_key'), null);
 });

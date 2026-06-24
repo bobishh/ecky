@@ -103,6 +103,33 @@ function paramNode(
   };
 }
 
+/**
+ * Splices an edited slice back into a base document.
+ *
+ * `start`/`end` are clamped to `[0, base.length]`; an inverted range
+ * (`start > end`) collapses to a zero-width point at the clamped `start` so
+ * the result is a pure insertion instead of a throw or a reordering.
+ */
+/**
+ * Locates the id of the part node (direct child of `root`) whose param
+ * children include `fieldKey`. Used by focus flows to decide which part must
+ * be auto-expanded before a param control can receive focus.
+ */
+export function findOwningPartId(root: MacroAstMapNode, fieldKey: string | undefined | null): string | null {
+  if (!fieldKey) return null;
+  for (const part of root.children ?? []) {
+    if (part.children?.some((param) => param.fieldKey === fieldKey)) return part.id;
+  }
+  return null;
+}
+
+export function spliceMacroSource(base: string, start: number, end: number, slice: string): string {
+  const length = base.length;
+  const clampedStart = Math.max(0, Math.min(start, length));
+  const clampedEnd = Math.max(clampedStart, Math.min(end, length));
+  return base.slice(0, clampedStart) + slice + base.slice(clampedEnd);
+}
+
 export function buildMacroAstMapProjection(input: MacroAstMapInput): MacroAstMapProjection {
   const sourceEntries = new Map(
     (input.sourceNodes ?? []).map((entry) => [entry.id, entry]),
