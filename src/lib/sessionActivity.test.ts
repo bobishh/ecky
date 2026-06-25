@@ -6,6 +6,7 @@ import {
   composeBubbleEvent,
   composeCodeDiffView,
   composeSessionActivity,
+  relatedSessionEvents,
   type SessionEvent,
 } from './sessionActivity';
 
@@ -13,8 +14,8 @@ function makeEvent(overrides: Partial<SessionEvent>): SessionEvent {
   return {
     id: overrides.id ?? 'event-1',
     sessionId: overrides.sessionId ?? 'session-1',
-    threadId: overrides.threadId ?? 'thread-1',
-    versionId: overrides.versionId ?? 'version-1',
+    threadId: overrides.threadId !== undefined ? overrides.threadId : 'thread-1',
+    versionId: overrides.versionId !== undefined ? overrides.versionId : 'version-1',
     actor:
       overrides.actor ?? {
         kind: 'agent',
@@ -226,4 +227,56 @@ test('composeCodeDiffView returns an empty state when no macro event exists', ()
   assert.equal(diffView.hasDiff, false);
   assert.equal(diffView.currentCode, 'print("current")\n');
   assert.equal(diffView.nextCode, 'print("current")\n');
+});
+
+test('relatedSessionEvents links render, validation, and preview for one version', () => {
+  const events = [
+    makeEvent({ id: 'render-start', timestamp: 1, kind: 'render_started' }),
+    makeEvent({ id: 'render-ok', timestamp: 2, kind: 'render_succeeded', severity: 'success' }),
+    makeEvent({ id: 'validation', timestamp: 3, kind: 'validation_reported', severity: 'warning' }),
+    makeEvent({ id: 'preview', timestamp: 4, kind: 'preview_updated' }),
+    makeEvent({ id: 'other-version', timestamp: 5, kind: 'render_succeeded', versionId: 'version-2' }),
+    makeEvent({ id: 'macro', timestamp: 6, kind: 'macro_patch_applied' }),
+  ];
+
+  const related = relatedSessionEvents(events, 'preview');
+
+  assert.deepEqual(
+    related.map((event) => event.id),
+    ['render-start', 'render-ok', 'validation'],
+  );
+});
+
+test('relatedSessionEvents excludes self and unrelated kinds', () => {
+  const events = [
+    makeEvent({ id: 'params', timestamp: 1, kind: 'params_changed' }),
+    makeEvent({ id: 'render-ok', timestamp: 2, kind: 'render_succeeded' }),
+    makeEvent({ id: 'preview', timestamp: 3, kind: 'preview_updated' }),
+  ];
+
+  const related = relatedSessionEvents(events, 'render-ok');
+
+  assert.deepEqual(
+    related.map((event) => event.id),
+    ['preview'],
+  );
+});
+
+test('relatedSessionEvents returns empty without a version anchor', () => {
+  const events = [
+    makeEvent({ id: 'render-ok', timestamp: 1, kind: 'render_succeeded', versionId: null }),
+    makeEvent({ id: 'preview', timestamp: 2, kind: 'preview_updated', versionId: null }),
+  ];
+
+  assert.deepEqual(relatedSessionEvents(events, 'preview'), []);
+});
+
+test('relatedSessionEvents returns empty for unknown or non-render event', () => {
+  const events = [
+    makeEvent({ id: 'macro', timestamp: 1, kind: 'macro_patch_applied' }),
+    makeEvent({ id: 'render-ok', timestamp: 2, kind: 'render_succeeded' }),
+  ];
+
+  assert.deepEqual(relatedSessionEvents(events, 'macro'), []);
+  assert.deepEqual(relatedSessionEvents(events, 'missing'), []);
 });

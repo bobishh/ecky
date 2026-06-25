@@ -7436,15 +7436,15 @@ mod tests {
         assert!(ir_guide.contains("fileExtension: `.ecky`."));
         assert!(ir_guide.contains("Current sourceLanguage: `ecky`."));
         assert!(ir_guide.contains("never from thread metadata"));
-        assert!(ir_guide.contains("EckyRust is a controlled CAD runtime pipeline"));
-        assert!(ir_guide.contains("parse -> expand -> typecheck -> lower -> validate"));
-        assert!(ir_guide.contains("direct OCCT is an internal STEP/STL fast path"));
-        assert!(ir_guide.contains("Do not promise STEP for every mesh/eckyRust render"));
+        assert!(ir_guide.contains("renders through EckyRust CAD VM"));
+        assert!(ir_guide
+            .contains("Do not promise STEP unless `ArtifactBundle.exportArtifacts` proves one exists"));
         assert!(ir_guide.contains("structural verification first"));
         assert!(ir_guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
         assert!(ir_guide.contains("unfilled holes intentionally reject during render/lowering"));
         assert!(ir_guide.contains("range"));
-        assert!(ir_guide.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(ir_guide
+            .contains("Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry"));
         assert!(ir_guide.contains("Static tuple destructuring is supported only for `zip`"));
         assert!(ir_guide.contains("Zip destructuring"));
         assert!(ir_guide.contains("`organic-loop`"));
@@ -7660,13 +7660,18 @@ mod tests {
         assert!(guide.contains("Current sourceLanguage: `ecky`."));
         assert!(guide.contains("Target geometryBackend: `build123d`."));
         assert!(guide.contains("Return canonical Ecky source in `macro_code`."));
-        assert!(guide.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(guide
+            .contains("Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry"));
         assert!(guide.contains("Static tuple destructuring is supported only for `zip`"));
         assert!(guide.contains("Zip destructuring"));
         assert!(guide.contains("Wall-pattern is mesh/eckyRust only"));
         assert!(guide.contains("typed/static errors and structural verification first"));
         assert!(guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
-        assert!(!guide.contains("Python"));
+        // The guide may *mention* Python only to forbid it; it must not carry
+        // Python source or API examples.
+        assert!(guide.contains("never emit Python source"));
+        assert!(!guide.contains("BuildPart"));
+        assert!(!guide.contains("import build123d"));
         assert!(!guide.contains("`wall-pattern`"));
         assert!(!guide.contains("`schwarz-p`"));
         assert!(!guide.contains("`schwarz-d`"));
@@ -7686,7 +7691,8 @@ mod tests {
         assert!(guide.contains("Target geometryBackend: `freecad`."));
         assert!(guide.contains("Return canonical Ecky source in `macro_code`."));
         assert!(guide.contains("Supported CAD ops for this backend"));
-        assert!(guide.contains("Use `map`/`range` inside `part` geometry/list expressions"));
+        assert!(guide
+            .contains("Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry"));
         assert!(guide.contains("Static tuple destructuring is supported only for `zip`"));
         assert!(guide.contains("Zip destructuring"));
         assert!(guide.contains("Wall-pattern is mesh/eckyRust only"));

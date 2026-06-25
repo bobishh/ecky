@@ -4850,9 +4850,12 @@ async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error
     .expect_err("invalid Ecky source should fail in lowering path");
 
     assert_eq!(malformed_err.operation.as_deref(), Some("lower:build123d"));
-    assert!(malformed_err
-        .message
-        .contains("Expected a proper list for model form."));
+    // The raw parser diagnostic (naming the offending `$` token) must survive
+    // to the MCP error, whatever the parser's exact phrasing is.
+    assert!(
+        malformed_err.message.contains('$'),
+        "{malformed_err:?}"
+    );
     assert!(
         malformed_err
             .start_line

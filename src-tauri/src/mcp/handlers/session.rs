@@ -1071,6 +1071,9 @@ pub async fn handle_thread_create(
         format!("Created new thread '{}'.", title),
     )
     .await;
+    // Same rationale as thread_borrow: clear any stale draft from a previous
+    // thread so no-arg tools resolve against the freshly created thread.
+    super::clear_session_render_preview_durable(state, &ctx.session_id).await?;
     state.emit_history_updated();
 
     Ok(ThreadCreateResponse { thread_id, title })
@@ -1107,6 +1110,12 @@ pub async fn handle_thread_borrow(
         format!("Borrowed thread '{}'.", title),
     )?;
     drop(conn);
+
+    // Drop any stale render-preview draft left by a previous render in a
+    // different thread. Without this, `target_meta_get` and other no-arg
+    // tools keep resolving to the old thread because the draft wins over
+    // `session.last_target` in `resolve_target_for_session`.
+    super::clear_session_render_preview_durable(state, &ctx.session_id).await?;
 
     if let Some(message_id) = target.message_id.clone() {
         mark_live_session_idle(

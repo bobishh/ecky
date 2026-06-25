@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { SessionEvent, SessionEventArtifact, SessionEventDiff } from './sessionActivity';
+  import {
+    relatedSessionEvents,
+    type SessionEvent,
+    type SessionEventArtifact,
+    type SessionEventDiff,
+  } from './sessionActivity';
 
   let {
     events = [],
@@ -19,6 +24,10 @@
       null
     );
   });
+
+  const relatedEvents = $derived.by<SessionEvent[]>(() =>
+    selectedEvent ? relatedSessionEvents(events, selectedEvent.id) : [],
+  );
 
   function actorLabel(event: SessionEvent): string {
     if (event.actor.kind === 'agent') return event.actor.label || event.actor.id;
@@ -120,6 +129,25 @@
                 <pre class="activity-raw">{formatRaw(artifact.raw)}</pre>
               {/if}
             </div>
+          {/each}
+        </section>
+      {/if}
+
+      {#if relatedEvents.length > 0}
+        <section class="activity-section" data-testid="activity-related-events">
+          <h4>RELATED</h4>
+          {#each relatedEvents as related (related.id)}
+            <button
+              type="button"
+              class="activity-related"
+              onclick={() => onSelectEvent?.(related.id)}
+            >
+              <span class="activity-related__meta">
+                <span>{eventTime(related)}</span>
+                <span>{related.kind.replace(/_/g, ' ').toUpperCase()}</span>
+              </span>
+              <span class="activity-related__title">{related.title}</span>
+            </button>
           {/each}
         </section>
       {/if}
@@ -295,5 +323,38 @@
     color: var(--text-muted);
     font-weight: 800;
     text-align: center;
+  }
+
+  .activity-related {
+    display: grid;
+    gap: 4px;
+    padding: 8px 10px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-100) 66%, transparent);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+  }
+
+  .activity-related:hover {
+    background: color-mix(in srgb, var(--primary) 14%, var(--bg-200));
+  }
+
+  .activity-related__meta {
+    display: flex;
+    gap: 10px;
+    color: var(--text-muted);
+    font-size: 0.66rem;
+    text-transform: uppercase;
+  }
+
+  .activity-related__title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.76rem;
+    font-weight: 700;
   }
 </style>

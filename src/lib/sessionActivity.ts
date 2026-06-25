@@ -119,6 +119,36 @@ const MACRO_EVENT_KINDS = new Set<SessionEventKind>([
   'macro_patch_applied',
 ]);
 
+const RENDER_CYCLE_KINDS = new Set<SessionEventKind>([
+  'render_started',
+  'render_succeeded',
+  'render_failed',
+  'validation_reported',
+  'preview_updated',
+]);
+
+/// Related events for one render cycle: render/validation/preview events
+/// sharing the anchor's version. Non-cycle anchors (macro, params, commit)
+/// and version-less anchors have no cycle to link, so they return [].
+export function relatedSessionEvents(
+  events: SessionEvent[],
+  eventId: string,
+): SessionEvent[] {
+  const anchor = events.find((event) => event.id === eventId);
+  if (!anchor) return [];
+  if (!anchor.versionId) return [];
+  if (!RENDER_CYCLE_KINDS.has(anchor.kind)) return [];
+
+  return sortSessionEvents(
+    events.filter(
+      (event) =>
+        event.id !== anchor.id &&
+        event.versionId === anchor.versionId &&
+        RENDER_CYCLE_KINDS.has(event.kind),
+    ),
+  );
+}
+
 export function appendSessionEvent(
   events: SessionEvent[],
   event: SessionEvent,

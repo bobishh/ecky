@@ -115,7 +115,8 @@ function changedParamKeys(before: DesignParams, after: DesignParams): string[] {
   return [...keys].filter((key) => stableJson(before[key]) !== stableJson(after[key])).sort();
 }
 
-function recordParamsChanged(input: {
+// Exported for the once-per-action emission tests (session-collab-visibility 5.7).
+export function recordParamsChanged(input: {
   threadId: string | null;
   versionId: string | null;
   before: DesignParams;
