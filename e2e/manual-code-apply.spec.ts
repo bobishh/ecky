@@ -292,6 +292,30 @@ test.describe('Manual code apply/version coverage', () => {
       });
   });
 
+  test('Given applied code draft When macro patch event exists Then code editor shows LAST MACRO DIFF with actor and changed lines', async ({
+    page,
+  }) => {
+    await bootManualCodeFlow(page);
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal).toBeVisible();
+    await expect(modal.getByTestId('last-macro-diff')).toHaveCount(0);
+
+    const editor = page.locator('.cm-content').first();
+    await editor.click();
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await page.keyboard.type('print("diffed bracket")');
+    await page.locator('.code-modal-footer').getByRole('button', { name: 'APPLY' }).click();
+
+    const diffPanel = modal.getByTestId('last-macro-diff');
+    await expect(diffPanel).toBeVisible();
+    await expect(diffPanel.getByTestId('last-macro-diff-meta')).toContainText('SYSTEM');
+    await expect(diffPanel.getByTestId('last-macro-diff-meta')).toContainText('line');
+    await expect(diffPanel.getByTestId('last-macro-diff-summary')).toContainText('Code draft applied');
+    await expect(diffPanel.getByTestId('last-macro-diff-rows')).toContainText('print("diffed bracket")');
+  });
+
   test('Given ecky workbench code When verify template inserts and applies Then render uses authored verify source without committing', async ({
     page,
   }) => {
@@ -372,7 +396,7 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(modal).toBeVisible();
     await expect(modal.locator('.cm-ecky-comment').filter({ hasText: '; shell' })).toBeVisible();
     await expect(modal.locator('.cm-ecky-keyword').filter({ hasText: 'model' })).toBeVisible();
-    await expect(modal.locator('.cm-ecky-keyword').filter({ hasText: 'number' })).toBeVisible();
+    await expect(modal.locator('.cm-ecky-kind').filter({ hasText: 'number' })).toBeVisible();
     await expect(modal.locator('.cm-ecky-number').filter({ hasText: '10' })).toBeVisible();
     await expect(modal.locator('.cm-ecky-string').filter({ hasText: '"Width"' })).toBeVisible();
     await expect(modal.locator('.cm-ecky-atom').filter({ hasText: ':label' })).toBeVisible();
@@ -500,7 +524,11 @@ test.describe('Manual code apply/version coverage', () => {
     await expect
       .poll(async () => page.evaluate(() => window.__manualCodeApplyMock?.addManualVersionCalls.length ?? 0))
       .toBe(1);
-    await expect(page.getByText(/MACRO INSPECTOR:/i)).toHaveCount(0);
+    // Windows stay mounted when closed (visibility:hidden), so assert
+    // hidden-ness rather than absence from the DOM.
+    await expect(
+      page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' }),
+    ).toBeHidden();
     await expect(page.locator('.code-modal-footer').getByRole('button', { name: 'COMMITTING...' })).toHaveCount(0);
   });
 

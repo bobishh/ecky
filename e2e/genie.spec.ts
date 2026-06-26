@@ -277,6 +277,50 @@ test.describe('VertexGenie', () => {
     await expect(activityWindow.getByTestId('session-preview-detail')).toContainText('preview-feedback.stl');
   });
 
+  test('Given preview artifact event When user opens activity Then extended preview detail shows the artifact section', async ({ page }) => {
+    await installGenieMocks(page);
+    await page.goto('/');
+
+    const bubble = page.getByTestId('genie-session-bubble');
+    await expect(bubble).toBeVisible();
+    await bubble.click();
+
+    const activityWindow = page.locator('[data-window-id="activity"]');
+    await expect(activityWindow).toBeVisible();
+    const previewDetail = activityWindow.getByTestId('session-preview-detail');
+    await expect(previewDetail).toBeVisible();
+    await expect(previewDetail).toContainText('Preview artifact');
+    await expect(previewDetail).toContainText('preview-feedback.stl');
+  });
+
+  test('Given agent error state When user opens activity Then detail shows raw issue body', async ({ page }) => {
+    await installGenieMocks(page, {
+      connectionState: 'error',
+      phase: 'error',
+      statusText: 'Renderer failed: non-manifold shell in part case.',
+      activityLabel: 'Renderer failed: non-manifold shell in part case.',
+      busy: false,
+    });
+    await page.goto('/');
+
+    const bubble = page.getByTestId('genie-session-bubble');
+    await expect(bubble).toBeVisible();
+    await bubble.click();
+
+    const activityWindow = page.locator('[data-window-id="activity"]');
+    await expect(activityWindow).toBeVisible();
+    await activityWindow
+      .getByTestId('activity-event-list')
+      .locator('.activity-event')
+      .filter({ hasText: 'Renderer failed: non-manifold shell in part case.' })
+      .first()
+      .click();
+    const detail = activityWindow.getByTestId('activity-event-detail');
+    await expect(detail).toContainText('Renderer failed: non-manifold shell in part case.');
+    await expect(detail).toContainText('RAW');
+    await expect(detail).toContainText('threadPhase');
+  });
+
   test('Given preview draft feedback with authoring lint When workbench opens Then bubble mentions lint suggestion', async ({ page }) => {
     await installGenieMocks(page, {
       authoringLints: [

@@ -121,6 +121,55 @@ endsolid mock
               },
             };
           }
+          if (`${args?.prompt ?? ''}`.includes('macro with two editable parts')) {
+            (window as any).__PARAM_SCENARIO__ = 'editable-macro-pair';
+            return {
+              threadId: args.threadId || 'mock-thread-1',
+              messageId: 'mock-msg-1',
+              usage: null,
+              design: {
+                title: 'Editable Macro Pair',
+                versionName: 'V1',
+                interactionMode: 'design',
+                macroCode: '(model\n  (part alpha (box 10 20 5))\n  (part beta (box 7 7 7)))',
+                uiSpec: {
+                  fields: [
+                    {
+                      type: 'number',
+                      key: 'model_size_mm',
+                      label: 'Model Size',
+                    },
+                  ],
+                },
+                initialParams: { model_size_mm: 10 },
+                postProcessing: null,
+              },
+            };
+          }
+          if (`${args?.prompt ?? ''}`.includes('dense macro')) {
+            (window as any).__PARAM_SCENARIO__ = 'dense-macro';
+            const denseKeys = Array.from({ length: 8 }, (_, index) => `dense_param_${index}_mm`);
+            return {
+              threadId: args.threadId || 'mock-thread-1',
+              messageId: 'mock-msg-1',
+              usage: null,
+              design: {
+                title: 'Dense Macro',
+                versionName: 'V1',
+                interactionMode: 'design',
+                macroCode: '(model\n  (part dense (box 10 20 5)))',
+                uiSpec: {
+                  fields: denseKeys.map((key, index) => ({
+                    type: 'number',
+                    key,
+                    label: `Dense Param ${index}`,
+                  })),
+                },
+                initialParams: Object.fromEntries(denseKeys.map((key, index) => [key, index])),
+                postProcessing: null,
+              },
+            };
+          }
           if (`${args?.prompt ?? ''}`.includes('editable macro')) {
             (window as any).__PARAM_SCENARIO__ = 'editable-macro';
             return {
@@ -337,6 +386,59 @@ endsolid mock
           };
         }
         if (cmd === 'get_model_manifest') {
+          if ((window as any).__PARAM_SCENARIO__ === 'editable-macro-pair') {
+            return {
+              modelId: 'editable-macro-pair-model',
+              sourceKind: 'generated',
+              document: {
+                documentName: 'Editable Macro Pair',
+                documentLabel: 'Editable Macro Pair',
+                objectCount: 2,
+                warnings: [],
+              },
+              parts: [
+                {
+                  partId: 'alpha',
+                  freecadObjectName: 'alpha',
+                  label: 'Alpha',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: ['model_size_mm'],
+                },
+                {
+                  partId: 'beta',
+                  freecadObjectName: 'beta',
+                  label: 'Beta',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: [],
+                },
+              ],
+            };
+          }
+          if ((window as any).__PARAM_SCENARIO__ === 'dense-macro') {
+            const denseKeys = Array.from({ length: 8 }, (_, index) => `dense_param_${index}_mm`);
+            return {
+              modelId: 'dense-macro-model',
+              sourceKind: 'generated',
+              document: {
+                documentName: 'Dense Macro',
+                documentLabel: 'Dense Macro',
+                objectCount: 1,
+                warnings: [],
+              },
+              parts: [
+                {
+                  partId: 'dense',
+                  freecadObjectName: 'dense',
+                  label: 'Dense',
+                  kind: 'solid',
+                  editable: true,
+                  parameterKeys: denseKeys,
+                },
+              ],
+            };
+          }
           if ((window as any).__PARAM_SCENARIO__ === 'editable-macro') {
             return {
               modelId: 'editable-macro-model',
@@ -1150,7 +1252,7 @@ endsolid mock
     page,
   }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make an editable macro');
+    await page.fill('textarea.prompt-input', 'make a macro with two editable parts');
     await page
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
@@ -1160,18 +1262,18 @@ endsolid mock
     await page.getByRole('button', { name: 'new params', exact: true }).click();
     await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
 
-    const partNode = page.locator('.macro-ast-node-part[data-node-id="part:body"]');
+    const partNode = page.locator('.macro-ast-node-part[data-node-id="part:alpha"]');
     await expect(partNode).toBeVisible();
     await partNode.locator('.macro-ast-node__header').first().dblclick();
 
-    // Split pane: full document with the node scope highlighted.
+    // Slice pane: only the selected node's source, not the whole document.
     const pane = page.getByTestId('macro-source-pane');
     await expect(pane).toBeVisible();
-    await expect(pane).toContainText('EDIT SOURCE / BODY');
-    await expect(pane.locator('.cm-content')).toContainText('(part body (box 10 20 5))');
-    await expect(pane.locator('.cm-ecky-scope').first()).toBeVisible();
+    await expect(pane).toContainText('EDIT SOURCE / ALPHA');
+    await expect(pane.locator('.cm-content')).toContainText('(part alpha (box 10 20 5))');
+    await expect(pane.locator('.cm-content')).not.toContainText('(part beta (box 7 7 7))');
 
-    await pane.locator('.cm-content').fill('(model\n  (part body (box 12 20 5)))');
+    await pane.locator('.cm-content').fill('(part alpha (box 12 20 5))');
     await pane.getByRole('button', { name: 'APPLY' }).click();
 
     await expect
@@ -1181,7 +1283,8 @@ endsolid mock
             (window as any).__PARAM_CALLS__.filter(
               (entry: { cmd: string; args?: any }) =>
                 entry.cmd === 'render_model' &&
-                `${entry.args?.macroCode ?? ''}`.includes('box 12 20 5'),
+                `${entry.args?.macroCode ?? ''}`.includes('box 12 20 5') &&
+                `${entry.args?.macroCode ?? ''}`.includes('box 7 7 7'),
             ).length,
         ),
       )
@@ -1206,7 +1309,7 @@ endsolid mock
     const partNode = page.locator('.macro-ast-node-part[data-node-id="part:body"]');
     await partNode.locator('.macro-ast-node__header').first().dblclick();
     const pane = page.getByTestId('macro-source-pane');
-    await pane.locator('.cm-content').fill('(model\n  (part body (boom 12 20 5)))');
+    await pane.locator('.cm-content').fill('(part body (boom 12 20 5))');
     await pane.getByRole('button', { name: 'APPLY' }).click();
 
     await expect(pane.locator('.macro-source-pane__error')).toBeVisible();
@@ -1267,8 +1370,8 @@ endsolid mock
     const pane = page.getByTestId('macro-source-pane');
     await expect(pane).toBeVisible();
     await expect(pane).toContainText('EDIT SOURCE / NEW PART PART_2');
-    await expect(pane.locator('.cm-content')).toContainText('(part part_2 (box 10 10 10))');
-    await expect(pane.locator('.cm-ecky-scope').first()).toBeVisible();
+    // Slice pane: only the inserted template, not the surrounding document.
+    await expect(pane.locator('.cm-content')).toHaveText('(part part_2 (box 10 10 10))');
 
     await pane.getByRole('button', { name: 'APPLY' }).click();
     await expect
@@ -1285,4 +1388,99 @@ endsolid mock
       .toBeGreaterThan(0);
     await expect(pane).toHaveCount(0);
   });
+
+  test('Given a dirty source pane When another node is double-clicked Then the switch is refused with an inline notice', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a macro with two editable parts');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    const alphaNode = page.locator('.macro-ast-node-part[data-node-id="part:alpha"]');
+    const betaNode = page.locator('.macro-ast-node-part[data-node-id="part:beta"]');
+    await alphaNode.locator('.macro-ast-node__header').first().dblclick();
+
+    const pane = page.getByTestId('macro-source-pane');
+    await expect(pane).toContainText('EDIT SOURCE / ALPHA');
+    await pane.locator('.cm-content').fill('(part alpha (box 99 20 5))');
+
+    // Dirty draft: switching to another node is refused, draft is kept.
+    // dispatchEvent: with the pane open the squeezed map can slide nodes under
+    // the bottom dock overlay, which blocks Playwright's pointer actionability.
+    await betaNode.locator('.macro-ast-node__header').first().dispatchEvent('dblclick');
+    await expect(pane).toContainText('EDIT SOURCE / ALPHA');
+    await expect(pane.locator('.cm-content')).toContainText('box 99 20 5');
+    await expect(pane).toContainText(/unsaved/i);
+
+    // Clean pane: closing and reopening lets the switch through.
+    await pane.getByRole('button', { name: 'CLOSE' }).click();
+    await expect(pane).toHaveCount(0);
+    await betaNode.locator('.macro-ast-node__header').first().dispatchEvent('dblclick');
+    await expect(pane).toContainText('EDIT SOURCE / BETA');
+    await expect(pane.locator('.cm-content')).toContainText('(part beta (box 7 7 7))');
+
+    // Clean pane (no edits yet): dblclicking another node swaps freely.
+    await alphaNode.locator('.macro-ast-node__header').first().dispatchEvent('dblclick');
+    await expect(pane).toContainText('EDIT SOURCE / ALPHA');
+    await expect(pane.locator('.cm-content')).toContainText('(part alpha (box 10 20 5))');
+  });
+
+  test('Given a dense part When New Params opens Then it renders collapsed with a count chip until expanded', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a dense macro');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'new params', exact: true }).click();
+    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+
+    const denseNode = page.locator('.macro-ast-node-part[data-node-id="part:dense"]');
+    await expect(denseNode).toBeVisible();
+
+    // Scene nodes are flat siblings in the DOM (not nested under the part),
+    // so param controls are asserted against the whole map shell.
+    const overlays = page.locator('.macro-ast-map-shell .macro-ast-node__overlay');
+
+    const chip = denseNode.getByTestId('macro-ast-part-collapse-chip');
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText('8 PARAMS');
+    await expect(overlays).toHaveCount(0);
+    await expect(page.locator('.macro-ast-node-param')).toHaveCount(0);
+
+    await chip.click();
+    await expect(page.locator('.macro-ast-node-param')).toHaveCount(8);
+    await expect(overlays).not.toHaveCount(0);
+
+    // Zoomed out the map shows dense chips; clicking a module flies the
+    // camera in and reveals the live control (same pattern as the
+    // "New Params edits a value" spec).
+    await page.locator('.macro-ast-node-param .macro-ast-node__header').first().click();
+    const firstDenseParam = page.locator('.macro-ast-map-shell .param-field input.param-input').first();
+    await expect(firstDenseParam).toBeVisible();
+    await firstDenseParam.fill('42');
+    await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled();
+
+    // Collapsing again removes the controls and restores the compact node.
+    // dispatchEvent: after the camera flies in, a param node can visually
+    // overlap the part header/chip, which blocks Playwright's pointer
+    // actionability check (same workaround as the dirty-switch guard spec).
+    const collapseChip = denseNode.getByTestId('macro-ast-part-collapse-chip');
+    await collapseChip.dispatchEvent('click');
+    await expect(page.locator('.macro-ast-node-param')).toHaveCount(0);
+    await expect(overlays).toHaveCount(0);
+    await expect(collapseChip).toContainText('8 PARAMS');
+  });
+
 });
