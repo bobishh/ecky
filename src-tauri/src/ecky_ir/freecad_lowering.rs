@@ -4841,6 +4841,19 @@ mod tests {
     }
 
     #[test]
+    fn freecad_lowering_rejects_hull() {
+        let src = r#"
+            (model
+              (part body
+                (hull
+                  (sphere 6)
+                  (translate 30 0 0 (sphere 6)))))"#;
+        let err = crate::ecky_ir::lower_to_freecad(src).expect_err("hull must reject on FreeCAD");
+        let text = format!("{err} {}", err.details.as_deref().unwrap_or(""));
+        assert!(text.contains("hull"), "diagnostic must name hull: {text}");
+    }
+
+    #[test]
     fn freecad_lowering_supports_sampled_radial_loft_smoke() {
         let src = r#"
             (model

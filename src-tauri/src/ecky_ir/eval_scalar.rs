@@ -45,10 +45,18 @@ pub(super) fn eval_number(value: &IrExpr, env: &BTreeMap<String, ParamValue>) ->
             .iter()
             .try_fold(1.0, |acc, arg| Ok(acc * eval_number(arg, env)?)),
         "/" => {
-            if args.len() != 2 {
-                return Err(validation("`/` expects exactly two numeric arguments."));
+            // Scheme semantics: `(/ x)` is the reciprocal, more arguments
+            // fold left as successive division.
+            if args.is_empty() {
+                return Err(validation("`/` expects at least one numeric argument."));
             }
-            Ok(eval_number(&args[0], env)? / eval_number(&args[1], env)?)
+            if args.len() == 1 {
+                return Ok(1.0 / eval_number(&args[0], env)?);
+            }
+            let first = eval_number(&args[0], env)?;
+            args[1..]
+                .iter()
+                .try_fold(first, |acc, arg| Ok(acc / eval_number(arg, env)?))
         }
         "min" => args.iter().try_fold(
             f64::INFINITY,

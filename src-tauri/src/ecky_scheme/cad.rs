@@ -60,6 +60,7 @@ pub const MODULE: ModuleSpec = ModuleSpec {
         "scale",
         "mirror",
         "sampled-radial-loft",
+        "hull",
         "bezier-path",
         "bspline",
         "path",

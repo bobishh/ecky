@@ -98,7 +98,9 @@ const NATIVE_OCCT_OPS: &[BackendOperationCapability] = &[
     ),
     unsupported(
         "svg",
-        "requires svg-profile preprocessing before native render",
+        "rewritten to profile geometry before native render; clean profiles take \
+         the fast path and artwork (self-intersecting, multi-outer, even-odd) is \
+         resolved into OCCT wire-soup faces",
     ),
     unsupported(
         "import-stl",

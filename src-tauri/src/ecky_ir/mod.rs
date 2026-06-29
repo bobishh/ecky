@@ -30,18 +30,6 @@ pub fn source_uses_ecky_rust_only_cad_ops(source: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn source_uses_exact_backend_only_cad_ops(source: &str) -> bool {
-    if let Some(program) = try_compile_to_core_program(source) {
-        return program
-            .map(|program| core_program_uses_exact_backend_only_cad_ops(&program))
-            .unwrap_or(false);
-    }
-
-    syntax::ir_parse(source)
-        .map(|value| value_uses_exact_backend_only_cad_ops(&value))
-        .unwrap_or(false)
-}
-
 pub fn source_uses_direct_occt_required_cad_ops(source: &str) -> bool {
     if let Some(program) = try_compile_to_core_program(source) {
         return program
@@ -159,13 +147,6 @@ fn core_program_uses_ecky_rust_only_cad_ops(program: &CoreProgram) -> bool {
         .any(|part| core_node_uses_ecky_rust_only_cad_ops(&part.root))
 }
 
-fn core_program_uses_exact_backend_only_cad_ops(program: &CoreProgram) -> bool {
-    program
-        .parts
-        .iter()
-        .any(|part| core_node_uses_exact_backend_only_cad_ops(&part.root))
-}
-
 fn core_program_uses_direct_occt_required_cad_ops(program: &CoreProgram) -> bool {
     program
         .parts
@@ -278,64 +259,9 @@ fn core_node_uses_direct_occt_required_cad_ops(node: &CoreNode) -> bool {
     }
 }
 
-fn core_node_uses_exact_backend_only_cad_ops(node: &CoreNode) -> bool {
-    match &node.kind {
-        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) | CoreNodeKind::Range { .. } => false,
-        CoreNodeKind::Build { bindings, result } => {
-            bindings
-                .iter()
-                .any(|binding| core_node_uses_exact_backend_only_cad_ops(&binding.value))
-                || core_node_uses_exact_backend_only_cad_ops(result)
-        }
-        CoreNodeKind::Let { bindings, body } => {
-            bindings
-                .iter()
-                .any(|binding| core_node_uses_exact_backend_only_cad_ops(&binding.value))
-                || core_node_uses_exact_backend_only_cad_ops(body)
-        }
-        CoreNodeKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            core_node_uses_exact_backend_only_cad_ops(condition)
-                || core_node_uses_exact_backend_only_cad_ops(then_branch)
-                || core_node_uses_exact_backend_only_cad_ops(else_branch)
-        }
-        CoreNodeKind::Call { op, args, keywords } => {
-            operation_uses_exact_backend_only_cad_ops(op)
-                || args.iter().any(core_node_uses_exact_backend_only_cad_ops)
-                || keywords
-                    .iter()
-                    .any(|keyword| core_node_uses_exact_backend_only_cad_ops(keyword.source_node()))
-        }
-        CoreNodeKind::Map { sources, body, .. } => {
-            sources
-                .iter()
-                .any(core_node_uses_exact_backend_only_cad_ops)
-                || core_node_uses_exact_backend_only_cad_ops(body)
-        }
-        CoreNodeKind::Apply { op, args, list } => {
-            operation_uses_exact_backend_only_cad_ops(op)
-                || args.iter().any(core_node_uses_exact_backend_only_cad_ops)
-                || core_node_uses_exact_backend_only_cad_ops(list)
-        }
-        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
-            items.iter().any(core_node_uses_exact_backend_only_cad_ops)
-        }
-    }
-}
-
 fn operation_uses_ecky_rust_only_cad_ops(op: &CoreOperation) -> bool {
     match op {
         CoreOperation::Custom(name) => is_ecky_rust_only_cad_head(name),
-        _ => false,
-    }
-}
-
-fn operation_uses_exact_backend_only_cad_ops(op: &CoreOperation) -> bool {
-    match op {
-        CoreOperation::Custom(name) => is_exact_backend_only_cad_head(name),
         _ => false,
     }
 }
@@ -354,22 +280,6 @@ fn value_uses_ecky_rust_only_cad_ops(value: &lexpr::Value) -> bool {
     }
 
     items.iter().any(value_uses_ecky_rust_only_cad_ops)
-}
-
-fn value_uses_exact_backend_only_cad_ops(value: &lexpr::Value) -> bool {
-    let Some(items) = value.to_vec() else {
-        return false;
-    };
-
-    if items
-        .first()
-        .and_then(lexpr::Value::as_symbol)
-        .is_some_and(is_exact_backend_only_cad_head)
-    {
-        return true;
-    }
-
-    items.iter().any(value_uses_exact_backend_only_cad_ops)
 }
 
 fn value_uses_direct_occt_required_cad_ops(value: &lexpr::Value) -> bool {
@@ -392,12 +302,9 @@ fn is_ecky_rust_only_cad_head(head: &str) -> bool {
     crate::ecky_language_surface::ECKY_RUST_ONLY_CAD_OPS.contains(&head) || head == "pattern"
 }
 
-fn is_exact_backend_only_cad_head(head: &str) -> bool {
-    crate::ecky_language_surface::EXACT_BACKEND_ONLY_CAD_OPS.contains(&head)
-}
-
 fn is_direct_occt_required_cad_head(head: &str) -> bool {
     matches!(head, "text" | "svg" | "import-stl" | "helical-ridge")
+        || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&head)
 }
 
 fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
@@ -406,7 +313,9 @@ fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
         CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Text)
             | CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Svg)
             | CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Stl)
-    ) || matches!(op, CoreOperation::Custom(name) if name == "helical-ridge")
+    ) || matches!(op, CoreOperation::Custom(name)
+        if name == "helical-ridge"
+            || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&name.as_str()))
 }
 
 #[cfg(test)]

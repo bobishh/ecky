@@ -147,11 +147,15 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
     "build",
     "shape",
     "result",
+    "sampled-radial-loft",
 ];
-pub const EXACT_BACKEND_ONLY_CAD_OPS: &[&str] = &["sampled-radial-loft"];
 // Mesh/EckyRust-only surface. Do not add future CAD VM/OCCT names here until
 // the compiler/runtime actually exports and lowers them.
 pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &["wall-pattern"];
+// EckyRust direct-OCCT-only surface: rendered natively (no mesh path) and
+// rejected by the build123d/FreeCAD exact lowerings. Unlike `wall-pattern`
+// (mesh) these are BREP ops the exact backends cannot express.
+pub const ECKY_RUST_DIRECT_ONLY_CAD_OPS: &[&str] = &["hull"];
 pub const WALL_PATTERN_MODES: &[&str] = &[
     "ribs",
     "rings",
@@ -213,13 +217,9 @@ pub struct EckySupportedSurfaceReference {
 
 pub fn cad_ops_for_backend(backend: GeometryBackend) -> Vec<&'static str> {
     let mut ops = CAD_OPS_PORTABLE.to_vec();
-    match backend {
-        GeometryBackend::Build123d | GeometryBackend::Freecad => {
-            ops.extend(EXACT_BACKEND_ONLY_CAD_OPS);
-        }
-        GeometryBackend::EckyRust => {
-            ops.extend(ECKY_RUST_ONLY_CAD_OPS);
-        }
+    if matches!(backend, GeometryBackend::EckyRust) {
+        ops.extend(ECKY_RUST_ONLY_CAD_OPS);
+        ops.extend(ECKY_RUST_DIRECT_ONLY_CAD_OPS);
     }
     ops
 }
@@ -1037,8 +1037,10 @@ fn boolean_reference(name: &str) -> SurfaceReferenceEntry {
 fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEntry {
     let support = if name == "wall-pattern" {
         "mesh/eckyRust only; rejected by build123d/freecad lowerers"
+    } else if name == "hull" {
+        "eckyRust direct OCCT only; rejected by build123d/freecad lowerers"
     } else if matches!(name, "sampled-radial-loft") {
-        "build123d/freecad only; rejected by eckyRust mesh runtime"
+        "eckyRust direct OCCT, build123d, freecad; not the mesh runtime"
     } else {
         backend_support(backend)
     };
@@ -1074,7 +1076,8 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "chamfer" => ref_entry(name, "cadOp", "(chamfer distance [:edges selector] solid)", "solid", "Bevels edges of a solid. `:edges` accepts coarse selectors like `bottom`, `front`, `axis-z`, `y-max`, or `x-min+z-max`; exact backends also accept `target-id:<id>` and `target-ids:<id>|<id>`.", true, support, "(chamfer 1 :edges \"bottom\" body)", &["Topology-sensitive post-op: if the selector matches no edges after one smaller-distance retry and one selector retry, stop retrying chamfer. Rebuild with source bevel/rounding geometry such as explicit profiles, `loft`, `taper`, `cone`, `rounded-polygon`, or `offset-rounded`."]),
         "taper" => ref_entry(name, "cadOp", "(taper height scale sketch) or (taper height scale-x scale-y sketch)", "solid", "Extrudes a sketch while scaling the top section.", true, support, "(taper 30 0.7 0.7 (circle 12 32))", &[]),
         "twist" => ref_entry(name, "cadOp", "(twist height angle sketch)", "solid", "Extrudes a sketch while rotating sections along height.", true, support, "(twist 40 90 profile)", &[]),
-        "sampled-radial-loft" => ref_entry(name, "cadOp", "(sampled-radial-loft (theta z fz) :height h :z-steps n :theta-steps n :radius expr :z-map expr?)", "solid", "Samples radial sections across height, then lofts exact backend wires/faces into a solid.", true, support, "(sampled-radial-loft (theta z fz) :height 40 :z-steps 24 :theta-steps 72 :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))", &["Binders expose per-sample `theta`, absolute `z`, and normalized `fz` in `[0,1]`.", "Use on FreeCAD/build123d for formula-driven dome/pot families."]),
+        "sampled-radial-loft" => ref_entry(name, "cadOp", "(sampled-radial-loft (theta z fz) :height h :z-steps n :theta-steps n :radius expr :z-map expr?)", "solid", "Samples radial sections across height, then lofts the wires/faces into a solid.", true, support, "(sampled-radial-loft (theta z fz) :height 40 :z-steps 24 :theta-steps 72 :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))", &["Binders expose per-sample `theta`, absolute `z`, and normalized `fz` in `[0,1]`.", "Renders on all backends (native direct OCCT, build123d, FreeCAD) for formula-driven dome/pot families."]),
+        "hull" => ref_entry(name, "cadOp", "(hull solid...)", "solid", "Convex hull of the child solids as a single closed BREP solid.", true, support, "(hull (sphere 6) (translate 30 0 0 (sphere 6)))", &["Native direct OCCT only; build123d/FreeCAD reject it.", "Great for organic blends/bridges (slipper lasts, fairings) without hand-lofting sections."]),
         "union" | "fuse" => ref_entry(name, "cadOp", &format!("({name} solid...)"), "solid", "Boolean union/fuse of solids.", true, support, &format!("({name} a b c)"), &[]),
         "difference" | "cut" => ref_entry(name, "cadOp", &format!("({name} base cutter...)"), "solid", "Subtracts cutter solids from a base solid.", true, support, &format!("({name} body hole)"), &[]),
         "intersection" | "common" => ref_entry(name, "cadOp", &format!("({name} solid...)"), "solid", "Keeps shared volume of solids.", true, support, &format!("({name} a b)"), &[]),
@@ -1182,8 +1185,7 @@ mod tests {
     #[test]
     fn supported_surface_manifest_uses_canonical_arrays() {
         let manifest = supported_surface_manifest(GeometryBackend::Build123d);
-        let mut expected_ops = CAD_OPS_PORTABLE.to_vec();
-        expected_ops.extend(EXACT_BACKEND_ONLY_CAD_OPS);
+        let expected_ops = CAD_OPS_PORTABLE.to_vec();
 
         assert_eq!(manifest.model_clauses, MODEL_CLAUSES);
         assert_eq!(manifest.model_wrappers, MODEL_WRAPPERS);
@@ -1203,14 +1205,16 @@ mod tests {
             assert!(manifest.cad_ops.contains(&"sampled-radial-loft"));
             assert!(manifest.cad_ops.contains(&"helical-ridge"));
             assert!(!manifest.cad_ops.contains(&"wall-pattern"));
+            assert!(!manifest.cad_ops.contains(&"hull"));
             assert!(manifest.wall_pattern_modes.is_empty());
         }
 
         let mesh_manifest = supported_surface_manifest(GeometryBackend::EckyRust);
 
-        assert!(!mesh_manifest.cad_ops.contains(&"sampled-radial-loft"));
+        assert!(mesh_manifest.cad_ops.contains(&"sampled-radial-loft"));
         assert!(mesh_manifest.cad_ops.contains(&"helical-ridge"));
         assert!(mesh_manifest.cad_ops.contains(&"wall-pattern"));
+        assert!(mesh_manifest.cad_ops.contains(&"hull"));
         assert_eq!(mesh_manifest.wall_pattern_modes, WALL_PATTERN_MODES);
     }
 
@@ -1249,8 +1253,8 @@ mod tests {
     fn manifest_cad_ops_are_exported_by_cad_module() {
         for op in CAD_OPS_PORTABLE
             .iter()
-            .chain(EXACT_BACKEND_ONLY_CAD_OPS.iter())
             .chain(ECKY_RUST_ONLY_CAD_OPS.iter())
+            .chain(ECKY_RUST_DIRECT_ONLY_CAD_OPS.iter())
         {
             assert!(cad::MODULE.exports.contains(op), "missing export: {op}");
         }
@@ -1260,13 +1264,16 @@ mod tests {
     fn backend_cad_op_sets_match_actual_support() {
         assert!(cad_ops_for_backend(GeometryBackend::Build123d).contains(&"sampled-radial-loft"));
         assert!(cad_ops_for_backend(GeometryBackend::Freecad).contains(&"sampled-radial-loft"));
-        assert!(!cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"sampled-radial-loft"));
+        assert!(cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"sampled-radial-loft"));
         assert!(cad_ops_for_backend(GeometryBackend::Build123d).contains(&"helical-ridge"));
         assert!(cad_ops_for_backend(GeometryBackend::Freecad).contains(&"helical-ridge"));
         assert!(cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"helical-ridge"));
         assert!(!cad_ops_for_backend(GeometryBackend::Build123d).contains(&"wall-pattern"));
         assert!(!cad_ops_for_backend(GeometryBackend::Freecad).contains(&"wall-pattern"));
         assert!(cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"wall-pattern"));
+        assert!(!cad_ops_for_backend(GeometryBackend::Build123d).contains(&"hull"));
+        assert!(!cad_ops_for_backend(GeometryBackend::Freecad).contains(&"hull"));
+        assert!(cad_ops_for_backend(GeometryBackend::EckyRust).contains(&"hull"));
     }
 
     #[test]
@@ -1399,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_reference_documents_exact_only_sampled_radial_loft() {
+    fn surface_reference_documents_portable_sampled_radial_loft() {
         let reference = supported_surface_reference(GeometryBackend::Build123d);
         let radial = reference
             .entries
@@ -1409,7 +1416,7 @@ mod tests {
 
         assert_eq!(
             radial.backend_support,
-            "build123d/freecad only; rejected by eckyRust mesh runtime"
+            "eckyRust direct OCCT, build123d, freecad; not the mesh runtime"
         );
         assert!(radial.description.contains("Samples radial sections"));
         assert!(radial.notes.iter().any(|note| note.contains("theta")));
@@ -1458,7 +1465,7 @@ mod tests {
             .any(|entry| entry.kind == "wallPatternMode"));
 
         let mesh = supported_surface_reference(GeometryBackend::EckyRust);
-        assert!(!mesh
+        assert!(mesh
             .entries
             .iter()
             .any(|entry| entry.name == "sampled-radial-loft"));

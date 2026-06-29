@@ -58,9 +58,12 @@ enum ComponentRole {
     Library,
 }
 
-fn selector_payload_for_keyword(name: &str, value: &CoreNode) -> Option<CoreSelectorPayload> {
+fn selector_payload_for_keyword(
+    name: &str,
+    value: &CoreNode,
+) -> CoreResult<Option<CoreSelectorPayload>> {
     if let Some(tag_name) = selector_tag_reference_name(value) {
-        return match name {
+        return Ok(match name {
             "edges" => Some(CoreSelectorPayload::EdgeTargetIds(vec![format!(
                 "tag:{tag_name}"
             )])),
@@ -68,7 +71,7 @@ fn selector_payload_for_keyword(name: &str, value: &CoreNode) -> Option<CoreSele
                 "tag:{tag_name}"
             )])),
             _ => None,
-        };
+        });
     }
 
     let selector = match &value.kind {
@@ -83,12 +86,19 @@ fn selector_payload_for_keyword(name: &str, value: &CoreNode) -> Option<CoreSele
             CoreSymbol::Center => "center",
             CoreSymbol::Max => "max",
         },
-        _ => return None,
+        _ => return Ok(None),
     };
+    // A malformed selector string is an authoring error: surface the parser's
+    // specific message (with the shared selector help) at compile time instead
+    // of degrading to a generic expr keyword that fails later.
     match name {
-        "edges" => parse_core_edge_selector_payload(selector).ok(),
-        "faces" => parse_core_face_selector_payload(selector).ok(),
-        _ => None,
+        "edges" => parse_core_edge_selector_payload(selector)
+            .map(Some)
+            .map_err(|err| CompilerError::new(CompilerErrorKind::TypeMismatch, err.message)),
+        "faces" => parse_core_face_selector_payload(selector)
+            .map(Some)
+            .map_err(|err| CompilerError::new(CompilerErrorKind::TypeMismatch, err.message)),
+        _ => Ok(None),
     }
 }
 
@@ -786,8 +796,11 @@ fn model_level_sequence_form_error(name: &str) -> CompilerError {
 
 fn compile_to_core_program_from_expanded_ast(source: &str) -> CoreResult<CoreProgram> {
     validate_source_budget_before_steel(source)?;
+    // Mirror the legacy expanded path: static zip/enumerate tuple
+    // destructuring in `map` lambdas is rewritten before Steel expansion.
+    let source = rewrite_sequence_destructuring_source(source)?;
     let mut engine = bootstrap::new_engine();
-    let (wrapped, offset_map) = wrap_expanded_ast_source(source);
+    let (wrapped, offset_map) = wrap_expanded_ast_source(&source);
     let forms = engine
         .emit_expanded_ast_without_optimizations(&wrapped, None)
         .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
@@ -3652,6 +3665,11 @@ fn parse_expanded_node(
                     } else if local_names.contains(&op_name)
                         || node_refs.contains_key(&op_name)
                         || param_ids.contains_key(&op_name)
+                        // `decode_expanded_expr` strips `list` heads, so a
+                        // list literal whose first element is a let*-bound
+                        // value (a non-callable Value helper) arrives here
+                        // shaped like a call. Treat it as a list literal.
+                        || matches!(helpers.get(&op_name), Some(ExpandedHelper::Value(_)))
                     {
                         (
                             CoreNodeKind::List(
@@ -3768,20 +3786,20 @@ fn parse_expanded_node(
                                         let keyword_name =
                                             normalized.trim_start_matches(':').to_string();
                                         keywords.push(
-                                            selector_payload_for_keyword(&keyword_name, &value)
-                                                .map(|selector| {
-                                                    CoreKeywordArg::selector(
-                                                        keyword_name.clone(),
-                                                        value.clone(),
-                                                        selector,
-                                                    )
-                                                })
-                                                .unwrap_or_else(|| {
-                                                    CoreKeywordArg::expr(
-                                                        keyword_name.clone(),
-                                                        value,
-                                                    )
-                                                }),
+                                            match selector_payload_for_keyword(
+                                                &keyword_name,
+                                                &value,
+                                            )? {
+                                                Some(selector) => CoreKeywordArg::selector(
+                                                    keyword_name.clone(),
+                                                    value.clone(),
+                                                    selector,
+                                                ),
+                                                None => CoreKeywordArg::expr(
+                                                    keyword_name.clone(),
+                                                    value,
+                                                ),
+                                            },
                                         );
                                         index += 2;
                                         continue;
@@ -4027,21 +4045,49 @@ fn parse_expanded_append_node(
     local_names: &BTreeSet<String>,
     helper_stack: &BTreeSet<String>,
 ) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
+    let nodes = args
+        .iter()
+        .map(|arg| {
+            parse_expanded_node(
+                arg,
+                next_node,
+                param_ids,
+                helpers,
+                node_refs,
+                local_names,
+                helper_stack,
+            )
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    // Arguments that aren't literal lists (deferred `map`, references) can't
+    // be flattened at compile time; lower to a deferred `append` call for the
+    // backends to evaluate.
+    if !nodes.iter().all(node_is_static_list) {
+        return Ok((
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom("append".to_string()),
+                args: nodes,
+                keywords: Vec::new(),
+            },
+            CoreValueKind::List,
+        ));
+    }
     let mut combined = Vec::new();
-    for arg in args {
-        let node = parse_expanded_node(
-            arg,
-            next_node,
-            param_ids,
-            helpers,
-            node_refs,
-            local_names,
-            helper_stack,
-        )?;
+    for node in nodes {
         combined.extend(extract_list_items(node, "`append`", next_node)?);
     }
     let value_kind = infer_list_value_kind(&combined);
     Ok((CoreNodeKind::List(combined), value_kind))
+}
+
+/// True when the node is a literal list whose items are known at compile
+/// time (mirrors the shapes `extract_list_items` can flatten).
+fn node_is_static_list(node: &CoreNode) -> bool {
+    match &node.kind {
+        CoreNodeKind::List(_) => true,
+        CoreNodeKind::Let { body, .. } => node_is_static_list(body),
+        _ => false,
+    }
 }
 
 fn parse_expanded_reverse_node(
@@ -4068,6 +4114,19 @@ fn parse_expanded_reverse_node(
         local_names,
         helper_stack,
     )?;
+    if !node_is_static_list(&node) {
+        // Reversal of a deferred list (e.g. a param-dependent `map`) must
+        // happen at evaluation time; dropping it silently would flip the
+        // point order of authored paths.
+        return Ok((
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom("reverse".to_string()),
+                args: vec![node],
+                keywords: Vec::new(),
+            },
+            CoreValueKind::List,
+        ));
+    }
     let mut items = extract_list_items(node, "`reverse`", next_node)?;
     items.reverse();
     let value_kind = infer_list_value_kind(&items);
@@ -5972,13 +6031,8 @@ fn extract_list_items(
     context: &str,
     next_node: &mut u64,
 ) -> CoreResult<Vec<CoreNode>> {
-    let CoreNode {
-        kind,
-        value_kind,
-        span,
-        ..
-    } = node;
-    match kind {
+    let span = node.span;
+    match node.kind {
         CoreNodeKind::List(items) => Ok(items),
         CoreNodeKind::Let { bindings, body } => {
             extract_list_items(*body, context, next_node).map(|items| {
@@ -5991,7 +6045,7 @@ fn extract_list_items(
         _ => Err(sequence_type_mismatch_error(
             context,
             "list",
-            core_value_kind_label(value_kind),
+            core_value_kind_label(node.value_kind),
             span,
         )),
     }
@@ -8168,17 +8222,14 @@ fn parse_node(
                                     let keyword_name =
                                         normalized.trim_start_matches(':').to_string();
                                     keywords.push(
-                                        selector_payload_for_keyword(&keyword_name, &value)
-                                            .map(|selector| {
-                                                CoreKeywordArg::selector(
-                                                    keyword_name.clone(),
-                                                    value.clone(),
-                                                    selector,
-                                                )
-                                            })
-                                            .unwrap_or_else(|| {
-                                                CoreKeywordArg::expr(keyword_name.clone(), value)
-                                            }),
+                                        match selector_payload_for_keyword(&keyword_name, &value)? {
+                                            Some(selector) => CoreKeywordArg::selector(
+                                                keyword_name.clone(),
+                                                value.clone(),
+                                                selector,
+                                            ),
+                                            None => CoreKeywordArg::expr(keyword_name.clone(), value),
+                                        },
                                     );
                                     index += 2;
                                     continue;
@@ -9433,7 +9484,8 @@ mod tests {
         "#;
 
         let expanded = compile_to_core_program(source).expect("expanded compile");
-        let runtime = compile_to_core_program_via_runtime(source).expect("runtime compile");
+        let lowered = lower_component_definitions_source(source).expect("lowering");
+        let runtime = compile_to_core_program_via_runtime(&lowered).expect("runtime compile");
 
         assert_eq!(expanded.parts.len(), 1);
         assert_eq!(runtime.parts.len(), 1);
@@ -11145,11 +11197,14 @@ mod tests {
             "#,
         )
         .expect("compile");
-        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
-            panic!("expected build");
+        // Single-expression parts may compile to a bare call (no `build`
+        // wrapper); accept both shapes.
+        let result = match &program.parts[0].root.kind {
+            CoreNodeKind::Build { result, .. } => result.as_ref(),
+            _ => &program.parts[0].root,
         };
         let CoreNodeKind::Call { keywords, .. } = &result.kind else {
-            panic!("expected call");
+            panic!("expected call, got {:?}", result.kind);
         };
         assert_eq!(keywords.len(), 1);
         assert_eq!(
@@ -11173,11 +11228,13 @@ mod tests {
             "#,
         )
         .expect("compile");
-        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
-            panic!("expected build");
+        // Single-expression parts may compile to a bare call; accept both.
+        let result = match &program.parts[0].root.kind {
+            CoreNodeKind::Build { result, .. } => result.as_ref(),
+            _ => &program.parts[0].root,
         };
         let CoreNodeKind::Call { keywords, .. } = &result.kind else {
-            panic!("expected call");
+            panic!("expected call, got {:?}", result.kind);
         };
         assert_eq!(
             keywords[0].selector_payload(),
@@ -11258,11 +11315,13 @@ mod tests {
             "#,
         )
         .expect("compile");
-        let CoreNodeKind::Build { result, .. } = &program.parts[0].root.kind else {
-            panic!("expected build");
+        // Single-expression parts may compile to a bare call; accept both.
+        let result = match &program.parts[0].root.kind {
+            CoreNodeKind::Build { result, .. } => result.as_ref(),
+            _ => &program.parts[0].root,
         };
         let CoreNodeKind::Call { keywords, .. } = &result.kind else {
-            panic!("expected call");
+            panic!("expected call, got {:?}", result.kind);
         };
         assert_eq!(keywords.len(), 1);
         assert_eq!(
@@ -12416,4 +12475,70 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn let_star_binding_referenced_in_append_compiles() {
+        let src = r#"
+(model
+(params (number tube_od 22) (number wall 2.4) (number clip_gap 2.2))
+(let* ((or (/ tube_od 2))
+       (ir (- or wall))
+       (cr (+ or wall))
+       (step-a (* 0.5 3.14159265))
+       (n-pts-a 16)
+       (arc-a (map (lambda (i)
+         (let* ((t (/ i n-pts-a))
+                (a (+ step-a (* t (- 1.5707963 step-a)))))
+           (list (* ir (cos a)) (* ir (sin a)))))
+         (range n-pts-a)))
+       (ox-end (list (* cr (cos step-a)) (* cr (sin step-a))))
+       (path (append arc-a (list ox-end (list (- clip_gap) ir))
+                     (reverse (map (lambda (p) (list (car p) (- (cadr p)))) arc-a)))))
+(part clip (extrude (polygon path) 2))))"#;
+        let program = compile_to_core_program(src).expect("compile");
+        assert_eq!(program.parts.len(), 1);
+        assert_eq!(program.parts[0].key, "clip");
+        // The polygon path cannot be flattened at compile time (its point
+        // lists depend on parameters through `map`), so it must lower to a
+        // deferred `append` call for backends to evaluate.
+        fn find_custom_call(node: &CoreNode, name: &str) -> bool {
+            match &node.kind {
+                CoreNodeKind::Call { op, args, keywords } => {
+                    matches!(op, crate::ecky_core_ir::CoreOperation::Custom(op_name) if op_name == name)
+                        || args.iter().any(|arg| find_custom_call(arg, name))
+                        || keywords
+                            .iter()
+                            .any(|keyword| find_custom_call(keyword.source_node(), name))
+                }
+                CoreNodeKind::Let { bindings, body } => {
+                    bindings
+                        .iter()
+                        .any(|binding| find_custom_call(&binding.value, name))
+                        || find_custom_call(body, name)
+                }
+                CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+                    items.iter().any(|item| find_custom_call(item, name))
+                }
+                CoreNodeKind::Map { sources, body, .. } => {
+                    sources.iter().any(|source| find_custom_call(source, name))
+                        || find_custom_call(body, name)
+                }
+                CoreNodeKind::Apply { args, list, .. } => {
+                    args.iter().any(|arg| find_custom_call(arg, name))
+                        || find_custom_call(list, name)
+                }
+                _ => false,
+            }
+        }
+        assert!(
+            find_custom_call(&program.parts[0].root, "append"),
+            "expected deferred `append` call in part root"
+        );
+        assert!(
+            find_custom_call(&program.parts[0].root, "reverse"),
+            "expected deferred `reverse` call in part root"
+        );
+    }
 }
+
+
