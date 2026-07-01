@@ -127,10 +127,10 @@ pub fn lower_to_build123d(source: &str) -> AppResult<String> {
         Err(_) => {
             let program = crate::ecky_scheme::compile_to_core_program(source)
                 .map_err(|err| {
-                    crate::contracts::AuthoringDiagnostic::surface(
+                    crate::models::AppError::from(crate::contracts::AuthoringError::surface(
                         crate::contracts::AuthoringReason::ParseSyntax,
                         err.to_string(),
-                    ).to_app_error()
+                    ))
                 })?;
             lower_core_program_to_build123d(&program)
         }
@@ -736,6 +736,231 @@ fn lower_point_3d_expr(
         ));
     }
     Err(validation("3D points must be (x y z) triples."))
+}
+
+// --- Deterministic point-generator helpers ---------------------------------
+// The scheme prelude (`ecky/core`) defines chaotic/parametric point generators
+// (`henon-points`, `lorenz-points`, `organic-loop`, ...). Rather than teaching
+// the build123d lowerer to transpile arbitrary recursion, we unroll a generator
+// over its constant `count` into explicit point `Value` expressions that mirror
+// the scheme definition, then reuse the existing scalar lowering. Deterministic
+// state (the chaotic recurrence) is folded to numbers in Rust; scale/radius/seed
+// stay symbolic so parameters flow through unchanged.
+
+fn gen_call(head: &str, args: Vec<Value>) -> Value {
+    let mut items = Vec::with_capacity(args.len() + 1);
+    items.push(Value::symbol(head));
+    items.extend(args);
+    Value::list(items)
+}
+
+/// `(clamp value (- scale) scale)`, mirroring the prelude `bounded-point*`.
+fn gen_clamp(value: Value, scale: &Value) -> Value {
+    gen_call(
+        "clamp",
+        vec![value, gen_call("-", vec![scale.dup()]), scale.dup()],
+    )
+}
+
+/// `(* scale (/ numerator divisor))` with a folded numeric numerator.
+fn gen_scaled(scale: &Value, numerator: f64, divisor: f64) -> Value {
+    gen_call(
+        "*",
+        vec![
+            scale.dup(),
+            gen_call("/", vec![Value::number(numerator), Value::number(divisor)]),
+        ],
+    )
+}
+
+fn gen_const_count(value: &Value) -> AppResult<usize> {
+    let n = value.as_f64().ok_or_else(|| {
+        unsupported("Point generators require a constant `count` for the build123d backend.")
+    })?;
+    if !n.is_finite() || n < 1.0 {
+        return Err(validation("Point generator `count` must be a positive integer."));
+    }
+    Ok(n.round() as usize)
+}
+
+fn gen_const_number(value: &Value, what: &str) -> AppResult<f64> {
+    value.as_f64().ok_or_else(|| {
+        unsupported(format!(
+            "Point generator `{what}` must be constant for the build123d backend."
+        ))
+    })
+}
+
+/// `(henon-points count scale)` — deterministic Hénon attractor, 2D.
+fn generator_henon(args: &[Value]) -> AppResult<LoweredList> {
+    if args.len() != 2 {
+        return Err(validation("`henon-points` expects count and scale."));
+    }
+    let count = gen_const_count(&args[0])?;
+    let scale = args[1].dup();
+    let (mut x, mut y) = (0.1_f64, 0.0_f64);
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let nx = 1.0 - 1.4 * x * x + y;
+        let ny = 0.3 * x;
+        let px = gen_clamp(gen_scaled(&scale, nx, 2.0), &scale);
+        let py = gen_clamp(gen_scaled(&scale, ny, 2.0), &scale);
+        items.push(Value::list(vec![px, py]));
+        x = nx;
+        y = ny;
+    }
+    Ok(LoweredList::new(
+        items,
+        LoweredListKind::Point2d,
+        Some("henon-points".to_string()),
+    ))
+}
+
+/// `(lorenz-points count dt scale)` — Lorenz attractor sampled at `dt`, 3D.
+fn generator_lorenz(args: &[Value]) -> AppResult<LoweredList> {
+    if args.len() != 3 {
+        return Err(validation("`lorenz-points` expects count, dt, and scale."));
+    }
+    let count = gen_const_count(&args[0])?;
+    let dt = gen_const_number(&args[1], "dt")?;
+    let scale = args[2].dup();
+    let (sigma, rho, beta) = (10.0_f64, 28.0_f64, 8.0_f64 / 3.0_f64);
+    let (mut x, mut y, mut z) = (0.1_f64, 0.0_f64, 0.0_f64);
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let dx = sigma * (y - x);
+        let dy = x * (rho - z) - y;
+        let dz = x * y - beta * z;
+        let nx = x + dt * dx;
+        let ny = y + dt * dy;
+        let nz = z + dt * dz;
+        let cx = gen_clamp(gen_scaled(&scale, nx, 30.0), &scale);
+        let cy = gen_clamp(gen_scaled(&scale, ny, 30.0), &scale);
+        let cz = gen_clamp(gen_scaled(&scale, nz, 50.0), &scale);
+        items.push(Value::list(vec![cx, cy, cz]));
+        x = nx;
+        y = ny;
+        z = nz;
+    }
+    Ok(LoweredList::new(
+        items,
+        LoweredListKind::Point3d,
+        Some("lorenz-points".to_string()),
+    ))
+}
+
+/// `(organic-loop count radius amount seed)` — a jittered ring, 2D. `radius`,
+/// `amount`, and `seed` stay symbolic so parameters flow into the point math.
+fn generator_organic(args: &[Value]) -> AppResult<LoweredList> {
+    if args.len() != 4 {
+        return Err(validation(
+            "`organic-loop` expects count, radius, amount, and seed.",
+        ));
+    }
+    let count = gen_const_count(&args[0])?;
+    let radius = args[1].dup();
+    let amount = args[2].dup();
+    let seed = args[3].dup();
+    let mut items = Vec::with_capacity(count);
+    for i in 0..count {
+        let t = (i as f64) / (count as f64);
+        let angle = gen_call("*", vec![Value::symbol("tau"), Value::number(t)]);
+        let hashed = gen_call(
+            "hash-signed",
+            vec![Value::number(i as f64), Value::number(count as f64), seed.dup()],
+        );
+        let r = gen_call(
+            "+",
+            vec![radius.dup(), gen_call("*", vec![amount.dup(), hashed])],
+        );
+        let px = gen_call("*", vec![r.dup(), gen_call("cos", vec![angle.dup()])]);
+        let py = gen_call("*", vec![r, gen_call("sin", vec![angle])]);
+        items.push(Value::list(vec![px, py]));
+    }
+    Ok(LoweredList::new(
+        items,
+        LoweredListKind::Point2d,
+        Some("organic-loop".to_string()),
+    ))
+}
+
+/// Recognize a prelude point generator by head symbol and unroll it. Returns
+/// `None` for non-generator ops so the caller can keep probing other list forms.
+fn lower_point_generator(op: &str, args: &[Value]) -> Option<AppResult<LoweredList>> {
+    match op {
+        "henon-points" => Some(generator_henon(args)),
+        "lorenz-points" => Some(generator_lorenz(args)),
+        "organic-loop" => Some(generator_organic(args)),
+        _ => None,
+    }
+}
+
+/// Unroll `(map (lambda (i) body) (range start end))` into an explicit point
+/// list when the range bounds are constant and `body` lowers to a point. The
+/// loop index is bound per-iteration via a `let` wrapper so the existing scalar
+/// lowering resolves it. Returns `None` (fall through) for non-point maps,
+/// multi-source `map`, or non-constant ranges — those keep the runtime path.
+fn try_unroll_point_map(
+    args: &[Value],
+    scope: &LoweringScope<'_>,
+) -> AppResult<Option<LoweredList>> {
+    if args.len() != 2 {
+        return Ok(None);
+    }
+    let Ok((params, body)) = parse_lambda_expr(&args[0]) else {
+        return Ok(None);
+    };
+    if params.len() != 1 {
+        return Ok(None);
+    }
+    let Some(range_items) = args[1].to_vec() else {
+        return Ok(None);
+    };
+    if range_items.first().and_then(Value::as_symbol) != Some("range") {
+        return Ok(None);
+    }
+    let (start, end) = match &range_items[1..] {
+        [end] => (0.0, end.as_f64()),
+        [start, end] => (start.as_f64().unwrap_or(f64::NAN), end.as_f64()),
+        _ => return Ok(None),
+    };
+    let (Some(start), Some(end)) = (Some(start).filter(|s| s.is_finite()), end) else {
+        return Ok(None);
+    };
+    if !end.is_finite() {
+        return Ok(None);
+    }
+    let start = start.floor() as i64;
+    let end = end.floor() as i64;
+    if end <= start {
+        return Ok(None);
+    }
+
+    let param = &params[0];
+    let mut items = Vec::with_capacity((end - start) as usize);
+    for i in start..end {
+        let binding = Value::list(vec![Value::list(vec![
+            Value::symbol(param.clone()),
+            Value::number(i as f64),
+        ])]);
+        items.push(Value::list(vec![
+            Value::symbol("let"),
+            binding,
+            body.dup(),
+        ]));
+    }
+
+    // Probe the first element to decide 2D vs 3D; if it is not a point at all,
+    // this is not a point comprehension — let the runtime path handle it.
+    let kind = if lower_point_2d_expr(&items[0], scope).is_ok() {
+        LoweredListKind::Point2d
+    } else if lower_point_3d_expr(&items[0], scope).is_ok() {
+        LoweredListKind::Point3d
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(LoweredList::new(items, kind, Some("map".to_string()))))
 }
 
 fn extract_let_binding_hint(pair: &[Value]) -> Option<CoreValueKind> {
@@ -2660,7 +2885,30 @@ impl<'a> ExprLowerer<'a> {
             )));
         }
 
-        if items.first().and_then(Value::as_symbol).is_some() {
+        if let Some(op) = items.first().and_then(Value::as_symbol) {
+            if let Some(result) = lower_point_generator(op, &items[1..]) {
+                return result.map(Some);
+            }
+            if op == "map" {
+                return try_unroll_point_map(&items[1..], scope);
+            }
+            if op == "append" {
+                return self.try_materialize_append(&items[1..], scope);
+            }
+            if op == "reverse" {
+                if items.len() != 2 {
+                    return Ok(None);
+                }
+                let Some(mut sub) = self.try_materialize_list_binding(&items[1], scope)? else {
+                    return Ok(None);
+                };
+                sub.items.reverse();
+                return Ok(Some(LoweredList::new(
+                    sub.items,
+                    sub.kind,
+                    Some("reverse".to_string()),
+                )));
+            }
             return Ok(None);
         }
 
@@ -2672,18 +2920,54 @@ impl<'a> ExprLowerer<'a> {
         )))
     }
 
+    /// Concatenate `(append a b ...)` of point lists into one materialized list,
+    /// so CAD ops can splice literal points, generators, and comprehensions.
+    fn try_materialize_append(
+        &self,
+        args: &[Value],
+        scope: &LoweringScope<'_>,
+    ) -> AppResult<Option<LoweredList>> {
+        let mut merged: Vec<Value> = Vec::new();
+        let mut kind: Option<LoweredListKind> = None;
+        for arg in args {
+            let Some(sub) = self.try_materialize_list_binding(arg, scope)? else {
+                return Ok(None);
+            };
+            kind = Some(match kind {
+                None => sub.kind,
+                Some(prev) if prev == sub.kind => prev,
+                Some(_) => LoweredListKind::Mixed,
+            });
+            merged.extend(sub.items);
+        }
+        Ok(Some(LoweredList::new(
+            merged,
+            kind.unwrap_or(LoweredListKind::Empty),
+            Some("append".to_string()),
+        )))
+    }
+
     fn require_list_kind(
         &self,
         list: LoweredList,
         cad_op: &str,
         expected_kind: LoweredListKind,
         subject: Option<String>,
-        _scope: &LoweringScope<'_>,
+        scope: &LoweringScope<'_>,
     ) -> AppResult<LoweredList> {
         if list.kind == expected_kind {
             return Ok(list);
         }
-        if expected_kind == LoweredListKind::Point2d && list.kind == LoweredListKind::Pair {
+        // A `Pair` only survives inference when its items did NOT lower as 2D
+        // points, so coerce to `Point2d` only when every item actually validates
+        // as one; otherwise fall through to the kind-mismatch error below.
+        if expected_kind == LoweredListKind::Point2d
+            && list.kind == LoweredListKind::Pair
+            && list
+                .items
+                .iter()
+                .all(|item| lower_point_2d_expr(item, scope).is_ok())
+        {
             return Ok(LoweredList::new(
                 list.items,
                 LoweredListKind::Point2d,

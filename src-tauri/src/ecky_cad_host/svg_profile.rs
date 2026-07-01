@@ -7,10 +7,40 @@ const EPS: f64 = 1e-9;
 const CURVE_SAMPLES: usize = 12;
 const QUAD_SAMPLES: usize = 8;
 
+/// Exact contour segment (ocpsvg/build123d parity). Geometry destined for OCCT
+/// keeps lines and cubic Béziers as-is; quadratics are elevated to cubics
+/// losslessly. The flattened sample points remain only for Rust-side validity
+/// checks (self-intersection, containment, fit bounds).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SvgPathSegment {
+    Line { to: [f64; 2] },
+    Cubic { c1: [f64; 2], c2: [f64; 2], to: [f64; 2] },
+}
+
+/// Exact geometry of one closed contour: a start anchor plus consecutive
+/// segments in authored order. Winding is not normalized here — the OCCT face
+/// builders repair orientation downstream (ShapeFix_Face).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SvgContourGeometry {
+    pub start: [f64; 2],
+    pub segments: Vec<SvgPathSegment>,
+}
+
+impl SvgContourGeometry {
+    pub fn has_curves(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|segment| matches!(segment, SvgPathSegment::Cubic { .. }))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SvgProfile {
     pub outer_loop: Vec<[f64; 2]>,
     pub hole_loops: Vec<Vec<[f64; 2]>>,
+    /// Exact geometry parallel to `outer_loop` / `hole_loops`.
+    pub outer_geometry: SvgContourGeometry,
+    pub hole_geometries: Vec<SvgContourGeometry>,
     pub fit: SvgProfileFit,
     pub source_view_box: [f64; 4],
 }
@@ -48,11 +78,167 @@ impl FromStr for SvgFitMode {
     }
 }
 
+/// One extracted contour: flattened check-points plus exact geometry.
+#[derive(Debug, Clone)]
+struct ExtractedContour {
+    points: Vec<[f64; 2]>,
+    geometry: SvgContourGeometry,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ProfileParseState {
-    loops: Vec<Vec<[f64; 2]>>,
+    loops: Vec<ExtractedContour>,
     has_visible_path: bool,
     has_raster_or_text: bool,
+}
+
+/// SVG fill-rule as authored on a `<path>`. Determines how OCCT resolves nested
+/// wires into filled regions downstream (mirrors ocpsvg's per-path handling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvgFillRule {
+    NonZero,
+    EvenOdd,
+}
+
+/// One `<path>`'s tolerant wire extraction: every closed wire it produced plus
+/// the fill-rule that governs how those wires nest into regions. Region
+/// resolution (containment/parity) is delegated to OCCT, so this stage keeps all
+/// wires without rejecting self-intersecting, open, or multi-outer geometry.
+#[derive(Debug, Clone)]
+pub struct SvgWireSoup {
+    pub fill_rule: SvgFillRule,
+    pub wires: Vec<Vec<[f64; 2]>>,
+    /// Exact geometry parallel to `wires` (same indices).
+    pub wire_geometries: Vec<SvgContourGeometry>,
+}
+
+/// Tolerant per-`<path>` wire-soup extraction. Unlike [`parse_svg_profile`] (the
+/// clean fast path), this never rejects self-intersecting / open / multi-outer
+/// contours: it collects the raw closed wires and captures each path's fill-rule
+/// so a downstream OCCT face builder can resolve regions. Degenerate wires
+/// (fewer than three points, near-zero area) are silently dropped.
+pub fn extract_svg_wire_soup(svg_text: &str) -> AppResult<Vec<SvgWireSoup>> {
+    let fontdb = usvg::fontdb::Database::new();
+    let tree = Tree::from_str(svg_text, &usvg::Options::default(), &fontdb)
+        .map_err(|err| AppError::validation(err.to_string()))?;
+
+    let mut soups = Vec::new();
+    collect_wire_soup(tree.root(), &mut soups)?;
+    Ok(soups)
+}
+
+/// Fit-transformed wire soup ready to hand to the OCCT planar-face builder for
+/// region resolution. All wires share one fit computed over their combined
+/// bounds (so a compound of disjoint shapes keeps its relative layout), and the
+/// fill-rule collapses to even-odd if any contributing `<path>` used it.
+#[derive(Debug, Clone)]
+pub struct SvgWireSoupProfile {
+    pub wires: Vec<Vec<[f64; 2]>>,
+    /// Exact geometry parallel to `wires` (same indices), fit-transformed.
+    pub wire_geometries: Vec<SvgContourGeometry>,
+    pub fill_rule: SvgFillRule,
+}
+
+/// Tolerant sibling of [`parse_svg_profile`]: extract every filled `<path>`'s
+/// wires (no self-intersection / single-outer / closed-only rejection), apply
+/// the same fit transform, and return the raw soup for OCCT to resolve into
+/// faces. Errors only when there is no faceable filled geometry at all.
+pub fn extract_svg_wire_soup_profile(
+    svg_text: &str,
+    target_width: Option<f64>,
+    target_height: Option<f64>,
+    fit_mode: SvgFitMode,
+) -> AppResult<SvgWireSoupProfile> {
+    let soups = extract_svg_wire_soup(svg_text)?;
+
+    let mut wires: Vec<Vec<[f64; 2]>> = Vec::new();
+    let mut wire_geometries: Vec<SvgContourGeometry> = Vec::new();
+    let mut any_even_odd = false;
+    for soup in &soups {
+        if soup.fill_rule == SvgFillRule::EvenOdd {
+            any_even_odd = true;
+        }
+        wires.extend(soup.wires.iter().cloned());
+        wire_geometries.extend(soup.wire_geometries.iter().cloned());
+    }
+
+    if wires.is_empty() {
+        return Err(AppError::validation(
+            "SVG has no faceable filled paths for native region resolution. \
+             Stroke-only lineart is not yet supported by the native backend.",
+        ));
+    }
+
+    // compute_fit only reads the combined point set for bounds/center; the
+    // outer/holes split is irrelevant here, so treat the first wire as outer.
+    let (outer, holes) = wires.split_first().expect("wires non-empty");
+    let holes_vec: Vec<Vec<[f64; 2]>> = holes.to_vec();
+    let fit = compute_fit(outer, &holes_vec, target_width, target_height, fit_mode)?;
+
+    let wires = wires
+        .into_iter()
+        .map(|points| transform_loop(points, &fit))
+        .collect();
+    let wire_geometries = wire_geometries
+        .into_iter()
+        .map(|geometry| transform_geometry(geometry, &fit))
+        .collect();
+
+    Ok(SvgWireSoupProfile {
+        wires,
+        wire_geometries,
+        fill_rule: if any_even_odd {
+            SvgFillRule::EvenOdd
+        } else {
+            SvgFillRule::NonZero
+        },
+    })
+}
+
+fn collect_wire_soup(root: &usvg::Group, soups: &mut Vec<SvgWireSoup>) -> AppResult<()> {
+    for node in root.children() {
+        match node {
+            Node::Group(group) => collect_wire_soup(group, soups)?,
+            Node::Path(path) => {
+                if path.visibility() != Visibility::Visible {
+                    continue;
+                }
+                let fill = match path.fill() {
+                    Some(fill) => fill,
+                    // No fill: stroke-only paths carry no region intent for the
+                    // face builder, so they contribute no wire soup.
+                    None => continue,
+                };
+                let fill_rule = match fill.rule() {
+                    usvg::FillRule::NonZero => SvgFillRule::NonZero,
+                    usvg::FillRule::EvenOdd => SvgFillRule::EvenOdd,
+                };
+                let mut contours = Vec::new();
+                extract_contours(
+                    path.data(),
+                    path.abs_transform(),
+                    path.id(),
+                    &mut contours,
+                    true,
+                )?;
+                if !contours.is_empty() {
+                    let mut wires = Vec::with_capacity(contours.len());
+                    let mut wire_geometries = Vec::with_capacity(contours.len());
+                    for contour in contours {
+                        wires.push(contour.points);
+                        wire_geometries.push(contour.geometry);
+                    }
+                    soups.push(SvgWireSoup {
+                        fill_rule,
+                        wires,
+                        wire_geometries,
+                    });
+                }
+            }
+            Node::Image(_) | Node::Text(_) => {}
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_svg_profile(
@@ -87,9 +273,23 @@ pub fn parse_svg_profile(
         ));
     }
 
-    let (outer_loop, hole_loops) = classify_loops(normalized, reject_multi_outer_first_slice)?;
+    // The clean fast path assumes properly nested, disjoint loops. Loops that
+    // cross EACH OTHER (banana-lineart style artwork: every stroke outline
+    // passed the per-contour self-intersection check, then classified as
+    // "holes" of the biggest outline) build faces with intersecting rings —
+    // OCCT garbage downstream. Reject here so the wire-soup resolver, which
+    // splits intersections properly, takes over.
+    if loops_mutually_intersect(&normalized) {
+        return Err(AppError::validation(
+            "SVG contours intersect each other; artwork requires wire-soup region resolution.",
+        ));
+    }
+
+    let (outer, holes) = classify_loops(normalized, reject_multi_outer_first_slice)?;
+    let hole_loops: Vec<Vec<[f64; 2]>> =
+        holes.iter().map(|contour| contour.points.clone()).collect();
     let fit = compute_fit(
-        &outer_loop,
+        &outer.points,
         &hole_loops,
         target_width,
         target_height,
@@ -98,10 +298,15 @@ pub fn parse_svg_profile(
 
     let source_view_box = tree.view_box();
     Ok(SvgProfile {
-        outer_loop: transform_loop(outer_loop, &fit),
+        outer_loop: transform_loop(outer.points, &fit),
         hole_loops: hole_loops
             .into_iter()
             .map(|points| transform_loop(points, &fit))
+            .collect(),
+        outer_geometry: transform_geometry(outer.geometry, &fit),
+        hole_geometries: holes
+            .into_iter()
+            .map(|contour| transform_geometry(contour.geometry, &fit))
             .collect(),
         fit,
         source_view_box: [
@@ -138,6 +343,7 @@ fn collect_visible_node(node: &Node, state: &mut ProfileParseState) -> AppResult
                 path.abs_transform(),
                 path.id(),
                 &mut state.loops,
+                false,
             )?;
             Ok(())
         }
@@ -152,15 +358,19 @@ fn extract_contours(
     path_data: &usvg::tiny_skia_path::Path,
     abs_transform: Transform,
     _context: &str,
-    contours: &mut Vec<Vec<[f64; 2]>>,
+    contours: &mut Vec<ExtractedContour>,
+    tolerant: bool,
 ) -> AppResult<()> {
     let mut current: Vec<[f64; 2]> = Vec::new();
+    let mut geometry = SvgContourGeometry::default();
     let mut start: Option<[f64; 2]> = None;
 
     let mut finalize = |current: &mut Vec<[f64; 2]>,
+                        geometry: &mut SvgContourGeometry,
                         start: &mut Option<[f64; 2]>,
                         close_explicit: bool|
      -> AppResult<()> {
+        let contour_geometry = std::mem::take(geometry);
         if current.len() < 2 {
             current.clear();
             *start = None;
@@ -169,15 +379,30 @@ fn extract_contours(
 
         let loop_points = current.clone();
         *current = Vec::new();
-        let mut cleaned = normalize_contour(loop_points)?;
+        let mut cleaned = match normalize_contour(loop_points) {
+            Ok(value) => value,
+            Err(_) if tolerant => {
+                let _ = start.take();
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
 
         if cleaned.len() < 3 {
+            if tolerant {
+                let _ = start.take();
+                return Ok(());
+            }
             return Err(AppError::validation(
                 "SVG path contour has fewer than three distinct points.",
             ));
         }
 
         if !close_explicit && !points_equal(cleaned[0], cleaned[cleaned.len() - 1]) {
+            if tolerant {
+                let _ = start.take();
+                return Ok(());
+            }
             return Err(AppError::validation(
                 "SVG path contour is open. Closed paths are required for profile ingestion.",
             ));
@@ -192,23 +417,37 @@ fn extract_contours(
         }
 
         if cleaned.len() < 3 {
+            if tolerant {
+                let _ = start.take();
+                return Ok(());
+            }
             return Err(AppError::validation(
                 "SVG path contour has fewer than three points.",
             ));
         }
 
-        if self_intersects(&cleaned) {
+        if !tolerant && self_intersects(&cleaned) {
             return Err(AppError::validation(
                 "SVG path contour is self-intersecting and cannot be used as profile geometry.",
             ));
         }
+        // tolerant mode intentionally skips the self-intersection check: region
+        // resolution is delegated to OCCT's planar face builder downstream
+        // (BRepBuilderAPI_MakeFace), mirroring the build123d/ocpsvg path.
 
         if signed_area(&cleaned).abs() < EPS {
+            if tolerant {
+                let _ = start.take();
+                return Ok(());
+            }
             return Err(AppError::validation("SVG path contour has near-zero area."));
         }
 
         let _ = start.take();
-        contours.push(cleaned);
+        contours.push(ExtractedContour {
+            points: cleaned,
+            geometry: contour_geometry,
+        });
         Ok(())
     };
 
@@ -216,10 +455,14 @@ fn extract_contours(
         match segment {
             PathSegment::MoveTo(point) => {
                 if !current.is_empty() {
-                    finalize(&mut current, &mut start, false)?;
+                    finalize(&mut current, &mut geometry, &mut start, false)?;
                 }
                 let point = transform_point(point, abs_transform);
                 current.push(point);
+                geometry = SvgContourGeometry {
+                    start: point,
+                    segments: Vec::new(),
+                };
                 start = Some(point);
             }
             PathSegment::LineTo(point) => {
@@ -231,6 +474,7 @@ fn extract_contours(
                 let point = transform_point(point, abs_transform);
                 if current.is_empty() || !points_equal(*current.last().expect("non-empty"), point) {
                     current.push(point);
+                    geometry.segments.push(SvgPathSegment::Line { to: point });
                 }
             }
             PathSegment::QuadTo(c1, c2) => {
@@ -240,6 +484,9 @@ fn extract_contours(
                     ));
                 }
                 let anchor = *current.last().expect("non-empty");
+                geometry
+                    .segments
+                    .push(quad_to_cubic(anchor, c1, c2, abs_transform));
                 sample_quad(anchor, c1, c2, abs_transform, &mut current);
             }
             PathSegment::CubicTo(c1, c2, c3) => {
@@ -249,22 +496,45 @@ fn extract_contours(
                     ));
                 }
                 let anchor = *current.last().expect("non-empty");
+                geometry.segments.push(SvgPathSegment::Cubic {
+                    c1: transform_point(c1, abs_transform),
+                    c2: transform_point(c2, abs_transform),
+                    to: transform_point(c3, abs_transform),
+                });
                 sample_cubic(anchor, c1, c2, c3, abs_transform, &mut current);
             }
             PathSegment::Close => {
                 if start.is_none() {
                     continue;
                 }
-                finalize(&mut current, &mut start, true)?;
+                finalize(&mut current, &mut geometry, &mut start, true)?;
             }
         }
     }
 
     if !current.is_empty() {
-        finalize(&mut current, &mut start, false)?;
+        finalize(&mut current, &mut geometry, &mut start, false)?;
     }
 
     Ok(())
+}
+
+/// Lossless degree elevation of a quadratic Bézier to a cubic:
+/// c1 = q0 + ⅔(q1 − q0), c2 = q2 + ⅔(q1 − q2).
+fn quad_to_cubic(anchor: [f64; 2], c1: Point, c2: Point, transform: Transform) -> SvgPathSegment {
+    let q1 = transform_point(c1, transform);
+    let q2 = transform_point(c2, transform);
+    SvgPathSegment::Cubic {
+        c1: [
+            anchor[0] + 2.0 / 3.0 * (q1[0] - anchor[0]),
+            anchor[1] + 2.0 / 3.0 * (q1[1] - anchor[1]),
+        ],
+        c2: [
+            q2[0] + 2.0 / 3.0 * (q1[0] - q2[0]),
+            q2[1] + 2.0 / 3.0 * (q1[1] - q2[1]),
+        ],
+        to: q2,
+    }
 }
 
 fn transform_point(point: Point, transform: Transform) -> [f64; 2] {
@@ -352,10 +622,10 @@ fn normalize_contour(mut contour: Vec<[f64; 2]>) -> AppResult<Vec<[f64; 2]>> {
     Ok(contour)
 }
 
-fn normalize_loops(contours: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<Vec<[f64; 2]>>> {
+fn normalize_loops(contours: Vec<ExtractedContour>) -> AppResult<Vec<ExtractedContour>> {
     let mut normalized = Vec::with_capacity(contours.len());
     for contour in contours {
-        let mut points = normalize_contour(contour)?;
+        let mut points = normalize_contour(contour.points)?;
         if points.len() < 3 {
             return Err(AppError::validation(
                 "SVG path contour has fewer than three usable points after normalization.",
@@ -370,22 +640,27 @@ fn normalize_loops(contours: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<Vec<[f64; 2]>>
             return Err(AppError::validation("SVG path contour has near-zero area."));
         }
 
+        // Only the flattened check-points get winding-normalized; the exact
+        // geometry keeps authored order (OCCT's ShapeFix repairs orientation).
         if signed_area(&points) < 0.0 {
             points.reverse();
         }
-        normalized.push(points);
+        normalized.push(ExtractedContour {
+            points,
+            geometry: contour.geometry,
+        });
     }
     Ok(normalized)
 }
 
 fn classify_loops(
-    loops: Vec<Vec<[f64; 2]>>,
+    loops: Vec<ExtractedContour>,
     reject_multi_outer_first_slice: bool,
-) -> AppResult<(Vec<[f64; 2]>, Vec<Vec<[f64; 2]>>)> {
+) -> AppResult<(ExtractedContour, Vec<ExtractedContour>)> {
     let mut parent: Vec<Option<usize>> = vec![None; loops.len()];
 
     for i in 0..loops.len() {
-        let rep = polygon_representative_point(&loops[i]);
+        let rep = polygon_representative_point(&loops[i].points);
         let mut parent_area = f64::INFINITY;
         let mut parent_index = None;
 
@@ -393,11 +668,11 @@ fn classify_loops(
             if i == j {
                 continue;
             }
-            let candidate_area = signed_area(&loops[j]).abs();
-            if candidate_area <= signed_area(&loops[i]).abs() {
+            let candidate_area = signed_area(&loops[j].points).abs();
+            if candidate_area <= signed_area(&loops[i].points).abs() {
                 continue;
             }
-            if point_in_polygon(rep, &loops[j]) && candidate_area < parent_area {
+            if point_in_polygon(rep, &loops[j].points) && candidate_area < parent_area {
                 parent_area = candidate_area;
                 parent_index = Some(j);
             }
@@ -426,37 +701,29 @@ fn classify_loops(
     let outer_index = outer_indices
         .into_iter()
         .max_by(|left, right| {
-            signed_area(&loops[*left])
+            signed_area(&loops[*left].points)
                 .abs()
-                .total_cmp(&signed_area(&loops[*right]).abs())
+                .total_cmp(&signed_area(&loops[*right].points).abs())
         })
         .ok_or_else(|| AppError::validation("SVG profile ingestion found no outer loops."))?;
 
     let mut holes = Vec::new();
-    for (index, points) in loops.iter().enumerate() {
+    for (index, contour) in loops.iter().enumerate() {
         if index == outer_index {
             continue;
         }
         if is_descendant(index, outer_index, &parent) {
-            let mut hole = points.clone();
-            if signed_area(&hole) > 0.0 {
-                hole.reverse();
+            let mut hole = contour.clone();
+            if signed_area(&hole.points) > 0.0 {
+                hole.points.reverse();
             }
             holes.push(hole);
         }
     }
 
-    if holes.is_empty() {
-        let mut outer_only = loops[outer_index].clone();
-        if signed_area(&outer_only) < 0.0 {
-            outer_only.reverse();
-        }
-        return Ok((outer_only, holes));
-    }
-
     let mut outer = loops[outer_index].clone();
-    if signed_area(&outer) < 0.0 {
-        outer.reverse();
+    if signed_area(&outer.points) < 0.0 {
+        outer.points.reverse();
     }
     Ok((outer, holes))
 }
@@ -579,13 +846,36 @@ fn validate_positive(value: f64, field: &str) -> AppResult<f64> {
 fn transform_loop(points: Vec<[f64; 2]>, fit: &SvgProfileFit) -> Vec<[f64; 2]> {
     points
         .into_iter()
-        .map(|point| {
-            [
-                (point[0] + fit.translate_x) * fit.scale_x,
-                (point[1] + fit.translate_y) * fit.scale_y,
-            ]
-        })
+        .map(|point| fit_point(point, fit))
         .collect()
+}
+
+fn fit_point(point: [f64; 2], fit: &SvgProfileFit) -> [f64; 2] {
+    [
+        (point[0] + fit.translate_x) * fit.scale_x,
+        (point[1] + fit.translate_y) * fit.scale_y,
+    ]
+}
+
+/// The fit is affine, so it maps Bézier control points exactly.
+fn transform_geometry(geometry: SvgContourGeometry, fit: &SvgProfileFit) -> SvgContourGeometry {
+    SvgContourGeometry {
+        start: fit_point(geometry.start, fit),
+        segments: geometry
+            .segments
+            .into_iter()
+            .map(|segment| match segment {
+                SvgPathSegment::Line { to } => SvgPathSegment::Line {
+                    to: fit_point(to, fit),
+                },
+                SvgPathSegment::Cubic { c1, c2, to } => SvgPathSegment::Cubic {
+                    c1: fit_point(c1, fit),
+                    c2: fit_point(c2, fit),
+                    to: fit_point(to, fit),
+                },
+            })
+            .collect(),
+    }
 }
 
 fn deduplicate_points(points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
@@ -679,6 +969,29 @@ fn signed_area(points: &[[f64; 2]]) -> f64 {
         area -= points[j][0] * points[i][1];
     }
     0.5 * area
+}
+
+/// True when any two distinct loops cross each other (segment-level test on
+/// the flattened check-points).
+fn loops_mutually_intersect(loops: &[ExtractedContour]) -> bool {
+    for left_index in 0..loops.len() {
+        for right_index in (left_index + 1)..loops.len() {
+            let left = &loops[left_index].points;
+            let right = &loops[right_index].points;
+            for i in 0..left.len() {
+                let a1 = left[i];
+                let a2 = left[(i + 1) % left.len()];
+                for j in 0..right.len() {
+                    let b1 = right[j];
+                    let b2 = right[(j + 1) % right.len()];
+                    if segments_intersect(a1, a2, b1, b2) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn self_intersects(points: &[[f64; 2]]) -> bool {
@@ -908,5 +1221,121 @@ mod tests {
         let err = parse_svg_profile(svg, None, None, SvgFitMode::Contain, true)
             .expect_err("self intersecting contour should fail");
         assert!(err.to_string().contains("self-intersecting"));
+    }
+
+    #[test]
+    fn wire_soup_keeps_self_intersecting_lineart() {
+        // A 5-point star self-intersects: the clean fast path rejects it, but the
+        // tolerant wire-soup path keeps the wire for downstream OCCT resolution.
+        let svg = r#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+              <path d="M50 0 L20 90 L95 35 L5 35 L80 90 Z"/>
+            </svg>
+        "#;
+        parse_svg_profile(svg, None, None, SvgFitMode::Contain, true)
+            .expect_err("clean path rejects self-intersecting star");
+
+        let soups = extract_svg_wire_soup(svg).expect("wire soup extracts");
+        assert_eq!(soups.len(), 1, "one <path> => one soup");
+        assert_eq!(soups[0].fill_rule, SvgFillRule::NonZero);
+        assert_eq!(soups[0].wires.len(), 1, "star is a single closed wire");
+    }
+
+    #[test]
+    fn wire_soup_captures_evenodd_multi_subpath() {
+        let svg = r#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+              <path fill-rule="evenodd" d="M0 0 L10 0 L10 10 L0 10 Z M3 3 L7 3 L7 7 L3 7 Z"/>
+            </svg>
+        "#;
+        let soups = extract_svg_wire_soup(svg).expect("wire soup extracts");
+        assert_eq!(soups.len(), 1, "one <path> => one soup");
+        assert_eq!(soups[0].fill_rule, SvgFillRule::EvenOdd);
+        assert_eq!(soups[0].wires.len(), 2, "two subpaths => two wires");
+    }
+
+    #[test]
+    fn wire_soup_compound_icon_groups_per_path() {
+        let svg = r#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 10">
+              <path d="M0 0 L10 0 L10 10 L0 10 Z"/>
+              <path fill-rule="evenodd" d="M20 0 L30 0 L30 10 L20 10 Z"/>
+            </svg>
+        "#;
+        let soups = extract_svg_wire_soup(svg).expect("wire soup extracts");
+        assert_eq!(soups.len(), 2, "two <path> elements => two soups");
+        assert_eq!(soups[0].fill_rule, SvgFillRule::NonZero);
+        assert_eq!(soups[1].fill_rule, SvgFillRule::EvenOdd);
+        assert!(soups.iter().all(|soup| soup.wires.len() == 1));
+    }
+
+    /// Exact-curve parity: curved contours carry cubic segments whose control
+    /// points went through the same affine fit as the flattened points.
+    #[test]
+    fn parse_svg_profile_carries_exact_curve_segments_through_fit() {
+        // Curve bounds are 8 wide (x 1..9) and 6 tall (y 2..8, the cubic
+        // extrema), centered at (5,5). Contain fit into 20×20 => scale 2.5.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+            <path d="M1 5 C1 1 9 1 9 5 C9 9 1 9 1 5 Z"/>
+        </svg>"##;
+        let profile =
+            parse_svg_profile(svg, Some(20.0), Some(20.0), SvgFitMode::Contain, true)
+                .expect("parse");
+
+        assert!(profile.outer_geometry.has_curves());
+        assert_eq!(profile.outer_geometry.segments.len(), 2);
+        let scale = profile.fit.scale_x;
+        assert!((scale - 2.5).abs() < 1.0e-6, "unexpected fit scale {scale}");
+        // Source anchor (1,5) => ((1-5)·s, 0); control (1,1) => ((1-5)·s, (1-5)·s);
+        // segment end (9,5) => ((9-5)·s, 0).
+        assert!((profile.outer_geometry.start[0] - -4.0 * scale).abs() < 1.0e-9);
+        assert!(profile.outer_geometry.start[1].abs() < 1.0e-9);
+        let SvgPathSegment::Cubic { c1, to, .. } = &profile.outer_geometry.segments[0] else {
+            panic!("expected cubic first segment");
+        };
+        assert!((c1[0] - -4.0 * scale).abs() < 1.0e-9 && (c1[1] - -4.0 * scale).abs() < 1.0e-9);
+        assert!((to[0] - 4.0 * scale).abs() < 1.0e-9 && to[1].abs() < 1.0e-9);
+    }
+
+    /// Banana-lineart class: individually clean loops that CROSS each other
+    /// must not pass the clean fast path (they build faces with intersecting
+    /// rings); they belong to the wire-soup resolver.
+    #[test]
+    fn parse_svg_profile_rejects_mutually_intersecting_loops() {
+        // Big square outer + two rectangles inside it that cross each other.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+            <path d="M0 0 H40 V40 H0 Z"/>
+            <path d="M8 14 H30 V22 H8 Z"/>
+            <path d="M14 8 H22 V30 H14 Z"/>
+        </svg>"##;
+        let error = parse_svg_profile(svg, Some(40.0), Some(40.0), SvgFitMode::Contain, true)
+            .expect_err("mutually intersecting loops must fall back to wire soup");
+        assert!(
+            error.message.contains("intersect each other"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    /// TTF quads elevate to cubics losslessly: endpoints match and the cubic's
+    /// midpoint equals the quadratic's midpoint (t=0.5 identity of degree
+    /// elevation).
+    #[test]
+    fn quad_to_cubic_elevation_is_lossless_at_endpoints_and_midpoint() {
+        let anchor = [0.0, 0.0];
+        let control = Point::from_xy(2.0, 4.0);
+        let end = Point::from_xy(4.0, 0.0);
+        let SvgPathSegment::Cubic { c1, c2, to } =
+            quad_to_cubic(anchor, control, end, Transform::identity())
+        else {
+            panic!("expected cubic");
+        };
+        assert_eq!(to, [4.0, 0.0]);
+        // Quadratic at t=0.5: 0.25*q0 + 0.5*q1 + 0.25*q2 = (2, 2).
+        let cubic_mid = [
+            0.125 * anchor[0] + 0.375 * c1[0] + 0.375 * c2[0] + 0.125 * to[0],
+            0.125 * anchor[1] + 0.375 * c1[1] + 0.375 * c2[1] + 0.125 * to[1],
+        ];
+        assert!((cubic_mid[0] - 2.0).abs() < 1.0e-12);
+        assert!((cubic_mid[1] - 2.0).abs() < 1.0e-12);
     }
 }

@@ -203,6 +203,7 @@ pub fn emit_plan_export_source_with_params(
     let topology_path = step_path.with_file_name("topology.json");
     let topology_writer_source = direct_occt_topology_writer_source();
     let stl_writer_source = direct_occt_stl_writer_source();
+    let hull_helper_source = direct_occt_hull_helper_source();
     let topology_writer_calls = direct_occt_topology_writer_calls(&part_topology_roots);
 
     Ok(format!(
@@ -210,6 +211,7 @@ pub fn emit_plan_export_source_with_params(
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepFeat.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -221,7 +223,9 @@ pub fn emit_plan_export_source_with_params(
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -256,6 +260,8 @@ pub fn emit_plan_export_source_with_params(
 #include <IFSelect_ReturnStatus.hxx>
 #include <Poly_Triangulation.hxx>
 #include <STEPControl_Writer.hxx>
+#include <ShapeFix_Face.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <StlAPI_Reader.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -269,6 +275,9 @@ pub fn emit_plan_export_source_with_params(
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -298,6 +307,7 @@ namespace fs = std::filesystem;
 
 {topology_writer_source}
 {stl_writer_source}
+{hull_helper_source}
 
 int main() {{
 {body}    TopoDS_Shape shape = {root_var};
@@ -392,14 +402,288 @@ fn direct_occt_topology_writer_calls(
         .collect::<String>()
 }
 
-fn direct_occt_stl_writer_source() -> &'static str {
-    r#"bool write_ascii_stl_mesh(const TopoDS_Shape& shape, const char* path) {
-    std::ofstream out(path);
-    if (!out) {
-        return false;
+// Same incremental convex-hull algorithm as `convex_hull_shapes` in
+// `native/direct_occt_runner.cpp` — keep the two implementations in sync.
+// Generated-source style: no exceptions; a null shape signals failure and the
+// emit site maps it to a return code.
+fn direct_occt_hull_helper_source() -> &'static str {
+    r#"static double ecky_hull_orient(const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& c, const gp_Pnt& d) {
+    gp_Vec ab(a, b);
+    gp_Vec ac(a, c);
+    gp_Vec ad(a, d);
+    return ab.Crossed(ac).Dot(ad);
+}
+
+static TopoDS_Shape ecky_convex_hull_shapes(const std::vector<TopoDS_Shape>& hull_inputs) {
+    std::vector<gp_Pnt> pts;
+    for (const TopoDS_Shape& input : hull_inputs) {
+        BRepMesh_IncrementalMesh mesh(input, 0.1, Standard_False, 0.5, Standard_True);
+        (void)mesh;
+        for (TopExp_Explorer ex(input, TopAbs_FACE); ex.More(); ex.Next()) {
+            TopoDS_Face face = TopoDS::Face(ex.Current());
+            TopLoc_Location loc;
+            Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+            if (tri.IsNull()) {
+                continue;
+            }
+            gp_Trsf t = loc.Transformation();
+            for (Standard_Integer i = 1; i <= tri->NbNodes(); ++i) {
+                pts.push_back(tri->Node(i).Transformed(t));
+            }
+        }
+        for (TopExp_Explorer ex(input, TopAbs_VERTEX); ex.More(); ex.Next()) {
+            pts.push_back(BRep_Tool::Pnt(TopoDS::Vertex(ex.Current())));
+        }
     }
-    out << "solid ecky\n";
-    bool wrote_triangle = false;
+    const std::size_t n = pts.size();
+    const double eps = 1.0e-9;
+    if (n < 4) {
+        return TopoDS_Shape();
+    }
+    int i0 = 0;
+    int i1 = -1;
+    double best = -1.0;
+    for (std::size_t j = 1; j < n; ++j) {
+        double d = pts[0].SquareDistance(pts[j]);
+        if (d > best) { best = d; i1 = static_cast<int>(j); }
+    }
+    if (i1 < 0 || best <= eps) {
+        return TopoDS_Shape();
+    }
+    int i2 = -1;
+    best = -1.0;
+    for (std::size_t j = 0; j < n; ++j) {
+        gp_Vec e(pts[i0], pts[i1]);
+        gp_Vec p(pts[i0], pts[j]);
+        double area = e.Crossed(p).SquareMagnitude();
+        if (area > best) { best = area; i2 = static_cast<int>(j); }
+    }
+    if (i2 < 0 || best <= eps) {
+        return TopoDS_Shape();
+    }
+    int i3 = -1;
+    best = 0.0;
+    for (std::size_t j = 0; j < n; ++j) {
+        double vol = std::abs(ecky_hull_orient(pts[i0], pts[i1], pts[i2], pts[j]));
+        if (vol > best) { best = vol; i3 = static_cast<int>(j); }
+    }
+    if (i3 < 0 || best <= eps) {
+        return TopoDS_Shape();
+    }
+    struct EckyHullFace { int v[3]; };
+    auto make_outward = [&](int a, int b, int c, int apex) -> EckyHullFace {
+        if (ecky_hull_orient(pts[a], pts[b], pts[c], pts[apex]) > 0.0) {
+            return EckyHullFace{{a, c, b}};
+        }
+        return EckyHullFace{{a, b, c}};
+    };
+    std::vector<EckyHullFace> faces;
+    faces.push_back(make_outward(i0, i1, i2, i3));
+    faces.push_back(make_outward(i0, i1, i3, i2));
+    faces.push_back(make_outward(i0, i2, i3, i1));
+    faces.push_back(make_outward(i1, i2, i3, i0));
+    std::vector<bool> used(n, false);
+    used[i0] = used[i1] = used[i2] = used[i3] = true;
+    for (std::size_t p = 0; p < n; ++p) {
+        if (used[p]) {
+            continue;
+        }
+        std::vector<char> visible(faces.size(), 0);
+        bool any = false;
+        for (std::size_t f = 0; f < faces.size(); ++f) {
+            const EckyHullFace& face = faces[f];
+            if (ecky_hull_orient(pts[face.v[0]], pts[face.v[1]], pts[face.v[2]], pts[p]) > eps) {
+                visible[f] = 1;
+                any = true;
+            }
+        }
+        if (!any) {
+            continue;
+        }
+        std::map<std::pair<int, int>, int> edge_count;
+        for (std::size_t f = 0; f < faces.size(); ++f) {
+            if (!visible[f]) {
+                continue;
+            }
+            const EckyHullFace& face = faces[f];
+            for (int e = 0; e < 3; ++e) {
+                int a = face.v[e];
+                int b = face.v[(e + 1) % 3];
+                edge_count[std::make_pair(a, b)] += 1;
+            }
+        }
+        std::vector<EckyHullFace> kept;
+        kept.reserve(faces.size());
+        for (std::size_t f = 0; f < faces.size(); ++f) {
+            if (!visible[f]) {
+                kept.push_back(faces[f]);
+            }
+        }
+        for (std::map<std::pair<int, int>, int>::const_iterator it = edge_count.begin(); it != edge_count.end(); ++it) {
+            int a = it->first.first;
+            int b = it->first.second;
+            if (edge_count.find(std::make_pair(b, a)) == edge_count.end()) {
+                kept.push_back(EckyHullFace{{a, b, static_cast<int>(p)}});
+            }
+        }
+        faces.swap(kept);
+        used[p] = true;
+    }
+    if (faces.empty()) {
+        return TopoDS_Shape();
+    }
+    BRepBuilderAPI_Sewing sewing(1.0e-6);
+    for (std::size_t f = 0; f < faces.size(); ++f) {
+        const EckyHullFace& face = faces[f];
+        BRepBuilderAPI_MakePolygon poly(pts[face.v[0]], pts[face.v[1]], pts[face.v[2]], Standard_True);
+        if (!poly.IsDone()) {
+            continue;
+        }
+        BRepBuilderAPI_MakeFace mk(poly.Wire(), Standard_True);
+        if (!mk.IsDone()) {
+            continue;
+        }
+        sewing.Add(mk.Face());
+    }
+    sewing.Perform();
+    TopoDS_Shape sewn = sewing.SewedShape();
+    TopoDS_Shell shell;
+    bool found_shell = false;
+    for (TopExp_Explorer ex(sewn, TopAbs_SHELL); ex.More(); ex.Next()) {
+        shell = TopoDS::Shell(ex.Current());
+        found_shell = true;
+        break;
+    }
+    if (!found_shell) {
+        return TopoDS_Shape();
+    }
+    BRepBuilderAPI_MakeSolid mk_solid(shell);
+    if (!mk_solid.IsDone()) {
+        return TopoDS_Shape();
+    }
+    TopoDS_Solid solid = mk_solid.Solid();
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(solid, props);
+    if (props.Mass() < 0.0) {
+        solid.Reverse();
+    }
+    return solid;
+}
+"#
+}
+
+fn direct_occt_stl_writer_source() -> &'static str {
+    r#"// Whole-wire containment test with `BRepFeat.IsInside_s` semantics: every
+// vertex of the wire must classify IN/ON against the candidate face. Uses
+// `theUseBndBox=true` (OCCT recommends this for faces with >10 edges) to keep
+// dense SVG polyline containment tests fast.
+bool wire_inside_face(const TopoDS_Wire& wire, const TopoDS_Face& face) {
+    bool saw_vertex = false;
+    BRepClass_FaceClassifier classifier;
+    for (TopExp_Explorer explorer(wire, TopAbs_VERTEX); explorer.More(); explorer.Next()) {
+        saw_vertex = true;
+        gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(explorer.Current()));
+        classifier.Perform(face, point, 1.0e-7, Standard_True);
+        TopAbs_State state = classifier.State();
+        if (state != TopAbs_IN && state != TopAbs_ON) {
+            return false;
+        }
+    }
+    return saw_vertex;
+}
+
+// ocpsvg parity (`ensure_face_normal_up`): profile faces must present +Z
+// normals before extrusion, or the prism comes out inverted and silently
+// poisons downstream boolean operations.
+TopoDS_Face ensure_face_normal_up(TopoDS_Face face) {
+    double u_min = 0.0;
+    double u_max = 0.0;
+    double v_min = 0.0;
+    double v_max = 0.0;
+    BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+    if (!std::isfinite(u_min) || !std::isfinite(u_max) ||
+        !std::isfinite(v_min) || !std::isfinite(v_max)) {
+        return face;
+    }
+    BRepAdaptor_Surface surface(face);
+    gp_Pnt point;
+    gp_Vec du;
+    gp_Vec dv;
+    surface.D1((u_min + u_max) / 2.0, (v_min + v_max) / 2.0, point, du, dv);
+    gp_Vec normal = du.Crossed(dv);
+    if (normal.Magnitude() <= 1.0e-9) {
+        return face;
+    }
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    if (normal.Z() < 0.0) {
+        face.Reverse();
+    }
+    return face;
+}
+
+// Weld tolerance for STL vertices. Boolean rebuilds and transform round-trips
+// leave duplicated boundary topology whose tessellations drift a few double
+// ULPs apart; downstream manifold checks compare exact bits, so even 1e-16
+// drift reads as a crack. 1e-6 mm is two orders below the chord error and far
+// below any modelled clearance.
+constexpr double kStlWeldTolerance = 1.0e-6;
+
+// Snap a point to the coordinates of a previously seen point within the weld
+// tolerance (spatial hash over grid cells, checking neighbor cells so pairs
+// straddling a cell boundary still merge).
+class StlVertexWelder {
+public:
+    gp_Pnt weld(const gp_Pnt& point) {
+        const std::int64_t cx = cell(point.X());
+        const std::int64_t cy = cell(point.Y());
+        const std::int64_t cz = cell(point.Z());
+        for (std::int64_t dx = -1; dx <= 1; ++dx) {
+            for (std::int64_t dy = -1; dy <= 1; ++dy) {
+                for (std::int64_t dz = -1; dz <= 1; ++dz) {
+                    auto bucket = buckets_.find(key(cx + dx, cy + dy, cz + dz));
+                    if (bucket == buckets_.end()) {
+                        continue;
+                    }
+                    for (const gp_Pnt& candidate : bucket->second) {
+                        if (point.SquareDistance(candidate) <=
+                            kStlWeldTolerance * kStlWeldTolerance) {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+        gp_Pnt snapped(
+            point.X() == 0.0 ? 0.0 : point.X(),
+            point.Y() == 0.0 ? 0.0 : point.Y(),
+            point.Z() == 0.0 ? 0.0 : point.Z());
+        buckets_[key(cx, cy, cz)].push_back(snapped);
+        return snapped;
+    }
+
+private:
+    static std::int64_t cell(double value) {
+        return static_cast<std::int64_t>(std::floor(value / kStlWeldTolerance));
+    }
+
+    static std::string key(std::int64_t x, std::int64_t y, std::int64_t z) {
+        return std::to_string(x) + ":" + std::to_string(y) + ":" + std::to_string(z);
+    }
+
+    std::map<std::string, std::vector<gp_Pnt>> buckets_;
+};
+
+bool write_binary_stl_mesh(const TopoDS_Shape& shape, const char* path) {
+    // Collect triangles first (welded, degenerate-skipped), then write as binary
+    // STL. Binary format is required because downstream multipart export (3MF /
+    // zip) parses the binary triangle-count header; ASCII STL makes the count
+    // field read as garbage and the parser fails with "failed to fill whole
+    // buffer".
+    struct Triangle { gp_Pnt p1, p2, p3; };
+    std::vector<Triangle> triangles;
+    StlVertexWelder welder;
     for (TopExp_Explorer face_explorer(shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
         TopoDS_Face face = TopoDS::Face(face_explorer.Current());
         TopLoc_Location location;
@@ -969,9 +1253,12 @@ fn emit_command(
         OcctOp::Extrude => {
             let profile = ref_arg(&command.args, 0)?;
             let distance = numeric_arg(&command.args, 1)?;
+            // Multi-region profiles (text glyphs, SVG artwork) arrive as
+            // compounds whose faces may overlap; extrude per face and fuse the
+            // prisms so downstream booleans get one valid solid.
             body.push_str(&format!(
-                "    TopoDS_Shape {var} = BRepPrimAPI_MakePrism({}, gp_Vec(0, 0, {distance})).Shape();\n",
-                slot_var(profile)
+                "    TopoDS_Shape {var};\n    {{\n        const TopoDS_Shape& {var}_profile = {profile_var};\n        std::vector<TopoDS_Shape> {var}_profile_faces;\n        if ({var}_profile.ShapeType() == TopAbs_COMPOUND) {{\n            for (TopExp_Explorer {var}_face_explorer({var}_profile, TopAbs_FACE); {var}_face_explorer.More(); {var}_face_explorer.Next()) {{\n                {var}_profile_faces.push_back({var}_face_explorer.Current());\n            }}\n        }}\n        if ({var}_profile_faces.size() > 1) {{\n            // Merge overlapping regions in 2D, then keep the per-region prisms\n            // as a compound: fusing the prisms in 3D rebuilds every face and\n            // leaves cap/wall boundary edges duplicated instead of shared.\n            TopoDS_Shape {var}_merged = {var}_profile_faces.front();\n            for (std::size_t {var}_face_index = 1; {var}_face_index < {var}_profile_faces.size(); ++{var}_face_index) {{\n                BRepAlgoAPI_Fuse {var}_region_fuse({var}_merged, {var}_profile_faces[{var}_face_index]);\n                if (!{var}_region_fuse.IsDone()) {{ return 37; }}\n                {var}_merged = {var}_region_fuse.Shape();\n            }}\n            ShapeUpgrade_UnifySameDomain {var}_unify({var}_merged, Standard_True, Standard_True, Standard_False);\n            {var}_unify.Build();\n            {var}_merged = {var}_unify.Shape();\n            std::vector<TopoDS_Shape> {var}_prisms;\n            for (TopExp_Explorer {var}_region_explorer({var}_merged, TopAbs_FACE); {var}_region_explorer.More(); {var}_region_explorer.Next()) {{\n                TopoDS_Face {var}_region_face = ensure_face_normal_up(TopoDS::Face({var}_region_explorer.Current()));\n                {var}_prisms.push_back(BRepPrimAPI_MakePrism({var}_region_face, gp_Vec(0, 0, {distance})).Shape());\n            }}\n            if ({var}_prisms.empty()) {{ return 37; }}\n            if ({var}_prisms.size() == 1) {{\n                {var} = {var}_prisms.front();\n            }} else {{\n                BRep_Builder {var}_prism_builder;\n                TopoDS_Compound {var}_prism_compound;\n                {var}_prism_builder.MakeCompound({var}_prism_compound);\n                for (const auto& {var}_prism : {var}_prisms) {{\n                    {var}_prism_builder.Add({var}_prism_compound, {var}_prism);\n                }}\n                {var} = {var}_prism_compound;\n            }}\n        }} else {{\n            {var} = BRepPrimAPI_MakePrism({var}_profile, gp_Vec(0, 0, {distance})).Shape();\n        }}\n    }}\n",
+                profile_var = slot_var(profile)
             ));
         }
         OcctOp::Revolve => {
@@ -1220,6 +1507,26 @@ fn emit_command(
             "BRepAlgoAPI_Common",
             ref_args(&command.args)?,
         )?,
+        OcctOp::Hull => {
+            let inputs = ref_args(&command.args)?;
+            if inputs.is_empty() {
+                return Err(AppError::validation(
+                    "Direct OCCT executor `hull` requires at least one operand.",
+                ));
+            }
+            body.push_str(&format!(
+                "    std::vector<TopoDS_Shape> {var}_hull_inputs;\n"
+            ));
+            for input in inputs {
+                body.push_str(&format!(
+                    "    {var}_hull_inputs.push_back({});\n",
+                    slot_var(input)
+                ));
+            }
+            body.push_str(&format!(
+                "    TopoDS_Shape {var} = ecky_convex_hull_shapes({var}_hull_inputs);\n    if ({var}.IsNull()) {{ return 41; }}\n"
+            ));
+        }
     }
     vars.insert(command.output, var);
     Ok(())
@@ -1651,6 +1958,9 @@ fn ref_args_after(args: &[OcctArg], start: usize) -> AppResult<Vec<OcctSlot>> {
 struct ProfileRefs {
     outer: Vec<OcctSlot>,
     holes: Vec<OcctSlot>,
+    // SVG artwork fallback: the wires in `outer` are an unclassified soup and
+    // outer/hole nesting is resolved by containment parity at execute time.
+    soup: bool,
 }
 
 fn profile_refs(
@@ -1659,6 +1969,7 @@ fn profile_refs(
 ) -> AppResult<ProfileRefs> {
     let mut outer = Vec::new();
     let mut holes = Vec::new();
+    let mut soup = false;
 
     if keywords.is_empty() {
         outer.extend(ref_args(args)?);
@@ -1676,6 +1987,16 @@ fn profile_refs(
                 "holes" => {
                     holes.extend(ref_collection_arg(keyword.source_arg(), "profile :holes")?)
                 }
+                "fill-rule" => match keyword.source_arg() {
+                    // Parity nesting matches ocpsvg for both nonzero and
+                    // evenodd, so the value only marks the soup contract.
+                    OcctArg::Text(_) => soup = true,
+                    other => {
+                        return Err(AppError::validation(format!(
+                            "Direct OCCT executor `profile :fill-rule` expected text, got {other:?}."
+                        )));
+                    }
+                },
                 other => {
                     return Err(AppError::validation(format!(
                         "Direct OCCT executor `profile` does not recognize `:{other}`."
@@ -1690,7 +2011,12 @@ fn profile_refs(
             "Direct OCCT executor `profile` needs at least one outer loop.",
         ));
     }
-    Ok(ProfileRefs { outer, holes })
+    if soup && !holes.is_empty() {
+        return Err(AppError::validation(
+            "Direct OCCT executor `profile` wire soup resolves holes by parity and does not accept `:holes`.",
+        ));
+    }
+    Ok(ProfileRefs { outer, holes, soup })
 }
 
 fn ref_collection_arg(arg: &OcctArg, label: &str) -> AppResult<Vec<OcctSlot>> {
@@ -3262,6 +3588,9 @@ fn emit_profile_face(body: &mut String, var: &str, profile: ProfileRefs) -> AppR
             "Direct OCCT executor `profile` needs at least one outer loop.",
         ));
     }
+    if profile.soup {
+        return emit_wire_soup_profile_face(body, var, &profile.outer);
+    }
     body.push_str(&format!(
         "    std::vector<TopoDS_Wire> {var}_outer_wires;\n    std::vector<TopoDS_Face> {var}_outer_faces;\n    std::vector<double> {var}_outer_areas;\n    std::vector<std::vector<TopoDS_Wire>> {var}_hole_wires;\n"
     ));
@@ -3278,7 +3607,28 @@ fn emit_profile_face(body: &mut String, var: &str, profile: ProfileRefs) -> AppR
         ));
     }
     body.push_str(&format!(
-        "    std::vector<TopoDS_Shape> {var}_faces;\n    for (std::size_t {var}_outer_index = 0; {var}_outer_index < {var}_outer_wires.size(); ++{var}_outer_index) {{\n        BRepBuilderAPI_MakeFace {var}_face_builder({var}_outer_wires[{var}_outer_index]);\n        if (!{var}_face_builder.IsDone()) {{ return 32; }}\n        for (const auto& {var}_hole_wire : {var}_hole_wires[{var}_outer_index]) {{\n            {var}_face_builder.Add(TopoDS::Wire({var}_hole_wire.Reversed()));\n        }}\n        {var}_faces.push_back({var}_face_builder.Shape());\n    }}\n    TopoDS_Shape {var};\n    if ({var}_faces.size() == 1) {{\n        {var} = {var}_faces.front();\n    }} else {{\n        BRep_Builder {var}_profile_builder;\n        TopoDS_Compound {var}_profile_compound;\n        {var}_profile_builder.MakeCompound({var}_profile_compound);\n        for (const auto& {var}_face : {var}_faces) {{\n            {var}_profile_builder.Add({var}_profile_compound, {var}_face);\n        }}\n        {var} = {var}_profile_compound;\n    }}\n"
+        "    std::vector<TopoDS_Shape> {var}_faces;\n    for (std::size_t {var}_outer_index = 0; {var}_outer_index < {var}_outer_wires.size(); ++{var}_outer_index) {{\n        BRepBuilderAPI_MakeFace {var}_face_builder({var}_outer_wires[{var}_outer_index]);\n        if (!{var}_face_builder.IsDone()) {{ return 32; }}\n        for (const auto& {var}_hole_wire : {var}_hole_wires[{var}_outer_index]) {{\n            {var}_face_builder.Add(TopoDS::Wire({var}_hole_wire.Reversed()));\n        }}\n        TopoDS_Face {var}_oriented_face = TopoDS::Face({var}_face_builder.Shape());\n        ShapeFix_Face {var}_face_fixer({var}_oriented_face);\n        {var}_face_fixer.Perform();\n        {var}_face_fixer.FixOrientation();\n        {var}_faces.push_back(ensure_face_normal_up({var}_face_fixer.Face()));\n    }}\n    TopoDS_Shape {var};\n    if ({var}_faces.size() == 1) {{\n        {var} = {var}_faces.front();\n    }} else {{\n        BRep_Builder {var}_profile_builder;\n        TopoDS_Compound {var}_profile_compound;\n        {var}_profile_builder.MakeCompound({var}_profile_compound);\n        for (const auto& {var}_face : {var}_faces) {{\n            {var}_profile_builder.Add({var}_profile_compound, {var}_face);\n        }}\n        {var} = {var}_profile_compound;\n    }}\n"
+    ));
+    Ok(())
+}
+
+/// Wire-soup resolution for SVG artwork profiles, mirroring the precompiled
+/// runner's `make_faces_from_wire_soup` (ocpsvg parity): face each wire
+/// individually (soft-skipping unfaceable ones), classify containment depth,
+/// and emit even-depth wires as outer faces carrying their odd-depth children
+/// as reversed hole wires.
+fn emit_wire_soup_profile_face(body: &mut String, var: &str, outer: &[OcctSlot]) -> AppResult<()> {
+    body.push_str(&format!(
+        "    std::vector<TopoDS_Wire> {var}_soup_wires;\n    std::vector<TopoDS_Face> {var}_soup_faces;\n    std::vector<double> {var}_soup_areas;\n    std::vector<gp_Pnt> {var}_soup_samples;\n"
+    ));
+    for (index, slot) in outer.iter().enumerate() {
+        let wire_var = slot_var(*slot);
+        body.push_str(&format!(
+            "    do {{\n        TopoDS_Wire {var}_soup_{index}_wire;\n        for (TopExp_Explorer {var}_soup_{index}_wire_explorer({wire_var}, TopAbs_WIRE); {var}_soup_{index}_wire_explorer.More(); {var}_soup_{index}_wire_explorer.Next()) {{\n            {var}_soup_{index}_wire = TopoDS::Wire({var}_soup_{index}_wire_explorer.Current());\n            break;\n        }}\n        if ({var}_soup_{index}_wire.IsNull()) {{ break; }}\n        BRepBuilderAPI_MakeFace {var}_soup_{index}_face_builder({var}_soup_{index}_wire, Standard_True);\n        if (!{var}_soup_{index}_face_builder.IsDone()) {{ break; }}\n        TopoDS_Face {var}_soup_{index}_face = TopoDS::Face({var}_soup_{index}_face_builder.Shape());\n        ShapeFix_Face {var}_soup_{index}_fixer({var}_soup_{index}_face);\n        {var}_soup_{index}_fixer.Perform();\n        {var}_soup_{index}_fixer.FixOrientation();\n        {var}_soup_{index}_face = {var}_soup_{index}_fixer.Face();\n        gp_Pnt {var}_soup_{index}_sample;\n        bool {var}_soup_{index}_sample_found = false;\n        for (TopExp_Explorer {var}_soup_{index}_edge_explorer({var}_soup_{index}_wire, TopAbs_EDGE); {var}_soup_{index}_edge_explorer.More(); {var}_soup_{index}_edge_explorer.Next()) {{\n            BRepAdaptor_Curve {var}_soup_{index}_curve(TopoDS::Edge({var}_soup_{index}_edge_explorer.Current()));\n            double {var}_soup_{index}_first = {var}_soup_{index}_curve.FirstParameter();\n            double {var}_soup_{index}_last = {var}_soup_{index}_curve.LastParameter();\n            if (!std::isfinite({var}_soup_{index}_first) || !std::isfinite({var}_soup_{index}_last)) {{\n                continue;\n            }}\n            {var}_soup_{index}_sample = {var}_soup_{index}_curve.Value(({var}_soup_{index}_first + {var}_soup_{index}_last) / 2.0);\n            {var}_soup_{index}_sample_found = true;\n            break;\n        }}\n        if (!{var}_soup_{index}_sample_found) {{ break; }}\n        GProp_GProps {var}_soup_{index}_props;\n        BRepGProp::SurfaceProperties({var}_soup_{index}_face, {var}_soup_{index}_props);\n        {var}_soup_wires.push_back({var}_soup_{index}_wire);\n        {var}_soup_faces.push_back({var}_soup_{index}_face);\n        {var}_soup_areas.push_back(std::abs({var}_soup_{index}_props.Mass()));\n        {var}_soup_samples.push_back({var}_soup_{index}_sample);\n    }} while (false);\n"
+        ));
+    }
+    body.push_str(&format!(
+        "    if ({var}_soup_wires.empty()) {{ return 35; }}\n    std::vector<int> {var}_soup_depth({var}_soup_wires.size(), 0);\n    std::vector<std::size_t> {var}_soup_parent({var}_soup_wires.size(), 0);\n    std::vector<bool> {var}_soup_has_parent({var}_soup_wires.size(), false);\n    for (std::size_t {var}_soup_i = 0; {var}_soup_i < {var}_soup_wires.size(); ++{var}_soup_i) {{\n        double {var}_soup_parent_area = 0.0;\n        for (std::size_t {var}_soup_j = 0; {var}_soup_j < {var}_soup_wires.size(); ++{var}_soup_j) {{\n            if ({var}_soup_i == {var}_soup_j) {{ continue; }}\n            if (!wire_inside_face({var}_soup_wires[{var}_soup_i], {var}_soup_faces[{var}_soup_j])) {{ continue; }}\n            {var}_soup_depth[{var}_soup_i] += 1;\n            if (!{var}_soup_has_parent[{var}_soup_i] || {var}_soup_areas[{var}_soup_j] < {var}_soup_parent_area) {{\n                {var}_soup_has_parent[{var}_soup_i] = true;\n                {var}_soup_parent[{var}_soup_i] = {var}_soup_j;\n                {var}_soup_parent_area = {var}_soup_areas[{var}_soup_j];\n            }}\n        }}\n    }}\n    std::vector<TopoDS_Shape> {var}_soup_regions;\n    for (std::size_t {var}_soup_i = 0; {var}_soup_i < {var}_soup_wires.size(); ++{var}_soup_i) {{\n        if ({var}_soup_depth[{var}_soup_i] % 2 != 0) {{ continue; }}\n        BRepBuilderAPI_MakeFace {var}_soup_region_builder({var}_soup_wires[{var}_soup_i], Standard_True);\n        if (!{var}_soup_region_builder.IsDone()) {{ continue; }}\n        for (std::size_t {var}_soup_j = 0; {var}_soup_j < {var}_soup_wires.size(); ++{var}_soup_j) {{\n            if ({var}_soup_depth[{var}_soup_j] % 2 == 0 || !{var}_soup_has_parent[{var}_soup_j] || {var}_soup_parent[{var}_soup_j] != {var}_soup_i) {{ continue; }}\n            {var}_soup_region_builder.Add(TopoDS::Wire({var}_soup_wires[{var}_soup_j].Reversed()));\n        }}\n        TopoDS_Face {var}_soup_region = TopoDS::Face({var}_soup_region_builder.Shape());\n        ShapeFix_Face {var}_soup_region_fixer({var}_soup_region);\n        {var}_soup_region_fixer.Perform();\n        {var}_soup_region_fixer.FixOrientation();\n        {var}_soup_regions.push_back(ensure_face_normal_up({var}_soup_region_fixer.Face()));\n    }}\n    if ({var}_soup_regions.empty()) {{ return 36; }}\n    TopoDS_Shape {var};\n    if ({var}_soup_regions.size() == 1) {{\n        {var} = {var}_soup_regions.front();\n    }} else {{\n        BRep_Builder {var}_soup_builder;\n        TopoDS_Compound {var}_soup_compound;\n        {var}_soup_builder.MakeCompound({var}_soup_compound);\n        for (const auto& {var}_soup_region : {var}_soup_regions) {{\n            {var}_soup_builder.Add({var}_soup_compound, {var}_soup_region);\n        }}\n        {var} = {var}_soup_compound;\n    }}\n"
     ));
     Ok(())
 }
@@ -3643,6 +3993,7 @@ fn op_name(op: OcctOp) -> &'static str {
         OcctOp::Scale => "scale",
         OcctOp::Mirror => "mirror",
         OcctOp::Compound => "compound",
+        OcctOp::Hull => "hull",
     }
 }
 
@@ -3651,6 +4002,10 @@ mod tests {
     use super::*;
     use crate::ecky_cad_host::direct_occt_sdk::{
         bundled_build123d_runtime_root_from_repo, inspect_build123d_ocp_runtime,
+    };
+    use crate::ecky_cad_host::native_parity_harness::{
+        ascii_stl_non_manifold_edge_count, assert_native_matches_reference, stl_metrics,
+        ParityReference,
     };
     use crate::models::PathResolver;
 
@@ -3721,6 +4076,108 @@ mod tests {
         assert!(source.contains("BRepMesh_IncrementalMesh mesh(shape, 0.05, false, 0.15, true);"));
         assert!(source.contains("/tmp/model.step"));
         assert!(source.contains("/tmp/preview.stl"));
+    }
+
+    #[test]
+    fn emits_clean_svg_with_holes_profile_as_native_occt_source() {
+        // A donut that the clean SVG path parses successfully (single outer,
+        // one hole). The plan must carry a profile form the executor accepts —
+        // the historical positional-outer + `:holes` keyword mix was rejected
+        // by both native tiers.
+        let program = compile(
+            r##"(model (part body (extrude (svg "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\"><path fill=\"#000\" d=\"M0 0 H20 V20 H0 Z M6 6 V14 H14 V6 Z\"/></svg>" 20 20 "contain") 4)))"##,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let profile = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Profile)
+            .expect("profile command in plan");
+        assert!(
+            profile
+                .keywords
+                .iter()
+                .any(|keyword| keyword.name == "holes"),
+            "expected clean svg donut to carry a hole loop"
+        );
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+        assert!(source.contains("BRepClass_FaceClassifier"));
+    }
+
+    #[test]
+    fn emits_svg_wire_soup_profile_as_native_occt_source() {
+        // Two disjoint filled subpaths force the tolerant wire-soup fallback:
+        // the plan carries `profile :outer ... :fill-rule "evenodd"` and the
+        // shim must resolve it instead of rejecting the keyword.
+        let program = compile(
+            r##"(model (part body (extrude (svg "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 10\"><path fill-rule=\"evenodd\" d=\"M0 0h4v4h-4z M10 0h4v4h-4z\"/></svg>" 20 10 "contain") 4)))"##,
+        );
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        assert!(
+            plan.parts[0].commands.iter().any(|command| {
+                command.op == OcctOp::Profile
+                    && command
+                        .keywords
+                        .iter()
+                        .any(|keyword| keyword.name == "fill-rule")
+            }),
+            "expected wire-soup profile command in plan"
+        );
+
+        let source = emit_plan_export_source(
+            &plan,
+            Path::new("/tmp/model.step"),
+            Path::new("/tmp/preview.stl"),
+        )
+        .expect("source");
+
+        assert!(source.contains("ShapeFix_Face"));
+        assert!(source.contains("BRepClass_FaceClassifier"));
+    }
+
+    #[test]
+    fn live_executor_exports_svg_wire_soup_artwork_when_runtime_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(
+            r##"(model (part body (extrude (svg "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 10\"><path fill-rule=\"evenodd\" d=\"M0 0h4v4h-4z M10 0h4v4h-4z\"/></svg>" 20 10 "contain") 4)))"##,
+        );
+
+        let outcome = export_core_program_step_stl(
+            &program,
+            &layout,
+            temp_root("direct-occt-svg-wire-soup-shim"),
+        )
+        .expect("export");
+
+        if layout.can_compile_native_shim() {
+            let NativeExportOutcome::Exported {
+                step_path,
+                stl_path,
+            ..
+            } = outcome
+            else {
+                panic!("expected direct OCCT wire-soup shim export");
+            };
+            assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+            assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+            assert!(
+                std::fs::metadata(&stl_path).expect("stl metadata").len() > 512,
+                "STL export too small"
+            );
+        }
     }
 
     #[test]
@@ -5101,8 +5558,12 @@ mod tests {
         )
         .expect_err("unknown selector should fail");
 
+        // The selector parser's specific message (with the shared selector help
+        // list) now surfaces at compile time instead of a generic
+        // "expected selector payload" from signature verification.
         assert!(
-            err.message.contains("expected selector payload"),
+            err.message.contains("Unknown edge selector `side`")
+                && err.message.contains("`x-min+axis-z`"),
             "unexpected error: {}",
             err
         );
@@ -5786,6 +6247,360 @@ mod tests {
         );
     }
 
+    /// Completion eval for the SVG-native-artwork-parity change: the woodlouse
+    /// hotel macro (two parts, folded `if` param branches, and two SVG artwork
+    /// overlays that need the wire-soup fallback) must export end-to-end
+    /// through the production runner-first path, on whichever tier is
+    /// available.
+    #[test]
+    fn live_woodlouse_hotel_macro_exports_end_to_end_when_runtime_ready() {
+        use crate::models::ParamValue;
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(include_str!(
+            "../../tests/fixtures/cad/surface/woodlouse_hotel.ecky"
+        ));
+
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cad/svg");
+        let mut params = DesignParams::new();
+        // veg = clean-parsing donut with a hole loop, fruit = self-intersecting
+        // overlaps needing the wire-soup fallback: the two artwork classes the
+        // real user SVGs exercise.
+        params.insert(
+            "veg_svg".into(),
+            ParamValue::String(
+                fixtures
+                    .join("artwork_clean_with_hole.svg")
+                    .display()
+                    .to_string(),
+            ),
+        );
+        params.insert(
+            "fruit_svg".into(),
+            ParamValue::String(
+                fixtures
+                    .join("artwork_overlapping_arcs.svg")
+                    .display()
+                    .to_string(),
+            ),
+        );
+
+        let output_dir = temp_root("direct-occt-woodlouse-hotel-eval");
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &params,
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export woodlouse hotel");
+
+        let runner_available =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+            .map(|runner| runner.is_file())
+            .unwrap_or(false);
+        if !runner_available && !layout.can_compile_native_shim() {
+            return;
+        }
+        let NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+        ..
+        } = outcome
+        else {
+            panic!("expected woodlouse hotel export, got {outcome:?}");
+        };
+        assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+        assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+        assert!(
+            std::fs::metadata(&step_path).expect("step metadata").len() > 100_000,
+            "STEP export suspiciously small for a two-part model"
+        );
+        assert!(
+            std::fs::metadata(&stl_path).expect("stl metadata").len() > 50_000,
+            "STL export suspiciously small for a two-part model"
+        );
+        // build123d parity: booleans with glyph/artwork overlays must not
+        // swallow the lid — the flat canopy tops out above the body walls
+        // (floor 2.4 + wall 7 + clearance 0.35 + canopy 2.2 ≈ 11.95).
+        let (mins, maxs) = ascii_stl_bbox(&stl_path);
+        assert!(
+            maxs[2] > 11.0,
+            "lid canopy missing from native render: bbox {mins:?} .. {maxs:?}"
+        );
+        let non_manifold = ascii_stl_non_manifold_edge_count(&stl_path);
+        assert_eq!(
+            non_manifold, 0,
+            "preview STL has {non_manifold} non-manifold edge(s): {stl_path:?}"
+        );
+        assert!(
+            maxs[0] - mins[0] > 100.0 && maxs[1] - mins[1] > 90.0,
+            "model footprint collapsed: bbox {mins:?} .. {maxs:?}"
+        );
+    }
+
+    fn woodlouse_macro() -> &'static str {
+        include_str!("../../tests/fixtures/cad/surface/woodlouse_hotel.ecky")
+    }
+
+    #[test]
+    fn live_differential_woodlouse_with_artwork_params_matches_build123d() {
+        use crate::models::ParamValue;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cad/svg");
+        let mut params = DesignParams::new();
+        params.insert(
+            "veg_svg".into(),
+            ParamValue::String(fixtures.join("artwork_clean_with_hole.svg").display().to_string()),
+        );
+        params.insert(
+            "fruit_svg".into(),
+            ParamValue::String(
+                fixtures.join("artwork_overlapping_arcs.svg").display().to_string(),
+            ),
+        );
+        assert_native_matches_reference(
+            woodlouse_macro(),
+            &params,
+            "woodlouse-artwork",
+            ParityReference::Freecad,
+        );
+    }
+
+    /// The regressed UI-default state: image params left as empty strings.
+    #[test]
+    fn live_differential_woodlouse_with_empty_image_params_matches_build123d() {
+        assert_native_matches_reference(
+            woodlouse_macro(),
+            &DesignParams::new(),
+            "woodlouse-empty-images",
+            ParityReference::Freecad,
+        );
+    }
+
+    #[test]
+    #[ignore = "known parity gap: build123d `Text` centers glyphs; native/FreeCAD anchor left-baseline. Align the build123d lowering (emit align MIN + baseline compensation), then re-enable."]
+    fn live_differential_glyph_text_matches_build123d() {
+        assert_native_matches_reference(
+            r#"
+            (model
+              (part body
+                (fuse
+                  (box 40 12 3 :align '(center center min))
+                  (translate -16 -3 3 (extrude (text "ОВЩ" 6) 2)))))
+            "#,
+            &DesignParams::new(),
+            "glyph-text",
+            ParityReference::Build123d,
+        );
+    }
+
+    #[test]
+    #[ignore = "known parity gap: self-intersecting artwork wires resolve to different regions than ocpsvg. Move soup resolution to BOPAlgo_Tools::WiresToFaces, then re-enable."]
+    fn live_differential_artwork_soup_matches_build123d() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cad/svg");
+        let macro_source = format!(
+            r#"(model (part body (extrude (svg "{}") 2)))"#,
+            fixtures.join("artwork_overlapping_arcs.svg").display()
+        );
+        assert_native_matches_reference(
+            &macro_source,
+            &DesignParams::new(),
+            "artwork-soup",
+            ParityReference::Build123d,
+        );
+    }
+
+    #[test]
+    fn live_differential_sampled_radial_loft_matches_build123d() {
+        assert_native_matches_reference(
+            r#"
+            (model
+              (part body
+                (sampled-radial-loft
+                  (theta z fz)
+                  :height 40
+                  :z-steps 12
+                  :theta-steps 48
+                  :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))))
+            "#,
+            &DesignParams::new(),
+            "sampled-radial-loft",
+            ParityReference::Build123d,
+        );
+    }
+
+    fn ascii_stl_bbox(path: &Path) -> ([f64; 3], [f64; 3]) {
+        let bytes = std::fs::read(path).expect("read stl");
+        let mut mins = [f64::INFINITY; 3];
+        let mut maxs = [f64::NEG_INFINITY; 3];
+        // Binary STL: 80-byte header + 4-byte count + 50 bytes/triangle.
+        assert!(bytes.len() >= 84, "STL too small: {} bytes", bytes.len());
+        let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+        let mut off = 84usize;
+        for _ in 0..count {
+            off += 12; // normal
+            for _ in 0..3 {
+                for axis in 0..3 {
+                    let val = f32::from_le_bytes(bytes[off + axis * 4..off + axis * 4 + 4].try_into().unwrap()) as f64;
+                    mins[axis] = mins[axis].min(val);
+                    maxs[axis] = maxs[axis].max(val);
+                }
+                off += 12;
+            }
+            off += 2; // attribute
+        }
+        (mins, maxs)
+    }
+
+    /// Perf guard for exact-curve parity (svg-native-exact-curves): dense
+    /// overlapping curved artwork must render in the same order of time as the
+    /// build123d backend. The flattened-polyline pipeline blew past a minute
+    /// on inputs like this (O(wires² × sampled vertices) containment).
+    #[test]
+    fn live_native_dense_curved_artwork_renders_within_budget() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+
+        // ~40 overlapping cubic "petals": the artwork class (lineart / layered
+        // arcs) that real user SVGs exercise, dense enough that the flattened
+        // pipeline degenerates.
+        let mut paths = String::new();
+        for index in 0..40 {
+            let x = 2.0 + (index % 8) as f64 * 3.5;
+            let y = 4.0 + (index / 8) as f64 * 3.0;
+            paths.push_str(&format!(
+                "<path fill=\"#000\" d=\"M{x} {y} C{cx1} {cy1} {cx2} {cy1} {x2} {y} C{cx2} {cy2} {cx1} {cy2} {x} {y} Z\"/>",
+                x = x,
+                y = y,
+                x2 = x + 6.0,
+                cx1 = x + 1.0,
+                cx2 = x + 5.0,
+                cy1 = y - 3.5,
+                cy2 = y + 3.5,
+            ));
+        }
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 34 22\">{paths}</svg>"
+        );
+        let svg_path = temp_root("direct-occt-dense-artwork-src").with_extension("svg");
+        std::fs::create_dir_all(svg_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&svg_path, svg).expect("write dense svg");
+
+        let program = compile(&format!(
+            r#"(model (part body (extrude (svg "{}") 2)))"#,
+            svg_path.display()
+        ));
+        let output_dir = temp_root("direct-occt-dense-artwork");
+        let started = std::time::Instant::now();
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export dense artwork");
+        let elapsed = started.elapsed();
+
+        let runner_available =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+            .map(|runner| runner.is_file())
+            .unwrap_or(false);
+        if !runner_available && !layout.can_compile_native_shim() {
+            return;
+        }
+        let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
+            panic!("expected dense artwork export, got {outcome:?}");
+        };
+        let non_manifold = ascii_stl_non_manifold_edge_count(&stl_path);
+        assert_eq!(
+            non_manifold, 0,
+            "dense artwork STL has {non_manifold} non-manifold edge(s)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "dense curved artwork render took {elapsed:?}; exact-curve parity budget is 60s"
+        );
+    }
+
+    /// Boolean ops must survive profile wires arriving in arbitrary winding:
+    /// font glyphs with counters ("A", "О") historically produced inverted
+    /// hole faces whose extrusion silently swallowed the other fuse operand.
+    #[test]
+    fn live_native_fuse_keeps_box_when_fused_with_holed_glyph_text() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (fuse
+                  (box 30 10 4 :align '(center center min))
+                  (translate -10 -3 2 (extrude (text "A" 6) 4)))))
+            "#,
+        );
+        let output_dir = temp_root("direct-occt-holed-glyph-fuse");
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export holed glyph fuse");
+
+        let runner_available =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+            .map(|runner| runner.is_file())
+            .unwrap_or(false);
+        if !runner_available && !layout.can_compile_native_shim() {
+            return;
+        }
+        let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
+            panic!("expected holed glyph fuse export, got {outcome:?}");
+        };
+        let (mins, maxs) = ascii_stl_bbox(&stl_path);
+        // The 30mm box must survive the fuse; garbage output leaves only the
+        // ~4mm glyph solids.
+        assert!(
+            maxs[0] - mins[0] > 29.0 && maxs[1] - mins[1] > 9.0,
+            "box was swallowed by the glyph fuse: bbox {mins:?} .. {maxs:?}"
+        );
+        let non_manifold = ascii_stl_non_manifold_edge_count(&stl_path);
+        assert_eq!(
+            non_manifold, 0,
+            "glyph fuse STL has {non_manifold} non-manifold edge(s): {stl_path:?}"
+        );
+    }
+
+
     #[test]
     fn live_runner_first_exports_text_profile_when_runner_ready() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5966,6 +6781,63 @@ mod tests {
         );
         assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
         assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+    }
+
+    // Regression (parametric-thread-feature 1.1, fixed by 64af169): on
+    // coarse/deep params the core cylinder and the helical ridge's root shared
+    // a coincident cylindrical face, so `union(core, ridge)` dropped the core
+    // and left a hollow spiral shell instead of a solid thread. The fix buries
+    // the ridge root `overlap` inside the core radius. Assert the union stays
+    // a single watertight solid whose volume is at least the bare core's (the
+    // hollow-bug shape was a thin shell at a fraction of that volume).
+    #[test]
+    fn thread_union_stays_solid_on_coarse_deep_params_regression() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+
+        let radius = 6.0;
+        let length = 10.0;
+        let program = compile(&format!(
+            "(model (part screw (thread :radius {radius} :pitch 3 :length {length} :depth 1.2)))"
+        ));
+        let output_dir = temp_root("direct-occt-thread-hollow-regression");
+
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("export");
+        let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
+            panic!("expected direct OCCT thread export");
+        };
+
+        // Facet-adjacency non-manifold counting isn't used here: helical sweep
+        // tessellation legitimately produces seam T-vertices that heuristic
+        // flags, even on a valid solid. Volume + component count are the
+        // actual hollow-vs-solid signal for this shape.
+        let metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(&stl_path);
+        assert_eq!(
+            metrics.components, 1,
+            "thread union split into {} disconnected shells (core dropped?)",
+            metrics.components
+        );
+        let core_cylinder_volume = std::f64::consts::PI * radius * radius * length;
+        assert!(
+            metrics.volume >= core_cylinder_volume * 0.9,
+            "thread volume {:.2} is far below the bare core cylinder volume {:.2}: \
+             looks like the hollow-bug regressed (core dropped from the union)",
+            metrics.volume,
+            core_cylinder_volume,
+        );
     }
 
     // Regression: a `clip-box` over a `helical-ridge` used to collapse to an
@@ -6822,6 +7694,86 @@ mod tests {
             };
             assert!(!blockers.is_empty());
         }
+    }
+
+    /// Hull of two disjoint spheres must produce the analytic convex envelope
+    /// (a spherocylinder/capsule): V = 4/3·π·r³ + π·r²·d for r=6, d=30.
+    #[test]
+    fn live_executor_exports_hull_capsule_with_analytic_volume() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        let runner_available =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+            .map(|runner| runner.is_file())
+            .unwrap_or(false);
+        if !runner_available && !layout.can_compile_native_shim() {
+            return;
+        }
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (hull
+                  (sphere 6)
+                  (translate 30 0 0 (sphere 6)))))
+            "#,
+        );
+
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &temp_root("direct-occt-hull-capsule"),
+            &TestResolver,
+        )
+        .expect("hull export");
+        let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
+            panic!("expected native hull export, got {outcome:?}");
+        };
+
+        let metrics = stl_metrics(&stl_path);
+        let radius: f64 = 6.0;
+        let distance = 30.0;
+        let analytic = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3)
+            + std::f64::consts::PI * radius.powi(2) * distance;
+        // The hull is built from a tessellated point cloud, so it inscribes
+        // the smooth capsule: volume must be close but never above analytic.
+        assert!(
+            metrics.volume <= analytic,
+            "hull volume {:.2} exceeds analytic capsule {:.2}",
+            metrics.volume,
+            analytic
+        );
+        assert!(
+            (analytic - metrics.volume) / analytic < 0.03,
+            "hull volume {:.2} diverges from analytic capsule {:.2}",
+            metrics.volume,
+            analytic
+        );
+        assert_eq!(metrics.components, 1, "hull must be a single closed shell");
+        for (axis, (lo, hi)) in [(-radius, distance + radius), (-radius, radius), (-radius, radius)]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                (metrics.bbox_min[axis] - lo).abs() <= 0.5
+                    && (metrics.bbox_max[axis] - hi).abs() <= 0.5,
+                "hull bbox axis {axis} diverges: {:?}..{:?}",
+                metrics.bbox_min,
+                metrics.bbox_max,
+            );
+        }
+        let non_manifold = ascii_stl_non_manifold_edge_count(&stl_path);
+        assert_eq!(non_manifold, 0, "hull STL has non-manifold edges");
     }
 
     #[test]

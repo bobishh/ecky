@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::ecky_cad_host::svg_profile::{SvgContourGeometry, SvgPathSegment};
 use crate::models::{AppError, AppResult};
 use fontdb::{Family, Query, Source, Stretch, Style, Weight};
 use rustybuzz::UnicodeBuffer;
@@ -9,29 +10,37 @@ use ttf_parser::{Face, GlyphId, OutlineBuilder};
 const CURVE_SAMPLES: usize = 12;
 const QUAD_SAMPLES: usize = 8;
 const EPS: f64 = 1.0e-9;
+// build123d parity: its `Text` resolves the system default (regular-weight
+// Arial family) via OCCT's font manager. Regular weights must come first here
+// or the same macro renders visibly fatter glyphs natively (Arial Black has
+// ~2× the ink of Arial — caught by the build123d differential harness).
 const DEFAULT_FONT_PATHS: &[&str] = &[
-    "/System/Library/Fonts/Supplemental/Arial Black.ttf",
-    "/System/Library/Fonts/Supplemental/Impact.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/Library/Fonts/Arial.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     "C:/Windows/Fonts/arial.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+    "/System/Library/Fonts/Supplemental/Impact.ttf",
 ];
 const DEFAULT_FONT_FAMILIES: &[&str] = &[
-    "Arial Black",
-    "Impact",
     "Arial",
     "Arial Unicode MS",
     "DejaVu Sans",
     "Liberation Sans",
+    "Arial Black",
+    "Impact",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextProfileComponent {
     pub outer_loop: Vec<[f64; 2]>,
     pub hole_loops: Vec<Vec<[f64; 2]>>,
+    /// Exact glyph geometry parallel to `outer_loop` / `hole_loops`
+    /// (build123d `Font_BRepFont` parity — curves stay curves).
+    pub outer_geometry: SvgContourGeometry,
+    pub hole_geometries: Vec<SvgContourGeometry>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,9 +50,16 @@ struct ResolvedFont {
 }
 
 #[derive(Debug, Clone)]
+struct GlyphContour {
+    points: Vec<[f64; 2]>,
+    geometry: SvgContourGeometry,
+}
+
+#[derive(Debug, Clone)]
 struct GlyphLoopBuilder {
-    loops: Vec<Vec<[f64; 2]>>,
+    loops: Vec<GlyphContour>,
     current: Vec<[f64; 2]>,
+    current_geometry: SvgContourGeometry,
     start: Option<[f64; 2]>,
     last: Option<[f64; 2]>,
     scale: f64,
@@ -53,6 +69,7 @@ struct GlyphLoopBuilder {
 #[derive(Debug, Clone)]
 struct LoopEntry {
     points: Vec<[f64; 2]>,
+    geometry: SvgContourGeometry,
     area: f64,
 }
 
@@ -61,6 +78,7 @@ impl GlyphLoopBuilder {
         Self {
             loops: Vec::new(),
             current: Vec::new(),
+            current_geometry: SvgContourGeometry::default(),
             start: None,
             last: None,
             scale,
@@ -68,7 +86,7 @@ impl GlyphLoopBuilder {
         }
     }
 
-    fn finish(mut self) -> AppResult<Vec<Vec<[f64; 2]>>> {
+    fn finish(mut self) -> AppResult<Vec<GlyphContour>> {
         self.flush_current(true)?;
         Ok(self.loops)
     }
@@ -94,6 +112,7 @@ impl GlyphLoopBuilder {
     }
 
     fn flush_current(&mut self, close: bool) -> AppResult<()> {
+        let geometry = std::mem::take(&mut self.current_geometry);
         if self.current.is_empty() {
             self.start = None;
             self.last = None;
@@ -112,7 +131,10 @@ impl GlyphLoopBuilder {
         }
         let normalized = normalize_loop(std::mem::take(&mut self.current))?;
         if normalized.len() >= 3 {
-            self.loops.push(normalized);
+            self.loops.push(GlyphContour {
+                points: normalized,
+                geometry,
+            });
         }
         self.start = None;
         self.last = None;
@@ -125,12 +147,20 @@ impl OutlineBuilder for GlyphLoopBuilder {
         let _ = self.flush_current(true);
         let point = self.map_point(x, y);
         self.current.push(point);
+        self.current_geometry = SvgContourGeometry {
+            start: point,
+            segments: Vec::new(),
+        };
         self.start = Some(point);
         self.last = Some(point);
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        self.push_point(self.map_point(x, y));
+        let point = self.map_point(x, y);
+        self.current_geometry
+            .segments
+            .push(SvgPathSegment::Line { to: point });
+        self.push_point(point);
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
@@ -139,6 +169,18 @@ impl OutlineBuilder for GlyphLoopBuilder {
         };
         let control = self.map_point(x1, y1);
         let end = self.map_point(x, y);
+        // Lossless degree elevation of the TTF quad to a cubic.
+        self.current_geometry.segments.push(SvgPathSegment::Cubic {
+            c1: [
+                start[0] + 2.0 / 3.0 * (control[0] - start[0]),
+                start[1] + 2.0 / 3.0 * (control[1] - start[1]),
+            ],
+            c2: [
+                end[0] + 2.0 / 3.0 * (control[0] - end[0]),
+                end[1] + 2.0 / 3.0 * (control[1] - end[1]),
+            ],
+            to: end,
+        });
         for step in 1..=QUAD_SAMPLES {
             let t = step as f64 / QUAD_SAMPLES as f64;
             let mt = 1.0 - t;
@@ -156,6 +198,11 @@ impl OutlineBuilder for GlyphLoopBuilder {
         let control1 = self.map_point(x1, y1);
         let control2 = self.map_point(x2, y2);
         let end = self.map_point(x, y);
+        self.current_geometry.segments.push(SvgPathSegment::Cubic {
+            c1: control1,
+            c2: control2,
+            to: end,
+        });
         for step in 1..=CURVE_SAMPLES {
             let t = step as f64 / CURVE_SAMPLES as f64;
             let mt = 1.0 - t;
@@ -313,17 +360,21 @@ fn load_font_selector(selector: &str) -> Option<ResolvedFont> {
     }
 }
 
-fn classify_text_loops(loops: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<TextProfileComponent>> {
+fn classify_text_loops(loops: Vec<GlyphContour>) -> AppResult<Vec<TextProfileComponent>> {
     let mut entries = loops
         .into_iter()
-        .map(|points| {
-            let area = signed_area(&points);
+        .map(|contour| {
+            let area = signed_area(&contour.points);
             if area.abs() <= EPS {
                 Err(AppError::validation(
                     "Text glyph contour collapsed to zero area.",
                 ))
             } else {
-                Ok(LoopEntry { points, area })
+                Ok(LoopEntry {
+                    points: contour.points,
+                    geometry: contour.geometry,
+                    area,
+                })
             }
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -366,14 +417,18 @@ fn classify_text_loops(loops: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<TextProfileCo
             continue;
         }
         let mut holes = Vec::new();
+        let mut hole_geometries = Vec::new();
         for child in 0..entries.len() {
             if parents[child] == Some(index) && depths[child] == depths[index] + 1 {
                 holes.push(entries[child].points.clone());
+                hole_geometries.push(entries[child].geometry.clone());
             }
         }
         faces.push(TextProfileComponent {
             outer_loop: entries[index].points.clone(),
             hole_loops: holes,
+            outer_geometry: entries[index].geometry.clone(),
+            hole_geometries,
         });
     }
     Ok(faces)

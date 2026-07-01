@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use crate::contracts::{AppError, AppResult, DesignParams, ParamValue};
-use crate::ecky_cad_host::svg_profile::{parse_svg_profile, SvgFitMode};
+use crate::ecky_cad_host::svg_profile::{
+    extract_svg_wire_soup_profile, parse_svg_profile, SvgFillRule, SvgFitMode,
+};
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBinding, CoreKeywordArg, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation,
     CorePart, CorePrimitive, CoreProgram, CoreShapeBinding, CoreSymbol, CoreValueKind, NodeId,
@@ -186,11 +188,18 @@ fn normalize_node_for_direct_occt(
                 param_names,
                 env,
             ) {
+                // Fold to the statically-selected branch, but keep the `if`
+                // node's id: build bindings register their value node's id, and
+                // references elsewhere (`RefNode(if_id)`) must keep resolving.
                 Ok(true) => {
-                    normalize_node_for_direct_occt(then_branch, param_names, env, next_node_id)
+                    let branch =
+                        normalize_node_for_direct_occt(then_branch, param_names, env, next_node_id)?;
+                    Ok(rebuild_node(node, branch.kind))
                 }
                 Ok(false) => {
-                    normalize_node_for_direct_occt(else_branch, param_names, env, next_node_id)
+                    let branch =
+                        normalize_node_for_direct_occt(else_branch, param_names, env, next_node_id)?;
+                    Ok(rebuild_node(node, branch.kind))
                 }
                 Err(_) => Ok(rebuild_node(
                     node,
@@ -418,6 +427,7 @@ fn normalize_node_for_direct_occt(
                     }
                     CoreOperation::Custom(name)
                         if name == "helical-ridge"
+                            || name == "hull"
                             || name == "thread"
                             || name == "rib"
                             || name == "groove"
@@ -438,6 +448,18 @@ fn normalize_node_for_direct_occt(
                         ))
                     }
                     CoreOperation::Custom(name) if is_scalar_eval_custom_op(name) => {
+                        Ok(rebuild_node(
+                            node,
+                            CoreNodeKind::Call {
+                                op: op.clone(),
+                                args: normalized_args,
+                                keywords: normalized_keywords,
+                            },
+                        ))
+                    }
+                    // Deferred list combinators stay symbolic (like `map`);
+                    // the planner evaluates them into concrete lists.
+                    CoreOperation::Custom(name) if name == "append" || name == "reverse" => {
                         Ok(rebuild_node(
                             node,
                             CoreNodeKind::Call {
@@ -1486,70 +1508,95 @@ fn normalize_svg_node(
         })
         .transpose()?;
 
-    let profile = parse_svg_profile(
-        &svg_text,
-        target_width,
-        target_height,
-        fit_mode.unwrap_or(SvgFitMode::Contain),
-        true,
-    )?;
+    let fit = fit_mode.unwrap_or(SvgFitMode::Contain);
 
-    let outer = normalized_svg_polygon_node(&profile.outer_loop, next_node_id);
-    let holes = profile
-        .hole_loops
-        .iter()
-        .map(|points| normalized_svg_polygon_node(points, next_node_id))
-        .collect::<Vec<_>>();
-    let keywords = if holes.is_empty() {
-        Vec::new()
-    } else {
-        vec![CoreKeywordArg::expr(
-            "holes".to_string(),
-            CoreNode::new(
-                next_id(next_node_id),
-                CoreNodeKind::List(holes),
-                CoreValueKind::List,
-            ),
-        )]
-    };
+    // Clean fast path keeps its exact geometry; artwork the clean path rejects
+    // (self-intersecting, multi-outer, even-odd) falls back to the tolerant wire
+    // soup and lets OCCT resolve regions in the runner (build123d/ocpsvg parity).
+    match parse_svg_profile(&svg_text, target_width, target_height, fit, true) {
+        Ok(profile) => {
+            let outer = vec![crate::ecky_cad_host::direct_occt::profile_contour_node(
+                &profile.outer_loop,
+                &profile.outer_geometry,
+                next_node_id,
+            )];
+            let holes = profile
+                .hole_loops
+                .iter()
+                .zip(profile.hole_geometries.iter())
+                .map(|(points, geometry)| {
+                    crate::ecky_cad_host::direct_occt::profile_contour_node(
+                        points,
+                        geometry,
+                        next_node_id,
+                    )
+                })
+                .collect::<Vec<_>>();
+            // Same positional-vs-keyword split as text glyphs: executors reject
+            // a positional outer mixed with a `:holes` keyword.
+            let (args, keywords) = crate::ecky_cad_host::direct_occt::profile_components(
+                outer,
+                holes,
+                next_node_id,
+            );
 
-    Ok(rebuild_node(
-        node,
-        CoreNodeKind::Call {
-            op: CoreOperation::Primitive(CorePrimitive::Profile),
-            args: vec![outer],
-            keywords,
-        },
-    ))
-}
+            Ok(rebuild_node(
+                node,
+                CoreNodeKind::Call {
+                    op: CoreOperation::Primitive(CorePrimitive::Profile),
+                    args,
+                    keywords,
+                },
+            ))
+        }
+        Err(_) => {
+            let soup =
+                extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)?;
+            let wire_nodes = soup
+                .wires
+                .iter()
+                .zip(soup.wire_geometries.iter())
+                .map(|(points, geometry)| {
+                    crate::ecky_cad_host::direct_occt::profile_contour_node(
+                        points,
+                        geometry,
+                        next_node_id,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let fill_rule = match soup.fill_rule {
+                SvgFillRule::NonZero => "nonzero",
+                SvgFillRule::EvenOdd => "evenodd",
+            };
+            let keywords = vec![
+                CoreKeywordArg::expr(
+                    "outer".to_string(),
+                    CoreNode::new(
+                        next_id(next_node_id),
+                        CoreNodeKind::List(wire_nodes),
+                        CoreValueKind::List,
+                    ),
+                ),
+                CoreKeywordArg::expr(
+                    "fill-rule".to_string(),
+                    CoreNode::new(
+                        next_id(next_node_id),
+                        CoreNodeKind::Literal(CoreLiteral::Text(fill_rule.to_string())),
+                        CoreValueKind::Text,
+                    ),
+                ),
+            ];
 
-fn normalized_svg_polygon_node(points: &[[f64; 2]], next_node_id: &mut u64) -> CoreNode {
-    let point_nodes = points
-        .iter()
-        .map(|point| {
-            CoreNode::new(
-                next_id(next_node_id),
-                CoreNodeKind::Literal(CoreLiteral::Point2(*point)),
-                CoreValueKind::Point2,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let list = CoreNode::new(
-        next_id(next_node_id),
-        CoreNodeKind::List(point_nodes),
-        CoreValueKind::List,
-    );
-
-    CoreNode::new(
-        next_id(next_node_id),
-        CoreNodeKind::Call {
-            op: CoreOperation::Primitive(CorePrimitive::Polygon),
-            args: vec![list],
-            keywords: Vec::new(),
-        },
-        CoreValueKind::Sketch,
-    )
+            Ok(rebuild_node(
+                node,
+                CoreNodeKind::Call {
+                    op: CoreOperation::Primitive(CorePrimitive::Profile),
+                    args: Vec::new(),
+                    keywords,
+                },
+            ))
+        }
+    }
 }
 
 fn next_id(next_node_id: &mut u64) -> NodeId {
@@ -2104,6 +2151,69 @@ mod tests {
                 ..
             } if name == "helical-ridge"
         ));
+    }
+
+    /// build123d/ocpsvg import SVG curves as exact OCCT edges; the native plan
+    /// must do the same — a curved contour becomes a `bezier-path` wire, not a
+    /// curve-sampled polygon.
+    #[test]
+    fn normalizes_curved_svg_profile_to_bezier_path() {
+        let svg_path = std::path::Path::new("/tmp/ecky-direct-occt-svg-normalize-curved.svg");
+        {
+            let mut file = std::fs::File::create(svg_path).expect("create svg");
+            use std::io::Write;
+            file.write_all(
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">\n  <path d=\"M1 5 C1 1 9 1 9 5 C9 9 1 9 1 5 Z\"/>\n</svg>\n",
+            )
+            .expect("write svg");
+        }
+
+        let program = compile(
+            r#"(model (part body (extrude (svg "/tmp/ecky-direct-occt-svg-normalize-curved.svg" 10 10 "contain") 4)))"#,
+        );
+
+        let normalized = normalize_core_program_for_direct_occt(&program, &Default::default())
+            .expect("normalize");
+
+        match &normalized.parts[0].root.kind {
+            CoreNodeKind::Call {
+                op: CoreOperation::Surface(crate::ecky_core_ir::CoreSurfaceOp::Extrude),
+                args,
+                ..
+            } => match &args[0].kind {
+                CoreNodeKind::Call {
+                    op: CoreOperation::Primitive(CorePrimitive::Profile),
+                    args: profile_args,
+                    ..
+                } => {
+                    assert_eq!(profile_args.len(), 1);
+                    match &profile_args[0].kind {
+                        CoreNodeKind::Call {
+                            op: CoreOperation::Path(crate::ecky_core_ir::CorePathOp::BezierPath),
+                            args: bezier_args,
+                            ..
+                        } => {
+                            let CoreNodeKind::List(points) = &bezier_args[0].kind else {
+                                panic!("expected bezier-path point list");
+                            };
+                            assert_eq!(
+                                points.len() % 3,
+                                1,
+                                "bezier-path expects 3n+1 control points, got {}",
+                                points.len()
+                            );
+                        }
+                        other => {
+                            panic!("expected bezier-path outer loop for curved svg, got {other:?}")
+                        }
+                    }
+                }
+                other => panic!("expected profile, got {:?}", other),
+            },
+            other => panic!("expected extrude, got {:?}", other),
+        }
+
+        assert!(std::fs::remove_file(svg_path).is_ok());
     }
 
     #[test]

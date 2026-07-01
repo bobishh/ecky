@@ -50,6 +50,7 @@ Status terms:
 | surface | `chamfer` | direct | fillet/chamfer live test | target-id selectors supported |
 | surface | `taper` | direct | taper live test | BREP transform-like op |
 | surface | `twist` | direct | twist live test | BREP generated op |
+| surface | `draft` | direct | draft planner test; runner live + build123d differential tests | side-wall face draft, runner-supported |
 | path | `polyline` | direct | path frame/sweep tests | emitted as path |
 | path | `bezier-path` | direct | bezier sweep live test | cubic-control validation |
 | path | `bspline` | direct | bspline profile live test | closed/open profile usage |
@@ -69,8 +70,9 @@ Status terms:
 | meta | `group` | direct | multi-part/compound tests | emitted as compound |
 | meta | `comment` | unsupported | normalizer/planner unsupported branch | rejected by operation name |
 | meta | `annotate` | unsupported | normalizer/planner unsupported branch | rejected by operation name |
-| custom | `sampled-radial-loft` | normalized-direct | sampled-radial-loft live tests | exact-only but already covered |
-| custom | `helical-ridge` | unsupported | direct planner/service rejection tests; build123d/freecad lowering tests | explicit exact backend only; no EckyRust silent fallback |
+| custom | `sampled-radial-loft` | normalized-direct | sampled-radial-loft live + differential parity tests | portable: native, build123d, FreeCAD (not mesh) |
+| custom | `hull` | direct | hull capsule live tests (runner + shim tiers) | native-only convex hull; build123d/FreeCAD reject |
+| custom | `helical-ridge` | normalized-direct | native helical-ridge render tests; build123d/freecad lowering tests | planner-expanded into helix sweep + boolean forms |
 | custom | `hole` | unsupported | typed-hole rejection test | must be filled before planning |
 | custom | `wall-pattern` | mesh-only | mesh path tests | Rust mesh-only operation |
 | custom | `pattern` | mesh-only | source classifier | legacy mesh alias |
@@ -79,10 +81,8 @@ Status terms:
 
 ## Open Gaps
 
-- `helical-ridge` is not yet covered by Direct OCCT geometry; EckyRust rejects it
-  explicitly and exact rendering requires an explicit build123d/FreeCAD request.
 - FreeCAD/build123d exact-only operations still outside Direct OCCT path:
-  `text`, `import-stl`, `xor`, `helical-ridge`.
+  `text`, `import-stl`, `xor`.
 - Typed `hole` placeholders still must be filled before Direct OCCT planning.
 - Precompiled runner is proven for the covered subset below, but generated C++
   fallback remains required for Direct OCCT forms that are not yet admitted by
@@ -136,6 +136,8 @@ proven runner subset:
 | `scale` | runner-supported | transform |
 | `mirror` | runner-supported | transform |
 | `compound` | runner-supported | grouping output |
+| `draft` | runner-supported | keyword-free or `:neutral-z`/`:neutral_z` numeric keyword; native `draft_shape` added 2026-07-06, no longer generated-source-only |
+| `hull` | runner-supported | variadic shape refs; incremental 3-D convex hull added 2026-07-09 |
 
 Every other Direct OCCT op is currently runner-fallback, not unsupported by
 Direct OCCT itself. Generated C++ fallback remains the active execution path for
@@ -156,7 +158,8 @@ the build123d / FreeCAD exact lowerings can render.
 | `union/difference/intersection` | yes | yes | yes | covered | direct booleans |
 | `extrude/revolve/loft/sweep/taper/twist/offset` | yes | yes | yes | covered | direct BREP forms |
 | `offset-rounded` | yes | yes | yes | covered | normalized/emitted as direct offset path |
-| `sampled-radial-loft` | yes | yes | yes | covered | normalized into direct OCCT forms before runner/direct execution |
+| `sampled-radial-loft` | yes | yes | yes | covered | planner-expanded into loft sections; differential parity proven vs build123d |
+| `hull` | no | no | yes | covered (native-only) | direct-OCCT-required op; exact lowerings reject with a diagnostic |
 | arrays `linear/radial/grid/arc` | yes | yes | yes | covered | direct transform arrays |
 | `repeat`, `repeat-union`, `repeat-pick`, `repeat-compound` | yes | yes | yes | covered | normalized into finite direct forms before runner/direct execution |
 | frames `plane/location/path-frame/place/clip-box` | yes | yes | yes | covered | runner-first proven |
@@ -169,14 +172,15 @@ the build123d / FreeCAD exact lowerings can render.
 | `text` | limited/no | yes | no | not covered | FreeCAD exact-only today |
 | `import-stl` | yes | yes | no | not covered | mesh/import path, not Direct OCCT BREP |
 | `xor` | yes | yes | no | not covered | Direct OCCT rejects `xor` |
-| `helical-ridge` | yes | yes | no | not covered | explicit Direct OCCT rejection |
+| `helical-ridge` | yes | yes | yes | covered | planner-expanded helix sweep; native render test proven |
 | typed `hole` placeholders | rejected until filled | rejected until filled | rejected until filled | not applicable | authoring placeholder, not runtime op |
 
 ### Practical reading
 
 - `build123d` and `FreeCAD` still cover a bigger surface than current
-  runner-first only because of exact-only extras like `helical-ridge`,
-  `text`, `import-stl`, and `xor`.
+  runner-first only because of exact-only extras like `text`, `import-stl`,
+  and `xor`. Conversely `hull` is native-only: Direct OCCT renders it and the
+  exact lowerings reject it.
 - For the shared BREP subset, `EckyRust -> Direct OCCT -> precompiled runner`
   now covers the common primitives, booleans, transforms, arrays, frames,
   profile/SVG workflows, and the supported selector-driven `fillet` /
@@ -187,9 +191,8 @@ the build123d / FreeCAD exact lowerings can render.
 
 ## Removal Blockers From This Matrix
 
-- Build123d fallback is not part of the EckyRust direct path. Full dependency
-  removal still needs either Direct OCCT `helical-ridge` geometry or product
-  acceptance that `helical-ridge` stays unsupported.
+- Build123d fallback is not part of the EckyRust direct path. Remaining
+  exact-only surface for full dependency removal: `text`, `import-stl`, `xor`.
 - Generated C++ compile cannot be removed until `plan.json` runner covers the
   complete Direct OCCT op set, including keyword/selector-driven exact ops.
 - UI/MCP cannot claim full Direct OCCT support until broad selector filtering

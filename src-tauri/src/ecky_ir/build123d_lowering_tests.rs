@@ -3,7 +3,24 @@ use super::super::edge_ops::{
     EdgeAxis, EdgeSelector,
 };
 use super::super::shared::IrMesh;
-use super::{lower_core_program_to_build123d, lower_to_build123d};
+use super::lower_core_program_to_build123d;
+
+/// Guarded shim shadowing `super::lower_to_build123d` for the whole test module.
+///
+/// Production always lowers on a 32 MiB guarded thread (see `services::render` /
+/// `bin::ecky`). The `lower_to_build123d` frame is large in debug builds, so
+/// deeply nested fixtures overflow the default ~2 MiB test-thread stack. Running
+/// every test call through this shim exercises the same large-stack path prod
+/// uses, and keeps the ~60 call sites edit-free.
+fn lower_to_build123d(source: &str) -> crate::models::AppResult<String> {
+    let code = source.to_string();
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || super::lower_to_build123d(&code))
+        .expect("spawn lowering thread")
+        .join()
+        .expect("join lowering thread")
+}
 
 fn surface_fixture(name: &str) -> String {
     let path = format!(
@@ -530,7 +547,7 @@ fn lower_to_build123d_path_accepts_lorenz_point_helper() {
     let src = r#"(model
         (part rail
           (path (lorenz-points 4 0.01 12))))"#;
-    let code = crate::ecky_ir::lower_to_build123d(src).expect("lower");
+    let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("Polyline("), "path: {}", code);
     assert!(
         code.contains("max((-12.0), min(12.0"),
@@ -544,7 +561,7 @@ fn lower_to_build123d_polygon_accepts_henon_point_helper() {
     let src = r#"(model
         (part body
           (extrude (polygon (henon-points 8 10)) 2)))"#;
-    let code = crate::ecky_ir::lower_to_build123d(src).expect("lower");
+    let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("_ecky_polygon("), "polygon: {}", code);
     assert!(
         code.contains("max((-10.0), min(10.0"),
@@ -1832,7 +1849,7 @@ fn lower_to_build123d_tooth_rotated_cutters_comprehension_fixture() {
 
 #[test]
 fn lower_to_build123d_supports_deterministic_fancy_helpers() {
-    let code = crate::ecky_ir::lower_to_build123d(
+    let code = lower_to_build123d(
         r#"(model
           (params (number seed 7 :label "Seed" :min 0 :max 99))
           (part body
@@ -1854,7 +1871,7 @@ fn lower_to_build123d_supports_deterministic_fancy_helpers() {
 #[test]
 fn lower_to_build123d_organic_bspline_loop_fixture() {
     let source = surface_fixture("organic_bspline_loop.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(code.contains("Spline("), "bspline helper: {}", code);
     assert!(code.contains("periodic=True"), "closed loop: {}", code);
@@ -1865,7 +1882,7 @@ fn lower_to_build123d_organic_bspline_loop_fixture() {
 #[test]
 fn lower_to_build123d_voronoi_perforated_panel_fixture() {
     let source = surface_fixture("voronoi_perforated_panel.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(code.contains("Cylinder("), "cutout cylinders: {}", code);
     assert!(
@@ -1887,7 +1904,7 @@ fn lower_to_build123d_voronoi_perforated_panel_fixture() {
 
 #[test]
 fn lower_to_build123d_thomas_modular_ramp_fixture() {
-    let code = crate::ecky_ir::lower_to_build123d(include_str!(
+    let code = lower_to_build123d(include_str!(
         "../../tests/fixtures/cad/surface/thomas_modular_ramp.ecky"
     ))
     .expect("lower");
@@ -1903,7 +1920,7 @@ fn lower_to_build123d_thomas_modular_ramp_fixture() {
 #[test]
 fn lower_to_build123d_direct_occt_frame_array_bracket_fixture_keeps_op_mix_markers() {
     let source = surface_fixture("direct_occt_frame_array_bracket.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(code.contains("Bezier("), "rail bezier path: {}", code);
     assert!(
@@ -1938,7 +1955,7 @@ fn lower_to_build123d_direct_occt_frame_array_bracket_fixture_keeps_op_mix_marke
 #[test]
 fn lower_to_build123d_direct_occt_snap_clip_fixture_keeps_tuple_and_curve_markers() {
     let source = surface_fixture("direct_occt_snap_clip.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(
         code.contains("RectangleRounded(42.0, 24.0, 3.0)"),
@@ -1963,7 +1980,7 @@ fn lower_to_build123d_direct_occt_snap_clip_fixture_keeps_tuple_and_curve_marker
 #[test]
 fn lower_to_build123d_wall_pattern_fixture_reports_unsupported_operation_context() {
     let source = surface_fixture("wall_pattern_cellular.ecky");
-    let err = crate::ecky_ir::lower_to_build123d(&source).expect_err("wall-pattern unsupported");
+    let err = lower_to_build123d(&source).expect_err("wall-pattern unsupported");
     let message = err.to_string();
     assert!(
         message.contains("Node `wall-pattern` is not yet supported by the build123d lowerer")
@@ -1976,7 +1993,7 @@ fn lower_to_build123d_wall_pattern_fixture_reports_unsupported_operation_context
 #[test]
 fn lower_to_build123d_film_scanning_adapter_helicoid_fixture() {
     let source = example_fixture("film-scanning-adapter-helicoid.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(
         code.contains("_ecky_helical_ridge("),
@@ -1995,7 +2012,7 @@ fn lower_to_build123d_film_scanning_adapter_helicoid_fixture() {
 #[test]
 fn lower_to_build123d_helicoid_thread_coupon_fixture_keeps_clearance_variants() {
     let source = example_fixture("helicoid-thread-coupon.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(
         code.contains("_ecky_helical_ridge("),
@@ -2028,7 +2045,7 @@ fn lower_to_build123d_helicoid_thread_coupon_fixture_keeps_clearance_variants() 
 #[test]
 fn lower_to_build123d_film_adapter_film_gap_coupon_fixture_keeps_boolean_and_part_tuple() {
     let source = example_fixture("film-adapter-film-gap-coupon.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(
         code.contains(r#"float(params.get("film_gap", 0.35))"#),
@@ -2055,7 +2072,7 @@ fn lower_to_build123d_film_adapter_film_gap_coupon_fixture_keeps_boolean_and_par
 #[test]
 fn lower_to_build123d_film_path_gap_coupon_fixture_keeps_gap_variants_and_transforms() {
     let source = example_fixture("film-path-gap-coupon.ecky");
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert!(
         code.contains("_ecky_cut_many("),
@@ -2090,7 +2107,7 @@ fn lower_to_build123d_film_path_gap_coupon_fixture_keeps_gap_variants_and_transf
 fn lower_to_build123d_dovetail_box_fixture_keeps_tuple_and_boolean_markers() {
     let fixture_name = "dovetail-box.ecky";
     let source = example_fixture_required(fixture_name);
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert_tuple_contains_fixture_parts(&code, &source, fixture_name);
     assert_marker_hits_at_least(
@@ -2109,7 +2126,7 @@ fn lower_to_build123d_dovetail_box_fixture_keeps_tuple_and_boolean_markers() {
 fn lower_to_build123d_vermicomposter_lid_clearance_fixture_keeps_tuple_and_clearance_markers() {
     let fixture_name = "vermicomposter-lid-clearance.ecky";
     let source = example_fixture_required(fixture_name);
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert_tuple_contains_fixture_parts(&code, &source, fixture_name);
     assert_marker_hits_at_least(
@@ -2129,7 +2146,7 @@ fn lower_to_build123d_vermicomposter_lid_clearance_fixture_keeps_tuple_and_clear
 fn lower_to_build123d_snap_hook_coupon_fixture_keeps_tuple_and_snap_markers() {
     let fixture_name = "snap-hook-coupon.ecky";
     let source = example_fixture_required(fixture_name);
-    let code = crate::ecky_ir::lower_to_build123d(&source).expect("lower");
+    let code = lower_to_build123d(&source).expect("lower");
 
     assert_tuple_contains_fixture_parts(&code, &source, fixture_name);
     assert_marker_hits_at_least(
@@ -2154,9 +2171,20 @@ fn lower_core_program_to_build123d_matches_public_entrypoint_for_comprehension_f
         .expect("compiled path")
         .expect("program");
     let direct = lower_core_program_to_build123d(&program).expect("direct");
-    let public = crate::ecky_ir::lower_to_build123d(source).expect("public");
+    let public = lower_to_build123d(source).expect("public");
 
-    assert_eq!(direct, public);
+    // The Steel expander's hygiene counter is process-global, so compiling the
+    // same source twice yields different numeric suffixes on lambda binders
+    // (`i` vs `i2`). Canonicalize those suffixes before comparing — the parity
+    // claim is about lowering shape, not gensym numbering.
+    let canon = |code: &str| {
+        regex::Regex::new(r"(__ecky_map_[A-Za-z]+|\b_[A-Za-z]+)\d+\b")
+            .expect("canon regex")
+            .replace_all(code, "$1")
+            .into_owned()
+    };
+    assert_eq!(canon(&direct), canon(&public));
+    let direct = canon(&direct);
     assert!(
         direct.contains("for __ecky_map_") && direct.contains(" in _b"),
         "map loop: {}",
@@ -3004,6 +3032,19 @@ fn lower_to_build123d_variadic_loft() {
 }
 
 #[test]
+fn lower_to_build123d_rejects_hull() {
+    let src = r#"
+        (model
+          (part body
+            (hull
+              (sphere 6)
+              (translate 30 0 0 (sphere 6)))))"#;
+    let err = lower_to_build123d(src).expect_err("hull must reject on build123d");
+    let text = format!("{err} {}", err.details.as_deref().unwrap_or(""));
+    assert!(text.contains("hull"), "diagnostic must name hull: {text}");
+}
+
+#[test]
 fn lower_to_build123d_sampled_radial_loft() {
     let src = r#"
         (model
@@ -3015,7 +3056,7 @@ fn lower_to_build123d_sampled_radial_loft() {
               :theta-steps 24
               :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
               :z-map (+ z (* fz 2)))))"#;
-    let code = crate::ecky_ir::lower_to_build123d(src).expect("lower");
+    let code = lower_to_build123d(src).expect("lower");
     assert!(code.contains("_zi in range("), "{code}");
     assert!(code.contains("_ti in range("), "{code}");
     assert!(code.contains("math.cos("), "{code}");

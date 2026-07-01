@@ -1,0 +1,387 @@
+(model
+  (params
+    ;; Physical phone body
+    (number phone-body-length 146.7 :label "Phone Body Length" :min 140 :max 180 :step 0.1)
+    (number phone-body-width 71.5 :label "Phone Body Width" :min 60 :max 90 :step 0.1)
+    (number phone-body-thickness 7.8 :label "Phone Body Thickness" :min 5 :max 12 :step 0.1)
+    (number phone-body-corner-radius 12.0 :label "Phone Body Corner Radius" :min 8 :max 16 :step 0.5)
+
+    ;; TPU fit and structure
+    (number phone-pocket-clearance 0.35 :label "Phone Pocket Clearance Per Side" :min -0.2 :max 0.8 :step 0.05)
+    (number side-wall-thickness 2.5 :label "Side Wall Thickness" :min 1.5 :max 6 :step 0.1)
+    (number rear-panel-thickness 1.6 :label "Rear Panel Thickness" :min 1 :max 4 :step 0.1)
+
+    ;; Front retaining rim
+    ;; Increased so the TPU rim is more visible and grips better.
+    (number front-lip-height 1.4 :label "Front Lip Height" :min 0.8 :max 3.0 :step 0.1)
+    (number front-rim-overlap 1.3 :label "Front Rim Overlap" :min 0.3 :max 2.0 :step 0.1)
+
+    ;; Rear camera line
+    ;; Camera coordinates are measured from phone top-left corner.
+    ;; Mic and flash are derived from camera right edge, so visible gaps are equal.
+    (number rear-camera-center-from-left-edge 13.5 :label "Rear Camera Center From Left Edge" :min 8 :max 35 :step 0.1)
+    (number rear-camera-center-from-top-edge 13.5 :label "Rear Camera Center From Top Edge" :min 8 :max 35 :step 0.1)
+    (number rear-camera-hole-diameter 15.8 :label "Rear Camera Hole Diameter" :min 12 :max 26 :step 0.1)
+
+    (number rear-camera-to-mic-gap 3.0 :label "Camera Edge To Mic Edge Gap" :min 0.5 :max 6 :step 0.1)
+    (number rear-mic-hole-diameter 1.3 :label "Rear Mic Hole Diameter" :min 0.8 :max 4 :step 0.1)
+
+    (number rear-mic-to-flash-gap 3.0 :label "Mic Edge To Flash Edge Gap" :min 0.5 :max 6 :step 0.1)
+    (number rear-flash-hole-diameter 3.8 :label "Rear Flash Hole Diameter" :min 3 :max 12 :step 0.1)
+
+    ;; Bottom USB-C port
+    (number usb-c-port-opening-width 16.0 :label "USB-C Port Opening Width" :min 10 :max 24 :step 0.5)
+    (number usb-c-port-opening-height 8.0 :label "USB-C Port Opening Height" :min 4 :max 12 :step 0.5)
+
+    ;; Side button opening thickness through the wall
+    (number side-button-opening-height 5.0 :label "Side Button Opening Height" :min 3 :max 8 :step 0.5)
+
+    ;; Left side buttons
+    ;; Public Y coordinates are from the phone top edge.
+    (number action-button-opening-length 8.0 :label "Action Button Opening Length" :min 5 :max 16 :step 0.1)
+    (number action-button-center-from-top-edge 31.28 :label "Action Button Center From Top Edge" :min 15 :max 50 :step 0.1)
+
+    (number volume-up-button-opening-length 12.5 :label "Volume Up Button Opening Length" :min 8 :max 18 :step 0.1)
+    (number volume-up-button-center-from-top-edge 45.43 :label "Volume Up Button Center From Top Edge" :min 25 :max 70 :step 0.1)
+
+    (number volume-down-button-opening-length 12.5 :label "Volume Down Button Opening Length" :min 8 :max 18 :step 0.1)
+    (number volume-down-button-center-from-top-edge 59.63 :label "Volume Down Button Center From Top Edge" :min 35 :max 85 :step 0.1)
+
+    ;; Right side power button
+    ;; From Apple drawing: side button center is about 52.53 mm from top edge.
+    ;; This places it between volume up and volume down, higher than the previous bad value.
+    (number power-button-opening-length 19.0 :label "Power Button Opening Length" :min 10 :max 30 :step 0.1)
+    (number power-button-center-from-top-edge 52.53 :label "Power Button Center From Top Edge" :min 30 :max 80 :step 0.1))
+
+  (verify
+    (tag preview_exists)
+    (metric check (manifest has-preview-stl))
+    (expect check (= true)))
+
+  (verify
+    (tag mesh_clean)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+
+  (part iphone-17e-tpu-case
+    (let* (
+      ;; Derived phone pocket dimensions
+      (phone-pocket-width
+        (+ phone-body-width (* 2.0 phone-pocket-clearance)))
+
+      (phone-pocket-length
+        (+ phone-body-length (* 2.0 phone-pocket-clearance)))
+
+      (phone-pocket-corner-radius
+        (+ phone-body-corner-radius phone-pocket-clearance))
+
+      ;; Outer case dimensions
+      (outer-case-width
+        (+ phone-pocket-width (* 2.0 side-wall-thickness)))
+
+      (outer-case-length
+        (+ phone-pocket-length (* 2.0 side-wall-thickness)))
+
+      (outer-case-corner-radius
+        (+ phone-pocket-corner-radius side-wall-thickness))
+
+      (case-total-height
+        (+ rear-panel-thickness phone-body-thickness front-lip-height))
+
+      ;; Boolean cutter safety margins
+      (through-wall-cutter-extra-depth 12.0)
+
+      (side-wall-through-cutter-depth
+        (+ side-wall-thickness through-wall-cutter-extra-depth))
+
+      (bottom-wall-through-cutter-depth
+        (+ side-wall-thickness through-wall-cutter-extra-depth))
+
+      (rear-panel-through-cutter-height
+        (+ rear-panel-thickness 6.0))
+
+      (front-opening-through-cutter-height
+        (+ front-lip-height 6.0))
+
+      ;; Structural solid: main outer body
+      (outer-case-profile
+        (rounded-rect
+          outer-case-width
+          outer-case-length
+          outer-case-corner-radius))
+
+      (outer-case-solid-body
+        (extrude outer-case-profile case-total-height))
+
+      ;; Structural solid: corner protection bumpers
+      (corner-bumper-center-x
+        (- (/ outer-case-width 2.0) outer-case-corner-radius))
+
+      (corner-bumper-center-y
+        (- (/ outer-case-length 2.0) outer-case-corner-radius))
+
+      (corner-bumper-radius
+        (+ outer-case-corner-radius 1.2))
+
+      (top-right-corner-bumper-solid
+        (translate corner-bumper-center-x corner-bumper-center-y 0
+          (cylinder corner-bumper-radius case-total-height)))
+
+      (bottom-right-corner-bumper-solid
+        (translate corner-bumper-center-x (- 0.0 corner-bumper-center-y) 0
+          (cylinder corner-bumper-radius case-total-height)))
+
+      (top-left-corner-bumper-solid
+        (translate (- 0.0 corner-bumper-center-x) corner-bumper-center-y 0
+          (cylinder corner-bumper-radius case-total-height)))
+
+      (bottom-left-corner-bumper-solid
+        (translate (- 0.0 corner-bumper-center-x) (- 0.0 corner-bumper-center-y) 0
+          (cylinder corner-bumper-radius case-total-height)))
+
+      (outer-case-solid-with-corner-bumpers
+        (union
+          outer-case-solid-body
+          top-right-corner-bumper-solid
+          bottom-right-corner-bumper-solid
+          top-left-corner-bumper-solid
+          bottom-left-corner-bumper-solid))
+
+      ;; Cutter: phone body pocket
+      (phone-body-pocket-profile
+        (rounded-rect
+          phone-pocket-width
+          phone-pocket-length
+          phone-pocket-corner-radius))
+
+      (phone-body-pocket-cutter
+        (translate 0 0 rear-panel-thickness
+          (extrude
+            phone-body-pocket-profile
+            (+ phone-body-thickness 0.15))))
+
+      ;; Cutter: front retaining rim opening
+      (front-screen-opening-width
+        (- phone-pocket-width (* 2.0 front-rim-overlap)))
+
+      (front-screen-opening-length
+        (- phone-pocket-length (* 2.0 front-rim-overlap)))
+
+      (front-screen-opening-corner-radius
+        (- phone-pocket-corner-radius front-rim-overlap))
+
+      (front-screen-opening-profile
+        (rounded-rect
+          front-screen-opening-width
+          front-screen-opening-length
+          front-screen-opening-corner-radius))
+
+      (front-retaining-rim-opening-cutter
+        (translate 0 0 (+ rear-panel-thickness phone-body-thickness -0.05)
+          (extrude
+            front-screen-opening-profile
+            front-opening-through-cutter-height)))
+
+      ;; Rear camera line radii
+      (rear-camera-hole-radius
+        (/ rear-camera-hole-diameter 2.0))
+
+      (rear-mic-hole-radius
+        (/ rear-mic-hole-diameter 2.0))
+
+      (rear-flash-hole-radius
+        (/ rear-flash-hole-diameter 2.0))
+
+      ;; Rear camera line coordinates.
+      ;; Camera is absolute from phone left/top.
+      ;; Mic and flash are calculated from visible hole edges:
+      ;; camera right edge -> gap -> mic -> gap -> flash.
+      (rear-camera-right-edge-from-left
+        (+ rear-camera-center-from-left-edge rear-camera-hole-radius))
+
+      (rear-mic-center-from-left-edge
+        (+ rear-camera-right-edge-from-left
+           rear-camera-to-mic-gap
+           rear-mic-hole-radius))
+
+      (rear-flash-center-from-left-edge
+        (+ rear-mic-center-from-left-edge
+           rear-mic-hole-radius
+           rear-mic-to-flash-gap
+           rear-flash-hole-radius))
+
+      (rear-mic-center-from-top-edge
+        rear-camera-center-from-top-edge)
+
+      (rear-flash-center-from-top-edge
+        rear-camera-center-from-top-edge)
+
+      ;; Convert from human coordinates to centered CAD coordinates.
+      ;; X input: from phone left edge.
+      ;; Y input: from phone top edge.
+      (rear-camera-center-x
+        (- rear-camera-center-from-left-edge (/ phone-body-width 2.0)))
+
+      (rear-camera-center-y
+        (- (/ phone-body-length 2.0) rear-camera-center-from-top-edge))
+
+      (rear-mic-center-x
+        (- rear-mic-center-from-left-edge (/ phone-body-width 2.0)))
+
+      (rear-mic-center-y
+        (- (/ phone-body-length 2.0) rear-mic-center-from-top-edge))
+
+      (rear-flash-center-x
+        (- rear-flash-center-from-left-edge (/ phone-body-width 2.0)))
+
+      (rear-flash-center-y
+        (- (/ phone-body-length 2.0) rear-flash-center-from-top-edge))
+
+      ;; Cutter: rear camera
+      (rear-camera-back-panel-cutter
+        (translate rear-camera-center-x rear-camera-center-y -2.0
+          (cylinder
+            rear-camera-hole-radius
+            rear-panel-through-cutter-height)))
+
+      ;; Cutter: rear microphone
+      (rear-mic-back-panel-cutter
+        (translate rear-mic-center-x rear-mic-center-y -2.0
+          (cylinder
+            rear-mic-hole-radius
+            rear-panel-through-cutter-height)))
+
+      ;; Cutter: rear flash
+      (rear-flash-back-panel-cutter
+        (translate rear-flash-center-x rear-flash-center-y -2.0
+          (cylinder
+            rear-flash-hole-radius
+            rear-panel-through-cutter-height)))
+
+      ;; Cutter: bottom USB-C port
+      (usb-c-port-opening-corner-radius 3.0)
+
+      (usb-c-port-center-z
+        (+ rear-panel-thickness (/ phone-body-thickness 2.0)))
+
+      (bottom-wall-outside-y
+        (- 0.0 (/ outer-case-length 2.0)))
+
+      (usb-c-port-through-wall-cutter-start-y
+        (+ bottom-wall-outside-y bottom-wall-through-cutter-depth))
+
+      (bottom-usb-c-port-through-wall-cutter
+        (translate 0 usb-c-port-through-wall-cutter-start-y usb-c-port-center-z
+          (rotate 90 0 0
+            (extrude
+              (rounded-rect
+                usb-c-port-opening-width
+                usb-c-port-opening-height
+                usb-c-port-opening-corner-radius)
+              (* 2.0 bottom-wall-through-cutter-depth)))))
+
+      ;; Convert button positions from top-edge coordinates to centered CAD Y.
+      (action-button-center-y
+        (- (/ phone-body-length 2.0) action-button-center-from-top-edge))
+
+      (volume-up-button-center-y
+        (- (/ phone-body-length 2.0) volume-up-button-center-from-top-edge))
+
+      (volume-down-button-center-y
+        (- (/ phone-body-length 2.0) volume-down-button-center-from-top-edge))
+
+      (power-button-center-y
+        (- (/ phone-body-length 2.0) power-button-center-from-top-edge))
+
+      ;; Shared side-button cutter geometry
+      (side-button-opening-corner-radius 2.0)
+
+      (side-button-center-z
+        (+ rear-panel-thickness (/ phone-body-thickness 2.0)))
+
+      (left-wall-outside-x
+        (- 0.0 (/ outer-case-width 2.0)))
+
+      (right-wall-outside-x
+        (/ outer-case-width 2.0))
+
+      (left-side-through-wall-cutter-start-x
+        (- left-wall-outside-x side-wall-through-cutter-depth))
+
+      (right-side-through-wall-cutter-start-x
+        (+ right-wall-outside-x side-wall-through-cutter-depth))
+
+      ;; Cutter: left-side action button opening
+      (left-action-button-through-wall-cutter
+        (translate
+          left-side-through-wall-cutter-start-x
+          action-button-center-y
+          side-button-center-z
+          (rotate 0 90 0
+            (extrude
+              (rounded-rect
+                side-button-opening-height
+                action-button-opening-length
+                side-button-opening-corner-radius)
+              (* 2.0 side-wall-through-cutter-depth)))))
+
+      ;; Cutter: left-side volume up button opening
+      (left-volume-up-button-through-wall-cutter
+        (translate
+          left-side-through-wall-cutter-start-x
+          volume-up-button-center-y
+          side-button-center-z
+          (rotate 0 90 0
+            (extrude
+              (rounded-rect
+                side-button-opening-height
+                volume-up-button-opening-length
+                side-button-opening-corner-radius)
+              (* 2.0 side-wall-through-cutter-depth)))))
+
+      ;; Cutter: left-side volume down button opening
+      (left-volume-down-button-through-wall-cutter
+        (translate
+          left-side-through-wall-cutter-start-x
+          volume-down-button-center-y
+          side-button-center-z
+          (rotate 0 90 0
+            (extrude
+              (rounded-rect
+                side-button-opening-height
+                volume-down-button-opening-length
+                side-button-opening-corner-radius)
+              (* 2.0 side-wall-through-cutter-depth)))))
+
+      ;; Cutter: right-side power button opening
+      (right-power-button-through-wall-cutter
+        (translate
+          right-side-through-wall-cutter-start-x
+          power-button-center-y
+          side-button-center-z
+          (rotate 0 -90 0
+            (extrude
+              (rounded-rect
+                side-button-opening-height
+                power-button-opening-length
+                side-button-opening-corner-radius)
+              (* 2.0 side-wall-through-cutter-depth)))))
+    )
+
+    (difference
+      outer-case-solid-with-corner-bumpers
+
+      phone-body-pocket-cutter
+      front-retaining-rim-opening-cutter
+
+      rear-camera-back-panel-cutter
+      rear-mic-back-panel-cutter
+      rear-flash-back-panel-cutter
+
+      bottom-usb-c-port-through-wall-cutter
+
+      left-action-button-through-wall-cutter
+      left-volume-up-button-through-wall-cutter
+      left-volume-down-button-through-wall-cutter
+      right-power-button-through-wall-cutter)))
+)

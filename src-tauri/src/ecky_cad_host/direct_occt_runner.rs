@@ -377,8 +377,20 @@ fn runner_command_supported(command: &OcctCommand) -> bool {
         OcctOp::Shell => runner_shell_supported(command),
         OcctOp::Bspline => runner_bspline_keywords_supported(command),
         OcctOp::Sweep => runner_sweep_keywords_supported(command),
+        OcctOp::Draft => runner_draft_keywords_supported(command),
         _ => false,
     }
+}
+
+/// The runner's `draft_shape` honours a single `:neutral-z` (or `:neutral_z`)
+/// numeric keyword; any other keyword stays unsupported so the plan falls
+/// back to the executor.
+fn runner_draft_keywords_supported(command: &OcctCommand) -> bool {
+    command.keywords.iter().all(|keyword| {
+        matches!(keyword.name.as_str(), "neutral-z" | "neutral_z")
+            && keyword.selector_payload().is_none()
+            && matches!(keyword.source_arg(), OcctArg::Number(_))
+    })
 }
 
 /// The runner's `sweep_shape` honours a single `:frenet` boolean (the trihedron
@@ -443,6 +455,11 @@ fn runner_profile_keywords_supported(command: &OcctCommand) -> bool {
             }
             "holes" => {
                 if !runner_ref_collection_supported(keyword.source_arg()) {
+                    return false;
+                }
+            }
+            "fill-rule" => {
+                if !matches!(keyword.source_arg(), OcctArg::Text(_)) {
                     return false;
                 }
             }
@@ -698,6 +715,7 @@ fn runner_op_supported(op: OcctOp) -> bool {
             | OcctOp::Sweep
             | OcctOp::Twist
             | OcctOp::Taper
+            | OcctOp::Draft
             | OcctOp::Offset
             | OcctOp::Path
             | OcctOp::HelixPath
@@ -723,6 +741,7 @@ fn runner_op_supported(op: OcctOp) -> bool {
             | OcctOp::Scale
             | OcctOp::Mirror
             | OcctOp::Compound
+            | OcctOp::Hull
     )
 }
 
@@ -1018,6 +1037,7 @@ fn runner_op_token(op: OcctOp) -> &'static str {
         OcctOp::Scale => "scale",
         OcctOp::Mirror => "mirror",
         OcctOp::Compound => "compound",
+        OcctOp::Hull => "hull",
     }
 }
 
@@ -1915,6 +1935,57 @@ mod tests {
         )
     }
 
+    fn draft_plan() -> OcctPlan {
+        sample_plan_for_commands(
+            OcctSlot(2),
+            vec![
+                OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Box,
+                    args: vec![
+                        OcctArg::Number(20.0),
+                        OcctArg::Number(20.0),
+                        OcctArg::Number(20.0),
+                    ],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(2),
+                    op: OcctOp::Draft,
+                    args: vec![OcctArg::Number(10.0), OcctArg::Ref(OcctSlot(1))],
+                    keywords: Vec::new(),
+                },
+            ],
+        )
+    }
+
+    fn draft_neutral_z_plan() -> OcctPlan {
+        sample_plan_for_commands(
+            OcctSlot(2),
+            vec![
+                OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Box,
+                    args: vec![
+                        OcctArg::Number(20.0),
+                        OcctArg::Number(20.0),
+                        OcctArg::Number(20.0),
+                    ],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(2),
+                    op: OcctOp::Draft,
+                    args: vec![OcctArg::Number(10.0), OcctArg::Ref(OcctSlot(1))],
+                    keywords: vec![OcctKeyword::arg(
+                        "neutral-z".to_string(),
+                        OcctArg::Number(5.0),
+                    )],
+                },
+            ],
+        )
+    }
+
     fn exact_chamfer_plan() -> OcctPlan {
         sample_plan_for_commands(
             OcctSlot(2),
@@ -2253,6 +2324,8 @@ mod tests {
         assert!(runner_supports_plan(&clause_chamfer_plan()));
         assert!(runner_supports_plan(&exact_shell_plan()));
         assert!(runner_supports_plan(&shell_clause_plan()));
+        assert!(runner_supports_plan(&draft_plan()));
+        assert!(runner_supports_plan(&draft_neutral_z_plan()));
     }
 
     #[test]
@@ -3005,6 +3078,34 @@ exit 7
     }
 
     #[test]
+    fn live_precompiled_runner_resolves_svg_wire_soup_artwork_when_available() {
+        // Two disjoint filled squares = a compound the clean profile path rejects.
+        // The tolerant wire-soup fallback hands both wires to the runner with a
+        // fill-rule; OCCT must resolve them into two extruded regions.
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r##"(model (part body (extrude (svg "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 10\"><path fill-rule=\"evenodd\" d=\"M0 0h4v4h-4z M10 0h4v4h-4z\"/></svg>" 20 10 "contain") 4)))"##,
+        )
+        .expect("compile");
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let Some((root, topology)) =
+            run_real_runner_plan_json("live-runner-svg-wire-soup", &plan)
+        else {
+            return;
+        };
+
+        let faces = topology["parts"][0]["faces"].as_array().expect("faces");
+        // Two extruded square prisms → at least the two top caps survive as faces.
+        assert!(
+            faces.len() >= 2,
+            "expected wire-soup compound to yield multiple faces, got {}",
+            faces.len()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn live_precompiled_runner_accepts_clip_box_keywords_when_available() {
         let Some((root, topology)) =
             run_real_runner_plan_json("live-runner-clip-box", &keyword_clip_box_plan())
@@ -3038,6 +3139,8 @@ exit 7
             ("live-runner-chamfer-clause", clause_chamfer_plan()),
             ("live-runner-shell-exact", exact_shell_plan()),
             ("live-runner-shell-clause", shell_clause_plan()),
+            ("live-runner-draft", draft_plan()),
+            ("live-runner-draft-neutral-z", draft_neutral_z_plan()),
         ] {
             let Some((root, topology)) = run_real_runner_plan_json(label, &plan) else {
                 return;
@@ -3090,3 +3193,4 @@ exit 7
         let _ = fs::remove_dir_all(param_root);
     }
 }
+

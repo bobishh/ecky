@@ -15,6 +15,7 @@
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepGProp.hxx>
+#include <BRepGProp_Face.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
@@ -37,6 +38,7 @@
 #include <BOPAlgo_Tools.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
@@ -97,6 +99,7 @@
 #include <gp_Elips.hxx>
 #include <gp_Dir.hxx>
 #include <gp_GTrsf.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -2294,6 +2297,38 @@ TopoDS_Shape twist_shape(const TopoDS_Shape& profile, double height, double angl
     return twist.Shape();
 }
 
+// MVP: taper every vertical (side) face about the z = neutral_z plane,
+// pulling +Z. Faces whose normal is perpendicular to the pull direction are
+// the side walls. Mirrors emit_draft_operation in direct_occt_executor.rs so
+// the runner and generated-source paths produce identical geometry.
+TopoDS_Shape draft_shape(const TopoDS_Shape& input, double angle_degrees, double neutral_z) {
+    double angle_radians = angle_degrees * M_PI / 180.0;
+    BRepOffsetAPI_DraftAngle draft(input);
+    gp_Dir pull(0, 0, 1);
+    gp_Pln neutral(gp_Pnt(0, 0, neutral_z), pull);
+    for (TopExp_Explorer face_explorer(input, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
+        TopoDS_Face face = TopoDS::Face(face_explorer.Current());
+        BRepGProp_Face props(face);
+        Standard_Real u1, u2, v1, v2;
+        props.Bounds(u1, u2, v1, v2);
+        gp_Pnt point;
+        gp_Vec normal;
+        props.Normal((u1 + u2) / 2.0, (v1 + v2) / 2.0, point, normal);
+        if (normal.Magnitude() < 1.0e-12) {
+            continue;
+        }
+        gp_Dir normal_dir(normal);
+        if (std::abs(normal_dir.Z()) < 1.0e-6) {
+            draft.Add(face, pull, angle_radians, neutral);
+        }
+    }
+    draft.Build();
+    if (!draft.IsDone()) {
+        throw EvalError("draft failed to build");
+    }
+    return draft.Shape();
+}
+
 TopoDS_Shape taper_shape(const TopoDS_Shape& profile, double height, double scale_x, double scale_y) {
     TopoDS_Wire base_wire = first_wire(profile, "taper");
     gp_GTrsf top_scale;
@@ -2324,6 +2359,223 @@ TopoDS_Shape cut_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
 
 TopoDS_Shape common_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
     return BRepAlgoAPI_Common(lhs, rhs).Shape();
+}
+
+// --- Convex hull -----------------------------------------------------------
+// OCCT ships no convex-hull primitive, so the hull op gathers a surface point
+// cloud (tessellated nodes plus BREP vertices) from every child shape and
+// builds the 3-D convex hull with an incremental algorithm: seed a tetrahedron
+// from four extreme non-coplanar points, then fold each remaining point into
+// the hull by deleting the faces it can see and stitching new faces across the
+// horizon. The resulting triangle set is sewn into a closed shell and a solid.
+namespace hull_detail {
+
+// Signed volume of the parallelepiped spanned by (b-a, c-a, d-a) == 6·V of the
+// tetrahedron. Positive when d sits on the +normal side of triangle (a,b,c).
+inline double orient(const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& c, const gp_Pnt& d) {
+    gp_Vec ab(a, b);
+    gp_Vec ac(a, c);
+    gp_Vec ad(a, d);
+    return ab.Crossed(ac).Dot(ad);
+}
+
+struct Face {
+    int v[3];
+};
+
+std::vector<Face> incremental_hull(const std::vector<gp_Pnt>& pts) {
+    const std::size_t n = pts.size();
+    const double eps = 1.0e-9;
+
+    // i0/i1: the two points farthest apart along the initial extent.
+    int i0 = 0;
+    int i1 = -1;
+    double best = -1.0;
+    for (std::size_t j = 1; j < n; ++j) {
+        double d = pts[0].SquareDistance(pts[j]);
+        if (d > best) {
+            best = d;
+            i1 = static_cast<int>(j);
+        }
+    }
+    if (i1 < 0 || best <= eps) {
+        throw EvalError("hull requires input geometry with more than one distinct point");
+    }
+
+    // i2: farthest from the line i0-i1.
+    int i2 = -1;
+    best = -1.0;
+    for (std::size_t j = 0; j < n; ++j) {
+        gp_Vec e(pts[i0], pts[i1]);
+        gp_Vec p(pts[i0], pts[j]);
+        double area = e.Crossed(p).SquareMagnitude();
+        if (area > best) {
+            best = area;
+            i2 = static_cast<int>(j);
+        }
+    }
+    if (i2 < 0 || best <= eps) {
+        throw EvalError("hull requires non-collinear input geometry");
+    }
+
+    // i3: farthest from the plane i0-i1-i2.
+    int i3 = -1;
+    best = 0.0;
+    for (std::size_t j = 0; j < n; ++j) {
+        double vol = std::abs(orient(pts[i0], pts[i1], pts[i2], pts[j]));
+        if (vol > best) {
+            best = vol;
+            i3 = static_cast<int>(j);
+        }
+    }
+    if (i3 < 0 || best <= eps) {
+        throw EvalError("hull requires non-coplanar input geometry (need volume)");
+    }
+
+    // Seed tetrahedron with every face oriented so its normal points outward
+    // (away from the opposite vertex, i.e. away from the interior).
+    auto make_outward = [&](int a, int b, int c, int apex) -> Face {
+        if (orient(pts[a], pts[b], pts[c], pts[apex]) > 0.0) {
+            return Face{{a, c, b}};
+        }
+        return Face{{a, b, c}};
+    };
+    std::vector<Face> faces;
+    faces.push_back(make_outward(i0, i1, i2, i3));
+    faces.push_back(make_outward(i0, i1, i3, i2));
+    faces.push_back(make_outward(i0, i2, i3, i1));
+    faces.push_back(make_outward(i1, i2, i3, i0));
+
+    std::vector<bool> used(n, false);
+    used[i0] = used[i1] = used[i2] = used[i3] = true;
+
+    for (std::size_t p = 0; p < n; ++p) {
+        if (used[p]) {
+            continue;
+        }
+        // Faces the point can see (it lies on their outward side).
+        std::vector<char> visible(faces.size(), 0);
+        bool any = false;
+        for (std::size_t f = 0; f < faces.size(); ++f) {
+            const Face& face = faces[f];
+            if (orient(pts[face.v[0]], pts[face.v[1]], pts[face.v[2]], pts[p]) > eps) {
+                visible[f] = 1;
+                any = true;
+            }
+        }
+        if (!any) {
+            continue;  // interior point
+        }
+
+        // Horizon = directed edges of visible faces whose reverse is not also
+        // visible. Count directed edges to find the boundary of the visible set.
+        std::map<std::pair<int, int>, int> edge_count;
+        for (std::size_t f = 0; f < faces.size(); ++f) {
+            if (!visible[f]) {
+                continue;
+            }
+            const Face& face = faces[f];
+            for (int e = 0; e < 3; ++e) {
+                int a = face.v[e];
+                int b = face.v[(e + 1) % 3];
+                edge_count[{a, b}] += 1;
+            }
+        }
+        std::vector<Face> kept;
+        kept.reserve(faces.size());
+        for (std::size_t f = 0; f < faces.size(); ++f) {
+            if (!visible[f]) {
+                kept.push_back(faces[f]);
+            }
+        }
+        for (const auto& entry : edge_count) {
+            int a = entry.first.first;
+            int b = entry.first.second;
+            if (edge_count.find({b, a}) == edge_count.end()) {
+                // Boundary edge: cone it to the new point, preserving winding.
+                kept.push_back(Face{{a, b, static_cast<int>(p)}});
+            }
+        }
+        faces.swap(kept);
+        used[p] = true;
+    }
+
+    return faces;
+}
+
+}  // namespace hull_detail
+
+TopoDS_Shape convex_hull_shapes(const std::vector<TopoDS_Shape>& shapes) {
+    std::vector<gp_Pnt> pts;
+    for (const TopoDS_Shape& shape : shapes) {
+        BRepMesh_IncrementalMesh mesh(shape, 0.1, Standard_False, 0.5, Standard_True);
+        (void)mesh;
+        for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
+            TopoDS_Face face = TopoDS::Face(ex.Current());
+            TopLoc_Location loc;
+            Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+            if (tri.IsNull()) {
+                continue;
+            }
+            gp_Trsf t = loc.Transformation();
+            for (Standard_Integer i = 1; i <= tri->NbNodes(); ++i) {
+                pts.push_back(tri->Node(i).Transformed(t));
+            }
+        }
+        // BREP vertices cover sketch/polygon inputs that carry no triangulation.
+        for (TopExp_Explorer ex(shape, TopAbs_VERTEX); ex.More(); ex.Next()) {
+            pts.push_back(BRep_Tool::Pnt(TopoDS::Vertex(ex.Current())));
+        }
+    }
+    if (pts.size() < 4) {
+        throw EvalError("hull requires at least four surface points across its inputs");
+    }
+
+    std::vector<hull_detail::Face> faces = hull_detail::incremental_hull(pts);
+    if (faces.empty()) {
+        throw EvalError("hull produced no faces");
+    }
+
+    BRepBuilderAPI_Sewing sewing(1.0e-6);
+    for (const hull_detail::Face& face : faces) {
+        BRepBuilderAPI_MakePolygon poly(pts[face.v[0]], pts[face.v[1]], pts[face.v[2]], Standard_True);
+        if (!poly.IsDone()) {
+            continue;
+        }
+        BRepBuilderAPI_MakeFace mk(poly.Wire(), Standard_True);
+        if (!mk.IsDone()) {
+            continue;
+        }
+        sewing.Add(mk.Face());
+    }
+    sewing.Perform();
+    TopoDS_Shape sewn = sewing.SewedShape();
+
+    TopoDS_Shell shell;
+    bool found = false;
+    for (TopExp_Explorer ex(sewn, TopAbs_SHELL); ex.More(); ex.Next()) {
+        shell = TopoDS::Shell(ex.Current());
+        found = true;
+        break;
+    }
+    if (!found) {
+        throw EvalError("hull failed to sew a closed shell");
+    }
+
+    BRepBuilderAPI_MakeSolid mk_solid(shell);
+    if (!mk_solid.IsDone()) {
+        throw EvalError("hull failed to build a solid from its shell");
+    }
+    TopoDS_Solid solid = mk_solid.Solid();
+
+    // A shell sewn from outward triangles can still yield an inverted solid;
+    // flip it if the enclosed volume comes out negative.
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(solid, props);
+    if (props.Mass() < 0.0) {
+        solid.Reverse();
+    }
+    return solid;
 }
 
 // Clip by subtracting the six half-slabs outside [x,y,z] with BRepAlgoAPI_Cut.
@@ -3492,7 +3744,7 @@ SlotValue evaluate_command(
     if (!command.keywords.empty() && op != "box" && op != "sphere" && op != "cylinder" &&
         op != "cone" && op != "torus" && op != "wedge" && op != "profile" && op != "plane" &&
         op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline" &&
-        op != "sweep") {
+        op != "sweep" && op != "draft") {
         throw EvalError(op + " keywords unsupported yet");
     }
 
@@ -3649,6 +3901,16 @@ SlotValue evaluate_command(
                                require_number_arg(command.args, 2, op));
         }
         throw EvalError(op + " expects height, scale, profile or height, scale-x, scale-y, profile");
+    }
+    if (op == "draft") {
+        double neutral_z = 0.0;
+        for (const auto& keyword : command.keywords) {
+            if ((keyword.name == "neutral-z" || keyword.name == "neutral_z") &&
+                keyword.value.kind == Arg::Kind::Number) {
+                neutral_z = keyword.value.number_value;
+            }
+        }
+        return draft_shape(get_ref_shape(1), require_number_arg(command.args, 0, op), neutral_z);
     }
     if (op == "path") {
         return make_path_wire(require_point3_sequence(command.args, op));

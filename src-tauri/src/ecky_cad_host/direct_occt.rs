@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use crate::ecky_cad_host::svg_profile::{parse_svg_profile, SvgFitMode};
+use crate::ecky_cad_host::svg_profile::{
+    extract_svg_wire_soup_profile, parse_svg_profile, SvgFillRule, SvgFitMode,
+};
 use crate::ecky_cad_host::text_profile::parse_text_profile;
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp,
@@ -9,7 +11,7 @@ use crate::ecky_core_ir::{
     CoreProgram, CoreReference, CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol,
     CoreTransformOp, CoreValueKind, NodeId,
 };
-use crate::contracts::{AuthoringDiagnostic, AuthoringReason, ErrorFix};
+use crate::contracts::{AuthoringError, AuthoringReason, ErrorFix};
 use crate::models::{AppError, AppResult, DesignParams, ParamValue};
 
 // --- Authoring-error constructors (backend layer) -------------------------
@@ -18,27 +20,27 @@ use crate::models::{AppError, AppResult, DesignParams, ParamValue};
 // call sites one line and guarantee a backend-layered error.
 
 fn bk(reason: AuthoringReason, msg: impl Into<String>) -> AppError {
-    AuthoringDiagnostic::backend(reason, msg).to_app_error()
+    AuthoringError::backend(reason, msg).into()
 }
 
 fn bk_op(reason: AuthoringReason, op: &str, msg: impl Into<String>) -> AppError {
-    AuthoringDiagnostic::backend(reason, msg).with_op(op).to_app_error()
+    AuthoringError::backend(reason, msg).with_op(op).into()
 }
 
 fn bk_arity(op: &str, expected: &str) -> AppError {
-    AuthoringDiagnostic::backend(AuthoringReason::Arity, format!("`{op}` expects {expected}."))
+    AuthoringError::backend(AuthoringReason::Arity, format!("`{op}` expects {expected}."))
         .with_op(op)
-        .to_app_error()
+        .into()
 }
 
 fn bk_constrained(op: &str, msg: impl Into<String>, valid: &[&str]) -> AppError {
-    AuthoringDiagnostic::backend(AuthoringReason::ConstrainedValue, msg)
+    AuthoringError::backend(AuthoringReason::ConstrainedValue, msg)
         .with_op(op)
         .with_fix(ErrorFix {
             hint: Some(format!("valid values: {}", valid.join(", "))),
             suggestions: valid.iter().map(|s| (*s).to_string()).collect(),
         })
-        .to_app_error()
+        .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +137,7 @@ pub enum OcctOp {
     Scale,
     Mirror,
     Compound,
+    Hull,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -223,35 +226,12 @@ pub fn plan_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
     plan_core_program_with_params(program, &DesignParams::new())
 }
 
-/// Bridge the collected authoring-diagnostic set to the boundary `AppError`.
-/// The full `Vec<StructuralIssue>` rides in `AppError.diagnostics` (boundary
-/// transport); `message` is a short summary so the raw-text path still works.
-fn issues_to_app_error(issues: Vec<crate::contracts::StructuralIssue>) -> AppError {
-    let first = issues.first().expect("issues non-empty");
-    let code = match first.layer {
-        Some(crate::contracts::ErrorLayer::Surface) => crate::contracts::AppErrorCode::Parse,
-        Some(crate::contracts::ErrorLayer::CoreIr) => crate::contracts::AppErrorCode::Validation,
-        _ => crate::contracts::AppErrorCode::Render,
-    };
-    let summary = if issues.len() > 1 {
-        format!(
-            "{} (and {} more authoring issue(s))",
-            first.message,
-            issues.len() - 1
-        )
-    } else {
-        first.message.clone()
-    };
-    AppError::new(code, summary).with_diagnostics(issues)
-}
-
 pub fn plan_core_program_with_params(
     program: &CoreProgram,
     parameters: &DesignParams,
 ) -> AppResult<OcctPlan> {
     let normalized =
-        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)
-            .map_err(issues_to_app_error)?;
+        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)?;
     let expanded = expand_core_program_for_direct_occt(&normalized, parameters)?;
     plan_expanded_core_program(&expanded, parameters)
 }
@@ -748,18 +728,18 @@ fn expand_svg_node(
     let source = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
     let svg_text = if fs::metadata(&source).is_ok() {
         fs::read_to_string(&source).map_err(|err| {
-            AuthoringDiagnostic::surface(
+            AppError::from(AuthoringError::surface(
                 AuthoringReason::Type,
                 format!("Direct OCCT adapter could not read SVG file `{source}`: {err}"),
-            ).to_app_error()
+            ))
         })?
     } else if source.trim_start().starts_with('<') {
         source
     } else {
-        return Err(AuthoringDiagnostic::surface(
+        return Err(AuthoringError::surface(
             AuthoringReason::Type,
             format!("Direct OCCT adapter could not read SVG source at `{source}`."),
-        ).to_app_error());
+        ).into());
     };
 
     let target_width = args
@@ -798,41 +778,80 @@ fn expand_svg_node(
         })
         .transpose()?;
 
-    let profile = parse_svg_profile(
-        &svg_text,
-        target_width,
-        target_height,
-        fit_mode.unwrap_or(SvgFitMode::Contain),
-        true,
-    )?;
+    let fit = fit_mode.unwrap_or(SvgFitMode::Contain);
 
-    let outer = profile_polygon_node(&profile.outer_loop, next_node_id);
-    let holes = profile
-        .hole_loops
-        .iter()
-        .map(|points| profile_polygon_node(points, next_node_id))
-        .collect::<Vec<_>>();
-    let keywords = if holes.is_empty() {
-        Vec::new()
-    } else {
-        vec![CoreKeywordArg::expr(
-            "holes".to_string(),
-            CoreNode::new(
-                next_id(next_node_id),
-                CoreNodeKind::List(holes),
-                CoreValueKind::List,
-            ),
-        )]
-    };
+    // Clean fast path: a single-outer, non-self-intersecting profile keeps its
+    // exact current geometry. Artwork that the clean path rejects (self-
+    // intersecting, multi-outer, even-odd) falls back to the tolerant wire soup
+    // and lets OCCT resolve regions, mirroring build123d/ocpsvg.
+    match parse_svg_profile(&svg_text, target_width, target_height, fit, true) {
+        Ok(profile) => {
+            let outer = vec![profile_contour_node(
+                &profile.outer_loop,
+                &profile.outer_geometry,
+                next_node_id,
+            )];
+            let holes = profile
+                .hole_loops
+                .iter()
+                .zip(profile.hole_geometries.iter())
+                .map(|(points, geometry)| profile_contour_node(points, geometry, next_node_id))
+                .collect::<Vec<_>>();
+            // Same positional-vs-keyword split as text glyphs: executors reject
+            // a positional outer mixed with a `:holes` keyword.
+            let (args, keywords) = profile_components(outer, holes, next_node_id);
 
-    Ok(rebuild_node(
-        node,
-        CoreNodeKind::Call {
-            op: CoreOperation::Primitive(CorePrimitive::Profile),
-            args: vec![outer],
-            keywords,
-        },
-    ))
+            Ok(rebuild_node(
+                node,
+                CoreNodeKind::Call {
+                    op: CoreOperation::Primitive(CorePrimitive::Profile),
+                    args,
+                    keywords,
+                },
+            ))
+        }
+        Err(_) => {
+            let soup =
+                extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)?;
+            let wire_nodes = soup
+                .wires
+                .iter()
+                .zip(soup.wire_geometries.iter())
+                .map(|(points, geometry)| profile_contour_node(points, geometry, next_node_id))
+                .collect::<Vec<_>>();
+            let fill_rule = match soup.fill_rule {
+                SvgFillRule::NonZero => "nonzero",
+                SvgFillRule::EvenOdd => "evenodd",
+            };
+            let keywords = vec![
+                CoreKeywordArg::expr(
+                    "outer".to_string(),
+                    CoreNode::new(
+                        next_id(next_node_id),
+                        CoreNodeKind::List(wire_nodes),
+                        CoreValueKind::List,
+                    ),
+                ),
+                CoreKeywordArg::expr(
+                    "fill-rule".to_string(),
+                    CoreNode::new(
+                        next_id(next_node_id),
+                        CoreNodeKind::Literal(CoreLiteral::Text(fill_rule.to_string())),
+                        CoreValueKind::Text,
+                    ),
+                ),
+            ];
+
+            Ok(rebuild_node(
+                node,
+                CoreNodeKind::Call {
+                    op: CoreOperation::Primitive(CorePrimitive::Profile),
+                    args: Vec::new(),
+                    keywords,
+                },
+            ))
+        }
+    }
 }
 
 fn expand_text_node(
@@ -852,12 +871,23 @@ fn expand_text_node(
     let components = parse_text_profile(&value, size, None)?;
     let outer_nodes = components
         .iter()
-        .map(|component| profile_polygon_node(&component.outer_loop, next_node_id))
+        .map(|component| {
+            profile_contour_node(
+                &component.outer_loop,
+                &component.outer_geometry,
+                next_node_id,
+            )
+        })
         .collect::<Vec<_>>();
     let hole_nodes = components
         .iter()
-        .flat_map(|component| component.hole_loops.iter())
-        .map(|points| profile_polygon_node(points, next_node_id))
+        .flat_map(|component| {
+            component
+                .hole_loops
+                .iter()
+                .zip(component.hole_geometries.iter())
+        })
+        .map(|(points, geometry)| profile_contour_node(points, geometry, next_node_id))
         .collect::<Vec<_>>();
     let (profile_args, profile_keywords) =
         profile_components(outer_nodes, hole_nodes, next_node_id);
@@ -1480,6 +1510,103 @@ fn expand_slot_center_point_node(
     ))
 }
 
+/// Emit one profile loop as its exact geometry (ocpsvg/build123d parity):
+/// contours with curves become a `bezier-path` wire of consecutive cubics
+/// (lines encoded as exact degree-3 segments), pure-line contours keep the
+/// flattened `polygon` plan unchanged.
+pub(crate) fn profile_contour_node(
+    points: &[[f64; 2]],
+    geometry: &crate::ecky_cad_host::svg_profile::SvgContourGeometry,
+    next_node_id: &mut u64,
+) -> CoreNode {
+    use crate::ecky_cad_host::svg_profile::SvgPathSegment;
+
+    if !geometry.has_curves() || geometry.segments.is_empty() {
+        return profile_polygon_node(points, next_node_id);
+    }
+
+    let cubic_third = |from: [f64; 2], to: [f64; 2]| -> ([f64; 2], [f64; 2]) {
+        (
+            [
+                from[0] + (to[0] - from[0]) / 3.0,
+                from[1] + (to[1] - from[1]) / 3.0,
+            ],
+            [
+                from[0] + 2.0 * (to[0] - from[0]) / 3.0,
+                from[1] + 2.0 * (to[1] - from[1]) / 3.0,
+            ],
+        )
+    };
+
+    let mut controls: Vec<[f64; 3]> = vec![[geometry.start[0], geometry.start[1], 0.0]];
+    let mut cursor = geometry.start;
+    let near = |a: [f64; 2], b: [f64; 2]| -> bool {
+        (a[0] - b[0]).abs() <= 1.0e-9 && (a[1] - b[1]).abs() <= 1.0e-9
+    };
+    for segment in &geometry.segments {
+        let (c1, c2, to) = match segment {
+            SvgPathSegment::Line { to } => {
+                let (c1, c2) = cubic_third(cursor, *to);
+                (c1, c2, *to)
+            }
+            SvgPathSegment::Cubic { c1, c2, to } => (*c1, *c2, *to),
+        };
+        // Degenerate (zero-extent) segments produce degenerate OCCT edges;
+        // drop them the way the flattened path's point dedupe used to.
+        if near(to, cursor) && near(c1, cursor) && near(c2, cursor) {
+            continue;
+        }
+        controls.push([c1[0], c1[1], 0.0]);
+        controls.push([c2[0], c2[1], 0.0]);
+        controls.push([to[0], to[1], 0.0]);
+        cursor = to;
+    }
+    if controls.len() < 4 {
+        return profile_polygon_node(points, next_node_id);
+    }
+    // Profile loops must be closed wires. A near-coincident endpoint (float
+    // noise from the SVG/font parser) must SNAP onto the start — emitting a
+    // micro closing segment instead creates a degenerate edge that corrupts
+    // meshing and booleans (non-manifold shells, swallowed fuses). Only a
+    // genuinely open contour gets a real closing line.
+    let gap = ((cursor[0] - geometry.start[0]).powi(2) + (cursor[1] - geometry.start[1]).powi(2))
+        .sqrt();
+    if gap <= 1.0e-6 {
+        let last = controls.last_mut().expect("closing endpoint");
+        *last = [geometry.start[0], geometry.start[1], 0.0];
+    } else {
+        let (c1, c2) = cubic_third(cursor, geometry.start);
+        controls.push([c1[0], c1[1], 0.0]);
+        controls.push([c2[0], c2[1], 0.0]);
+        controls.push([geometry.start[0], geometry.start[1], 0.0]);
+    }
+
+    let point_nodes = controls
+        .iter()
+        .map(|point| {
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::Literal(CoreLiteral::Point3(*point)),
+                CoreValueKind::Point3,
+            )
+        })
+        .collect::<Vec<_>>();
+    let list = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::List(point_nodes),
+        CoreValueKind::List,
+    );
+    CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Path(CorePathOp::BezierPath),
+            args: vec![list],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Path,
+    )
+}
+
 fn profile_polygon_node(points: &[[f64; 2]], next_node_id: &mut u64) -> CoreNode {
     let point_nodes = points
         .iter()
@@ -1509,7 +1636,7 @@ fn profile_polygon_node(points: &[[f64; 2]], next_node_id: &mut u64) -> CoreNode
     )
 }
 
-fn profile_components(
+pub(crate) fn profile_components(
     outer_nodes: Vec<CoreNode>,
     hole_nodes: Vec<CoreNode>,
     next_node_id: &mut u64,
@@ -2706,7 +2833,97 @@ impl<'a> PartPlanner<'a> {
             } => self.plan_map_arg(params, sources, body),
             CoreNodeKind::Let { bindings, body } => self.plan_let_arg(bindings, body),
             CoreNodeKind::Build { bindings, result } => self.plan_build_arg(bindings, result),
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom(name),
+                args,
+                ..
+            } if name == "append" => {
+                let mut combined = Vec::new();
+                for arg in args {
+                    match self.plan_arg(arg)? {
+                        OcctArg::List(items) => combined.extend(items),
+                        other => {
+                            return Err(bk(AuthoringReason::Type, format!(
+                                "Direct OCCT adapter `append` expected list argument, got {:?}.",
+                                other
+                            )))
+                        }
+                    }
+                }
+                Ok(OcctArg::List(combined))
+            }
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom(name),
+                args,
+                ..
+            } if name == "reverse" => {
+                let [arg] = args.as_slice() else {
+                    return Err(bk(AuthoringReason::Arity, format!(
+                        "Direct OCCT adapter `reverse` expected one list, got {} arguments.",
+                        args.len()
+                    )));
+                };
+                match self.plan_arg(arg)? {
+                    OcctArg::List(mut items) => {
+                        items.reverse();
+                        Ok(OcctArg::List(items))
+                    }
+                    other => Err(bk(AuthoringReason::Type, format!(
+                        "Direct OCCT adapter `reverse` expected list argument, got {:?}.",
+                        other
+                    ))),
+                }
+            }
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom(name),
+                args,
+                ..
+            } if matches!(name.as_str(), "car" | "first" | "cadr" | "second" | "third") => {
+                let index = match name.as_str() {
+                    "car" | "first" => 0,
+                    "cadr" | "second" => 1,
+                    _ => 2,
+                };
+                let [arg] = args.as_slice() else {
+                    return Err(bk(AuthoringReason::Arity, format!(
+                        "Direct OCCT adapter `{name}` expected one list, got {} arguments.",
+                        args.len()
+                    )));
+                };
+                let items = match self.plan_arg(arg)? {
+                    OcctArg::List(items) => items,
+                    OcctArg::Point2(point) => {
+                        point.iter().copied().map(OcctArg::Number).collect()
+                    }
+                    OcctArg::Point3(point) => {
+                        point.iter().copied().map(OcctArg::Number).collect()
+                    }
+                    other => {
+                        return Err(bk(AuthoringReason::Type, format!(
+                            "Direct OCCT adapter `{name}` expected list argument, got {:?}.",
+                            other
+                        )))
+                    }
+                };
+                items.get(index).cloned().ok_or_else(|| {
+                    bk(AuthoringReason::Arity, format!(
+                        "Direct OCCT adapter `{name}` expected at least {} item(s), got {}.",
+                        index + 1,
+                        items.len()
+                    ))
+                })
+            }
             CoreNodeKind::Call { .. } | CoreNodeKind::Apply { .. } => {
+                // Arithmetic over list accessors (`(- (cadr p))` in a map
+                // body) cannot reach the shared scalar evaluator: resolve the
+                // accessor subnodes to literals first.
+                let substituted;
+                let node = if node_contains_list_accessor(node) {
+                    substituted = self.substitute_list_accessors(node)?;
+                    &substituted
+                } else {
+                    node
+                };
                 if let Some(scalar) = self.plan_scalar_arg(node)? {
                     return Ok(scalar);
                 }
@@ -2722,6 +2939,45 @@ impl<'a> PartPlanner<'a> {
                 id
             ))),
         }
+    }
+
+    /// Clone `node` with list-accessor calls (`car`, `cadr`, ...) replaced by
+    /// literal scalars resolved against planned locals, so the shared scalar
+    /// evaluator can fold the surrounding arithmetic.
+    fn substitute_list_accessors(&mut self, node: &CoreNode) -> AppResult<CoreNode> {
+        if let CoreNodeKind::Call {
+            op: CoreOperation::Custom(name),
+            ..
+        } = &node.kind
+        {
+            if is_list_accessor_name(name) {
+                let literal = match self.plan_arg(node)? {
+                    OcctArg::Number(value) => CoreLiteral::Number(value),
+                    OcctArg::Boolean(flag) => CoreLiteral::Boolean(flag),
+                    OcctArg::Text(text) => CoreLiteral::Text(text),
+                    _ => return Ok(node.clone()),
+                };
+                let mut resolved = node.clone();
+                resolved.kind = CoreNodeKind::Literal(literal);
+                return Ok(resolved);
+            }
+        }
+        let mut resolved = node.clone();
+        if let CoreNodeKind::Call { args, keywords, .. } = &mut resolved.kind {
+            for arg in args.iter_mut() {
+                *arg = self.substitute_list_accessors(arg)?;
+            }
+            for keyword in keywords.iter_mut() {
+                let value = self.substitute_list_accessors(keyword.source_node())?;
+                *keyword = match keyword.selector_payload() {
+                    Some(selector) => {
+                        CoreKeywordArg::selector(keyword.name.clone(), value, selector.clone())
+                    }
+                    None => CoreKeywordArg::expr(keyword.name.clone(), value),
+                };
+            }
+        }
+        Ok(resolved)
     }
 
     fn plan_align_arg(&mut self, node: &CoreNode) -> AppResult<OcctArg> {
@@ -2924,6 +3180,23 @@ impl<'a> PartPlanner<'a> {
     }
 }
 
+fn is_list_accessor_name(name: &str) -> bool {
+    matches!(name, "car" | "first" | "cadr" | "second" | "third")
+}
+
+fn node_contains_list_accessor(node: &CoreNode) -> bool {
+    match &node.kind {
+        CoreNodeKind::Call { op, args, keywords } => {
+            matches!(op, CoreOperation::Custom(name) if is_list_accessor_name(name))
+                || args.iter().any(node_contains_list_accessor)
+                || keywords
+                    .iter()
+                    .any(|keyword| node_contains_list_accessor(keyword.source_node()))
+        }
+        _ => false,
+    }
+}
+
 fn occt_arg_to_scalar(arg: &OcctArg) -> Option<ParamValue> {
     match arg {
         OcctArg::Number(value) => Some(ParamValue::Number(*value)),
@@ -3012,6 +3285,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Transform(CoreTransformOp::Scale) => Ok(OcctOp::Scale),
         CoreOperation::Transform(CoreTransformOp::Mirror) => Ok(OcctOp::Mirror),
         CoreOperation::Meta(CoreMetaOp::Group) => Ok(OcctOp::Compound),
+        CoreOperation::Custom(name) if name == "hull" => Ok(OcctOp::Hull),
         CoreOperation::Custom(name) if name == "hole" => Err(bk_op(AuthoringReason::Unsupported, "hole",
             "Typed hole must be filled before direct OCCT planning.",
         )),
@@ -3039,7 +3313,7 @@ fn keyword_text(keywords: &[CoreKeywordArg], name: &str) -> Option<String> {
 }
 
 fn unsupported(op: &str, reason: &str) -> AppError {
-    crate::contracts::AuthoringDiagnostic::backend(
+    crate::contracts::AuthoringError::backend(
         crate::contracts::AuthoringReason::Unsupported,
         format!("The active backend (direct OCCT) cannot execute `{op}`: {reason}."),
     )
@@ -3052,7 +3326,7 @@ fn unsupported(op: &str, reason: &str) -> AppError {
         ),
         suggestions: Vec::new(),
     })
-    .to_app_error()
+    .into()
 }
 
 fn symbol_name(symbol: &CoreSymbol) -> &'static str {
@@ -3517,6 +3791,34 @@ mod tests {
     }
 
     #[test]
+    fn live_draft_matches_build123d_reference() {
+        // T10.9: draft was the only OcctOp with no precompiled-runner
+        // dispatch at all (generated-source-only). Proves the new runner
+        // `draft_shape` produces geometry matching build123d within the
+        // shared differential tolerance, routed through whichever path
+        // runner-first selects.
+        crate::ecky_cad_host::native_parity_harness::assert_native_matches_reference(
+            "(model (part body (draft 10 (box 20 20 20))))",
+            &DesignParams::new(),
+            "draft-op",
+            crate::ecky_cad_host::native_parity_harness::ParityReference::Build123d,
+        );
+    }
+
+    #[test]
+    fn live_torus_matches_build123d_reference() {
+        // Proves the parity harness (language-convenience-stdlib 5.1) is
+        // reusable outside direct_occt_executor.rs: torus parity was
+        // previously only checked by hand on a live render.
+        crate::ecky_cad_host::native_parity_harness::assert_native_matches_reference(
+            "(model (part body (torus 10 3)))",
+            &DesignParams::new(),
+            "torus-primitive",
+            crate::ecky_cad_host::native_parity_harness::ParityReference::Build123d,
+        );
+    }
+
+    #[test]
     fn plans_slot_overall_primitive_for_direct_occt() {
         let program = compile("(model (part body (extrude (slot-overall 40 10) 5)))");
 
@@ -3737,6 +4039,118 @@ mod tests {
     }
 
     #[test]
+    fn plans_deferred_append_reverse_polygon_points() {
+        // Param-dependent `map` lists composed with `append`/`reverse` cannot
+        // be flattened at compile time; the planner must evaluate the deferred
+        // calls into one concrete point list (16 arc + 2 fixed + 16 mirrored).
+        let program = compile(
+            r#"
+            (model
+              (params (number tube_od 22) (number wall 2.4) (number clip_gap 2.2))
+              (let* ((or (/ tube_od 2))
+                     (ir (- or wall))
+                     (cr (+ or wall))
+                     (step-a (* 0.5 3.14159265))
+                     (n-pts-a 16)
+                     (arc-a (map (lambda (i)
+                       (let* ((t (/ i n-pts-a))
+                              (a (+ step-a (* t (- 1.5707963 step-a)))))
+                         (list (* ir (cos a)) (* ir (sin a)))))
+                       (range n-pts-a)))
+                     (ox-end (list (* cr (cos step-a)) (* cr (sin step-a))))
+                     (path (append arc-a (list ox-end (list (- clip_gap) ir))
+                                   (reverse (map (lambda (p) (list (car p) (- (cadr p)))) arc-a)))))
+                (part clip (extrude (polygon path) 2))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        let polygon = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Polygon)
+            .expect("polygon command");
+        let OcctArg::List(points) = &polygon.args[0] else {
+            panic!("expected concrete point list, got {:?}", polygon.args[0]);
+        };
+        assert_eq!(points.len(), 34);
+        // The tail comes from `reverse`: its first point must mirror (negate y)
+        // the LAST arc point, not the first.
+        let point_xy = |arg: &OcctArg| -> (f64, f64) {
+            match arg {
+                OcctArg::Point2(point) => (point[0], point[1]),
+                OcctArg::List(items) => match items.as_slice() {
+                    [OcctArg::Number(x), OcctArg::Number(y)] => (*x, *y),
+                    other => panic!("expected 2 numbers, got {other:?}"),
+                },
+                other => panic!("expected point, got {other:?}"),
+            }
+        };
+        let (first_arc_x, first_arc_y) = point_xy(&points[0]);
+        let (last_arc_x, last_arc_y) = point_xy(&points[15]);
+        let (first_tail_x, first_tail_y) = point_xy(&points[18]);
+        let (last_tail_x, last_tail_y) = point_xy(&points[33]);
+        assert!((first_tail_x - last_arc_x).abs() < 1e-9);
+        assert!((first_tail_y + last_arc_y).abs() < 1e-9);
+        assert!((last_tail_x - first_arc_x).abs() < 1e-9);
+        assert!((last_tail_y + first_arc_y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn plans_nested_parameterized_component_for_direct_occt() {
+        // G-COMP: a nested, parameterized component instantiated with a
+        // param-driven override plans through the native Direct OCCT path.
+        let program = compile(
+            r#"
+            (define-component rib
+              ((number w 2) (number h 8))
+              (box w 20 h))
+            (define-component ribbed-wall
+              ((number rib-h 8))
+              (union
+                (box 60 20 3)
+                (repeat-union i 3
+                  (translate (- (* i 20) 20) 0 3
+                    (rib :h rib-h)))))
+            (model
+              (params (number rib_h 8))
+              (part wall (ribbed-wall :rib-h rib_h)))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(plan.parts.len(), 1);
+        assert_eq!(plan.parts[0].key, "wall");
+        let boxes = plan.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Box)
+            .count();
+        assert!(
+            boxes >= 4,
+            "expected wall + 3 expanded rib instances, got {boxes} boxes"
+        );
+    }
+
+    #[test]
+    fn plans_full_tube_clip_freecad_migration_fixture() {
+        // Real FreeCAD-migrated model: three param-dependent arcs composed
+        // with `append`/`reverse`, unary `(/ x)` reciprocal, `car`/`cadr`
+        // accessors. Must compile through the expanded path and plan natively.
+        let program = compile(include_str!("../ecky_scheme/clip_full.ecky"));
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert!(!plan.parts.is_empty());
+        assert!(plan.parts[0]
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::Polygon));
+    }
+
+    #[test]
     fn plans_rounded_rectangle_profile_for_direct_occt() {
         let program = compile("(model (part body (extrude (rounded_rect 20 10 2) 5)))");
 
@@ -3942,6 +4356,42 @@ mod tests {
     }
 
     #[test]
+    fn plans_hull_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (hull
+                  (sphere 6)
+                  (translate 30 0 0 (sphere 6)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ops,
+            vec![
+                OcctOp::Sphere,
+                OcctOp::Sphere,
+                OcctOp::Translate,
+                OcctOp::Hull,
+            ]
+        );
+        let hull = plan.parts[0].commands.last().expect("hull");
+        assert_eq!(hull.op, OcctOp::Hull);
+        assert_eq!(hull.args.len(), 2);
+        assert!(hull
+            .args
+            .iter()
+            .all(|arg| matches!(arg, OcctArg::Ref(_))));
+    }
+
+    #[test]
     fn plans_shell_sampled_radial_loft_for_direct_occt() {
         let program = compile(
             r#"
@@ -4041,6 +4491,90 @@ mod tests {
                 .map(|command| command.op)
                 .collect::<Vec<_>>(),
             vec![OcctOp::Polygon, OcctOp::Profile, OcctOp::Extrude]
+        );
+
+        assert!(std::fs::remove_file(svg_path).is_ok());
+    }
+
+    #[test]
+    fn plans_folded_if_branch_referenced_by_build_result() {
+        // Normalize folds a statically-known `if` to one branch. The branch must
+        // keep the `if` node's id, or every `RefNode(if_id)` (e.g. the build
+        // result referencing the `overlay` binding) dangles at plan time.
+        let program = compile(
+            r#"(model
+              (params (number k 1))
+              (part p (build
+                (shape base (box 20 10 2))
+                (shape empty_overlay (difference base base))
+                (shape overlay (if (= k 0) empty_overlay (translate 0 0 1 (box 3 3 3))))
+                (result (fuse base overlay)))))"#,
+        );
+        let plan = plan_core_program(&program).expect("folded-if plan");
+        assert!(
+            plan.parts[0].commands.iter().any(|c| c.op == OcctOp::Translate),
+            "else branch survives fold"
+        );
+
+        // Then-branch case: the fold result is itself a reference to another
+        // binding (`empty_overlay`); the aliased id must resolve too.
+        let program = compile(
+            r#"(model
+              (params (number k 0))
+              (part p (build
+                (shape base (box 20 10 2))
+                (shape empty_overlay (difference base base))
+                (shape overlay (if (= k 0) empty_overlay (translate 0 0 1 (box 3 3 3))))
+                (result (fuse base overlay)))))"#,
+        );
+        plan_core_program(&program).expect("folded-if reference-branch plan");
+    }
+
+    #[test]
+    fn plans_svg_wire_soup_for_artwork_rejected_by_clean_path() {
+        // Two disjoint filled squares = multiple outer loops, which the clean
+        // profile path rejects. The tolerant wire-soup fallback must instead
+        // hand every wire to OCCT with a fill-rule, so region resolution happens
+        // in the runner (mirrors build123d/ocpsvg).
+        let svg_path = std::path::Path::new("/tmp/ecky-direct-occt-svg-artwork.svg");
+        {
+            let mut file = std::fs::File::create(svg_path).expect("create svg");
+            file.write_all(
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 10\">\n  <path fill-rule=\"evenodd\" d=\"M0 0h4v4h-4z M10 0h4v4h-4z\"/>\n</svg>\n",
+            )
+            .expect("write svg");
+        }
+
+        let program = compile(
+            r#"(model (part body (extrude (svg "/tmp/ecky-direct-occt-svg-artwork.svg" 20 10 "contain") 4)))"#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+        let commands = &plan.parts[0].commands;
+        let ops = commands.iter().map(|command| command.op).collect::<Vec<_>>();
+
+        assert_eq!(
+            ops,
+            vec![OcctOp::Polygon, OcctOp::Polygon, OcctOp::Profile, OcctOp::Extrude],
+            "two wires + soup profile + extrude"
+        );
+
+        let profile = commands
+            .iter()
+            .find(|command| command.op == OcctOp::Profile)
+            .expect("profile command");
+        let fill_rule = profile
+            .keywords
+            .iter()
+            .find(|keyword| keyword.name == "fill-rule")
+            .expect("fill-rule keyword present");
+        assert_eq!(
+            fill_rule.source_arg(),
+            &OcctArg::Text("evenodd".to_string())
+        );
+        assert!(
+            profile.keywords.iter().any(|keyword| keyword.name == "outer"),
+            "wires ride via :outer"
         );
 
         assert!(std::fs::remove_file(svg_path).is_ok());
@@ -4638,35 +5172,21 @@ mod tests {
 
     #[test]
     fn unsupported_op_reports_backend_layer_with_fix() {
-        use crate::contracts::{AuthoringReason, ErrorLayer};
+        use crate::contracts::ErrorLayer;
         let err = unsupported("fillet", "not in first surface");
-        // `unsupported` builds via the diagnostic builder then bridges to AppError;
-        // layer/fix live on StructuralIssue. Assert the surviving identity on
-        // AppError and the full layer/fix via into_issue.
+        // `unsupported` builds an `AuthoringError` then bridges to `AppError`
+        // via `From`; layer/fix now live directly on the boundary `AppError`.
         assert_eq!(err.operation.as_deref(), Some("fillet"));
         assert_eq!(err.code, crate::contracts::AppErrorCode::Render);
         assert!(err.to_string().contains("direct OCCT"), "backend named: {}", err);
-        let diag = crate::contracts::AuthoringDiagnostic::backend(
-            AuthoringReason::Unsupported,
-            "x",
-        )
-        .with_op("fillet")
-        .with_fix(crate::contracts::ErrorFix {
-            hint: Some("switch backend".into()),
-            suggestions: Vec::new(),
-        });
-        let issue = diag.into_issue();
-        assert_eq!(issue.layer, Some(ErrorLayer::Backend));
-        assert!(issue.fix.unwrap().hint.is_some());
-        let _ = AuthoringReason::Unsupported;
-        let _ = AuthoringReason::Unsupported;
+        assert_eq!(err.layer, Some(ErrorLayer::Backend));
+        assert!(err.fix.expect("fix present").hint.is_some());
     }
 
     #[test]
-    fn plan_carries_full_diagnostic_set_on_authoring_failure() {
-        use crate::contracts::StructuralIssue;
-        // Two bad parts → the plan error carries both issues in `diagnostics`,
-        // not just a collapsed message.
+    fn plan_reports_authoring_failure_naming_op() {
+        // A bad op fails planning; the boundary error is a single `AppError`
+        // whose summary names an offending op (no diagnostics collection anymore).
         let program = compile(
             r#"
             (model
@@ -4675,12 +5195,12 @@ mod tests {
             "#,
         );
         let err = plan_core_program(&program).expect_err("authoring failure");
-        let diags: &[StructuralIssue] = err.diagnostics.as_ref().expect("diagnostics present");
-        assert_eq!(diags.len(), 2, "the full set rides to the boundary");
-        assert!(diags.iter().any(|d| d.part_id.as_deref() == Some("body")));
-        assert!(diags.iter().any(|d| d.part_id.as_deref() == Some("handle")));
-        assert!(diags.iter().all(|d| d.layer.is_some()));
-        // And no bundle is produced (the error path means no ArtifactBundle).
-        assert!(err.message.contains("bx"), "summary names an op: {}", err.message);
+        assert!(
+            err.message.contains("bx") || err.message.contains("sphre"),
+            "summary names an op: {}",
+            err.message
+        );
     }
 }
+
+

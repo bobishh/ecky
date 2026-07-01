@@ -1,0 +1,242 @@
+(model
+  (params
+    (number length 100 :label "Length" :min 80 :max 230 :step 5)
+    (number width 80 :label "Width" :min 65 :max 150 :step 5)
+    (number floor_thickness 2.4 :label "Floor thickness" :min 1 :max 5 :step 0.2)
+    (number wall_height 7 :label "Wall height" :min 5 :max 20 :step 1)
+    (number wall_thickness 3 :label "Wall thickness" :min 1.5 :max 6 :step 0.5)
+    (number center_hall_width 34 :label "Center food hall width" :min 22 :max 55 :step 1)
+    (number divider_thickness 2.4 :label "Corridor divider thickness" :min 1.2 :max 5 :step 0.2)
+    (number hall_opening_width 24 :label "Hall doorway width" :min 12 :max 42 :step 1)
+    (number food_tray_length 38 :label "Food tray length" :min 20 :max 70 :step 2)
+    (number food_tray_width 18 :label "Food tray width" :min 12 :max 32 :step 1)
+    (number food_tray_rim_height 3 :label "Food tray rim height" :min 1 :max 7 :step 0.5)
+    (number entrance_width 18 :label "Side entrance width" :min 10 :max 32 :step 1)
+    (number entrance_offset_v2 48 :label "Entrance offset" :min 28 :max 64 :step 1)
+    (number rail_tip_w 3.0 :label "Bottom side rail protrusion" :min 1.5 :max 5 :step 0.1)
+    (number rail_h 2.4 :label "Bottom side rail height" :min 1.2 :max 4 :step 0.1)
+    (number joint_sink 0.6 :label "Rail sink" :min 0.2 :max 2.5 :step 0.1)
+    (number fit_clearance 0.35 :label "Slide fit clearance" :min 0.15 :max 0.8 :step 0.05)
+    (number lead_in 4 :label "Slide lead-in" :min 0 :max 10 :step 0.5)
+    (number close_slide 28 :label "Slide distance to open/close entrances" :min 20 :max 45 :step 1)
+    (number lid_skirt_thickness 3.4 :label "Lid side shutter thickness" :min 2 :max 7 :step 0.1)
+    (number roof_thickness 1.8 :label "Roof shell thickness" :min 1.2 :max 4 :step 0.2)
+    (number flat_canopy_thickness_v1 2.2 :label "Flat canopy thickness" :min 1.6 :max 5 :step 0.2)
+    (number side_canopy_overhang_v1 5 :label "Side canopy overhang" :min 0 :max 12 :step 0.5)
+    (number door_frame_thickness 1.2 :label "Raised shutter/frame thickness" :min 0.6 :max 2.5 :step 0.1)
+    (number svg_icon_width 8 :label "SVG icon width" :min 2 :max 20 :step 0.5)
+    (number svg_icon_height 5 :label "SVG icon height" :min 2 :max 12 :step 0.5)
+    (number svg_gap 1 :label "SVG/text gap" :min 0 :max 16 :step 0.5)
+    (number label_group_shift_x -4 :label "Label group X shift" :min -20 :max 20 :step 0.5)
+    (number fruit_group_shift_x 3 :label "Fruit side X shift" :min -24 :max 24 :step 0.5)
+    (select svg_fit_mode "contain" :label "SVG fit mode" :options (("Contain" "contain") ("Cover" "cover") ("Stretch" "stretch")))
+    (image veg_svg "" :label "Vegetables SVG overlay")
+    (image fruit_svg "" :label "Fruits SVG overlay"))
+
+  (part woodlouse_trap_body
+    (build
+      (shape half_l (/ length 2))
+      (shape half_w (/ width 2))
+      (shape body_top (+ floor_thickness wall_height))
+      (shape hall_half (/ hall_opening_width 2))
+      (shape inner_end_x (- half_l wall_thickness))
+      (shape door_half (/ entrance_width 2))
+      (shape door_offset_auto (/ (+ hall_half inner_end_x) 2))
+      (shape door_offset_user (clamp entrance_offset_v2 (+ hall_half door_half) (- inner_end_x door_half)))
+      (shape length_blend (clamp (/ (- length 100) 50) 0 1))
+      (shape entrance_offset_actual (+ door_offset_auto (* length_blend (- door_offset_user door_offset_auto))))
+      (shape door1_x (- entrance_offset_actual))
+      (shape door2_x entrance_offset_actual)
+      (shape door1_left (- door1_x door_half))
+      (shape door1_right (+ door1_x door_half))
+      (shape door2_left (- door2_x door_half))
+      (shape door2_right (+ door2_x door_half))
+      (shape inner_l (- length (* wall_thickness 2)))
+      (shape floor (box length width floor_thickness :align '(center center min)))
+      (shape end_wall_left
+        (translate (- (/ wall_thickness 2) half_l) 0 floor_thickness
+          (box wall_thickness width wall_height :align '(center center min))))
+      (shape end_wall_right
+        (translate (- half_l (/ wall_thickness 2)) 0 floor_thickness
+          (box wall_thickness width wall_height :align '(center center min))))
+      (shape min_wall_seg_len 0.8)
+      (shape seg1_len (max min_wall_seg_len (- (+ door1_x half_l) door_half)))
+      (shape seg2_len (max min_wall_seg_len (- door2_x door1_x entrance_width)))
+      (shape seg3_len (max min_wall_seg_len (- half_l door2_x door_half)))
+      (shape seg1_x (/ (+ (- half_l) (- door1_x door_half)) 2))
+      (shape seg2_x (/ (+ (+ door1_x door_half) (- door2_x door_half)) 2))
+      (shape seg3_x (/ (+ (+ door2_x door_half) half_l) 2))
+      (shape front_y (- half_w (/ wall_thickness 2)))
+      (shape back_y (- (/ wall_thickness 2) half_w))
+      (shape front_1 (translate seg1_x front_y floor_thickness (box seg1_len wall_thickness wall_height :align '(center center min))))
+      (shape front_2 (translate seg2_x front_y floor_thickness (box seg2_len wall_thickness wall_height :align '(center center min))))
+      (shape front_3 (translate seg3_x front_y floor_thickness (box seg3_len wall_thickness wall_height :align '(center center min))))
+      (shape back_1 (translate seg1_x back_y floor_thickness (box seg1_len wall_thickness wall_height :align '(center center min))))
+      (shape back_2 (translate seg2_x back_y floor_thickness (box seg2_len wall_thickness wall_height :align '(center center min))))
+      (shape back_3 (translate seg3_x back_y floor_thickness (box seg3_len wall_thickness wall_height :align '(center center min))))
+      (shape divider_y (+ (/ center_hall_width 2) (/ divider_thickness 2)))
+      (shape divider_seg_len (/ (- inner_l hall_opening_width) 2))
+      (shape divider_left_x (- (+ (/ hall_opening_width 2) (/ divider_seg_len 2))))
+      (shape divider_right_x (+ (/ hall_opening_width 2) (/ divider_seg_len 2)))
+      (shape north_divider_left (translate divider_left_x divider_y floor_thickness (box divider_seg_len divider_thickness wall_height :align '(center center min))))
+      (shape north_divider_right (translate divider_right_x divider_y floor_thickness (box divider_seg_len divider_thickness wall_height :align '(center center min))))
+      (shape south_divider_left (translate divider_left_x (- divider_y) floor_thickness (box divider_seg_len divider_thickness wall_height :align '(center center min))))
+      (shape south_divider_right (translate divider_right_x (- divider_y) floor_thickness (box divider_seg_len divider_thickness wall_height :align '(center center min))))
+      (shape corridor_inner_y (+ (/ center_hall_width 2) divider_thickness))
+      (shape corridor_outer_y (- half_w wall_thickness))
+      (shape corridor_span (- corridor_outer_y corridor_inner_y))
+      (shape maze_passage_gap (clamp (/ corridor_span 2) 10 18))
+      (shape maze_baffle_span (max 4 (- corridor_span maze_passage_gap)))
+      (shape maze_inner_y (+ corridor_inner_y (/ maze_baffle_span 2)))
+      (shape maze_outer_y (- corridor_outer_y (/ maze_baffle_span 2)))
+      (shape left_outer_baffle_x (/ (+ (- inner_end_x) door1_left) 2))
+      (shape left_inner_baffle_x (/ (+ door1_right (- hall_half)) 2))
+      (shape right_inner_baffle_x (/ (+ hall_half door2_left) 2))
+      (shape right_outer_baffle_x (/ (+ door2_right inner_end_x) 2))
+      (shape north_maze_inner (fuse (translate left_inner_baffle_x maze_inner_y floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min))) (translate right_inner_baffle_x maze_inner_y floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min)))))
+      (shape north_maze_outer (fuse (translate left_outer_baffle_x maze_outer_y floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min))) (translate right_outer_baffle_x maze_outer_y floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min)))))
+      (shape south_maze_inner (fuse (translate left_inner_baffle_x (- maze_inner_y) floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min))) (translate right_inner_baffle_x (- maze_inner_y) floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min)))))
+      (shape south_maze_outer (fuse (translate left_outer_baffle_x (- maze_outer_y) floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min))) (translate right_outer_baffle_x (- maze_outer_y) floor_thickness (box divider_thickness maze_baffle_span wall_height :align '(center center min)))))
+      (shape tray_t 1.4)
+      (shape tray_long_a (translate 0 (/ food_tray_width 2) floor_thickness (box food_tray_length tray_t food_tray_rim_height :align '(center center min))))
+      (shape tray_long_b (translate 0 (- (/ food_tray_width 2)) floor_thickness (box food_tray_length tray_t food_tray_rim_height :align '(center center min))))
+      (shape tray_short_a (translate (/ food_tray_length 2) 0 floor_thickness (box tray_t food_tray_width food_tray_rim_height :align '(center center min))))
+      (shape tray_short_b (translate (- (/ food_tray_length 2)) 0 floor_thickness (box tray_t food_tray_width food_tray_rim_height :align '(center center min))))
+      (shape rail_y (- half_w 1))
+      (shape rail_z (/ rail_h 2))
+      (shape rail_profile_pos
+        (polygon
+          (((- (/ rail_h 2)) 0)
+           ((/ rail_h 2) 0)
+           (0 (/ rail_tip_w 2)))))
+      (shape rail_profile_neg
+        (polygon
+          (((- (/ rail_h 2)) 0)
+           ((/ rail_h 2) 0)
+           (0 (- (/ rail_tip_w 2))))))
+      (shape rail_front_1
+        (translate (- half_l) rail_y rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_pos seg1_len))))
+      (shape rail_front_2
+        (translate (+ door1_x door_half) rail_y rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_pos seg2_len))))
+      (shape rail_front_3
+        (translate (+ door2_x door_half) rail_y rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_pos seg3_len))))
+      (shape rail_back_1
+        (translate (- half_l) (- rail_y) rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_neg seg1_len))))
+      (shape rail_back_2
+        (translate (+ door1_x door_half) (- rail_y) rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_neg seg2_len))))
+      (shape rail_back_3
+        (translate (+ door2_x door_half) (- rail_y) rail_z
+          (rotate 0 90 0
+            (extrude rail_profile_neg seg3_len))))
+      (result
+        (fuse
+          floor
+          end_wall_left end_wall_right
+          front_1 front_2 front_3
+          back_1 back_2 back_3
+          north_divider_left north_divider_right
+          south_divider_left south_divider_right
+          north_maze_inner north_maze_outer south_maze_inner south_maze_outer
+          tray_long_a tray_long_b tray_short_a tray_short_b
+          rail_front_1 rail_front_2 rail_front_3
+          rail_back_1 rail_back_2 rail_back_3))))
+
+  (part woodlouse_trap_slide_lid
+    (build
+      (shape lid_offset_x (- close_slide))
+      (shape half_l (/ length 2))
+      (shape half_w (/ width 2))
+      (shape hall_half (/ hall_opening_width 2))
+      (shape inner_end_x (- half_l wall_thickness))
+      (shape door_half (/ entrance_width 2))
+      (shape door_offset_auto (/ (+ hall_half inner_end_x) 2))
+      (shape door_offset_user (clamp entrance_offset_v2 (+ hall_half door_half) (- inner_end_x door_half)))
+      (shape length_blend (clamp (/ (- length 100) 50) 0 1))
+      (shape entrance_offset_actual (+ door_offset_auto (* length_blend (- door_offset_user door_offset_auto))))
+      (shape door1_x (- entrance_offset_actual))
+      (shape door2_x entrance_offset_actual)
+      (shape lid_travel close_slide)
+      (shape lid_skirt_drop (+ floor_thickness wall_height fit_clearance))
+      (shape window_w (+ entrance_width 3))
+      (shape cover_w (+ entrance_width (* 2 fit_clearance)))
+      (shape nose_w cover_w)
+      (shape grip_overhang side_canopy_overhang_v1)
+      (shape lid_l (+ length lid_travel grip_overhang))
+      (shape lid_center_x (+ lid_offset_x (/ (+ lid_travel grip_overhang) 2)))
+      (shape skirt_x_min (- door1_x (/ window_w 2)))
+      (shape skirt_x_max (+ door2_x lid_travel (/ nose_w 2)))
+      (shape side_skirt_l (- skirt_x_max skirt_x_min))
+      (shape side_skirt_center_x (+ lid_offset_x (/ (+ skirt_x_min skirt_x_max) 2)))
+      (shape lid_w (+ width (* 2 (+ lid_skirt_thickness fit_clearance))))
+      (shape roof_w (+ lid_w (* 2 side_canopy_overhang_v1)))
+      (shape roof_half_w (/ roof_w 2))
+      (shape roof_start_x (- lid_center_x (/ lid_l 2)))
+      (shape rail_y (- half_w 1))
+      (shape channel_h (+ rail_h (* 2 fit_clearance)))
+      (shape channel_w (+ rail_tip_w (* 2 fit_clearance)))
+      (shape channel_z (/ channel_h 2))
+      (shape channel_profile_pos
+        (polygon
+          (((- (/ channel_h 2)) 0)
+           ((/ channel_h 2) 0)
+           (0 (/ channel_w 2)))))
+      (shape channel_profile_neg
+        (polygon
+          (((- (/ channel_h 2)) 0)
+           ((/ channel_h 2) 0)
+           (0 (- (/ channel_w 2))))))
+      (shape channel_front
+        (translate (- lid_center_x (+ (/ lid_l 2) lead_in)) rail_y channel_z
+          (rotate 0 90 0
+            (extrude channel_profile_pos (+ lid_l (* 2 lead_in))))))
+      (shape channel_back
+        (translate (- lid_center_x (+ (/ lid_l 2) lead_in)) (- rail_y) channel_z
+          (rotate 0 90 0
+            (extrude channel_profile_neg (+ lid_l (* 2 lead_in))))))
+      (shape roof
+        (translate lid_center_x 0 lid_skirt_drop
+          (box lid_l roof_w flat_canopy_thickness_v1 :align '(center center min))))
+      (shape skirt_y (+ half_w fit_clearance (/ lid_skirt_thickness 2)))
+      (shape window_h (+ lid_skirt_drop 2))
+      (shape window_cut_t (+ lid_skirt_thickness 0.8))
+      (shape window_z -0.2)
+      (shape front_skirt_blank (translate side_skirt_center_x skirt_y 0 (box side_skirt_l lid_skirt_thickness (+ lid_skirt_drop flat_canopy_thickness_v1) :align '(center center min))))
+      (shape back_skirt_blank (translate side_skirt_center_x (- skirt_y) 0 (box side_skirt_l lid_skirt_thickness (+ lid_skirt_drop flat_canopy_thickness_v1) :align '(center center min))))
+      (shape window1_x (+ lid_offset_x door1_x))
+      (shape window2_x (+ lid_offset_x door2_x))
+      (shape front_window_1 (translate window1_x skirt_y window_z (box window_w window_cut_t window_h :align '(center center min))))
+      (shape front_window_2 (translate window2_x skirt_y window_z (box window_w window_cut_t window_h :align '(center center min))))
+      (shape back_window_1 (translate window1_x (- skirt_y) window_z (box window_w window_cut_t window_h :align '(center center min))))
+      (shape back_window_2 (translate window2_x (- skirt_y) window_z (box window_w window_cut_t window_h :align '(center center min))))
+      (shape front_skirt (difference front_skirt_blank front_window_1 front_window_2))
+      (shape back_skirt (difference back_skirt_blank back_window_1 back_window_2))
+      (shape front_text_face_y (+ skirt_y (/ lid_skirt_thickness 2)))
+      (shape back_text_face_y (- 0 skirt_y (/ lid_skirt_thickness 2)))
+      (shape relief_h 0.7)
+      (shape relief_overlap 0.12)
+      (shape front_relief_y (- front_text_face_y relief_overlap))
+      (shape back_relief_y (+ back_text_face_y relief_overlap))
+      (shape empty_svg_overlay (difference roof roof))
+      (shape bridge_text_x (+ lid_offset_x (/ (+ door1_x door2_x) 2) label_group_shift_x))
+      (shape label_text_offset 9)
+      (shape svg_center_offset (+ label_text_offset svg_gap (/ svg_icon_width 2)))
+      (shape back_text_vegetables (translate (- bridge_text_x label_text_offset) back_relief_y 3.4 (rotate 90 0 0 (extrude (text "ОВОЩИ" 4.8) relief_h))))
+      (shape veg_svg_overlay (if (= veg_svg "") empty_svg_overlay (translate (+ bridge_text_x svg_center_offset) back_relief_y 4.1 (rotate 90 0 0 (extrude (svg veg_svg svg_icon_width svg_icon_height svg_fit_mode) relief_h)))))
+      (shape fruit_text_x (+ bridge_text_x label_text_offset fruit_group_shift_x))
+      (shape fruit_svg_x (+ (- bridge_text_x svg_center_offset) fruit_group_shift_x))
+      (shape front_text_fruits (translate fruit_text_x front_relief_y 3.4 (rotate -90 0 0 (scale -1 -1 1 (extrude (text "ФРУКТЫ" 4.8) relief_h)))))
+      (shape fruit_svg_overlay (if (= fruit_svg "") empty_svg_overlay (translate fruit_svg_x front_relief_y 4.1 (rotate -90 0 0 (scale -1 -1 1 (extrude (svg fruit_svg svg_icon_width svg_icon_height svg_fit_mode) relief_h))))))
+      (shape lid_raw (fuse roof front_skirt back_skirt back_text_vegetables veg_svg_overlay front_text_fruits fruit_svg_overlay))
+      (shape channeled_lid
+        (difference lid_raw channel_front channel_back))
+      (result channeled_lid))))
