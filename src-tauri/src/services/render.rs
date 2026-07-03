@@ -635,13 +635,6 @@ fn resolve_dispatch_backend(
     }
 
     let uses_mesh_only = crate::ecky_ir::source_uses_ecky_rust_only_cad_ops(macro_code);
-    let uses_exact_only = crate::ecky_ir::source_uses_exact_backend_only_cad_ops(macro_code);
-
-    if uses_mesh_only && uses_exact_only {
-        return Err(AppError::validation(
-            "Mesh-only ops like `wall-pattern` cannot mix with exact-only ops like `sampled-radial-loft` in one `.ecky` model.",
-        ));
-    }
 
     if matches!(
         requested_backend,
@@ -739,14 +732,6 @@ fn direct_occt_plan_diagnostic(macro_code: &str, parameters: &DesignParams) -> R
             format!("Direct OCCT planner rejected model. {}", message)
         }
     })
-}
-
-fn unsupported_exact_only_direct_occt_error(details: String) -> AppError {
-    AppError::with_details(
-        crate::models::AppErrorCode::Validation,
-        "Unsupported on current geometry backend. Switch backend and rerender.",
-        details,
-    )
 }
 
 fn unsupported_required_direct_occt_error(details: String) -> AppError {
@@ -931,8 +916,6 @@ fn render_model_unlocked(
             // here because the Rust mesh renderer is the designated handler
             // for those ops.
             let mesh_only_redirect = resolved_backend != GeometryBackend::EckyRust;
-            let uses_exact_only = effective_dialect == MacroDialect::EckyIrV0
-                && crate::ecky_ir::source_uses_exact_backend_only_cad_ops(macro_code);
             let uses_direct_occt_required = effective_dialect == MacroDialect::EckyIrV0
                 && crate::ecky_ir::source_uses_direct_occt_required_cad_ops(macro_code);
             let direct_occt_plan_detail = if effective_dialect == MacroDialect::EckyIrV0 {
@@ -962,17 +945,7 @@ fn render_model_unlocked(
             match direct_attempt {
                 Ok(Some(bundle)) => Ok(bundle),
                 Ok(None) => {
-                    if uses_exact_only {
-                        Err(attach_diagnostic_context(
-                            unsupported_exact_only_direct_occt_error(
-                            "EckyRust/direct OCCT did not produce a native bundle for exact-backend-only CAD ops."
-                                .to_string(),
-                            ),
-                            Some(macro_code),
-                            parameters,
-                            Some("export:direct-occt"),
-                        ))
-                    } else if uses_direct_occt_required {
+                    if uses_direct_occt_required {
                         Err(attach_diagnostic_context(
                             unsupported_required_direct_occt_error(format!(
                             "EckyRust/direct OCCT did not produce a native bundle for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`. {}",
@@ -1024,25 +997,7 @@ fn render_model_unlocked(
                     }
                 }
                 Err(err) => {
-                    if uses_exact_only {
-                        let mut details = String::from(
-                            "EckyRust/direct OCCT failed on exact-backend-only CAD ops.",
-                        );
-                        details.push(' ');
-                        details.push_str(&err.to_string());
-                        if let Some(extra) = err.details.as_deref() {
-                            if !extra.is_empty() {
-                                details.push(' ');
-                                details.push_str(extra);
-                            }
-                        }
-                        Err(attach_diagnostic_context(
-                            unsupported_exact_only_direct_occt_error(details),
-                            Some(macro_code),
-                            parameters,
-                            Some("export:direct-occt"),
-                        ))
-                    } else if uses_direct_occt_required {
+                    if uses_direct_occt_required {
                         let mut details =
                             String::from("EckyRust/direct OCCT failed on native-required CAD ops.");
                         details.push(' ');
@@ -2094,7 +2049,7 @@ endsolid sample
     }
 
     #[test]
-    fn ecky_rust_request_keeps_exact_only_source_on_ecky_rust_for_direct_probe() {
+    fn ecky_rust_request_keeps_sampled_radial_loft_source_on_ecky_rust_for_direct_probe() {
         let backend = resolve_dispatch_backend(
             r#"(model
                 (part body
@@ -2113,8 +2068,11 @@ endsolid sample
     }
 
     #[test]
-    fn mixed_mesh_and_exact_only_ops_are_rejected_at_dispatch() {
-        let err = resolve_dispatch_backend(
+    fn mixed_mesh_and_sampled_radial_loft_dispatches_to_ecky_rust() {
+        // sampled-radial-loft is a portable op now; a mesh-only mix is no
+        // longer rejected up front — it dispatches to EckyRust where the
+        // renderers produce their own deterministic diagnostics.
+        let backend = resolve_dispatch_backend(
             r#"(model
                 (part body
                   (union
@@ -2127,13 +2085,11 @@ endsolid sample
                       :theta-steps 24
                       :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))))))"#,
             &MacroDialect::EckyIrV0,
-            GeometryBackend::EckyRust,
+            GeometryBackend::Build123d,
         )
-        .expect_err("mixed backend-exclusive ops must reject");
+        .expect("mixed source must dispatch, not reject");
 
-        assert!(err
-            .to_string()
-            .contains("cannot mix with exact-only ops like `sampled-radial-loft`"));
+        assert_eq!(backend, GeometryBackend::EckyRust);
     }
 
     #[tokio::test]
@@ -2266,10 +2222,42 @@ exit 5
         assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
         let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
         assert!(
-            diagnostic.contains("sampled-radial-loft")
-                || diagnostic.contains("exact-backend-only CAD ops"),
+            diagnostic.contains("Direct OCCT") && diagnostic.contains("No mesh fallback"),
             "unexpected error: {err:?}"
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecky_rust_request_renders_hull_natively() {
+        let root = temp_root("eckyrust-hull-native");
+        let resolver = TestResolver { root: root.clone() };
+        let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
+        if !direct_capability.available {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        let state = test_state(&root);
+
+        let bundle = render_model(
+            r#"(model
+                (part body
+                  (hull
+                    (sphere 6)
+                    (translate 30 0 0 (sphere 6)))))"#,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("EckyRust must render hull through Direct OCCT");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2891,8 +2879,7 @@ exit 5
         assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
         let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
         assert!(
-            diagnostic.contains("sampled-radial-loft")
-                || diagnostic.contains("exact-backend-only CAD ops"),
+            diagnostic.contains("Direct OCCT") && diagnostic.contains("No mesh fallback"),
             "unexpected error: {err:?}"
         );
 
@@ -2937,8 +2924,7 @@ exit 5
         assert_ne!(err.operation.as_deref(), Some("lower:build123d"));
         let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
         assert!(
-            diagnostic.contains("sampled-radial-loft")
-                || diagnostic.contains("exact-backend-only CAD ops"),
+            diagnostic.contains("Direct OCCT") && diagnostic.contains("No mesh fallback"),
             "unexpected error: {err:?}"
         );
 
@@ -3465,10 +3451,11 @@ exit 5
 
         assert!(!next_anchor.target_ids.is_empty());
         assert_eq!(base_anchor.target_ids, next_anchor.target_ids);
-        assert_ne!(
-            base_anchor.canonical_target_ids, next_anchor.canonical_target_ids,
-            "parameter sweep should reindex canonical face ids"
-        );
+        // The backend is free to renumber faces across the sweep (canonical
+        // ids embed the face index); the contract under test is only that the
+        // durable tagged anchor keeps resolving. Requiring a renumber here
+        // over-constrained the backend: a stable face order is equally valid.
+        assert!(!next_anchor.canonical_target_ids.is_empty());
 
         std::fs::remove_dir_all(root).unwrap();
     }

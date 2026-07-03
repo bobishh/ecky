@@ -117,7 +117,7 @@ fn ecky_backend_guide_text(
     let backend_note = if matches!(backend, crate::models::GeometryBackend::EckyRust) {
         "- `mesh`/`eckyRust` renders through EckyRust CAD VM. Do not promise STEP unless `ArtifactBundle.exportArtifacts` proves one exists.\n"
     } else {
-        "- This is still `.ecky` source. Backend only selects lowerer/runtime behavior; do not write Python for `.ecky` requests.\n"
+        "- This is still `.ecky` source. Backend only selects lowerer/runtime behavior; never emit Python source for `.ecky` requests. Wall-pattern is mesh/eckyRust only; it rejects on this backend.\n"
     };
     let wall_patterns = if surface.wall_pattern_modes.is_empty() {
         String::new()
@@ -150,12 +150,13 @@ AUTHORING RULES\n\
 - Top-level model clauses: {model_clauses}. Use `params`, `part`, and `meta` directly under `model`.\n\
 - Supported expression forms: {expression_forms}. Use `let*` when later bindings depend on earlier ones.\n\
 - Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry, not to generate top-level clauses.\n\
+- Static tuple destructuring is supported only for `zip` and `enumerate` static sources: `(map (lambda ((x y)) ...) (zip xs ys))`. Zip destructuring of a dynamic source rejects with a clear error.\n\
 - Supported CAD ops for this backend: {supported_ops}.\n\
-- Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}.\n\
+- Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}. Bounded literal counts/steps only. Seeded helpers are deterministic for a given seed.\n\
 - Keywords are not callable nodes: write `(box 10 10 2 :align '(center center min))`, never `(align ...)`.\n\
 - Name fit-critical bindings before use: `wall`, `clearance`, `bore-r`, `top-z`. No anonymous offsets for fit-critical geometry.\n\
 - For generated Ecky models, write top-level `(verify ...)` clauses in the same `(model ...)` from the user's measurable requirements before trusting geometry; a red first render is expected repair input.\n\
-- Verify with typed/static errors first, structural checks second, screenshots last.\n\
+- Verify with typed/static errors and structural verification first, screenshots last.\n\
 {backend_note}{wall_patterns}\n\
 PARAMS\n\
 - `(number key default :label \"...\" :min n :max n :step n)`\n\
@@ -1340,7 +1341,7 @@ mod tests {
         assert!(build123d.contains("`arc-array`"));
         assert!(build123d.contains("`deg->rad`"));
         assert!(build123d.contains("`rad->deg`"));
-        assert!(build123d.contains("do not write Python for `.ecky` requests"));
+        assert!(build123d.contains("never emit Python source for `.ecky` requests"));
         assert!(!build123d.contains("`wall-pattern`"));
         assert!(!build123d.contains("`schwarz-p`"));
         assert!(!build123d.contains("`schwarz-d`"));
@@ -1378,7 +1379,7 @@ mod tests {
         assert!(freecad.contains("Target geometryBackend: `freecad`."));
         assert!(freecad.contains("Return canonical Ecky source in `macro_code`."));
         assert!(freecad.contains("This is still `.ecky` source"));
-        assert!(freecad.contains("do not write Python for `.ecky` requests"));
+        assert!(freecad.contains("never emit Python source for `.ecky` requests"));
         assert!(freecad.contains("PROGRESSIVE ECKY EXAMPLES"));
         assert!(freecad.contains("(sphere 10)"));
         assert!(freecad.contains("Sketch then extrude"));

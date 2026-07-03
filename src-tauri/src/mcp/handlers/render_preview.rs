@@ -786,7 +786,29 @@ pub async fn handle_macro_preview_render(
             state,
             app,
         )
-        .await?;
+        .await
+        .map_err(|mut err| {
+            // Diagnostics must show the parameters the agent actually sent.
+            // Param reconciliation drops keys the model does not declare, so
+            // a failing render can otherwise report an empty param context
+            // even though the request carried explicit values.
+            if let Some(requested) = req.parameters.as_ref() {
+                if !requested.is_empty() {
+                    if let Some(context) = err.diagnostic_context.as_mut() {
+                        if context.resolved_params.is_empty() {
+                            context.resolved_params = requested
+                                .iter()
+                                .map(|(key, value)| crate::contracts::DiagnosticParamValue {
+                                    key: key.clone(),
+                                    value: value.clone(),
+                                })
+                                .collect();
+                        }
+                    }
+                }
+            }
+            err
+        })?;
         push_mcp_profile(
             state,
             ctx,
