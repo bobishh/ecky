@@ -2194,6 +2194,7 @@ mod tests {
                 usage TEXT,
                 artifact_bundle TEXT,
                 model_manifest TEXT,
+                structural_verification TEXT,
                 agent_origin TEXT,
                 timestamp INTEGER NOT NULL,
                 image_data TEXT,

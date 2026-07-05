@@ -4,7 +4,10 @@ use specta::Type;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod error;
-pub use error::{AppError, AppErrorCode, AppResult, DiagnosticContext, DiagnosticParamValue};
+pub use error::{
+    AppError, AppErrorCode, AppResult, AuthoringError, AuthoringReason, DiagnosticContext,
+    DiagnosticParamValue, ErrorFix, ErrorLayer,
+};
 mod config;
 pub use config::{
     AppLogEntry, Asset, AutoAgent, Config, Engine, FreecadLibraryImportRequest, FreecadLibraryItem,

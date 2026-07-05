@@ -400,6 +400,19 @@ fn resolve_bundled_python_cmd(app: &dyn PathResolver) -> Option<PathBuf> {
         }
     }
 
+    // Dev/test fallback: the relative candidates above resolve against the
+    // process cwd, which for `cargo test` is the package root (`src-tauri`),
+    // not the repo root where `.dist/` lives. Anchor on the compile-time
+    // manifest dir so tests find the bundled runtime deterministically; on
+    // machines where that path does not exist this is a no-op.
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?;
+    for fallback in BUNDLED_PYTHON_FALLBACK_CANDIDATES {
+        let path = repo_root.join(fallback);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
     None
 }
 

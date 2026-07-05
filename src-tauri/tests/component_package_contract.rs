@@ -351,6 +351,7 @@ fn test_config() -> Config {
         default_geometry_backend: GeometryBackend::Freecad,
         max_generation_attempts: 3,
         max_verify_attempts: 0,
+        projects_root: None,
     }
 }
 
