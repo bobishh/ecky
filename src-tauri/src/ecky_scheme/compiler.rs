@@ -775,6 +775,7 @@ fn reject_model_level_sequence_form_group(form: &ExprKind) -> CoreResult<()> {
                         }
                     }
                     "map" | "range" => return Err(model_level_sequence_form_error(head.as_str())),
+                    "define" => return Err(define_inside_model_error()),
                     _ => {}
                 }
             }
@@ -791,6 +792,17 @@ fn model_level_sequence_form_error(name: &str) -> CompilerError {
             "Model children are clauses, not sequence expressions. Supported direct clauses: `params`, `verify`, `part`, `feature`, `meta`. Supported wrappers: `begin`, `let`, `let*`. `{}` belongs inside `(part ...)` geometry/list expressions.",
             name
         ),
+    )
+}
+
+fn define_inside_model_error() -> CompilerError {
+    CompilerError::new(
+        CompilerErrorKind::UnsupportedFeature,
+        "`(define ...)` is not supported inside `(model ...)`. \
+         Top-level `(define (fn args) ...)` helper functions are allowed outside \
+         `(model ...)`, but computed values that reference params must use `let*` \
+         inside each `(part ...)`. For example: \
+         `(part body (let* ((half (/ frame_length 2))) (box half 10 10)))`.",
     )
 }
 
@@ -12538,6 +12550,89 @@ mod tests {
             find_custom_call(&program.parts[0].root, "reverse"),
             "expected deferred `reverse` call in part root"
         );
+    }
+
+    #[test]
+    fn define_inside_model_rejected_with_let_star_hint() {
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (params (number frame_length 160))
+              (define wall 3)
+              (part body (box frame_length wall 10)))
+            "#,
+        )
+        .expect_err("define inside model must be rejected");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("`(define ...)` is not supported"),
+            "{message}"
+        );
+        assert!(message.contains("let*"), "{message}");
+    }
+
+    #[test]
+    fn define_with_param_ref_inside_model_rejected_clearly() {
+        // This was the original "toy gun spring" failure: the body used
+        // (define x (- frame_length 10)) inside model and got a misleading
+        // TypeMismatch from Steel's eager evaluator. The guard must intercept
+        // before Steel runs and name let* as the fix.
+        let err = compile_to_core_program(
+            r#"
+            (model
+              (params (number frame_length 160))
+              (define half_len (- frame_length 2))
+              (part body (cylinder half_len 10)))
+            "#,
+        )
+        .expect_err("define inside model must be rejected before Steel");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("`(define ...)` is not supported"),
+            "{message}"
+        );
+        // Must NOT leak Steel's internal TypeMismatch.
+        assert!(
+            !message.contains("TypeMismatch"),
+            "define guard should fire before Steel evaluation: {message}"
+        );
+        assert!(message.contains("let*"), "{message}");
+    }
+
+    #[test]
+    fn define_function_top_level_still_allowed() {
+        // Function defines at top level (outside model) are the documented
+        // helper-function pattern and must continue to work.
+        let program = compile_to_core_program(
+            r#"
+            (define (double x) (* x 2))
+            (model
+              (params (number width 10))
+              (part body (box (double width) 10 5)))
+            "#,
+        )
+        .expect("top-level function define should compile");
+
+        assert_eq!(program.parts.len(), 1);
+    }
+
+    #[test]
+    fn define_value_top_level_literal_still_allowed() {
+        // Value defines of constants at top level (no param reference) are
+        // legitimate and must continue to work.
+        let program = compile_to_core_program(
+            r#"
+            (define wall 3)
+            (model
+              (params (number length 50))
+              (part body (box length wall 10)))
+            "#,
+        )
+        .expect("top-level value define (literal) should compile");
+
+        assert_eq!(program.parts.len(), 1);
     }
 }
 

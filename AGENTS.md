@@ -184,3 +184,5 @@ When stuck, ask:
 - What is the simplest different approach?
 - Do I already have enough to act without asking?
 - What evidence do I have?
+
+## Imported Claude Cowork project instructions

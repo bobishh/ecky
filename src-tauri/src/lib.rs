@@ -493,6 +493,7 @@ CRITICAL RULES:
 - FRAMEWORK PARAMS: When using the CAD SDK, raw `params` access is allowed only inside `registry.bind(params)` during config bootstrap. Use `cfg` for geometry.
 - NO BRACES: NEVER use `{var}` style interpolation inside the macro_code string.
 - CLEANUP: You MUST remove any parameters from "ui_spec" and "initial_params" that are no longer used in the current "macro_code". Do not accumulate parameters from previous designs.
+- BINDINGS: NEVER use `(define ...)` inside `(model ...)`. It will fail with a misleading TypeMismatch error. Use `(let* ...)` inside each `(part ...)` to compute derived values from params — e.g. `(part body (let* ((half (/ frame_length 2))) (box half 10 10)))`. Top-level `(define (fn args) ...)` helper functions OUTSIDE `(model ...)` are allowed and correct for reusable pure functions.
 - PRINTABILITY: Prefer geometry that is straightforward to 3D print (manifold solids, reasonable wall thickness, avoid fragile or unsupported details unless requested).
 - PRINTABILITY REPORTING: If printability risks remain, mention them explicitly at the end of "response" as a separate sentence prefixed with `PRINTING RISKS:`.
 - LITHOPHANE DEFAULTS: If you return `post_processing.displacement`, choose projection automatically from the model intent: `planar` for flat faces, `cylindrical` for wrapped round walls, `spherical` only for globe-like surfaces.

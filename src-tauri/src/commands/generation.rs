@@ -148,7 +148,9 @@ API MODE ONE-PROMPT WORKFLOW\n\
 AUTHORING RULES\n\
 - Output finished renderable geometry unless user explicitly asks for a placeholder. {typed_hole_policy}\n\
 - Top-level model clauses: {model_clauses}. Use `params`, `part`, and `meta` directly under `model`.\n\
-- Supported expression forms: {expression_forms}. Use `let*` when later bindings depend on earlier ones.\n\
+- Supported expression forms: {expression_forms}. Use `let*` when later bindings depend on earlier ones.
+\
+- Never use `(define ...)` inside `(model ...)`. Steel evaluates it eagerly before params have values, producing a misleading TypeMismatch. Use `let*` inside `(part ...)` for computed values from params: `(part body (let* ((half (/ width 2))) (box half 10 10)))`. Top-level `(define (fn args) ...)` helper functions outside `(model ...)` are allowed for reusable pure functions.\n\
 - Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry, not to generate top-level clauses.\n\
 - Static tuple destructuring is supported only for `zip` and `enumerate` static sources: `(map (lambda ((x y)) ...) (zip xs ys))`. Zip destructuring of a dynamic source rejects with a clear error.\n\
 - Supported CAD ops for this backend: {supported_ops}.\n\

@@ -574,6 +574,35 @@ Use `repeat-pick` when only some indices should produce geometry.
       (sphere 4))))
 ```
 
+### Common mistake: `(define ...)` inside `(model ...)`
+
+`(define ...)` is only valid at the **top level** (outside `(model ...)`), where it
+defines reusable helper functions like `divider-depth` above. Inside `(model ...)`,
+Steel evaluates `define` eagerly — before params have values — so any arithmetic
+on a param produces a misleading `TypeMismatch` error instead of a clear message.
+
+**Wrong** — define inside model:
+```scheme
+(model
+  (params (number frame_length 160))
+  (define half_len (/ frame_length 2))   ; ← TypeMismatch at runtime
+  (part body (box half_len 10 10)))
+```
+
+**Right** — `let*` inside the part:
+```scheme
+(model
+  (params (number frame_length 160))
+  (part body
+    (let* ((half_len (/ frame_length 2)))
+      (box half_len 10 10))))
+```
+
+The rule is simple: **`define` for top-level helper functions, `let*` for computed
+values inside parts.** If a derived value needs to reference a param, it belongs
+in a `let*` binding scoped to the part (or a `let*` wrapping model clauses that
+spans multiple parts).
+
 ## Components and Reuse: Lift a Proven Part
 
 `repeat` solves "the same shape, many times, in one part." It does not solve "the same _proven_ shape, in two different parts, with its checks coming along." The moment you copy a block of geometry from one part into another, you have made a second thing to maintain — and the day you change the wall thickness in one and forget the other is the day a print fails. A **component** is the fix: name the geometry once, reuse it by reference, and let its proof travel with it.
