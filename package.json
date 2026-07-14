@@ -27,7 +27,8 @@
     "test:e2e:ci": "playwright test e2e/app.spec.ts e2e/config.spec.ts e2e/layout.spec.ts e2e/genie.spec.ts e2e/params.spec.ts",
     "test:e2e": "playwright test",
     "start": "tsx server/index.ts",
-    "prepare": "git config core.hooksPath .githooks"
+    "prepare": "git config core.hooksPath .githooks",
+    "build:docs-site": "tsx scripts/build_ecky_ir_docs_site.ts"
   },
   "dependencies": {
     "@codemirror/lang-python": "^6.2.1",

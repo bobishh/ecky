@@ -132,6 +132,29 @@ jobs:
         # config (webServer spins up the landing dev server on port 4243).
         run: npx playwright test --config=sites/landing/playwright.config.ts
 
+  test-docs:
+    name: Docs Site (build + e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Build + serve docs, run e2e
+        # The docs-site config builds the themed HTML + EPUB, stages a
+        # production-mirroring directory, and serves it on port 4245.
+        run: npx playwright test --config=sites/docs/playwright.config.ts
+
   build-tauri:
     name: Tauri Build Check
     needs: [test-rust, test-frontend, test-e2e]

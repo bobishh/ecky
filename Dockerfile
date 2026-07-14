@@ -33,16 +33,16 @@ RUN apk add --no-cache zip
 # Install tsx (the only runtime dep the book builder needs).
 RUN npm init -y && npm install tsx
 
-# Copy the book builder + its pure-TS dependencies.
-COPY scripts/build_ecky_ir_book.ts ./scripts/
+# Copy the book builders + their pure-TS dependencies.
+COPY scripts/build_ecky_ir_book.ts scripts/build_ecky_ir_docs_site.ts ./scripts/
 COPY src/lib/docs/ ./src/lib/docs/
 
 # Copy the canonical doc source + committed rendered images.
 COPY public/docs/ecky-ir.md ./public/docs/ecky-ir.md
 COPY docs/books/ecky-ir/assets/ ./target/book/public/docs/assets/
 
-# Run the builder. It writes to target/book/dist/books/.
-RUN npx tsx scripts/build_ecky_ir_book.ts
+# Build both: the EPUB (offline download) and the themed web docs site.
+RUN npx tsx scripts/build_ecky_ir_book.ts && npx tsx scripts/build_ecky_ir_docs_site.ts
 
 # ────────────────────────────────────────────────────────────
 # Stage 3 — nginx serves everything
@@ -53,8 +53,12 @@ FROM nginx:alpine AS static
 COPY --from=landing-builder /repo/sites/landing/dist/ /usr/share/nginx/html/
 
 # Field guide → /docs
-COPY --from=docs-builder /repo/target/book/dist/books/ecky-ir-field-guide.html /usr/share/nginx/html/docs/index.html
+# Themed server-rendered HTML for humans + SEO
+COPY --from=docs-builder /repo/target/book/dist/docs-site/index.html /usr/share/nginx/html/docs/index.html
 COPY --from=docs-builder /repo/target/book/dist/books/assets/ /usr/share/nginx/html/docs/assets/
+# Raw markdown for agents/LLMs
+COPY --from=docs-builder /repo/public/docs/ecky-ir.md /usr/share/nginx/html/docs/ecky-ir.md
+# EPUB for offline reading
 COPY --from=docs-builder /repo/target/book/dist/books/ecky-ir-field-guide.epub /usr/share/nginx/html/docs/ecky-ir-field-guide.epub
 
 COPY nginx.conf /etc/nginx/nginx.conf
