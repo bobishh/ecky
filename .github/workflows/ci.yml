@@ -101,6 +101,37 @@ jobs:
       - name: Run Playwright E2E
         run: npm run test:e2e:ci
 
+  test-landing:
+    name: Landing Site (build + e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: sites/landing/package-lock.json
+
+      - name: Install landing dependencies
+        run: npm ci
+        working-directory: sites/landing
+
+      - name: Build landing
+        run: npm run build
+        working-directory: sites/landing
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: sites/landing
+
+      - name: Run landing e2e
+        # The landing is a separate Vite project. Run from repo root so it
+        # reuses the root @playwright/test install, pointing at the landing
+        # config (webServer spins up the landing dev server on port 4243).
+        run: npx playwright test --config=sites/landing/playwright.config.ts
+
   build-tauri:
     name: Tauri Build Check
     needs: [test-rust, test-frontend, test-e2e]
