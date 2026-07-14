@@ -1,6 +1,62 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" fill="#111524" />
-  <rect x="6" y="6" width="52" height="52" fill="#151b2f" stroke="#c8a620" stroke-width="4" />
-  <path d="M20 20H44V28H28V36H40V44H20Z" fill="#4a8c5c" />
-  <path d="M44 20H48V44H44Z" fill="#c8a620" />
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1a2a44"/>
+      <stop offset="1" stop-color="#070a14"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="256" cy="250" r="215" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4a8c5c" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#4a8c5c" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="128" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="128" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+  <circle cx="256" cy="250" r="215" fill="url(#aura)"/>
+
+  <!-- Ecky pebble: chunky, lit top-left, flat-shaded -->
+  <g filter="url(#soft)">
+    <g stroke="#2c5f3c" stroke-width="2" stroke-opacity="0.3" stroke-linejoin="round">
+      <path d="M160,118 L240,88 L250,200 Z" fill="#5aa66e"/>
+      <path d="M240,88 L352,118 L250,200 Z" fill="#4f9a62"/>
+      <path d="M352,118 L424,216 L250,200 Z" fill="#3f8250"/>
+      <path d="M92,212 L160,118 L250,200 Z" fill="#47905a"/>
+      <path d="M92,212 L250,200 L260,320 Z" fill="#396f47"/>
+      <path d="M250,200 L424,216 L260,320 Z" fill="#356c44"/>
+      <path d="M424,216 L412,322 L260,320 Z" fill="#2b5a38"/>
+      <path d="M412,322 L322,402 L260,320 Z" fill="#245030"/>
+      <path d="M322,402 L196,408 L260,320 Z" fill="#1f4629"/>
+      <path d="M196,408 L104,330 L260,320 Z" fill="#1b3f25"/>
+      <path d="M104,330 L92,212 L260,320 Z" fill="#2a5836"/>
+    </g>
+    <path d="M240,88 L352,118 L424,216 L412,322 L322,402 L196,408 L104,330 L92,212 L160,118 Z"
+          fill="none" stroke="#6fbc84" stroke-width="5" stroke-opacity="0.9" stroke-linejoin="round"/>
+  </g>
+
+  <!-- face -->
+  <g fill="#eaf7ee">
+    <rect x="168" y="206" width="56" height="32" rx="16"/>
+    <rect x="288" y="206" width="56" height="32" rx="16"/>
+  </g>
+  <circle cx="212" cy="215" r="6" fill="#ffffff"/>
+  <circle cx="332" cy="215" r="6" fill="#ffffff"/>
+  <path d="M198,296 Q256,338 314,296" fill="none" stroke="#eaf7ee" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="148" cy="278" r="19" fill="#7fc492" fill-opacity="0.3"/>
+  <circle cx="364" cy="278" r="19" fill="#7fc492" fill-opacity="0.3"/>
+
+  <!-- three quiet vertex sparks -->
+  <g fill="#dff9ea">
+    <circle cx="240" cy="88" r="6"/>
+    <circle cx="424" cy="216" r="6"/>
+    <circle cx="104" cy="330" r="6"/>
+  </g>
+
+  <path d="M128,0 C60,0 0,60 0,128 L0,80 C0,60 60,0 128,0 Z" fill="#ffffff" fill-opacity="0.04"/>
 </svg>
