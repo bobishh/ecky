@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Ecky CAD",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "identifier": "com.alcoholics-audacious.ecky-cad",
   "build": {
     "beforeDevCommand": "npm run dev:web",
@@ -23,7 +23,10 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**", "$RESOURCE/**"]
+        "scope": [
+          "$APPDATA/**",
+          "$RESOURCE/**"
+        ]
       }
     }
   },
