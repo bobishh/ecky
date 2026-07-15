@@ -3,7 +3,7 @@
 
   const repoUrl = 'https://github.com/bobishh/ecky';
   const releasesUrl = 'https://github.com/bobishh/ecky/releases';
-  const docsUrl = '/docs';
+  const docsUrl = '/docs/';
 
   const layers = [
     {
