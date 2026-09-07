@@ -80,7 +80,7 @@ fn check(args: &[String]) -> Result<(), CliError> {
     }
     let source = read_source(&args[0], CliError::Check)?;
     let program = ecky_cad_lib::ecky_scheme::compile_to_core_program(&source)
-        .map_err(|error| CliError::Check(error.to_string()))?;
+        .map_err(|error| CliError::Check(error.render_with_source(&source)))?;
     println!("check: ok");
     println!("parts: {}", program.parts.len());
     println!("params: {}", program.parameters.len());

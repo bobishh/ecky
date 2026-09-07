@@ -17,13 +17,14 @@ use crate::core_ir::{
     AnalysisId, CompilerError, CompilerErrorKind, CoreAnalysisClause, CoreAnalysisClauseKind,
     CoreAnalysisDecl, CoreAnalysisKind, CoreAnalysisLocalRefinement, CoreAnalysisScalarExpr,
     CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFeatureDecl, CoreFrameOp, CoreKeywordArg,
-    CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CoreParameter,
-    CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart, CorePathOp,
-    CorePreviewPartOffset, CorePreviewViewDecl, CorePrimitive, CoreProgram, CoreProgramConstraints,
-    CoreReference, CoreRelationConstraint, CoreRelationOperand, CoreRelationOperator, CoreResult,
-    CoreSelectorPayload, CoreSelectorTagDecl, CoreSelectorTagKind, CoreShapeBinding, CoreSurfaceOp,
-    CoreSymbol, CoreTransformOp, CoreValueKind, CoreVerifyClause, CoreVerifySection,
-    CoreVerifyValue, NodeId, ParamId, PartId, ProgramId, SourceFileId, SourceSpan,
+    CoreLiteral, CoreMetaOp, CoreMetadataValue, CoreNode, CoreNodeKind, CoreOperation,
+    CoreParameter, CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart,
+    CorePathOp, CorePreviewPartOffset, CorePreviewViewDecl, CorePrimitive, CoreProgram,
+    CoreProgramConstraints, CoreReference, CoreRelationConstraint, CoreRelationOperand,
+    CoreRelationOperator, CoreResult, CoreSelectorPayload, CoreSelectorTagDecl,
+    CoreSelectorTagKind, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
+    CoreValueKind, CoreVerifyClause, CoreVerifySection, CoreVerifyValue, NodeId, ParamId, PartId,
+    ProgramId, SourceFileId, SourceSpan,
 };
 use crate::deterministic as ecky_deterministic;
 
@@ -198,7 +199,7 @@ fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProg
 fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     bootstrap::validate_user_source(source)
         .map_err(|err| CompilerError::new(CompilerErrorKind::Parse, err))?;
-    let strict_units = source_enables_strict_units(source);
+    validate_surface_form_contracts(source)?;
     if !source_contains_suffixed_unit_literals(source) {
         let legacy_source = rewrite_sequence_destructuring_source(source)?;
         reject_model_level_sequence_forms(&legacy_source)?;
@@ -207,7 +208,7 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
 
         if can_use_expanded_ast(&legacy_source) {
             match compile_to_core_program_from_expanded_ast_legacy(&legacy_source) {
-                Ok(program) => return verify_compiled_core_program(program, source, strict_units),
+                Ok(program) => return verify_compiled_core_program(program, source),
                 Err(error) if error.message.contains("analysis-to-geometry cycle") => {
                     return Err(error)
                 }
@@ -216,7 +217,7 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
         }
 
         return compile_to_core_program_via_runtime(&legacy_source)
-            .and_then(|program| verify_compiled_core_program(program, source, strict_units));
+            .and_then(|program| verify_compiled_core_program(program, source));
     }
 
     let expanded_source = lower_component_placement_source(source)?;
@@ -228,7 +229,7 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
 
     if can_use_expanded_ast(&expanded_source) {
         match compile_to_core_program_from_expanded_ast(&expanded_source) {
-            Ok(program) => return verify_compiled_core_program(program, source, strict_units),
+            Ok(program) => return verify_compiled_core_program(program, source),
             Err(error) if error.message.contains("analysis-to-geometry cycle") => {
                 return Err(error)
             }
@@ -237,7 +238,79 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     }
 
     compile_to_core_program_via_runtime(&runtime_source)
-        .and_then(|program| verify_compiled_core_program(program, source, strict_units))
+        .and_then(|program| verify_compiled_core_program(program, source))
+}
+
+fn validate_surface_form_contracts(source: &str) -> CoreResult<()> {
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+    for form in &forms {
+        validate_surface_form_contract(form)?;
+    }
+    Ok(())
+}
+
+fn validate_surface_form_contract(expr: &ExprKind) -> CoreResult<()> {
+    match expr {
+        ExprKind::List(list) => {
+            if let Some(head) = list.args.first().and_then(expr_head_name) {
+                if matches!(head.as_str(), "for-union" | "for-compound") {
+                    validate_for_form_contract(expr, &head, &list.args)?;
+                }
+            }
+            for item in &list.args {
+                validate_surface_form_contract(item)?;
+            }
+        }
+        ExprKind::Vector(vector) => {
+            for item in &vector.args {
+                validate_surface_form_contract(item)?;
+            }
+        }
+        ExprKind::Begin(begin) => {
+            for item in &begin.exprs {
+                validate_surface_form_contract(item)?;
+            }
+        }
+        ExprKind::Define(definition) => validate_surface_form_contract(&definition.body)?,
+        ExprKind::Let(let_expr) => {
+            for (_, value) in &let_expr.bindings {
+                validate_surface_form_contract(value)?;
+            }
+            validate_surface_form_contract(&let_expr.body_expr)?;
+        }
+        ExprKind::LambdaFunction(lambda) => validate_surface_form_contract(&lambda.body)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_for_form_contract(expr: &ExprKind, head: &str, items: &[ExprKind]) -> CoreResult<()> {
+    let binding = items
+        .get(1)
+        .and_then(|value| expr_list_items(value, "for binding").ok());
+    let valid_binding = binding.as_ref().is_some_and(|binding| {
+        binding.len() == 2
+            && binding.first().and_then(expr_identifier).is_some()
+            && binding.first().and_then(expr_identifier).as_deref() != Some("range")
+    });
+    if items.len() == 3 && valid_binding {
+        return Ok(());
+    }
+
+    let mut error = CompilerError::new(
+        CompilerErrorKind::Parse,
+        format!(
+            "`{head}` expects `({head} (index count) body)`; `(range count)` plus `lambda` is not this form."
+        ),
+    )
+    .with_help(format!(
+        "use `({head} (i 6) body)`; `i` is bound inside body"
+    ));
+    if let Some(span) = expr_source_span(expr) {
+        error = error.with_span(span);
+    }
+    Err(error)
 }
 
 fn source_contains_suffixed_unit_literals(source: &str) -> bool {
@@ -250,17 +323,13 @@ fn source_contains_suffixed_unit_literals(source: &str) -> bool {
     found
 }
 
-fn verify_compiled_core_program(
-    mut program: CoreProgram,
-    source: &str,
-    strict_units: bool,
-) -> CoreResult<CoreProgram> {
+fn verify_compiled_core_program(mut program: CoreProgram, source: &str) -> CoreResult<CoreProgram> {
     apply_authored_part_root_spans(&mut program, source);
     let literal_dimensions = literal_dimensions_from_program_source(&program, source);
     let _warnings = crate::core_ir::verify_core_program_with_literal_dimensions(
         &program,
         &literal_dimensions,
-        strict_units,
+        program_uses_strict_units(&program),
     )?;
     Ok(program)
 }
@@ -420,8 +489,11 @@ fn collect_literal_dimensions_from_node(
     }
 }
 
-fn source_enables_strict_units(source: &str) -> bool {
-    source.contains("(meta units strict)") || source.contains("(meta \"units\" \"strict\")")
+fn program_uses_strict_units(program: &CoreProgram) -> bool {
+    matches!(
+        program.metadata.get("units").or_else(|| program.metadata.get(":units")),
+        Some(CoreMetadataValue::Symbol(value) | CoreMetadataValue::Text(value)) if value == "strict"
+    )
 }
 
 fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
@@ -830,7 +902,7 @@ fn rewrite_runtime_model_clause_group_source(expr: &ExprKind) -> String {
     };
 
     match head.as_str() {
-        "verify" => format!("(list (quote {}))", expr),
+        "verify" | "meta" => format!("(list (quote {}))", expr),
         "begin" => append_runtime_clause_groups(
             items
                 .iter()
@@ -4030,6 +4102,7 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
         ));
     }
 
+    let mut metadata = BTreeMap::new();
     let mut params = Vec::new();
     let mut pending_relations = Vec::new();
     let mut next_param = 1u64;
@@ -4073,7 +4146,10 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
                 &mut next_analysis_clause,
             )?),
             "part" | "feature" => raw_parts.push(clause_form),
-            "meta" => {}
+            "meta" => {
+                let (key, value) = parse_expanded_meta_clause(&clause_form.items)?;
+                insert_model_metadata(&mut metadata, key, value)?;
+            }
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
             other => {
                 return Err(CompilerError::new(
@@ -4153,11 +4229,70 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let _ = part_components;
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
+        .with_metadata(metadata)
         .with_analyses(analyses)
         .with_feature_decls(feature_decls)
         .with_selector_tags(selector_tags)
         .with_preview_views(preview_views)
         .with_constraints(constraints))
+}
+
+fn parse_expanded_meta_clause(items: &[ExprKind]) -> CoreResult<(String, CoreMetadataValue)> {
+    if items.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`meta` expects exactly one key and one literal value.",
+        ));
+    }
+    let key = normalize_keyword(&expr_value_symbol_or_text(&items[1], "meta key")?);
+    let value = match &items[2] {
+        ExprKind::Atom(atom) => match &atom.syn.ty {
+            TokenType::BooleanLiteral(value) => CoreMetadataValue::Boolean(*value),
+            TokenType::Number(_) => {
+                CoreMetadataValue::Number(expr_number_value(&items[2], "meta value")?)
+            }
+            TokenType::StringLiteral(value) => CoreMetadataValue::Text(value.to_string()),
+            TokenType::Identifier(value) | TokenType::Keyword(value) => {
+                let value = value.to_string();
+                if let Some((number, _)) = parse_numeric_text_with_optional_unit(&value) {
+                    CoreMetadataValue::Number(number)
+                } else if value == "true" {
+                    CoreMetadataValue::Boolean(true)
+                } else if value == "false" {
+                    CoreMetadataValue::Boolean(false)
+                } else {
+                    CoreMetadataValue::Symbol(normalize_keyword(&value))
+                }
+            }
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::TypeMismatch,
+                    format!("meta value must be a literal, received {:?}.", other),
+                ))
+            }
+        },
+        other => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                format!("meta value must be a literal, received {:?}.", other),
+            ))
+        }
+    };
+    Ok((key, value))
+}
+
+fn insert_model_metadata(
+    metadata: &mut BTreeMap<String, CoreMetadataValue>,
+    key: String,
+    value: CoreMetadataValue,
+) -> CoreResult<()> {
+    if metadata.insert(key.clone(), value).is_some() {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Resolve,
+            format!("Duplicate model metadata key `{key}`."),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_expanded_verify_clause(items: &[ExprKind]) -> CoreResult<CoreVerifyClause> {
@@ -9525,6 +9660,7 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
         ));
     }
 
+    let mut metadata = BTreeMap::new();
     let mut params = Vec::new();
     let mut pending_relations = Vec::new();
     let mut raw_parts = Vec::new();
@@ -9567,7 +9703,10 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
                 part_spellings.insert(raw_parts.len(), clause.to_string());
                 raw_parts.push(items);
             }
-            "meta" => {}
+            "meta" => {
+                let (key, value) = parse_meta_clause(&items)?;
+                insert_model_metadata(&mut metadata, key, value)?;
+            }
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
             other => {
                 return Err(CompilerError::new(
@@ -9649,11 +9788,44 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     let _ = part_components;
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
+        .with_metadata(metadata)
         .with_analyses(analyses)
         .with_feature_decls(feature_decls)
         .with_selector_tags(selector_tags)
         .with_preview_views(preview_views)
         .with_constraints(constraints))
+}
+
+fn parse_meta_clause(items: &[SteelVal]) -> CoreResult<(String, CoreMetadataValue)> {
+    if items.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`meta` expects exactly one key and one literal value.",
+        ));
+    }
+    let key = normalize_keyword(&value_symbol_or_text(&items[1], "meta key")?);
+    let value = match &items[2] {
+        SteelVal::BoolV(value) => CoreMetadataValue::Boolean(*value),
+        SteelVal::IntV(_) | SteelVal::NumV(_) => {
+            CoreMetadataValue::Number(number_value(&items[2], "meta value")?)
+        }
+        SteelVal::StringV(value) => CoreMetadataValue::Text(value.to_string()),
+        SteelVal::SymbolV(value) => {
+            let value = value.to_string();
+            if let Some((number, _)) = parse_numeric_text_with_optional_unit(&value) {
+                CoreMetadataValue::Number(number)
+            } else {
+                CoreMetadataValue::Symbol(normalize_keyword(&value))
+            }
+        }
+        other => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                format!("meta value must be a literal, received {:?}.", other),
+            ))
+        }
+    };
+    Ok((key, value))
 }
 
 fn parse_verify_clause(items: &[SteelVal]) -> CoreResult<CoreVerifyClause> {
@@ -11548,6 +11720,13 @@ fn emit_program(program: &CoreProgram) -> String {
         .map(|param| (param.id.raw(), param.key.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut out = String::from("(model");
+    for (key, value) in &program.metadata {
+        out.push_str("\n  (meta ");
+        out.push_str(key);
+        out.push(' ');
+        out.push_str(&emit_metadata_value(value));
+        out.push(')');
+    }
     if !program.parameters.is_empty() || !program.constraints.relations.is_empty() {
         out.push_str("\n  (params");
         for param in &program.parameters {
@@ -11602,6 +11781,16 @@ fn emit_program(program: &CoreProgram) -> String {
     }
     out.push_str("\n)");
     out
+}
+
+fn emit_metadata_value(value: &CoreMetadataValue) -> String {
+    match value {
+        CoreMetadataValue::Text(value) => emit_string(value),
+        CoreMetadataValue::Symbol(value) => value.clone(),
+        CoreMetadataValue::Number(value) => emit_number(*value),
+        CoreMetadataValue::Boolean(true) => "true".to_string(),
+        CoreMetadataValue::Boolean(false) => "false".to_string(),
+    }
 }
 
 fn emit_verify_clause(clause: &CoreVerifyClause) -> String {

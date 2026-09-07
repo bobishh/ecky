@@ -30,6 +30,10 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Put reusable pure `(define ...)` helpers and `define-component` declarations before `(model ...)`.
 - Direct `model` clauses are `params`, `verify`, `part`, `feature`, `meta`,
   `tag-vertex`, `tag-face`, `tag-edge`, `tag-edges`, `view`, and `analysis`.
+- `meta` stores literal model metadata; it creates no geometry. Use
+  `(meta :title "Name")` for the exported document label and
+  `(meta units strict)` for dimensional checking. Values must be string,
+  symbol, number, or boolean literals; duplicate keys reject.
 - `component_get` is vendor mode: paste its closed `define-component` source;
   it creates no package dependency.
 - `(import-component "package.id" :version "1.2.0" :component "component-id"
@@ -215,7 +219,7 @@ a `[...]` note marks a backend restriction.
 (verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))  ; Declares one conditional runtime check with intent, severity, and typed evidence.
 (part body (cylinder radius height 48))  ; Declares a named renderable part from a solid, sketch, path, or compound expression.
 (feature shell :role enclosure :params (width wall) (box width 40 wall))  ; Declares renderable geometry plus semantic role and primary control metadata.
-(meta :title "Bottle cage")  ; Stores model metadata such as labels, intent, or semantic hints.
+(meta :title "Bottle cage")  ; Stores literal model metadata in Core IR; `:title` labels the exported document and `units strict` enables dimensional checks.
 (tag-vertex datum :vertex "top" body)  ; Names a stable vertex selection for downstream operations and analysis.
 (tag-face mounting :faces "bottom" body)  ; Names a stable face selection for downstream operations and analysis.
 (tag-edge rim :edges "top" body)  ; Names a stable edge selection for downstream operations and analysis.

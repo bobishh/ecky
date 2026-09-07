@@ -10,6 +10,10 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Put reusable pure `(define ...)` helpers and `define-component` declarations before `(model ...)`.
 - Direct `model` clauses are `params`, `verify`, `part`, `feature`, `meta`,
   `tag-vertex`, `tag-face`, `tag-edge`, `tag-edges`, `view`, and `analysis`.
+- `meta` stores literal model metadata; it creates no geometry. Use
+  `(meta :title "Name")` for the exported document label and
+  `(meta units strict)` for dimensional checking. Values must be string,
+  symbol, number, or boolean literals; duplicate keys reject.
 - `component_get` is vendor mode: paste its closed `define-component` source;
   it creates no package dependency.
 - `(import-component "package.id" :version "1.2.0" :component "component-id"

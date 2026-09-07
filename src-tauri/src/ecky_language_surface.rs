@@ -516,11 +516,14 @@ fn model_clause_reference(name: &str) -> SurfaceReferenceEntry {
             "modelClause",
             "(meta key value)",
             "model clause",
-            "Stores model metadata such as labels, intent, or semantic hints.",
+            "Stores literal model metadata in Core IR; `:title` labels the exported document and `units strict` enables dimensional checks.",
             true,
             "all .ecky backends",
             "(meta :title \"Bottle cage\")",
-            &["Metadata does not create geometry."],
+            &[
+                "Metadata does not create geometry.",
+                "Values must be string, symbol, number, or boolean literals; duplicate keys reject.",
+            ],
         ),
         "tag-vertex" => selector_tag_reference(
             name,

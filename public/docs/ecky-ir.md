@@ -1659,7 +1659,7 @@ Do not edit rows by hand; run `npm run generate:prompt`.
 | `max` | numericHelper | `(max a b...)` | freecad, legacy-build123d, mesh/native | Returns largest number. | `(max wall 1.2)` |
 | `mesh` | cadOp | `(mesh :vertices ((x y z) ...) :triangles ((a b c) ...))` | mesh/native | Creates bounded indexed triangle geometry. Open orientable surfaces are allowed; invalid indices, degenerate faces, duplicates, non-manifold edges, or inconsistent winding reject. | `(mesh :vertices ((0 0 0) (10 0 0) (0 10 0)) :triangles ((0 1 2)))` |
 | `mesh-anchor` | cadOp | `(mesh-anchor triangle-index barycentric-0 barycentric-1 barycentric-2)` | mesh/native | Declares one exact triangle seed used inside a native mesh \`surface-trim\` path. | `(mesh-anchor 42 0.2 0.3 0.5)` |
-| `meta` | modelClause | `(meta key value)` | freecad, legacy-build123d, mesh/native | Stores model metadata such as labels, intent, or semantic hints. | `(meta :title "Bottle cage")` |
+| `meta` | modelClause | `(meta key value)` | freecad, legacy-build123d, mesh/native | Stores literal model metadata in Core IR; \`:title\` labels the exported document and \`units strict\` enables dimensional checks. | `(meta :title "Bottle cage")` |
 | `min` | numericHelper | `(min a b...)` | freecad, legacy-build123d, mesh/native | Returns smallest number. | `(min wall max-wall)` |
 | `mirror` | cadOp | `(mirror axis offset geometry)` | freecad, legacy-build123d, mesh/native | Mirrors geometry across the \`x\`, \`y\`, or \`z\` plane at offset. | `(mirror "x" 0 body)` |
 | `neovius` | wallPatternMode | `neovius` | mesh/native | Triply periodic Neovius implicit field. | `(wall-pattern (:mode neovius :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |

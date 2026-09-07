@@ -1,4 +1,4 @@
-use ecky_render::core_ir::{CoreNodeKind, CoreOperation, CorePrimitive};
+use ecky_render::core_ir::{CoreMetadataValue, CoreNodeKind, CoreOperation, CorePrimitive};
 use ecky_render::scheme::SchemeSourceCompiler;
 use ecky_render::SourceCompiler;
 
@@ -22,4 +22,30 @@ fn scheme_source_compiles_inside_platform_neutral_crate() {
             ..
         }
     ));
+}
+
+#[test]
+fn model_metadata_survives_runtime_compilation() {
+    let program = SchemeSourceCompiler
+        .compile(
+            r#"
+        (define-syntax passthrough
+          (syntax-rules ()
+            [(_ value) value]))
+        (model
+          (meta :title "Pasta Curl")
+          (meta units strict)
+          (part body (passthrough (box 10mm 20mm 3mm))))
+        "#,
+        )
+        .expect("model metadata compiles through runtime path");
+
+    assert_eq!(
+        program.metadata.get(":title"),
+        Some(&CoreMetadataValue::Text("Pasta Curl".into()))
+    );
+    assert_eq!(
+        program.metadata.get("units"),
+        Some(&CoreMetadataValue::Symbol("strict".into()))
+    );
 }

@@ -110,6 +110,45 @@ impl CompilerError {
         self.help = Some(help.into().into_boxed_str());
         self
     }
+
+    pub fn render_with_source(&self, source: &str) -> String {
+        let mut output = self.to_string();
+        if let Some(span) = self.primary_span {
+            let start = (span.start as usize).min(source.len());
+            let end = (span.end as usize)
+                .min(source.len())
+                .max(start.saturating_add(1).min(source.len()));
+            let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = source[start..]
+                .find('\n')
+                .map_or(source.len(), |index| start + index);
+            let line_number = source[..line_start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1;
+            let column = source[line_start..start].chars().count() + 1;
+            let source_line = &source[line_start..line_end];
+            let underline_end = end.min(line_end);
+            let underline_width = source[start..underline_end].chars().count().max(1);
+            let gutter_width = line_number.to_string().len();
+            output.push_str(&format!(
+                "\n--> line {line_number}, column {column}\n{line_number:>gutter_width$} | {source_line}\n{:>gutter_width$} | {}{}",
+                "",
+                " ".repeat(column.saturating_sub(1)),
+                "^".repeat(underline_width),
+            ));
+        }
+        for note in &self.notes {
+            output.push_str("\nnote: ");
+            output.push_str(note);
+        }
+        if let Some(help) = &self.help {
+            output.push_str("\nhelp: ");
+            output.push_str(help);
+        }
+        output
+    }
 }
 
 impl fmt::Display for CompilerError {
@@ -519,8 +558,17 @@ pub struct CoreAnalysisDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum CoreMetadataValue {
+    Text(String),
+    Symbol(String),
+    Number(f64),
+    Boolean(bool),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoreProgram {
     pub id: ProgramId,
+    pub metadata: BTreeMap<String, CoreMetadataValue>,
     pub parameters: Vec<CoreParameter>,
     pub parts: Vec<CorePart>,
     pub analyses: Vec<CoreAnalysisDecl>,
@@ -534,6 +582,7 @@ impl CoreProgram {
     pub fn new(id: ProgramId, parameters: Vec<CoreParameter>, parts: Vec<CorePart>) -> Self {
         Self {
             id,
+            metadata: BTreeMap::new(),
             parameters,
             parts,
             analyses: Vec::new(),
@@ -542,6 +591,11 @@ impl CoreProgram {
             preview_views: Vec::new(),
             constraints: CoreProgramConstraints::default(),
         }
+    }
+
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, CoreMetadataValue>) -> Self {
+        self.metadata = metadata;
+        self
     }
 
     pub fn with_analyses(mut self, analyses: Vec<CoreAnalysisDecl>) -> Self {

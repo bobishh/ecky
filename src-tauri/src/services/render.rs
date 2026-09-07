@@ -1588,29 +1588,25 @@ fn format_nested_app_error(err: &AppError) -> String {
 }
 
 fn direct_occt_plan_diagnostic(macro_code: &str, parameters: &DesignParams) -> Result<(), String> {
-    let macro_code = macro_code.to_string();
+    let program = match ecky_render::scheme::try_compile_to_core_program(macro_code) {
+        Some(Ok(program)) => program,
+        Some(Err(err)) => {
+            return Err(format!(
+                "Ecky compiler rejected model.\n{}",
+                err.render_with_source(macro_code)
+            ));
+        }
+        None => return Err("Ecky compiler did not recognize source as Ecky Core IR.".to_string()),
+    };
     let parameters = parameters.clone();
     run_direct_occt_with_large_stack("plan", move || {
-        let program = match crate::ecky_scheme::try_compile_to_core_program(&macro_code) {
-            Some(Ok(program)) => program,
-            Some(Err(err)) => {
-                return Err(AppError::validation(format_nested_app_error(&err)));
-            }
-            None => {
-                return Err(AppError::validation("Source did not compile to Core IR."));
-            }
-        };
         crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, &parameters)
             .map(|_| ())
             .map_err(AppError::from)
     })
     .map_err(|err| {
         let message = format_nested_app_error(&err);
-        if message.starts_with("Source did not compile") {
-            message
-        } else {
-            format!("Direct OCCT planner rejected model. {}", message)
-        }
+        format!("Direct OCCT planner rejected model. {}", message)
     })
 }
 
@@ -2432,7 +2428,7 @@ mod tests {
     use super::{
         acquire_render_flight, annotate_lowering_error, apply_requested_post_processing,
         cache_salted_render_source, component_placement_evidence_from_source,
-        is_tagged_selector_mismatch_error, load_manifest_for_bundle,
+        direct_occt_plan_diagnostic, is_tagged_selector_mismatch_error, load_manifest_for_bundle,
         persist_authored_source_digest, post_processing_marker_matches, render_flight_key,
         render_flight_keys, render_flight_strong_count, render_model,
         render_model_with_dependency_upgrade, render_model_with_previous_manifest,
@@ -3510,6 +3506,36 @@ endsolid sample
         );
         assert_eq!(super::direct_occt_stack_size_from_mb("0"), None);
         assert_eq!(super::direct_occt_stack_size_from_mb("nope"), None);
+    }
+
+    #[test]
+    fn direct_occt_diagnostic_names_compiler_failures_without_blame_on_planner() {
+        let error = direct_occt_plan_diagnostic("(model", &Default::default())
+            .expect_err("malformed source must fail compilation");
+
+        assert!(
+            error.starts_with("Ecky compiler rejected model."),
+            "{error}"
+        );
+        assert!(!error.contains("Direct OCCT planner rejected"), "{error}");
+    }
+
+    #[test]
+    fn direct_occt_compiler_diagnostic_shows_source_line_and_fix() {
+        let source = r#"(model
+  (meta :title "Pasta Curl")
+  (part body
+    (for-union (range 6) (lambda (i) (box 1 1 1)))))"#;
+
+        let error = direct_occt_plan_diagnostic(source, &Default::default())
+            .expect_err("legacy for-union spelling must fail");
+
+        assert!(error.contains("--> line 4, column 5"), "{error}");
+        assert!(error.contains("4 |     (for-union (range 6)"), "{error}");
+        assert!(
+            error.contains("help: use `(for-union (i 6) body)`"),
+            "{error}"
+        );
     }
 
     #[test]

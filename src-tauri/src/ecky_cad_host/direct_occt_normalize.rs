@@ -93,6 +93,7 @@ fn normalize_core_program_for_direct_occt_inner(
 
     Ok(CoreProgram {
         id: program.id,
+        metadata: program.metadata.clone(),
         parameters: program.parameters.clone(),
         parts,
         analyses: program.analyses.clone(),
@@ -2162,6 +2163,7 @@ mod tests {
 
         let native_program = CoreProgram {
             id: ProgramId::new(1),
+            metadata: Default::default(),
             parameters: Vec::new(),
             parts: vec![
                 CorePart {

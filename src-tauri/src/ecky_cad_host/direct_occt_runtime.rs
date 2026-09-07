@@ -20,8 +20,8 @@ use crate::contracts::{
     SourceRef, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::ecky_core_ir::{
-    CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive, CoreProgram, CoreReference,
-    CoreSelectorTagDecl,
+    CoreMetadataValue, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive, CoreProgram,
+    CoreReference, CoreSelectorTagDecl,
 };
 use crate::ecky_ir::mesh_asset::{IndexedMeshAsset, MeshAssetSource};
 use crate::models::PathResolver;
@@ -728,6 +728,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         &part_bounds,
         &program_provenance,
     )?;
+    apply_direct_occt_model_metadata(&mut manifest.document, program);
     apply_direct_occt_program_provenance(&mut manifest, program, &program_provenance);
     manifest.analysis_declarations = program
         .analyses
@@ -769,6 +770,19 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
     write_complete_cached_bundle_digests(&bundle_dir, &stored.0)?;
     remember_complete_cached_bundle(&bundle_dir, &content_hash, &stored);
     Ok(stored)
+}
+
+fn apply_direct_occt_model_metadata(document: &mut DocumentMetadata, program: &CoreProgram) {
+    let title = program
+        .metadata
+        .get(":title")
+        .or_else(|| program.metadata.get("title"));
+    if let Some(CoreMetadataValue::Text(title) | CoreMetadataValue::Symbol(title)) = title {
+        let title = title.trim();
+        if !title.is_empty() {
+            document.document_label = title.to_string();
+        }
+    }
 }
 
 fn read_complete_cached_bundle(
@@ -3368,6 +3382,22 @@ mod tests {
 
     fn compile(source: &str) -> CoreProgram {
         crate::ecky_scheme::compile_to_core_program(source).expect("compile")
+    }
+
+    #[test]
+    fn model_title_metadata_labels_direct_occt_document() {
+        let program = compile(r#"(model (meta :title "Pasta Curl") (part body (box 1 1 1)))"#);
+        let mut document = DocumentMetadata {
+            document_name: "Direct OCCT".into(),
+            document_label: "Direct OCCT".into(),
+            source_path: None,
+            object_count: 1,
+            warnings: Vec::new(),
+        };
+
+        apply_direct_occt_model_metadata(&mut document, &program);
+
+        assert_eq!(document.document_label, "Pasta Curl");
     }
 
     #[cfg(unix)]
