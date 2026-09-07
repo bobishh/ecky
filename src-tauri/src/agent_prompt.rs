@@ -4,12 +4,12 @@
 //! agent that has no MCP — it can only emit `.ecky` source and read the compiler
 //! diagnostic on a failed request. The body is therefore self-contained:
 //!
-//!   API operating contract  +  concise `.ecky` language guide  +  op catalogue
+//!   Mode-specific operating contract + shared `.ecky` guide + op catalogue
 //!
 //! The op catalogue is rendered from `ecky_language_surface::supported_surface_reference`
 //! (derived from the real op set), so adding/removing an op updates the prompt
-//! automatically and cannot drift. Both MCP (`ecky://guides/technical-system-prompt`)
-//! and API mode call `agent_language_reference` so their language rules are identical.
+//! automatically and cannot drift. MCP and API share the language body while
+//! retaining their own operating instructions.
 
 use crate::contracts::GeometryBackend;
 use crate::ecky_language_surface::supported_surface_reference;
@@ -41,8 +41,36 @@ everything you need to write valid source is in this prompt.
   geometry that renders on the active backend.
 ";
 
-/// The full self-contained language reference for `backend`.
+/// Tool-aware rules for MCP callers; language content remains shared with API mode.
+const MCP_OPERATING_CONTRACT: &str = "\
+# Ecky authoring — MCP operating contract
+
+Use Ecky MCP tools to inspect, validate, render, and verify `.ecky` models.
+
+- Inspect the current target and its `sourcePath`, parameters, and backend.
+  Edit a bound source file directly; wait for its watcher render to finish.
+  Use preview tools for unbound targets or guarded AST patches.
+- Constraint validation is not render proof. A saved file or successful compile
+  does not prove that geometry rendered or that active parameter values changed.
+- Read the completed render result for the exact edited version, then call
+  `verify_generated_model` with that version's `messageId`. Report completion
+  only from matching render and verification evidence; inspect viewport evidence
+  before making visual claims.
+- Preserve raw diagnostics. Isolate the named failing expression before broader
+  edits; do not repeatedly rewrite unrelated geometry or retry identical failures.
+";
+
+/// The full self-contained language reference for a tool-less API caller.
 pub fn agent_language_reference(backend: GeometryBackend) -> String {
+    language_reference(backend, API_OPERATING_CONTRACT)
+}
+
+/// The same language reference with instructions for a tool-equipped MCP caller.
+pub fn mcp_language_reference(backend: GeometryBackend) -> String {
+    language_reference(backend, MCP_OPERATING_CONTRACT)
+}
+
+fn language_reference(backend: GeometryBackend, contract: &str) -> String {
     let backend_label = match backend {
         GeometryBackend::Build123d => "mesh (legacy setting migrated to Ecky Native)",
         GeometryBackend::Freecad => "freecad",
@@ -50,7 +78,6 @@ pub fn agent_language_reference(backend: GeometryBackend) -> String {
     };
     format!(
         "{contract}\nTarget geometryBackend: `{backend_label}`.\n\n{guide}\n\n{catalogue}",
-        contract = API_OPERATING_CONTRACT,
         guide = canonical_agent_reference(),
         catalogue = op_catalogue(backend),
     )
@@ -127,6 +154,20 @@ mod tests {
             GeometryBackend::Build123d,
             GeometryBackend::Freecad,
         ]
+    }
+
+    #[test]
+    fn mcp_prompt_keeps_tools_and_requires_render_evidence() {
+        for backend in backends() {
+            let prompt = mcp_language_reference(backend);
+            assert!(!prompt.contains("You have no tools"));
+            assert!(prompt.contains("sourcePath"));
+            assert!(prompt.contains("Constraint validation is not render proof"));
+            assert!(prompt.contains("verify_generated_model"));
+            assert!(prompt.contains(canonical_agent_reference()));
+            assert!(prompt.len() <= AGENT_PROMPT_CHAR_CEILING);
+            assert!(agent_language_reference(backend).contains(API_OPERATING_CONTRACT));
+        }
     }
 
     // Self-containment: an API agent has no MCP, so the prompt must not depend on

@@ -2399,22 +2399,22 @@ fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
             .unwrap_or(crate::contracts::GeometryBackend::EckyRust)
     };
     if let Some(backend) = ecky_source_backend_for_uri(uri) {
-        return Some(crate::agent_prompt::agent_language_reference(backend));
+        return Some(crate::agent_prompt::mcp_language_reference(backend));
     }
     match uri {
         "ecky://guides/authoring-card" => Some(authoring_card_text().to_string()),
         "ecky://guides/technical-system-prompt" => Some(
-            crate::agent_prompt::agent_language_reference(configured_backend()),
+            crate::agent_prompt::mcp_language_reference(configured_backend()),
         ),
         "ecky://guides/modeling-guidelines" => Some(workflow_guide_text(state)),
         "ecky://guides/ecky-source" | "ecky://guides/ecky-ir-v0" => Some(
-            crate::agent_prompt::agent_language_reference(configured_backend()),
+            crate::agent_prompt::mcp_language_reference(configured_backend()),
         ),
-        "ecky://guides/freecad" | "ecky://guides/cad-sdk" => {
-            Some(crate::commands::generation::freecad_guide_text())
-        }
+        "ecky://guides/freecad" | "ecky://guides/cad-sdk" => Some(
+            crate::agent_prompt::mcp_language_reference(crate::contracts::GeometryBackend::Freecad),
+        ),
         "ecky://guides/ecky-rust" | "ecky://guides/mesh" => {
-            Some(crate::commands::generation::ecky_ir_v0_guide_text(
+            Some(crate::agent_prompt::mcp_language_reference(
                 crate::contracts::GeometryBackend::EckyRust,
             ))
         }
@@ -7884,8 +7884,8 @@ fn ensure_mcp_tool_allowed_for_app_mode(config: &Config, tool_name: &str) -> App
 mod tests {
     use super::*;
     use crate::contracts::{
-        ArtifactBundle, DesignOutput, InteractionMode, MacroDialect, Message, MessageRole,
-        MessageStatus, ModelManifest,
+        ArtifactBundle, DesignOutput, GeometryBackend, InteractionMode, MacroDialect, Message,
+        MessageRole, MessageStatus, ModelManifest,
     };
     use crate::contracts::{Config, McpConfig};
     use rusqlite::Connection;
@@ -10563,19 +10563,47 @@ mod tests {
     }
 
     #[test]
-    fn mcp_language_resources_share_the_api_language_reference() {
+    fn mcp_language_resources_share_language_but_preserve_tool_access() {
         let state = test_state();
-        let backend = state.config.lock().unwrap().default_geometry_backend;
-        let expected = crate::agent_prompt::agent_language_reference(backend);
-
-        assert_eq!(
-            read_resource_text(&state, "ecky://guides/ecky-source").as_deref(),
-            Some(expected.as_str())
-        );
-        assert_eq!(
-            read_resource_text(&state, "ecky://guides/technical-system-prompt").as_deref(),
-            Some(expected.as_str())
-        );
+        let configured = state.config.lock().unwrap().default_geometry_backend;
+        for (uri, backend) in [
+            ("ecky://guides/ecky-source", configured),
+            ("ecky://guides/ecky-ir-v0", configured),
+            ("ecky://guides/technical-system-prompt", configured),
+            ("ecky://guides/freecad", GeometryBackend::Freecad),
+            ("ecky://guides/cad-sdk", GeometryBackend::Freecad),
+            ("ecky://guides/ecky-rust", GeometryBackend::EckyRust),
+            ("ecky://guides/mesh", GeometryBackend::EckyRust),
+            (
+                "ecky://guides/ecky-source/freecad",
+                GeometryBackend::Freecad,
+            ),
+            (
+                "ecky://guides/ecky-source/ecky-rust",
+                GeometryBackend::EckyRust,
+            ),
+        ] {
+            let resource = read_resource_text(&state, uri).expect("language resource exists");
+            assert!(
+                !resource.contains("You have no tools"),
+                "{uri} must not give API-only instructions to an MCP caller"
+            );
+            assert!(
+                resource.contains("sourcePath"),
+                "{uri} must explain bound-file edits"
+            );
+            assert!(
+                resource.contains("verify_generated_model"),
+                "{uri} must require render evidence"
+            );
+            let api = crate::agent_prompt::agent_language_reference(backend);
+            let language_marker = "# Ecky language reference";
+            assert_eq!(
+                resource.split_once(language_marker).unwrap().1,
+                api.split_once(language_marker).unwrap().1,
+                "{uri} must retain the same language body and operation catalogue"
+            );
+        }
     }
 
     #[test]

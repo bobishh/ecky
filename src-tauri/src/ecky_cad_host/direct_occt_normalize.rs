@@ -968,6 +968,17 @@ fn eval_scalar_binding(
             )?,
         )),
         CoreValueKind::Any => {
+            // The stringish evaluator returns an unresolved symbol's spelling.
+            // That is useful for selectors, but is not a scalar value for a
+            // geometry alias. Only fold locals present in the scalar environment.
+            if let CoreNodeKind::Reference(crate::ecky_core_ir::CoreReference::Local(name)) =
+                &node.kind
+            {
+                return Ok(env
+                    .get(name)
+                    .filter(|value| !matches!(value, ParamValue::Null))
+                    .cloned());
+            }
             if let Ok(number) =
                 crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env)
             {
@@ -1771,6 +1782,53 @@ mod tests {
 
     fn compile(source: &str) -> CoreProgram {
         compile_to_core_program(source).expect("compile")
+    }
+
+    #[test]
+    fn scalar_folding_preserves_unresolved_shape_aliases() {
+        let reference = CoreNode {
+            id: NodeId::new(1),
+            kind: CoreNodeKind::Reference(crate::ecky_core_ir::CoreReference::Local(
+                "camera-opening".into(),
+            )),
+            value_kind: CoreValueKind::Any,
+            span: None,
+        };
+        assert_eq!(
+            eval_scalar_binding(
+                &reference,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new()
+            )
+            .expect("shape reference is valid"),
+            None,
+            "a geometry alias must not become its identifier as text"
+        );
+    }
+
+    #[test]
+    fn scalar_folding_keeps_known_alias_types() {
+        let reference = CoreNode {
+            id: NodeId::new(1),
+            kind: CoreNodeKind::Reference(crate::ecky_core_ir::CoreReference::Local(
+                "value".into(),
+            )),
+            value_kind: CoreValueKind::Any,
+            span: None,
+        };
+        for value in [
+            ParamValue::Number(12.0),
+            ParamValue::Boolean(true),
+            ParamValue::String("camera".into()),
+        ] {
+            let env = BTreeMap::from([("value".to_string(), value.clone())]);
+            assert_eq!(
+                eval_scalar_binding(&reference, &BTreeMap::new(), &env, &BTreeMap::new())
+                    .expect("known scalar alias folds"),
+                Some(value)
+            );
+        }
     }
 
     #[test]
