@@ -465,6 +465,44 @@ test.describe('Codex provider integration', () => {
     await expect(image).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
   });
 
+  test('Given Codex persisted a generated concept sketch When dialogue reloads Then the assistant image remains visible', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.messages[1].attachments = [{
+        path: '/workspace/gearbox/.ecky/attachments/engine-sketch.png',
+        name: 'engine-sketch.png',
+        explanation: 'Generated concept sketch.',
+        dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+        kind: 'image',
+      }];
+    });
+    await selectCodexProvider(page);
+    await openDialogue(page);
+
+    const image = page.locator('.trail-assistant .trail-image');
+    await expect(image).toHaveCount(1);
+    await expect(image).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
+  });
+
+  test('Given Codex persisted an Ecky sketch MCP result When dialogue reloads Then the sketch result remains visible', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.messages.push({
+        id: 'codex:mcp:engine-layout',
+        role: 'assistant',
+        content: 'Ecky sketch draft created · engine-layout · 1 sketch.',
+        status: 'success',
+        timestamp: 1787263020,
+      });
+    });
+    await selectCodexProvider(page);
+    await openDialogue(page);
+
+    await expect(page.locator('.trail-assistant').filter({ hasText: 'Ecky sketch draft created · engine-layout · 1 sketch.' })).toBeVisible();
+  });
+
   test('Given a Codex provider image attachment When sending Then the provider receives it and the composer clears it', async ({ page }) => {
     await installProviderMocks(page, 'happy', true);
     await bootProviderDialogue(page);

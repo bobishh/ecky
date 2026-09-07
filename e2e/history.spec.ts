@@ -736,7 +736,7 @@ test.describe('Projects', () => {
     await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
   });
 
-  test('Given a reusable blank thread and an authored thread When Projects opens Then only the authored thread is listed', async ({ page }) => {
+  test('Given a reusable blank, provider-only thread, and authored thread When Projects opens Then only the completely blank thread is omitted', async ({ page }) => {
     await installProjectSwitcherMocks({
       history: [
         {
@@ -751,6 +751,19 @@ test.describe('Projects', () => {
           errorCount: 0,
           status: 'active',
           isBlank: true,
+        },
+        {
+          id: 'provider-only-thread',
+          title: 'Draw an engine concept',
+          summary: 'Provider conversation without a CAD version',
+          messages: [],
+          updatedAt: 150,
+          versionCount: 0,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          isBlank: false,
         },
         {
           id: 'authored-thread',
@@ -773,6 +786,7 @@ test.describe('Projects', () => {
 
     const projects = page.locator('[data-window-id="projects"]');
     await expect(projects.getByText('Rocksteady AirTag head', { exact: true })).toBeVisible();
+    await expect(projects.getByText('Draw an engine concept', { exact: true })).toBeVisible();
     await expect(projects.getByText('Untitled design', { exact: true })).toHaveCount(0);
   });
 

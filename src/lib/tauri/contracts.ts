@@ -2284,7 +2284,7 @@ export type TaggedAnchorBinding = { kind: TaggedAnchorKind; authoredSelector: st
 export type TaggedAnchorKind = "vertex" | "face" | "edge"
 export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number;
 /**
- * Technical reusable blank: no visible messages and blank bound source.
+ * Technical reusable blank: default title and no visible native/provider content.
  */
 isBlank?: boolean; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
 export type ThreadLifecycleIntent = { threadId: string; selectedMessageId: string | null }

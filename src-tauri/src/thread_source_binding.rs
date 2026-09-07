@@ -52,14 +52,6 @@ pub(crate) fn is_blank_thread_source(source: &str) -> bool {
     source == DEFAULT_THREAD_SOURCE || source == LEGACY_DEMO_THREAD_SOURCE
 }
 
-pub(crate) fn thread_is_blank(conn: &Connection, thread_id: &str) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT created_at = updated_at FROM threads WHERE id = ?1",
-        [thread_id],
-        |row| row.get::<_, bool>(0),
-    )
-}
-
 pub(crate) fn migrate_legacy_blank_source(
     conn: &Connection,
     binding: &ThreadSourceBinding,

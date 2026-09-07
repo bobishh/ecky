@@ -64,3 +64,6 @@
 - [x] 7.5 Keep queued prompt durable across rotation and persist accepted user item under stable turn identity.
 - [x] 7.6 Green focused Rust/Playwright proof, strict OpenSpec validation, production app build, and installed app smoke.
 - [x] 7.7 Persist provider user attachments, recover Codex image blocks, and render images after history reload.
+- [x] 7.8 Persist completed Codex-generated image outputs and render them as assistant timeline images after history reload.
+- [x] 7.9 Persist completed Ecky sketch MCP results as concise assistant timeline evidence without replacing canonical source.
+- [x] 7.10 Advance thread activity and derive a still-default title when provider history is persisted; backfill older provider-only threads.

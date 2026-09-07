@@ -203,6 +203,49 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    let thread_columns = conn
+        .prepare("PRAGMA table_info(threads)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if ["title", "created_at", "updated_at"]
+        .iter()
+        .all(|required| thread_columns.iter().any(|column| column == required))
+    {
+        backfill_provider_thread_projection(conn)?;
+    }
+    Ok(())
+}
+
+pub fn backfill_provider_thread_projection(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE threads
+         SET updated_at = MAX(
+                 updated_at + 1,
+                 COALESCE((
+                     SELECT MAX(provider_message.created_at)
+                     FROM agent_provider_messages AS provider_message
+                     WHERE provider_message.ecky_thread_id = threads.id
+                 ), updated_at + 1)
+             ),
+             title = CASE
+                 WHEN title = 'Untitled design' THEN COALESCE((
+                     SELECT substr(trim(replace(replace(content, char(10), ' '), char(13), ' ')), 1, 80)
+                     FROM agent_provider_messages
+                     WHERE ecky_thread_id = threads.id
+                       AND role = 'user'
+                       AND trim(content) != ''
+                     ORDER BY created_at ASC, id ASC
+                     LIMIT 1
+                 ), title)
+                 ELSE title
+             END
+         WHERE threads.created_at = threads.updated_at
+           AND EXISTS (
+               SELECT 1 FROM agent_provider_messages
+               WHERE ecky_thread_id = threads.id
+           )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -498,12 +541,17 @@ pub fn persist_finished_provider_messages(
     external_thread_id: &str,
     messages: &[CodexDialogueMessage],
 ) -> AppResult<usize> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
     let mut persisted = 0;
+    let mut activity_at = 0;
+    let mut first_user_title = None;
     for message in messages
         .iter()
         .filter(|message| is_finished_provider_message_status(&message.status))
     {
-        let changed = conn
+        let changed = tx
             .execute(
                 "INSERT INTO agent_provider_messages (
                     id, ecky_thread_id, provider, external_thread_id,
@@ -543,8 +591,40 @@ pub fn persist_finished_provider_messages(
             )
             .map_err(|error| AppError::persistence(error.to_string()))?;
         persisted += changed;
+        if changed > 0 {
+            activity_at = activity_at.max(message.timestamp);
+            first_user_title = first_user_title.or_else(|| {
+                (message.role == "user")
+                    .then(|| provider_thread_title(&message.content))
+                    .flatten()
+            });
+        }
     }
+    tx.execute(
+        "UPDATE threads
+         SET updated_at = MAX(updated_at + 1, ?2),
+             title = CASE
+                 WHEN title = 'Untitled design' AND ?3 IS NOT NULL THEN ?3
+                 ELSE title
+             END
+         WHERE id = ?1 AND ?4 > 0",
+        params![
+            ecky_thread_id,
+            activity_at,
+            first_user_title,
+            persisted as i64
+        ],
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+    tx.commit()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
     Ok(persisted)
+}
+
+fn provider_thread_title(content: &str) -> Option<String> {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = normalized.chars().take(80).collect::<String>();
+    (!title.is_empty()).then_some(title)
 }
 
 pub fn persist_provider_turn_user_input(
@@ -1175,10 +1255,22 @@ mod tests {
     #[test]
     fn durable_provider_history_round_trips_user_attachments() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)", [])
-            .unwrap();
-        conn.execute("INSERT INTO threads (id) VALUES ('ecky-thread')", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, title, created_at, updated_at)
+             VALUES ('ecky-thread', 'Untitled design', 1, 1)",
+            [],
+        )
+        .unwrap();
         ensure_schema(&conn).unwrap();
         upsert_agent_binding(
             &conn,
@@ -1216,15 +1308,53 @@ mod tests {
 
         let page = provider_message_page(&conn, "ecky-thread", CODEX_PROVIDER_ID, None).unwrap();
         assert_eq!(page.messages[0].attachments, vec![attachment]);
+        let (title, created_at, updated_at): (String, i64, i64) = conn
+            .query_row(
+                "SELECT title, created_at, updated_at FROM threads WHERE id = 'ecky-thread'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Use this image.");
+        assert!(updated_at > created_at);
+
+        conn.execute(
+            "UPDATE threads SET title = 'Untitled design', updated_at = created_at
+             WHERE id = 'ecky-thread'",
+            [],
+        )
+        .unwrap();
+        ensure_schema(&conn).unwrap();
+        let (title, created_at, updated_at): (String, i64, i64) = conn
+            .query_row(
+                "SELECT title, created_at, updated_at FROM threads WHERE id = 'ecky-thread'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Use this image.");
+        assert!(updated_at > created_at);
     }
 
     #[test]
     fn metadata_refresh_preserves_undelivered_bootstrap_version() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)", [])
-            .unwrap();
-        conn.execute("INSERT INTO threads (id) VALUES ('ecky-thread')", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, title, created_at, updated_at)
+             VALUES ('ecky-thread', 'Untitled design', 1, 1)",
+            [],
+        )
+        .unwrap();
         ensure_schema(&conn).unwrap();
         let old = upsert_agent_binding(
             &conn,

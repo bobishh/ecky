@@ -12,8 +12,6 @@ pub fn get_history(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
     for thread in &mut threads {
         thread.title = crate::transport_budget::bounded_text(&thread.title, 512);
         thread.summary = crate::transport_budget::bounded_text(&thread.summary, 1_024);
-        thread.is_blank = crate::thread_source_binding::thread_is_blank(conn, &thread.id)
-            .map_err(|err| AppError::persistence(err.to_string()))?;
     }
     crate::transport_budget::require_serialized_budget(
         "threadList",
@@ -54,8 +52,9 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
         .iter()
         .filter(|m| m.role == MessageRole::Assistant && m.status == MessageStatus::Error)
         .count();
-    let is_blank = crate::thread_source_binding::thread_is_blank(conn, id)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
+    let is_blank = title == "Untitled design"
+        && !db::thread_has_durable_content(conn, id)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
 
     let lifecycle = db::get_thread_lifecycle(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
@@ -568,13 +567,7 @@ pub fn reopen_thread(conn: &rusqlite::Connection, thread_id: &str) -> AppResult<
 }
 
 pub fn get_inventory(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
-    let mut threads =
-        db::get_inventory_threads(conn).map_err(|err| AppError::persistence(err.to_string()))?;
-    for thread in &mut threads {
-        thread.is_blank = crate::thread_source_binding::thread_is_blank(conn, &thread.id)
-            .map_err(|err| AppError::persistence(err.to_string()))?;
-    }
-    Ok(threads)
+    db::get_inventory_threads(conn).map_err(|err| AppError::persistence(err.to_string()))
 }
 
 pub fn get_thread_preview(
@@ -1146,15 +1139,22 @@ mod tests {
     }
 
     #[test]
-    fn history_marks_only_never_modified_thread_as_reusable_blank() {
+    fn history_marks_only_completely_empty_thread_as_reusable_blank() {
         let db_path = std::env::temp_dir().join(format!(
             "ecky-thread-blank-classification-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let conn = db::init_db(&db_path).unwrap();
         db::create_or_update_thread(&conn, "blank", "Untitled design", 200, None).unwrap();
+        db::create_or_update_thread(&conn, "touched-empty", "Untitled design", 175, None).unwrap();
         db::create_or_update_thread(&conn, "renamed-blank", "Untitled design", 150, None).unwrap();
+        db::create_or_update_thread(&conn, "provider-only", "Untitled design", 125, None).unwrap();
         db::update_thread_title(&conn, "renamed-blank", "Hydrant cap").unwrap();
+        conn.execute(
+            "UPDATE threads SET updated_at = updated_at + 1 WHERE id = 'touched-empty'",
+            [],
+        )
+        .unwrap();
 
         let root = std::env::temp_dir().join(format!(
             "ecky-thread-blank-bindings-{}",
@@ -1170,10 +1170,46 @@ mod tests {
         .unwrap();
         crate::thread_source_binding::upsert_binding_row(
             &conn,
+            "touched-empty",
+            &root.join("touched-empty"),
+            &crate::thread_source_binding::source_digest(""),
+            None,
+        )
+        .unwrap();
+        crate::thread_source_binding::upsert_binding_row(
+            &conn,
             "renamed-blank",
             &root.join("renamed-blank"),
             &crate::thread_source_binding::source_digest(""),
             None,
+        )
+        .unwrap();
+        crate::thread_source_binding::upsert_binding_row(
+            &conn,
+            "provider-only",
+            &root.join("provider-only"),
+            &crate::thread_source_binding::source_digest(""),
+            None,
+        )
+        .unwrap();
+        crate::services::codex_takeover::bind_owned_thread(
+            &conn,
+            "provider-only",
+            "provider-thread",
+            "Untitled design",
+            root.join("provider-only").to_string_lossy().as_ref(),
+            125,
+        )
+        .unwrap();
+        crate::services::codex_takeover::persist_provider_turn_user_input(
+            &conn,
+            "provider-only",
+            crate::services::codex_takeover::CODEX_PROVIDER_ID,
+            "provider-thread",
+            "turn-1",
+            "Draw an engine concept",
+            &[],
+            126,
         )
         .unwrap();
 
@@ -1186,14 +1222,29 @@ mod tests {
                 .is_blank
         );
         assert!(
+            threads
+                .iter()
+                .find(|thread| thread.id == "touched-empty")
+                .unwrap()
+                .is_blank
+        );
+        assert!(
             !threads
                 .iter()
                 .find(|thread| thread.id == "renamed-blank")
                 .unwrap()
                 .is_blank
         );
+        let provider_only = threads
+            .iter()
+            .find(|thread| thread.id == "provider-only")
+            .unwrap();
+        assert!(!provider_only.is_blank);
+        assert_eq!(provider_only.title, "Draw an engine concept");
+        assert!(provider_only.updated_at > 125);
 
         let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

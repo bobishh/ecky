@@ -1616,6 +1616,105 @@ pub fn project_thread_messages(thread: &Value) -> AppResult<Vec<CodexDialogueMes
     Ok(project_turn_messages(thread_id, turns))
 }
 
+fn generated_image_attachment(item: &Value) -> Option<Attachment> {
+    if item.get("status").and_then(Value::as_str) != Some("completed") {
+        return None;
+    }
+    let result = item.get("result").and_then(Value::as_str)?.trim();
+    if result.is_empty() {
+        return None;
+    }
+    let path = item
+        .get("savedPath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mime = match std::path::Path::new(&path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "jpeg",
+        Some("webp") => "webp",
+        _ => "png",
+    };
+    let data_url = if result.starts_with("data:image/") {
+        result.to_string()
+    } else {
+        format!("data:image/{mime};base64,{result}")
+    };
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("generated-concept.png")
+        .to_string();
+    Some(Attachment {
+        path,
+        name,
+        explanation: "Generated concept sketch.".to_string(),
+        data_url: Some(data_url),
+        kind: AttachmentKind::Image,
+    })
+}
+
+fn completed_ecky_sketch_tool_result(item: &Value) -> Option<(String, Vec<Attachment>)> {
+    if item.get("status").and_then(Value::as_str) != Some("completed") {
+        return None;
+    }
+    let server = string_field(item, &["server", "serverName"])?;
+    if !server.contains("ecky") {
+        return None;
+    }
+    let tool = string_field(item, &["tool", "toolName", "name"])?;
+    if !tool.contains("sketch") {
+        return None;
+    }
+    let result = item.get("result")?;
+    let structured = result.get("structuredContent").unwrap_or(result);
+    let payload = structured.get("data").unwrap_or(structured);
+    let document = payload
+        .get("sketchDocument")
+        .or_else(|| payload.get("document"))?;
+    let document_id = string_field(document, &["documentId", "id"])?;
+    if document_id.trim().is_empty() {
+        return None;
+    }
+    let sketch_count = document
+        .get("sketches")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let noun = if sketch_count == 1 {
+        "sketch"
+    } else {
+        "sketches"
+    };
+    let attachments = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|content| content.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|content| {
+            let mime_type = content.get("mimeType").and_then(Value::as_str)?;
+            let data = content.get("data").and_then(Value::as_str)?.trim();
+            (!data.is_empty()).then(|| Attachment {
+                path: String::new(),
+                name: "ecky-sketch-preview".to_string(),
+                explanation: "Ecky sketch preview.".to_string(),
+                data_url: Some(format!("data:{mime_type};base64,{data}")),
+                kind: AttachmentKind::Image,
+            })
+        })
+        .collect();
+    Some((
+        format!("Ecky sketch draft created · {document_id} · {sketch_count} {noun}."),
+        attachments,
+    ))
+}
+
 pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialogueMessage> {
     let mut messages = Vec::new();
     let mut ordered_turns = turns.iter().collect::<Vec<_>>();
@@ -1731,6 +1830,32 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
                             status: status.to_string(),
                             timestamp: completed_at,
                             attachments: Vec::new(),
+                            provider_event_kind: None,
+                        });
+                    }
+                }
+                Some("imageGeneration") => {
+                    if let Some(attachment) = generated_image_attachment(item) {
+                        assistant_messages.push(CodexDialogueMessage {
+                            id: format!("codex:{thread_id}:{turn_id}:image:{item_id}"),
+                            role: "assistant".to_string(),
+                            content: "Generated concept sketch.".to_string(),
+                            status: status.to_string(),
+                            timestamp: completed_at,
+                            attachments: vec![attachment],
+                            provider_event_kind: None,
+                        });
+                    }
+                }
+                Some("mcpToolCall") => {
+                    if let Some((content, attachments)) = completed_ecky_sketch_tool_result(item) {
+                        assistant_messages.push(CodexDialogueMessage {
+                            id: format!("codex:{thread_id}:{turn_id}:mcp:{item_id}"),
+                            role: "assistant".to_string(),
+                            content,
+                            status: status.to_string(),
+                            timestamp: completed_at,
+                            attachments,
                             provider_event_kind: None,
                         });
                     }
@@ -1871,5 +1996,120 @@ mod tests {
             Some("data:image/png;base64,abc")
         );
         assert_eq!(messages[0].attachments[1].name, "reference.png");
+    }
+
+    #[test]
+    fn provider_thread_projection_keeps_generated_concept_sketches() {
+        let messages = project_turn_messages(
+            "codex-thread",
+            &[json!({
+                "id": "turn-1",
+                "status": "completed",
+                "startedAt": 10,
+                "completedAt": 11,
+                "items": [{
+                    "id": "generated-sketch",
+                    "type": "imageGeneration",
+                    "status": "completed",
+                    "savedPath": "/tmp/engine-sketch.png",
+                    "result": "iVBORw0KGgo="
+                }]
+            })],
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content, "Generated concept sketch.");
+        assert_eq!(
+            messages[0].attachments[0].data_url.as_deref(),
+            Some("data:image/png;base64,iVBORw0KGgo=")
+        );
+    }
+
+    #[test]
+    fn provider_thread_projection_omits_incomplete_generated_images() {
+        let messages = project_turn_messages(
+            "codex-thread",
+            &[json!({
+                "id": "turn-1",
+                "status": "inProgress",
+                "startedAt": 10,
+                "items": [{
+                    "id": "generated-sketch",
+                    "type": "imageGeneration",
+                    "status": "inProgress",
+                    "result": "iVBORw0KGgo="
+                }]
+            })],
+        );
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn provider_thread_projection_keeps_ecky_sketch_tool_results() {
+        let messages = project_turn_messages(
+            "codex-thread",
+            &[json!({
+                "id": "turn-1",
+                "status": "completed",
+                "startedAt": 10,
+                "completedAt": 11,
+                "items": [{
+                    "id": "sketch-result",
+                    "type": "mcpToolCall",
+                    "server": "ecky_provider_mcp",
+                    "tool": "sketch_preview_create",
+                    "status": "completed",
+                    "result": {
+                        "structuredContent": {
+                            "sketchDocument": {
+                                "documentId": "engine-layout",
+                                "sketches": [{"sketchId": "block-profile"}]
+                            },
+                            "draftSource": {"source": "(model (part engine-block ...))"},
+                            "artifactBundle": {"modelStlPath": "/tmp/engine-layout.stl"}
+                        }
+                    }
+                }]
+            })],
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(
+            messages[0].content,
+            "Ecky sketch draft created · engine-layout · 1 sketch."
+        );
+        assert!(messages[0].content.contains("engine-layout"));
+    }
+
+    #[test]
+    fn provider_thread_projection_omits_incomplete_ecky_sketch_tool_results() {
+        let messages = project_turn_messages(
+            "codex-thread",
+            &[json!({
+                "id": "turn-1",
+                "status": "inProgress",
+                "startedAt": 10,
+                "items": [{
+                    "id": "sketch-result",
+                    "type": "mcpToolCall",
+                    "server": "ecky_provider_mcp",
+                    "tool": "sketch_preview_create",
+                    "status": "inProgress",
+                    "result": {
+                        "structuredContent": {
+                            "sketchDocument": {
+                                "documentId": "engine-layout",
+                                "sketches": [{"sketchId": "block-profile"}]
+                            }
+                        }
+                    }
+                }]
+            })],
+        );
+
+        assert!(messages.is_empty());
     }
 }

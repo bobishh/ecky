@@ -96,7 +96,10 @@ threads MAY use a deterministic empty per-thread workspace until a version exist
 
 Finished provider user/assistant turns SHALL be durably normalized into
 `agent_provider_messages`. Recent provider conversation SHALL update bounded
-`threads.summary` for API/MCP handoff.
+`threads.summary` for API/MCP handoff. Persisting new provider messages SHALL
+atomically advance the owning thread's `updated_at`. The first non-empty provider
+user message SHALL replace only the default `Untitled design` title with a bounded
+prompt prefix. Existing provider history SHALL be backfilled to the same projection.
 
 #### Scenario: Codex work moves to API or MCP
 
@@ -104,6 +107,15 @@ Finished provider user/assistant turns SHALL be durably normalized into
 - **WHEN** user selects API or MCP and sends next message
 - **THEN** existing context assembler includes recent Codex handoff
 - **AND** next runtime knows current target and recent decisions
+
+#### Scenario: Provider-only thread enters Projects inventory
+
+- **GIVEN** an Ecky thread has blank model source and no CAD version
+- **WHEN** a provider user or assistant message is durably persisted
+- **THEN** the owning thread `updated_at` advances in the same transaction
+- **AND** history no longer classifies the thread as a reusable blank
+- **AND** the first non-empty user prompt names a still-default thread
+- **AND** a manual thread title is never replaced
 
 ### Requirement: History is cursor paged
 
@@ -141,6 +153,21 @@ SHALL NOT replace already visible Ecky messages or versions.
 - **THEN** Ecky renders the original image beside that user message
 - **AND** read-only Codex backfill may restore missing image metadata from `image` or `localImage` input blocks
 - **AND** an attachment-free later projection does not erase an already persisted image
+
+#### Scenario: Codex generated image survives history reload
+
+- **GIVEN** a completed owned Codex turn contains an `imageGeneration` output
+- **WHEN** Ecky backfills and later reloads its local provider page
+- **THEN** Ecky persists the generated image as an assistant timeline attachment
+- **AND** Dialogue renders that image beside its generated-sketch message
+
+#### Scenario: Ecky sketch MCP result survives history reload
+
+- **GIVEN** a completed owned Codex turn contains an Ecky MCP tool result with a `SketchDocument`
+- **WHEN** Ecky backfills and later reloads its local provider page
+- **THEN** Ecky persists one concise assistant result with the sketch document identity and sketch count
+- **AND** Dialogue renders that result without replacing the current canonical `.ecky` model
+- **AND** incomplete sketch tool calls do not appear as completed results
 
 #### Scenario: User searches versions
 

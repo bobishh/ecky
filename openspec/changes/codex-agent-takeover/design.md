@@ -68,6 +68,13 @@ After successful read-only backfill, Ecky stores normalized finished Codex
 user/assistant messages plus user attachment metadata and builds a bounded handoff from canonical Ecky messages
 plus recent provider dialogue. API and MCP already consume that canonical summary.
 Provider compaction or cursor replacement cannot erase Ecky's finished transcript.
+The same transcript transaction advances the owning Ecky thread `updated_at`.
+Its first non-empty provider user message replaces only the default
+`Untitled design` title with the first 80 characters of normalized prompt text.
+Manual titles remain authoritative. Schema initialization backfills these projections
+for provider messages persisted before this invariant existed. History classifies
+reusable blanks inside its bounded list query using indexed content existence checks;
+it performs no per-thread follow-up reads.
 
 ## History and Runtime
 
@@ -77,7 +84,11 @@ scroll anchor. Provider I/O never sits on this UI path. Background provider back
 is cursor paged and writes finished messages incrementally. Provider turns are
 normalized oldest-first; user items precede assistant items inside a turn even when
 timestamps collide. `agent_provider_messages.attachments_json` preserves prepared
-local image paths or provider-backed inline image data. Backfill updates missing
+local image paths or provider-backed inline image data, including completed Codex
+`imageGeneration` outputs and any image content returned by completed Ecky sketch
+MCP tools. Completed Ecky sketch tool calls also persist a concise assistant result
+with the `SketchDocument` identity and sketch count; they remain evidence and do not
+replace canonical `.ecky` source. Backfill updates missing
 attachment metadata without letting attachment-free projections erase stored images.
 
 One long-lived app-server supervisor owns JSONL framing, request timeout, stderr tail,
@@ -117,7 +128,7 @@ Provider mode reuses normal trail/composer. Ecky messages, authored versions, Co
 messages, and local queued prompts form one timeline; provider snapshot arrival never
 replaces Ecky history. Timeline controls provide text search plus `ALL`/`VERSIONS`
 filter. It also adds unified pagination, queue, `STEER`, and `STOP` when applicable.
-Raw adapter errors appear in Dialogue. Persisted user image attachments render through
+Raw adapter errors appear in Dialogue. Persisted user, generated image, and Ecky sketch tool results render through
 the same trail visual path after reload.
 
 Provider final-answer presentation is derived from the raw durable transcript. A

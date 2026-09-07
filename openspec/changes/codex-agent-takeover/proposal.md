@@ -25,7 +25,7 @@ without exposing or importing unrelated Codex conversations.
 - Project recent Codex dialogue back into Ecky's canonical compacted thread summary
   so switching among API, MCP, and Provider retains “what are we building?” context.
 - Persist finished provider turns in Ecky and page them by opaque local cursor. Keep
-  user attachment metadata with each normalized message so images survive reload.
+  user, generated-image, and completed Ecky sketch-tool result metadata with each normalized message so visuals and native sketch evidence survive reload.
   Keep
   read-only provider backfill, FIFO queue, exact-turn steer, stop,
   timeout recovery, and compaction-safe completion semantics.

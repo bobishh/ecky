@@ -1698,6 +1698,7 @@ fn init_db_with_payload_mode(
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
     migrate_threads_drop_authoring_columns(&conn)?;
     normalize_thread_lifecycle_rows(&conn)?;
+    crate::services::codex_takeover::backfill_provider_thread_projection(&conn)?;
     let _ = conn.execute(
         "ALTER TABLE agent_sessions ADD COLUMN host_label TEXT NOT NULL DEFAULT ''",
         [],
@@ -1914,7 +1915,8 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count,
+        EXISTS(SELECT 1 FROM agent_provider_messages WHERE ecky_thread_id = threads.id AND status != 'discarded') as has_provider_content
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -1926,9 +1928,11 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             .get::<_, String>(9)
             .unwrap_or_else(|_| "active".to_string());
         let message_count = row.get::<_, i64>(12)? as usize;
+        let has_provider_content = row.get::<_, bool>(13)?;
+        let title: String = row.get(1)?;
         Ok(Thread {
             id: id.clone(),
-            title: row.get(1)?,
+            title: title.clone(),
             summary: row.get(2)?,
             updated_at: row.get::<_, i64>(3)? as u64,
             messages: vec![],
@@ -1937,7 +1941,7 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             pending_count: row.get::<_, i64>(6)? as usize,
             queued_count: row.get::<_, i64>(7)? as usize,
             error_count: row.get::<_, i64>(8)? as usize,
-            is_blank: message_count == 0,
+            is_blank: title == "Untitled design" && message_count == 0 && !has_provider_content,
             status: status_str
                 .parse()
                 .unwrap_or(crate::contracts::ThreadStatus::Active),
@@ -1984,7 +1988,9 @@ pub fn get_thread_summary_by_id(conn: &Connection, thread_id: &str) -> SqlResult
            threads.finalized_at,
            threads.pending_confirm,
            (SELECT COUNT(*) FROM messages
-            WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded')
+            WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded'),
+           EXISTS(SELECT 1 FROM agent_provider_messages
+            WHERE ecky_thread_id = threads.id AND status != 'discarded')
          FROM threads
          WHERE threads.id = ?1 AND threads.deleted_at IS NULL",
         [thread_id],
@@ -1992,9 +1998,10 @@ pub fn get_thread_summary_by_id(conn: &Connection, thread_id: &str) -> SqlResult
             let id: String = row.get(0)?;
             let traits_str: Option<String> = row.get(4)?;
             let status_str: String = row.get(9)?;
+            let title: String = row.get(1)?;
             Ok(Thread {
                 id: id.clone(),
-                title: row.get(1)?,
+                title: title.clone(),
                 summary: row.get(2)?,
                 updated_at: row.get::<_, i64>(3)? as u64,
                 messages: Vec::new(),
@@ -2003,7 +2010,9 @@ pub fn get_thread_summary_by_id(conn: &Connection, thread_id: &str) -> SqlResult
                 pending_count: row.get::<_, i64>(6)? as usize,
                 queued_count: row.get::<_, i64>(7)? as usize,
                 error_count: row.get::<_, i64>(8)? as usize,
-                is_blank: row.get::<_, i64>(12)? == 0,
+                is_blank: title == "Untitled design"
+                    && row.get::<_, i64>(12)? == 0
+                    && !row.get::<_, bool>(13)?,
                 status: status_str.parse().unwrap_or(ThreadStatus::Active),
                 finalized_at: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
                 pending_confirm: row.get(11)?,
@@ -2035,7 +2044,8 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count,
+        EXISTS(SELECT 1 FROM agent_provider_messages WHERE ecky_thread_id = threads.id AND status != 'discarded') as has_provider_content
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -2049,9 +2059,11 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
             .get::<_, String>(9)
             .unwrap_or_else(|_| "active".to_string());
         let message_count = row.get::<_, i64>(12)? as usize;
+        let has_provider_content = row.get::<_, bool>(13)?;
+        let title: String = row.get(1)?;
         Ok(Thread {
             id: id.clone(),
-            title: row.get(1)?,
+            title: title.clone(),
             summary: row.get(2)?,
             updated_at: row.get::<_, i64>(3)? as u64,
             messages: vec![],
@@ -2060,7 +2072,7 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
             pending_count: row.get::<_, i64>(6)? as usize,
             queued_count: row.get::<_, i64>(7)? as usize,
             error_count: row.get::<_, i64>(8)? as usize,
-            is_blank: message_count == 0,
+            is_blank: title == "Untitled design" && message_count == 0 && !has_provider_content,
             status: status_str
                 .parse()
                 .unwrap_or(crate::contracts::ThreadStatus::Active),
@@ -2241,6 +2253,25 @@ pub fn get_visible_thread_title(conn: &Connection, thread_id: &str) -> SqlResult
     .optional()
 }
 
+pub fn thread_has_durable_content(conn: &Connection, thread_id: &str) -> SqlResult<bool> {
+    conn.query_row(
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM messages
+                WHERE thread_id = ?1
+                  AND deleted_at IS NULL
+                  AND status != 'discarded'
+            )
+            OR EXISTS (
+                SELECT 1 FROM agent_provider_messages
+                WHERE ecky_thread_id = ?1
+                  AND status != 'discarded'
+            )",
+        [thread_id],
+        |row| row.get(0),
+    )
+}
+
 pub fn get_thread_summary(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
     conn.query_row(
         "SELECT summary FROM threads WHERE id = ?1",
@@ -2334,7 +2365,8 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count,
+        EXISTS(SELECT 1 FROM agent_provider_messages WHERE ecky_thread_id = threads.id AND status != 'discarded') as has_provider_content
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'finalized'
         ORDER BY finalized_at DESC, id DESC
@@ -2346,9 +2378,11 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             .get::<_, String>(9)
             .unwrap_or_else(|_| "finalized".to_string());
         let message_count = row.get::<_, i64>(12)? as usize;
+        let has_provider_content = row.get::<_, bool>(13)?;
+        let title: String = row.get(1)?;
         Ok(Thread {
             id: id.clone(),
-            title: row.get(1)?,
+            title: title.clone(),
             summary: row.get(2)?,
             updated_at: row.get::<_, i64>(3)? as u64,
             messages: vec![],
@@ -2357,7 +2391,7 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             pending_count: row.get::<_, i64>(6)? as usize,
             queued_count: row.get::<_, i64>(7)? as usize,
             error_count: row.get::<_, i64>(8)? as usize,
-            is_blank: message_count == 0,
+            is_blank: title == "Untitled design" && message_count == 0 && !has_provider_content,
             status: status_str
                 .parse()
                 .unwrap_or(crate::contracts::ThreadStatus::Finalized),
@@ -5403,6 +5437,7 @@ mod tests {
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
         normalize_thread_lifecycle_rows(&conn)?;
+        crate::services::codex_takeover::ensure_schema(conn)?;
         Ok(())
     }
 

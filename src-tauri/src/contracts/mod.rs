@@ -1248,7 +1248,7 @@ pub struct Thread {
     pub queued_count: usize,
     #[serde(default, alias = "error_count")]
     pub error_count: usize,
-    /// Technical reusable blank: no visible messages and blank bound source.
+    /// Technical reusable blank: default title and no visible native/provider content.
     #[serde(default, alias = "is_blank")]
     pub is_blank: bool,
     #[serde(default, alias = "thread_status")]
