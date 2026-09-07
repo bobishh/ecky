@@ -107,3 +107,5 @@
 - [x] 8.5 Run `openspec validate agent-event-notification-stack --strict`.
 - [x] 8.6 Confirm no source-control stage or commit occurred without request.
 - [x] 8.7 Reject targetless MCP session activity and preserve bound thread attribution.
+- [x] 8.8 Keep mascot seed bound to persisted thread traits across model versions; retain model-derived fallback for legacy threads.
+- [x] 8.9 Map draft preview feedback state to matching notification severity and result border tone.

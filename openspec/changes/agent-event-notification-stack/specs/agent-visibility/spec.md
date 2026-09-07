@@ -93,6 +93,13 @@ SHALL NOT render a second bubble or top-right agent toast lane.
 - THEN `VertexGenie` receives no notification or bubble data
 - AND the separate notification center owns card rendering and interaction.
 
+#### Scenario: Mascot identity survives a new model version
+
+- GIVEN an active Ecky thread has persisted `genieTraits`
+- WHEN preview or render replaces its artifact or version identity
+- THEN the mascot keeps the persisted thread seed
+- AND a missing persisted trait uses the model-derived seed only as fallback
+
 #### Scenario: Local queue error appears while agent cards exist
 
 - GIVEN agent activity cards already render beside Ecky
@@ -100,6 +107,18 @@ SHALL NOT render a second bubble or top-right agent toast lane.
 - THEN the queue error renders as another card in the same visual stack
 - AND no legacy speech bubble or second toast lane appears
 - AND the local card receives no fabricated backend cursor or activity record.
+
+#### Scenario: Preview verification result has a matching card tone
+
+- GIVEN an active draft preview reports passed structural verification
+- WHEN its notification card renders
+- THEN the card reports success with a green result border
+- AND active-thread emphasis does not replace that result border.
+
+- GIVEN an active draft preview reports a warning or failure
+- WHEN its notification card renders
+- THEN warning uses a bronze result border
+- AND failure uses a red result border.
 
 #### Scenario: Same text belongs to different events
 

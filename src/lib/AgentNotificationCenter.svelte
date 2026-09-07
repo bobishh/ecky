@@ -301,13 +301,17 @@
         class="agent-card"
         class:agent-card--active={card.threadId === activeThreadId}
         class:agent-card--muted={card.threadId !== activeThreadId}
-        class:agent-card--error={(card.severity === 'error' || card.state === 'failed') && card.state !== 'resolved'}
+        class:agent-card--success={card.severity === 'success'}
+        class:agent-card--warning={card.severity === 'warning'}
+        class:agent-card--error={card.severity === 'error' || (card.state === 'failed' && card.severity !== 'success' && card.severity !== 'warning')}
         class:agent-card--resolved={card.state === 'resolved'}
         tabindex="0"
         role="button"
         aria-label={cardAriaLabel(card)}
         data-event-id={card.eventId}
         data-thread-id={card.threadId ?? undefined}
+        data-state={card.state}
+        data-severity={card.severity}
         onmouseenter={() => setHover(card.eventId)}
         onmouseleave={() => setHover(null)}
         onfocusin={() => setFocus(card.eventId)}
@@ -505,6 +509,7 @@
   }
 
   .agent-card {
+    --agent-card-tone: color-mix(in srgb, var(--primary) 42%, var(--bg-300));
     position: relative;
     pointer-events: auto;
     display: flex;
@@ -512,7 +517,7 @@
     gap: 6px;
     overflow: hidden;
     min-height: 74px;
-    border: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
+    border: 2px solid var(--agent-card-tone);
     background: color-mix(in srgb, var(--bg-100) 90%, transparent);
     color: var(--text);
     padding: 12px 104px 12px 14px;
@@ -526,7 +531,10 @@
   }
 
   .agent-card--active {
-    border-color: color-mix(in srgb, var(--primary) 62%, var(--bg-300));
+    box-shadow:
+      inset 4px 0 0 color-mix(in srgb, var(--primary) 70%, var(--bg-300)),
+      0 0 0 2px color-mix(in srgb, var(--bg-300) 85%, transparent),
+      var(--shadow);
   }
 
   .agent-card--muted {
@@ -535,11 +543,18 @@
   }
 
   .agent-card--error {
-    border-color: color-mix(in srgb, var(--red) 72%, var(--bg-300));
+    --agent-card-tone: color-mix(in srgb, var(--red) 72%, var(--bg-300));
+  }
+
+  .agent-card--warning {
+    --agent-card-tone: color-mix(in srgb, var(--secondary) 72%, var(--bg-300));
+  }
+
+  .agent-card--success {
+    --agent-card-tone: color-mix(in srgb, var(--green) 72%, var(--bg-300));
   }
 
   .agent-card--resolved {
-    border-color: color-mix(in srgb, var(--primary) 50%, var(--bg-300));
     opacity: 0.88;
   }
 
@@ -551,9 +566,9 @@
     width: 12px;
     height: 20px;
     background: color-mix(in srgb, var(--bg-100) 90%, transparent);
-    border-left: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    border-top: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    border-bottom: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
+    border-left: 2px solid var(--agent-card-tone);
+    border-top: 2px solid var(--agent-card-tone);
+    border-bottom: 2px solid var(--agent-card-tone);
   }
 
   .agent-card:focus-visible {

@@ -116,6 +116,7 @@ function manualCodeApplyMockScript() {
         );
       }
       const warningPreview = previewId === 'agent-preview-25';
+      const passedPreview = previewId === 'agent-preview-passed';
       const width = warningPreview ? 25 : 33;
       const modelId = warningPreview ? 'agent-preview-model' : 'compact-model';
       return {
@@ -143,9 +144,9 @@ function manualCodeApplyMockScript() {
           previewViews: [], advisories: [], selectionTargets: [], measurementAnnotations: [], warnings: [],
           enrichmentState: { status: 'none', proposals: [] },
         },
-        draftFeedback: warningPreview ? {
-          status: 'warning',
-          summary: 'Preview requires inspection.',
+        draftFeedback: warningPreview || passedPreview ? {
+          status: warningPreview ? 'warning' : 'passed',
+          summary: warningPreview ? 'Preview requires inspection.' : 'All structural checks passed.',
           items: [],
           source: 'structuralVerification',
         } : null,
@@ -546,6 +547,33 @@ endsolid mock
 }
 
 test.describe('Manual code apply/version coverage', () => {
+  test('Given a passed MCP preview When it becomes active Then Ecky presents success instead of warning', async ({
+    page,
+  }) => {
+    await bootManualCodeFlow(page);
+
+    await page.evaluate(() => {
+      const activeThreadId = window.__manualCodeApplyMock?.latestThreadId;
+      if (!activeThreadId) throw new Error('Expected active generation thread');
+      window.__emitTauriEvent?.('agent-draft-preview-changed', {
+        sessionId: 'agent-session',
+        threadId: activeThreadId,
+        previewId: 'agent-preview-passed',
+        baseMessageId: 'mock-msg-1',
+        modelId: 'compact-model',
+        revision: 26,
+        feedbackStatus: 'passed',
+        feedbackSummary: 'All structural checks passed.',
+      });
+    });
+
+    const card = page.locator('.agent-notification-center .agent-card').filter({ hasText: 'All structural checks passed.' });
+    await expect(card).toBeVisible();
+    await expect(card.locator('.agent-card__severity')).toHaveText('success');
+    await expect(card).toHaveClass(/agent-card--success/);
+    await expect(card).not.toHaveClass(/agent-card--error/);
+  });
+
   test('Given warning MCP preview becomes active When Code opens Then UI shows the rendered params and matching source', async ({
     page,
   }) => {
@@ -566,6 +594,11 @@ test.describe('Manual code apply/version coverage', () => {
       });
     });
 
+    const warningCard = page.locator('.agent-notification-center .agent-card').filter({ hasText: 'Preview requires inspection.' });
+    await expect(warningCard).toBeVisible();
+    await expect(warningCard.locator('.agent-card__severity')).toHaveText('warning');
+    await expect(warningCard).toHaveClass(/agent-card--warning/);
+
     const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
     await expect(widthInput).toHaveValue('25');
 
@@ -574,7 +607,7 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(modal.locator('.cm-content')).toContainText('print("agent draft bracket")');
     await expect(modal.locator('.cm-content')).not.toContainText('print("base bracket")');
     await expect(modal.getByTestId('code-draft-source-notice')).toContainText(
-      'ACTIVE VERSION SOURCE',
+      'RENDERED VIEWPORT SOURCE',
     );
     await expect(modal.getByRole('button', { name: 'OPEN BASE FILE' })).toBeVisible();
   });

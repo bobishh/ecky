@@ -162,6 +162,12 @@ Timer tests use an injected clock.
 copy, dismiss, activity-open, relay-card, and notification lifecycle props from
 its contract. It neither subscribes to nor renders agent notifications.
 
+Mascot identity belongs to persisted `Thread.genieTraits`. An active thread keeps
+the same seed across render, preview, artifact, and version changes. A
+model-derived seed is fallback only when persisted thread traits are absent.
+Settings rerolls key local overrides by stable thread identity, never by model
+artifact identity.
+
 Add one `AgentNotificationCenter.svelte` at the app shell level. It subscribes
 directly to the app-global notification store and renders one overflow-hidden
 stack container with one card per visible notification. `App.svelte` mounts the
@@ -177,9 +183,12 @@ cursor event.
 Each card contains thread label, actor/relay attribution, compact summary,
 age/state marker, copy, dismiss where allowed, and exact-event click callback.
 Oldest card renders above newest card. Cards belonging to the active thread use
-a strong bronze border/accent and full text contrast. Other-thread cards stay
+a separate inner bronze accent and full text contrast. Result border color stays
+semantic: green for success, bronze for warning, red for error. Draft preview
+feedback records `passed` as resolved success, `warning` as resolved warning,
+`failed` as failed error, and `checking` as active info. Other-thread cards stay
 visible with muted border/contrast; they are never filtered. Changing active
-thread only recomputes this styling. Tactical Midnight colors, square borders,
+thread only recomputes its accent. Tactical Midnight colors, square borders,
 `--primary` and `--secondary` accents remain. Stack and all major containers use
 `overflow: hidden`; long card bodies clamp, while activity detail remains full.
 
