@@ -34,6 +34,9 @@ duplicating its contracts.
   `project_folder_apply` so agents and external editors share one flow; all
   version writes go through existing preview/commit handlers (no direct DB
   writes).
+- Watcher eligibility comes from active authoring surfaces: the selected UI
+  thread and live MCP session targets. It never depends on a rendered version,
+  so a bound blank thread can append its first changed source.
 - Literate-document rendering of the macro (prose-like nested document where
   each AST node is an editable block) is recorded here as a second renderer
   over the `macro-ast-map-editor` AstMap projection, gated behind that change's
@@ -72,6 +75,8 @@ duplicating its contracts.
   committed version with a rendered preview in the app.
 - Invalid edits remain visible as versions with failure status, while successful
   versions can be filtered independently.
+- A live MCP session can create a blank bound thread, edit `model.ecky`, and
+  receive the first immutable version through the normal watcher path.
 - All sync states are observable through `project_folder_status` without side
   effects.
 - Existing storage, params panel, and editor behavior unchanged.

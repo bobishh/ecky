@@ -76,6 +76,17 @@ Status is read-only and cheap (one digest + one history lookup).
 - Frontend: none in this change. Later phases surface status in the UI and add
   an export action; the literate renderer is a macro-ast-map-editor phase.
 
+## Watcher eligibility
+
+The watcher consumes a set of active authoring thread identities. The set is
+the union of the selected UI thread and live MCP session targets. Render
+snapshots remain viewport evidence only; they do not decide whether source may
+enter history. This keeps the first append for a blank bound thread on the same
+path as every later append, without a no-version bootstrap branch.
+
+Inactive folders remain ignored. Multiple active authoring surfaces may own
+different threads; the existing apply lock serializes their builds.
+
 ## Literate projection note
 
 The document/"literate programming" editing mode is the AstMap projection

@@ -9712,6 +9712,129 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
 }
 
 #[tokio::test]
+async fn given_active_mcp_session_owns_blank_thread_when_source_changes_then_watcher_creates_first_version(
+) {
+    let conn = crate::db::init_db(&test_db_path("blank-thread-first-watch-version")).expect("db");
+    let mut config = test_config();
+    config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    config.default_geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    let state = AppState::new(config, None, conn);
+    let resolver = TestPathResolver {
+        root: std::env::temp_dir().join(format!("ecky-blank-thread-watch-root-{}", Uuid::new_v4())),
+    };
+    std::fs::create_dir_all(&resolver.root).unwrap();
+    seed_live_session(&state).await;
+
+    let created = handle_thread_create(
+        &state,
+        &resolver,
+        ThreadCreateRequest {
+            identity: AgentIdentityOverride::default(),
+            title: Some("First watched model".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("blank thread");
+    assert!(state.last_snapshot.lock().unwrap().is_none());
+
+    let source_path = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, &created.thread_id)
+            .expect("binding query")
+            .expect("blank thread binding")
+            .source_path
+    };
+    std::fs::write(&source_path, "(model (part body (box 11 10 5)))")
+        .expect("external source edit");
+
+    let mut watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
+    assert!(matches!(
+        &watcher.tick(&state, &resolver, &test_ctx()).await[..],
+        [ProjectFolderWatchEvent::Detected { thread_id, .. }]
+            if thread_id == &created.thread_id
+    ));
+    let applied = watcher.tick(&state, &resolver, &test_ctx()).await;
+    assert!(matches!(
+        &applied[..],
+        [ProjectFolderWatchEvent::Applied { thread_id, .. }]
+            if thread_id == &created.thread_id
+    ));
+
+    let conn = state.db.lock().await;
+    let head = db::get_thread_latest_version(&conn, &created.thread_id)
+        .expect("head query")
+        .expect("first watcher version");
+    assert_eq!(head.status, MessageStatus::Success);
+    assert_eq!(
+        head.output.expect("source output").macro_code,
+        "(model (part body (box 11 10 5)))"
+    );
+}
+
+#[tokio::test]
+async fn given_active_mcp_session_owns_blank_thread_when_source_is_invalid_then_watcher_preserves_error_head(
+) {
+    let conn = crate::db::init_db(&test_db_path("blank-thread-invalid-watch-version")).expect("db");
+    let mut config = test_config();
+    config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    config.default_geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    let state = AppState::new(config, None, conn);
+    let resolver = TestPathResolver {
+        root: std::env::temp_dir().join(format!(
+            "ecky-blank-thread-invalid-watch-root-{}",
+            Uuid::new_v4()
+        )),
+    };
+    std::fs::create_dir_all(&resolver.root).unwrap();
+    seed_live_session(&state).await;
+
+    let created = handle_thread_create(
+        &state,
+        &resolver,
+        ThreadCreateRequest {
+            identity: AgentIdentityOverride::default(),
+            title: Some("Broken first watched model".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("blank thread");
+    let source_path = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, &created.thread_id)
+            .expect("binding query")
+            .expect("blank thread binding")
+            .source_path
+    };
+    let invalid_source = "(model (part body (box 11 10";
+    std::fs::write(&source_path, invalid_source).expect("invalid external source edit");
+
+    let mut watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
+    assert!(matches!(
+        &watcher.tick(&state, &resolver, &test_ctx()).await[..],
+        [ProjectFolderWatchEvent::Detected { thread_id, .. }]
+            if thread_id == &created.thread_id
+    ));
+    let failed = watcher.tick(&state, &resolver, &test_ctx()).await;
+    assert!(matches!(
+        &failed[..],
+        [ProjectFolderWatchEvent::ApplyFailed { thread_id, error, .. }]
+            if thread_id == &created.thread_id && !error.is_empty()
+    ));
+
+    let conn = state.db.lock().await;
+    let head = db::get_thread_latest_version(&conn, &created.thread_id)
+        .expect("head query")
+        .expect("failed first watcher version");
+    assert_eq!(head.status, MessageStatus::Error);
+    assert_eq!(
+        head.output.expect("failed source output").macro_code,
+        invalid_source
+    );
+}
+
+#[tokio::test]
 async fn project_folder_watcher_ignores_edits_for_another_open_thread() {
     let (state, resolver) = seed_target_with_macro(
         "Background Bracket",

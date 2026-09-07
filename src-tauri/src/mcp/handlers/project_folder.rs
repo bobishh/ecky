@@ -909,12 +909,7 @@ impl ProjectFolderWatcher {
             // may interrupt their build, but must never hide or delete them.
             self.recovered_orphans = true;
         }
-        let active_thread_id = state
-            .last_snapshot
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|snapshot| snapshot.thread_id.clone());
+        let active_thread_ids = state.active_authoring_thread_ids().await;
         let root = configured_projects_root(state);
         let mut folders = std::collections::BTreeMap::new();
         if let Ok(slugs) = crate::project_mirror::list_project_slugs(app, root.as_deref()) {
@@ -994,7 +989,7 @@ impl ProjectFolderWatcher {
             let Ok(Some(mut manifest)) = crate::project_mirror::read_manifest(&dir) else {
                 continue;
             };
-            if active_thread_id.as_deref() != Some(manifest.thread_id.as_str()) {
+            if !active_thread_ids.contains(&manifest.thread_id) {
                 self.pending.remove(&slug);
                 state
                     .project_folder_render_activity

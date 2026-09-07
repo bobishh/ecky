@@ -111,3 +111,24 @@ writes the application database directly.
 - WHEN the new version is persisted
 - THEN it is written through the existing commit-preview handler
 - AND no direct database write is performed by the mirror code
+
+### Requirement: Watcher eligibility follows authoring ownership
+
+The watcher SHALL derive eligible threads from active authoring surfaces rather
+than rendered-version state. Selected UI threads and live MCP session targets
+SHALL be eligible. A thread SHALL NOT need an existing version or render
+snapshot before its changed bound source can be appended.
+
+#### Scenario: MCP-owned blank thread creates its first version
+
+- GIVEN a live MCP session owns a bound blank thread with no versions
+- WHEN the session changes that thread's `model.ecky`
+- THEN the watcher appends the exact source as the thread's first immutable version
+- AND normal validation, render, verification, and failure persistence run
+- AND no synthetic seed version or no-version recovery branch is used
+
+#### Scenario: Inactive folder remains isolated
+
+- GIVEN a bound folder belongs to neither the selected UI thread nor a live MCP target
+- WHEN its source differs from the manifest
+- THEN the watcher leaves it pending and does not append a version

@@ -530,6 +530,33 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Threads currently selected by an authoring surface.
+    ///
+    /// UI selection and live MCP ownership are peer projections. Neither
+    /// requires a rendered version, so blank bound threads remain eligible for
+    /// their first watcher append.
+    pub async fn active_authoring_thread_ids(&self) -> HashSet<String> {
+        let ui_thread_id = self
+            .last_snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|snapshot| snapshot.thread_id.clone());
+        let sessions = self.mcp_session_registry.with_sessions().lock().await;
+        ui_thread_id
+            .into_iter()
+            .chain(sessions.values().flat_map(|session| {
+                [
+                    session.bound_thread_id.as_ref(),
+                    session.current_turn_thread_id.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .cloned()
+            }))
+            .collect()
+    }
+
     pub fn new(
         config: Config,
         last_snapshot: Option<LastDesignSnapshot>,

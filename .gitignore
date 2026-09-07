@@ -22,6 +22,8 @@ src-tauri/capabilities/
 test-results/
 playwright-report/
 blob-report/
+*.sqlite-shm
+*.sqlite-wal
 
 # OS / IDE
 .vscode/

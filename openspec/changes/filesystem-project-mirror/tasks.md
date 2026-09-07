@@ -63,6 +63,9 @@ Write scope: `src-tauri/src/mcp/server.rs`, tests.
 - [x] 5.1 File watcher (debounced) emitting status changes to the UI.
   (1s polling loop, two-tick digest settle, per-digest failure memo;
   emits `history-updated` + `project-folder-sync` events.)
+- [x] 5.1a Derive watcher eligibility from active UI and live MCP authoring
+  targets, independent of render/version state. Prove first-version success,
+  failed-source preservation, and inactive-folder isolation.
 - [ ] 5.2 Status chip + export/apply affordances in the app shell: remove
   conflict/force refusal UI; show failed head and success-only filter.
   (Tauri commands `project_folder_export` / `project_folder_status` /
