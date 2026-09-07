@@ -4384,7 +4384,19 @@ import {
           kind: preview.feedback ? 'validation_reported' : 'preview_updated',
           title: preview.feedback ? 'Preview validation reported' : 'Draft preview updated',
           summary: preview.feedback?.summary || 'Draft preview rendered.',
-          severity: preview.feedback?.status === 'failed' ? 'error' : preview.feedback ? 'warning' : 'success',
+          severity: preview.feedback?.status === 'failed'
+            ? 'error'
+            : preview.feedback?.status === 'warning'
+              ? 'warning'
+              : preview.feedback?.status === 'passed'
+                ? 'success'
+                : 'info',
+          state: preview.feedback?.status === 'failed'
+            ? 'failed'
+            : preview.feedback?.status === 'checking'
+              ? 'active'
+              : 'resolved',
+          requiresAttention: preview.feedback?.status === 'failed',
           artifacts: [
             {
               kind: 'preview_file',
@@ -4549,26 +4561,9 @@ import {
     if (isBooting || !$runtimeCapabilities) return null;
     return $runtimeCapabilities.freecad.available ? null : $runtimeCapabilities.freecad.detail;
   });
-  const eckySeedIdentity = $derived.by(() => {
-    const bundle = activeArtifactBundle;
-    const manifest = sessionModelManifest;
-    const authoring = activeAuthoringContext;
-    return [
-      'model',
-      bundle?.modelId ?? manifest?.modelId ?? '',
-      bundle?.contentHash ?? '',
-      `${bundle?.artifactVersion ?? ''}`,
-      activeVersionMessage?.id ?? activeVersionMessage?.output?.versionName ?? '',
-      authoring?.engineKind ?? bundle?.engineKind ?? manifest?.engineKind ?? '',
-      authoring?.sourceLanguage ?? bundle?.sourceLanguage ?? manifest?.sourceLanguage ?? '',
-      authoring?.geometryBackend ?? bundle?.geometryBackend ?? manifest?.geometryBackend ?? '',
-    ]
-      .map((part) => `${part}`.trim().toLowerCase())
-      .filter(Boolean)
-      .join('|') || 'model|ecky|boot';
-  });
+  const eckySeedIdentity = $derived(`thread:${$activeThreadId ?? 'unbound'}`);
   const baseEckyTraits = $derived<GenieTraits>(
-    buildModelGenieTraits({
+    activeThread?.genieTraits ?? buildModelGenieTraits({
       artifactBundle: activeArtifactBundle,
       modelManifest: sessionModelManifest,
       messageId: activeVersionMessage?.id ?? null,

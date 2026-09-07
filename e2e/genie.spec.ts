@@ -14,6 +14,7 @@ async function installGenieMocks(
   page: Page,
   agentState: Record<string, unknown> = {},
   configOverride: Record<string, unknown> = {},
+  history: Record<string, unknown>[] = [],
 ) {
   await page.route(/\/mock\/.*\.stl(?:\?.*)?$/, async (route: Route) => {
     await route.fulfill({
@@ -114,7 +115,7 @@ async function installGenieMocks(
           },
         };
       }
-      if (cmd === 'get_history') return [];
+      if (cmd === 'get_history') return payload.history;
       if (cmd === 'get_last_design') return snapshot;
       if (cmd === 'get_thread_message_version') return null;
       if (cmd === 'get_thread_latest_version') return null;
@@ -165,7 +166,7 @@ async function installGenieMocks(
       }
       return null;
     };
-  }, { mockAgentState: agentState, configOverride });
+  }, { mockAgentState: agentState, configOverride, history });
 }
 
 test.describe('VertexGenie', () => {
@@ -239,6 +240,55 @@ test.describe('VertexGenie', () => {
 
     await expect(mascot).not.toHaveAttribute('data-seed', before ?? '');
     await expect(mascot).toHaveAttribute('data-poke-state', 'calm');
+  });
+
+  test('Given Ecky thread has persisted mascot traits When workbench opens Then mascot uses the thread seed', async ({ page }) => {
+    await installGenieMocks(page, {}, {}, [{
+      id: 'thread-preview-feedback',
+      title: 'Validation Fixture',
+      summary: '',
+      messages: [],
+      updatedAt: 100,
+      genieTraits: {
+        version: 2,
+        seed: 314159,
+        colorHue: 144,
+        vertexCount: 12,
+        radiusBase: 30,
+        stretchY: 0.96,
+        asymmetry: 1,
+        chordSkip: 4,
+        jitterScale: 1,
+        pulseScale: 1,
+        hoverScale: 1,
+        warpScale: 1,
+        glowHueShift: 0,
+        eyeStyle: 'dot',
+        eyeSpacing: 19,
+        eyeSize: 2.7,
+        mouthCurve: 1.6,
+        thinkingBias: 0.6,
+        repairBias: 0.6,
+        renderBias: 0.6,
+        expressiveness: 0.6,
+      },
+    }]);
+
+    await page.goto('/');
+    await expect(page.locator('.genie-stone-button')).toHaveAttribute('data-seed', '314159');
+  });
+
+  test('Given Ecky thread lacks persisted mascot traits When workbench opens Then mascot keeps model fallback', async ({ page }) => {
+    await installGenieMocks(page, {}, {}, [{
+      id: 'thread-preview-feedback',
+      title: 'Validation Fixture',
+      summary: '',
+      messages: [],
+      updatedAt: 100,
+    }]);
+
+    await page.goto('/');
+    await expect(page.locator('.genie-stone-button')).toHaveAttribute('data-seed', '2352809809');
   });
 
   test('Given Ecky is dragged When user rotates the mascot Then it does not count as a poke', async ({ page }) => {
