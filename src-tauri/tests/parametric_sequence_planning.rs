@@ -11,7 +11,6 @@ use std::path::PathBuf;
 struct TempPathResolver {
     root: PathBuf,
 }
-
 impl PathResolver for TempPathResolver {
     fn app_config_dir(&self) -> PathBuf {
         self.root.join("config")
@@ -177,4 +176,3 @@ fn given_original_round_folds_when_cli_native_export_then_writes_artifacts() {
     ));
     let _ = std::fs::remove_dir_all(root);
 }
-
