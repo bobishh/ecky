@@ -4409,7 +4409,7 @@ impl<'a> PartPlanner<'a> {
                 .locals
                 .get(name)
                 .cloned()
-                .or_else(|| match name.as_str() {
+                .or(match name.as_str() {
                     "pi" => Some(OcctArg::Number(std::f64::consts::PI)),
                     "tau" => Some(OcctArg::Number(std::f64::consts::TAU)),
                     _ => None,
