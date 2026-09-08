@@ -44,6 +44,8 @@
   reality.
 - [x] 3.3 Document the demotion direction (native primary) in the change so a
   later removal change has a recorded decision. No removal here.
+- [x] 3.4 Validate native runner argument, keyword, and selector forms through
+  one admission contract with exact command diagnostics.
 
 ## 4. Hygiene (S)
 

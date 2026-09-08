@@ -58,6 +58,28 @@ intersection-of-all semantics.
 - THEN result equals the region common to every operand
 - AND operands are not lowered as `head ∩ union(tail)`
 
+### Requirement: Native runner admission is exact and diagnosable
+
+The system SHALL validate Direct OCCT runner operation, argument, keyword, and
+selector forms through one admission contract before starting the runner.
+
+#### Scenario: Partial clip-box is rejected before execution
+
+- GIVEN a planned `clip-box` provides `:z` but omits required `:x` and `:y`
+- WHEN Direct OCCT admission runs
+- THEN no runner process starts
+- AND the error identifies the part, output slot, `clip-box` operation, and
+  missing `:x` and `:y` keywords
+
+#### Scenario: Unsupported command form remains actionable without fallback
+
+- GIVEN an operation exists in the runner but its planned keyword or selector
+  form is outside the runner ABI
+- WHEN Direct OCCT admission runs
+- THEN the error identifies the exact part, output slot, operation, and form
+- AND removal of generated-C++ fallback does not replace that cause with a
+  generic unsupported-plan error
+
 ### Requirement: Deterministic hybrid reuse
 
 The system SHALL reuse successful immutable hybrid artifacts by content and
@@ -97,4 +119,3 @@ for long-running kernel jobs.
 - THEN cooperative cancellation is requested
 - AND an uncooperative child is terminated
 - AND no partial artifact enters cache
-

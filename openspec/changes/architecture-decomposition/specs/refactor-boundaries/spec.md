@@ -51,6 +51,8 @@ text-backend coverage explicit before any backend removal.
 - GIVEN every CoreOperation is enumerated
 - WHEN backend capabilities are checked
 - THEN native OCCT covers each operation or marks it explicitly unsupported
+- AND native runner argument, keyword, and selector-form constraints are
+  validated before execution with the exact rejected command identified
 - AND build123d and FreeCAD declare only their verified subsets.
 
 #### Scenario: Backend demotion does not remove behavior in this change

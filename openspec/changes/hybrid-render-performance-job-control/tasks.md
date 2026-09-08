@@ -115,6 +115,8 @@
   its mesh islands.
 - [x] Preserve exact BRep/analytic STEP in OCCT and avoid fabricated STEP.
 - [x] Reject hidden kernel fallback.
+- [x] Centralize Direct OCCT plan admission and report exact part, output slot,
+  operation, and ABI constraint before runner execution.
 
 ## 7. Optional decoration simplification
 

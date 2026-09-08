@@ -338,12 +338,7 @@ fn run_plan_step_stl_with_mode_and_bindings(
         return Ok(None);
     };
 
-    let runner_safe_plan = runner_supports_plan(plan);
-    if !runner_safe_plan {
-        return Err(AppError::validation(
-            "Direct OCCT runner does not support plan; generated-C++ fallback was removed.",
-        ));
-    }
+    validate_runner_plan(plan)?;
 
     let Some(serialized_plan) = runner_plan(plan)? else {
         return Err(AppError::validation(
@@ -1131,10 +1126,53 @@ fn runner_plan_id(
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
+#[cfg(test)]
 fn runner_supports_plan(plan: &OcctPlan) -> bool {
-    plan.parts
+    validate_runner_plan(plan).is_ok()
+}
+
+fn validate_runner_plan(plan: &OcctPlan) -> AppResult<()> {
+    for part in &plan.parts {
+        for command in &part.commands {
+            if let Some(reason) = runner_command_unsupported_reason(command) {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT runner rejected part `{}` output `{}` op `{}`: {reason}.",
+                    part.key,
+                    command.output.0,
+                    runner_op_token(command.op),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn runner_command_unsupported_reason(command: &OcctCommand) -> Option<String> {
+    if !runner_args_supported(&command.args)
+        || !runner_keywords_sources_supported(&command.keywords)
+    {
+        return Some("arguments must be fully resolved before serialization".to_string());
+    }
+    if !runner_op_supported(command.op) {
+        return Some("operation is absent from the native runner ABI".to_string());
+    }
+    if command.op == OcctOp::ClipBox {
+        return runner_clip_box_unsupported_reason(command);
+    }
+    if runner_command_supported(command) {
+        return None;
+    }
+    let keywords = command
+        .keywords
         .iter()
-        .all(|part| part.commands.iter().all(runner_command_supported))
+        .map(|keyword| format!("`:{}`", keyword.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(if keywords.is_empty() {
+        "argument form is unsupported by the native runner ABI".to_string()
+    } else {
+        format!("keyword form [{keywords}] is unsupported by the native runner ABI")
+    })
 }
 
 fn runner_command_supported(command: &OcctCommand) -> bool {
@@ -1277,39 +1315,68 @@ fn runner_profile_keywords_supported(command: &OcctCommand) -> bool {
 }
 
 fn runner_clip_box_keywords_supported(command: &OcctCommand) -> bool {
+    runner_clip_box_unsupported_reason(command).is_none()
+}
+
+fn runner_clip_box_unsupported_reason(command: &OcctCommand) -> Option<String> {
     if command.args.len() != 1 || !matches!(command.args[0], OcctArg::Ref(_)) {
-        return false;
+        return Some("clip-box expects one shape reference argument".to_string());
     }
     let mut saw_x = false;
     let mut saw_y = false;
     let mut saw_z = false;
     for keyword in &command.keywords {
+        if keyword.selector_payload().is_some() {
+            return Some(format!(
+                "clip-box keyword `:{}` expects a resolved `(min max)` range",
+                keyword.name
+            ));
+        }
         match keyword.name.as_str() {
             "x" => {
                 saw_x = true;
                 if !runner_range_arg_supported(keyword.source_arg()) {
-                    return false;
+                    return Some(
+                        "clip-box keyword `:x` expects a resolved `(min max)` range".to_string(),
+                    );
                 }
             }
             "y" => {
                 saw_y = true;
                 if !runner_range_arg_supported(keyword.source_arg()) {
-                    return false;
+                    return Some(
+                        "clip-box keyword `:y` expects a resolved `(min max)` range".to_string(),
+                    );
                 }
             }
             "z" => {
                 saw_z = true;
                 if !runner_range_arg_supported(keyword.source_arg()) {
-                    return false;
+                    return Some(
+                        "clip-box keyword `:z` expects a resolved `(min max)` range".to_string(),
+                    );
                 }
             }
-            _ => return false,
-        }
-        if keyword.selector_payload().is_some() {
-            return false;
+            _ => {
+                return Some(format!(
+                    "clip-box keyword `:{}` is unsupported",
+                    keyword.name
+                ));
+            }
         }
     }
-    saw_x && saw_y && saw_z
+    let missing = [("x", saw_x), ("y", saw_y), ("z", saw_z)]
+        .into_iter()
+        .filter_map(|(name, seen)| (!seen).then(|| format!("`:{name}`")))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "clip-box missing required keywords {}",
+            missing.join(", ")
+        ))
+    }
 }
 
 fn runner_clip_plane_keywords_supported(command: &OcctCommand) -> bool {
@@ -5678,6 +5745,14 @@ mod tests {
         )
     }
 
+    fn partial_keyword_clip_box_plan() -> OcctPlan {
+        let mut plan = keyword_clip_box_plan();
+        plan.parts[0].commands[1]
+            .keywords
+            .retain(|keyword| keyword.name == "z");
+        plan
+    }
+
     fn keyword_clip_plane_plan() -> OcctPlan {
         compiled_plan(
             r#"
@@ -7071,7 +7146,71 @@ exit 7
         )
         .expect_err("runner-only path must reject unsupported plans");
 
-        assert!(error.to_string().contains("runner does not support plan"));
+        let message = error.to_string();
+        assert!(
+            message.contains("part `body`"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("output `1`"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("op `rounded-rect`"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("keyword form [`:faces`] is unsupported"),
+            "unexpected error: {message}"
+        );
+        assert!(!output_dir.join(PLAN_FILE_NAME).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_only_path_reports_exact_partial_clip_box_contract_failure() {
+        let root = temp_root("partial-clip-box-admission");
+        let runner = root
+            .join("resources")
+            .join("bin")
+            .join("direct-occt-runner");
+        let output_dir = root.join("bundle");
+        fs::create_dir_all(runner.parent().expect("runner parent")).expect("mkdir");
+        write_executable(
+            &runner,
+            r#"#!/bin/sh
+echo "runner should not run" >&2
+exit 7
+"#,
+        );
+        let resolver = TestResolver { root: root.clone() };
+
+        let error = run_plan_step_stl_with_mode(
+            &partial_keyword_clip_box_plan(),
+            &output_dir,
+            &resolver,
+            true,
+        )
+        .expect_err("partial clip-box must fail admission");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("part `body`"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("output `2`"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("op `clip-box`"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("missing required keywords `:x`, `:y`"),
+            "unexpected error: {message}"
+        );
         assert!(!output_dir.join(PLAN_FILE_NAME).exists());
         let _ = fs::remove_dir_all(root);
     }

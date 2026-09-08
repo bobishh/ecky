@@ -3467,6 +3467,115 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
         return loft.Shape();
     }
 
+    // Bézier paths are currently represented by short linear edges to avoid an
+    // OCCT RTTI boundary defect in this runner. PipeShell treats each sampled
+    // vertex as a transition and can collapse a circular section into a ribbon.
+    // For a fully linear spine, loft circular sections in transported normal
+    // planes instead. This preserves both transverse dimensions in the BRep.
+    std::vector<gp_Pnt> dense_points;
+    bool linear_spine = true;
+    for (BRepTools_WireExplorer explorer(spine); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Line) {
+            linear_spine = false;
+            break;
+        }
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        gp_Pnt first;
+        gp_Pnt last;
+        curve.D0(reversed ? curve.LastParameter() : curve.FirstParameter(), first);
+        curve.D0(reversed ? curve.FirstParameter() : curve.LastParameter(), last);
+        if (dense_points.empty() || dense_points.back().Distance(first) > 1.0e-7) {
+            dense_points.push_back(first);
+        }
+        if (dense_points.empty() || dense_points.back().Distance(last) > 1.0e-7) {
+            dense_points.push_back(last);
+        }
+    }
+    if (linear_spine && dense_points.size() >= 2) {
+        constexpr std::size_t kSectionStride = 2;
+        std::vector<gp_Pnt> section_points;
+        section_points.reserve((dense_points.size() + kSectionStride - 1) / kSectionStride + 1);
+        for (std::size_t index = 0; index < dense_points.size(); index += kSectionStride) {
+            section_points.push_back(dense_points[index]);
+        }
+        if (section_points.back().Distance(dense_points.back()) > 1.0e-7) {
+            section_points.push_back(dense_points.back());
+        }
+
+        BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False, 1.0e-6);
+        gp_Vec previous_x;
+        gp_Vec previous_y;
+        bool have_frame = false;
+        for (std::size_t index = 0; index < section_points.size(); ++index) {
+            gp_Vec tangent;
+            if (index == 0) {
+                tangent = gp_Vec(section_points[0], section_points[1]);
+            } else if (index + 1 == section_points.size()) {
+                tangent = gp_Vec(section_points[index - 1], section_points[index]);
+            } else {
+                tangent = gp_Vec(section_points[index - 1], section_points[index + 1]);
+            }
+            if (tangent.Magnitude() <= 1.0e-12) {
+                throw EvalError("sweep section has a zero tangent");
+            }
+            tangent.Normalize();
+
+            gp_Vec section_x;
+            if (!have_frame) {
+                section_x = gp_Vec(0.0, 0.0, 1.0);
+                section_x.Subtract(tangent.Multiplied(section_x.Dot(tangent)));
+                if (section_x.Magnitude() <= 1.0e-12) {
+                    section_x = gp_Vec(0.0, 1.0, 0.0);
+                    section_x.Subtract(tangent.Multiplied(section_x.Dot(tangent)));
+                }
+            } else {
+                section_x = previous_x;
+                section_x.Subtract(tangent.Multiplied(section_x.Dot(tangent)));
+                if (section_x.Magnitude() <= 1.0e-12) {
+                    section_x = previous_y;
+                    section_x.Subtract(tangent.Multiplied(section_x.Dot(tangent)));
+                }
+            }
+            if (section_x.Magnitude() <= 1.0e-12) {
+                throw EvalError("sweep section frame collapsed");
+            }
+            section_x.Normalize();
+            gp_Vec section_y = tangent.Crossed(section_x);
+            section_y.Normalize();
+            section_x = section_y.Crossed(tangent);
+            section_x.Normalize();
+
+            gp_Trsf placement;
+            const gp_Pnt& point = section_points[index];
+            placement.SetValues(
+                section_x.X(), section_y.X(), tangent.X(), point.X(),
+                section_x.Y(), section_y.Y(), tangent.Y(), point.Y(),
+                section_x.Z(), section_y.Z(), tangent.Z(), point.Z());
+            const TopoDS_Shape section =
+                BRepBuilderAPI_Transform(profile, placement, true).Shape();
+            loft.AddWire(first_wire(section, "sweep section"));
+            previous_x = section_x;
+            previous_y = section_y;
+            have_frame = true;
+        }
+        loft.Build();
+        if (!loft.IsDone() || loft.Shape().IsNull()) {
+            throw EvalError("section loft sweep failed to build");
+        }
+        TopoDS_Shape swept = loft.Shape();
+        if (!shape_has_solid(swept) || !BRepCheck_Analyzer(swept).IsValid()) {
+            ShapeFix_Shape fixer(swept);
+            fixer.Perform();
+            swept = fixer.Shape();
+        }
+        if (!shape_has_solid(swept) || !BRepCheck_Analyzer(swept).IsValid()) {
+            throw EvalError("section loft sweep produced an invalid solid");
+        }
+        return swept;
+    }
+
     BRepOffsetAPI_MakePipeShell pipe(spine);
     // Match build123d's `Solid.sweep`: corrected-Frenet trihedron
     // (is_frenet=False) for generic spines, Transformed transition, and
@@ -3482,8 +3591,8 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
     // helix edge already carries a 3D curve (BRepLib::BuildCurves3d) so Frenet
     // does not hit Standard_NullObject. Generic spines keep corrected-Frenet +
     // Transformed to match build123d's `Solid.sweep`.
-    pipe.SetMode(frenet ? Standard_True : Standard_False);
-    pipe.SetTransitionMode(frenet ? BRepBuilderAPI_RightCorner : BRepBuilderAPI_Transformed);
+    pipe.SetMode(Standard_False);
+    pipe.SetTransitionMode(BRepBuilderAPI_Transformed);
     BRepTools_WireExplorer start_explorer(spine);
     if (!start_explorer.More()) {
         throw EvalError("sweep path has no edge");
@@ -3525,7 +3634,7 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
     );
     const TopoDS_Shape placed_profile =
         BRepBuilderAPI_Transform(profile, start_frame, true).Shape();
-    pipe.Add(first_wire(placed_profile, "sweep"), Standard_False, Standard_False);
+    pipe.Add(first_wire(placed_profile, "sweep"), Standard_False, Standard_True);
     pipe.Build();
     if (!pipe.IsDone()) {
         throw EvalError("sweep failed to build");
@@ -3534,8 +3643,15 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
     // difference between "renders as a tube" and "can be clipped/cut": a helix
     // whose ends will not auto-cap leaves an open shell here, which later
     // BRepAlgoAPI_Common (clip-box) silently reduces to nothing.
-    pipe.MakeSolid();
-    TopoDS_Shape swept = pipe.Shape();
+    TopoDS_Shape swept;
+    try {
+        pipe.MakeSolid();
+        swept = pipe.Shape();
+    } catch (const Standard_Failure&) {
+        // Some OCCT versions throw while marking a face sweep solid even when
+        // the generated closed shell is usable; keep the shell for sewing.
+        swept = pipe.Shape();
+    }
     // Defensive: if the pipe-shell did not cap into a solid, sew + close it so
     // downstream booleans have a solid to operate on.
     if (!shape_has_solid(swept)) {
@@ -3544,15 +3660,45 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
     if (!shape_has_solid(swept)) {
         throw EvalError("sweep did not produce a closed solid");
     }
+    // Collapse duplicate same-domain faces emitted at spline section seams.
+    ShapeUpgrade_UnifySameDomain unify_sweep(
+        swept, Standard_True, Standard_True, Standard_False);
+    unify_sweep.Build();
+    if (!unify_sweep.Shape().IsNull() &&
+        BRepCheck_Analyzer(unify_sweep.Shape()).IsValid()) {
+        swept = unify_sweep.Shape();
+    }
+    // Sew coincident PipeShell seams before downstream tessellation. This is
+    // topology repair on the analytic BRep, not a mesh weld.
+    try {
+        BRepBuilderAPI_Sewing sewer(1.0e-5);
+        sewer.Add(swept);
+        sewer.Perform();
+        const TopoDS_Shape sewn = sewer.SewedShape();
+        for (TopExp_Explorer shell_explorer(sewn, TopAbs_SHELL);
+             shell_explorer.More(); shell_explorer.Next()) {
+            BRepBuilderAPI_MakeSolid maker(TopoDS::Shell(shell_explorer.Current()));
+            if (!maker.IsDone()) continue;
+            const TopoDS_Shape candidate = maker.Solid();
+            if (BRepCheck_Analyzer(candidate).IsValid()) {
+                swept = candidate;
+                break;
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
     // Heal an invalid (self-intersecting / out-of-tolerance) swept solid so it
     // can be intersected and subtracted like any other solid.
     if (!BRepCheck_Analyzer(swept).IsValid()) {
         ShapeFix_Shape fixer(swept);
         fixer.Perform();
         TopoDS_Shape fixed = fixer.Shape();
-        if (shape_has_solid(fixed)) {
+        if (shape_has_solid(fixed) && BRepCheck_Analyzer(fixed).IsValid()) {
             swept = fixed;
         }
+    }
+    if (!BRepCheck_Analyzer(swept).IsValid()) {
+        throw EvalError("sweep produced an invalid solid after healing");
     }
     return swept;
 }
@@ -5052,12 +5198,8 @@ TopoDS_Shape make_bezier_path_wire(const std::vector<std::array<double, 3>>& poi
     // Flatten cubic Bézier segments to a polyline of linear edges.
     // Rationale: constructing `Geom_BezierCurve` in this translation unit
     // duplicates its typeinfo against the OCCT dylib, which corrupts
-    // `dynamic_cast` and C++ catch-by-type dispatch across the whole runner
-    // (gp_VectorWithNullMagnitude thrown by OCCT booleans then escapes every
-    // `catch (const Standard_Failure&)`). Linear edges carry their typeinfo in
-    // the OCCT dylib and are already what every other op here produces, so the
-    // wire-soup arrangement and downstream booleans stay stable. The	n    // exact-curve parity feature must wait for the runner to be built inside
-    // OCCT's visibility scope (see openspec/changes/svg-native-exact-curves).
+    // `dynamic_cast` and C++ catch-by-type dispatch across the whole runner.
+    // The sweep implementation handles this sampled representation explicitly.
     constexpr int SAMPLES = 16;
     BRepBuilderAPI_MakeWire wire_builder;
     gp_Pnt prev;

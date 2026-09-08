@@ -85,7 +85,9 @@ struct BackendCapability { backend, ops: Set<CoreOperation>, role }
 - build123d / freecad: role = export/interop, declared op subset.
 - A completeness test enumerates every `CoreOperation` and asserts native
   covers it (or is explicitly marked unsupported), and that the text backends'
-  declared subsets match reality.
+  declared subsets match reality. Native runner admission additionally owns
+  argument, keyword, and selector-form constraints; operation presence alone
+  never implies every command form is executable.
 
 This does not remove anything. It turns "some ops need three implementations"
 from a silent tax into a visible, tested contract, and records the direction

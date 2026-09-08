@@ -50,6 +50,12 @@ runner receives vertices and triangles directly.
 Kernel admission happens before execution. Failure after Manifold starts is
 reported raw; no hidden OCCT fallback runs.
 
+Direct OCCT runner admission uses one plan validator for operation, argument,
+keyword, and selector-form support. A rejected command identifies its part,
+output slot, operation, and violated ABI constraint before the runner process
+starts. Removal of generated-C++ fallback MUST NOT collapse distinct admission
+failures into a generic unsupported-plan error.
+
 ## Boolean Planning
 
 Union and head-minus-tail difference use one n-ary Boolean builder. OCCT
@@ -129,4 +135,3 @@ explicit acknowledgement.
 5. Complete standalone indexed import and multipart mesh-native export.
 6. Reduce preview aggregate payload.
 7. Add decoration simplification only if benchmarks still justify it.
-
