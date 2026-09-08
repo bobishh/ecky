@@ -1,0 +1,114 @@
+; One round cord: close flat folds and a low integrated four-loop comb.
+(define (straight-controls x0 y0 z0 x1 y1 z1)
+  (list
+    (list (/ (+ (* 2 x0) x1) 3.0) (/ (+ (* 2 y0) y1) 3.0) (/ (+ (* 2 z0) z1) 3.0))
+    (list (/ (+ x0 (* 2 x1)) 3.0) (/ (+ y0 (* 2 y1)) 3.0) (/ (+ z0 (* 2 z1)) 3.0))
+    (list x1 y1 z1)))
+
+(define (quarter-controls cx cy cz ux uy uz vx vy vz)
+  (let* ((k 0.5522847498307936))
+    (list
+      (list (+ cx ux (* k vx)) (+ cy uy (* k vy)) (+ cz uz (* k vz)))
+      (list (+ cx vx (* k ux)) (+ cy vy (* k uy)) (+ cz vz (* k uz)))
+      (list (+ cx vx) (+ cy vy) (+ cz vz)))))
+
+(define (tooth-controls x y start-z end-z shoulder r)
+  (let* ((mid (+ x r)) (end (+ x (* 2 r))))
+    (append
+      (straight-controls x y start-z x y shoulder)
+      (quarter-controls mid y shoulder (- r) 0 0 0 0 r)
+      (quarter-controls mid y shoulder 0 0 r r 0 0)
+      (straight-controls end y shoulder end y end-z))))
+
+(define (valley-controls x y floor r)
+  (let* ((mid (+ x r)) (cz (+ floor r)))
+    (append
+      (quarter-controls mid y cz (- r) 0 0 0 0 (- r))
+      (quarter-controls mid y cz 0 0 (- r) r 0 0))))
+
+(model
+  (meta :title "Fold — compact spoon rest")
+  (verify
+    (tag printable-mesh)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0)))
+  (verify
+    (tag one-piece)
+    (metric bodies (stl connected-component-count))
+    (expect bodies (= 1)))
+  (verify
+    (tag stl-ready)
+    (metric exported (manifest has-model-stl))
+    (expect exported (= true)))
+  (params
+    (number tube-diameter 8mm :label "Cord diameter" :min 6 :max 10 :step 0.5)
+    (number strand-gap 1.5mm :label "Base strand gap" :min 0.5 :max 3 :step 0.5)
+    (number bend-gap 0.4mm :label "Gap inside upright folds" :min 0.2 :max 1 :step 0.1)
+    (number tooth-height 34mm :label "Fold height" :min 30 :max 45 :step 1)
+    (number crown-rise 2mm :label "Middle fold lift" :min 0 :max 6 :step 1)
+    (number handle-gap 12mm :label "Handle slot" :min 8 :max 18 :step 1)
+    (number row-count 10 :label "Base passes" :min 4 :max 14 :step 2)
+    (number tooth-count 4 :label "Upright folds" :min 2 :max 6 :step 1))
+  (part spoon-rest
+    (let* ((mat-pitch (+ tube-diameter strand-gap))
+           (tube-r (/ tube-diameter 2.0))
+           (floor-z tube-r)
+           (turn-r (/ mat-pitch 2.0))
+           (last-row-y (* (- row-count 1) mat-pitch))
+           (top-r (/ (+ tube-diameter bend-gap) 2.0))
+           (valley-r (/ (+ handle-gap tube-diameter) 2.0))
+           (tooth-pitch (+ (* 2 top-r) (* 2 valley-r)))
+           (rack-width (+ (* tooth-count 2 top-r) (* (- tooth-count 1) 2 valley-r)))
+           (rack-left (- (/ rack-width 2.0)))
+           (rack-right (/ rack-width 2.0))
+           (mat-half-span (- rack-right turn-r))
+           (entry-turn-r turn-r)
+           (entry-y (+ last-row-y entry-turn-r))
+           (rise-r turn-r)
+           (root-z (+ floor-z rise-r))
+           (rack-y (+ entry-y rise-r))
+           (valley-z (+ floor-z valley-r))
+           (shoulder-z (- tooth-height tube-r top-r))
+           (floor-controls
+             (flat-map
+               (lambda (i)
+                 (let* ((direction (cos (* i pi)))
+                        (row-y (* i mat-pitch))
+                        (end-x (* direction mat-half-span))
+                        (bend-y (+ row-y turn-r))
+                        (outward-r (* direction turn-r)))
+                   (append
+                     (straight-controls (- end-x) row-y floor-z end-x row-y floor-z)
+                     (quarter-controls end-x bend-y floor-z 0 (- turn-r) 0 outward-r 0 0)
+                     (quarter-controls end-x bend-y floor-z outward-r 0 0 0 turn-r 0))))
+               (range (- row-count 1))))
+           (rising-controls
+             (append
+               (straight-controls mat-half-span last-row-y floor-z (- mat-half-span) last-row-y floor-z)
+               (quarter-controls (- mat-half-span) entry-y floor-z 0 (- entry-turn-r) 0 (- entry-turn-r) 0 0)
+               (quarter-controls rack-left entry-y root-z 0 0 (- rise-r) 0 rise-r 0)))
+           (comb-controls
+             (flat-map
+               (lambda (i)
+                 (let* ((x (+ rack-left (* i tooth-pitch)))
+                        (start-z (if (= i 0) root-z valley-z))
+                        (end-z (if (= i (- tooth-count 1)) root-z valley-z))
+                        (lift (if (= i 0) 0 (if (= i (- tooth-count 1)) 0 crown-rise))))
+                   (append
+                     (tooth-controls x rack-y start-z end-z (+ shoulder-z lift) top-r)
+                     (if (< i (- tooth-count 1))
+                       (valley-controls (+ x (* 2 top-r)) rack-y floor-z valley-r)
+                       (list)))))
+               (range tooth-count)))
+           (ending-controls
+             (quarter-controls (- rack-right rise-r) rack-y root-z rise-r 0 0 0 0 (- rise-r)))
+           (rope-controls
+             (append
+               (list (list (- mat-half-span) 0 floor-z))
+               floor-controls rising-controls comb-controls ending-controls)))
+      (build
+        (shape folded-centerline (bezier-path rope-controls))
+        (shape round-section (make-face (circle tube-r)))
+        (shape folded-rope (sweep round-section folded-centerline))
+        (result folded-rope))))
+  (tag-face print-bed :faces "bottom" spoon-rest))

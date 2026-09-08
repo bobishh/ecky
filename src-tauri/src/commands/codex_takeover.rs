@@ -280,7 +280,7 @@ async fn persist_latest_codex_history(
 async fn resume_binding(
     state: &AppState,
     binding: &CodexTakeoverBinding,
-    force_writer_activation: bool,
+    force_resume_request: bool,
 ) -> AppResult<()> {
     let endpoint = require_mcp_endpoint(state)?;
     let title = project_title(state, &binding.ecky_thread_id).await?;
@@ -295,7 +295,7 @@ async fn resume_binding(
             &endpoint,
             &handoff,
             refresh_developer_instructions,
-            force_writer_activation,
+            force_resume_request,
             configured_codex_model(state).as_deref(),
         )
         .await?;
@@ -323,6 +323,8 @@ pub(crate) async fn activate_bound_writer(state: &AppState, ecky_thread_id: &str
         codex_takeover::get_binding(&conn, ecky_thread_id)?
     };
     if let Some(binding) = binding {
+        // Explicit activation may refresh this client's subscription. It never
+        // claims, interrupts, or releases another client's writer.
         resume_binding(state, &binding, true).await?;
     }
     Ok(())
@@ -417,69 +419,6 @@ async fn ensure_binding(
     Ok(binding)
 }
 
-async fn rotate_binding_after_writer_conflict(
-    state: &AppState,
-    current: &CodexTakeoverBinding,
-) -> AppResult<CodexTakeoverBinding> {
-    let _rotation = CODEX_BINDING_CREATE_LOCK.lock().await;
-    let saved = binding_for(state, &current.ecky_thread_id).await?;
-    if saved.codex_thread_id != current.codex_thread_id {
-        return Ok(saved);
-    }
-
-    let endpoint = require_mcp_endpoint(state)?;
-    let title = project_title(state, &current.ecky_thread_id).await?;
-    let handoff = format!(
-        "{}\n\nPROVIDER THREAD LINEAGE\nPrevious Codex thread id: {}\nReason: another Codex client still owns that writer. Continue from Ecky durable history above; do not require the previous writer.",
-        canonical_handoff(state, &current.ecky_thread_id).await?,
-        current.codex_thread_id,
-    );
-    let thread = state
-        .codex_app_server
-        .start_thread(
-            &current.ecky_thread_id,
-            &title,
-            &current.cwd,
-            &endpoint,
-            &handoff,
-            configured_codex_model(state).as_deref(),
-        )
-        .await?;
-    let rotated = {
-        let conn = state.db.lock().await;
-        codex_takeover::rotate_owned_thread(
-            &conn,
-            current,
-            &thread.id,
-            "active_writer",
-            now_seconds(),
-        )
-    };
-    let rotated = match rotated {
-        Ok(binding) => binding,
-        Err(error) => {
-            let cleanup = state.codex_app_server.delete_thread(&thread.id).await;
-            return match cleanup {
-                Ok(()) => Err(error),
-                Err(cleanup_error) => Err(AppError::with_details(
-                    error.code,
-                    error.message,
-                    format!(
-                        "{}\nReplacement Codex thread cleanup also failed: {}",
-                        error.details.unwrap_or_default(),
-                        codex_takeover::error_text(&cleanup_error),
-                    ),
-                )),
-            };
-        }
-    };
-    state
-        .codex_app_server
-        .name_thread(&rotated.codex_thread_id, &title)
-        .await?;
-    Ok(rotated)
-}
-
 async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) -> AppResult<()> {
     let mut binding = binding.clone();
     loop {
@@ -520,11 +459,6 @@ async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) ->
             ));
         }
         if let Err(error) = resume_binding(state, &binding, false).await {
-            let text = codex_takeover::error_text(&error);
-            if codex_takeover::is_active_writer_error(&text) {
-                binding = rotate_binding_after_writer_conflict(state, &binding).await?;
-                continue;
-            }
             let claimed = {
                 let conn = state.db.lock().await;
                 codex_takeover::claim_queue_item(&conn, &head.id, now_seconds())?
@@ -581,14 +515,7 @@ async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) ->
                 codex_takeover::complete_queue_item(&conn, &head.id)?;
             }
             Err(error) => {
-                let text = codex_takeover::error_text(&error);
                 let conn = state.db.lock().await;
-                if codex_takeover::is_active_writer_error(&text) {
-                    codex_takeover::defer_queue_item(&conn, &head.id, &text, now_seconds())?;
-                    drop(conn);
-                    binding = rotate_binding_after_writer_conflict(state, &binding).await?;
-                    continue;
-                }
                 record_queue_delivery_error(&conn, &head.id, &error)?;
                 return Err(error);
             }
@@ -898,4 +825,180 @@ pub async fn remove_codex_queued_prompt(
         codex_takeover::remove_queue_item(&conn, &ecky_thread_id, &queue_id)?;
     }
     snapshot_for(&state, binding, None).await
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::contracts::{Config, EngineKind, GeometryBackend, McpConfig, SourceLanguage};
+    use crate::services::codex_takeover::{
+        bind_owned_thread, enqueue_prompt, ensure_schema, get_binding, list_provider_messages,
+        list_queue,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    struct EnvRestore {
+        codex_bin: Option<std::ffi::OsString>,
+        requests: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.codex_bin {
+                Some(value) => std::env::set_var("ECKY_CODEX_BIN", value),
+                None => std::env::remove_var("ECKY_CODEX_BIN"),
+            }
+            match &self.requests {
+                Some(value) => std::env::set_var("ECKY_CODEX_TEST_REQUESTS", value),
+                None => std::env::remove_var("ECKY_CODEX_TEST_REQUESTS"),
+            }
+        }
+    }
+
+    fn test_config() -> Config {
+        Config {
+            engines: Vec::new(),
+            selected_engine_id: String::new(),
+            freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
+            freecad_library_roots: Vec::new(),
+            assets: Vec::new(),
+            microwave: None,
+            voice: crate::contracts::VoiceConfig::default(),
+            mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
+            has_seen_onboarding: true,
+            connection_type: Some("provider:codex".to_string()),
+            provider_models: crate::contracts::ProviderModels::default(),
+            default_engine_kind: EngineKind::Freecad,
+            default_geometry_backend: GeometryBackend::Freecad,
+            default_source_language: SourceLanguage::LegacyPython,
+            max_generation_attempts: 3,
+            max_verify_attempts: 0,
+            projects_root: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_writer_conflict_retries_same_binding_without_thread_start() {
+        let test_id = uuid::Uuid::new_v4().to_string();
+        let directory = std::env::temp_dir().join(format!("ecky-codex-dispatch-{test_id}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("fake-codex");
+        let requests = directory.join("requests");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json, os, sys
+resume_count = 0
+requests = open(os.environ["ECKY_CODEX_TEST_REQUESTS"], "a", encoding="utf-8")
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method:
+        requests.write(method + " " + str(message.get("params", {}).get("threadId", "")) + "\n")
+        requests.flush()
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method == "thread/turns/list":
+        print(json.dumps({"id": message["id"], "result": {"data": [{"id": "turn-external", "startedAt": 1, "completedAt": 2, "status": "completed", "items": [{"id": "user-1", "type": "userMessage", "content": [{"type": "text", "text": "Desktop prompt"}]}, {"id": "assistant-1", "type": "agentMessage", "text": "Desktop reply"}]}]}}), flush=True)
+    elif method == "thread/resume":
+        resume_count += 1
+        if resume_count == 1:
+            print(json.dumps({"id": message["id"], "error": {"message": "thread codex-7 already has an active writer", "data": {"owner": "foreign-client"}}}), flush=True)
+        else:
+            print(json.dumps({"id": message["id"], "result": {"thread": {"id": "codex-7", "preview": "Dryer", "cwd": "/tmp/dryer", "createdAt": 1, "updatedAt": 2, "modelProvider": "openai", "status": {"type": "idle"}}, "initialTurnsPage": {"data": []}}}), flush=True)
+    elif method == "thread/name/set":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method == "turn/start":
+        print(json.dumps({"id": message["id"], "result": {"turn": {"id": "turn-2"}}}), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let _env_restore = EnvRestore {
+            codex_bin: std::env::var_os("ECKY_CODEX_BIN"),
+            requests: std::env::var_os("ECKY_CODEX_TEST_REQUESTS"),
+        };
+        std::env::set_var("ECKY_CODEX_BIN", &executable);
+        std::env::set_var("ECKY_CODEX_TEST_REQUESTS", &requests);
+
+        let db_path = directory.join("ecky.sqlite");
+        let conn = crate::db::init_db(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, title, updated_at, genie_traits) VALUES (?1, ?2, ?3, NULL)",
+            rusqlite::params!["ecky-1", "Dryer", 1i64],
+        )
+        .unwrap();
+        ensure_schema(&conn).unwrap();
+        bind_owned_thread(&conn, "ecky-1", "codex-7", "Dryer", "/tmp/dryer", 1).unwrap();
+        let queued = enqueue_prompt(&conn, "ecky-1", "Continue", 2).unwrap();
+        let state = AppState::new(test_config(), None, conn);
+        state.set_mcp_status(true, None);
+
+        let binding = {
+            let conn = state.db.lock().await;
+            get_binding(&conn, "ecky-1").unwrap().unwrap()
+        };
+        let first = dispatch_queue_for(&state, &binding).await.unwrap_err();
+        assert!(codex_takeover::error_text(&first).contains("already has an active writer"));
+        let external = {
+            let conn = state.db.lock().await;
+            list_provider_messages(&conn, "ecky-1", codex_takeover::CODEX_PROVIDER_ID, 30).unwrap()
+        };
+        assert!(external
+            .iter()
+            .any(|message| message.content == "Desktop reply"));
+        assert_eq!(
+            {
+                let conn = state.db.lock().await;
+                get_binding(&conn, "ecky-1")
+                    .unwrap()
+                    .unwrap()
+                    .codex_thread_id
+            },
+            "codex-7"
+        );
+
+        {
+            let conn = state.db.lock().await;
+            let queue = list_queue(&conn, "ecky-1").unwrap();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].id, queued.id);
+            assert_eq!(queue[0].status, "queued");
+            assert!(queue[0].error.as_deref().unwrap().contains("active writer"));
+            conn.execute(
+                "UPDATE agent_prompt_queue SET updated_at = 0 WHERE id = ?1",
+                rusqlite::params![queued.id],
+            )
+            .unwrap();
+        }
+
+        let binding = {
+            let conn = state.db.lock().await;
+            get_binding(&conn, "ecky-1").unwrap().unwrap()
+        };
+        dispatch_queue_for(&state, &binding).await.unwrap();
+        let conn = state.db.lock().await;
+        let queue = list_queue(&conn, "ecky-1").unwrap();
+        assert!(queue.iter().all(|item| item.id != queued.id));
+        drop(conn);
+        let log = std::fs::read_to_string(&requests).unwrap();
+        assert!(
+            !log.contains("thread/start"),
+            "dispatch must not create a task: {log}"
+        );
+        assert!(
+            log.contains("thread/resume codex-7"),
+            "same binding resume: {log}"
+        );
+        assert!(
+            log.contains("turn/start codex-7"),
+            "same binding continuation: {log}"
+        );
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }

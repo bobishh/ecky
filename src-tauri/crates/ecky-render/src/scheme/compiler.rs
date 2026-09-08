@@ -8006,44 +8006,47 @@ fn parse_expanded_flat_map_node(
     local_names: &BTreeSet<String>,
     helper_stack: &BTreeSet<String>,
 ) -> CoreResult<(CoreNodeKind, CoreValueKind)> {
-    if args.len() < 2 {
-        return Err(sequence_arity_error(
-            &format!("`{}`", op_name),
-            "function and at least one list",
-            args.len(),
-            args.first().and_then(expr_source_span),
-        ));
-    }
-    let mut flattened = Vec::new();
-    for items in zip_sequence_sources(collect_sequence_sources(
+    let (mapped_kind, mapped_value_kind) = parse_expanded_map_node(
         op_name,
-        &args[1..],
+        args,
         next_node,
         param_ids,
         helpers,
         node_refs,
         local_names,
         helper_stack,
-    )?) {
-        let result = compile_sequence_callable_application(
-            op_name,
-            &args[0],
-            items,
-            next_node,
-            param_ids,
-            helpers,
-            node_refs,
-            local_names,
-            helper_stack,
-        )?;
-        flattened.extend(extract_list_items(
-            result,
-            &format!("`{}` result", op_name),
-            next_node,
-        )?);
+    )?;
+    let mapped = core_node_with_span(
+        alloc_node_id(next_node),
+        mapped_kind,
+        mapped_value_kind,
+        args.first().and_then(expr_source_span),
+    );
+    if let CoreNodeKind::List(items) = &mapped.kind {
+        if items.iter().all(node_is_static_list) {
+            let mut flattened = Vec::new();
+            for item in items {
+                flattened.extend(extract_list_items(
+                    clone_node_with_fresh_ids(item, next_node),
+                    &format!("`{}` result", op_name),
+                    next_node,
+                )?);
+            }
+            let kind = infer_list_value_kind(&flattened);
+            return Ok((CoreNodeKind::List(flattened), kind));
+        }
     }
-    let value_kind = infer_list_value_kind(&flattened);
-    Ok((CoreNodeKind::List(flattened), value_kind))
+    // Keep symbolic counts and callback results until parameter evaluation.
+    // Core already represents map and variadic apply, so concatenation needs
+    // neither eager default substitution nor a second sequence representation.
+    Ok((
+        CoreNodeKind::Apply {
+            op: CoreOperation::Custom("append".to_string()),
+            args: Vec::new(),
+            list: Box::new(mapped),
+        },
+        CoreValueKind::List,
+    ))
 }
 
 fn collect_sequence_sources(
@@ -11709,7 +11712,7 @@ fn infer_call_value_kind(name: &str, args: &[CoreNode]) -> CoreValueKind {
 fn is_apply_splice_operation(name: &str) -> bool {
     matches!(
         name,
-        "union" | "fuse" | "difference" | "cut" | "intersection" | "common" | "compound"
+        "union" | "fuse" | "difference" | "cut" | "intersection" | "common" | "compound" | "append"
     )
 }
 
@@ -12260,6 +12263,26 @@ fn normalize_keyword(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compiles_parameter_dependent_flat_map_without_eager_evaluation() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"(model (params (number count 3) (number pitch 8mm))
+              (part points (path (flat-map
+                (lambda (i) (list (list (* i pitch) 0 0) (list (* i pitch) pitch 0)))
+                (range count)))))"#,
+        )
+        .expect("dynamic flat-map must retain its parameter references");
+        assert_eq!(program.parameters.len(), 2);
+        let names = program
+            .parameters
+            .iter()
+            .map(|p| (p.id.raw(), p.key.clone()))
+            .collect();
+        let emitted = emit_node(&program.parts[0].root, &names, &BTreeMap::new());
+        assert!(emitted.contains("(range 0 count)"), "{emitted}");
+        assert!(emitted.contains("pitch"), "{emitted}");
+    }
+
     use crate::ecky_core_ir::{
         CoreArrayOp, CoreFrameOp, CoreKeywordValue, CoreNodeKind, CoreOperation, CorePathOp,
         CorePrimitive, CoreReference, CoreSurfaceOp, CoreSymbol,

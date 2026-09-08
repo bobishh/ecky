@@ -1,11 +1,11 @@
 use ecky_cad_lib::contracts::{Attachment, AttachmentKind, CodexDialogueMessage};
 use ecky_cad_lib::services::codex_takeover::{
-    bind_owned_thread, build_provider_handoff_summary, claim_queue_item, defer_queue_item,
-    enqueue_prompt, enqueue_prompt_with_attachments, ensure_schema, fail_queue_item,
-    get_agent_binding_for_provider, get_binding, list_binding_lineage, list_provider_messages,
-    list_queue, mark_queue_sending, pending_queue_bindings, persist_finished_provider_messages,
-    persist_provider_turn_user_input, provider_message_page, recover_retryable_failures,
-    recover_stale_sending, remove_queue_item, retry_queue_item, rotate_owned_thread,
+    bind_owned_thread, build_provider_handoff_summary, claim_queue_item, complete_queue_item,
+    defer_queue_item, enqueue_prompt, enqueue_prompt_with_attachments, ensure_schema,
+    fail_queue_item, get_agent_binding_for_provider, get_binding, list_binding_lineage,
+    list_provider_messages, list_queue, mark_queue_sending, pending_queue_bindings,
+    persist_finished_provider_messages, persist_provider_turn_user_input, provider_message_page,
+    recover_retryable_failures, recover_stale_sending, remove_queue_item, retry_queue_item,
     upsert_agent_binding, AgentThreadBindingRecord,
 };
 use rusqlite::{params, Connection};
@@ -259,7 +259,7 @@ fn provider_handoff_reenters_existing_api_and_mcp_context_assembler() {
 }
 
 #[test]
-fn finished_codex_turns_are_durable_across_binding_rotation() {
+fn writer_conflict_retry_preserves_binding_and_finished_history() {
     let conn = connection();
     let first = bind_owned_thread(
         &conn,
@@ -307,9 +307,24 @@ fn finished_codex_turns_are_durable_across_binding_rotation() {
     )
     .unwrap();
 
-    let rotated = rotate_owned_thread(&conn, &first, "codex-new", "active_writer", 200).unwrap();
+    let queued = enqueue_prompt(&conn, "ecky-1", "Continue after lock", 200).unwrap();
+    mark_queue_sending(&conn, &queued.id, 201).unwrap();
+    defer_queue_item(
+        &conn,
+        &queued.id,
+        "thread codex-old already has an active writer",
+        204,
+    )
+    .unwrap();
 
-    assert_eq!(rotated.codex_thread_id, "codex-new");
+    let binding = get_binding(&conn, "ecky-1").unwrap().unwrap();
+    assert_eq!(binding.codex_thread_id, "codex-old");
+    assert_eq!(
+        list_binding_lineage(&conn, "ecky-1", "codex")
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         list_provider_messages(&conn, "ecky-1", "codex", 30)
             .unwrap()
@@ -318,16 +333,27 @@ fn finished_codex_turns_are_durable_across_binding_rotation() {
             .collect::<Vec<_>>(),
         vec!["Keep the 3 mm walls.", "Walls retained."]
     );
-    let lineage = list_binding_lineage(&conn, "ecky-1", "codex").unwrap();
+    assert!(pending_queue_bindings(&conn, 203).unwrap().is_empty());
+    assert_eq!(pending_queue_bindings(&conn, 204).unwrap(), vec![first]);
+    assert!(claim_queue_item(&conn, &queued.id, 205).unwrap());
+    complete_queue_item(&conn, &queued.id).unwrap();
+    persist_provider_turn_user_input(
+        &conn,
+        "ecky-1",
+        "codex",
+        "codex-old",
+        "turn-2",
+        "Continue after lock",
+        &[],
+        206,
+    )
+    .unwrap();
     assert_eq!(
-        lineage
-            .iter()
-            .map(|entry| (
-                entry.external_thread_id.as_str(),
-                entry.superseded_reason.as_deref()
-            ))
-            .collect::<Vec<_>>(),
-        vec![("codex-old", Some("active_writer")), ("codex-new", None)]
+        get_binding(&conn, "ecky-1")
+            .unwrap()
+            .unwrap()
+            .codex_thread_id,
+        "codex-old"
     );
 }
 

@@ -1799,6 +1799,20 @@ fn verify_apply(
     let name = operation_name(op);
     verify_expected_node(&name, args.len(), "list", ExpectedKind::List, list, env)?;
     match op {
+        CoreOperation::Custom(name) if name == "append" => {
+            for (index, arg) in args.iter().enumerate() {
+                verify_expected_node(name, index, "list", ExpectedKind::List, arg, env)?;
+            }
+            verify_expected_list_items(
+                name,
+                args.len(),
+                "list item",
+                ExpectedKind::List,
+                list,
+                env,
+            )?;
+            verify_result(name, ExpectedKind::List, node, env)
+        }
         CoreOperation::Boolean(_) | CoreOperation::Meta(CoreMetaOp::Group) => {
             for (index, arg) in args.iter().enumerate() {
                 verify_expected_node(&name, index, "shape", ExpectedKind::Shape, arg, env)?;

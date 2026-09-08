@@ -1579,7 +1579,7 @@ Do not edit rows by hand; run `npm run generate:prompt`.
 | `atan2` | numericHelper | `(atan2 y x)` | freecad, legacy-build123d, mesh/native | Two-argument arctangent returning radians. | `(atan2 y x)` |
 | `attractor-field` | wallPatternMode | `attractor-field` | mesh/native | Seeded chaotic attractor-style field. | `(wall-pattern (:mode attractor-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
 | `begin` | modelWrapper | `(begin clause...)` | freecad, legacy-build123d, mesh/native | Groups multiple model clauses where a single clause position is expected. | `(model (begin (params ...) (part body ...)))` |
-| `bezier-path` | cadOp | `(bezier-path points)` | freecad, legacy-build123d, mesh/native | Builds a Bezier path from control points. | `(bezier-path points)` |
+| `bezier-path` | cadOp | `(bezier-path points)` | freecad, legacy-build123d, mesh/native | Builds a cubic Bézier path from control points; native lowering uses a fixed 16 samples per cubic, so the path is an approximation. | `(bezier-path ((0 0 0) (8 0 0) (8 8 12) (16 8 12)))` |
 | `box` | cadOp | `(box x y z :align '(x y z))` | freecad, legacy-build123d, mesh/native | Creates an axis-aligned rectangular solid. | `(box 40 20 10 :align '(min center min))` |
 | `bspline` | cadOp | `(bspline points :closed #t\|#f)` | freecad, legacy-build123d, mesh/native | Builds a 2D B-spline sketch from control points. | `(bspline points :closed #t)` |
 | `build` | cadOp | `(build expr...)` | freecad, legacy-build123d, mesh/native | Build container for grouped construction forms. | `(build (shape body) (result body))` |
@@ -1588,8 +1588,8 @@ Do not edit rows by hand; run `npm run generate:prompt`.
 | `chamfer` | cadOp | `(chamfer distance [:edges selector] solid)` | freecad, legacy-build123d, mesh/native | Bevels edges of a solid. \`:edges\` accepts coarse selectors like \`bottom\`, \`front\`, \`axis-z\`, \`y-max\`, or \`x-min+z-max\`; exact backends also accept \`target-id:<id>\` and \`target-ids:<id>\|<id>\`. | `(chamfer 1 :edges "bottom" body)` |
 | `circle` | cadOp | `(circle radius segments)` | freecad, legacy-build123d, mesh/native | Creates a circular sketch/profile. | `(circle 20 64)` |
 | `clamp` | numericHelper | `(clamp value min max)` | freecad, legacy-build123d, mesh/native | Constrains value to a numeric interval. | `(clamp depth 0 3)` |
-| `clip-box` | cadOp | `(clip-box geometry :x '(min max) :y '(min max) :z '(min max))` | freecad, legacy-build123d, mesh/native | Clips geometry by an axis-aligned box. | `(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))` |
-| `clip-plane` | cadOp | `(clip-plane geometry :origin '(x y z) :normal '(x y z) [:keep positive\|negative])` | freecad, legacy-build123d, mesh/native | Clips geometry against an oriented plane. | `(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep positive)` |
+| `clip-box` | cadOp | `(clip-box geometry :x '(min max) :y '(min max) :z '(min max))` | freecad, legacy-build123d, mesh/native | Clips geometry by an axis-aligned box; all three ranges are required. | `(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))` |
+| `clip-plane` | cadOp | `(clip-plane geometry :origin '(x y z) :normal '(x y z) [:keep "positive"\|"negative"])` | freecad, legacy-build123d, mesh/native | Clips geometry against an oriented plane. \`:keep\` is text; quote it to avoid unresolved local symbols. | `(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep "positive")` |
 | `common` | cadOp | `(common solid...)` | freecad, legacy-build123d, mesh/native | Keeps shared volume of solids. | `(common a b)` |
 | `compound` | cadOp | `(compound geometry...)` | freecad, legacy-build123d, mesh/native | Groups geometry without fusing into one solid. | `(compound body bolts)` |
 | `concat-map` | expressionForm | `(concat-map fn list)` | freecad, legacy-build123d, mesh/native | Maps each item to a list and concatenates the results. | `(flat-map (lambda (i) (list i (- i))) (range 3))` |

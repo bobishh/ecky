@@ -593,12 +593,12 @@ fn contains_unquoted_lisp_form_head(source: &str, heads: &[&str]) -> bool {
 }
 
 pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
-    // Strip ;; comment lines so a header like
-    //   ;; Disable for build123d/FreeCAD fallback.
+    // Strip Scheme comment lines so a header like
+    //   ; Disable for build123d/FreeCAD fallback.
     // does not cause an Ecky (.ecky) source to be misclassified as Build123d.
     let stripped: String = macro_code
         .lines()
-        .filter(|line| !line.trim_start().starts_with(";;"))
+        .filter(|line| !line.trim_start().starts_with(';'))
         .collect::<Vec<_>>()
         .join("\n");
     let trimmed = stripped.trim();

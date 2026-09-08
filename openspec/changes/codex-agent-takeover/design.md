@@ -28,7 +28,9 @@ as third connection type and `CODEX` as its current provider choice.
 
 `agent_thread_bindings` remains keyed by Ecky thread id and uniquely constrains
 `(provider, external_thread_id)`. It stores the current provider execution cursor,
-not conversation authority. `agent_thread_binding_lineage` retains superseded cursors.
+not conversation authority. `agent_thread_binding_lineage` records historical cursors
+only when a supported provider lifecycle explicitly replaces one; an active-writer
+conflict never changes this binding.
 First provider-mode submit executes:
 
 1. read existing provider binding;
@@ -48,10 +50,13 @@ read-only background `thread/turns/list` backfill may reconcile finished turns i
 Ecky without delaying Dialogue.
 
 If delivery finds that another Codex client still owns the stored writer, Ecky
-backfills readable finished turns, starts a replacement Codex thread with canonical
-handoff plus the previous external id, atomically rotates the current binding, marks
-the old lineage row `active_writer`, and dispatches the same queued prompt. Ecky does
-not unsubscribe, kill, or indefinitely retry the foreign writer.
+backfills readable finished turns, retains the current binding and external id, and
+keeps the same queued prompt at the FIFO head with the raw provider error. The
+supervisor retries that head on the existing delayed schedule after the writer may
+have become available. Ecky does not create a replacement thread, unsubscribe, kill,
+or retry in a tight loop. The installed Codex 0.153.4 app-server protocol exposes no
+writer release or claim-transfer method; `thread/unsubscribe` only changes this
+client's subscription and is not a takeover path.
 
 ## Prompt Bootstrap and Cross-Mode Handoff
 
@@ -60,14 +65,14 @@ At thread/start and each process-generation resume, developer instructions conta
 - Ecky identity and exact Ecky thread id/title;
 - canonical project-mirror cwd, `model.ecky`/manifest paths, and live
   `ecky_provider_mcp` endpoint;
-- inspect→validate→preview→commit workflow;
+- inspect→validate→preview→verify workflow;
 - canonical Ecky `THREAD SUMMARY`, `RECENT DIALOGUE`, design digest, and artifact
   digest from the existing context assembler.
 
 After successful read-only backfill, Ecky stores normalized finished Codex
 user/assistant messages plus user attachment metadata and builds a bounded handoff from canonical Ecky messages
 plus recent provider dialogue. API and MCP already consume that canonical summary.
-Provider compaction or cursor replacement cannot erase Ecky's finished transcript.
+Provider compaction or a supported cursor replacement cannot erase Ecky's finished transcript.
 The same transcript transaction advances the owning Ecky thread `updated_at`.
 Its first non-empty provider user message replaces only the default
 `Untitled design` title with the first 80 characters of normalized prompt text.
@@ -154,7 +159,8 @@ square borders.
   a provider reconciliation problem into a thread-loading failure.
 - Compaction never clears active turn or dispatches queue.
 - Mode switching never deletes durable transcript or binding lineage. Returning to
-  Provider displays Ecky history immediately. Delivery resumes the current cursor or
-  rotates it when another client owns the writer.
+  Provider displays Ecky history immediately. Delivery resumes the current cursor;
+  another client's writer lock leaves the cursor and FIFO prompt intact for delayed
+  retry.
 - Codex desktop presence or task visibility never becomes a delivery prerequisite.
 - Config persistence errors are global `ECKY APP` notifications, never thread bubbles.

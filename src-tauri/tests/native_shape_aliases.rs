@@ -50,7 +50,7 @@ fn given_chained_aliases_when_native_planning_then_matches_direct_use() {
                     .iter()
                     .map(|command| {
                         (
-                            command.op.clone(),
+                            command.op,
                             command
                                 .args
                                 .iter()

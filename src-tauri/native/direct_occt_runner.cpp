@@ -3419,6 +3419,39 @@ TopoDS_Shape solidify_swept_shell(const TopoDS_Shape& shape) {
     return maker.Solid();
 }
 
+bool sweep_points_are_collinear(const gp_Pnt& first, const gp_Pnt& middle,
+                                const gp_Pnt& last) {
+    const gp_Vec first_to_middle(first, middle);
+    const gp_Vec middle_to_last(middle, last);
+    const double first_length = first_to_middle.Magnitude();
+    const double last_length = middle_to_last.Magnitude();
+    if (first_length <= 1.0e-9 || last_length <= 1.0e-9) {
+        return true;
+    }
+    if (first_to_middle.Dot(middle_to_last) < 0.0) {
+        return false;
+    }
+    const double cross_length = first_to_middle.Crossed(middle_to_last).Magnitude();
+    return cross_length <= 1.0e-8 * std::max(1.0, first_length * last_length);
+}
+
+std::vector<gp_Pnt> simplify_linear_sweep_points(const std::vector<gp_Pnt>& points) {
+    std::vector<gp_Pnt> simplified;
+    simplified.reserve(points.size());
+    for (const gp_Pnt& point : points) {
+        simplified.push_back(point);
+        while (simplified.size() >= 3) {
+            const std::size_t last = simplified.size() - 1;
+            if (!sweep_points_are_collinear(
+                    simplified[last - 2], simplified[last - 1], simplified[last])) {
+                break;
+            }
+            simplified.erase(simplified.end() - 2);
+        }
+    }
+    return simplified;
+}
+
 TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, bool frenet) {
     const TopoDS_Wire spine = first_wire(path, "sweep");
     if (frenet) {
@@ -3494,17 +3527,21 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
         }
     }
     if (linear_spine && dense_points.size() >= 2) {
-        constexpr std::size_t kSectionStride = 2;
-        std::vector<gp_Pnt> section_points;
-        section_points.reserve((dense_points.size() + kSectionStride - 1) / kSectionStride + 1);
-        for (std::size_t index = 0; index < dense_points.size(); index += kSectionStride) {
-            section_points.push_back(dense_points[index]);
-        }
-        if (section_points.back().Distance(dense_points.back()) > 1.0e-7) {
-            section_points.push_back(dense_points.back());
+        // Every direction-changing vertex is authored geometry. Remove only
+        // numerically collinear interior samples, which preserves the exact
+        // centerline while collapsing straight Bézier samples. The 1024-point
+        // bound covers authored multi-row, multi-loop noodle workloads at 16
+        // samples per cubic, while keeping loft cost deterministic.
+        const std::vector<gp_Pnt> section_points =
+            simplify_linear_sweep_points(dense_points);
+        constexpr std::size_t kMaxSweepSectionCount = 1024;
+        if (section_points.size() > kMaxSweepSectionCount) {
+            throw EvalError("sweep path has too many linear sections (maximum 1024)");
         }
 
-        BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False, 1.0e-6);
+        // Ruled sections keep authored polyline corners as separate straight
+        // spans. A smooth BSpline loft overshoots sharply changing tangents.
+        BRepOffsetAPI_ThruSections loft(Standard_True, Standard_True, 1.0e-6);
         gp_Vec previous_x;
         gp_Vec previous_y;
         bool have_frame = false;

@@ -6,6 +6,7 @@
 #include <string>
 
 #include <BOPAlgo_PaveFiller.hxx>
+#include <BRepAlgoAPI_Section.hxx>
 
 #define main direct_occt_runner_program_main
 #include "direct_occt_runner.cpp"
@@ -127,6 +128,112 @@ std::array<double, 6> bounds(const std::vector<ShapeRecord>& parts) {
     double xmin, ymin, zmin, xmax, ymax, zmax;
     box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
     return {xmin, ymin, zmin, xmax, ymax, zmax};
+}
+
+std::array<double, 6> shape_bounds(const TopoDS_Shape& shape) {
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    double xmin, ymin, zmin, xmax, ymax, zmax;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    return {xmin, ymin, zmin, xmax, ymax, zmax};
+}
+
+double shape_volume(const TopoDS_Shape& shape) {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+
+std::vector<double> circular_edge_radii(const TopoDS_Shape& shape) {
+    std::vector<double> radii;
+    for (TopExp_Explorer edges(shape, TopAbs_EDGE); edges.More(); edges.Next()) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+        if (curve.GetType() == GeomAbs_Circle) radii.push_back(curve.Circle().Radius());
+    }
+    return radii;
+}
+
+std::array<double, 6> middle_curved_section_bounds(const TopoDS_Shape& swept) {
+    // The cubic test path crosses x=10 at its midpoint, with tangent parallel
+    // to x. Intersecting with this plane measures the interior section rather
+    // than relying on the two circular cap edges.
+    const gp_Pln middle_plane(gp_Pnt(10.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+    const TopoDS_Shape plane_face = BRepBuilderAPI_MakeFace(
+        middle_plane, -100.0, 100.0, -100.0, 100.0).Shape();
+    BRepAlgoAPI_Section section(swept, plane_face, Standard_False);
+    section.Build();
+    assert(section.IsDone());
+    return shape_bounds(section.Shape());
+}
+
+void given_linear_sweep_when_path_has_authored_corners_then_all_corners_shape_sweep() {
+    const TopoDS_Shape profile = make_circle_face(2.0);
+    const TopoDS_Shape path = make_path_wire({
+        {0.0, 0.0, 0.0}, {20.0, 0.0, 0.0}, {20.0, 20.0, 0.0},
+    });
+    const TopoDS_Shape swept = sweep_shape(profile, path, false);
+    assert(shape_has_solid(swept));
+    assert(BRepCheck_Analyzer(swept).IsValid());
+
+    const auto box = shape_bounds(swept);
+    const double volume = shape_volume(swept);
+    assert(volume > 380.0);
+    assert(box[3] >= 22.5);
+}
+
+void given_multi_point_linear_sweep_when_path_has_corners_then_volume_tracks_full_path() {
+    const TopoDS_Shape profile = make_circle_face(2.0);
+    const TopoDS_Shape path = make_path_wire({
+        {0.0, 0.0, 0.0}, {10.0, 0.0, 0.0}, {10.0, 10.0, 0.0},
+        {20.0, 10.0, 0.0}, {20.0, 20.0, 0.0},
+    });
+    const TopoDS_Shape swept = sweep_shape(profile, path, false);
+    assert(shape_has_solid(swept));
+    assert(BRepCheck_Analyzer(swept).IsValid());
+    const auto box = shape_bounds(swept);
+    const double volume = shape_volume(swept);
+    assert(volume > 380.0);
+    assert(box[3] > 20.0 && box[4] >= 19.9);
+}
+
+void given_curved_sampled_sweep_when_profile_is_round_then_section_keeps_nine_by_nine_span() {
+    const TopoDS_Shape profile = make_circle_face(4.5);
+    const TopoDS_Shape path = make_bezier_path_wire({
+        {0.0, 0.0, 0.0}, {0.0, 20.0, 0.0}, {20.0, 20.0, 0.0}, {20.0, 0.0, 0.0},
+    });
+    const TopoDS_Shape swept = sweep_shape(profile, path, false);
+    assert(shape_has_solid(swept));
+    assert(BRepCheck_Analyzer(swept).IsValid());
+    const auto box = shape_bounds(swept);
+    assert(box[3] - box[0] > 25.0);
+    assert(box[4] - box[1] > 19.0);
+    const auto middle_box = middle_curved_section_bounds(swept);
+    assert(middle_box[4] - middle_box[1] > 8.5);
+    assert(middle_box[4] - middle_box[1] < 9.5);
+    assert(middle_box[5] - middle_box[2] > 8.5);
+    assert(middle_box[5] - middle_box[2] < 9.5);
+    const auto radii = circular_edge_radii(swept);
+    assert(radii.size() >= 2);
+    assert(std::all_of(radii.begin(), radii.end(), [](double radius) {
+        return std::abs(radius - 4.5) < 1.0e-6;
+    }));
+    assert(shape_volume(swept) > 1500.0);
+}
+
+void given_oversized_linear_sweep_when_sections_exceed_bound_then_it_fails_before_loft() {
+    std::vector<std::array<double, 3>> points;
+    points.reserve(1025);
+    for (int index = 0; index < 1025; ++index) {
+        const double angle = static_cast<double>(index) * 0.001;
+        points.push_back({100.0 * std::cos(angle), 100.0 * std::sin(angle), 0.0});
+    }
+    bool failed = false;
+    try {
+        (void)sweep_shape(make_circle_face(1.0), make_path_wire(points), false);
+    } catch (const EvalError& error) {
+        failed = std::string(error.what()).find("maximum 1024") != std::string::npos;
+    }
+    assert(failed);
 }
 
 std::string fingerprint(const TopoDS_Shape& shape) {
@@ -852,6 +959,10 @@ void given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive() {
 }  // namespace
 
 int main() {
+    given_linear_sweep_when_path_has_authored_corners_then_all_corners_shape_sweep();
+    given_multi_point_linear_sweep_when_path_has_corners_then_volume_tracks_full_path();
+    given_curved_sampled_sweep_when_profile_is_round_then_section_keeps_nine_by_nine_span();
+    given_oversized_linear_sweep_when_sections_exceed_bound_then_it_fails_before_loft();
     given_independent_ready_nodes_when_scheduled_then_order_release_budget_and_parity_hold();
     given_resolved_runner_plan_when_identity_is_built_then_only_semantics_and_native_runtime_enter();
     given_bad_ready_node_when_evaluated_then_failure_stops_publication();

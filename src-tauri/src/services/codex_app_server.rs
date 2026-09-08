@@ -722,7 +722,7 @@ impl CodexAppServerSupervisor {
         mcp_endpoint: &str,
         handoff_context: &str,
         refresh_developer_instructions: bool,
-        force_writer_activation: bool,
+        force_resume_request: bool,
         model: Option<&str>,
     ) -> AppResult<()> {
         let _resume = self.inner.resume.lock().await;
@@ -738,7 +738,7 @@ impl CodexAppServerSupervisor {
                 state.resumed_threads.get(&binding.codex_thread_id).copied(),
                 generation,
                 refresh_developer_instructions,
-                force_writer_activation,
+                force_resume_request,
             ) {
                 return Ok(());
             }
@@ -988,10 +988,10 @@ fn should_skip_resume(
     resumed_generation: Option<u64>,
     current_generation: u64,
     refresh_developer_instructions: bool,
-    force_writer_activation: bool,
+    force_resume_request: bool,
 ) -> bool {
     !refresh_developer_instructions
-        && !force_writer_activation
+        && !force_resume_request
         && resumed_generation == Some(current_generation)
 }
 
@@ -1907,13 +1907,13 @@ mod tests {
 
         assert_eq!(start_instructions, resume_instructions);
         assert!(start_instructions.contains(crate::mcp::authoring::authoring_card_text()));
-        assert!(start_instructions.contains("`thread_borrow` with threadId `ecky-thread`"));
+        assert!(start_instructions.contains("Do not call `thread_borrow` for this thread"));
         assert!(start_instructions.contains("edit that exact file"));
         assert!(!start_instructions.contains("preview -> commit"));
     }
 
     #[test]
-    fn bootstrap_refresh_or_open_activation_forces_resume_in_same_process_generation() {
+    fn bootstrap_refresh_or_new_process_generation_resumes_once() {
         assert!(should_skip_resume(Some(9), 9, false, false));
         assert!(!should_skip_resume(Some(9), 9, true, false));
         assert!(!should_skip_resume(Some(9), 9, false, true));

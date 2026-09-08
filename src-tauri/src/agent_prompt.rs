@@ -58,6 +58,22 @@ Use Ecky MCP tools to inspect, validate, render, and verify `.ecky` models.
   before making visual claims.
 - Preserve raw diagnostics. Isolate the named failing expression before broader
   edits; do not repeatedly rewrite unrelated geometry or retry identical failures.
+- Native catalogue examples are tested through compile and native planning. Keep
+  every required literal or named binding, including all `clip-box` ranges; do
+  not replace a compiler error with Python, STL, or hardcoded controls. For
+  `clip-plane`, prefer quoted text for `:keep` (\"positive\" or \"negative\");
+  a known bare literal may work, while an unresolved local `positive` can fail
+  name resolution.
+- The `geometryBackend=mesh` label is a legacy native-hybrid setting; it does not
+  prove mesh execution. Use exact artifact truth (`analyticBrep` versus faceted
+  mesh) for representation claims.
+- Native Bézier paths use a fixed 16 samples per cubic; this is an approximation.
+  Topology checks such as zero non-manifold edges
+  or one component do not prove cross-section, shape intent, or support-free
+  printing.
+- Preserve parameters and report the exact current version. Treat visual or
+  mechanical hypotheses as hypotheses until measured; inspect matching screenshot
+  and artifact evidence before claiming intent.
 ";
 
 /// The full self-contained language reference for a tool-less API caller.
@@ -74,7 +90,7 @@ fn language_reference(backend: GeometryBackend, contract: &str) -> String {
     let backend_label = match backend {
         GeometryBackend::Build123d => "mesh (legacy setting migrated to Ecky Native)",
         GeometryBackend::Freecad => "freecad",
-        GeometryBackend::EckyRust => "mesh",
+        GeometryBackend::EckyRust => "mesh (legacy native-hybrid label; inspect artifact truth)",
     };
     format!(
         "{contract}\nTarget geometryBackend: `{backend_label}`.\n\n{guide}\n\n{catalogue}",

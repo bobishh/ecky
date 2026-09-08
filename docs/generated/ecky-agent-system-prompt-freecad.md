@@ -71,6 +71,9 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Use model-level `let*` for shared derived dimensions, part-local `let*` for
   part-only math, and a top-level pure `define` for reusable functions. Never
   repeat fit math across parts.
+- For local spacing edits, preserve existing topology and design intent. Move
+  named spacing controls; do not fill loops or replace bent round profiles
+  with solid teeth as a workaround.
 
 ## Components
 
@@ -149,6 +152,9 @@ ranges or `latest`.
 - Name every fit-critical dimension or relation: wall thickness, clearance, bore radius, pitch, seat height, and mating axis. Do not hide physical fit in anonymous offsets.
 - Prefer selectors based on physical meaning or stable tags. Boolean operations rebuild topology, so raw face or edge indices are not stable design intent.
 - Backend support is authoritative. If a diagnostic rejects an operation on the active backend, change the operation or backend; do not retry unchanged source.
+- `clip-box` requires all three bounds (`:x`, `:y`, and `:z`). Missing bounds are malformed input, not proof of an unsupported operation. For `clip-plane`, use `:keep "positive"` or `:keep "negative"` so selector text cannot become an unresolved local.
+- Native Bézier lowering uses a fixed 16 samples per cubic. This is an approximation, even when the result exports to STEP.
+- `geometryBackend=mesh` is a legacy native-hybrid label, not proof of mesh execution. Inspect artifact truth (`analyticBrep` or faceted mesh) before describing representation.
 - STEP-backed live components require locked analytic provenance and native
   Direct OCCT import. Never route them through FreeCAD, STL, `solidify`, hidden
   repair, or implicit fusion.
@@ -177,7 +183,7 @@ Write top-level `verify` clauses from measurable requirements. Keep them during 
   (part body (box 30 20 10)))
 ```
 
-Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. Zero non-manifold edges and one connected component establish topology only; they do not prove cross-section, shape intent, or support-free printing. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
 
 Use `bed-contact-area-ratio`, `bed-contact-x-span-ratio`, and
 `bed-contact-y-span-ratio` for print-bed grounding. Optional part id scopes the
@@ -208,7 +214,7 @@ of geometry or printability.
 
 ## Operating contract
 
-Output source and required response fields only. Do not claim compilation, rendering, verification, STEP availability, or printability before runtime evidence exists. When the compiler returns a diagnostic, fix the named cause and emit a complete corrected program.
+Output source and required response fields only. Preserve authored parameters. Inspect matching version, artifact, and viewport evidence before claiming visual or mechanical intent; unmeasured explanations remain hypotheses. Never replace compiler errors with Python, STL, or hardcoded controls. Do not claim compilation, rendering, verification, STEP availability, or printability before runtime evidence exists. When the compiler returns a diagnostic, fix the named cause and emit a complete corrected program.
 
 # Op catalogue — one worked example per form
 Every snippet below renders on the active backend. Comments note what each form does;
@@ -336,7 +342,7 @@ a `[...]` note marks a backend restriction.
 (import-stl "/tmp/part.stl" :target-triangles 4000 :max-error 0.05 :preserve-boundaries #t)  ; Imports an STL file as geometry. Optional preparation keywords keep the raw source and derive a bounded indexed mesh.
 (path (polyline points))  ; Builds a path from path segments.
 (polyline ((0 0) (10 0) (10 5)))  ; Builds a connected line path from points.
-(bezier-path points)  ; Builds a Bezier path from control points.
+(bezier-path ((0 0 0) (8 0 0) (8 8 12) (16 8 12)))  ; Builds a cubic Bézier path from control points; native lowering uses a fixed 16 samples per cubic, so the path is an approximation.
 (bspline points :closed #t)  ; Builds a 2D B-spline sketch from control points.
 (extrude image-path 3 :width 40 :depth 30 :fit contain :threshold 0.5 :foreground dark)  ; Extrudes a sketch, or traces raster foreground coverage into contours before the same extrusion. One raster dimension preserves source aspect ratio; two contain and center by default. `:fit stretch` explicitly fills a non-matching box.
 (revolve profile 360)  ; Revolves a sketch profile around an axis.
@@ -390,8 +396,8 @@ a `[...]` note marks a backend restriction.
 (location (plane :origin '(80 0 6)) :rotate '(0 90 0))  ; Creates a placement from a frame and optional local transform.
 (path-frame rail :at end :up '(0 0 1))  ; Computes a local frame along a path parameter.
 (place end-frame (cylinder 4 18) :offset '(0 0 -9))  ; Places geometry in a local coordinate frame.
-(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))  ; Clips geometry by an axis-aligned box.
-(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep positive)  ; Clips geometry against an oriented plane.
+(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))  ; Clips geometry by an axis-aligned box; all three ranges are required.
+(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep "positive")  ; Clips geometry against an oriented plane. `:keep` is text; quote it to avoid unresolved local symbols.
 (build (shape body) (result body))  ; Build container for grouped construction forms.
 (shape body)  ; Marks or wraps a geometry expression in build contexts.
 (result body)  ; Selects final geometry from a build context.

@@ -34,7 +34,7 @@ lineage. The provider-global conversation index SHALL NOT be exposed.
 - **GIVEN** an Ecky thread already bound to Codex
 - **WHEN** user switches away and later returns to Provider
 - **THEN** Ecky renders its locally persisted provider timeline without resuming a writer
-- **AND** creates no replacement until delivery requires one
+- **AND** creates no replacement while loading history or handling a writer conflict
 
 #### Scenario: Stored Codex cursor has another active writer
 
@@ -42,9 +42,17 @@ lineage. The provider-global conversation index SHALL NOT be exposed.
 - **AND** another Codex client owns the current external writer
 - **WHEN** Ecky dispatches a queued prompt
 - **THEN** Ecky read-only backfills any available finished turns
-- **AND** starts a replacement Codex thread with canonical handoff and previous thread id
-- **AND** atomically rotates the current binding while retaining old lineage
-- **AND** dispatches the same queued prompt without requiring unsubscribe or task closure
+- **AND** retains the same current binding, external thread id, and provider history
+- **AND** keeps the same queued prompt at the FIFO head with the precise raw provider error
+- **AND** schedules a delayed retry using the existing queue recovery path
+- **AND** does not create a replacement thread, unsubscribe, kill, or interrupt the other client
+
+#### Scenario: Foreign writer conflict resolves
+
+- **GIVEN** a queued prompt remains bound to the same Codex external thread after an active-writer error
+- **WHEN** a later bounded retry finds that the foreign writer has released the thread
+- **THEN** Ecky resumes and delivers the queued prompt to that same external thread id
+- **AND** the Ecky binding and finished provider history remain continuous
 
 #### Scenario: Start fails
 

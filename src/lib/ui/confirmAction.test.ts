@@ -41,7 +41,7 @@ test('confirmAction awaits Tauri dialog confirm when Tauri runtime exists', asyn
       invoke: async (cmd, args) => {
         capturedCommand = cmd;
         capturedArgs = args;
-    return 'OK';
+        return true;
       },
       transformCallback: () => 0,
     },
@@ -50,19 +50,20 @@ test('confirmAction awaits Tauri dialog confirm when Tauri runtime exists', asyn
   const confirmed = await confirmAction('Fork now?', 'Ecky CAD');
 
   assert.equal(confirmed, true);
-  assert.equal(capturedCommand, 'plugin:dialog|message');
+  assert.equal(capturedCommand, 'plugin:dialog|confirm');
   assert.deepEqual(capturedArgs, {
     message: 'Fork now?',
     title: 'Ecky CAD',
     kind: 'warning',
-    buttons: { OkCancelCustom: ['OK', 'Cancel'] },
+    okButtonLabel: 'OK',
+    cancelButtonLabel: 'Cancel',
   });
 });
 
 test('confirmAction treats undefined Tauri confirmation as cancelled', async () => {
   setWindow({
     __TAURI_INTERNALS__: {
-      invoke: async () => 'Cancel',
+      invoke: async () => undefined,
       transformCallback: () => 0,
     },
   });

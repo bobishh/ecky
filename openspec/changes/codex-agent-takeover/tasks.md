@@ -14,7 +14,7 @@
 ## 3. Owned Codex lifecycle
 
 - [x] 3.1 Add app-server `thread/start`, `thread/name/set`, and cleanup of failed binding.
-- [x] 3.2 Lazily ensure binding from first send; resume current cursor or rotate on foreign writer conflict.
+- [x] 3.2 Lazily ensure binding from first send; resume current cursor and retry same cursor on foreign writer conflict.
 - [x] 3.3 Resolve deterministic Ecky project cwd and keep one-to-one provider-neutral schema.
 
 ## 4. Context continuity
@@ -59,9 +59,9 @@
 
 - [x] 7.1 Persist normalized finished provider messages in Ecky and cursor-page them without provider I/O.
 - [x] 7.2 Render local Codex history before any background reconciliation; never activate writer on Dialogue open.
-- [x] 7.3 Retain provider binding lineage across external cursor replacement.
-- [x] 7.4 Rotate to a new Codex thread on active-writer conflict and carry canonical handoff plus previous id.
-- [x] 7.5 Keep queued prompt durable across rotation and persist accepted user item under stable turn identity.
+- [x] 7.3 Retain provider binding lineage across supported external cursor replacement.
+- [x] 7.4 Preserve current Codex thread on active-writer conflict; carry durable history forward through delayed FIFO retry.
+- [x] 7.5 Keep queued prompt durable across active-writer conflict and persist accepted user item under stable turn identity.
 - [x] 7.6 Green focused Rust/Playwright proof, strict OpenSpec validation, production app build, and installed app smoke.
 - [x] 7.7 Persist provider user attachments, recover Codex image blocks, and render images after history reload.
 - [x] 7.8 Persist completed Codex-generated image outputs and render them as assistant timeline images after history reload.

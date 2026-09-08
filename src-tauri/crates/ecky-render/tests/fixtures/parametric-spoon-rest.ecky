@@ -1,0 +1,124 @@
+; Flat folded cord and solid teeth: open handle valleys, no closed arch undersides.
+(define (straight-controls x0 y0 z0 x1 y1 z1)
+  (list
+    (list (/ (+ (* 2 x0) x1) 3.0) (/ (+ (* 2 y0) y1) 3.0) (/ (+ (* 2 z0) z1) 3.0))
+    (list (/ (+ x0 (* 2 x1)) 3.0) (/ (+ y0 (* 2 y1)) 3.0) (/ (+ z0 (* 2 z1)) 3.0))
+    (list x1 y1 z1)))
+
+(define (quarter-controls cx cy cz ux uy uz vx vy vz)
+  (let* ((k 0.5522847498307936))
+    (list
+      (list (+ cx ux (* k vx)) (+ cy uy (* k vy)) (+ cz uz (* k vz)))
+      (list (+ cx vx (* k ux)) (+ cy vy (* k uy)) (+ cz vz (* k uz)))
+      (list (+ cx vx) (+ cy vy) (+ cz vz)))))
+
+(define (arc-outline cx cz r start-angle end-angle)
+  (map (lambda (i)
+    (let* ((angle (+ start-angle (* (- end-angle start-angle) (/ i 24.0)))))
+      (list (+ cx (* r (cos angle))) (+ cz (* r (sin angle))))))
+    (range 25)))
+
+(model
+  (meta :title "Fold — compact spoon rest")
+  (verify
+    (tag printable-mesh)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0)))
+  (verify
+    (tag one-piece)
+    (metric bodies (stl connected-component-count))
+    (expect bodies (= 1)))
+  (verify
+    (tag stl-ready)
+    (metric exported (manifest has-model-stl))
+    (expect exported (= true)))
+  (verify
+    (tag no-support-overhangs)
+    (metric overhangs (stl overhang-face-count))
+    (expect overhangs (= 0)))
+  (params
+    (number bed-trim 1.6mm :label "Bed trim" :min 1.6 :max 3 :step 0.1)
+    (number tube-diameter 8mm :label "Cord diameter" :min 6 :max 10 :step 0.5)
+    (number strand-gap 1.5mm :label "Gap between strands" :min 1 :max 3 :step 0.5)
+    (number tooth-height 34mm :label "Tooth height" :min 28 :max 45 :step 1)
+    (number crown-rise 2mm :label "Middle tooth lift" :min 0 :max 6 :step 1)
+    (number handle-gap 12mm :label "Handle gap" :min 8 :max 18 :step 1)
+    (number row-count 10 :label "Base passes" :min 4 :max 14 :step 2)
+    (number tooth-count 4 :label "Teeth" :min 2 :max 6 :step 1))
+  (part spoon-rest
+    (let* ((mat-pitch (+ tube-diameter strand-gap))
+           (tube-r (/ tube-diameter 2.0))
+           (floor-z tube-r)
+           (turn-r (/ mat-pitch 2.0))
+           (last-row-y (* (- row-count 1) mat-pitch))
+           (top-r turn-r)
+           (valley-r (/ (+ handle-gap tube-diameter) 2.0))
+           (tooth-pitch (+ (* 2 top-r) (* 2 valley-r)))
+           (rack-width (+ (* tooth-count 2 top-r) (* (- tooth-count 1) 2 valley-r)))
+           (rack-left (- (/ rack-width 2.0)))
+           (rack-right (/ rack-width 2.0))
+           (mat-half-span (- rack-right turn-r))
+           (entry-turn-r turn-r)
+           (entry-y (+ last-row-y entry-turn-r))
+           (rise-r turn-r)
+           (root-z (+ floor-z rise-r))
+           (rack-y (+ entry-y rise-r))
+           (valley-z (+ floor-z valley-r))
+           (shoulder-z (- tooth-height tube-r top-r))
+           (floor-controls
+             (flat-map
+               (lambda (i)
+                 (let* ((direction (cos (* i pi)))
+                        (row-y (* i mat-pitch))
+                        (end-x (* direction mat-half-span))
+                        (bend-y (+ row-y turn-r))
+                        (outward-r (* direction turn-r)))
+                   (append
+                     (straight-controls (- end-x) row-y floor-z end-x row-y floor-z)
+                     (quarter-controls end-x bend-y floor-z 0 (- turn-r) 0 outward-r 0 0)
+                     (quarter-controls end-x bend-y floor-z outward-r 0 0 0 turn-r 0))))
+               (range (- row-count 1))))
+           (entry-controls
+             (append
+               (straight-controls mat-half-span last-row-y floor-z (- mat-half-span) last-row-y floor-z)
+               (quarter-controls (- mat-half-span) entry-y floor-z 0 (- entry-turn-r) 0 (- entry-turn-r) 0 0)
+               (straight-controls rack-left entry-y floor-z rack-left rack-y floor-z)))
+           (rope-controls
+             (append (list (list (- mat-half-span) 0 floor-z)) floor-controls entry-controls))
+           (tooth-outer-r (+ top-r tube-r))
+           (valley-inner-r (- valley-r tube-r))
+           (comb-outline
+             (append
+               (list (list (- rack-left tube-r) 0))
+               (flat-map
+                 (lambda (i)
+                   (let* ((x (+ rack-left (* i tooth-pitch)))
+                          (lift (if (= i 0) 0 (if (= i (- tooth-count 1)) 0 crown-rise))))
+                     (append
+                       (arc-outline (+ x top-r) (+ shoulder-z lift) tooth-outer-r pi 0)
+                       (if (< i (- tooth-count 1))
+                         (arc-outline (+ x (* 2 top-r) valley-r) valley-z valley-inner-r pi (* 2 pi))
+                         (list)))))
+                 (range tooth-count))
+               (list (list (+ rack-right tube-r) 0)))))
+      (build
+        (shape folded-centerline (bezier-path rope-controls))
+        (shape round-section (make-face (circle tube-r)))
+        (shape folded-rope (sweep round-section folded-centerline))
+        (shape solid-teeth
+          (translate 0 (+ rack-y tube-r) 0
+            (rotate 90 0 0 (extrude (polygon comb-outline) tube-diameter))))
+        (shape connected-rest (union folded-rope solid-teeth))
+        (shape flat-print-base
+          (translate 0 0 (- bed-trim)
+            (difference connected-rest
+              (translate 0 0 (- bed-trim tube-diameter)
+                (extrude
+                  (polygon (list
+                    (list (- rack-width) (- rack-y))
+                    (list rack-width (- rack-y))
+                    (list rack-width (* rack-y 2))
+                    (list (- rack-width) (* rack-y 2))))
+                  tube-diameter)))))
+        (result flat-print-base))))
+  (tag-face print-bed :faces "bottom" spoon-rest))

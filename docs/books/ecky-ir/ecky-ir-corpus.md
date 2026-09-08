@@ -2871,7 +2871,7 @@ Do not edit rows by hand; run `npm run generate:prompt`.
 | `atan2` | numericHelper | `(atan2 y x)` | freecad, legacy-build123d, mesh/native | Two-argument arctangent returning radians. | `(atan2 y x)` |
 | `attractor-field` | wallPatternMode | `attractor-field` | mesh/native | Seeded chaotic attractor-style field. | `(wall-pattern (:mode attractor-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
 | `begin` | modelWrapper | `(begin clause...)` | freecad, legacy-build123d, mesh/native | Groups multiple model clauses where a single clause position is expected. | `(model (begin (params ...) (part body ...)))` |
-| `bezier-path` | cadOp | `(bezier-path points)` | freecad, legacy-build123d, mesh/native | Builds a Bezier path from control points. | `(bezier-path points)` |
+| `bezier-path` | cadOp | `(bezier-path points)` | freecad, legacy-build123d, mesh/native | Builds a cubic Bézier path from control points; native lowering uses a fixed 16 samples per cubic, so the path is an approximation. | `(bezier-path ((0 0 0) (8 0 0) (8 8 12) (16 8 12)))` |
 | `box` | cadOp | `(box x y z :align '(x y z))` | freecad, legacy-build123d, mesh/native | Creates an axis-aligned rectangular solid. | `(box 40 20 10 :align '(min center min))` |
 | `bspline` | cadOp | `(bspline points :closed #t\|#f)` | freecad, legacy-build123d, mesh/native | Builds a 2D B-spline sketch from control points. | `(bspline points :closed #t)` |
 | `build` | cadOp | `(build expr...)` | freecad, legacy-build123d, mesh/native | Build container for grouped construction forms. | `(build (shape body) (result body))` |
@@ -2880,8 +2880,8 @@ Do not edit rows by hand; run `npm run generate:prompt`.
 | `chamfer` | cadOp | `(chamfer distance [:edges selector] solid)` | freecad, legacy-build123d, mesh/native | Bevels edges of a solid. \`:edges\` accepts coarse selectors like \`bottom\`, \`front\`, \`axis-z\`, \`y-max\`, or \`x-min+z-max\`; exact backends also accept \`target-id:<id>\` and \`target-ids:<id>\|<id>\`. | `(chamfer 1 :edges "bottom" body)` |
 | `circle` | cadOp | `(circle radius segments)` | freecad, legacy-build123d, mesh/native | Creates a circular sketch/profile. | `(circle 20 64)` |
 | `clamp` | numericHelper | `(clamp value min max)` | freecad, legacy-build123d, mesh/native | Constrains value to a numeric interval. | `(clamp depth 0 3)` |
-| `clip-box` | cadOp | `(clip-box geometry :x '(min max) :y '(min max) :z '(min max))` | freecad, legacy-build123d, mesh/native | Clips geometry by an axis-aligned box. | `(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))` |
-| `clip-plane` | cadOp | `(clip-plane geometry :origin '(x y z) :normal '(x y z) [:keep positive\|negative])` | freecad, legacy-build123d, mesh/native | Clips geometry against an oriented plane. | `(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep positive)` |
+| `clip-box` | cadOp | `(clip-box geometry :x '(min max) :y '(min max) :z '(min max))` | freecad, legacy-build123d, mesh/native | Clips geometry by an axis-aligned box; all three ranges are required. | `(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))` |
+| `clip-plane` | cadOp | `(clip-plane geometry :origin '(x y z) :normal '(x y z) [:keep "positive"\|"negative"])` | freecad, legacy-build123d, mesh/native | Clips geometry against an oriented plane. \`:keep\` is text; quote it to avoid unresolved local symbols. | `(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep "positive")` |
 | `common` | cadOp | `(common solid...)` | freecad, legacy-build123d, mesh/native | Keeps shared volume of solids. | `(common a b)` |
 | `compound` | cadOp | `(compound geometry...)` | freecad, legacy-build123d, mesh/native | Groups geometry without fusing into one solid. | `(compound body bolts)` |
 | `concat-map` | expressionForm | `(concat-map fn list)` | freecad, legacy-build123d, mesh/native | Maps each item to a list and concatenates the results. | `(flat-map (lambda (i) (list i (- i))) (range 3))` |
@@ -3112,6 +3112,9 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Use model-level `let*` for shared derived dimensions, part-local `let*` for
   part-only math, and a top-level pure `define` for reusable functions. Never
   repeat fit math across parts.
+- For local spacing edits, preserve existing topology and design intent. Move
+  named spacing controls; do not fill loops or replace bent round profiles
+  with solid teeth as a workaround.
 
 ## Components
 
@@ -3190,6 +3193,9 @@ ranges or `latest`.
 - Name every fit-critical dimension or relation: wall thickness, clearance, bore radius, pitch, seat height, and mating axis. Do not hide physical fit in anonymous offsets.
 - Prefer selectors based on physical meaning or stable tags. Boolean operations rebuild topology, so raw face or edge indices are not stable design intent.
 - Backend support is authoritative. If a diagnostic rejects an operation on the active backend, change the operation or backend; do not retry unchanged source.
+- `clip-box` requires all three bounds (`:x`, `:y`, and `:z`). Missing bounds are malformed input, not proof of an unsupported operation. For `clip-plane`, use `:keep "positive"` or `:keep "negative"` so selector text cannot become an unresolved local.
+- Native Bézier lowering uses a fixed 16 samples per cubic. This is an approximation, even when the result exports to STEP.
+- `geometryBackend=mesh` is a legacy native-hybrid label, not proof of mesh execution. Inspect artifact truth (`analyticBrep` or faceted mesh) before describing representation.
 - STEP-backed live components require locked analytic provenance and native
   Direct OCCT import. Never route them through FreeCAD, STL, `solidify`, hidden
   repair, or implicit fusion.
@@ -3218,7 +3224,7 @@ Write top-level `verify` clauses from measurable requirements. Keep them during 
   (part body (box 30 20 10)))
 ```
 
-Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. Zero non-manifold edges and one connected component establish topology only; they do not prove cross-section, shape intent, or support-free printing. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
 
 Use `bed-contact-area-ratio`, `bed-contact-x-span-ratio`, and
 `bed-contact-y-span-ratio` for print-bed grounding. Optional part id scopes the
@@ -3249,5 +3255,5 @@ of geometry or printability.
 
 ## Operating contract
 
-Output source and required response fields only. Do not claim compilation, rendering, verification, STEP availability, or printability before runtime evidence exists. When the compiler returns a diagnostic, fix the named cause and emit a complete corrected program.
+Output source and required response fields only. Preserve authored parameters. Inspect matching version, artifact, and viewport evidence before claiming visual or mechanical intent; unmeasured explanations remain hypotheses. Never replace compiler errors with Python, STL, or hardcoded controls. Do not claim compilation, rendering, verification, STEP availability, or printability before runtime evidence exists. When the compiler returns a diagnostic, fix the named cause and emit a complete corrected program.
 <!-- ECKY_AGENT_REFERENCE_END -->

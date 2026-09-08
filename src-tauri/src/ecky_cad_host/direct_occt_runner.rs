@@ -1367,7 +1367,8 @@ fn runner_clip_box_unsupported_reason(command: &OcctCommand) -> Option<String> {
     }
     let missing = [("x", saw_x), ("y", saw_y), ("z", saw_z)]
         .into_iter()
-        .filter_map(|(name, seen)| (!seen).then(|| format!("`:{name}`")))
+        .filter(|(_, seen)| !seen)
+        .map(|(name, _)| format!("`:{name}`"))
         .collect::<Vec<_>>();
     if missing.is_empty() {
         None

@@ -1900,6 +1900,52 @@ pub(crate) fn thread_printability_warnings(
     Ok(warnings)
 }
 
+fn contains_thread_geometry(node: &CoreNode) -> bool {
+    match &node.kind {
+        CoreNodeKind::Call { op, args, keywords } => {
+            matches!(op, CoreOperation::Custom(name) if name == "thread")
+                || args.iter().any(contains_thread_geometry)
+                || keywords
+                    .iter()
+                    .any(|arg| contains_thread_geometry(arg.source_node()))
+        }
+        CoreNodeKind::Build { bindings, result } => {
+            bindings
+                .iter()
+                .any(|binding| contains_thread_geometry(&binding.value))
+                || contains_thread_geometry(result)
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            bindings
+                .iter()
+                .any(|binding| contains_thread_geometry(&binding.value))
+                || contains_thread_geometry(body)
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            contains_thread_geometry(condition)
+                || contains_thread_geometry(then_branch)
+                || contains_thread_geometry(else_branch)
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            sources.iter().any(contains_thread_geometry) || contains_thread_geometry(body)
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            args.iter().any(contains_thread_geometry) || contains_thread_geometry(list)
+        }
+        CoreNodeKind::Range { start, end } => {
+            contains_thread_geometry(start) || contains_thread_geometry(end)
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            items.iter().any(contains_thread_geometry)
+        }
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => false,
+    }
+}
+
 fn collect_thread_printability_warnings(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
@@ -1907,6 +1953,11 @@ fn collect_thread_printability_warnings(
     node_env: &BTreeMap<u64, ParamValue>,
     warnings: &mut Vec<String>,
 ) -> AuthoringResult<()> {
+    // A thread-specific advisory must not execute unrelated deferred helpers.
+    // Map callback locals exist only during geometry planning, not this walk.
+    if !contains_thread_geometry(node) {
+        return Ok(());
+    }
     match &node.kind {
         CoreNodeKind::Call {
             op: CoreOperation::Custom(name),
@@ -4135,7 +4186,11 @@ impl<'a> PartPlanner<'a> {
     fn scalar_env_snapshot(&self) -> BTreeMap<String, ParamValue> {
         let mut env = self.scalar_env.clone();
         for (name, arg) in &self.locals {
-            if let Some(value) = occt_arg_to_scalar(arg) {
+            let scalar = match arg {
+                OcctArg::Param(key) => self.scalar_env.get(key).cloned(),
+                _ => occt_arg_to_scalar(arg),
+            };
+            if let Some(value) = scalar {
                 env.insert(name.clone(), value);
             }
         }
@@ -4350,14 +4405,21 @@ impl<'a> PartPlanner<'a> {
                 })?;
                 Ok(OcctArg::Ref(slot))
             }
-            CoreNodeKind::Reference(CoreReference::Local(name)) => {
-                self.locals.get(name).cloned().ok_or_else(|| {
+            CoreNodeKind::Reference(CoreReference::Local(name)) => self
+                .locals
+                .get(name)
+                .cloned()
+                .or_else(|| match name.as_str() {
+                    "pi" => Some(OcctArg::Number(std::f64::consts::PI)),
+                    "tau" => Some(OcctArg::Number(std::f64::consts::TAU)),
+                    _ => None,
+                })
+                .ok_or_else(|| {
                     planner_error(
                         AuthoringReason::Type,
                         format!("Direct OCCT adapter could not resolve local `{}`.", name),
                     )
-                })
-            }
+                }),
             CoreNodeKind::List(items) | CoreNodeKind::Group(items) => Ok(OcctArg::List(
                 items
                     .iter()
@@ -4372,6 +4434,36 @@ impl<'a> PartPlanner<'a> {
             } => self.plan_map_arg(params, sources, body),
             CoreNodeKind::Let { bindings, body } => self.plan_let_arg(bindings, body),
             CoreNodeKind::Build { bindings, result } => self.plan_build_arg(bindings, result),
+            CoreNodeKind::Apply {
+                op: CoreOperation::Custom(name),
+                args,
+                list,
+            } if name == "append" => {
+                let mut lists = args
+                    .iter()
+                    .map(|arg| self.plan_arg(arg))
+                    .collect::<AuthoringResult<Vec<_>>>()?;
+                match self.plan_arg(list)? {
+                    OcctArg::List(items) => lists.extend(items),
+                    other => {
+                        return Err(planner_error(
+                            AuthoringReason::Type,
+                            format!(
+                                "Direct OCCT adapter `apply append` expected list, got {other:?}."
+                            ),
+                        ))
+                    }
+                }
+                let mut combined = Vec::new();
+                for value in lists {
+                    match value {
+                        OcctArg::List(items) => combined.extend(items),
+                        other => return Err(planner_error(AuthoringReason::Type,
+                            format!("Direct OCCT adapter `apply append` expected list item, got {other:?}."))),
+                    }
+                }
+                Ok(OcctArg::List(combined))
+            }
             CoreNodeKind::Call {
                 op: CoreOperation::Custom(name),
                 args,
@@ -6067,10 +6159,11 @@ mod tests {
             panic!("thread profile must lower as a point list: {literal_profile:?}");
         };
         assert_eq!(
-            points[0],
-            OcctArg::Point3([7.7, 0.0, -expected_base * 0.5]),
+            points[1],
+            OcctArg::Point3([0.0, 0.0, -expected_base * 0.5]),
             "native thread must consume canonical IR degrees exactly once"
         );
+        assert_eq!(points[4], OcctArg::Point3([0.0, 0.0, expected_base * 0.5]));
     }
 
     #[test]
@@ -6152,6 +6245,19 @@ mod tests {
             vec![diagnostic],
             "native manifest warning payload"
         );
+    }
+
+    #[test]
+    fn thread_advisories_ignore_unrelated_deferred_point_helpers() {
+        let program = compile(
+            r#"(model (params (number count 3))
+          (part wire (path (map (lambda (i) (let* ((x (* i 2))) (list x 0 0))) (range count))))
+          (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1 :crest 0.4 :flank 45deg :clearance 0.1)))"#,
+        );
+        let warnings = thread_printability_warnings(&program, &DesignParams::new())
+            .expect("thread advisories must not evaluate unrelated map callbacks");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("turns merge"));
     }
 
     #[test]

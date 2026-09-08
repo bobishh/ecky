@@ -45,7 +45,7 @@ const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
 /// on top of [`DIRECT_OCCT_HOT_CACHE_CAPACITY`]; it guards a couple of
 /// pathological oversized renders from pinning the hot cache.
 const DIRECT_OCCT_HOT_CACHE_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
-const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v10-svg-fill-parity";
+const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v11-sweep-path-preservation";
 const DIRECT_OCCT_GEOMETRY_CACHE_SCHEMA: &str = "direct-occt-geometry-v1";
 const DIRECT_OCCT_GEOMETRY_CACHE_DIR: &str = "direct-occt-geometry";
 const DIRECT_OCCT_GEOMETRY_CACHE_FILE: &str = "geometry-cache.json";
@@ -8220,6 +8220,22 @@ printf 'run\n' >> "$invoked_marker"
             content_hash_with_font_path(source, params_json, None),
             current,
             "production must key on DIRECT_OCCT_CACHE_SCHEMA with no legacy branch"
+        );
+    }
+
+    #[test]
+    fn sweep_corner_fix_invalidates_v10_cached_artifacts() {
+        let source = "(model (part wire (sweep (make-face (circle 2)) (path ((0 0 0) (20 0 0) (20 20 0))))))";
+        let stale = content_hash_with_backend_version(
+            "direct-occt-v10-svg-fill-parity",
+            source,
+            "{}",
+            None,
+        );
+        assert_ne!(
+            content_hash_with_font_path(source, "{}", None),
+            stale,
+            "unchanged source must not reuse the pre-repair sweep artifact"
         );
     }
 

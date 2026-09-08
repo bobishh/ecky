@@ -9,6 +9,7 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- Only when `sourcePath` is absent, use `macro_buffer_get` for non-trivial edits, edit against line numbers/digest, then render with `macro_buffer_replace_and_preview`; use full `macro_preview_render` only for small complete rewrites.\n",
     "- Do not reuse parameter keys with different meanings. Keep macroCode, uiSpec, and initialParams aligned; remove stale params.\n",
     "- Valid basics: `(box 40 20 10 :align '(min center min))`, `(extrude (polygon ((0 0) (100 0) (100 20) (0 20))) 8)`, `(place (location (plane :origin '(80 0 6)) :rotate '(0 90 0)) (cylinder 4 18))`.\n",
+    "- Native catalogue examples must compile and plan before reuse. Keep literal or named binding inputs intact: `clip-box` requires all three ranges `:x`, `:y`, and `:z`; `clip-plane` should use quoted text such as `:keep \"positive\"` because an unresolved local `positive` can fail name resolution, even though the native planner accepts the known bare literal. Do not call a missing range unsupported, or replace compiler errors with Python, STL, or hardcoded controls.\n",
     "- When authoring new physical values, emit suffixed literals in source (`70mm`, `1in`, `45deg`, `0.5rad`) instead of bare numbers when the unit matters.\n",
     "- `let` is parallel; use `let*` when later bindings depend on earlier bindings.\n",
     "- NEVER use `(define ...)` inside `(model ...)`. It fails with a misleading TypeMismatch because Steel evaluates it eagerly before params have values. Use `let*` inside each `(part ...)` to compute derived values from params. Top-level `(define (fn args) ...)` helper functions OUTSIDE `(model ...)` are allowed and correct for reusable pure functions.\n",
@@ -19,8 +20,10 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- `feature :params` declares primary controls for that semantic feature. It supplements inferred dependencies; it does not replace or constrain them.\n",
     "- Tag interaction-critical faces and edges with `tag-face` / `tag-edges`; use `:created-by <shape>` when the owning build stage is known. Do not tag every incidental topology element.\n",
     "- AST/compiler dependency inference is authoritative for actual parameter ownership across shapes, features, and parts. Prompt-authored names and `feature :params` add intent, but must never override inferred dependencies.\n",
+    "- Preserve authored parameters and report exact current version evidence. A native plan or topology result (zero non-manifold edges, one component) does not prove cross-section, shape intent, or support-free printing; inspect matching artifact and viewport evidence, and keep visual/mechanical hypotheses unmeasured until evidence exists.\n",
     "- Do not author or generate Ecky `controlViews`. Native Ecky parameter groups and viewport controls are deterministic projections of AST dependencies plus runtime topology provenance.\n",
     "- For authored `mesh`/`polyhedron`, prefer bounded formula-generated vertex/triangle lists over copied literal blocks. Add topology verification for boundary/non-manifold edges and connected components before printability or solid claims.\n",
+    "- Native Bézier lowering uses a fixed 16 samples per cubic; this is an approximation. The `geometryBackend=mesh` label is legacy native-hybrid metadata, not proof of mesh execution; inspect artifact truth for `analyticBrep` versus faceted mesh.\n",
     "- Reference images are inferred approximation inputs; treat geometry from them as inferred approximation source. Vision text cannot claim reconstruction or accepted CAD; normal compile, preview, structural verification, and exact artifact gates decide artifact truth.\n",
     "- Components: `(define-component name ((number key default :label ...) ...) body)` defines a closed, parameterized geometry unit; instantiate with keywords `(name :key value)`. Bodies may reference signature keys, local bindings, other components, and immutable top-level `define` helpers from the same source; model params must be passed explicitly. Pasted components carry their own `(verify ...)` clauses, tag-namespaced per instantiating part (`partkey/tag`).\n",
     "- Mounted components: keep body geometry in one local frame; declare `(ports (port mount :type \"type.v1\" :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))`, declare matching ports on the target part, then use `(place-component (component ...) :from mount :to (port-ref target-part target-port) :normal aligned|opposed)`. Change the target `port-ref` to move the unchanged body between faces. Use optional `:roll`, target-local `:offset`, and local `:mirror x|y|none`; never derive reusable placement with handwritten Euler angles.\n",
@@ -29,6 +32,7 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- STEP live components require locked payload digest plus package-carried geometry provenance. They enter native Direct OCCT as BRep. Never route STEP through FreeCAD, STL conversion, `solidify`, hidden repair, or implicit fuse.\n",
     "- Bound source authoring: a bound target exposes `sourcePath`, `sourceFolder`, and `sourceState` in `workspace_overview.defaultTarget` and `target_meta_get`. When `sourcePath` is present, this file flow takes precedence over macro buffer/rewrite tools. Edit the file at `sourcePath` directly with normal file tools; the project-folder watcher appends, validates, and previews settled edits as a new version. `sourceState` reports file freshness, never a version-write conflict. Do NOT export a fresh mirror first — `project_folder_export` only re-seeds a missing folder. Never write version history outside this flow.\n",
     "- Derived values should appear once. If the same fit math or repeated body setup appears across parts, lift it into model-level `let*`, helper `define`, or a `define-component` instead of copy-paste.\n",
+    "- For local spacing edits, preserve existing topology and design intent. Move named spacing controls; do not fill loops or replace bent round profiles with solid teeth as a workaround.\n",
     "- Physical fit relations need explicit names. Do not leave anonymous offsets like `(+ holder_w 12)` in fit-critical placement/dimension expressions; introduce named bindings or named constraints.\n",
     "- Any fit-critical face/edge selector should be tagged with `tag-face` or `tag-edges` before downstream shell/fillet/chamfer/cut use so topology can rebind across param changes.\n",
     "- If a fit-critical clause selector depends on topology created inside `build`, add `:created-by <shape>` to scope candidates to that helper shape instead of unrelated matching faces/edges.\n",
@@ -174,6 +178,22 @@ mod tests {
         assert!(card.contains("facetedStep"));
         assert!(card.contains("analyticStep"));
         assert!(card.contains("geometryRepresentation"));
+    }
+
+    #[test]
+    fn authoring_card_requires_native_example_and_evidence_boundaries() {
+        let card = authoring_card_text();
+
+        assert!(card.contains("compile and plan before reuse"));
+        assert!(card.contains("all three ranges `:x`, `:y`, and `:z`"));
+        assert!(card.contains(":keep \"positive\""));
+        assert!(card.contains("fixed 16 samples per cubic"));
+        assert!(card.contains("legacy native-hybrid metadata"));
+        assert!(card.contains("analyticBrep` versus faceted mesh"));
+        assert!(card.contains("topology result (zero non-manifold edges, one component)"));
+        assert!(card.contains("exact current version evidence"));
+        assert!(card.contains("visual/mechanical hypotheses"));
+        assert!(card.contains("Python, STL, or hardcoded controls"));
     }
 
     #[test]

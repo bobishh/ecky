@@ -16,8 +16,8 @@ without exposing or importing unrelated Codex conversations.
   `CODEX` initially.
 - Keep Projects/Ecky thread list as the only user-facing conversation index.
 - Lazily create one persisted Codex execution thread on the first provider-mode
-  message from an unbound Ecky thread. Retain it as the current cursor until delivery
-  must rotate away from a foreign active writer.
+  message from an unbound Ecky thread. Retain it as the current cursor through
+  foreign-writer conflicts; delivery retries the same cursor with bounded backoff.
 - Hide external conversation ids and lifecycle controls. No discovery, takeover,
   release, or foreign-thread picker exists in Dialogue.
 - Bootstrap thread/start and thread/resume with Ecky's stable provider prompt,
@@ -41,9 +41,10 @@ without exposing or importing unrelated Codex conversations.
   external junk conversation.
 - `connectionType` stores provider choice as `provider:<adapter-id>`; currently
   `provider:codex`.
-- Ecky transcript is finished-history authority. External provider threads are
-  replaceable execution cursors; Ecky persists normalized turns, lineage, and a
-  bounded provider-neutral handoff summary.
+- Ecky transcript is finished-history authority. The bound external provider
+  thread is the current execution cursor; Ecky persists normalized turns and
+  lineage for supported provider replacement, while an active-writer conflict
+  retains the same binding and bounded provider-neutral handoff summary.
 - Normal submit during active work queues. `STEER` mutates current turn only. `STOP`
   interrupts current turn only.
 - Compaction is progress. Only terminal turn state advances FIFO.

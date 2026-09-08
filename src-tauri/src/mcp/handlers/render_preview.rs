@@ -1206,4 +1206,16 @@ mod tests {
 
         assert_eq!(context.resolved_params[0].value, ParamValue::Number(55.0));
     }
+
+    #[test]
+    fn ecky_source_with_single_semicolon_comment_keeps_current_controls() {
+        let source =
+            include_str!("../../../crates/ecky-render/tests/fixtures/close-fold-spoon-rest.ecky");
+        let parsed = crate::commands::design::parse_macro_params(source.to_string());
+
+        assert_eq!(parsed.params.len(), 8);
+        assert_eq!(parsed.fields.len(), 8);
+        assert!(parsed.params.contains_key("row-count"));
+        assert!(parsed.params.contains_key("tooth-count"));
+    }
 }

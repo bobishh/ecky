@@ -51,6 +51,9 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Use model-level `let*` for shared derived dimensions, part-local `let*` for
   part-only math, and a top-level pure `define` for reusable functions. Never
   repeat fit math across parts.
+- For local spacing edits, preserve existing topology and design intent. Move
+  named spacing controls; do not fill loops or replace bent round profiles
+  with solid teeth as a workaround.
 
 ## Components
 
@@ -129,6 +132,9 @@ ranges or `latest`.
 - Name every fit-critical dimension or relation: wall thickness, clearance, bore radius, pitch, seat height, and mating axis. Do not hide physical fit in anonymous offsets.
 - Prefer selectors based on physical meaning or stable tags. Boolean operations rebuild topology, so raw face or edge indices are not stable design intent.
 - Backend support is authoritative. If a diagnostic rejects an operation on the active backend, change the operation or backend; do not retry unchanged source.
+- `clip-box` requires all three bounds (`:x`, `:y`, and `:z`). Missing bounds are malformed input, not proof of an unsupported operation. For `clip-plane`, use `:keep "positive"` or `:keep "negative"` so selector text cannot become an unresolved local.
+- Native Bézier lowering uses a fixed 16 samples per cubic. This is an approximation, even when the result exports to STEP.
+- `geometryBackend=mesh` is a legacy native-hybrid label, not proof of mesh execution. Inspect artifact truth (`analyticBrep` or faceted mesh) before describing representation.
 - STEP-backed live components require locked analytic provenance and native
   Direct OCCT import. Never route them through FreeCAD, STL, `solidify`, hidden
   repair, or implicit fusion.
@@ -157,7 +163,7 @@ Write top-level `verify` clauses from measurable requirements. Keep them during 
   (part body (box 30 20 10)))
 ```
 
-Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. Zero non-manifold edges and one connected component establish topology only; they do not prove cross-section, shape intent, or support-free printing. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
 
 Use `bed-contact-area-ratio`, `bed-contact-x-span-ratio`, and
 `bed-contact-y-span-ratio` for print-bed grounding. Optional part id scopes the
@@ -188,4 +194,4 @@ of geometry or printability.
 
 ## Operating contract
 
-Output source and required response fields only. Do not claim compilation, rendering, verification, STEP availability, or printability before runtime evidence exists. When the compiler returns a diagnostic, fix the named cause and emit a complete corrected program.
+Output source and required response fields only. Preserve authored parameters. Inspect matching version, artifact, and viewport evidence before claiming visual or mechanical intent; unmeasured explanations remain hypotheses. Never replace compiler errors with Python, STL, or hardcoded controls. Do not claim compilation, rendering, verification, STEP availability, or printability before runtime evidence exists. When the compiler returns a diagnostic, fix the named cause and emit a complete corrected program.

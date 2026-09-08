@@ -425,3 +425,127 @@ for line in sys.stdin:
     std::env::remove_var("ECKY_CODEX_REQUEST_TIMEOUT_MS");
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writer_conflicts_retry_same_bound_thread_after_foreign_release() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_id = uuid::Uuid::new_v4().to_string();
+    let directory = std::env::temp_dir().join(format!("ecky-codex-writer-{test_id}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("fake-codex");
+    let requests = directory.join("requests");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+resume_count = 0
+start_count = 0
+requests = open(os.environ["ECKY_CODEX_TEST_REQUESTS"], "a", encoding="utf-8")
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method:
+        requests.write(method + " " + str(message.get("params", {}).get("threadId", "")) + "\n")
+        requests.flush()
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method == "thread/resume":
+        resume_count += 1
+        if resume_count == 1:
+            print(json.dumps({"id": message["id"], "error": {"message": "thread codex-7 already has an active writer", "data": {"owner": "foreign-client"}}}), flush=True)
+        else:
+            print(json.dumps({"id": message["id"], "result": {"thread": {"id": "codex-7", "preview": "Dryer", "cwd": "/tmp/dryer", "createdAt": 1, "updatedAt": 2, "modelProvider": "openai", "status": {"type": "idle"}}, "initialTurnsPage": {"data": []}}}), flush=True)
+    elif method == "turn/start":
+        start_count += 1
+        if start_count == 1:
+            print(json.dumps({"id": message["id"], "error": {"message": "thread codex-7 already has an active writer", "data": {"owner": "foreign-client"}}}), flush=True)
+        else:
+            print(json.dumps({"id": message["id"], "result": {"turn": {"id": "turn-2"}}}), flush=True)
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    std::env::set_var("ECKY_CODEX_BIN", &executable);
+    std::env::set_var("ECKY_CODEX_TEST_REQUESTS", &requests);
+    let supervisor = CodexAppServerSupervisor::new();
+    let binding = CodexTakeoverBinding {
+        ecky_thread_id: "ecky-1".to_string(),
+        codex_thread_id: "codex-7".to_string(),
+        label: "Dryer".to_string(),
+        cwd: "/tmp/dryer".to_string(),
+        bootstrap_version: ecky_cad_lib::services::codex_takeover::CODEX_BOOTSTRAP_VERSION,
+        created_at: 1,
+        updated_at: 1,
+    };
+
+    let first_resume = supervisor
+        .resume_thread(
+            &binding,
+            "Dryer",
+            "http://127.0.0.1:1234/mcp",
+            "handoff",
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(first_resume
+        .message
+        .contains("already has an active writer"));
+
+    supervisor
+        .resume_thread(
+            &binding,
+            "Dryer",
+            "http://127.0.0.1:1234/mcp",
+            "handoff",
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    let first_turn = supervisor.start_turn("codex-7", "Continue", None).await;
+    assert!(first_turn
+        .unwrap_err()
+        .message
+        .contains("already has an active writer"));
+    // The successful resume remains cached for this app-server generation. A
+    // later retry must continue the same binding without manufacturing another
+    // resume or replacement thread.
+    supervisor
+        .resume_thread(
+            &binding,
+            "Dryer",
+            "http://127.0.0.1:1234/mcp",
+            "handoff",
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        supervisor
+            .start_turn("codex-7", "Continue", None)
+            .await
+            .unwrap(),
+        "turn-2"
+    );
+
+    let request_log = std::fs::read_to_string(&requests).unwrap();
+    assert_eq!(request_log.matches("thread/start").count(), 0);
+    assert_eq!(request_log.matches("thread/resume codex-7").count(), 2);
+    assert_eq!(request_log.matches("turn/start codex-7").count(), 2);
+    assert!(!request_log.contains("thread/resume codex-new"));
+
+    std::env::remove_var("ECKY_CODEX_BIN");
+    std::env::remove_var("ECKY_CODEX_TEST_REQUESTS");
+    let _ = std::fs::remove_dir_all(directory);
+}
