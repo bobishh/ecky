@@ -10,6 +10,8 @@ use ecky_cad_lib::services::codex_app_server::{
 };
 use serde_json::json;
 
+static CODEX_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[test]
 fn model_list_projection_uses_subscription_catalog_and_omits_hidden_entries() {
     let (models, next_cursor) = parse_model_list_page(&json!({
@@ -380,6 +382,8 @@ fn transcript_projection_keeps_only_user_and_agent_messages_in_turn_order() {
 async fn timed_out_app_server_is_restarted_for_next_operation() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _environment = CODEX_ENV_LOCK.lock().await;
+
     let test_id = uuid::Uuid::new_v4().to_string();
     let directory = std::env::temp_dir().join(format!("ecky-codex-timeout-{test_id}"));
     std::fs::create_dir_all(&directory).unwrap();
@@ -430,6 +434,8 @@ for line in sys.stdin:
 #[tokio::test]
 async fn writer_conflicts_retry_same_bound_thread_after_foreign_release() {
     use std::os::unix::fs::PermissionsExt;
+
+    let _environment = CODEX_ENV_LOCK.lock().await;
 
     let test_id = uuid::Uuid::new_v4().to_string();
     let directory = std::env::temp_dir().join(format!("ecky-codex-writer-{test_id}"));
