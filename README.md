@@ -1,12 +1,16 @@
 # Ecky CAD
 
-Ecky is an experimental desktop application for building parametric 3D parts from code, with optional help from an LLM. It brings a source editor, a 3D preview, parameter controls, conversation history, and model versions into one workspace.
+Ecky is an experimental desktop application for building parametric 3D parts from code, with optional AI assistance. It brings projects, a source editor, a 3D viewport, parameter controls, and conversation and version history into one workspace. You can work manually, use an API provider, connect Codex inside Ecky, or bring an external MCP agent.
 
 Models are stored as `.ecky` source: a small modeling language with Lisp-style syntax. You can write it yourself, ask a model to generate it, or let an external agent edit it through MCP. The native geometry backend uses Open CASCADE Technology (OCCT); supported models can be exported as STEP or STL.
 
 The project is at **0.0.1** and under active development. Expect to build from source, encounter bugs, and see changes to the language and APIs.
 
 [Modeling tutorial](public/tutorials/ecky-campaign.md) · [Language reference](public/docs/ecky-ir.md) · [Website and examples](https://ecky-cad.com/)
+
+![Ecky desktop workspace with project cards, a filament-dryer model, editable source, and a Codex conversation](docs/screenshots/ecky-workbench.png)
+
+*The desktop workbench: projects, source, model preview, and conversation share a rearrangeable window layout.*
 
 ## How it started
 
@@ -18,15 +22,16 @@ So a printer purchase ended up involving a desktop application, a small programm
 
 ## Working with a model
 
-A design lives in a thread containing its conversation and model history. You can:
+A project keeps its source, conversation, and model versions together. The usual loop is to edit or describe a part, inspect the result, adjust dimensions, and export the geometry.
 
-- Write or edit `.ecky` source and rebuild the geometry.
-- Expose dimensions as controls and adjust them in the workbench.
-- Ask a configured LLM to create or revise a model. API adapters support Gemini, OpenAI-compatible endpoints, and Ollama.
-- Connect an external agent through the local MCP server to inspect source, make edits, render, and run checks.
-- Inspect the preview, compare versions, fork a design, and export available geometry.
+- **Edit source or controls.** Write `.ecky` in the workbench or open the project's `model.ecky` in an external editor. Saved file changes are picked up automatically; source parameters become workbench controls.
+- **Use Codex from Dialogue.** Select the Codex provider in settings and send prompts from Ecky. Each project keeps its attached Codex conversation and queued requests. Completed replies remain in the local history.
+- **Choose another connection.** API adapters support Gemini, OpenAI-compatible endpoints, and Ollama. The local MCP server lets external agents inspect the current project, edit its bound source file, render, and verify results.
+- **Keep revisions and evidence.** Changed drafts become versions before validation and rendering. Failed revisions stay in history with their errors; successful previews can carry structural checks and authored `verify` results. There is no separate model commit or promotion step.
+- **Organize and inspect.** Browse active, completed, and deleted projects; search conversation history or show only versions. Inspect source and previews, return to another version, or fork a design.
+- **Export the current result.** Save STL for slicing and STEP when the current geometry has a STEP artifact. Export availability comes from the rendered model.
 
-Source and history are stored locally. Using a remote provider sends it the context needed for the request, which can include model source, conversation, and viewport images. Manual authoring does not require an LLM provider.
+Source, settings, and history are stored locally. Manual authoring does not require an AI provider. Remote AI connections receive the context needed for the request, which can include source, conversation, attachments, and viewport images.
 
 For a concrete example, the repository contains a [bicycle bottle holder](sites/landing/src/models/bicycle-bottle-holder.ecky) and a separate [frame mount rail](sites/landing/src/models/bottle-holder-frame-mount-rail.ecky). Their source includes dimensions for the bottle, frame, walls, and dovetail connection. These are modeling examples; the files alone do not establish physical fit.
 
@@ -37,7 +42,7 @@ Save this as `model.ecky`:
 ```scheme
 (model
   (params
-    (number radius 10 :label "Radius" :min 1 :max 40 :step 1))
+    (number radius 10mm :label "Radius" :min 1 :max 40 :step 1))
 
   (part body
     (sphere radius)))
@@ -49,7 +54,7 @@ The source compiles to an intermediate representation before geometry is built. 
 
 ## Running from source
 
-The desktop application uses Tauri, Rust, Svelte, and Three.js. Native runtime preparation has macOS and Linux branches; the current runner linker is oriented toward macOS libraries, so Linux setup may require further work.
+The desktop application uses Tauri, Rust, Svelte, and Three.js. The runtime preparation and native runner scripts support macOS and Linux, including platform-specific library paths.
 
 You need:
 
@@ -67,9 +72,9 @@ npm run runtimes:prepare
 npm run tauri dev
 ```
 
-The Manifold preparation script downloads and builds the mesh library required by the native runner. `runtimes:prepare` copies the installed OCCT SDK into the local runtime bundle, builds the runner, and prepares the Python speech client. It does not install OCCT itself. See the [OCCT](scripts/prepare_occt_runtime.sh), [Manifold](scripts/prepare_manifold_runtime.sh), and [speech](scripts/prepare_speech_runtime.sh) scripts for paths and overrides.
+Run Manifold preparation first: it downloads and builds the mesh library required by the native runner. `runtimes:prepare` copies the installed OCCT SDK into the local runtime bundle, builds the runner, and prepares the Python speech client. It does not install OCCT itself. See the [OCCT](scripts/prepare_occt_runtime.sh), [Manifold](scripts/prepare_manifold_runtime.sh), and [speech](scripts/prepare_speech_runtime.sh) scripts for paths and overrides.
 
-Open settings to configure a provider if you want AI assistance. FreeCAD is needed only when using its backend; `freecadcmd` must be available on `PATH`.
+Open settings to choose an API, MCP, or Codex connection if you want AI assistance. FreeCAD is optional for native `.ecky` modeling, but required for its own backend, FCStd import, and STEP/FCStd imports from the FreeCAD library. Configure its command path in settings or use an installation the app can discover.
 
 `npm run dev` starts the Vite frontend and Node server. Use `npm run tauri dev` for the desktop application.
 
@@ -88,7 +93,7 @@ Using `model.ecky` from the example above:
 ```bash
 src-tauri/target/debug/ecky check model.ecky
 src-tauri/target/debug/ecky render --backend native model.ecky \
-  --param radius=12 --stl model.stl --json
+  --param radius=12 --stl model.stl --step model.step --json
 ```
 
 `check` compiles the source without rendering. `render` builds the requested artifact. The CLI also supports lowering to FreeCAD source and rendering through FreeCAD; its [entry point](src-tauri/src/bin/ecky.rs) contains the command syntax.
@@ -118,6 +123,6 @@ npm run typecheck
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-Geometry tests need their corresponding native runtimes or FreeCAD installation. `npm run test:rust:clean` runs Rust tests in a temporary Cargo target and removes it afterward.
+Geometry tests need their corresponding native runtimes or FreeCAD installation. `npm run test:rust:clean` runs `cargo check` and Rust tests in a temporary Cargo target, then cleans that target on exit.
 
-Documentation content lives in files under `public/tutorials/`, `public/docs/`, and `docs/`. `npm run build:book` builds the book and its generated chapter files; `npm run build:docs-site` builds the static documentation routes.
+The canonical language book and agent-reference content live in [the Ecky IR corpus](docs/books/ecky-ir/ecky-ir-corpus.md). `npm run sync:book-source` projects that content into the public reference files; edit the corpus rather than those generated copies. `npm run generate:docs` synchronizes the sources and rebuilds the agent prompts, book, docs site, and MCP skill reference. Tutorials and worked examples also live under `public/tutorials/` and `docs/books/ecky-ir/`.
