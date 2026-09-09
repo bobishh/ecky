@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-function installVersionTimelineMocks(options?: { includeFailedHead?: boolean }) {
+function installVersionTimelineMocks(options?: { includeFailedHead?: boolean; compactSelectedVersion?: boolean }) {
   const thread = {
     id: 'thread-verify',
     title: 'Verify Timeline Thread',
@@ -210,6 +210,16 @@ function installVersionTimelineMocks(options?: { includeFailedHead?: boolean }) 
     thread.updatedAt += 1;
   }
 
+  // Real workspace pages retain lightweight identity after full version payloads are evicted.
+  for (const message of thread.messages) {
+    const output = message.output as { title: string; versionName: string };
+    const bundle = message.artifactBundle as { modelId: string } | null;
+    message.versionSummary = {
+      title: output.title, versionName: output.versionName, modelId: bundle?.modelId ?? null,
+      hasOutput: true, hasRuntime: Boolean(bundle), hasManifest: Boolean(message.modelManifest),
+    };
+  }
+
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.route(/\/model-runtime\/model\.stl(?:\?.*)?$/, async (route) => {
       await route.fulfill({
@@ -227,7 +237,7 @@ endsolid mock
 `,
       });
     });
-    await page.addInitScript(({ thread }) => {
+    await page.addInitScript(({ thread, compactSelectedVersion }) => {
       const mockWindow = window as any;
       localStorage.clear();
       mockWindow.__versionProjectionCalls = [];
@@ -283,6 +293,16 @@ endsolid mock
         }
         if (cmd === 'get_inventory') {
           return [structuredClone(thread)];
+        }
+        if (cmd === 'open_inventory_thread_intent') {
+          return {
+            thread: { ...structuredClone(thread), messages: [] },
+            selectedVersion: compactSelectedVersion
+              ? { ...structuredClone(thread.messages.at(-1)), output: null, artifactBundle: null, modelManifest: null }
+              : structuredClone(thread.messages.at(-1)),
+            messagesPage: { messages: structuredClone(thread.messages), hasMore: false, nextBefore: null, observedBytes: 0, truncatedFields: [] },
+            requestedMessageFound: false,
+          };
         }
         if (cmd === 'get_thread') return structuredClone(thread);
         if (cmd === 'get_thread_latest_version') {
@@ -369,7 +389,7 @@ endsolid mock
         if (cmd === 'get_default_macro') return '# mock macro';
         return null;
       };
-    }, { thread });
+    }, { thread, compactSelectedVersion: options?.compactSelectedVersion ?? false });
   };
 }
 
@@ -398,6 +418,10 @@ test('Given persisted authored verify chips When opening version thread Then chi
     name: /Authored verify assembly_connected: Assembly must remain connected — when assembly-preview: false/i,
   });
 
+  await expect(page.getByText('IMMUTABLE VERSION', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('TUNING NOTE', { exact: true })).toHaveCount(0);
+  expect(await page.locator('.trail-content').first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(12);
+  expect(await failedChip.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
   await expect(failedChip).toBeVisible();
   await expect(passedChip).toBeDisabled();
   await expect(warningChip).toHaveClass(/trail-authored-verify__chip--amber/);
@@ -411,8 +435,8 @@ test('Given persisted authored verify chips When opening version thread Then chi
   await expect(page.getByText(/EDIT SOURCE \/ RIB_CLEARANCE/i)).toBeVisible();
 });
 
-test('Given dense version targets When opening a version Then core loads first and topology hydrates by bounded pages', async ({ page }) => {
-  await installVersionTimelineMocks()({ page });
+test('Given compact version metadata When opening a version Then core loads first and topology hydrates by bounded pages', async ({ page }) => {
+  await installVersionTimelineMocks({ compactSelectedVersion: true })({ page });
 
   await page.goto('/');
   await page.getByRole('button', { name: 'PROJECTS' }).click();
@@ -439,6 +463,9 @@ test('Given a failed artifact-less draft is newest When opening its thread Then 
   await expect(page.locator('.version-counter')).toHaveText(/V 2 OF 2/);
   await expect(page.locator('.version-title')).toHaveText('Broken bracket draft');
   await expect(page.locator('.trail-active-version')).toContainText('line 17: unexpected closing parenthesis');
+  await expect(page.locator('.trail-active-version .trail-status')).toHaveText('ERROR');
+  expect(await page.locator('.trail-active-version .trail-status').evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
+
 });
 
 test('Given version authoring controls When editing code or parameters Then Apply is the only version action', async ({ page }) => {

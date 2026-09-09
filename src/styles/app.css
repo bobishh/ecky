@@ -1,6 +1,9 @@
 /* Minimal reset + dark theme tokens. */
 
 :root {
+  --ui-font-caption: 0.65rem;
+  --ui-font-body: 0.75rem;
+  --ui-font-title: 0.85rem;
   --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   --spacing-xs: 4px;
   --spacing-sm: 8px;

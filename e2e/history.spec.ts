@@ -1210,3 +1210,34 @@ test.describe('Projects', () => {
     await expect(projectsWindow.getByText('database is locked')).toBeVisible();
   });
 });
+
+
+test('Given a project title When renaming or cancelling Then its typography and card bounds stay consistent', async ({ page }) => {
+  await installProjectSwitcherMocks({ history: [{
+    id: 'project-rename-type', title: 'Folded spoon rest', summary: '',
+    updatedAt: Date.UTC(2026, 8, 9), messages: [], versionCount: 1,
+    pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active',
+    finalizedAt: null, pendingConfirm: null, genieTraits: null,
+  }] })({ page });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  const card = page.locator('[data-project-id="project-rename-type"]');
+  const type = await card.locator('h3').evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { fontSize: s.fontSize, fontFamily: s.fontFamily, fontWeight: s.fontWeight, lineHeight: s.lineHeight, letterSpacing: s.letterSpacing };
+  });
+  await card.getByRole('button', { name: 'RENAME', exact: true }).click();
+  const input = card.locator('.rename-input');
+  await expect(input).toHaveValue('Folded spoon rest');
+  expect(await input.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { fontSize: s.fontSize, fontFamily: s.fontFamily, fontWeight: s.fontWeight, lineHeight: s.lineHeight, letterSpacing: s.letterSpacing };
+  })).toEqual(type);
+  const before = await card.boundingBox();
+  await input.fill('Long project title '.repeat(8));
+  expect(await card.boundingBox()).toEqual(before);
+  await input.fill('');
+  await input.press('Enter');
+  await expect(card.locator('h3')).toHaveText('Folded spoon rest');
+  await expect(input).toHaveCount(0);
+});

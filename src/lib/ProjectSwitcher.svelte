@@ -534,6 +534,7 @@
                   {#if editingProjectId === project.id}
                     <input
                       class="rename-input"
+                      aria-label="Project name"
                       bind:value={editingTitle}
                       onkeydown={(event) => event.key === 'Enter' && commitRename(project)}
                     />
@@ -740,7 +741,7 @@
     background: var(--bg-300);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.62rem;
+    font-size: var(--ui-font-caption);
     font-weight: 700;
     letter-spacing: 0.06em;
     padding: 5px 8px;
@@ -838,13 +839,21 @@
     overflow: hidden;
   }
 
+  .card-header h3,
+  .rename-input {
+    font-family: var(--font-mono);
+    font-size: var(--ui-font-title);
+    font-weight: 700;
+    line-height: 1.4;
+    letter-spacing: normal;
+  }
+
   .card-header h3 {
     flex: 1;
     min-width: 0;
     margin: 0;
     overflow: hidden;
     color: var(--text);
-    font-size: 0.84rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -853,14 +862,14 @@
   .card-footer > span {
     flex: 0 0 auto;
     color: var(--text-dim);
-    font-size: 0.6rem;
+    font-size: var(--ui-font-caption);
   }
 
   .summary,
   .attention {
     margin: 0;
     overflow: hidden;
-    font-size: 0.7rem;
+    font-size: var(--ui-font-body);
     line-height: 1.35;
   }
 
@@ -894,7 +903,7 @@
     padding: 4px 7px;
     background: transparent;
     color: var(--text-dim);
-    font-size: 0.58rem;
+    font-size: var(--ui-font-caption);
   }
 
   .card-open-action {

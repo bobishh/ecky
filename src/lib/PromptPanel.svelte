@@ -1304,7 +1304,6 @@
             </section>
           {:else if isVersion && (msg.output || msg.versionSummary)}
             <div class="trail-version-title">
-              <span>{isTuneVersion ? 'TUNING NOTE' : 'IMMUTABLE VERSION'}</span>
               <strong>{versionTimelineTitle(msg)}</strong>
             </div>
             {msg.output?.response || msg.content}
@@ -1572,7 +1571,7 @@
     background: color-mix(in srgb, var(--red) 10%, var(--bg-100));
     color: var(--red);
     font-family: var(--font-mono);
-    font-size: 0.65rem;
+    font-size: var(--ui-font-caption);
     line-height: 1.4;
     white-space: pre-wrap;
     overflow: auto;
@@ -1598,7 +1597,7 @@
     background: var(--bg-200);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.6rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.08em;
   }
 
@@ -1626,7 +1625,7 @@
     padding: 0.4rem 0.5rem;
     border: 1px solid var(--secondary);
     color: var(--secondary);
-    font-size: 0.72rem;
+    font-size: var(--ui-font-body);
     overflow: hidden;
   }
 
@@ -1654,8 +1653,8 @@
   }
 
   .codex-queue__item--failed { border-color: var(--red); }
-  .codex-queue__item span { color: var(--primary); font-size: 0.56rem; }
-  .codex-queue__item strong { color: var(--text); font-size: 0.62rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .codex-queue__item span { color: var(--primary); font-size: var(--ui-font-caption); }
+  .codex-queue__item strong { color: var(--text); font-size: var(--ui-font-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .codex-queue__item small { grid-column: 1 / -1; color: var(--red); white-space: pre-wrap; }
   .codex-queue__actions { display: flex; gap: 4px; }
 
@@ -1696,7 +1695,7 @@
     cursor: pointer;
     padding: 4px 8px;
     font-family: var(--font-mono);
-    font-size: 0.64rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.08em;
   }
 
@@ -1714,7 +1713,7 @@
   .attachment-hint {
     flex: 1 0 100%;
     color: var(--text-dim);
-    font-size: 0.64rem;
+    font-size: var(--ui-font-caption);
     line-height: 1.4;
     padding: 2px 2px 6px;
   }
@@ -1727,7 +1726,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 0.6rem;
+    font-size: var(--ui-font-caption);
     font-weight: bold;
   }
 
@@ -1762,7 +1761,7 @@
     border: 1px solid var(--bg-400);
     color: var(--text);
     padding: 2px 4px;
-    font-size: 0.65rem;
+    font-size: var(--ui-font-caption);
   }
 
   .version-nav {
@@ -1779,7 +1778,7 @@
   .version-engine,
   .version-engine-badge {
     font-family: var(--font-mono);
-    font-size: 0.62rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
@@ -1794,7 +1793,7 @@
     border: 1px solid var(--bg-300);
     color: var(--text);
     padding: 4px 8px;
-    font-size: 0.7rem;
+    font-size: var(--ui-font-body);
     cursor: pointer;
     font-family: var(--font-mono);
   }
@@ -1812,7 +1811,9 @@
   .version-info {
     display: flex;
     align-items: center;
-    gap: 16px;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    overflow: hidden;
     flex: 1;
     min-width: 0;
   }
@@ -1826,7 +1827,7 @@
   }
 
   .version-counter {
-    font-size: 0.7rem;
+    font-size: var(--ui-font-body);
     font-weight: bold;
     color: var(--secondary);
     font-family: var(--font-mono);
@@ -1834,7 +1835,7 @@
   }
 
   .version-name {
-    font-size: 0.65rem;
+    font-size: var(--ui-font-caption);
     color: var(--text-dim);
     text-transform: uppercase;
     font-weight: 500;
@@ -1844,12 +1845,8 @@
     white-space: nowrap;
   }
 
-  .version-engine,
-  .version-engine-badge {
-    padding: 2px 6px;
-    border: 1px solid color-mix(in srgb, var(--secondary) 45%, var(--bg-400));
-    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-200));
-    color: var(--secondary);
+  .version-engine {
+    color: var(--text-dim);
     white-space: nowrap;
   }
 
@@ -1857,7 +1854,7 @@
   .usage-strip,
   .trail-usage {
     font-family: var(--font-mono);
-    font-size: 0.62rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.06em;
     color: var(--secondary);
   }
@@ -1876,7 +1873,7 @@
     background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
     color: var(--primary);
     font-family: var(--font-mono);
-    font-size: 0.6rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.05em;
     text-transform: uppercase;
     white-space: nowrap;
@@ -1903,7 +1900,7 @@
     background: var(--bg-300);
     border: 1px solid var(--bg-400);
     color: var(--text);
-    font-size: 0.6rem;
+    font-size: var(--ui-font-caption);
     padding: 2px 6px;
     cursor: pointer;
     font-weight: bold;
@@ -1977,7 +1974,7 @@
     background: var(--bg-100);
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 0.64rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     padding: 7px 10px;
@@ -2021,7 +2018,7 @@
   .trail-captures__title {
     color: var(--primary);
     font-family: var(--font-mono);
-    font-size: 0.64rem;
+    font-size: var(--ui-font-caption);
     font-weight: 700;
     letter-spacing: 0.08em;
   }
@@ -2048,14 +2045,14 @@
   .trail-capture__meta strong {
     overflow: hidden;
     color: var(--text);
-    font-size: 0.72rem;
+    font-size: var(--ui-font-body);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .trail-capture__meta span {
     color: var(--text-dim);
-    font-size: 0.61rem;
+    font-size: var(--ui-font-caption);
   }
 
   .trail-capture button {
@@ -2067,7 +2064,7 @@
     background: color-mix(in srgb, var(--primary) 16%, var(--bg-100));
     color: var(--primary);
     font: inherit;
-    font-size: 0.65rem;
+    font-size: var(--ui-font-caption);
     font-weight: 700;
   }
 
@@ -2143,12 +2140,11 @@
 
   .trail-tune-version .trail-role {
     color: var(--text-dim);
-    font-size: 0.65rem;
+    font-size: var(--ui-font-caption);
   }
 
   .trail-tune-version .trail-version-title,
   .trail-tune-version .trail-content {
-    font-size: 0.8em;
     color: var(--text-dim);
   }
 
@@ -2162,14 +2158,16 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 4px;
-    font-size: 0.6rem;
+    font-size: var(--ui-font-caption);
   }
 
   .trail-meta {
     display: flex;
     align-items: center;
-    gap: 10px;
+    flex-wrap: wrap;
+    gap: 6px 10px;
     min-width: 0;
+    overflow: hidden;
   }
 
   .trail-role {
@@ -2180,7 +2178,7 @@
   .trail-status {
     border: 1px solid var(--bg-400);
     padding: 1px 5px;
-    font-size: 0.52rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.06em;
     color: var(--text-dim);
   }
@@ -2217,7 +2215,7 @@
     background: color-mix(in srgb, var(--bg) 78%, transparent);
     color: var(--text-dim);
     padding: 2px 6px;
-    font-size: 0.55rem;
+    font-size: var(--ui-font-caption);
     font-family: var(--font-mono);
     letter-spacing: 0.06em;
     cursor: pointer;
@@ -2232,7 +2230,7 @@
   }
 
   .trail-content {
-    font-size: 0.7rem;
+    font-size: var(--ui-font-body);
     color: var(--text);
     white-space: pre-wrap;
     line-height: 1.4;
@@ -2298,7 +2296,7 @@
     padding: 1px 5px;
     border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
     color: var(--text-dim);
-    font-size: 0.54rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.06em;
   }
 
@@ -2330,20 +2328,13 @@
     margin-bottom: 6px;
     color: var(--secondary);
     font-family: var(--font-mono);
-    font-size: 0.62rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.04em;
-  }
-
-  .trail-version-title span {
-    padding: 1px 5px;
-    border: 1px solid color-mix(in srgb, var(--secondary) 48%, var(--bg-400));
-    font-size: 0.54rem;
-    white-space: nowrap;
   }
 
   .trail-version-title strong {
     color: var(--text);
-    font-size: 0.72rem;
+    font-size: var(--ui-font-body);
     letter-spacing: 0.02em;
   }
 
@@ -2368,7 +2359,7 @@
     background: var(--bg-100);
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 0.56rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.05em;
     text-transform: uppercase;
     overflow: hidden;
@@ -2435,7 +2426,7 @@
     background: color-mix(in srgb, var(--bg-100) 88%, transparent);
     color: var(--secondary);
     font-family: var(--font-mono);
-    font-size: 0.56rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.08em;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2491,7 +2482,7 @@
   .visual-loupe__caption {
     flex: 0 0 auto;
     color: var(--text-dim);
-    font-size: 0.72rem;
+    font-size: var(--ui-font-body);
     line-height: 1.4;
     max-height: 5rem;
     overflow: auto;
@@ -2524,7 +2515,7 @@
   .version-loupe__title {
     min-width: 0;
     color: var(--secondary);
-    font-size: 0.72rem;
+    font-size: var(--ui-font-body);
     font-weight: 700;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2534,7 +2525,7 @@
   .version-loupe__subtitle {
     flex: 0 0 auto;
     color: var(--text-dim);
-    font-size: 0.62rem;
+    font-size: var(--ui-font-caption);
   }
 
   .version-loupe__viewer {
@@ -2552,7 +2543,7 @@
     color: var(--text-dim);
     padding: 8px;
     font-family: var(--font-mono);
-    font-size: 0.66rem;
+    font-size: var(--ui-font-caption);
     overflow: auto;
   }
 
@@ -2652,7 +2643,7 @@
   .voice-status {
     color: var(--secondary);
     font-family: var(--font-mono);
-    font-size: 0.58rem;
+    font-size: var(--ui-font-caption);
     line-height: 1.35;
     max-height: 42px;
     overflow: hidden;
@@ -2670,7 +2661,7 @@
     gap: 8px;
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.64rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.08em;
     white-space: nowrap;
   }
@@ -2683,7 +2674,7 @@
     background: color-mix(in srgb, var(--primary) 8%, var(--bg-100));
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.64rem;
+    font-size: var(--ui-font-caption);
     line-height: 1.45;
     overflow: hidden;
   }
@@ -2733,7 +2724,7 @@
 
   .workspace-capture-hint {
     color: var(--text-dim);
-    font-size: 0.58rem;
+    font-size: var(--ui-font-caption);
     line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2798,7 +2789,7 @@
   .error-header {
     font-weight: bold;
     margin-bottom: 8px;
-    font-size: 0.65rem;
+    font-size: var(--ui-font-caption);
     letter-spacing: 0.1em;
   }
 
