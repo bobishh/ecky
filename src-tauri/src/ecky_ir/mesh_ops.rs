@@ -2947,9 +2947,14 @@ pub(super) fn fold_boolean_geometry(
                     let union =
                         fuse_solids(left.iter().cloned().chain(right.iter().cloned()).collect())
                             .into_mesh("xor")?;
-                    let inter =
-                        common_solids_from_first(name, first, [&args[1]].into_iter(), env, bindings)?
-                            .into_mesh("xor")?;
+                    let inter = common_solids_from_first(
+                        name,
+                        first,
+                        [&args[1]].into_iter(),
+                        env,
+                        bindings,
+                    )?
+                    .into_mesh("xor")?;
                     if is_empty_mesh(&inter) {
                         Ok(Geometry::Mesh(union))
                     } else {

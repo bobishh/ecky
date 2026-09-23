@@ -316,21 +316,24 @@ fn eval_lookup_item(value: &IrExpr, env: &BTreeMap<String, ParamValue>) -> AppRe
         "list-ref" if args.len() == 2 => {
             let index = eval_number(&args[1], env)?;
             if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
-                return Err(validation("`list-ref` index must be a nonnegative integer."));
+                return Err(validation(
+                    "`list-ref` index must be a nonnegative integer.",
+                ));
             }
             (eval_lookup_list(&args[0], env)?, index as usize)
         }
-        _ => return Err(validation(format!("`{op}` expects a list and valid index."))),
+        _ => {
+            return Err(validation(format!(
+                "`{op}` expects a list and valid index."
+            )))
+        }
     };
     list.get(index)
         .cloned()
         .ok_or_else(|| validation(format!("`{op}` index {index} is out of range.")))
 }
 
-fn eval_lookup_list(
-    value: &IrExpr,
-    env: &BTreeMap<String, ParamValue>,
-) -> AppResult<Vec<IrExpr>> {
+fn eval_lookup_list(value: &IrExpr, env: &BTreeMap<String, ParamValue>) -> AppResult<Vec<IrExpr>> {
     let value = inline_let_expr(value)?;
     let items = expr_list_items(&value, "lookup table")?;
     match items.first().and_then(IrExpr::as_symbol) {
@@ -343,7 +346,9 @@ fn eval_lookup_list(
                     return Ok(pair.to_vec());
                 }
             }
-            Err(validation(format!("`assoc` key `{key}` is absent from lookup table.")))
+            Err(validation(format!(
+                "`assoc` key `{key}` is absent from lookup table."
+            )))
         }
         Some("list-ref") => {
             let selected = eval_lookup_item(&value, env)?;
@@ -439,7 +444,11 @@ mod tests {
         ]);
         let lookup = IrExpr::list(vec![
             IrExpr::symbol("cadr"),
-            IrExpr::list(vec![IrExpr::symbol("assoc"), IrExpr::symbol("letter"), table]),
+            IrExpr::list(vec![
+                IrExpr::symbol("assoc"),
+                IrExpr::symbol("letter"),
+                table,
+            ]),
         ]);
         let env = BTreeMap::from([("letter".to_string(), ParamValue::String("Г".into()))]);
         assert_eq!(eval_stringish(&lookup, &env).expect("lookup"), "Гг");

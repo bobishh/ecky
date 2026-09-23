@@ -4552,7 +4552,8 @@ impl<'a> PartPlanner<'a> {
                 };
                 for entry in entries {
                     if let OcctArg::List(pair) = &entry {
-                        if matches!(pair.first(), Some(OcctArg::Text(candidate)) if candidate == &key) {
+                        if matches!(pair.first(), Some(OcctArg::Text(candidate)) if candidate == &key)
+                        {
                             return Ok(entry);
                         }
                     }
@@ -4930,7 +4931,10 @@ impl<'a> PartPlanner<'a> {
 }
 
 fn is_list_accessor_name(name: &str) -> bool {
-    matches!(name, "car" | "first" | "cadr" | "second" | "third" | "list-ref")
+    matches!(
+        name,
+        "car" | "first" | "cadr" | "second" | "third" | "list-ref"
+    )
 }
 
 fn node_contains_list_accessor(node: &CoreNode) -> bool {
@@ -5235,9 +5239,8 @@ mod tests {
 
     #[test]
     fn plans_list_ref_from_literal_values() {
-        let program = compile(
-            "(model (part body (translate (list-ref '(0 20) 1) 0 0 (box 10 10 10))))",
-        );
+        let program =
+            compile("(model (part body (translate (list-ref '(0 20) 1) 0 0 (box 10 10 10))))");
         let plan = plan_core_program(&program).expect("literal list-ref resolves before OCCT");
         assert!(plan.parts[0].commands.iter().any(|command| {
             command.op == OcctOp::Translate && command.args.first() == Some(&OcctArg::Number(20.0))

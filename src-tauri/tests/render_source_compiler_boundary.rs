@@ -1,6 +1,6 @@
-use ecky_cad_lib::ecky_cad_host::source_compiler::NativeSourceCompiler;
-use ecky_cad_lib::ecky_cad_host::direct_occt::plan_core_program;
 use ecky_cad_lib::contracts::{DesignParams, GeometryBackend};
+use ecky_cad_lib::ecky_cad_host::direct_occt::plan_core_program;
+use ecky_cad_lib::ecky_cad_host::source_compiler::NativeSourceCompiler;
 use ecky_cad_lib::models::PathResolver;
 use ecky_cad_lib::services::render::render_cli_ecky;
 use ecky_render::core_ir::{CoreNodeKind, CoreOperation, CorePrimitive};
@@ -64,9 +64,7 @@ fn single_contour_curved_cyrillic_text_reaches_direct_occt_as_a_closed_profile()
     if !std::path::Path::new(font).is_file() {
         return;
     }
-    let source = format!(
-        "(model (part letter (extrude (text \"С\" 12 :font \"{font}\") 2)))"
-    );
+    let source = format!("(model (part letter (extrude (text \"С\" 12 :font \"{font}\") 2)))");
     let program = NativeSourceCompiler
         .compile(&source)
         .expect("Cyrillic text source compiles");
@@ -112,7 +110,10 @@ fn cyrillic_pair_lookup_renders_from_a_select_parameter() {
     let root = std::env::temp_dir().join(format!("ecky-pair-lookup-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("data")).expect("test data directory");
     std::fs::create_dir_all(root.join("config")).expect("test config directory");
-    let params = DesignParams::from([("letter".to_string(), ecky_cad_lib::contracts::ParamValue::String("Я".into()))]);
+    let params = DesignParams::from([(
+        "letter".to_string(),
+        ecky_cad_lib::contracts::ParamValue::String("Я".into()),
+    )]);
     let rendered = render_cli_ecky(
         &source,
         &params,

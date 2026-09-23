@@ -57,7 +57,9 @@ fn native_mesh_render_succeeds_from_worker_thread_with_small_stack() {
         })
         .expect("spawn small stack thread");
 
-    let result = handle.join().expect("thread did not crash with stack overflow");
+    let result = handle
+        .join()
+        .expect("thread did not crash with stack overflow");
     assert!(result.is_ok(), "render succeeded: {:?}", result.err());
     let _ = std::fs::remove_dir_all(root);
 }

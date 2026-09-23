@@ -826,7 +826,9 @@ fn run_native_mesh_with_large_stack<T: Send + 'static>(
         .stack_size(ECKY_NATIVE_RENDER_DEFAULT_STACK_SIZE)
         .spawn(task)
         .map_err(|err| {
-            AppError::internal(format!("Failed to spawn Ecky Native mesh {label} worker: {err}"))
+            AppError::internal(format!(
+                "Failed to spawn Ecky Native mesh {label} worker: {err}"
+            ))
         })?
         .join()
         .map_err(|_| AppError::internal(format!("Ecky Native mesh {label} worker panicked.")))?
