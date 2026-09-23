@@ -284,6 +284,12 @@ pub(super) fn eval_stringish(
             }
             return eval_stringish(&items[3], env);
         }
+        if matches!(
+            items.first().and_then(IrExpr::as_symbol),
+            Some("car" | "first" | "cadr" | "second" | "third" | "list-ref")
+        ) {
+            return eval_stringish(&eval_lookup_item(&value, env)?, env);
+        }
     }
     if let IrExpr::Selector(selector) = &value {
         return Ok(match selector {
@@ -292,6 +298,59 @@ pub(super) fn eval_stringish(
         });
     }
     Err(validation("Expected a string value."))
+}
+
+fn eval_lookup_item(value: &IrExpr, env: &BTreeMap<String, ParamValue>) -> AppResult<IrExpr> {
+    let items = expr_list_items(value, "list lookup")?;
+    let op = expr_head_symbol(items, "list lookup")?;
+    let args = &items[1..];
+    let (list, index) = match op {
+        "car" | "first" | "cadr" | "second" | "third" if args.len() == 1 => (
+            eval_lookup_list(&args[0], env)?,
+            match op {
+                "car" | "first" => 0,
+                "cadr" | "second" => 1,
+                _ => 2,
+            },
+        ),
+        "list-ref" if args.len() == 2 => {
+            let index = eval_number(&args[1], env)?;
+            if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
+                return Err(validation("`list-ref` index must be a nonnegative integer."));
+            }
+            (eval_lookup_list(&args[0], env)?, index as usize)
+        }
+        _ => return Err(validation(format!("`{op}` expects a list and valid index."))),
+    };
+    list.get(index)
+        .cloned()
+        .ok_or_else(|| validation(format!("`{op}` index {index} is out of range.")))
+}
+
+fn eval_lookup_list(
+    value: &IrExpr,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<Vec<IrExpr>> {
+    let value = inline_let_expr(value)?;
+    let items = expr_list_items(&value, "lookup table")?;
+    match items.first().and_then(IrExpr::as_symbol) {
+        Some("quote") if items.len() == 2 => eval_lookup_list(&items[1], env),
+        Some("assoc") if items.len() == 3 => {
+            let key = eval_stringish(&items[1], env)?;
+            for entry in eval_lookup_list(&items[2], env)? {
+                let pair = expr_list_items(&entry, "lookup entry")?;
+                if pair.len() >= 2 && eval_stringish(&pair[0], env)? == key {
+                    return Ok(pair.to_vec());
+                }
+            }
+            Err(validation(format!("`assoc` key `{key}` is absent from lookup table.")))
+        }
+        Some("list-ref") => {
+            let selected = eval_lookup_item(&value, env)?;
+            Ok(expr_list_items(&selected, "selected lookup entry")?.to_vec())
+        }
+        _ => Ok(items.to_vec()),
+    }
 }
 
 pub(super) fn compare_numbers(
@@ -366,4 +425,23 @@ pub(super) fn parse_count(
         )));
     }
     Ok(parsed.round().max(minimum as f64) as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_cyrillic_pair_from_literal_lookup_table() {
+        let table = IrExpr::list(vec![
+            IrExpr::list(vec![IrExpr::string("А"), IrExpr::string("Аа")]),
+            IrExpr::list(vec![IrExpr::string("Г"), IrExpr::string("Гг")]),
+        ]);
+        let lookup = IrExpr::list(vec![
+            IrExpr::symbol("cadr"),
+            IrExpr::list(vec![IrExpr::symbol("assoc"), IrExpr::symbol("letter"), table]),
+        ]);
+        let env = BTreeMap::from([("letter".to_string(), ParamValue::String("Г".into()))]);
+        assert_eq!(eval_stringish(&lookup, &env).expect("lookup"), "Гг");
+    }
 }

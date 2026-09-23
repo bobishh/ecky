@@ -3034,9 +3034,9 @@ fn expand_slot_center_point_node(
 }
 
 /// Emit one profile loop as its exact geometry (ocpsvg/build123d parity):
-/// contours with curves become a `bezier-path` wire of consecutive cubics
-/// (lines encoded as exact degree-3 segments), pure-line contours keep the
-/// flattened `polygon` plan unchanged.
+/// contours with curves become a closed `bezier-path` wire of consecutive cubics
+/// (lines encoded as exact degree-3 segments), then a face. Pure-line contours
+/// keep the flattened `polygon` plan unchanged. Both branches return a sketch.
 pub(crate) fn profile_contour_node(
     points: &[[f64; 2]],
     geometry: &crate::ecky_cad_host::svg_profile::SvgContourGeometry,
@@ -3119,7 +3119,7 @@ pub(crate) fn profile_contour_node(
         CoreNodeKind::List(point_nodes),
         CoreValueKind::List,
     );
-    CoreNode::new(
+    let wire = CoreNode::new(
         next_id(next_node_id),
         CoreNodeKind::Call {
             op: CoreOperation::Path(CorePathOp::BezierPath),
@@ -3127,6 +3127,15 @@ pub(crate) fn profile_contour_node(
             keywords: Vec::new(),
         },
         CoreValueKind::Path,
+    );
+    CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::MakeFace),
+            args: vec![wire],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Sketch,
     )
 }
 
@@ -4490,6 +4499,74 @@ impl<'a> PartPlanner<'a> {
                 op: CoreOperation::Custom(name),
                 args,
                 ..
+            } if name == "list-ref" => {
+                let [list, index] = args.as_slice() else {
+                    return Err(planner_arity_error("list-ref", "a list and an index"));
+                };
+                let items = match self.plan_arg(list)? {
+                    OcctArg::List(items) => items,
+                    OcctArg::Point2(point) => point.iter().copied().map(OcctArg::Number).collect(),
+                    OcctArg::Point3(point) => point.iter().copied().map(OcctArg::Number).collect(),
+                    other => {
+                        return Err(planner_op_error(
+                            AuthoringReason::Type,
+                            "list-ref",
+                            format!("expected list, got {other:?}."),
+                        ))
+                    }
+                };
+                let index = eval_core_number(index, self.param_names, &self.scalar_env_snapshot())?;
+                if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
+                    return Err(planner_op_error(
+                        AuthoringReason::Type,
+                        "list-ref",
+                        "index must be a nonnegative integer.",
+                    ));
+                }
+                items.get(index as usize).cloned().ok_or_else(|| {
+                    planner_op_error(
+                        AuthoringReason::Type,
+                        "list-ref",
+                        format!("index {index} is out of range."),
+                    )
+                })
+            }
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom(name),
+                args,
+                ..
+            } if name == "assoc" => {
+                let [key, table] = args.as_slice() else {
+                    return Err(planner_arity_error("assoc", "a key and a table"));
+                };
+                let key = eval_core_stringish(key, self.param_names, &self.scalar_env_snapshot())?;
+                let entries = match self.plan_arg(table)? {
+                    OcctArg::List(entries) => entries,
+                    other => {
+                        return Err(planner_op_error(
+                            AuthoringReason::Type,
+                            "assoc",
+                            format!("expected list of pairs, got {other:?}."),
+                        ))
+                    }
+                };
+                for entry in entries {
+                    if let OcctArg::List(pair) = &entry {
+                        if matches!(pair.first(), Some(OcctArg::Text(candidate)) if candidate == &key) {
+                            return Ok(entry);
+                        }
+                    }
+                }
+                Err(planner_op_error(
+                    AuthoringReason::Type,
+                    "assoc",
+                    format!("key `{key}` is absent from lookup table."),
+                ))
+            }
+            CoreNodeKind::Call {
+                op: CoreOperation::Custom(name),
+                args,
+                ..
             } if name == "reverse" => {
                 let [arg] = args.as_slice() else {
                     return Err(planner_error(
@@ -4853,7 +4930,7 @@ impl<'a> PartPlanner<'a> {
 }
 
 fn is_list_accessor_name(name: &str) -> bool {
-    matches!(name, "car" | "first" | "cadr" | "second" | "third")
+    matches!(name, "car" | "first" | "cadr" | "second" | "third" | "list-ref")
 }
 
 fn node_contains_list_accessor(node: &CoreNode) -> bool {
@@ -5154,6 +5231,17 @@ mod tests {
 
     fn compile(source: &str) -> CoreProgram {
         crate::ecky_scheme::compile_to_core_program(source).expect("compile")
+    }
+
+    #[test]
+    fn plans_list_ref_from_literal_values() {
+        let program = compile(
+            "(model (part body (translate (list-ref '(0 20) 1) 0 0 (box 10 10 10))))",
+        );
+        let plan = plan_core_program(&program).expect("literal list-ref resolves before OCCT");
+        assert!(plan.parts[0].commands.iter().any(|command| {
+            command.op == OcctOp::Translate && command.args.first() == Some(&OcctArg::Number(20.0))
+        }));
     }
 
     #[test]
@@ -7424,6 +7512,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![OcctOp::ImportStl]
         );
+    }
+
+    #[test]
+    fn curved_glyph_contour_is_a_sketch_after_lowering() {
+        use crate::ecky_cad_host::svg_profile::{SvgContourGeometry, SvgPathSegment};
+
+        let geometry = SvgContourGeometry {
+            start: [0.0, 0.0],
+            segments: vec![
+                SvgPathSegment::Cubic {
+                    c1: [1.0, 0.0],
+                    c2: [2.0, 1.0],
+                    to: [2.0, 2.0],
+                },
+                SvgPathSegment::Line { to: [0.0, 2.0] },
+                SvgPathSegment::Line { to: [0.0, 0.0] },
+            ],
+        };
+        let mut next_node_id = 1;
+        let node = profile_contour_node(
+            &[[0.0, 0.0], [2.0, 2.0], [0.0, 2.0]],
+            &geometry,
+            &mut next_node_id,
+        );
+
+        assert_eq!(node.value_kind, CoreValueKind::Sketch);
+        let CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::MakeFace),
+            args,
+            ..
+        } = node.kind
+        else {
+            panic!("curved contour must become a face");
+        };
+        assert!(matches!(
+            args[0].kind,
+            CoreNodeKind::Call {
+                op: CoreOperation::Path(CorePathOp::BezierPath),
+                ..
+            }
+        ));
     }
 
     #[test]

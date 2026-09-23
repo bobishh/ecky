@@ -11701,6 +11701,23 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
 
 fn infer_call_value_kind(name: &str, args: &[CoreNode]) -> CoreValueKind {
     match name {
+        "list-ref" => match (args.first(), args.get(1)) {
+            (
+                Some(CoreNode {
+                    kind: CoreNodeKind::List(items),
+                    ..
+                }),
+                Some(CoreNode {
+                    kind: CoreNodeKind::Literal(CoreLiteral::Number(index)),
+                    ..
+                }),
+            ) if *index >= 0.0 && index.fract() == 0.0 => items
+                .get(*index as usize)
+                .map(|item| item.value_kind)
+                .unwrap_or(CoreValueKind::Any),
+            _ => CoreValueKind::Any,
+        },
+        "assoc" => CoreValueKind::List,
         "place" => args
             .get(1)
             .map(|shape| shape.value_kind)
