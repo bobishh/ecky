@@ -815,6 +815,44 @@ impl PathResolver for DirectOcctThreadResolver {
     }
 }
 
+const ECKY_NATIVE_RENDER_DEFAULT_STACK_SIZE: usize = 32 * 1024 * 1024;
+
+fn run_native_mesh_with_large_stack<T: Send + 'static>(
+    label: &'static str,
+    task: impl FnOnce() -> AppResult<T> + Send + 'static,
+) -> AppResult<T> {
+    std::thread::Builder::new()
+        .name(format!("ecky-native-mesh-{label}"))
+        .stack_size(ECKY_NATIVE_RENDER_DEFAULT_STACK_SIZE)
+        .spawn(task)
+        .map_err(|err| {
+            AppError::internal(format!("Failed to spawn Ecky Native mesh {label} worker: {err}"))
+        })?
+        .join()
+        .map_err(|_| AppError::internal(format!("Ecky Native mesh {label} worker panicked.")))?
+}
+
+fn render_native_mesh_isolated(
+    label: &'static str,
+    macro_code: &str,
+    parameters: &DesignParams,
+    previous_manifest: Option<&ModelManifest>,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    let source = macro_code.to_string();
+    let parameters = parameters.clone();
+    let previous_manifest = previous_manifest.cloned();
+    let resolver = DirectOcctThreadResolver::from_resolver(app);
+    run_native_mesh_with_large_stack(label, move || {
+        crate::ecky_ir::render_model_with_previous_manifest(
+            &source,
+            &parameters,
+            previous_manifest.as_ref(),
+            &resolver,
+        )
+    })
+}
+
 fn load_manifest_for_bundle(bundle: &ArtifactBundle) -> AppResult<Option<ModelManifest>> {
     let path = bundle.manifest_path.trim();
     if path.is_empty() {
@@ -2138,7 +2176,8 @@ fn render_model_unlocked(
                 Ok(Some(bundle)) => Ok(bundle),
                 Ok(None) => {
                     if pure_mesh_source {
-                        crate::ecky_ir::render_model_with_previous_manifest(
+                        render_native_mesh_isolated(
+                            "pure-mesh",
                             macro_code,
                             parameters,
                             previous_manifest,
@@ -2154,7 +2193,8 @@ fn render_model_unlocked(
                             Some("export:direct-occt"),
                         ))
                     } else if mesh_only_redirect {
-                        crate::ecky_ir::render_model_with_previous_manifest(
+                        render_native_mesh_isolated(
+                            "mesh-only-redirect",
                             macro_code,
                             parameters,
                             previous_manifest,
@@ -2191,7 +2231,8 @@ fn render_model_unlocked(
                             Some("export:direct-occt"),
                         ))
                     } else if mesh_only_redirect {
-                        crate::ecky_ir::render_model_with_previous_manifest(
+                        render_native_mesh_isolated(
+                            "mesh-only-fallback",
                             macro_code,
                             parameters,
                             previous_manifest,

@@ -287,7 +287,17 @@ fn common_solids(
     let first = iter
         .next()
         .ok_or_else(|| validation(format!("`{}` expects at least two operands.", name)))?;
-    let mut current = flatten_solids(eval_geometry_with_bindings(first, env, bindings)?, name)?;
+    let current = flatten_solids(eval_geometry_with_bindings(first, env, bindings)?, name)?;
+    common_solids_from_first(name, current, iter, env, bindings)
+}
+
+fn common_solids_from_first<'a>(
+    name: &str,
+    mut current: Vec<IrMesh>,
+    iter: impl Iterator<Item = &'a IrExpr>,
+    env: &BTreeMap<String, ParamValue>,
+    bindings: &BTreeMap<String, Geometry>,
+) -> AppResult<Geometry> {
     for arg in iter {
         let next = flatten_solids(eval_geometry_with_bindings(arg, env, bindings)?, name)?;
         if current.is_empty() || next.is_empty() {
@@ -2894,16 +2904,14 @@ pub(super) fn fold_boolean_geometry(
         )));
     }
     let mut iter = args.iter();
-    match eval_geometry_with_bindings(iter.next().expect("checked"), env, bindings)? {
+    let first_geom = eval_geometry_with_bindings(iter.next().expect("checked"), env, bindings)?;
+    match first_geom {
         Geometry::Mesh(_) | Geometry::Compound(_) => {
-            let first = flatten_solids(
-                eval_geometry_with_bindings(args.first().expect("checked"), env, bindings)?,
-                name,
-            )?;
+            let first = flatten_solids(first_geom, name)?;
             match name {
                 "union" => {
                     let mut solids = first;
-                    for arg in &args[1..] {
+                    for arg in iter {
                         solids.extend(flatten_solids(
                             eval_geometry_with_bindings(arg, env, bindings)?,
                             name,
@@ -2912,26 +2920,26 @@ pub(super) fn fold_boolean_geometry(
                     Ok(fuse_solids(solids))
                 }
                 "difference" => {
-                    let base =
-                        eval_geometry_with_bindings(args.first().expect("checked"), env, bindings)?;
                     let mut cuts = Vec::new();
-                    for arg in &args[1..] {
+                    for arg in iter {
                         cuts.extend(flatten_solids(
                             eval_geometry_with_bindings(arg, env, bindings)?,
                             name,
                         )?);
                     }
+                    let base = match first.len() {
+                        0 => Geometry::Compound(Vec::new()),
+                        1 => Geometry::Mesh(first.into_iter().next().unwrap()),
+                        _ => Geometry::Compound(first),
+                    };
                     cut_solids(base, cuts, name)
                 }
-                "intersection" => common_solids(name, args, env, bindings),
+                "intersection" => common_solids_from_first(name, first, iter, env, bindings),
                 "xor" => {
                     if args.len() != 2 {
                         return Err(validation("`xor` expects exactly two solid operands."));
                     }
-                    let left = flatten_solids(
-                        eval_geometry_with_bindings(&args[0], env, bindings)?,
-                        name,
-                    )?;
+                    let left = first.clone();
                     let right = flatten_solids(
                         eval_geometry_with_bindings(&args[1], env, bindings)?,
                         name,
@@ -2939,7 +2947,9 @@ pub(super) fn fold_boolean_geometry(
                     let union =
                         fuse_solids(left.iter().cloned().chain(right.iter().cloned()).collect())
                             .into_mesh("xor")?;
-                    let inter = common_solids(name, args, env, bindings)?.into_mesh("xor")?;
+                    let inter =
+                        common_solids_from_first(name, first, [&args[1]].into_iter(), env, bindings)?
+                            .into_mesh("xor")?;
                     if is_empty_mesh(&inter) {
                         Ok(Geometry::Mesh(union))
                     } else {
