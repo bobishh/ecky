@@ -1,32 +1,67 @@
 ---
 id: mission-04-gillette-travel-kit
-title: Pack a razor into three printed parts
+title: Make a hollow travel case
 ---
 
-# Pack a razor into three printed parts
+# Make a hollow travel case
 
-Build a real assembly: base holds the handle and blade box, lid slides on rails, blade cover retains one consumable. Three printed parts means three interfaces to reason about.
+The razor travel kit has a base, sliding lid, and small blade cover. Start with the empty base: it shows how wall and floor thickness come from one subtraction. Then inspect the features that hold the lid and contents.
 
-## Parts have different jobs {#separate-parts}
+## Separate the moving pieces {#separate-parts}
 
-The base carries the handle clips and blade box. The lid protects the assembly and slides over rails. The blade cover is a small removable retention part. Keep them separate: each has different movement, wear, print orientation, and fit tolerance.
+Use separate `part` forms for the base, lid, and blade cover. Join features that belong to the same printed piece; leave parts that must move independently separate. A lid positioned above a base is still a separate part, even when their edges touch.
 
-## Make the shell {#shell}
+## Subtract the cavity {#shell}
 
-Start with outer shell, then overshooting cavity. `wall` sets side thickness; `floor` sets the bottom. The cavity starts at `floor` and deliberately extends beyond the top, so the subtraction cannot leave a skin over the opening.
+```scheme
+(model
+  (params
+    (number case_length 116 :label "Case length" :min 90 :max 150 :step 1)
+    (number case_width 72 :label "Case width" :min 50 :max 100 :step 1)
+    (number case_height 20 :label "Case height" :min 12 :max 36 :step 1)
+    (number wall 3 :label "Wall" :min 1.6 :max 5 :step 0.2)
+    (number floor 1.8 :label "Floor" :min 1 :max 4 :step 0.2)
+    :relations ((> case_length case_width) (> case_width wall)))
+  (part shell_blank
+    (let* (
+      (outer (extrude (rounded-rect case_length case_width 6) case_height))
+      (inner_length (- case_length (* 2 wall)))
+      (inner_width (- case_width (* 2 wall)))
+      (cavity (translate 0 0 floor
+                (extrude (rounded-rect inner_length inner_width 3)
+                         (+ (- case_height floor) 1)))))
+      (difference outer cavity))))
+```
 
-Render the supplied shell. Change `wall` from `3` to `2.4`, render, and inspect that the external envelope stays fixed while only the cavity grows. Restore it before continuing.
+[Download shell example](../projects/08-gillette-kit/shell-blank.ecky)
 
-## Complete the cover detents {#detents}
+The outside is 116 × 72 × 20 mm. With `wall = 3`, the cavity is 110 × 66 mm. Its bottom starts at Z = 1.8, leaving the floor. Its extrusion ends 1 mm above the outside, so the opening has no top skin.
 
-The blade cover needs two identical pockets. `detent_engagement` is one named decision: it moves both pockets equally from the cover edges. Keep `pocket_radius` derived from `detent_radius` plus clearance; do not type two unrelated pocket positions.
+Change `wall` from 3 to 2.4. The outside stays fixed and the cavity becomes 111.2 × 67.2 mm. Change `floor` separately to see the bottom rise without changing the side walls.
 
-Render the starter. Change engagement from `0.2` to `0.3` and identify both pockets moving together. Check Solution compares lowered Ecky IR, not source text.
+## Position the cover pockets {#detents}
 
-## Reveal the finished kit {#kit-solution}
+[Open the blade-cover exercise](../projects/08-gillette-kit/blade-cover-detents.ecky). Find `detent_engagement` and follow it into the two pocket positions. The same value moves both pockets; `pocket_radius` controls their size.
 
-The finished kit joins the airy base, rail lid, and blade cover as separate printable parts. Read each `part` boundary first; only then inspect detents, handle snaps, and dovetail rails. This prevents an assembly from turning into one unprintable solid.
+Change engagement from 0.2 to 0.3 and inspect both pockets. If only one moves, the two positions do not use the same binding. Do not compensate by changing pocket radius: position and size are different adjustments.
 
-## Study snap and rail fit {#fit-coupon}
+## Read the complete kit {#kit-solution}
 
-Use this handle clip as a coupon before printing the full kit. `snap_clearance` controls clip bore; `clip_wall` controls spring material; `clip_width` controls contact length. Test one short coupon with your filament and orientation, then carry measured clearance into the full model. A nominal number is not a physical guarantee.
+[Download travel kit](../../../../sites/landing/src/models/gillette-travel-kit.ecky)
+
+Start with the three `part` forms. In each part, find the final boolean expression and trace its inputs. Read the lid rails before the surface cutouts: rails determine how the lid engages the base.
+
+## Test the handle clip {#fit-coupon}
+
+[Download handle clip](../projects/08-gillette-kit/handle-snap.ecky)
+
+The clip uses these dimensions:
+
+```scheme
+(inner_radius (+ (/ handle_diameter 2) snap_clearance))
+(outer_radius (+ inner_radius clip_wall))
+```
+
+At the defaults, a 14 mm handle gets a 7.4 mm inner radius and a 9 mm outer radius. `snap_clearance` is radial here: 0.4 mm adds 0.8 mm to the bore diameter. `clip_wall` changes the material around the bore without changing that clearance.
+
+Print this short clip with the intended filament. Adjust clearance for insertion and wall thickness for flex before using the same values in the whole kit.

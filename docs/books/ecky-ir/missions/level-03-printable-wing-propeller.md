@@ -1,44 +1,83 @@
 ---
 id: mission-03-wing-propeller-study
-title: Drive form from stations and parameters
+title: Loft a wing and repeat a blade
 ---
 
-# Drive form from stations and parameters
+# Loft a wing and repeat a blade
 
-This is a geometry study, not flight hardware. Learn how one profile becomes a controllable form, then reuse that form around a hub.
+A loft joins cross-sections into a solid. Here two four-point profiles become a wing-shaped study. You will change its span and taper, then read how one blade is repeated around a hub. These examples demonstrate geometry, not tested flying parts.
 
-## A station is a contract {#stations}
+## Define the two sections {#stations}
 
-A station is one cross-section plus its position and orientation. The wing needs a root station, a tip station, span, taper, and twist. Name those decisions once; do not hand-draw a second almost-identical profile whenever the wing changes.
+A section, or station, is a profile at one position along the shape. In this example the root is wider and thicker than the tip. Each profile has four vertices in the XY plane; `loft` separates the profiles along Z.
 
-## Loft the first wing {#wing-worked-stations}
+## Build the first loft {#wing-worked-stations}
 
-Read the three stages in the source: root profile, tip profile, then `loft`. `root_chord` controls the first section. `tip_chord` controls the second. `twist` rotates only the tip before the loft joins both profiles across `span`.
+```scheme
+(model
+  (params
+    (number span 90 :label "Span" :min 50 :max 180 :step 5)
+    (number root_chord 44 :label "Root chord" :min 24 :max 80 :step 1)
+    (number tip_chord 26 :label "Tip chord" :min 12 :max 60 :step 1)
+    (number twist 6 :label "Tip twist" :min -12 :max 12 :step 1)
+    :relations ((> root_chord tip_chord)))
+  (part wing
+    (let* (
+      (root_thickness (* root_chord 0.12))
+      (tip_thickness (* tip_chord 0.10))
+      (root_station
+        (polygon (list
+          (list 0 0)
+          (list (* 0.35 root_chord) root_thickness)
+          (list root_chord 0)
+          (list (* 0.35 root_chord) (* -0.45 root_thickness)))))
+      (tip_station_raw
+        (polygon (list
+          (list 0 0)
+          (list (* 0.35 tip_chord) tip_thickness)
+          (list tip_chord 0)
+          (list (* 0.35 tip_chord) (* -0.45 tip_thickness)))))
+      (tip_station (rotate 0 0 twist tip_station_raw)))
+      (loft span root_station tip_station))))
+```
 
-Render the supplied model. Change `span` from `90` to `120`, render again, and identify the only dimension that should lengthen. Then restore it before continuing.
+[Download wing study](../projects/04-parametric-wing/worked-stations.ecky)
 
-## Derive the tip station {#wing-tip}
+`root_thickness` is 12% of root chord; `tip_thickness` is 10% of tip chord. The second profile rotates around Z before the loft. With two profiles, `span` is their separation.
 
-The starter has a hard-coded tip: `26`, `2.6`, `9`, and `-1.2`. Replace those literals with two names: derived tip chord and derived tip thickness. The chord must come from `root_chord * taper_ratio`; thickness comes from that derived chord. Keep the existing rotation, because twist is a transform of the finished tip profile, not a number baked into its points.
+Change `span` from 90 to 120. The sections move farther apart while their outlines stay the same. Restore it, then set `twist` to 0 to compare an untwisted tip.
 
-Render after each small edit. Check Solution compares the lowered Ecky IR, so equivalent geometry passes even if variable names or whitespace differ.
+## Derive the tip width {#wing-tip}
 
-## Reveal taper and twist {#wing-solution}
+The first model lets you set root and tip chord independently. To keep a fixed taper, calculate tip chord from the root instead:
 
-The solution adds `taper_ratio` to the parameter block and derives both tip dimensions in `let*`. Compare it with your source. `tip_chord` remains a useful measurement, but the actual profile now follows one relation. Change taper from `0.6` to `0.45` and see the tip shrink without redrawing anything.
+```scheme
+(derived_tip_chord (* root_chord taper_ratio))
+(tip_thickness (* derived_tip_chord 0.10))
+```
 
-## Repeat one blade from controls {#propeller-worked}
+These are `let*` bindings, not a complete program. Replace the tip profile's chord references with the derived name. A ratio of 0.6 gives a 26.4 mm tip for a 44 mm root.
 
-The propeller uses one lofted blade and `repeat-union`. `blade_count` selects copies by rotating the same blade through `360 / blade_count`. `diameter` and `hub_radius` define usable blade length; pitch and twist alter the two station profiles.
+## Compare the tapered model {#wing-solution}
 
-Render once. Change `blade_count` from `3` to `4`, render, and verify there are four evenly spaced copies rather than four separate blade definitions.
+[Download taper example](../projects/04-parametric-wing/solution-taper-twist.ecky)
 
-## Finish the hub variant {#hub-variant}
+Change `taper_ratio` from 0.6 to 0.45. The derived tip chord becomes 19.8 mm. This older example still declares `tip_chord` for a parameter relation; that control no longer drives the tip geometry. Follow the derived binding when checking the result.
 
-The starter already builds blades and a press-fit hub. Add a second named hub for `split_bolt`: a named split gap, named bolt-bore radius, clamp ears, bore, and slot. Then use `if` to select `split_bolt_hub` only when `hub_type` is `"split_bolt"`.
+## Repeat one blade {#propeller-worked}
 
-Do not change blade geometry. This task is one interface choice around a fixed repeated assembly. The bore clearance remains named because it is fit-critical.
+[Open the repeated-blade study](../projects/05-propeller-study/01-worked-stations.ecky). Find `repeat-union`: it builds copies from one blade expression. The angular spacing is `360 / blade_count`, so three blades are 120 degrees apart and four are 90 degrees apart.
 
-## Reveal the repeated propeller study {#propeller-solution}
+Change `blade_count` from 3 to 4. Count the blades and inspect where each meets the hub. The repeated blades must overlap the hub to form a connected solid.
 
-The solution keeps one blade definition and adds two hub choices. It is a printable geometry study only. It does not prove balance, fatigue life, thrust, RPM limit, motor compatibility, or airworthiness. Treat it as an exercise in loft, repeat, named fit, and conditional composition.
+## Add a different hub {#hub-variant}
+
+[Open the hub exercise](../projects/05-propeller-study/02-starter-hub-variant.ecky). Keep the blade expression intact. The change belongs in the hub: a split, clamp ears, and bolt bore are selected when `hub_type` is `"split_bolt"`.
+
+Use named dimensions for the bore clearance and split gap so you can adjust them independently.
+
+## Compare the hub branches {#propeller-solution}
+
+[Download completed hub example](../projects/05-propeller-study/03-solution-propeller.ecky)
+
+Compare the two hub expressions and the `if` that selects them. Check each branch separately. A successful render establishes the modeled shape; it does not establish balance, allowable speed, or strength.

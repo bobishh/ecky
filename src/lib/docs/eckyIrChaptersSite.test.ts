@@ -32,3 +32,12 @@ test('Given canonical mission files When static chapters build Then index and ex
   assert.match(chapter, /\(box 1 2 3\)/);
   assert.doesNotMatch(chapter, /OPEN IN CODE|mission state|live render/i);
 });
+
+test('Given authored heading anchors When a chapter renders Then its local contents targets clean headings', () => {
+  const pages = buildChaptersSitePages([{ ...chapters[0], markdown: '# Bracket\n\n## Join the parts {#join}\n\nChange the width.', checkpoints: [] }], { basePath: '/docs', epubPath: '/docs/book.epub' });
+  const html = pages.get('chapters/level-01-corner-bracket/index.html')!;
+  assert.match(html, /aria-label="On this page"/);
+  assert.match(html, /href="#join"/);
+  assert.match(html, /id="join">Join the parts/);
+  assert.doesNotMatch(html, /\{#join\}|Canonical sources|manifest checkpoints/);
+});

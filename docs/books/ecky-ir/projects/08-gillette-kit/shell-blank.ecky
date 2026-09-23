@@ -13,5 +13,5 @@
       (inner_width (- case_width (* 2 wall)))
       (cavity (translate 0 0 floor
                 (extrude (rounded-rect inner_length inner_width 3)
-                         (+ (- case_height floor) 1))))
+                         (+ (- case_height floor) 1)))))
       (difference outer cavity))))

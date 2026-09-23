@@ -1372,161 +1372,92 @@ Documented forms and operations. Select a name to open its signature.
 
 ## Language Overview
 
-Scope here:
+An `.ecky` file describes geometry with parenthesized expressions. A call starts with a function name followed by its arguments: `(box 60 30 4)` makes a box. Calls can contain other calls: `(translate 10 0 0 (box 60 30 4))` moves that box along X.
 
-- `ecky/cad` exported CAD forms and ops
-- `ecky/core` helper functions shipped with Ecky
-- `ecky/params` parameter forms
-- lowerer-visible keywords people otherwise guess from source
+Lengths use millimetres and rotations use degrees. Trigonometric helpers such as `sin` use radians. A value like `2cm` converts to 20 millimetres; it is not a different geometry type.
 
-Out of scope here:
+A complete file contains one `model`. Its `params` declare controls and its `part` forms name the output geometry. Reusable functions and components go before the model.
 
-- full Steel standard library reference
-- backend implementation internals
-- UI behavior outside `.ecky` authoring
+```scheme
+(model
+  (params (number width 60mm :min 20 :max 120))
+  (part plate (box width 30 4)))
+```
 
-Mental model:
+A `Solid` has volume; a `Sketch` is a planar profile; a `Path` describes a route; a `Frame` describes position and orientation. The argument type matters: `extrude` takes a profile, while `translate` can move a profile or a solid.
 
-- `.ecky` is Scheme surface syntax
-- compiler lowers it into Core IR
-- verifier checks value kinds and op signatures
-- native execution maps Core IR into `OcctPlan`, then the precompiled Direct OCCT runner; FreeCAD lowering is optional interop
-
-Read this order if new:
-
-- `Forms and Structure`
-- `Params and Controls`
-- `Primitive Signatures`
-- `Boolean and Transform Signatures`
-- `Surface and Path Signatures`
-- `Array and Frame Signatures`
-- `Special / Custom Operations`
-- `Selector Strings and Named Keywords`
+For a first model, start with [the bracket chapter](/docs/chapters/level-01-corner-bracket/). Use this reference to look up a call while editing. Square brackets in signatures mark optional arguments; do not type the brackets. Examples containing names such as `body` or `profile` are fragments: those names must be defined in the surrounding model.
 
 ## Forms and Structure
 
-This is top-level authoring grammar. If source feels mysterious, start here.
+These forms organize a model. They do not describe dimensions or shapes by themselves.
 
 ### `model`
 
 ```scheme
 (model
-  ...)
+  (params (number width 60))
+  (part body (box width 30 4)))
 ```
 
-- root form for one design
-- source must start with `(model ...)`
-- accepts the direct clauses listed in `Complete Compiler Surface`: `params`,
-  `verify`, `part`, `feature`, topology tags, `view`, and `analysis`
-- reusable helper `define`s and `define-component` declarations belong before
-  `(model ...)`; derived values depending on model params belong in `let*`
+Use one `model` per file. Its direct clauses include `params`, `part`, `feature`, `verify`, topology tags, `view`, and `analysis`. Put reusable `define` and `define-component` declarations before it. Use `let*` for derived values that depend on model parameters.
 
 ### `part`
 
 ```scheme
-(part body expr)
-(part body "Human Label" expr)
+(part body geometry)
+(part body "Display name" geometry)
 ```
 
-- positional 1: part id symbol
-- positional 2: optional display label text
-- final positional: expression producing geometry
+`body` is a stable part identifier. The optional string is its display label. The last expression produces its geometry. Separate `part` forms let you export and inspect pieces independently; they do not force the geometry inside each part to be connected.
 
 ### `feature`
 
-Two forms exist:
-
 ```scheme
-(feature body :role shell expr)
-(feature body :role shell :params (width height) expr)
+(feature body :role shell geometry)
+(feature body :role shell :params (width height) geometry)
 ```
 
-- positional 1: feature id symbol
-- required keyword: `:role`
-- optional keyword: `:params`
-- final positional: expression producing geometry
-
-Use `feature` when geometry needs explicit semantic identity, role, and parameter-key tracking.
+A feature gives geometry an identifier and a role. `:params` lists the parameters associated with it. Use it when you need to refer to a semantic feature in checks or downstream operations.
 
 ### `build`
 
 ```scheme
 (build
-  (shape outer expr)
-  (shape cavity expr)
-  (result expr))
+  (shape blank (box 60 30 4))
+  (shape bore (translate 0 0 -1 (cylinder 3 6)))
+  (result (difference blank bore)))
 ```
 
-- local binding block
-- accepts `shape` bindings plus one `result`
-- `result` must come once
-- do not place new `shape` bindings after `result`
+`build` evaluates named intermediate values in order and returns one result. Later shapes can use earlier names. It requires exactly one `result`, after the shape bindings.
 
 ### `shape`
 
 ```scheme
-(shape ribs expr)
+(shape blank (box 60 30 4))
 ```
 
-`shape` is not geometry op. It is bind statement inside `build`.
-
-- positional 1: local binding name
-- positional 2: expression producing value
-
-Read it as:
-
-- bind intermediate value
-- give later code a name
-- keep boolean stacks readable
+Inside `build`, bind a value to a name. Here `blank` can be used by later expressions in that build. `shape` does not create an extra exported part.
 
 ### `result`
 
 ```scheme
-(result expr)
+(result (difference blank bore))
 ```
 
-- final value returned by `build`
+Return the final value from `build`. Do not put more `shape` bindings after it.
 
 ### `assembly` (planned)
 
-Reserved shape sketch:
-
-```scheme
-(model
-  (assembly exploded_preview
-    ...))
-```
-
-- planned top-level clause for explicit multi-part assembly recipes
-- spelling reserved in book now; runtime/compiler support deferred
-- spec'd grammar reserved now; implementation deferred until views prove the display/manufacturing split
-- intended to formalize what component packages already do at the package layer
-- assemblies stay placement-based as today; no mate/joint solver implied
-- examples here mark intent only, not accepted source today
-- until implementation lands, keep physical bodies as `part`s, use `view` for preview-only offsets, and use component packages for solved assembly workflows
+This is not accepted model syntax yet. Declare physical pieces with `part`. For exploded placement that must not affect exports, use `view` and `offset-part`.
 
 ### `export` (planned)
 
-Reserved shape sketch:
-
-```scheme
-(model
-  (export manufacturing
-    ...))
-```
-
-- planned top-level clause for authored export/manufacturing policy
-- spelling reserved in book now; runtime/compiler support deferred
-- reserved until views prove the display/manufacturing split
-- preview transforms never affect STL or STEP artifacts
-- examples here mark intent only, not accepted source today
-- until implementation lands, use current export commands, artifact manifests, and package output modes outside `.ecky` source
+This is not accepted model syntax yet. Export through the app or CLI. An ordinary transform inside a part affects the geometry you export; only a `view` offset is preview-only.
 
 ## Components
 
-A component is a named, parameterized, closed geometry unit. Define once,
-instantiate anywhere, override knobs at the call site. `model` and `part`
-stay valid forever; components add reuse on top without changing them.
+A component is reusable geometry with its own parameters. Declare it before `model`, then call it by name inside a part. Each call can supply different parameter values.
 
 ### `define-component`
 
@@ -1575,14 +1506,16 @@ copy-inlineable: paste the `define-component` into any model and it works.
 tag namespaced by the instantiating part key:
 
 ```scheme
-(define-component pin ((number d 2))
-  (verify (tag pin_ok) (metric min_wall_thickness "body") (expect (>= value 1)))
-  (cylinder d 10 48))
+(define-component pin ((number radius 2))
+  (verify (tag pin_ok)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+  (cylinder radius 10))
 
-(part left (pin :d 3))   ; verify tag becomes left/pin_ok
+(model (part left (pin :radius 3)))
 ```
 
-A pasted component therefore carries its own checks — reuse includes proof.
+Each instance runs its own declared check. A passing check establishes only the expectation it measures.
 
 ### Component Library Workflow (MCP)
 
@@ -1654,14 +1587,11 @@ Use `verify` when source should declare structural expectations explicitly.
 ```scheme
 (model
   (verify
-    (tag front_gap body.front_window_1)
-    (intent "Keep lid clearance printable")
-    (severity error)
-    (when assembly-preview)
-    (metric gap (clearance min-distance body lid))
-    (expect gap (>= 3)))
-  (part body (box 10 10 10))
-  (part lid (box 10 10 10)))
+    (tag plate_connected)
+    (intent "The plate must be one connected mesh")
+    (metric pieces (stl connected-component-count))
+    (expect pieces (= 1)))
+  (part plate (box 60 30 4)))
 ```
 
 - model verification is top-level under `model`
@@ -1781,14 +1711,11 @@ selectors.
   - `<`
   - `<=`
 
-Authoring rule:
-
-- fix geometry or exports until `verify` passes
-- do not remove `verify` clauses to bypass authored requirements
+A failed expectation records which metric missed its threshold. Inspect the measurement before changing geometry. Removing the check also removes the requirement it was meant to test.
 
 ## Params and Controls
 
-Parameter forms live in `ecky/params`.
+Declare editable inputs inside `params`. The key is the name used by geometry expressions; `:label` is the text shown in the control. A saved project can override a source default with its current parameter value.
 
 ### `params`
 
@@ -1833,20 +1760,17 @@ Supported relation operators:
 
 ### Units and suffixed literals
 
-Humans may use bare numbers because Ecky's base units are millimetres and
-degrees. Agent-generated physical dimensions should use suffixed literals like
-mm/cm/in/deg/rad when the suffix makes intent clearer.
+Bare lengths are millimetres; bare rotation angles are degrees. Suffixes make conversions explicit:
 
-Examples:
+| Literal | Base-unit value |
+| --- | --- |
+| `12mm` | 12 mm |
+| `2.54cm` | 25.4 mm |
+| `0.25in` | 6.35 mm |
+| `45deg` | 45 degrees |
+| `1.5708rad` | Approximately 90 degrees |
 
-- `12mm`
-- `2.54cm`
-- `0.25in`
-- `45deg`
-- `1.5708rad`
-
-Prompt generators use suffixed literals for physical lengths and angles. Bare
-numbers remain appropriate for counts, ratios, segments, and unitless math.
+Use bare numbers for counts, ratios, and segment counts. Suffix conversion does not by itself provide dimensional type checking.
 
 ### `toggle`
 
@@ -1912,7 +1836,7 @@ numbers remain appropriate for counts, ratios, segments, and unitless math.
 
 ## Core Helper Library
 
-Helpers here come from `ecky/core`.
+These helpers return values rather than solids. Use them to calculate dimensions, generate profile points, and build lists for repeated geometry. Angles passed to trigonometric functions are radians; use `deg->rad` to convert degrees.
 
 ### Constructors and Symbols
 
@@ -2145,266 +2069,252 @@ Use helper outputs as inputs to `polygon`, `bspline`, `path`, `bezier-path`, `ma
 
 ## Value Kinds and IR Nodes
 
-Verifier-backed value kinds:
+Type errors tell you what kind of value a function expected. These are the types you will encounter while authoring:
 
-- `Any`
-- `Number`
-- `Boolean`
-- `Text`
-- `List`
-- `Point2`
-- `Point3`
-- `Sketch`
-- `Path`
-- `Frame`
-- `Compound`
-- `Solid`
+| Kind | Meaning | Example |
+| --- | --- | --- |
+| Number | Scalar dimension, angle, count, or other numeric value | `12`, `4mm` |
+| Boolean | True or false | `true`, `(< width 20)` |
+| Text | A string | `"lid"` |
+| List | Ordered values | `(list 1 2 3)` |
+| Point2 | Two coordinates | `(vec2 10 20)` |
+| Point3 | Three coordinates | `(vec3 10 20 5)` |
+| Sketch | Planar geometry used as a profile | `(circle 8)` |
+| Path | Route through points | `(path (0 0 0) (0 0 20))` |
+| Frame | Position and orientation | `(plane :origin '(0 0 10))` |
+| Solid | Geometry with volume | `(box 20 10 4)` |
+| Compound | Grouped geometry | `(compound a b)` |
+| Any | No narrower type required at this position | Depends on the call |
 
-Core node kinds:
+For example, passing `(box 20 10 4)` to a function that expects a sketch is a type mismatch. Use a 2D profile such as `(rectangle 20 10)` instead.
 
-- `Literal`
-- `Reference`
-- `Build`
-- `Let`
-- `If`
-- `Call`
-- `Range`
-- `Map`
-- `Apply`
-- `List`
-- `Group`
-
-If typecheck fails, compiler is checking these kinds, not backend Python text.
+IR means the compiler's intermediate representation. Names such as `Literal`, `Call`, `Reference`, `Build`, and `Let` describe internal nodes in diagnostics; they are not additional geometry functions.
 
 ## Primitive Signatures
 
-These are explicit authored calls. When backend diverges, caveat is spelled out.
+Solid primitives create volume. Sketch primitives create profiles for `extrude`, `revolve`, or another operation that needs a cross-section. Dimensions below are in millimetres.
 
 ### `box`
 
-- signature: `box width depth height`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)` with each axis one of `min | center | max`
+`(box width depth height [:align '(x y z)])` → Solid.
 
-### `sphere`
-
-- signature: `sphere radius`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)`
-
-### `cylinder`
-
-- signature: `cylinder radius height`
-- signature: `cylinder radius height segments`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)`
-
-### `cone`
-
-- signature: `cone radius1 radius2 height`
-- signature: `cone radius1 radius2 height segments`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)`
-
-### `circle`
-
-- signature: `circle radius`
-- signature: `circle radius segments`
-- result: `Sketch`
-
-### `rectangle`
-
-- signature: `rectangle width height`
-- result: `Sketch`
-
-### `rounded-rect`
-
-- signature: `rounded-rect width height radius`
-- result: `Sketch`
-
-### `rounded-polygon`
-
-- signature: `rounded-polygon points radius`
-- signature: `rounded-polygon points radius segments`
-- `points`: list of 2D points
-- result: `Sketch`
-
-### `polygon`
-
-- signature: `polygon points`
-- `points`: list of 2D points
-- result: `Sketch`
-
-### `profile`
-
-- signature: `profile loop1 loop2 ...`
-- signature: `profile :outer outer-loop :holes hole-loop-or-list`
-- result: `Sketch`
-
-Rules:
-
-- positional form treats every argument as sketch/wire loop
-- keyword form accepts `:outer` and `:holes` only
-- current hole-aware lowerers expect exactly one outer loop when `:holes` is used
-
-### `make-face`
-
-- signature: `make-face wire1 wire2 ...`
-- result: `Sketch`
-- use when you already have wire-like geometry and need face/sketch result
-
-### `text`
-
-- signature: `text string size [:font selector]`
-- result: `Sketch`
-- normal use: feed into `extrude`
-- `:font` belongs to `text`, not `extrude`
-- `selector` accepts an installed font family name or an absolute `.ttf`/`.otf` path
-- a literal selector changes one call; a shared `select` parameter can drive several calls
-
-Example:
-
-```scheme
-(extrude (text "HELLO" 12 :font "Arial") 2)
-```
-
-One label only:
-
-```scheme
-(union
-  (extrude (text "MORNING" 12 :font "Arial") 2)
-  (translate 0 20 0
-    (extrude (text "EVENING" 12 :font "Impact") 2)))
-```
-
-Shared parameter:
+X and Y are centered by default; Z starts at 0. A 60 × 30 × 4 box therefore spans X = −30…30, Y = −15…15, and Z = 0…4. Dimensions must be positive.
 
 ```scheme
 (model
-  (params
-    (select label-font "Arial" :label "Label Font"
-      :options (("Arial" "Arial") ("Impact" "Impact"))))
-  (part labels
-    (extrude (text "HELLO" 12 :font label-font) 2)))
+  (part plate (box 60 30 4)))
+```
+
+`:align` takes three values, each `min`, `center`, or `max`. `min` places the lower bound of that axis at the origin; `max` places its upper bound there.
+
+### `sphere`
+
+`(sphere radius [:align '(x y z)])` → Solid.
+
+The sphere is centered on all three axes by default. Radius is half the diameter: `(sphere 10)` has a 20 mm diameter.
+
+### `cylinder`
+
+`(cylinder radius height [segments] [:align '(x y z)])` → Solid.
+
+The axis is Z. X and Y are centered; the base starts at Z = 0. The first argument is radius, not diameter. `(cylinder 3 8)` is 6 mm across and 8 mm tall.
+
+The optional segment count controls polygonal approximations on paths that use them. Native OCCT keeps the cylinder analytic.
+
+### `cone`
+
+`(cone radius1 radius2 height [segments] [:align '(x y z)])` → Solid.
+
+`radius1` is the bottom radius and `radius2` the top radius. The axis is Z, with its base at 0 by default. Set one radius to zero for a pointed cone; keep both positive for a truncated cone.
+
+### `circle`
+
+`(circle radius [segments])` → Sketch.
+
+A circular profile in XY, centered at the origin. It has no height until used by an operation such as `(extrude (circle 8) 4)`.
+
+### `rectangle`
+
+`(rectangle width height)` → Sketch.
+
+A centered rectangle in XY. Its second dimension is along Y, not an extrusion height.
+
+### `rounded-rect`
+
+`(rounded-rect width height radius)` → Sketch.
+
+A centered rectangle with rounded corners. `radius` controls the corner arcs. Choose a radius no larger than half the shorter dimension.
+
+### `rounded-polygon`
+
+`(rounded-polygon points radius [segments])` → Sketch.
+
+Round the corners of a polygon defined by 2D points. The radius must fit the neighboring edges. Start with a small radius if the rounding fails.
+
+### `polygon`
+
+`(polygon points)` → Sketch.
+
+The points are an ordered list of XY coordinates. The boundary closes from the last point to the first. Use at least three non-collinear points and avoid a self-intersecting outline.
+
+```scheme
+(model
+  (part wedge
+    (extrude (polygon ((0 0) (30 0) (0 20))) 4)))
+```
+
+### `profile`
+
+`(profile loop1 loop2 ...)` → Sketch.
+
+The explicit hole form is `(profile :outer outer-loop :holes hole-loop-or-list)`. It accepts one outer loop and the enclosed holes. Use it when the hole is part of the cross-section, before extrusion.
+
+```scheme
+(model
+  (part washer
+    (extrude (profile :outer (circle 12) :holes (circle 4)) 2)))
+```
+
+### `make-face`
+
+`(make-face wire1 wire2 ...)` → Sketch.
+
+Build a face from wire-like loops. Use this when the boundary already exists as wires; use `profile` when explicitly combining an outer profile and holes.
+
+### `text`
+
+`(text string size [:font selector])` → Sketch.
+
+`size` sets text size. `:font` accepts an installed font family or an absolute `.ttf`/`.otf` path. It belongs to `text`, not to the following extrusion. The requested font must exist on the machine doing the render.
+
+```scheme
+(model
+  (part label
+    (extrude (text "OPEN" 12 :font "Arial") 2)))
 ```
 
 ### `svg`
 
-- native signature: `svg path`
-- FreeCAD interop signature: `svg path [target-width] [target-height] [fit-mode]`
-- result: `Sketch`
+`(svg path)` → Sketch on the native renderer.
 
-Known fit modes from lowerers/tests:
-
-- `"contain"`
-- `"cover"`
-- `"stretch"`
-- `"fill"`
+Import an SVG profile and use it in a geometry operation. The optional `target-width`, `target-height`, and `fit-mode` positional arguments belong to the FreeCAD interop form; they are not the native signature. Its fit modes are `"contain"`, `"cover"`, `"stretch"`, and `"fill"`.
 
 ### `import-stl`
 
-- signature: `import-stl path`
-- result: imported solid/mesh-like geometry
+`(import-stl path)` → imported mesh geometry.
+
+Read triangles from an STL file. Importing a mesh does not recover its original analytic surfaces. A later `solidify` operation can make an eligible closed mesh usable in the mesh-to-solid path; it does not reconstruct the original CAD design.
 
 ### `ring`
 
-- signature: `ring outer-radius inner-radius`
-- signature: `ring outer-radius inner-radius segments`
-- result: `Sketch`
-- lowering behavior: alias for profile-with-hole semantics
+`(ring outer-radius inner-radius [segments])` → Sketch.
+
+A centered circular profile with a circular hole. The inner radius must be smaller than the outer radius. `(extrude (ring 12 4) 2)` makes the same washer cross-section as the `profile` example above.
 
 ## Boolean and Transform Signatures
 
+Boolean operations combine or remove material. Transforms change where geometry is or how large it is. Expressions are evaluated inside out, so rotating then translating differs from translating then rotating.
+
 ### `union`
 
-- signature: `union shape1 shape2 ...`
-- result: shape-like value
+`(union shape1 shape2 ...)` → combined geometry.
+
+Join the supplied shapes. Overlapping solids can become one connected body; separated solids stay disconnected. Use `compound` when you only need a group and do not want a boolean join.
 
 ### `fuse`
 
-- alias of `union`
+Alias of `union`, with the same arguments.
 
 ### `difference`
 
-- signature: `difference base cut1 cut2 ...`
-- result: shape-like value
+`(difference base cut1 cut2 ...)` → remaining geometry.
+
+Subtract every cutter from `base`. The first argument is the material to keep. A cutter outside the base removes nothing. For through-holes, extend cutters slightly beyond both surfaces.
+
+```scheme
+(model
+  (part plate
+    (difference
+      (box 60 30 4)
+      (translate 0 0 -1 (cylinder 3 6)))))
+```
+
+The cutter runs from Z = −1 to 5 while the plate runs from 0 to 4.
 
 ### `cut`
 
-- alias of `difference`
+Alias of `difference`, with the same arguments.
 
 ### `intersection`
 
-- signature: `intersection shape1 shape2 ...`
-- result: shape-like value
+`(intersection shape1 shape2 ...)` → shared geometry.
+
+Keep only the region common to the supplied shapes. Shapes with no overlap have no shared volume.
 
 ### `common`
 
-- alias of `intersection`
+Alias of `intersection`, with the same arguments.
 
 ### `xor`
 
-- signature: `xor shape1 shape2 ...`
-- result: shape-like value
+`(xor shape1 shape2 ...)` → exclusive regions.
 
-Boolean rule:
-
-- minimum arity: one shape
+For two inputs, retain their non-overlapping regions and remove their shared region. Boolean forms require at least one shape argument.
 
 ### `translate`
 
-- signature: `translate x y z shape`
-- result kind follows input shape kind
+`(translate x y z shape)` → same kind as `shape`.
+
+Move by the specified offsets. `(translate 20 0 0 shape)` moves it 20 mm along X.
 
 ### `rotate`
 
-- signature: `rotate x y z shape`
-- result kind follows input shape kind
+`(rotate x y z shape)` → same kind as `shape`.
+
+Angles are degrees around the axes through the origin. Rotating an already translated object also moves it around the origin. To rotate in place before positioning, put `rotate` inside `translate`.
 
 ### `scale`
 
-- verifier accepts:
-  - `scale factor shape`
-  - `scale x y z shape`
-- native planner supports both forms
-- FreeCAD lowerer currently expects explicit `x y z shape`
-- result kind follows input shape kind
+`(scale factor shape)` or `(scale x y z shape)` → same kind as `shape`.
+
+Scale coordinates from the origin. A uniform factor of 2 doubles every dimension, including holes. XYZ factors allow different scaling on each axis. The native renderer supports both forms; FreeCAD interop requires explicit XYZ factors.
 
 ### `mirror`
 
-- signature: `mirror axis offset shape`
-- `axis`: string or symbol naming mirror axis
-- `offset`: numeric plane offset
-- result kind follows input shape kind
+`(mirror axis offset shape)` → same kind as `shape`.
 
-Examples:
+Reflect across the plane perpendicular to the named axis at `offset`. For example, `(mirror 'x 0 shape)` reflects X across the YZ plane.
 
 ```scheme
-(translate 20 0 0 (box 10 10 10))
-(rotate 0 0 45 (box 10 10 10))
-(scale 2 2 1 (circle 10))
-(mirror 'x 0 (box 10 10 10))
+(model
+  (part block
+    (translate 20 0 0
+      (rotate 0 0 45 (box 10 6 4)))))
 ```
+
+This rotates the block at the origin, then moves it 20 mm along X.
 
 ## Surface and Path Signatures
 
 ### `extrude`
 
+Extend a planar profile by `distance`, normally along Z for an XY sketch. `:symmetric true` distributes the extrusion about its profile plane.
+
 - signature: `extrude profile distance`
 - result: `Solid`
-- backend keyword:
+- optional keyword:
   - `:symmetric` boolean
 
 ### `revolve`
+
+Rotate the profile through `angle` degrees to make a solid of revolution. Use 360 for a complete turn.
 
 - signature: `revolve profile angle`
 - result: `Solid`
 
 ### `loft`
+
+Join two or more profiles along the loft distance. With two profiles, the distance separates the first and last sections.
 
 - signature: `loft distance profile1 profile2 ...`
 - requires at least two profiles after distance
@@ -2430,12 +2340,16 @@ through the bend, producing a capped solid rail.
 
 ### `shell`
 
+Hollow a solid using the requested wall thickness. `:faces` selects openings. Wall thickness must fit the local geometry; reduce it if adjacent walls or tight corners cause a failure.
+
 - signature: `shell thickness solid`
 - result: `Solid`
 - optional keyword:
   - `:faces selector`
 
 ### `offset`
+
+Expand or contract a planar profile by an amount. Use the resulting profile in a later solid operation.
 
 - signature: `offset amount profile`
 - result: `Sketch`
@@ -2444,6 +2358,8 @@ through the bend, producing a capped solid rail.
 
 ### `offset-rounded`
 
+Offset a profile with rounded transitions at corners.
+
 - signature: `offset-rounded amount profile`
 - result: `Sketch`
 - optional keyword:
@@ -2451,12 +2367,16 @@ through the bend, producing a capped solid rail.
 
 ### `fillet`
 
+Round selected solid edges with a constant radius. Omit `:edges` to use the default selection. A radius too large for the adjacent faces can fail; test a smaller radius and a narrower edge selection.
+
 - signature: `fillet radius solid`
 - result: `Solid`
 - optional keyword:
   - `:edges selector`
 
 ### `chamfer`
+
+Cut a flat bevel on selected solid edges. `distance` sets its size; `:edges` restricts the selection.
 
 - signature: `chamfer distance solid`
 - result: `Solid`
@@ -2474,7 +2394,7 @@ through the bend, producing a capped solid rail.
 
 - signature: `twist height angle profile`
 - result: `Solid`
-- verifier-backed form is 3 positional args
+- all three positional arguments are required
 
 ### `path`
 
@@ -2496,7 +2416,7 @@ through the bend, producing a capped solid rail.
 ### `bspline`
 
 - signature: `bspline point-list`
-- optional second positional in lowerers: `closed`
+- optional second positional: `closed`
 - optional keywords:
   - `:closed` boolean
   - `:tangents` point-list
@@ -2505,8 +2425,8 @@ through the bend, producing a capped solid rail.
 
 Notes:
 
-- verifier only requires point-list first
-- lowerers accept tangent hints
+- point-list is required
+- tangent hints are optional
 - tangents list may use 2 entries or one per point in native path
 
 Example:
@@ -2526,15 +2446,21 @@ Example:
 
 ### `linear-array`
 
+Copy the shape `count` times. XYZ values are the step between copies, not the final overall displacement.
+
 - signature: `linear-array count x y z shape`
 - result: same geometry family as input
 
 ### `radial-array`
 
+Copy around Z. `angle` is the angular step in degrees and `radius` is the radial offset. Four copies spaced by 90 degrees make a full circle.
+
 - signature: `radial-array count angle radius shape`
 - result: same geometry family as input
 
 ### `grid-array`
+
+Copy across rows and columns. X and Y set the spacing between adjacent copies.
 
 - signature: `grid-array rows cols x y shape`
 - result: same geometry family as input
@@ -2548,9 +2474,11 @@ Example:
 
 - signature: `repeat index count expr`
 - verifier recognizes form
-- geometry lowerers do not currently expose dedicated authored lowering path like `repeat-union` / `repeat-compound` / `repeat-pick`
+- use `repeat-union` to join copies or `repeat-compound` to keep a group when rendering native solid geometry
 
 ### `repeat-union`
+
+Evaluate the body for each index from 0 to `count - 1`, then join the resulting geometry. Use the index in a transform to put each copy in a different place.
 
 - signature: `repeat-union index count expr`
 - index must be symbol
@@ -2558,6 +2486,8 @@ Example:
 - result: union/fused geometry
 
 ### `repeat-compound`
+
+Evaluate one body per index and group the results without a boolean join.
 
 - signature: `repeat-compound index count expr`
 - index must be symbol
@@ -2601,14 +2531,15 @@ Defaults:
 
 ### `location`
 
-- verifier signature: `location [frame]`
-- authored backend-safe signature: `location frame`
+- signature: `location frame`
 - optional keywords:
   - `:offset (x y z)`
   - `:rotate (x y z)`
 - result: `Frame`
 
 ### `path-frame`
+
+Construct a frame on a path. `start` and `end` choose its endpoints; a numeric `:at` selects a position along it. `:up` helps choose the frame orientation.
 
 - signature: `path-frame path`
 - optional keywords:
@@ -2618,6 +2549,8 @@ Defaults:
 
 ### `place`
 
+Put geometry into a frame. This is useful for attaching a feature to a path or an inclined plane without reconstructing the orientation by hand.
+
 - signature: `place frame shape`
 - optional keywords:
   - `:offset (x y z)`
@@ -2625,6 +2558,8 @@ Defaults:
 - result: placed shape
 
 ### `clip-box`
+
+Keep the portion of a shape inside the given XYZ bounds. Each bound is a two-number list in the shape coordinate system.
 
 - signature: `clip-box shape`
 - required keywords:
@@ -2647,7 +2582,7 @@ Example:
 
 ## Special / Custom Operations
 
-These are exported authored ops outside generic primitive/boolean/surface families.
+These operations cover grouping, incomplete geometry, threads, and sampled surfaces.
 
 ### `hole`
 
@@ -2710,7 +2645,7 @@ Example:
 
 ### `sampled-radial-loft`
 
-Procedural sampled shell / loft op.
+Sample radial sections along Z and join them into a loft. `:radius` is evaluated at each sample using the three bound coordinates.
 
 ```scheme
 (sampled-radial-loft
@@ -2733,9 +2668,9 @@ Procedural sampled shell / loft op.
 
 ### `wall-pattern`
 
-Pattern op applied to shell/solid target.
+Apply a procedural mesh pattern to a supported shell or solid surface.
 
-Pattern shape seen in repo:
+Example call:
 
 ```scheme
 (wall-pattern
@@ -2743,7 +2678,7 @@ Pattern shape seen in repo:
   shape)
 ```
 
-Observed options:
+Options:
 
 - `:mode`
 - `:depth`
@@ -2751,7 +2686,7 @@ Observed options:
 - `:vFreq`
 - `:phase`
 
-Observed modes:
+Modes include:
 
 - `gyroid`
 - `cellular`
@@ -2762,13 +2697,32 @@ Backend caveat:
 
 - native OCCT handles BREP operations; `wall-pattern` remains mesh-only
 
+### `surface-trim`
+
+Trim an imported triangle mesh along an anchored loop. This is the source form written by the surface-trim tool; anchors must refer to the exact imported mesh.
+
+```scheme
+(surface-trim
+  (import-stl path)
+  :schema-version 1
+  :source-digest digest
+  :loop (anchor-a anchor-b anchor-c)
+  :keep-seed anchor-inside
+  :path-mode "shortest"
+  :cap "open")
+```
+
+This is a fragment. `path` and `digest` identify the source mesh. Each anchor has the form `(mesh-anchor triangle-index b0 b1 b2)`: one triangle index and three barycentric weights. The loop requires at least three anchors; `keep-seed` selects the region to retain.
+
+All six keywords are required. `:path-mode` accepts `"shortest"` or `"feature"`. `:cap` accepts `"open"`, `"flat"`, or `"surface-fill"`. Use the app's mesh selection tools to create anchors; editing triangle indices after replacing the source mesh invalidates their meaning.
+
 ## Selector Strings and Named Keywords
 
-This is where people waste time guessing.
+Selectors choose which edges or faces an operation modifies. Keywords also carry coordinates and orientation; their expected value shapes are listed below.
 
 ### Shared keyword value expectations
 
-Verifier enforces:
+Expected keyword values:
 
 - `:offset` -> 3D point
 - `:rotate` -> 3D point
@@ -2811,7 +2765,7 @@ Examples:
 - `:edges "left+vertical"`
 - `:edges "target-id:body:edge:0:0-0-0_10-0-0"`
 
-Observed canonical meaning:
+Named boundary selectors:
 
 - `top` -> boundary `z max`
 - `bottom` -> boundary `z min`
@@ -2837,17 +2791,17 @@ Accepted anchor values:
 
 ## Bound Project Lifecycle
 
-- When target metadata supplies `sourcePath`, edit that exact file. `sourceFolder`
-  is its workspace; `sourceState` reports clean, pending, or failed source.
-- The folder watcher waits for a settled edit, appends one version, validates,
-  renders a preview, and records status. Read raw diagnostics before success claims.
-- Do not export over bound source, write history storage directly, or invent a
-  commit/finalize step. Compatibility buffers apply only without `sourcePath`.
+When you open a file-backed project, its `.ecky` file is the editable source. Save a change in Ecky or an external editor. The app detects the saved edit, records a version, then validates and renders it. A failed edit remains in history with its diagnostics.
+
+Source defaults and current parameter values are separate. Changing a default in the file does not prove the current render uses it: inspect the active parameter controls.
+
+Export from a rendered version. Available formats depend on the resulting geometry and renderer. Native analytic geometry can retain STEP surfaces; mesh-only operations do not imply an analytic STEP result.
+
+An ordinary `translate` or `rotate` inside a part changes exported geometry. A `view` with `offset-part` changes only preview placement. Keep those separate when laying out a multipart model for inspection.
 
 ## Complete Compiler Surface
 
-Generated from the same Rust registry used by MCP manifests and agent prompts.
-Do not edit rows by hand; run `npm run generate:prompt`.
+Additional callable forms and helpers. Entries already explained in the preceding sections are omitted from this list.
 
 <!-- ECKY_GENERATED_SURFACE_REFERENCE_START -->
 | Form | Kind | Signature | Backends | Description | Example |

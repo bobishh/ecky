@@ -1,75 +1,85 @@
 ---
 id: mission-01-bracket-enclosure
-title: Make a bracket close an enclosure
+title: Build a bracket, then an enclosure
 ---
 
-# Make a bracket close an enclosure
+# Build a bracket, then an enclosure
 
-Build relations before details. This mission starts with two detached solids,
-then carries the same named dimensions into two separately printable enclosure
-parts and one bounded closure choice.
+A bracket is a useful first model: two boxes overlap, and `union` joins them. You will change its width, separate its two shapes, and see why placement matters before adding holes or a lid.
+
+Save the complete example below as `bracket.ecky` and open it in Ecky. Lengths are in millimetres. The source declares three controls: span, foot depth, and stock thickness.
 
 ## Join the corner bracket {#worked-bracket}
 
-The foot sits on the bed. The flange begins at `X=60`, deliberately detached,
-so placement is visible in the bundled preview. Move that translation to `X=0`,
-change `compound` to `union`, then render your edit. `compound` merely groups
-solids; `union` makes overlapping solids one load-bearing bracket.
+```scheme
+(model
+  (params
+    (number span 64 :label "bracket span" :min 40 :max 120 :step 2)
+    (number foot_d 36 :label "foot depth" :min 20 :max 70 :step 2)
+    (number stock_t 6 :label "stock thickness" :min 3 :max 12 :step 0.5))
+  (part bracket
+    (let* ((flange_h 40)
+           (overlap stock_t))
+      (build
+        (shape foot (box span foot_d stock_t :align '(center center min)))
+        (shape flange
+          (translate 0 (- (/ foot_d 2) (/ overlap 2)) 0
+            (box (- span (* 2 stock_t)) overlap flange_h :align '(center center min))))
+        (result (union foot flange))))))
+```
 
-## Inspect the connected bracket {#bracket-solution}
+[Download connected bracket](../projects/01-corner-bracket/02-connected-solution.ecky)
 
-The flange now overlaps the foot by `stock_t`. The same named stock controls the
-contact and the plate thickness. A union is appropriate only after that physical
-overlap exists.
+`box` takes width, depth, and height. Here `:align '(center center min)` centers X and Y and puts the bottom at Z = 0. The foot is 64 × 36 × 6. The flange is 52 × 6 × 40.
 
-## Read the modeling scaffold {#build-forms}
+The flange's Y position is `36 / 2 - 6 / 2 = 15`. Its back face meets the foot's back edge at Y = 18; the bottom 6 mm overlaps the foot. `union` joins that overlapping volume into one bracket.
 
-`params` declares adjustable inputs. `let*` names local derived dimensions such
-as `flange_h` and `overlap`. Inside `build`, each `shape` gives an intermediate
-solid a readable name, and `result` selects the final solid. Read this scaffold
-before adding a second printable part: it makes a relation inspectable instead
-of hiding it in copied offsets.
+## Change one dimension {#bracket-solution}
+
+Change span from 64 to 80 and render again. The foot becomes 80 mm wide; the flange becomes 68 mm wide. Depth and height stay fixed. Both widths follow `span`, so neither shape needs a separate edit.
+
+To see a placement error, change the first number in `translate` from `0` to `60`. The flange moves away from the foot. A union cannot bridge that gap. Restore `0` before continuing.
+
+## Read the nested expressions {#build-forms}
+
+Read from the inside outward: `box` creates geometry, `translate` moves it, and `union` combines it. `shape` names an intermediate value inside `build`; `result` returns the final value. `let*` gives names to dimensions used by those shapes.
+
+`part bracket` names the exported part. A `part` can contain disconnected geometry, so counting part declarations does not tell you whether a bracket is connected.
 
 ## Separate body from lid {#enclosure-shell}
 
-The enclosure uses two `part` forms because body and lid print, move, and wear
-independently. Both consume the same case dimensions. The body first defines an
-outer box, then removes a cavity with `difference`; the lid remains a separate
-plate at `body_h`. No joint decision is needed yet.
+An enclosure needs two parts because its lid moves independently. The body is an outer box minus a smaller cavity. For a 72 × 48 mm case with 3 mm walls, the cavity is 66 × 42 mm. Subtract twice the wall thickness: there is a wall on each side.
 
-## Switch one interface between snap and bolt {#joint-branch}
+[Download body and lid](../projects/02-configurable-enclosure/01-worked.ecky)
 
-This small male/female coupon names `fit_clearance` once. `if` chooses between
-two complete solids: snap tab plus slot, or bolt boss plus bore. That boundary
-matters: pass a finished solid from each branch, never the name of a prior
-`shape`. The female cut uses the same clearance. Change `joint_type`, render,
-then compare both assemblies before asking the enclosure to make the same
-choice.
+Open the file and find `part body` and `part lid`. Change `case_w` from 72 to 82. Both parts widen; `wall_t` remains 3. The cavity begins above the floor and extends through the top of the body.
 
-## Choose a closure {#joint}
+## Compare two closures {#joint-branch}
 
-The starter is a complete snap enclosure, so it renders before any edit. Replace
-each marked fixed snap block with the same complete-solid `if` pattern from the
-coupon: snap geometry for `snap`, bolt geometry for `bolted`; retain optional
-countersinks inside the bolted branch. Keep body and lid fixed as separate
-parts. No new joint pattern. No unnamed fit offset.
+A snap tab and a bolt boss need different geometry. `if` can select one expression or the other. Its first argument is a condition; the next two are the true and false branches.
 
-## Reveal the configurable enclosure {#configurable-enclosure}
+```scheme
+(if (= joint_type "snap")
+  snap_geometry
+  bolt_geometry)
+```
 
-The finished body adds snap hooks or bored bolt bosses. The finished lid cuts
-the matching slots or bores and may add recesses. `fit_clearance` expands only
-the receiving geometry; named case dimensions place both corners. Either
-closure remains one readable interface, not two unrelated models.
+This is a fragment: the three names come from the surrounding model. [Open the complete closure coupon](../projects/02-configurable-enclosure/01b-joint-modes-worked.ecky) to see both branches and their matching receiving cuts.
 
-## Tune hardware after the structure {#print-choice}
+## Add the closure to the enclosure {#joint}
 
-Use slots for installation adjustment and threads for a defined fastener. Cut
-only where remaining wall can carry load. Test fit in a small coupon before
-changing a full enclosure.
+[The enclosure starter](../projects/02-configurable-enclosure/02-joint-starter.ecky) contains fixed snap features. Find each `FIX` comment. Replace the indicated feature with the corresponding branch from the coupon, on both body and lid. Changing only the body leaves the lid with the wrong opening.
 
-## Finish the printable bracket {#finish}
+## Compare the finished source {#configurable-enclosure}
 
-Mounting slots, ribs, and lightening cuts are finish details. They come after
-the foot-to-flange load path and enclosure interface are correct. Inspect each
-detail as a consequence of named stock and clearance, not as a substitute for
-them.
+[Download configurable enclosure](../projects/02-configurable-enclosure/03-configurable-enclosure-solution.ecky)
+
+Compare its body and lid with your edit. Follow `fit_clearance` into the receiving cuts. A larger clearance should enlarge those cuts while leaving the nominal tab or bolt geometry unchanged.
+
+## Test the closure separately {#print-choice}
+
+Before printing the whole enclosure, print the small closure coupon. Adjust its clearance for the material and printer you will use. Transfer that value to the enclosure after the two pieces fit.
+
+## Add mounting details {#finish}
+
+[The extended bracket](../projects/01-corner-bracket/06-configurable-print-bracket.ecky) adds mounting and reinforcement details. Read it after the simple bracket: start at `result`, then follow the named shapes used there. Keep the connected foot and flange visible while inspecting each cut.

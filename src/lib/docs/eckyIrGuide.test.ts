@@ -77,27 +77,15 @@ test('parseDocsDocument reads section status and extracts snippets', () => {
 
   assert.ok(!parsed.sections.some((section) => section.slug === 'constraint-dojo'));
   assert.match(forms?.snippet ?? '', /\(model/);
-  assert.match(forms?.bodyHtml ?? '', /top-level authoring grammar/i);
+  assert.match(forms?.bodyHtml ?? '', /These forms organize a model/);
   assert.match(forms?.bodyHtml ?? '', /<code>assembly<\/code> \(planned\)/i);
-  assert.match(forms?.bodyHtml ?? '', /planned top-level clause for explicit multi-part assembly recipes/i);
-  assert.match(forms?.bodyHtml ?? '', /runtime\/compiler support deferred/i);
-  assert.match(forms?.bodyHtml ?? '', /views prove the display\/manufacturing split/i);
-  assert.match(forms?.bodyHtml ?? '', /formalize what component packages already do at the package layer/i);
-  assert.match(forms?.bodyHtml ?? '', /assemblies stay placement-based as today/i);
-  assert.match(forms?.bodyHtml ?? '', /examples here mark intent only, not accepted source today/i);
-  assert.match(forms?.bodyHtml ?? '', /use <code>view<\/code> for preview-only offsets/i);
+  assert.match(forms?.bodyHtml ?? '', /not accepted model syntax yet/i);
   assert.match(forms?.bodyHtml ?? '', /<code>export<\/code> \(planned\)/i);
-  assert.match(forms?.bodyHtml ?? '', /planned top-level clause for authored export\/manufacturing policy/i);
-  assert.match(forms?.bodyHtml ?? '', /preview transforms never affect STL or STEP artifacts/i);
-  assert.match(forms?.bodyHtml ?? '', /artifact manifests, and package output modes outside <code>\.ecky<\/code> source/i);
-  assert.match(params?.bodyHtml ?? '', /Humans may use bare numbers/i);
-  assert.match(params?.bodyHtml ?? '', /Agent-generated physical dimensions should use suffixed literals/i);
-  assert.match(
-    params?.bodyHtml ?? '',
-    /Bare numbers remain appropriate for counts, ratios, segments, and unitless math/i,
-  );
+  assert.match(forms?.bodyHtml ?? '', /only a <code>view<\/code> offset is preview-only/i);
+  assert.match(params?.bodyHtml ?? '', /Bare lengths are millimetres/i);
+  assert.match(params?.bodyHtml ?? '', /Use bare numbers for counts/i);
   assert.match(verify?.snippet ?? '', /\(verify/);
-  assert.match(verify?.snippet ?? '', /clearance min-distance/i);
+  assert.match(verify?.snippet ?? '', /connected-component-count/i);
   assert.match(verify?.bodyHtml ?? '', /clearance min-distance/i);
 });
 
@@ -136,4 +124,13 @@ test('renderMarkdownFragment renders generated operation tables as linked semant
   assert.match(html, /<th>Reference<\/th>/);
   assert.match(html, /<td><a href="#box"><code>box<\/code><\/a><\/td>/);
   assert.doesNotMatch(html, /build123d|ecky-rust|freecad/);
+});
+
+test('reader preserves links, quoted code, escaped table pipes and numbered steps', () => {
+  const html = renderMarkdownFragment('[Download source](/docs/examples/bracket.ecky)\n\n`(select mode "snap")`\n\n1. Open source.\n2. Render it.\n\n| Form | Choices |\n| --- | --- |\n| select | `a\\|b` |');
+  assert.match(html, /href="\/docs\/examples\/bracket.ecky"/);
+  assert.doesNotMatch(html, /&amp;quot;/);
+  assert.match(html, /<ol><li>Open source\.<\/li><li>Render it\.<\/li><\/ol>/);
+  assert.match(html, /<td><code>a\|b<\/code><\/td>/);
+  assert.doesNotMatch(renderMarkdownFragment('[bad](javascript:alert(1))'), /href="javascript/);
 });

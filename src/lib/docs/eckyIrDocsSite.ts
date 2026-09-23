@@ -212,8 +212,8 @@ function renderStylesheet(): string {
     --bg-300: #2a2a4a;
     --text: #e0e0e0;
     --text-dim: #8a8aa8;
-    --primary: #4a8c5c;
-    --secondary: #c8a620;
+    --primary: #c8924f;
+    --secondary: #e1b766;
     --border: #2a2a4a;
     --border-bright: #3a3a5a;
     --header-h: 58px;
@@ -228,7 +228,7 @@ function renderStylesheet(): string {
     overflow-x: hidden;
     background: var(--bg);
     color: var(--text);
-    font: 15px/1.7 var(--font-mono);
+    font: 18px/1.75 system-ui, -apple-system, sans-serif;
     background-image:
       linear-gradient(rgba(74, 140, 92, 0.025) 1px, transparent 1px),
       linear-gradient(90deg, rgba(74, 140, 92, 0.025) 1px, transparent 1px);
@@ -459,6 +459,12 @@ function renderStylesheet(): string {
     font-size: 0.72rem;
   }
 
+  .docs-main__body p code, .docs-main__body li code { font-size: .82em; overflow-wrap: anywhere; }
+  .docs-main__body h3 { font-size: 1.4rem; margin-top: 2.6rem; color: var(--text); }
+  .docs-main__body ul, .docs-main__body ol { padding-left: 1.3rem; margin-bottom: 1.3rem; }
+  .docs-main__body table { display: block; overflow-x: auto; font-size: .88rem; }
+  .docs-main__body th, .docs-main__body td { min-width: 110px; }
+  .docs-main__body pre { font-size: .82rem; }
   @media (max-width: 860px) {
     html.docs-nav-open,
     html.docs-nav-open body { overflow: hidden; overscroll-behavior: none; }

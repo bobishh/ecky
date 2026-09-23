@@ -99,3 +99,13 @@ test('published campaign and references equal their canonical projections', () =
     projected.agentReference,
   );
 });
+
+test('human reference keeps additional functions without repeating compiler metadata or documented signatures', () => {
+  const corpus = fs.readFileSync(path.join(root, 'docs/books/ecky-ir/ecky-ir-corpus.md'), 'utf8');
+  const ref = projectEckyIrContent(corpus).reference;
+  const appendix = ref.split('## Complete Compiler Surface')[1];
+  assert.ok(appendix);
+  assert.doesNotMatch(appendix, /\| Kind \||\| Backends \||\| `box` \||legacy-build123d/);
+  assert.match(appendix, /### `torus`/);
+  assert.match(appendix, /\(torus 20 5\)/);
+});

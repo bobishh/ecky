@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildEckyIrBook } from '../src/lib/docs/eckyIrBook';
-import { syncEckyIrContent } from './ecky_ir_content';
+import { readPublishedChapters, syncEckyIrContent } from './ecky_ir_content';
 import { syncSplitBook } from './ecky_ir_source';
 
 const root = process.cwd();
@@ -12,7 +12,6 @@ const outputDir = path.join(bookTargetDir, 'dist', 'books');
 const htmlPath = path.join(outputDir, 'ecky-ir-field-guide.html');
 const epubPath = path.join(outputDir, 'ecky-ir-field-guide.epub');
 const epubWorkDir = path.join(outputDir, 'ecky-ir-field-guide-epub');
-const campaignSourcePath = path.join(root, 'public', 'tutorials', 'ecky-campaign.md');
 const referenceSourcePath = path.join(root, 'public', 'docs', 'ecky-ir.md');
 // The app serves the reader markdown, the EPUB download, and chapter images
 // from `public/docs` (Vite static root). Publish the freshly built artifacts
@@ -22,9 +21,19 @@ const publicDocsDir = path.join(root, 'public', 'docs');
 
 syncEckyIrContent(root);
 syncSplitBook(root);
+const { chapters } = readPublishedChapters(root, 'https://ecky-cad.com/docs');
 const docsMarkdown = [
-  fs.readFileSync(campaignSourcePath, 'utf8').trimEnd(),
-  fs.readFileSync(referenceSourcePath, 'utf8').trimEnd(),
+  '# Ecky CAD: Models and Language',
+  'Six source walkthroughs, followed by the function reference. Download links open the complete model files.',
+  ...chapters.map((chapter) => {
+    const body = chapter.markdown.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '')
+      .replace(/^# .+\n+/, '')
+      .replace(/^### /gm, '#### ')
+      .replace(/^## /gm, '### ')
+      .replace(/ \{#[a-z0-9-]+\}/g, '');
+    return `## ${chapter.title}\n\n${body}`;
+  }),
+  fs.readFileSync(referenceSourcePath, 'utf8').replace(/^# .+\n/, ''),
 ].join('\n\n');
 
 const book = buildEckyIrBook({
@@ -33,6 +42,7 @@ const book = buildEckyIrBook({
 });
 
 fs.mkdirSync(outputDir, { recursive: true });
+fs.mkdirSync(path.join(outputDir, 'assets'), { recursive: true });
 fs.writeFileSync(htmlPath, book.html);
 copyHtmlAssets(book);
 writeEpub(book);
@@ -100,7 +110,7 @@ function bookContentXhtml(book: ReturnType<typeof buildEckyIrBook>): string {
       <h1>${escapeXml(book.title)}</h1>
       <div class="summary">
         ${book.summaryHtml}
-        <p>This edition packages the Ecky modeling campaign as a single EPUB.</p>
+        <p>The chapters and reference match the web edition.</p>
       </div>
     </section>
     ${chapters}

@@ -1,77 +1,63 @@
 ---
 id: mission-06-film-scanner
-title: Keep a film scanner adjustable
+title: Read the film scanner assembly
 ---
 
-# Keep a film scanner adjustable
+# Read the film scanner assembly
 
-The scanner is an assembly of printable parts, not a single hero mesh. Rail,
-channel, film insert, tunnel, cover, and moving lens carrier meet at named
-interfaces. Read each source as a contract between parts before treating it as
-a finished object.
+The film scanner combines rails, film inserts, a tunnel, a cover, and a threaded lens carrier. This chapter follows three settings through the source: rail clearance, film format, and thread clearance.
 
-## The interfaces are the model {#interfaces}
+[Download complete scanner](../../../../sites/landing/src/models/film-scanner.ecky)
 
-Three relations govern this mission. `fit_clearance` expands a female rail
-channel around its male rail. The film-format branch derives aperture dimensions
-from one selected value. `thread_clearance` separates the helicoid ridge from
-its matching socket. Keep those names at the point where the two features are
-derived; copying a number into each part makes later adjustment unsafe.
+## Locate the mating dimensions {#interfaces}
 
-## Make the rail and channel agree {#rail-fit}
+Find `fit_clearance`, `film_format`, and `thread_clearance` in the parameter block. They adjust different interfaces. Rail clearance affects sliding channels; film format selects aperture dimensions; thread clearance affects the carrier and socket.
 
-The first source is a small two-part coupon. A triangular rail profile is
-extruded into the base part. The tunnel part derives `channel_h` and `channel_w`
-by adding twice the shared clearance before extruding the matching cutter.
-This is deliberately smaller than the final scanner: it lets you inspect one
-male/female relation without confusing it with film format or focus motion.
+Start with one setting at a time. A changed film aperture should not require moving the lens carrier or changing its thread.
 
-Change rail tip width, rail height, or clearance only through its named
-parameter. A changed rail with an unchanged channel is a broken interface even
-if each part still renders.
+## Derive the channel profile {#rail-fit}
 
-## Branch by film format {#format}
+[Open the rail-profile study](../projects/06-film-scanner/01-worked-fit-profile.ecky). The channel derives its dimensions from the rail:
 
-`film_format` is one `select` control. Nested `if` expressions derive a frame
-width and height for 135, 120 6×4.5, and 120 6×9; the insert blank and aperture
-cut then consume those derived values. There is no copied 135 insert or copied
-120 insert. This keeps the aperture centered on the same rail and tunnel datum.
+```scheme
+(shape channel_h (+ rail_h (* 2 fit_clearance)))
+(shape channel_w (+ rail_tip_w (* 2 fit_clearance)))
+```
 
-The worked scanner subassembly expands that pattern with insert clearance and a
-base plate. Read the branch first, then follow `frame_w` and `frame_h` into the
-two cutter dimensions. Do not change a downstream box dimension to make a
-format fit: correct the branch relation instead.
+With `rail_h = 4.2`, `rail_tip_w = 5.4`, and `fit_clearance = 0.25`, these become 4.7 and 5.9 mm. Set clearance to 0.35: the receiving profile grows by 0.2 mm in both dimensions while the rail stays nominal.
 
-## Inspect the final scanner {#scanner-final}
+The profile study isolates the cross-section math. Its rail and channel use different extrusion axes; inspect their transforms before treating them as an assembled pair.
 
-The final scanner retains independently printable base rails, lower guides,
-upper clamp, tunnel, top cover, and moving lens carrier. The film insert is a
-two-piece stack: lower guides carry the supportless male rails; the upper clamp
-derives the matching female channels with named join clearance. The base/tunnel
-and top-cover rails use the same clearance relation introduced in the coupon.
+## Select a film aperture {#format}
 
-The helicoid is also a pair. The top cover cuts its socket with a female
-`helical-ridge`; the carrier fuses matching male ridges, both using pitch,
-depth, and thread clearance derived from the same controls. The preview proves
-part placement and branch structure only. It cannot prove a smooth sliding rail
-or a turning thread.
+[Open the scanner subassembly](../projects/06-film-scanner/03-solution-scanner-subassembly.ecky). Its width branch is:
 
-## Calibrate the moving interface {#coupon}
+```scheme
+(shape frame_w
+  (if (= film_format "135") 36
+    (if (= film_format "120_645") 42 84)))
+```
 
-The calibration source is a bounded mechanism study. It exposes one female
-helicoid ridge, a central bore, repeated radial stops, and a sampled focus knob.
-`repeat-union` makes stop geometry; `repeat-compound` keeps witness ticks
-grouped without fusing them. The `common`, `intersection`, and `xor` shapes are
-comparison witnesses, not extra scanner parts.
+The height branch gives 24 mm for 135 and 56 mm for both 120 options. Thus the apertures are 36 × 24, 42 × 56, and 84 × 56 mm. The insert blank adds a border around those dimensions; the aperture cutter uses them directly.
 
-Start with pitch and thread clearance. Print a short threaded sample and turn it
-through a few stops before changing the full carrier. Do not infer a production
-fit from a preview or from a Boolean that happens to compile.
+Change the format control and inspect both the opening and its surrounding insert. If you change the cutter alone, the border no longer follows the chosen format.
 
-## Print fit before finish {#print}
+## Follow the lens thread {#scanner-final}
 
-Print two small coupons before the complete scanner: a rail/channel section and
-a short helicoid/socket section. Use the intended material, nozzle, layer
-height, and orientation. Record the clearance that slides and the thread
-clearance that turns, then set those named controls in the full assembly. This
-is the handoff from geometric intent to a machine-specific fit.
+In the complete scanner, find `helical-ridge`. The carrier adds male ridges to a cylindrical body; the socket subtracts matching female ridge geometry. Pitch, ridge depth, and clearance must agree on both sides.
+
+Two starts are made by rotating a second ridge by 180 degrees. This is a second helix at the same pitch, not a pitch change. Follow the shared pitch binding before editing either ridge.
+
+The source also places parts apart for inspection. An ordinary `translate` inside a part affects its exported geometry. Only an authored `view` offset is preview-only; a variable named `preview` does not change that rule.
+
+## Inspect the calibration study {#coupon}
+
+[Download helicoid calibration study](../projects/06-film-scanner/04-calibration-helicoid-patterns.ecky)
+
+This file includes a socket, repeated stops, a sampled knob, and comparison shapes. It is a geometry study, not a ready-made two-piece fit coupon. `repeat-union` joins repeated stops; `repeat-compound` groups witness ticks without joining them.
+
+For a physical thread test, use a short section of both the carrier and its matching socket from the complete model. Preserve pitch, profile, and clearance.
+
+## Record the printed fit {#print}
+
+Test a rail/channel pair and a carrier/socket pair with the intended material and orientation. Record the clearance that slides and the thread clearance that turns. Apply those values to the full scanner, then recheck the aperture and part placement before exporting.

@@ -1,78 +1,70 @@
 ---
 id: mission-05-iphone-case-fixture
-title: Read a three-print phone case
+title: Read a multipart phone case
 ---
 
-# Read a three-print phone case
+# Read a multipart phone case
 
-This mission is a manufacturing read-through, not a request to redraw a phone
-from scratch. Follow one shared camera datum from the TPU shell into the two
-PETG pieces. The final source is the current composite camera-frame model; do
-not substitute an older open-lattice or single-piece case.
+This is a source walkthrough of a three-part case: a TPU shell and two PETG camera-frame inserts. It is an earlier design than the single-piece case on the landing page. Use the file linked here so the part names match the text.
 
-## One design, three printable parts {#materials}
+[Download the three-part case](../../../../sites/landing/src/models/iphone-17e-voronoi-case.ecky)
 
-One assembly produces three exports: the flexible TPU case, a phone-side PETG
-inner island, and a camera-side PETG snap island. “Two-piece camera frame”
-means the two PETG pieces cooperate at one camera cluster; it does not mean the
-TPU shell disappears. Keep material jobs separate: TPU supplies enclosure and
-capture compliance, while PETG supplies the rigid, flush camera frame.
+## Identify the three parts {#materials}
 
-## Trace the TPU envelope {#phone-shell}
+Search for `(part` in the file. The TPU part surrounds the phone. The inner PETG island seats against it; the outer snap island captures the camera opening from the other side. Their fit depends on both thickness and the shapes of their mating grooves.
 
-Start with the pocket rather than the decorative rear surface. Phone width,
-length, thickness, corner radius, pocket clearance, wall thickness, and rear
-panel thickness define the shell contract. Port and button cutters are then
-subtracted from that positive body. When a fit changes, change the named
-clearance or wall control; do not move a cutter by an unexplained offset.
+The source is long. Read its parameter declarations and part boundaries first, then return to individual cuts when the surrounding shape is clear.
 
-The current source also cuts the camera-frame seats from this TPU part. Those
-seats use the same measured camera, microphone, and flash datums as the PETG
-pieces. That shared datum is the relation to inspect before changing a
-dimension.
+## Follow the phone pocket {#phone-shell}
 
-## Distinguish authored from generated pattern {#lattice}
+The `iphone-17e-tpu-case` part starts with phone dimensions, then derives its pocket and outside. `phone-pocket-clearance` adjusts space around the phone; wall and rear-panel thickness add material outside that pocket.
 
-The rear treatment is a positive edge lattice: struts are explicit geometry
-joined to the shell, not holes pretending to be a Voronoi algorithm. Read the
-`lattice-strut` component as a reusable segment between two declared endpoints.
-The finished case may contain many such authored edges, but the source makes no
-claim that it can regenerate a new Voronoi graph for another phone.
+Find the USB and button cutters after the shell. Their sizes and positions are separate from the pocket. A wider case does not automatically imply a wider USB opening.
 
-Treat this as a boundary: changing the shell envelope can preserve the frame
-and fit relations, while changing the authored lattice requires new authored
-edge data and a printability review.
+## Read one lattice segment {#lattice}
 
-## Place the PETG islands {#islands}
+The rear lattice calls one component many times. This is its complete definition:
 
-The inner and outer PETG islands are the two parts of the composite camera
-frame. Both are built from the same three lobe centers: camera, microphone, and
-flash. The inner island provides the phone-side seat and a female capture
-groove. The outer island provides the camera opening, hidden snap skirt, bead,
-and repeated relief slots. The microphone and flash remain open through both
-pieces.
+```scheme
+(define-component lattice-strut((number x1 0.0)
+   (number y1 0.0)
+   (number x2 10.0)
+   (number y2 0.0)
+   (number width 2.0)
+   (number height 1.8))
 
-`lens-clamp-fit-clearance`, capture thickness, snap engagement depth, and snap
-interference are named fit controls. They are not cosmetic knobs: changing one
-requires inspecting the matching TPU cut and the opposing PETG feature.
+  (let* (
+    (mid-x (/ (+ x1 x2) 2.0))
+    (mid-y (/ (+ y1 y2) 2.0))
+  )
+  (extrude
+    (slot-center-point mid-x mid-y x2 y2 width)
+    height)))
+```
 
-## Inspect the complete assembly {#case-solution}
+The endpoints determine the segment midpoint. `slot-center-point` draws a rounded strip from that midpoint toward the second endpoint; `extrude` gives it thickness.
 
-The final source is the current three-export model: one TPU shell plus the two
-PETG camera-frame pieces. Its preview positions the PETG pieces beside the shell
-so their separate printable roles stay visible; that is an inspection layout,
-not a claim that they print as one merged solid. The camera frame itself is a
-composite of two mating pieces, not the old simplified one-piece camera pad.
+The calls below the component contain explicit endpoint data. Changing `back-voronoi-web-width` changes the strut width, but does not generate a new cell graph. To change the pattern, edit the endpoint data or replace it with a generator.
 
-Check the flush-stack relation before trusting the view: captured TPU plus the
-inner PETG thickness equals the rear-panel thickness. Then check that the snap
-through-cut, inner groove, and outer skirt use their named clearance and
-interference values consistently.
+## Follow the camera-frame thickness {#islands}
 
-## Make a coupon before committing {#fit-warning}
+The file defines a small helper for the inner insert:
 
-Print a small camera-frame coupon before the full case. Include a short piece
-of TPU seat, the inner PETG groove, and the outer PETG snap skirt. Test the
-actual filament pair, nozzle, layer height, and slicer settings. The model
-preserves the relation; the coupon decides whether the chosen clearance and
-interference are usable on this printer.
+```scheme
+(define (flush-insert-thickness panel-thickness captured-thickness)
+  (- panel-thickness captured-thickness))
+```
+
+For a 1.8 mm rear panel capturing 0.8 mm of TPU, the inner insert is 1 mm thick. That subtraction keeps the stack flush. Increasing one layer without reducing the other changes the total thickness.
+
+The camera, microphone, and flash centers are shared by the TPU cuts and PETG components. Follow those shared coordinates before moving an individual opening.
+
+## Inspect the assembled stack {#case-solution}
+
+The preview places the PETG pieces beside the TPU shell to expose their shapes. Those offsets help inspection; they are not their installed positions. Check the mating groove, skirt, and captured thickness in source as well as in the view.
+
+`lens-clamp-fit-clearance` and `lens-clamp-snap-interference-radius` serve different purposes: one provides space, the other sets snap engagement. Changing both together makes it harder to identify the cause of a tight fit.
+
+## Print a small camera-frame sample {#fit-warning}
+
+A useful test includes the TPU seat and both PETG mating features. Keep the full model's thicknesses and clearances in the sample. Test insertion and removal with the actual materials before printing the whole case.

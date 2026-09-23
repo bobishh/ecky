@@ -46,6 +46,7 @@ stage();
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
+  '.ecky': 'text/plain; charset=utf-8',
   '.epub': 'application/epub+zip',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',

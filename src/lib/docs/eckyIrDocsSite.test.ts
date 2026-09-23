@@ -124,9 +124,9 @@ test('Given parsed docs When site html built Then midnight tactical theme applie
 
   // Dark background token from the app theme.
   assert.ok(/#1a1a2e/i.test(html), 'dark bg token missing');
-  // Primary green + secondary bronze accent tokens.
-  assert.ok(/#4a8c5c/i.test(html), 'primary green token missing');
-  assert.ok(/#c8a620/i.test(html), 'secondary bronze token missing');
+  // Bronze accent tokens match the application theme.
+  assert.ok(/#c8924f/i.test(html), 'primary bronze token missing');
+  assert.ok(/#e1b766/i.test(html), 'secondary bronze token missing');
   // Mono font for code.
   assert.ok(/monospace/i.test(html), 'mono font family missing');
   // Square borders — every border-radius declaration must be zero.

@@ -150,17 +150,20 @@ export function renderMarkdownFragment(markdown: string, options: DocsRenderOpti
       continue;
     }
 
-    if (trimmed.startsWith('- ')) {
+    if (trimmed.startsWith('- ') || /^\d+\. /.test(trimmed)) {
+      const ordered = /^\d+\. /.test(trimmed);
+      const marker = ordered ? /^\d+\. / : /^- /;
       flushParagraph();
       const items: string[] = [];
       let listIndex = index;
       while (listIndex < lines.length) {
         const candidate = (lines[listIndex] ?? '').trim();
-        if (!candidate.startsWith('- ')) break;
-        items.push(`<li>${renderInline(candidate.slice(2).trim())}</li>`);
+        if (!marker.test(candidate)) break;
+        items.push(`<li>${renderInline(candidate.replace(marker, '').trim())}</li>`);
         listIndex += 1;
       }
-      chunks.push(`<ul>${items.join('')}</ul>`);
+      const tag = ordered ? 'ol' : 'ul';
+      chunks.push(`<${tag}>${items.join('')}</${tag}>`);
       index = listIndex - 1;
       continue;
     }
@@ -237,10 +240,10 @@ function extractFirstSnippet(markdown: string): string | null {
 function renderInline(text: string): string {
   let output = escapeHtml(text);
   output = output.replace(
-    /\[([^\]]+)\]\((#[a-zA-Z0-9_-]+)\)/g,
+    /\[([^\]]+)\]\(((?:https?:\/\/|\/(?!\/)|#)[^\s)]+)\)/g,
     '<a href="$2">$1</a>',
   );
-  output = output.replace(/`([^`]+)`/g, (_match, code) => `<code>${escapeHtml(code)}</code>`);
+  output = output.replace(/`([^`]+)`/g, (_match, code) => `<code>${code}</code>`);
   output = output.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   return output;
 }
@@ -270,8 +273,8 @@ function isTableDivider(text: string): boolean {
 function parseTableCells(text: string): string[] {
   return text
     .slice(1, -1)
-    .split('|')
-    .map((cell) => cell.trim());
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replaceAll('\\|', '|'));
 }
 
 function resolveAssetSrc(src: string, options: DocsRenderOptions): string {

@@ -80,161 +80,92 @@ Documented forms and operations. Select a name to open its signature.
 
 ## Language Overview
 
-Scope here:
+An `.ecky` file describes geometry with parenthesized expressions. A call starts with a function name followed by its arguments: `(box 60 30 4)` makes a box. Calls can contain other calls: `(translate 10 0 0 (box 60 30 4))` moves that box along X.
 
-- `ecky/cad` exported CAD forms and ops
-- `ecky/core` helper functions shipped with Ecky
-- `ecky/params` parameter forms
-- lowerer-visible keywords people otherwise guess from source
+Lengths use millimetres and rotations use degrees. Trigonometric helpers such as `sin` use radians. A value like `2cm` converts to 20 millimetres; it is not a different geometry type.
 
-Out of scope here:
+A complete file contains one `model`. Its `params` declare controls and its `part` forms name the output geometry. Reusable functions and components go before the model.
 
-- full Steel standard library reference
-- backend implementation internals
-- UI behavior outside `.ecky` authoring
+```scheme
+(model
+  (params (number width 60mm :min 20 :max 120))
+  (part plate (box width 30 4)))
+```
 
-Mental model:
+A `Solid` has volume; a `Sketch` is a planar profile; a `Path` describes a route; a `Frame` describes position and orientation. The argument type matters: `extrude` takes a profile, while `translate` can move a profile or a solid.
 
-- `.ecky` is Scheme surface syntax
-- compiler lowers it into Core IR
-- verifier checks value kinds and op signatures
-- native execution maps Core IR into `OcctPlan`, then the precompiled Direct OCCT runner; FreeCAD lowering is optional interop
-
-Read this order if new:
-
-- `Forms and Structure`
-- `Params and Controls`
-- `Primitive Signatures`
-- `Boolean and Transform Signatures`
-- `Surface and Path Signatures`
-- `Array and Frame Signatures`
-- `Special / Custom Operations`
-- `Selector Strings and Named Keywords`
+For a first model, start with [the bracket chapter](/docs/chapters/level-01-corner-bracket/). Use this reference to look up a call while editing. Square brackets in signatures mark optional arguments; do not type the brackets. Examples containing names such as `body` or `profile` are fragments: those names must be defined in the surrounding model.
 
 ## Forms and Structure
 
-This is top-level authoring grammar. If source feels mysterious, start here.
+These forms organize a model. They do not describe dimensions or shapes by themselves.
 
 ### `model`
 
 ```scheme
 (model
-  ...)
+  (params (number width 60))
+  (part body (box width 30 4)))
 ```
 
-- root form for one design
-- source must start with `(model ...)`
-- accepts the direct clauses listed in `Complete Compiler Surface`: `params`,
-  `verify`, `part`, `feature`, topology tags, `view`, and `analysis`
-- reusable helper `define`s and `define-component` declarations belong before
-  `(model ...)`; derived values depending on model params belong in `let*`
+Use one `model` per file. Its direct clauses include `params`, `part`, `feature`, `verify`, topology tags, `view`, and `analysis`. Put reusable `define` and `define-component` declarations before it. Use `let*` for derived values that depend on model parameters.
 
 ### `part`
 
 ```scheme
-(part body expr)
-(part body "Human Label" expr)
+(part body geometry)
+(part body "Display name" geometry)
 ```
 
-- positional 1: part id symbol
-- positional 2: optional display label text
-- final positional: expression producing geometry
+`body` is a stable part identifier. The optional string is its display label. The last expression produces its geometry. Separate `part` forms let you export and inspect pieces independently; they do not force the geometry inside each part to be connected.
 
 ### `feature`
 
-Two forms exist:
-
 ```scheme
-(feature body :role shell expr)
-(feature body :role shell :params (width height) expr)
+(feature body :role shell geometry)
+(feature body :role shell :params (width height) geometry)
 ```
 
-- positional 1: feature id symbol
-- required keyword: `:role`
-- optional keyword: `:params`
-- final positional: expression producing geometry
-
-Use `feature` when geometry needs explicit semantic identity, role, and parameter-key tracking.
+A feature gives geometry an identifier and a role. `:params` lists the parameters associated with it. Use it when you need to refer to a semantic feature in checks or downstream operations.
 
 ### `build`
 
 ```scheme
 (build
-  (shape outer expr)
-  (shape cavity expr)
-  (result expr))
+  (shape blank (box 60 30 4))
+  (shape bore (translate 0 0 -1 (cylinder 3 6)))
+  (result (difference blank bore)))
 ```
 
-- local binding block
-- accepts `shape` bindings plus one `result`
-- `result` must come once
-- do not place new `shape` bindings after `result`
+`build` evaluates named intermediate values in order and returns one result. Later shapes can use earlier names. It requires exactly one `result`, after the shape bindings.
 
 ### `shape`
 
 ```scheme
-(shape ribs expr)
+(shape blank (box 60 30 4))
 ```
 
-`shape` is not geometry op. It is bind statement inside `build`.
-
-- positional 1: local binding name
-- positional 2: expression producing value
-
-Read it as:
-
-- bind intermediate value
-- give later code a name
-- keep boolean stacks readable
+Inside `build`, bind a value to a name. Here `blank` can be used by later expressions in that build. `shape` does not create an extra exported part.
 
 ### `result`
 
 ```scheme
-(result expr)
+(result (difference blank bore))
 ```
 
-- final value returned by `build`
+Return the final value from `build`. Do not put more `shape` bindings after it.
 
 ### `assembly` (planned)
 
-Reserved shape sketch:
-
-```scheme
-(model
-  (assembly exploded_preview
-    ...))
-```
-
-- planned top-level clause for explicit multi-part assembly recipes
-- spelling reserved in book now; runtime/compiler support deferred
-- spec'd grammar reserved now; implementation deferred until views prove the display/manufacturing split
-- intended to formalize what component packages already do at the package layer
-- assemblies stay placement-based as today; no mate/joint solver implied
-- examples here mark intent only, not accepted source today
-- until implementation lands, keep physical bodies as `part`s, use `view` for preview-only offsets, and use component packages for solved assembly workflows
+This is not accepted model syntax yet. Declare physical pieces with `part`. For exploded placement that must not affect exports, use `view` and `offset-part`.
 
 ### `export` (planned)
 
-Reserved shape sketch:
-
-```scheme
-(model
-  (export manufacturing
-    ...))
-```
-
-- planned top-level clause for authored export/manufacturing policy
-- spelling reserved in book now; runtime/compiler support deferred
-- reserved until views prove the display/manufacturing split
-- preview transforms never affect STL or STEP artifacts
-- examples here mark intent only, not accepted source today
-- until implementation lands, use current export commands, artifact manifests, and package output modes outside `.ecky` source
+This is not accepted model syntax yet. Export through the app or CLI. An ordinary transform inside a part affects the geometry you export; only a `view` offset is preview-only.
 
 ## Components
 
-A component is a named, parameterized, closed geometry unit. Define once,
-instantiate anywhere, override knobs at the call site. `model` and `part`
-stay valid forever; components add reuse on top without changing them.
+A component is reusable geometry with its own parameters. Declare it before `model`, then call it by name inside a part. Each call can supply different parameter values.
 
 ### `define-component`
 
@@ -283,14 +214,16 @@ copy-inlineable: paste the `define-component` into any model and it works.
 tag namespaced by the instantiating part key:
 
 ```scheme
-(define-component pin ((number d 2))
-  (verify (tag pin_ok) (metric min_wall_thickness "body") (expect (>= value 1)))
-  (cylinder d 10 48))
+(define-component pin ((number radius 2))
+  (verify (tag pin_ok)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+  (cylinder radius 10))
 
-(part left (pin :d 3))   ; verify tag becomes left/pin_ok
+(model (part left (pin :radius 3)))
 ```
 
-A pasted component therefore carries its own checks — reuse includes proof.
+Each instance runs its own declared check. A passing check establishes only the expectation it measures.
 
 ### Component Library Workflow (MCP)
 
@@ -362,14 +295,11 @@ Use `verify` when source should declare structural expectations explicitly.
 ```scheme
 (model
   (verify
-    (tag front_gap body.front_window_1)
-    (intent "Keep lid clearance printable")
-    (severity error)
-    (when assembly-preview)
-    (metric gap (clearance min-distance body lid))
-    (expect gap (>= 3)))
-  (part body (box 10 10 10))
-  (part lid (box 10 10 10)))
+    (tag plate_connected)
+    (intent "The plate must be one connected mesh")
+    (metric pieces (stl connected-component-count))
+    (expect pieces (= 1)))
+  (part plate (box 60 30 4)))
 ```
 
 - model verification is top-level under `model`
@@ -489,14 +419,11 @@ selectors.
   - `<`
   - `<=`
 
-Authoring rule:
-
-- fix geometry or exports until `verify` passes
-- do not remove `verify` clauses to bypass authored requirements
+A failed expectation records which metric missed its threshold. Inspect the measurement before changing geometry. Removing the check also removes the requirement it was meant to test.
 
 ## Params and Controls
 
-Parameter forms live in `ecky/params`.
+Declare editable inputs inside `params`. The key is the name used by geometry expressions; `:label` is the text shown in the control. A saved project can override a source default with its current parameter value.
 
 ### `params`
 
@@ -541,20 +468,17 @@ Supported relation operators:
 
 ### Units and suffixed literals
 
-Humans may use bare numbers because Ecky's base units are millimetres and
-degrees. Agent-generated physical dimensions should use suffixed literals like
-mm/cm/in/deg/rad when the suffix makes intent clearer.
+Bare lengths are millimetres; bare rotation angles are degrees. Suffixes make conversions explicit:
 
-Examples:
+| Literal | Base-unit value |
+| --- | --- |
+| `12mm` | 12 mm |
+| `2.54cm` | 25.4 mm |
+| `0.25in` | 6.35 mm |
+| `45deg` | 45 degrees |
+| `1.5708rad` | Approximately 90 degrees |
 
-- `12mm`
-- `2.54cm`
-- `0.25in`
-- `45deg`
-- `1.5708rad`
-
-Prompt generators use suffixed literals for physical lengths and angles. Bare
-numbers remain appropriate for counts, ratios, segments, and unitless math.
+Use bare numbers for counts, ratios, and segment counts. Suffix conversion does not by itself provide dimensional type checking.
 
 ### `toggle`
 
@@ -620,7 +544,7 @@ numbers remain appropriate for counts, ratios, segments, and unitless math.
 
 ## Core Helper Library
 
-Helpers here come from `ecky/core`.
+These helpers return values rather than solids. Use them to calculate dimensions, generate profile points, and build lists for repeated geometry. Angles passed to trigonometric functions are radians; use `deg->rad` to convert degrees.
 
 ### Constructors and Symbols
 
@@ -853,266 +777,252 @@ Use helper outputs as inputs to `polygon`, `bspline`, `path`, `bezier-path`, `ma
 
 ## Value Kinds and IR Nodes
 
-Verifier-backed value kinds:
+Type errors tell you what kind of value a function expected. These are the types you will encounter while authoring:
 
-- `Any`
-- `Number`
-- `Boolean`
-- `Text`
-- `List`
-- `Point2`
-- `Point3`
-- `Sketch`
-- `Path`
-- `Frame`
-- `Compound`
-- `Solid`
+| Kind | Meaning | Example |
+| --- | --- | --- |
+| Number | Scalar dimension, angle, count, or other numeric value | `12`, `4mm` |
+| Boolean | True or false | `true`, `(< width 20)` |
+| Text | A string | `"lid"` |
+| List | Ordered values | `(list 1 2 3)` |
+| Point2 | Two coordinates | `(vec2 10 20)` |
+| Point3 | Three coordinates | `(vec3 10 20 5)` |
+| Sketch | Planar geometry used as a profile | `(circle 8)` |
+| Path | Route through points | `(path (0 0 0) (0 0 20))` |
+| Frame | Position and orientation | `(plane :origin '(0 0 10))` |
+| Solid | Geometry with volume | `(box 20 10 4)` |
+| Compound | Grouped geometry | `(compound a b)` |
+| Any | No narrower type required at this position | Depends on the call |
 
-Core node kinds:
+For example, passing `(box 20 10 4)` to a function that expects a sketch is a type mismatch. Use a 2D profile such as `(rectangle 20 10)` instead.
 
-- `Literal`
-- `Reference`
-- `Build`
-- `Let`
-- `If`
-- `Call`
-- `Range`
-- `Map`
-- `Apply`
-- `List`
-- `Group`
-
-If typecheck fails, compiler is checking these kinds, not backend Python text.
+IR means the compiler's intermediate representation. Names such as `Literal`, `Call`, `Reference`, `Build`, and `Let` describe internal nodes in diagnostics; they are not additional geometry functions.
 
 ## Primitive Signatures
 
-These are explicit authored calls. When backend diverges, caveat is spelled out.
+Solid primitives create volume. Sketch primitives create profiles for `extrude`, `revolve`, or another operation that needs a cross-section. Dimensions below are in millimetres.
 
 ### `box`
 
-- signature: `box width depth height`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)` with each axis one of `min | center | max`
+`(box width depth height [:align '(x y z)])` → Solid.
 
-### `sphere`
-
-- signature: `sphere radius`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)`
-
-### `cylinder`
-
-- signature: `cylinder radius height`
-- signature: `cylinder radius height segments`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)`
-
-### `cone`
-
-- signature: `cone radius1 radius2 height`
-- signature: `cone radius1 radius2 height segments`
-- result: `Solid`
-- keywords:
-  - `:align (x y z)`
-
-### `circle`
-
-- signature: `circle radius`
-- signature: `circle radius segments`
-- result: `Sketch`
-
-### `rectangle`
-
-- signature: `rectangle width height`
-- result: `Sketch`
-
-### `rounded-rect`
-
-- signature: `rounded-rect width height radius`
-- result: `Sketch`
-
-### `rounded-polygon`
-
-- signature: `rounded-polygon points radius`
-- signature: `rounded-polygon points radius segments`
-- `points`: list of 2D points
-- result: `Sketch`
-
-### `polygon`
-
-- signature: `polygon points`
-- `points`: list of 2D points
-- result: `Sketch`
-
-### `profile`
-
-- signature: `profile loop1 loop2 ...`
-- signature: `profile :outer outer-loop :holes hole-loop-or-list`
-- result: `Sketch`
-
-Rules:
-
-- positional form treats every argument as sketch/wire loop
-- keyword form accepts `:outer` and `:holes` only
-- current hole-aware lowerers expect exactly one outer loop when `:holes` is used
-
-### `make-face`
-
-- signature: `make-face wire1 wire2 ...`
-- result: `Sketch`
-- use when you already have wire-like geometry and need face/sketch result
-
-### `text`
-
-- signature: `text string size [:font selector]`
-- result: `Sketch`
-- normal use: feed into `extrude`
-- `:font` belongs to `text`, not `extrude`
-- `selector` accepts an installed font family name or an absolute `.ttf`/`.otf` path
-- a literal selector changes one call; a shared `select` parameter can drive several calls
-
-Example:
-
-```scheme
-(extrude (text "HELLO" 12 :font "Arial") 2)
-```
-
-One label only:
-
-```scheme
-(union
-  (extrude (text "MORNING" 12 :font "Arial") 2)
-  (translate 0 20 0
-    (extrude (text "EVENING" 12 :font "Impact") 2)))
-```
-
-Shared parameter:
+X and Y are centered by default; Z starts at 0. A 60 × 30 × 4 box therefore spans X = −30…30, Y = −15…15, and Z = 0…4. Dimensions must be positive.
 
 ```scheme
 (model
-  (params
-    (select label-font "Arial" :label "Label Font"
-      :options (("Arial" "Arial") ("Impact" "Impact"))))
-  (part labels
-    (extrude (text "HELLO" 12 :font label-font) 2)))
+  (part plate (box 60 30 4)))
+```
+
+`:align` takes three values, each `min`, `center`, or `max`. `min` places the lower bound of that axis at the origin; `max` places its upper bound there.
+
+### `sphere`
+
+`(sphere radius [:align '(x y z)])` → Solid.
+
+The sphere is centered on all three axes by default. Radius is half the diameter: `(sphere 10)` has a 20 mm diameter.
+
+### `cylinder`
+
+`(cylinder radius height [segments] [:align '(x y z)])` → Solid.
+
+The axis is Z. X and Y are centered; the base starts at Z = 0. The first argument is radius, not diameter. `(cylinder 3 8)` is 6 mm across and 8 mm tall.
+
+The optional segment count controls polygonal approximations on paths that use them. Native OCCT keeps the cylinder analytic.
+
+### `cone`
+
+`(cone radius1 radius2 height [segments] [:align '(x y z)])` → Solid.
+
+`radius1` is the bottom radius and `radius2` the top radius. The axis is Z, with its base at 0 by default. Set one radius to zero for a pointed cone; keep both positive for a truncated cone.
+
+### `circle`
+
+`(circle radius [segments])` → Sketch.
+
+A circular profile in XY, centered at the origin. It has no height until used by an operation such as `(extrude (circle 8) 4)`.
+
+### `rectangle`
+
+`(rectangle width height)` → Sketch.
+
+A centered rectangle in XY. Its second dimension is along Y, not an extrusion height.
+
+### `rounded-rect`
+
+`(rounded-rect width height radius)` → Sketch.
+
+A centered rectangle with rounded corners. `radius` controls the corner arcs. Choose a radius no larger than half the shorter dimension.
+
+### `rounded-polygon`
+
+`(rounded-polygon points radius [segments])` → Sketch.
+
+Round the corners of a polygon defined by 2D points. The radius must fit the neighboring edges. Start with a small radius if the rounding fails.
+
+### `polygon`
+
+`(polygon points)` → Sketch.
+
+The points are an ordered list of XY coordinates. The boundary closes from the last point to the first. Use at least three non-collinear points and avoid a self-intersecting outline.
+
+```scheme
+(model
+  (part wedge
+    (extrude (polygon ((0 0) (30 0) (0 20))) 4)))
+```
+
+### `profile`
+
+`(profile loop1 loop2 ...)` → Sketch.
+
+The explicit hole form is `(profile :outer outer-loop :holes hole-loop-or-list)`. It accepts one outer loop and the enclosed holes. Use it when the hole is part of the cross-section, before extrusion.
+
+```scheme
+(model
+  (part washer
+    (extrude (profile :outer (circle 12) :holes (circle 4)) 2)))
+```
+
+### `make-face`
+
+`(make-face wire1 wire2 ...)` → Sketch.
+
+Build a face from wire-like loops. Use this when the boundary already exists as wires; use `profile` when explicitly combining an outer profile and holes.
+
+### `text`
+
+`(text string size [:font selector])` → Sketch.
+
+`size` sets text size. `:font` accepts an installed font family or an absolute `.ttf`/`.otf` path. It belongs to `text`, not to the following extrusion. The requested font must exist on the machine doing the render.
+
+```scheme
+(model
+  (part label
+    (extrude (text "OPEN" 12 :font "Arial") 2)))
 ```
 
 ### `svg`
 
-- native signature: `svg path`
-- FreeCAD interop signature: `svg path [target-width] [target-height] [fit-mode]`
-- result: `Sketch`
+`(svg path)` → Sketch on the native renderer.
 
-Known fit modes from lowerers/tests:
-
-- `"contain"`
-- `"cover"`
-- `"stretch"`
-- `"fill"`
+Import an SVG profile and use it in a geometry operation. The optional `target-width`, `target-height`, and `fit-mode` positional arguments belong to the FreeCAD interop form; they are not the native signature. Its fit modes are `"contain"`, `"cover"`, `"stretch"`, and `"fill"`.
 
 ### `import-stl`
 
-- signature: `import-stl path`
-- result: imported solid/mesh-like geometry
+`(import-stl path)` → imported mesh geometry.
+
+Read triangles from an STL file. Importing a mesh does not recover its original analytic surfaces. A later `solidify` operation can make an eligible closed mesh usable in the mesh-to-solid path; it does not reconstruct the original CAD design.
 
 ### `ring`
 
-- signature: `ring outer-radius inner-radius`
-- signature: `ring outer-radius inner-radius segments`
-- result: `Sketch`
-- lowering behavior: alias for profile-with-hole semantics
+`(ring outer-radius inner-radius [segments])` → Sketch.
+
+A centered circular profile with a circular hole. The inner radius must be smaller than the outer radius. `(extrude (ring 12 4) 2)` makes the same washer cross-section as the `profile` example above.
 
 ## Boolean and Transform Signatures
 
+Boolean operations combine or remove material. Transforms change where geometry is or how large it is. Expressions are evaluated inside out, so rotating then translating differs from translating then rotating.
+
 ### `union`
 
-- signature: `union shape1 shape2 ...`
-- result: shape-like value
+`(union shape1 shape2 ...)` → combined geometry.
+
+Join the supplied shapes. Overlapping solids can become one connected body; separated solids stay disconnected. Use `compound` when you only need a group and do not want a boolean join.
 
 ### `fuse`
 
-- alias of `union`
+Alias of `union`, with the same arguments.
 
 ### `difference`
 
-- signature: `difference base cut1 cut2 ...`
-- result: shape-like value
+`(difference base cut1 cut2 ...)` → remaining geometry.
+
+Subtract every cutter from `base`. The first argument is the material to keep. A cutter outside the base removes nothing. For through-holes, extend cutters slightly beyond both surfaces.
+
+```scheme
+(model
+  (part plate
+    (difference
+      (box 60 30 4)
+      (translate 0 0 -1 (cylinder 3 6)))))
+```
+
+The cutter runs from Z = −1 to 5 while the plate runs from 0 to 4.
 
 ### `cut`
 
-- alias of `difference`
+Alias of `difference`, with the same arguments.
 
 ### `intersection`
 
-- signature: `intersection shape1 shape2 ...`
-- result: shape-like value
+`(intersection shape1 shape2 ...)` → shared geometry.
+
+Keep only the region common to the supplied shapes. Shapes with no overlap have no shared volume.
 
 ### `common`
 
-- alias of `intersection`
+Alias of `intersection`, with the same arguments.
 
 ### `xor`
 
-- signature: `xor shape1 shape2 ...`
-- result: shape-like value
+`(xor shape1 shape2 ...)` → exclusive regions.
 
-Boolean rule:
-
-- minimum arity: one shape
+For two inputs, retain their non-overlapping regions and remove their shared region. Boolean forms require at least one shape argument.
 
 ### `translate`
 
-- signature: `translate x y z shape`
-- result kind follows input shape kind
+`(translate x y z shape)` → same kind as `shape`.
+
+Move by the specified offsets. `(translate 20 0 0 shape)` moves it 20 mm along X.
 
 ### `rotate`
 
-- signature: `rotate x y z shape`
-- result kind follows input shape kind
+`(rotate x y z shape)` → same kind as `shape`.
+
+Angles are degrees around the axes through the origin. Rotating an already translated object also moves it around the origin. To rotate in place before positioning, put `rotate` inside `translate`.
 
 ### `scale`
 
-- verifier accepts:
-  - `scale factor shape`
-  - `scale x y z shape`
-- native planner supports both forms
-- FreeCAD lowerer currently expects explicit `x y z shape`
-- result kind follows input shape kind
+`(scale factor shape)` or `(scale x y z shape)` → same kind as `shape`.
+
+Scale coordinates from the origin. A uniform factor of 2 doubles every dimension, including holes. XYZ factors allow different scaling on each axis. The native renderer supports both forms; FreeCAD interop requires explicit XYZ factors.
 
 ### `mirror`
 
-- signature: `mirror axis offset shape`
-- `axis`: string or symbol naming mirror axis
-- `offset`: numeric plane offset
-- result kind follows input shape kind
+`(mirror axis offset shape)` → same kind as `shape`.
 
-Examples:
+Reflect across the plane perpendicular to the named axis at `offset`. For example, `(mirror 'x 0 shape)` reflects X across the YZ plane.
 
 ```scheme
-(translate 20 0 0 (box 10 10 10))
-(rotate 0 0 45 (box 10 10 10))
-(scale 2 2 1 (circle 10))
-(mirror 'x 0 (box 10 10 10))
+(model
+  (part block
+    (translate 20 0 0
+      (rotate 0 0 45 (box 10 6 4)))))
 ```
+
+This rotates the block at the origin, then moves it 20 mm along X.
 
 ## Surface and Path Signatures
 
 ### `extrude`
 
+Extend a planar profile by `distance`, normally along Z for an XY sketch. `:symmetric true` distributes the extrusion about its profile plane.
+
 - signature: `extrude profile distance`
 - result: `Solid`
-- backend keyword:
+- optional keyword:
   - `:symmetric` boolean
 
 ### `revolve`
+
+Rotate the profile through `angle` degrees to make a solid of revolution. Use 360 for a complete turn.
 
 - signature: `revolve profile angle`
 - result: `Solid`
 
 ### `loft`
+
+Join two or more profiles along the loft distance. With two profiles, the distance separates the first and last sections.
 
 - signature: `loft distance profile1 profile2 ...`
 - requires at least two profiles after distance
@@ -1138,12 +1048,16 @@ through the bend, producing a capped solid rail.
 
 ### `shell`
 
+Hollow a solid using the requested wall thickness. `:faces` selects openings. Wall thickness must fit the local geometry; reduce it if adjacent walls or tight corners cause a failure.
+
 - signature: `shell thickness solid`
 - result: `Solid`
 - optional keyword:
   - `:faces selector`
 
 ### `offset`
+
+Expand or contract a planar profile by an amount. Use the resulting profile in a later solid operation.
 
 - signature: `offset amount profile`
 - result: `Sketch`
@@ -1152,6 +1066,8 @@ through the bend, producing a capped solid rail.
 
 ### `offset-rounded`
 
+Offset a profile with rounded transitions at corners.
+
 - signature: `offset-rounded amount profile`
 - result: `Sketch`
 - optional keyword:
@@ -1159,12 +1075,16 @@ through the bend, producing a capped solid rail.
 
 ### `fillet`
 
+Round selected solid edges with a constant radius. Omit `:edges` to use the default selection. A radius too large for the adjacent faces can fail; test a smaller radius and a narrower edge selection.
+
 - signature: `fillet radius solid`
 - result: `Solid`
 - optional keyword:
   - `:edges selector`
 
 ### `chamfer`
+
+Cut a flat bevel on selected solid edges. `distance` sets its size; `:edges` restricts the selection.
 
 - signature: `chamfer distance solid`
 - result: `Solid`
@@ -1182,7 +1102,7 @@ through the bend, producing a capped solid rail.
 
 - signature: `twist height angle profile`
 - result: `Solid`
-- verifier-backed form is 3 positional args
+- all three positional arguments are required
 
 ### `path`
 
@@ -1204,7 +1124,7 @@ through the bend, producing a capped solid rail.
 ### `bspline`
 
 - signature: `bspline point-list`
-- optional second positional in lowerers: `closed`
+- optional second positional: `closed`
 - optional keywords:
   - `:closed` boolean
   - `:tangents` point-list
@@ -1213,8 +1133,8 @@ through the bend, producing a capped solid rail.
 
 Notes:
 
-- verifier only requires point-list first
-- lowerers accept tangent hints
+- point-list is required
+- tangent hints are optional
 - tangents list may use 2 entries or one per point in native path
 
 Example:
@@ -1234,15 +1154,21 @@ Example:
 
 ### `linear-array`
 
+Copy the shape `count` times. XYZ values are the step between copies, not the final overall displacement.
+
 - signature: `linear-array count x y z shape`
 - result: same geometry family as input
 
 ### `radial-array`
 
+Copy around Z. `angle` is the angular step in degrees and `radius` is the radial offset. Four copies spaced by 90 degrees make a full circle.
+
 - signature: `radial-array count angle radius shape`
 - result: same geometry family as input
 
 ### `grid-array`
+
+Copy across rows and columns. X and Y set the spacing between adjacent copies.
 
 - signature: `grid-array rows cols x y shape`
 - result: same geometry family as input
@@ -1256,9 +1182,11 @@ Example:
 
 - signature: `repeat index count expr`
 - verifier recognizes form
-- geometry lowerers do not currently expose dedicated authored lowering path like `repeat-union` / `repeat-compound` / `repeat-pick`
+- use `repeat-union` to join copies or `repeat-compound` to keep a group when rendering native solid geometry
 
 ### `repeat-union`
+
+Evaluate the body for each index from 0 to `count - 1`, then join the resulting geometry. Use the index in a transform to put each copy in a different place.
 
 - signature: `repeat-union index count expr`
 - index must be symbol
@@ -1266,6 +1194,8 @@ Example:
 - result: union/fused geometry
 
 ### `repeat-compound`
+
+Evaluate one body per index and group the results without a boolean join.
 
 - signature: `repeat-compound index count expr`
 - index must be symbol
@@ -1309,14 +1239,15 @@ Defaults:
 
 ### `location`
 
-- verifier signature: `location [frame]`
-- authored backend-safe signature: `location frame`
+- signature: `location frame`
 - optional keywords:
   - `:offset (x y z)`
   - `:rotate (x y z)`
 - result: `Frame`
 
 ### `path-frame`
+
+Construct a frame on a path. `start` and `end` choose its endpoints; a numeric `:at` selects a position along it. `:up` helps choose the frame orientation.
 
 - signature: `path-frame path`
 - optional keywords:
@@ -1326,6 +1257,8 @@ Defaults:
 
 ### `place`
 
+Put geometry into a frame. This is useful for attaching a feature to a path or an inclined plane without reconstructing the orientation by hand.
+
 - signature: `place frame shape`
 - optional keywords:
   - `:offset (x y z)`
@@ -1333,6 +1266,8 @@ Defaults:
 - result: placed shape
 
 ### `clip-box`
+
+Keep the portion of a shape inside the given XYZ bounds. Each bound is a two-number list in the shape coordinate system.
 
 - signature: `clip-box shape`
 - required keywords:
@@ -1355,7 +1290,7 @@ Example:
 
 ## Special / Custom Operations
 
-These are exported authored ops outside generic primitive/boolean/surface families.
+These operations cover grouping, incomplete geometry, threads, and sampled surfaces.
 
 ### `hole`
 
@@ -1418,7 +1353,7 @@ Example:
 
 ### `sampled-radial-loft`
 
-Procedural sampled shell / loft op.
+Sample radial sections along Z and join them into a loft. `:radius` is evaluated at each sample using the three bound coordinates.
 
 ```scheme
 (sampled-radial-loft
@@ -1441,9 +1376,9 @@ Procedural sampled shell / loft op.
 
 ### `wall-pattern`
 
-Pattern op applied to shell/solid target.
+Apply a procedural mesh pattern to a supported shell or solid surface.
 
-Pattern shape seen in repo:
+Example call:
 
 ```scheme
 (wall-pattern
@@ -1451,7 +1386,7 @@ Pattern shape seen in repo:
   shape)
 ```
 
-Observed options:
+Options:
 
 - `:mode`
 - `:depth`
@@ -1459,7 +1394,7 @@ Observed options:
 - `:vFreq`
 - `:phase`
 
-Observed modes:
+Modes include:
 
 - `gyroid`
 - `cellular`
@@ -1470,13 +1405,32 @@ Backend caveat:
 
 - native OCCT handles BREP operations; `wall-pattern` remains mesh-only
 
+### `surface-trim`
+
+Trim an imported triangle mesh along an anchored loop. This is the source form written by the surface-trim tool; anchors must refer to the exact imported mesh.
+
+```scheme
+(surface-trim
+  (import-stl path)
+  :schema-version 1
+  :source-digest digest
+  :loop (anchor-a anchor-b anchor-c)
+  :keep-seed anchor-inside
+  :path-mode "shortest"
+  :cap "open")
+```
+
+This is a fragment. `path` and `digest` identify the source mesh. Each anchor has the form `(mesh-anchor triangle-index b0 b1 b2)`: one triangle index and three barycentric weights. The loop requires at least three anchors; `keep-seed` selects the region to retain.
+
+All six keywords are required. `:path-mode` accepts `"shortest"` or `"feature"`. `:cap` accepts `"open"`, `"flat"`, or `"surface-fill"`. Use the app's mesh selection tools to create anchors; editing triangle indices after replacing the source mesh invalidates their meaning.
+
 ## Selector Strings and Named Keywords
 
-This is where people waste time guessing.
+Selectors choose which edges or faces an operation modifies. Keywords also carry coordinates and orientation; their expected value shapes are listed below.
 
 ### Shared keyword value expectations
 
-Verifier enforces:
+Expected keyword values:
 
 - `:offset` -> 3D point
 - `:rotate` -> 3D point
@@ -1519,7 +1473,7 @@ Examples:
 - `:edges "left+vertical"`
 - `:edges "target-id:body:edge:0:0-0-0_10-0-0"`
 
-Observed canonical meaning:
+Named boundary selectors:
 
 - `top` -> boundary `z max`
 - `bottom` -> boundary `z min`
@@ -1545,223 +1499,1118 @@ Accepted anchor values:
 
 ## Bound Project Lifecycle
 
-- When target metadata supplies `sourcePath`, edit that exact file. `sourceFolder`
-  is its workspace; `sourceState` reports clean, pending, or failed source.
-- The folder watcher waits for a settled edit, appends one version, validates,
-  renders a preview, and records status. Read raw diagnostics before success claims.
-- Do not export over bound source, write history storage directly, or invent a
-  commit/finalize step. Compatibility buffers apply only without `sourcePath`.
+When you open a file-backed project, its `.ecky` file is the editable source. Save a change in Ecky or an external editor. The app detects the saved edit, records a version, then validates and renders it. A failed edit remains in history with its diagnostics.
+
+Source defaults and current parameter values are separate. Changing a default in the file does not prove the current render uses it: inspect the active parameter controls.
+
+Export from a rendered version. Available formats depend on the resulting geometry and renderer. Native analytic geometry can retain STEP surfaces; mesh-only operations do not imply an analytic STEP result.
+
+An ordinary `translate` or `rotate` inside a part changes exported geometry. A `view` with `offset-part` changes only preview placement. Keep those separate when laying out a multipart model for inspection.
 
 ## Complete Compiler Surface
 
-Generated from the same Rust registry used by MCP manifests and agent prompts.
-Do not edit rows by hand; run `npm run generate:prompt`.
+Additional callable forms and helpers. Entries already explained in the preceding sections are omitted from this list.
 
-<!-- ECKY_GENERATED_SURFACE_REFERENCE_START -->
-| Form | Kind | Signature | Backends | Description | Example |
-| --- | --- | --- | --- | --- | --- |
-| `*` | numericHelper | `(* a b...)` | freecad, legacy-build123d, mesh/native | Multiplies numbers. | `(* radius 2)` |
-| `+` | numericHelper | `(+ a b...)` | freecad, legacy-build123d, mesh/native | Adds numbers. | `(+ width clearance)` |
-| `-` | numericHelper | `(- a b...)` | freecad, legacy-build123d, mesh/native | Subtracts numbers or negates one number. | `(- outer inner)` |
-| `/` | numericHelper | `(/ a b...)` | freecad, legacy-build123d, mesh/native | Divides numbers. | `(/ width 2)` |
-| `<` | booleanHelper | `(< a b)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(< 2 1)` |
-| `<=` | booleanHelper | `(<= a b)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(<= 2 1)` |
-| `=` | booleanHelper | `(= a b)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(= 2 1)` |
-| `>` | booleanHelper | `(> a b)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(> 2 1)` |
-| `>=` | booleanHelper | `(>= a b)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(>= 2 1)` |
-| `abs` | numericHelper | `(abs value)` | freecad, legacy-build123d, mesh/native | Returns absolute value. | `(abs offset)` |
-| `analysis` | modelClause | `(analysis id analysis-clause...)` | freecad, legacy-build123d, mesh/native | Declares an authored FEM/engineering analysis contract tied to model parts and selector tags. | `(analysis load-case (linear-static :part body) (fixed :face-tag mounting) (solve :method direct))` |
-| `and` | booleanHelper | `(and value...)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(and true false)` |
-| `append` | expressionForm | `(append list...)` | freecad, legacy-build123d, mesh/native | Concatenates lists. | `(append front-points back-points)` |
-| `apply` | expressionForm | `(apply fn args)` | freecad, legacy-build123d, mesh/native | Calls a function with arguments from a list. | `(apply union cutters)` |
-| `arc-array` | cadOp | `(arc-array count radius start-angle end-angle geometry)` | freecad, legacy-build123d, mesh/native | Repeats geometry along an arc. | `(arc-array 8 30 0 180 notch)` |
-| `atan` | numericHelper | `(atan value)` | freecad, legacy-build123d, mesh/native | Single-argument arctangent returning radians. | `(atan slope)` |
-| `atan2` | numericHelper | `(atan2 y x)` | freecad, legacy-build123d, mesh/native | Two-argument arctangent returning radians. | `(atan2 y x)` |
-| `attractor-field` | wallPatternMode | `attractor-field` | mesh/native | Seeded chaotic attractor-style field. | `(wall-pattern (:mode attractor-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `begin` | modelWrapper | `(begin clause...)` | freecad, legacy-build123d, mesh/native | Groups multiple model clauses where a single clause position is expected. | `(model (begin (params ...) (part body ...)))` |
-| `bezier-path` | cadOp | `(bezier-path points)` | freecad, legacy-build123d, mesh/native | Builds a cubic Bézier path from control points; native lowering uses a fixed 16 samples per cubic, so the path is an approximation. | `(bezier-path ((0 0 0) (8 0 0) (8 8 12) (16 8 12)))` |
-| `box` | cadOp | `(box x y z :align '(x y z))` | freecad, legacy-build123d, mesh/native | Creates an axis-aligned rectangular solid. | `(box 40 20 10 :align '(min center min))` |
-| `bspline` | cadOp | `(bspline points :closed #t\|#f)` | freecad, legacy-build123d, mesh/native | Builds a 2D B-spline sketch from control points. | `(bspline points :closed #t)` |
-| `build` | cadOp | `(build expr...)` | freecad, legacy-build123d, mesh/native | Build container for grouped construction forms. | `(build (shape body) (result body))` |
-| `cell-distance2` | numericHelper | `(cell-distance2 x y seed)` | freecad, legacy-build123d, mesh/native | Distance-like deterministic value to nearest jittered cellular site. | `(cell-distance2 x y seed)` |
-| `cellular` | wallPatternMode | `cellular` | mesh/native | Seeded cellular/Voronoi-like displacement field. | `(wall-pattern (:mode cellular :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `chamfer` | cadOp | `(chamfer distance [:edges selector] solid)` | freecad, legacy-build123d, mesh/native | Bevels edges of a solid. \`:edges\` accepts coarse selectors like \`bottom\`, \`front\`, \`axis-z\`, \`y-max\`, or \`x-min+z-max\`; exact backends also accept \`target-id:<id>\` and \`target-ids:<id>\|<id>\`. | `(chamfer 1 :edges "bottom" body)` |
-| `circle` | cadOp | `(circle radius segments)` | freecad, legacy-build123d, mesh/native | Creates a circular sketch/profile. | `(circle 20 64)` |
-| `clamp` | numericHelper | `(clamp value min max)` | freecad, legacy-build123d, mesh/native | Constrains value to a numeric interval. | `(clamp depth 0 3)` |
-| `clip-box` | cadOp | `(clip-box geometry :x '(min max) :y '(min max) :z '(min max))` | freecad, legacy-build123d, mesh/native | Clips geometry by an axis-aligned box; all three ranges are required. | `(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))` |
-| `clip-plane` | cadOp | `(clip-plane geometry :origin '(x y z) :normal '(x y z) [:keep "positive"\|"negative"])` | freecad, legacy-build123d, mesh/native | Clips geometry against an oriented plane. \`:keep\` is text; quote it to avoid unresolved local symbols. | `(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep "positive")` |
-| `common` | cadOp | `(common solid...)` | freecad, legacy-build123d, mesh/native | Keeps shared volume of solids. | `(common a b)` |
-| `compound` | cadOp | `(compound geometry...)` | freecad, legacy-build123d, mesh/native | Groups geometry without fusing into one solid. | `(compound body bolts)` |
-| `concat-map` | expressionForm | `(concat-map fn list)` | freecad, legacy-build123d, mesh/native | Maps each item to a list and concatenates the results. | `(flat-map (lambda (i) (list i (- i))) (range 3))` |
-| `cone` | cadOp | `(cone r1 r2 height segments)` | freecad, legacy-build123d, mesh/native | Creates a cone or tapered cylinder along local Z. | `(cone 12 6 30 48)` |
-| `cos` | numericHelper | `(cos radians)` | freecad, legacy-build123d, mesh/native | Trigonometric helper using radians. | `(cos (deg->rad 45))` |
-| `cube` | numericHelper | `(cube value)` | freecad, legacy-build123d, mesh/native | Raises a number to a small fixed power. | `(cube radius)` |
-| `cut` | cadOp | `(cut base cutter...)` | freecad, legacy-build123d, mesh/native | Subtracts cutter solids from a base solid. | `(cut body hole)` |
-| `cylinder` | cadOp | `(cylinder radius height segments)` | freecad, legacy-build123d, mesh/native | Creates a cylinder along local Z. | `(cylinder 8 30 48)` |
-| `define` | expressionForm | `(define name value)` | freecad, legacy-build123d, mesh/native | Defines a helper value or function in expression scope. | `(define wall 2)` |
-| `define-component` | componentPlacementForm | `(define-component id (signature...) [(ports ...)] [(verify ...)] geometry)` | freecad, legacy-build123d, mesh/native | Declares closed reusable local geometry and optional ports. | `(define-component latch () (ports (port mount :type "mount.v1" :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1)))) (box 20 4 2))` |
-| `deg` | numericHelper | `(deg radians)` | freecad, legacy-build123d, mesh/native | Converts radians to degrees. | `(deg angle-rad)` |
-| `deg->rad` | numericHelper | `(deg->rad degrees)` | freecad, legacy-build123d, mesh/native | Converts degrees to radians. | `(deg->rad 90)` |
-| `diamond` | wallPatternMode | `diamond` | mesh/native | Cross-hatched diamond displacement field. | `(wall-pattern (:mode diamond :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `diamond-field` | wallPatternMode | `diamond-field` | mesh/native | Alias-style diamond periodic implicit field. | `(wall-pattern (:mode diamond-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `difference` | cadOp | `(difference base cutter...)` | freecad, legacy-build123d, mesh/native | Subtracts cutter solids from a base solid. | `(difference body hole)` |
-| `draft` | cadOp | `(draft angle solid)` | freecad, legacy-build123d, mesh/native | Applies a draft angle to a solid. | `(draft 2deg body)` |
-| `ellipse` | cadOp | `(ellipse rx ry)` | freecad, legacy-build123d, mesh/native | Creates an elliptical 2D profile with radii along X and Y. | `(ellipse 10 4)` |
-| `empty?` | booleanHelper | `(empty? value)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(empty? '())` |
-| `end` | coreConstant | `end` | freecad, legacy-build123d, mesh/native | Symbolic endpoint accepted by path-frame \`:at\`. | `(path-frame rail :at end :up '(0 0 1))` |
-| `enumerate` | expressionForm | `(enumerate list)` | freecad, legacy-build123d, mesh/native | Pairs each index with its list item. | `(map (lambda ((index value)) (list index value)) (enumerate (range 4)))` |
-| `even?` | booleanHelper | `(even? number)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(even? 2)` |
-| `extrude` | cadOp | `(extrude sketch-or-image height [:symmetric #t\|#f] [:width w] [:depth d] [:fit contain\|stretch] [:threshold 0..1] [:foreground dark\|light])` | freecad, legacy-build123d, mesh/native | Extrudes a sketch, or traces raster foreground coverage into contours before the same extrusion. One raster dimension preserves source aspect ratio; two contain and center by default. \`:fit stretch\` explicitly fills a non-matching box. | `(extrude image-path 3 :width 40 :depth 30 :fit contain :threshold 0.5 :foreground dark)` |
-| `false` | coreConstant | `false` | freecad, legacy-build123d, mesh/native | Boolean constant equivalent to \`#t\` or \`#f\`. | `(if false body fallback)` |
-| `fbm` | wallPatternMode | `fbm` | mesh/native | Fractal noise displacement field. | `(wall-pattern (:mode fbm :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `fbm2` | numericHelper | `(fbm2 x y seed octaves lacunarity gain)` | freecad, legacy-build123d, mesh/native | fractal Brownian motion built from deterministic noise2 octaves. | `(fbm2 x y seed 4 2.0 0.5)` |
-| `feature` | modelClause | `(feature id :role role [:params (key...)] geometry)` | freecad, legacy-build123d, mesh/native | Declares renderable geometry plus semantic role and primary control metadata. | `(feature shell :role enclosure :params (width wall) (box width 40 wall))` |
-| `fillet` | cadOp | `(fillet radius [:edges selector] solid)` | freecad, legacy-build123d, mesh/native | Rounds edges of a solid. \`:edges\` accepts coarse selectors like \`top\`, \`left\`, \`axis-z\`, \`x-min\`, or \`x-min+z-max\`; exact backends also accept \`target-id:<id>\` and \`target-ids:<id>\|<id>\`. | `(fillet 2 :edges "x-min+z-max" body)` |
-| `filter` | expressionForm | `(filter fn list)` | freecad, legacy-build123d, mesh/native | Keeps list items where predicate returns true. | `(filter (lambda (i) (even? i)) (range 8))` |
-| `flat-map` | expressionForm | `(flat-map fn list)` | freecad, legacy-build123d, mesh/native | Maps each item to a list and concatenates the results. | `(flat-map (lambda (i) (list i (- i))) (range 3))` |
-| `floor` | numericHelper | `(floor value)` | freecad, legacy-build123d, mesh/native | Rounds down to an integer-valued number. | `(floor segments)` |
-| `fold` | expressionForm | `(fold fn initial list)` | freecad, legacy-build123d, mesh/native | Reduces a list into a single accumulated value. | `(fold + 0 (range 5))` |
-| `for-compound` | cadOp | `(for-compound list fn)` | freecad, legacy-build123d, mesh/native | Maps list values to geometry and compounds the result. | `(for-compound points (lambda (p) ...))` |
-| `for-union` | cadOp | `(for-union list fn)` | freecad, legacy-build123d, mesh/native | Maps list values to solids and unions the result. | `(for-union (range 6) (lambda (i) ...))` |
-| `fourier` | wallPatternMode | `fourier` | mesh/native | Layered sine/cosine Fourier-style displacement field. | `(wall-pattern (:mode fourier :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `frame` | componentPlacementForm | `(frame :origin '(x y z) :x-axis '(x y z) :z-axis '(x y z))` | freecad, legacy-build123d, mesh/native | Defines origin/x/z; derives y as z cross x. | `(frame :origin '(50 0 15) :x-axis '(0 1 0) :z-axis '(1 0 0))` |
-| `fuse` | cadOp | `(fuse solid...)` | freecad, legacy-build123d, mesh/native | Boolean union/fuse of solids. | `(fuse a b c)` |
-| `grid-array` | cadOp | `(grid-array rows cols dx dy geometry)` | freecad, legacy-build123d, mesh/native | Repeats geometry on a 2D grid. | `(grid-array 3 5 12 12 hole)` |
-| `groove` | cadOp | `(groove solid profile path)` | freecad, legacy-build123d, mesh/native | Removes material: sweeps \`profile\` along \`path\` and subtracts it from \`solid\`. | `(groove (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))` |
-| `gyroid` | wallPatternMode | `gyroid` | mesh/native | triply periodic gyroid implicit field. | `(wall-pattern (:mode gyroid :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `hammered` | wallPatternMode | `hammered` | mesh/native | Seeded hammered texture using deterministic noise. | `(wall-pattern (:mode hammered :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `hash-signed` | numericHelper | `(hash-signed x y seed)` | freecad, legacy-build123d, mesh/native | Deterministic signed hash value for offsets and jitter. | `(hash-signed ix iy seed)` |
-| `hash01` | numericHelper | `(hash01 x y seed)` | freecad, legacy-build123d, mesh/native | Deterministic hash value in the 0..1 range for procedural variation. | `(hash01 ix iy seed)` |
-| `helical-ridge` | cadOp | `(helical-ridge :radius r :pitch p :height h :base-width w :crest-width w :depth d [:female #t] [:clearance c] [:lefthand #t])` | freecad, legacy-build123d, mesh/native | Creates a printable trapezoid ridge swept along a cylindrical helix. | `(helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)` |
-| `henon-points` | pointListHelper | `(henon-points count scale)` | freecad, legacy-build123d, mesh/native | Samples deterministic Henon map points. | `(henon-points 100 12)` |
-| `hull` | cadOp | `(hull solid...)` | mesh/native | Convex hull of the child solids as a single closed BREP solid. | `(hull (sphere 6) (translate 30 0 0 (sphere 6)))` |
-| `if` | expressionForm | `(if condition then else)` | freecad, legacy-build123d, mesh/native | Chooses between two expressions from a boolean condition. | `(if useCap (sphere r) (cylinder r h))` |
-| `import-step` | cadOp | `(import-step path)` | mesh/native | Imports an exact STEP payload through native Direct OCCT. | `(import-step "/absolute/path/component.step")` |
-| `import-stl` | cadOp | `(import-stl path [:target-triangles n :max-error d [:preserve-boundaries #t\|#f]])` | freecad, legacy-build123d, mesh/native | Imports an STL file as geometry. Optional preparation keywords keep the raw source and derive a bounded indexed mesh. | `(import-stl "/tmp/part.stl" :target-triangles 4000 :max-error 0.05 :preserve-boundaries #t)` |
-| `intersection` | cadOp | `(intersection solid...)` | freecad, legacy-build123d, mesh/native | Keeps shared volume of solids. | `(intersection a b)` |
-| `invlerp` | numericHelper | `(invlerp start end value)` | freecad, legacy-build123d, mesh/native | Maps a value from an interval to its unbounded interpolation factor. | `(invlerp 0 100 height)` |
-| `jitter2` | pointListHelper | `(jitter2 x y amount seed)` | freecad, legacy-build123d, mesh/native | Returns a deterministic jittered 2D point from a base coordinate. | `(jitter2 10 20 2 seed)` |
-| `jittered-grid` | pointListHelper | `(jittered-grid rows cols dx dy amount seed)` | freecad, legacy-build123d, mesh/native | Builds a deterministic grid of jittered 2D points. | `(jittered-grid 4 6 12 12 2 seed)` |
-| `lambda` | expressionForm | `(lambda (arg...) body)` | freecad, legacy-build123d, mesh/native | Creates an anonymous function for map/filter/fold helpers. | `(lambda (i) (translate (* i pitch) 0 0 cutter))` |
-| `lerp` | numericHelper | `(lerp a b t)` | freecad, legacy-build123d, mesh/native | Linear interpolation from a to b by t. | `(lerp 10 20 0.25)` |
-| `let` | modelWrapper | `(let ((name value)...) clause...)` | freecad, legacy-build123d, mesh/native | Binds model-level constants for following clauses; bindings in one let are parallel. | `(model (let ((r 20)) (part body (sphere r))))` |
-| `let*` | modelWrapper | `(let* ((name value)...) clause...)` | freecad, legacy-build123d, mesh/native | Sequential model-level binding form; later bindings can use earlier bindings. | `(model (let* ((r 20) (h (* r 3))) (part body (cylinder r h))))` |
-| `linear-array` | cadOp | `(linear-array count dx dy dz geometry)` | freecad, legacy-build123d, mesh/native | Repeats geometry in a linear sequence. | `(linear-array 4 12 0 0 rib)` |
-| `linspace` | expressionForm | `(linspace start end count)` | freecad, legacy-build123d, mesh/native | Builds evenly spaced samples including endpoints. | `(linspace 0 360 12)` |
-| `list` | expressionForm | `(list value...)` | freecad, legacy-build123d, mesh/native | Builds a list value. | `(list x y z)` |
-| `list?` | booleanHelper | `(list? value)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(list? '())` |
-| `location` | cadOp | `(location frame :offset '(x y z) :rotate '(x y z))` | freecad, legacy-build123d, mesh/native | Creates a placement from a frame and optional local transform. | `(location (plane :origin '(80 0 6)) :rotate '(0 90 0))` |
-| `loft` | cadOp | `(loft sketch...)` | freecad, legacy-build123d, mesh/native | Creates a solid through multiple sketch sections. | `(loft bottom top)` |
-| `logistic-bifurcation-points` | pointListHelper | `(logistic-bifurcation-points r-count samples transient scale)` | freecad, legacy-build123d, mesh/native | Builds deterministic points from the logistic map bifurcation diagram. | `(logistic-bifurcation-points 24 8 16 30)` |
-| `lorenz-points` | pointListHelper | `(lorenz-points count dt scale)` | freecad, legacy-build123d, mesh/native | Samples a deterministic Lorenz attractor projection. | `(lorenz-points 80 0.01 4)` |
-| `make-face` | cadOp | `(make-face sketch)` | freecad, legacy-build123d, mesh/native | Turns a closed sketch into a face-like profile for downstream ops. | `(make-face (polygon points))` |
-| `map` | expressionForm | `(map fn list ...)` | freecad, legacy-build123d, mesh/native | Transforms each list item with a function. | `(map (lambda (i) (* i 10)) (range 4))` |
-| `max` | numericHelper | `(max a b...)` | freecad, legacy-build123d, mesh/native | Returns largest number. | `(max wall 1.2)` |
-| `mesh` | cadOp | `(mesh :vertices ((x y z) ...) :triangles ((a b c) ...))` | mesh/native | Creates bounded indexed triangle geometry. Open orientable surfaces are allowed; invalid indices, degenerate faces, duplicates, non-manifold edges, or inconsistent winding reject. | `(mesh :vertices ((0 0 0) (10 0 0) (0 10 0)) :triangles ((0 1 2)))` |
-| `mesh-anchor` | cadOp | `(mesh-anchor triangle-index barycentric-0 barycentric-1 barycentric-2)` | mesh/native | Declares one exact triangle seed used inside a native mesh \`surface-trim\` path. | `(mesh-anchor 42 0.2 0.3 0.5)` |
-| `meta` | modelClause | `(meta key value)` | freecad, legacy-build123d, mesh/native | Stores literal model metadata in Core IR; \`:title\` labels the exported document and \`units strict\` enables dimensional checks. | `(meta :title "Bottle cage")` |
-| `min` | numericHelper | `(min a b...)` | freecad, legacy-build123d, mesh/native | Returns smallest number. | `(min wall max-wall)` |
-| `mirror` | cadOp | `(mirror axis offset geometry)` | freecad, legacy-build123d, mesh/native | Mirrors geometry across the \`x\`, \`y\`, or \`z\` plane at offset. | `(mirror "x" 0 body)` |
-| `neovius` | wallPatternMode | `neovius` | mesh/native | Triply periodic Neovius implicit field. | `(wall-pattern (:mode neovius :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `noise2` | numericHelper | `(noise2 x y seed)` | freecad, legacy-build123d, mesh/native | smooth deterministic value noise sampled at 2D coordinates. | `(noise2 (* x 0.1) (* y 0.1) seed)` |
-| `not` | booleanHelper | `(not value)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(not false)` |
-| `null?` | booleanHelper | `(null? value)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(null? '())` |
-| `odd?` | booleanHelper | `(odd? number)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(odd? 2)` |
-| `offset` | cadOp | `(offset distance sketch)` | freecad, legacy-build123d, mesh/native | Offsets a sketch/profile by distance. | `(offset 2 profile)` |
-| `offset-rounded` | cadOp | `(offset-rounded distance sketch)` | freecad, legacy-build123d, mesh/native | Offsets a sketch with rounded joins where supported. | `(offset-rounded 2 profile)` |
-| `or` | booleanHelper | `(or value...)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(or true false)` |
-| `organic-loop` | pointListHelper | `(organic-loop count radius amount seed)` | freecad, legacy-build123d, mesh/native | Builds a deterministic irregular loop around a radius. | `(organic-loop 32 30 4 seed)` |
-| `params` | modelClause | `(params control...)` | freecad, legacy-build123d, mesh/native | Declares user-visible controls and default parameter values for the model. | `(params (number radius 20 :label "Radius" :min 5 :max 80))` |
-| `part` | modelClause | `(part id geometry)` | freecad, legacy-build123d, mesh/native | Declares a named renderable part from a solid, sketch, path, or compound expression. | `(part body (cylinder radius height 48))` |
-| `path` | cadOp | `(path segment...)` | freecad, legacy-build123d, mesh/native | Builds a path from path segments. | `(path (polyline points))` |
-| `path-frame` | cadOp | `(path-frame path :at start\|end\|t :up '(x y z))` | freecad, legacy-build123d, mesh/native | Computes a local frame along a path parameter. | `(path-frame rail :at end :up '(0 0 1))` |
-| `pi` | numericConstant | `pi` | freecad, legacy-build123d, mesh/native | Built-in circle constant. | `(* radius pi)` |
-| `place` | cadOp | `(place frame geometry :offset '(x y z) :rotate '(x y z))` | freecad, legacy-build123d, mesh/native | Places geometry in a local coordinate frame. | `(place end-frame (cylinder 4 18) :offset '(0 0 -9))` |
-| `place-component` | componentPlacementForm | `(place-component (component :param value ...) :from port-id :to (port-ref part-id port-id) :normal aligned\|opposed [:roll degrees] [:offset '(x y z)] [:mirror none\|x\|y])` | freecad, legacy-build123d, mesh/native | Mates source and target ports without Euler math. | `(place-component (latch) :from mount :to (port-ref enclosure side-left-latch) :normal opposed)` |
-| `plane` | cadOp | `(plane :origin '(x y z) :x '(x y z) :normal '(x y z))` | freecad, legacy-build123d, mesh/native | Creates a local coordinate plane. | `(plane :origin '(80 0 6) :normal '(0 0 1))` |
-| `polar-points` | pointListHelper | `(polar-points count radius)` | freecad, legacy-build123d, mesh/native | Builds evenly spaced points around a circle. | `(polar-points 32 20)` |
-| `polygon` | cadOp | `(polygon ((x y)...))` | freecad, legacy-build123d, mesh/native | Creates a closed polygon sketch from 2D points. | `(polygon ((0 0) (40 0) (40 20) (0 20)))` |
-| `polyhedron` | cadOp | `(polyhedron :vertices ((x y z) ...) :triangles ((a b c) ...))` | mesh/native | Creates one closed orientable indexed triangle solid after deterministic topology validation. | `(polyhedron :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))` |
-| `polyline` | cadOp | `(polyline points)` | freecad, legacy-build123d, mesh/native | Builds a connected line path from points. | `(polyline ((0 0) (10 0) (10 5)))` |
-| `port` | componentPlacementForm | `(port id :type type-id :frame frame [:compatible-with '(type-id ...)] [:params ((name value) ...)])` | freecad, legacy-build123d, mesh/native | Declares one stable typed local interface. | `(port mount :type "mount.v1" :frame local-frame)` |
-| `port-ref` | componentPlacementForm | `(port-ref part-id port-id)` | freecad, legacy-build123d, mesh/native | References one target port. | `(port-ref enclosure side-left-latch)` |
-| `ports` | componentPlacementForm | `(ports (port ...) ...)` | freecad, legacy-build123d, mesh/native | Groups local interfaces. | `(ports (port mount :type "mount.v1" :frame local-frame))` |
-| `profile` | cadOp | `(profile :outer sketch :holes sketch-or-list)` | freecad, legacy-build123d, mesh/native | Builds a face profile from an outer loop and optional hole loops. | `(profile :outer (circle 20) :holes (circle 6))` |
-| `protrude` | cadOp | `(protrude image-path height [:width w] [:depth d] [:fit contain\|stretch] [:foreground dark\|light])` | mesh/native | Raises continuous raster foreground coverage above local Z=0. One physical dimension preserves source aspect ratio; two contain and center by default. \`:fit stretch\` explicitly fills a non-matching box. Transparent pixels remain empty; an internal closure epsilon stays below the authored base plane. | `(protrude image-path 4 :width 100 :depth 70 :fit contain :foreground dark)` |
-| `quote` | expressionForm | `(quote value) or 'value` | freecad, legacy-build123d, mesh/native | Prevents evaluation of symbols/lists for literal data such as align tuples. | `'(center center min)` |
-| `rad` | numericHelper | `(rad degrees)` | freecad, legacy-build123d, mesh/native | Converts degrees to radians. | `(rad 90)` |
-| `rad->deg` | numericHelper | `(rad->deg radians)` | freecad, legacy-build123d, mesh/native | Converts radians to degrees. | `(rad->deg pi-angle)` |
-| `radial-array` | cadOp | `(radial-array count radius geometry)` | freecad, legacy-build123d, mesh/native | Repeats geometry around a circle. | `(radial-array 12 30 spoke)` |
-| `range` | expressionForm | `(range count)` | freecad, legacy-build123d, mesh/native | Builds integer indices from 0 to count - 1. | `(range 8)` |
-| `rectangle` | cadOp | `(rectangle width height)` | freecad, legacy-build123d, mesh/native | Creates a rectangular sketch/profile. | `(rectangle 40 20)` |
-| `reduce` | expressionForm | `(reduce fn initial list)` | freecad, legacy-build123d, mesh/native | Reduces a list into a single accumulated value. | `(fold + 0 (range 5))` |
-| `regular-polygon` | cadOp | `(regular-polygon sides radius :rotation deg)` | freecad, legacy-build123d, mesh/native | Creates a regular n-gon 2D profile by side count and circumradius. | `(regular-polygon 6 10)` |
-| `remap` | numericHelper | `(remap value in-start in-end out-start out-end)` | freecad, legacy-build123d, mesh/native | Linearly maps a value between two intervals. | `(remap height 0 100 1 3)` |
-| `repeat` | cadOp | `(repeat count fn-or-geometry)` | freecad, legacy-build123d, mesh/native | Repeat helper for patterned geometry generation. | `(repeat 6 rib)` |
-| `repeat-compound` | cadOp | `(repeat-compound count fn-or-geometry)` | freecad, legacy-build123d, mesh/native | Repeat helper for patterned geometry generation. | `(repeat-compound 6 rib)` |
-| `repeat-pick` | cadOp | `(repeat-pick count fn-or-geometry)` | freecad, legacy-build123d, mesh/native | Repeat helper for patterned geometry generation. | `(repeat-pick 6 rib)` |
-| `repeat-union` | cadOp | `(repeat-union count fn-or-geometry)` | freecad, legacy-build123d, mesh/native | Repeat helper for patterned geometry generation. | `(repeat-union 6 rib)` |
-| `result` | cadOp | `(result geometry)` | freecad, legacy-build123d, mesh/native | Selects final geometry from a build context. | `(result body)` |
-| `reverse` | expressionForm | `(reverse list)` | freecad, legacy-build123d, mesh/native | Returns list items in reverse order. | `(reverse points)` |
-| `revolve` | cadOp | `(revolve sketch angle)` | freecad, legacy-build123d, mesh/native | Revolves a sketch profile around an axis. | `(revolve profile 360)` |
-| `rib` | cadOp | `(rib solid profile path)` | freecad, legacy-build123d, mesh/native | Adds material: sweeps \`profile\` along \`path\` and unions it onto \`solid\`. | `(rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))` |
-| `ribs` | wallPatternMode | `ribs` | mesh/native | Straight rib pattern along the shell parameter direction. | `(wall-pattern (:mode ribs :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `ring` | cadOp | `(ring outer-radius inner-radius segments)` | freecad, legacy-build123d, mesh/native | Creates an annular sketch aliasing to a profile with one outer and one hole circle. | `(ring 20 10 64)` |
-| `rings` | wallPatternMode | `rings` | mesh/native | Ring bands around the shell parameter direction. | `(wall-pattern (:mode rings :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `rossler-points` | pointListHelper | `(rossler-points count dt scale)` | freecad, legacy-build123d, mesh/native | Samples a deterministic Rossler attractor projection. | `(rossler-points 80 0.03 6)` |
-| `rotate` | cadOp | `(rotate x-deg y-deg z-deg geometry)` | freecad, legacy-build123d, mesh/native | Rotates geometry in degrees around local axes. | `(rotate 0 0 45 body)` |
-| `rounded-polygon` | cadOp | `(rounded-polygon points radius)` | freecad, legacy-build123d, mesh/native | Creates a polygon profile with rounded corners. | `(rounded-polygon points 2)` |
-| `rounded-rect` | cadOp | `(rounded-rect width height radius)` | freecad, legacy-build123d, mesh/native | Creates a rectangle profile with rounded corners. | `(rounded-rect 40 20 3)` |
-| `sampled-radial-loft` | cadOp | `(sampled-radial-loft (theta z fz) :height h :z-steps n :theta-steps n :radius expr :z-map expr?)` | freecad, legacy-build123d, mesh/native | Samples radial sections across height, then lofts the wires/faces into a solid. | `(sampled-radial-loft (theta z fz) :height 40 :z-steps 24 :theta-steps 72 :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))` |
-| `scale` | cadOp | `(scale x y z geometry)` | freecad, legacy-build123d, mesh/native | Scales geometry by XYZ factors. | `(scale 1 1 0.5 body)` |
-| `schwarz-d` | wallPatternMode | `schwarz-d` | mesh/native | Triply periodic Schwarz D implicit field. | `(wall-pattern (:mode schwarz-d :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `schwarz-p` | wallPatternMode | `schwarz-p` | mesh/native | Triply periodic Schwarz P implicit field. | `(wall-pattern (:mode schwarz-p :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `shape` | cadOp | `(shape geometry)` | freecad, legacy-build123d, mesh/native | Marks or wraps a geometry expression in build contexts. | `(shape body)` |
-| `shell` | cadOp | `(shell thickness [:faces selector] solid)` | freecad, legacy-build123d, mesh/native | Hollows or thickens a solid by wall thickness. Exact backends also accept \`:faces\` with \`target-id:<id>\` or \`target-ids:<id>\|<id>\` to choose shell opening faces. | `(shell 2 :faces "target-id:body:face:0-0-20:1256.637" (cylinder 20 80))` |
-| `sin` | numericHelper | `(sin radians)` | freecad, legacy-build123d, mesh/native | Trigonometric helper using radians. | `(sin (deg->rad 45))` |
-| `slot-arc` | cadOp | `(slot-arc radius start end width)` | freecad, legacy-build123d, mesh/native | Curved (annular) obround: a circular-arc centerline of given radius from \`start\` to \`end\` degrees, thickened by width. | `(slot-arc 20 0 90 10)` |
-| `slot-center-point` | cadOp | `(slot-center-point cx cy px py width)` | freecad, legacy-build123d, mesh/native | Obround 2D profile from a center point to an end point, with width. | `(slot-center-point 0 0 20 0 10)` |
-| `slot-center-to-center` | cadOp | `(slot-center-to-center separation width)` | freecad, legacy-build123d, mesh/native | Obround 2D profile specified by the distance between the two end-arc centers. | `(slot-center-to-center 30 10)` |
-| `slot-overall` | cadOp | `(slot-overall length width)` | freecad, legacy-build123d, mesh/native | Creates an obround (stadium) 2D profile of given overall length and width. | `(slot-overall 40 10)` |
-| `smoothstep` | numericHelper | `(smoothstep edge0 edge1 x)` | freecad, legacy-build123d, mesh/native | Smooth Hermite interpolation useful for soft transitions. | `(smoothstep 0 1 t)` |
-| `sphere` | cadOp | `(sphere radius)` | freecad, legacy-build123d, mesh/native | Creates a sphere. | `(sphere 12)` |
-| `spiral` | wallPatternMode | `spiral` | mesh/native | Spiral rib pattern across shell parameters. | `(wall-pattern (:mode spiral :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `square` | numericHelper | `(square value)` | freecad, legacy-build123d, mesh/native | Raises a number to a small fixed power. | `(square radius)` |
-| `start` | coreConstant | `start` | freecad, legacy-build123d, mesh/native | Symbolic endpoint accepted by path-frame \`:at\`. | `(path-frame rail :at start :up '(0 0 1))` |
-| `superellipse-point` | pointListHelper | `(superellipse-point angle rx ry exponent)` | freecad, legacy-build123d, mesh/native | Samples one point from a superellipse. | `(superellipse-point (deg->rad 45) 30 20 4)` |
-| `surface-trim` | cadOp | `(surface-trim ...)` | mesh/native | Supported \`.ecky\` surface entry. Read backend guide and validation errors for exact constraints. | `(surface-trim ...)` |
-| `svg` | cadOp | `(svg path-or-data)` | freecad, legacy-build123d, mesh/native | Imports SVG profile/path data where backend lowering supports it. | `(svg iconData)` |
-| `sweep` | cadOp | `(sweep profile path)` | freecad, legacy-build123d, mesh/native | Sweeps a profile along a path. | `(sweep (circle 2 16) rail)` |
-| `tag-edge` | modelClause | `(tag-edge id :edge or :edges selector target)` | freecad, legacy-build123d, mesh/native | Names a stable edge selection for downstream operations and analysis. | `(tag-edge rim :edges "top" body)` |
-| `tag-edges` | modelClause | `(tag-edges id :edge or :edges selector target)` | freecad, legacy-build123d, mesh/native | Names a stable edge selection for downstream operations and analysis. | `(tag-edges rim :edges "top" body)` |
-| `tag-face` | modelClause | `(tag-face id :face or :faces selector target)` | freecad, legacy-build123d, mesh/native | Names a stable face selection for downstream operations and analysis. | `(tag-face mounting :faces "bottom" body)` |
-| `tag-vertex` | modelClause | `(tag-vertex id :vertex selector target)` | freecad, legacy-build123d, mesh/native | Names a stable vertex selection for downstream operations and analysis. | `(tag-vertex datum :vertex "top" body)` |
-| `tan` | numericHelper | `(tan radians)` | freecad, legacy-build123d, mesh/native | Trigonometric helper using radians. | `(tan (deg->rad 45))` |
-| `taper` | cadOp | `(taper height scale sketch) or (taper height scale-x scale-y sketch)` | freecad, legacy-build123d, mesh/native | Extrudes a sketch while scaling the top section. | `(taper 30 0.7 0.7 (circle 12 32))` |
-| `tapped-hole` | cadOp | `(tapped-hole :iso "M8" :length len [:radius r] [:pitch p] [:depth d] [:base-width w] [:crest-width w] [:lefthand #t])` | freecad, legacy-build123d, mesh/native | A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. \`:iso "M8"\` decodes a metric designation; an equal-nominal \`thread\` mates with it. | `(tapped-hole :iso "M8" :length 14)` |
-| `tau` | numericConstant | `tau` | freecad, legacy-build123d, mesh/native | Built-in circle constant. | `(* radius tau)` |
-| `text` | cadOp | `(text value size [:font selector])` | freecad, legacy-build123d, mesh/native | Creates a text profile. \`:font\` selects the face for this call before downstream extrusion. | `(extrude (text "A" 12 :font "Arial") 2)` |
-| `thread` | cadOp | `(thread :radius r :pitch p :length len :depth d [:base-width w] [:crest-width w] [:female #t] [:clearance c] [:lefthand #t] [:iso "M4"])` | freecad, legacy-build123d, mesh/native | Parametric helical thread: a core cylinder plus a \`helical-ridge\` (male), or a ridge cutter (\`:female\`). \`:iso "M4"\` decodes a metric designation into pitch/radius. | `(thread :radius 8 :pitch 2 :length 16 :depth 1)` |
-| `torus` | cadOp | `(torus major minor)` | freecad, legacy-build123d, mesh/native | Creates a ring torus: tube of radius \`minor\` swept at distance \`major\` from the Z axis. | `(torus 20 5)` |
-| `translate` | cadOp | `(translate x y z geometry)` | freecad, legacy-build123d, mesh/native | Moves geometry by XYZ offset. | `(translate 10 0 0 body)` |
-| `trapezoid` | cadOp | `(trapezoid bottom top height :skew s)` | freecad, legacy-build123d, mesh/native | Creates a trapezoid 2D profile (parallel bottom/top widths, given height, optional skew). | `(trapezoid 20 10 8 :skew 3)` |
-| `true` | coreConstant | `true` | freecad, legacy-build123d, mesh/native | Boolean constant equivalent to \`#t\` or \`#f\`. | `(if true body fallback)` |
-| `twist` | cadOp | `(twist height angle sketch)` | freecad, legacy-build123d, mesh/native | Extrudes a sketch while rotating sections along height. | `(twist 40 90 profile)` |
-| `union` | cadOp | `(union solid...)` | freecad, legacy-build123d, mesh/native | Boolean union/fuse of solids. | `(union a b c)` |
-| `vec2` | pointListHelper | `(vec2 x y)` | freecad, legacy-build123d, mesh/native | Constructs a two-coordinate point list. | `(vec2 10 20)` |
-| `vec3` | pointListHelper | `(vec3 x y z)` | freecad, legacy-build123d, mesh/native | Constructs a three-coordinate point list. | `(vec3 10 20 30)` |
-| `verify` | modelClause | `(verify (tag id) [(intent text)] [(severity error\|warning)] [(when bool-expr)] (metric id metric-expr) (expect id predicate))` | freecad, legacy-build123d, mesh/native | Declares one conditional runtime check with intent, severity, and typed evidence. | `(verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))` |
-| `view` | modelClause | `(view id (offset-part part dx dy dz)...) ` | freecad, legacy-build123d, mesh/native | Declares a preview-only exploded or print-layout view without changing export geometry. | `(view print-layout (offset-part lid 90 0 0) (offset-part body 0 0 0))` |
-| `voronoi-cell` | cadOp | `(voronoi-cell sites index width height inset)` | mesh/native | Creates one exact bounded Voronoi polygon, uniformly inset and expressed relative to its selected site. | `(voronoi-cell (voronoi-cells 3 3 12 12 1.5 23) 4 40 40 1.2)` |
-| `voronoi-cells` | pointListHelper | `(voronoi-cells rows cols dx dy amount seed)` | freecad, legacy-build123d, mesh/native | Builds jittered grid points suitable as Voronoi-ish perforation centers. | `(voronoi-cells 4 6 14 12 2 seed)` |
-| `voronoi2` | numericHelper | `(voronoi2 x y seed)` | freecad, legacy-build123d, mesh/native | Deterministic cellular field: high near cell centers, lower near cell borders. | `(voronoi2 (* x 0.15) (* y 0.15) seed)` |
-| `wall-pattern` | cadOp | `(wall-pattern (:mode mode :depth n :uFreq n :vFreq n :seed n) shell-target)` | mesh/native | Applies mesh/eckyRust procedural displacement/perforation-style wall patterns to supported shell surface targets. | `(wall-pattern (:mode gyroid :depth 0.6 :uFreq 4 :vFreq 5) (shell 2 (cylinder 20 80)))` |
-| `wave-loop` | pointListHelper | `(wave-loop count radius amplitude frequency phase)` | freecad, legacy-build123d, mesh/native | Builds a circular wave profile. | `(wave-loop 48 20 3 5 0)` |
-| `wedge` | cadOp | `(wedge dx dy dz xmin zmin xmax zmax :align '(x y z))` | freecad, legacy-build123d, mesh/native | Creates a wedge/ramp solid: a dx×dy×dz box whose top face is shrunk to the xmin..xmax / zmin..zmax window. | `(wedge 20 10 20 5 5 15 15)` |
-| `xor` | cadOp | `(xor solid...)` | freecad, legacy-build123d, mesh/native | Boolean exclusive-or for solids where supported. | `(xor a b)` |
-| `xy` | coreConstant | `xy` | freecad, legacy-build123d, mesh/native | Symbolic principal plane value. | `(list xy)` |
-| `xz` | coreConstant | `xz` | freecad, legacy-build123d, mesh/native | Symbolic principal plane value. | `(list xz)` |
-| `yz` | coreConstant | `yz` | freecad, legacy-build123d, mesh/native | Symbolic principal plane value. | `(list yz)` |
-| `zero?` | booleanHelper | `(zero? number)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(zero? 2)` |
-| `zip` | expressionForm | `(zip list-a list-b)` | freecad, legacy-build123d, mesh/native | Pairs items from two lists by index. | `(map (lambda ((x y)) (list x y)) (zip xs ys))` |
-<!-- ECKY_GENERATED_SURFACE_REFERENCE_END -->
+### `*`
+
+`(* a b...)`
+
+Multiplies numbers.
+
+Example fragment:
+
+```scheme
+(* radius 2)
+```
+
+### `+`
+
+`(+ a b...)`
+
+Adds numbers.
+
+Example fragment:
+
+```scheme
+(+ width clearance)
+```
+
+### `-`
+
+`(- a b...)`
+
+Subtracts numbers or negates one number.
+
+Example fragment:
+
+```scheme
+(- outer inner)
+```
+
+### `/`
+
+`(/ a b...)`
+
+Divides numbers.
+
+Example fragment:
+
+```scheme
+(/ width 2)
+```
+
+### `<`
+
+`(< a b)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(< 2 1)
+```
+
+### `<=`
+
+`(<= a b)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(<= 2 1)
+```
+
+### `=`
+
+`(= a b)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(= 2 1)
+```
+
+### `>`
+
+`(> a b)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(> 2 1)
+```
+
+### `>=`
+
+`(>= a b)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(>= 2 1)
+```
+
+### `abs`
+
+`(abs value)`
+
+Returns absolute value.
+
+Example fragment:
+
+```scheme
+(abs offset)
+```
+
+### `analysis`
+
+`(analysis id analysis-clause...)`
+
+Declares an authored FEM/engineering analysis contract tied to model parts and selector tags.
+
+Example fragment:
+
+```scheme
+(analysis load-case (linear-static :part body) (fixed :face-tag mounting) (solve :method direct))
+```
+
+### `and`
+
+`(and value...)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(and true false)
+```
+
+### `append`
+
+`(append list...)`
+
+Concatenates lists.
+
+Example fragment:
+
+```scheme
+(append front-points back-points)
+```
+
+### `apply`
+
+`(apply fn args)`
+
+Calls a function with arguments from a list.
+
+Example fragment:
+
+```scheme
+(apply union cutters)
+```
+
+### `atan`
+
+`(atan value)`
+
+Single-argument arctangent returning radians.
+
+Example fragment:
+
+```scheme
+(atan slope)
+```
+
+### `atan2`
+
+`(atan2 y x)`
+
+Two-argument arctangent returning radians.
+
+Example fragment:
+
+```scheme
+(atan2 y x)
+```
+
+### `attractor-field`
+
+`attractor-field`
+
+Seeded chaotic attractor-style field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode attractor-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `begin`
+
+`(begin clause...)`
+
+Groups multiple model clauses where a single clause position is expected.
+
+Example fragment:
+
+```scheme
+(model (begin (params ...) (part body ...)))
+```
+
+### `cellular`
+
+`cellular`
+
+Seeded cellular/Voronoi-like displacement field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode cellular :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `clip-plane`
+
+`(clip-plane geometry :origin '(x y z) :normal '(x y z) [:keep "positive"|"negative"])`
+
+Clips geometry against an oriented plane. `:keep` is text; quote it to avoid unresolved local symbols.
+
+Example fragment:
+
+```scheme
+(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep "positive")
+```
+
+### `cos`
+
+`(cos radians)`
+
+Trigonometric helper using radians.
+
+Example fragment:
+
+```scheme
+(cos (deg->rad 45))
+```
+
+### `define`
+
+`(define name value)`
+
+Defines a helper value or function in expression scope.
+
+Example fragment:
+
+```scheme
+(define wall 2)
+```
+
+### `diamond`
+
+`diamond`
+
+Cross-hatched diamond displacement field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode diamond :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `diamond-field`
+
+`diamond-field`
+
+Alias-style diamond periodic implicit field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode diamond-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `draft`
+
+`(draft angle solid)`
+
+Applies a draft angle to a solid.
+
+Example fragment:
+
+```scheme
+(draft 2deg body)
+```
+
+### `ellipse`
+
+`(ellipse rx ry)`
+
+Creates an elliptical 2D profile with radii along X and Y.
+
+Example fragment:
+
+```scheme
+(ellipse 10 4)
+```
+
+### `empty?`
+
+`(empty? value)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(empty? '())
+```
+
+### `even?`
+
+`(even? number)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(even? 2)
+```
+
+### `fbm`
+
+`fbm`
+
+Fractal noise displacement field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode fbm :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `filter`
+
+`(filter fn list)`
+
+Keeps list items where predicate returns true.
+
+Example fragment:
+
+```scheme
+(filter (lambda (i) (even? i)) (range 8))
+```
+
+### `floor`
+
+`(floor value)`
+
+Rounds down to an integer-valued number.
+
+Example fragment:
+
+```scheme
+(floor segments)
+```
+
+### `fold`
+
+`(fold fn initial list)`
+
+Reduces a list into a single accumulated value.
+
+Example fragment:
+
+```scheme
+(fold + 0 (range 5))
+```
+
+### `fourier`
+
+`fourier`
+
+Layered sine/cosine Fourier-style displacement field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode fourier :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `frame`
+
+`(frame :origin '(x y z) :x-axis '(x y z) :z-axis '(x y z))`
+
+Defines origin/x/z; derives y as z cross x.
+
+Example fragment:
+
+```scheme
+(frame :origin '(50 0 15) :x-axis '(0 1 0) :z-axis '(1 0 0))
+```
+
+### `groove`
+
+`(groove solid profile path)`
+
+Removes material: sweeps `profile` along `path` and subtracts it from `solid`.
+
+Example fragment:
+
+```scheme
+(groove (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))
+```
+
+### `gyroid`
+
+`gyroid`
+
+triply periodic gyroid implicit field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode gyroid :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `hammered`
+
+`hammered`
+
+Seeded hammered texture using deterministic noise.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode hammered :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `hull`
+
+`(hull solid...)`
+
+Convex hull of the child solids as a single closed BREP solid.
+
+Example fragment:
+
+```scheme
+(hull (sphere 6) (translate 30 0 0 (sphere 6)))
+```
+
+### `if`
+
+`(if condition then else)`
+
+Chooses between two expressions from a boolean condition.
+
+Example fragment:
+
+```scheme
+(if useCap (sphere r) (cylinder r h))
+```
+
+### `import-step`
+
+`(import-step path)`
+
+Imports an exact STEP payload through native Direct OCCT.
+
+Example fragment:
+
+```scheme
+(import-step "/absolute/path/component.step")
+```
+
+### `lambda`
+
+`(lambda (arg...) body)`
+
+Creates an anonymous function for map/filter/fold helpers.
+
+Example fragment:
+
+```scheme
+(lambda (i) (translate (* i pitch) 0 0 cutter))
+```
+
+### `let`
+
+`(let ((name value)...) clause...)`
+
+Binds model-level constants for following clauses; bindings in one let are parallel.
+
+Example fragment:
+
+```scheme
+(model (let ((r 20)) (part body (sphere r))))
+```
+
+### `let*`
+
+`(let* ((name value)...) clause...)`
+
+Sequential model-level binding form; later bindings can use earlier bindings.
+
+Example fragment:
+
+```scheme
+(model (let* ((r 20) (h (* r 3))) (part body (cylinder r h))))
+```
+
+### `list`
+
+`(list value...)`
+
+Builds a list value.
+
+Example fragment:
+
+```scheme
+(list x y z)
+```
+
+### `list?`
+
+`(list? value)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(list? '())
+```
+
+### `map`
+
+`(map fn list ...)`
+
+Transforms each list item with a function.
+
+Example fragment:
+
+```scheme
+(map (lambda (i) (* i 10)) (range 4))
+```
+
+### `max`
+
+`(max a b...)`
+
+Returns largest number.
+
+Example fragment:
+
+```scheme
+(max wall 1.2)
+```
+
+### `mesh`
+
+`(mesh :vertices ((x y z) ...) :triangles ((a b c) ...))`
+
+Creates bounded indexed triangle geometry. Open orientable surfaces are allowed; invalid indices, degenerate faces, duplicates, non-manifold edges, or inconsistent winding reject.
+
+Example fragment:
+
+```scheme
+(mesh :vertices ((0 0 0) (10 0 0) (0 10 0)) :triangles ((0 1 2)))
+```
+
+### `mesh-anchor`
+
+`(mesh-anchor triangle-index barycentric-0 barycentric-1 barycentric-2)`
+
+Declares one exact triangle seed used inside a native mesh `surface-trim` path.
+
+Example fragment:
+
+```scheme
+(mesh-anchor 42 0.2 0.3 0.5)
+```
+
+### `meta`
+
+`(meta key value)`
+
+Stores literal model metadata in Core IR; `:title` labels the exported document and `units strict` enables dimensional checks.
+
+Example fragment:
+
+```scheme
+(meta :title "Bottle cage")
+```
+
+### `min`
+
+`(min a b...)`
+
+Returns smallest number.
+
+Example fragment:
+
+```scheme
+(min wall max-wall)
+```
+
+### `neovius`
+
+`neovius`
+
+Triply periodic Neovius implicit field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode neovius :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `not`
+
+`(not value)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(not false)
+```
+
+### `null?`
+
+`(null? value)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(null? '())
+```
+
+### `odd?`
+
+`(odd? number)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(odd? 2)
+```
+
+### `or`
+
+`(or value...)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(or true false)
+```
+
+### `place-component`
+
+`(place-component (component :param value ...) :from port-id :to (port-ref part-id port-id) :normal aligned|opposed [:roll degrees] [:offset '(x y z)] [:mirror none|x|y])`
+
+Mates source and target ports without Euler math.
+
+Example fragment:
+
+```scheme
+(place-component (latch) :from mount :to (port-ref enclosure side-left-latch) :normal opposed)
+```
+
+### `polyhedron`
+
+`(polyhedron :vertices ((x y z) ...) :triangles ((a b c) ...))`
+
+Creates one closed orientable indexed triangle solid after deterministic topology validation.
+
+Example fragment:
+
+```scheme
+(polyhedron :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))
+```
+
+### `port`
+
+`(port id :type type-id :frame frame [:compatible-with '(type-id ...)] [:params ((name value) ...)])`
+
+Declares one stable typed local interface.
+
+Example fragment:
+
+```scheme
+(port mount :type "mount.v1" :frame local-frame)
+```
+
+### `port-ref`
+
+`(port-ref part-id port-id)`
+
+References one target port.
+
+Example fragment:
+
+```scheme
+(port-ref enclosure side-left-latch)
+```
+
+### `ports`
+
+`(ports (port ...) ...)`
+
+Groups local interfaces.
+
+Example fragment:
+
+```scheme
+(ports (port mount :type "mount.v1" :frame local-frame))
+```
+
+### `protrude`
+
+`(protrude image-path height [:width w] [:depth d] [:fit contain|stretch] [:foreground dark|light])`
+
+Raises continuous raster foreground coverage above local Z=0. One physical dimension preserves source aspect ratio; two contain and center by default. `:fit stretch` explicitly fills a non-matching box. Transparent pixels remain empty; an internal closure epsilon stays below the authored base plane.
+
+Example fragment:
+
+```scheme
+(protrude image-path 4 :width 100 :depth 70 :fit contain :foreground dark)
+```
+
+### `quote`
+
+`(quote value) or 'value`
+
+Prevents evaluation of symbols/lists for literal data such as align tuples.
+
+Example fragment:
+
+```scheme
+'(center center min)
+```
+
+### `range`
+
+`(range count)`
+
+Builds integer indices from 0 to count - 1.
+
+Example fragment:
+
+```scheme
+(range 8)
+```
+
+### `reduce`
+
+`(reduce fn initial list)`
+
+Reduces a list into a single accumulated value.
+
+Example fragment:
+
+```scheme
+(fold + 0 (range 5))
+```
+
+### `regular-polygon`
+
+`(regular-polygon sides radius :rotation deg)`
+
+Creates a regular n-gon 2D profile by side count and circumradius.
+
+Example fragment:
+
+```scheme
+(regular-polygon 6 10)
+```
+
+### `reverse`
+
+`(reverse list)`
+
+Returns list items in reverse order.
+
+Example fragment:
+
+```scheme
+(reverse points)
+```
+
+### `rib`
+
+`(rib solid profile path)`
+
+Adds material: sweeps `profile` along `path` and unions it onto `solid`.
+
+Example fragment:
+
+```scheme
+(rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))
+```
+
+### `ribs`
+
+`ribs`
+
+Straight rib pattern along the shell parameter direction.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode ribs :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `rings`
+
+`rings`
+
+Ring bands around the shell parameter direction.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode rings :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `schwarz-d`
+
+`schwarz-d`
+
+Triply periodic Schwarz D implicit field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode schwarz-d :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `schwarz-p`
+
+`schwarz-p`
+
+Triply periodic Schwarz P implicit field.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode schwarz-p :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `sin`
+
+`(sin radians)`
+
+Trigonometric helper using radians.
+
+Example fragment:
+
+```scheme
+(sin (deg->rad 45))
+```
+
+### `slot-arc`
+
+`(slot-arc radius start end width)`
+
+Curved (annular) obround: a circular-arc centerline of given radius from `start` to `end` degrees, thickened by width.
+
+Example fragment:
+
+```scheme
+(slot-arc 20 0 90 10)
+```
+
+### `slot-center-point`
+
+`(slot-center-point cx cy px py width)`
+
+Obround 2D profile from a center point to an end point, with width.
+
+Example fragment:
+
+```scheme
+(slot-center-point 0 0 20 0 10)
+```
+
+### `slot-center-to-center`
+
+`(slot-center-to-center separation width)`
+
+Obround 2D profile specified by the distance between the two end-arc centers.
+
+Example fragment:
+
+```scheme
+(slot-center-to-center 30 10)
+```
+
+### `slot-overall`
+
+`(slot-overall length width)`
+
+Creates an obround (stadium) 2D profile of given overall length and width.
+
+Example fragment:
+
+```scheme
+(slot-overall 40 10)
+```
+
+### `spiral`
+
+`spiral`
+
+Spiral rib pattern across shell parameters.
+
+Example fragment:
+
+```scheme
+(wall-pattern (:mode spiral :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)
+```
+
+### `tag-edge`
+
+`(tag-edge id :edge or :edges selector target)`
+
+Names a stable edge selection for downstream operations and analysis.
+
+Example fragment:
+
+```scheme
+(tag-edge rim :edges "top" body)
+```
+
+### `tag-edges`
+
+`(tag-edges id :edge or :edges selector target)`
+
+Names a stable edge selection for downstream operations and analysis.
+
+Example fragment:
+
+```scheme
+(tag-edges rim :edges "top" body)
+```
+
+### `tag-face`
+
+`(tag-face id :face or :faces selector target)`
+
+Names a stable face selection for downstream operations and analysis.
+
+Example fragment:
+
+```scheme
+(tag-face mounting :faces "bottom" body)
+```
+
+### `tag-vertex`
+
+`(tag-vertex id :vertex selector target)`
+
+Names a stable vertex selection for downstream operations and analysis.
+
+Example fragment:
+
+```scheme
+(tag-vertex datum :vertex "top" body)
+```
+
+### `tan`
+
+`(tan radians)`
+
+Trigonometric helper using radians.
+
+Example fragment:
+
+```scheme
+(tan (deg->rad 45))
+```
+
+### `tapped-hole`
+
+`(tapped-hole :iso "M8" :length len [:radius r] [:pitch p] [:depth d] [:base-width w] [:crest-width w] [:lefthand #t])`
+
+A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. `:iso "M8"` decodes a metric designation; an equal-nominal `thread` mates with it.
+
+Example fragment:
+
+```scheme
+(tapped-hole :iso "M8" :length 14)
+```
+
+### `thread`
+
+`(thread :radius r :pitch p :length len :depth d [:base-width w] [:crest-width w] [:female #t] [:clearance c] [:lefthand #t] [:iso "M4"])`
+
+Parametric helical thread: a core cylinder plus a `helical-ridge` (male), or a ridge cutter (`:female`). `:iso "M4"` decodes a metric designation into pitch/radius.
+
+Example fragment:
+
+```scheme
+(thread :radius 8 :pitch 2 :length 16 :depth 1)
+```
+
+### `torus`
+
+`(torus major minor)`
+
+Creates a ring torus: tube of radius `minor` swept at distance `major` from the Z axis.
+
+Example fragment:
+
+```scheme
+(torus 20 5)
+```
+
+### `trapezoid`
+
+`(trapezoid bottom top height :skew s)`
+
+Creates a trapezoid 2D profile (parallel bottom/top widths, given height, optional skew).
+
+Example fragment:
+
+```scheme
+(trapezoid 20 10 8 :skew 3)
+```
+
+### `verify`
+
+`(verify (tag id) [(intent text)] [(severity error|warning)] [(when bool-expr)] (metric id metric-expr) (expect id predicate))`
+
+Declares one conditional runtime check with intent, severity, and typed evidence.
+
+Example fragment:
+
+```scheme
+(verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))
+```
+
+### `view`
+
+`(view id (offset-part part dx dy dz)...) `
+
+Declares a preview-only exploded or print-layout view without changing export geometry.
+
+Example fragment:
+
+```scheme
+(view print-layout (offset-part lid 90 0 0) (offset-part body 0 0 0))
+```
+
+### `voronoi-cell`
+
+`(voronoi-cell sites index width height inset)`
+
+Creates one exact bounded Voronoi polygon, uniformly inset and expressed relative to its selected site.
+
+Example fragment:
+
+```scheme
+(voronoi-cell (voronoi-cells 3 3 12 12 1.5 23) 4 40 40 1.2)
+```
+
+### `wedge`
+
+`(wedge dx dy dz xmin zmin xmax zmax :align '(x y z))`
+
+Creates a wedge/ramp solid: a dx×dy×dz box whose top face is shrunk to the xmin..xmax / zmin..zmax window.
+
+Example fragment:
+
+```scheme
+(wedge 20 10 20 5 5 15 15)
+```
+
+### `zero?`
+
+`(zero? number)`
+
+Boolean predicate or comparator for conditionals and filtering.
+
+Example fragment:
+
+```scheme
+(zero? 2)
+```

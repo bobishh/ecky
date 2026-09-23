@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const REFERENCE_HEADING = '## Appendix: Language Reference';
@@ -71,10 +72,10 @@ export function projectEckyIrContent(corpus: string): EckyIrContentProjection {
   }
 
   const lessonCorpus = normalized.slice(0, referenceStart).trim();
-  const referenceBody = normalized
+  const referenceBody = projectHumanReference(normalized
     .slice(referenceStart + REFERENCE_HEADING.length, agentStart)
     .trim()
-    .replace(/^### Generated Operation Index$/m, '## Operation Index');
+    .replace(/^### Generated Operation Index$/m, '## Operation Index'));
   const agentReference = normalized
     .slice(agentStart + AGENT_START.length, agentEnd)
     .trim();
@@ -113,6 +114,23 @@ export function projectEckyIrContent(corpus: string): EckyIrContentProjection {
     ].join('\n'),
     agentReference: `${agentReference}\n`,
   };
+}
+
+function projectHumanReference(markdown: string): string {
+  const documented = new Set([...markdown.matchAll(/^#{3,4} `([^`]+)`/gm)].map((match) => match[1]));
+  return markdown.replace(/<!-- ECKY_GENERATED_SURFACE_REFERENCE_START -->([\s\S]*?)<!-- ECKY_GENERATED_SURFACE_REFERENCE_END -->/,
+    (_, table: string) => {
+      const details = table.split('\n').filter((line) => line.startsWith('| `')).flatMap((line) => {
+        const columns = line.slice(1, -1).split(/(?<!\\)\|/).map((cell) => cell.trim());
+        const name = columns[0].replaceAll('`', '');
+        if (documented.has(name)) return [];
+        const signature = columns[2].replace(/^`|`$/g, '').replaceAll('\\|', '|');
+        const description = columns[4].replaceAll('\\`', '`');
+        const example = columns[5].replace(/^`|`$/g, '').replaceAll('\\|', '|');
+        return [`### \`${name}\`\n\n\`${signature}\`\n\n${description}\n\nExample fragment:\n\n\`\`\`scheme\n${example}\n\`\`\``];
+      }).join('\n\n');
+      return details;
+    });
 }
 
 export function syncEckyIrContent(root: string, check = false): void {
@@ -155,4 +173,33 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   const check = process.argv.includes('--check');
   syncEckyIrContent(process.cwd(), check);
   console.log(check ? 'Published Ecky content is current.' : 'Published Ecky content synchronized.');
+}
+
+const missionFiles = [
+  ['mission-01-bracket-enclosure', 'level-01-corner-bracket.md'],
+  ['mission-02-bottle-cage-dovetail', 'level-02-bottle-cage-dovetail.md'],
+  ['mission-03-wing-propeller-study', 'level-03-printable-wing-propeller.md'],
+  ['mission-04-gillette-travel-kit', 'level-04-gillette-travel-kit.md'],
+  ['mission-05-iphone-case-fixture', 'level-05-iphone-case-fixture.md'],
+  ['mission-06-film-scanner', 'level-06-film-scanner.md'],
+] as const;
+
+export function readPublishedChapters(root: string, sourceBase = '/docs') {
+  const exampleFiles = new Map<string, Buffer>();
+  const chapters = missionFiles.map(([id, file]) => {
+    const contentPath = path.join(root, 'docs', 'books', 'ecky-ir', 'missions', file);
+    const markdown = fs.readFileSync(contentPath, 'utf8').replace(/\[([^\]]+)\]\(([^)]+\.ecky)\)/g, (_, label, relativePath) => {
+      const sourcePath = path.resolve(path.dirname(contentPath), relativePath);
+      if (!sourcePath.startsWith(`${root}${path.sep}`)) throw new Error(`Chapter source outside repository: ${relativePath}`);
+      const bytes = fs.readFileSync(sourcePath);
+      const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+      const assetPath = `examples/${hash}-${path.basename(sourcePath)}`;
+      exampleFiles.set(assetPath, bytes);
+      return `[${label}](${sourceBase}/${assetPath})`;
+    });
+    const title = markdown.match(/^title:\s*(.+)$/m)?.[1] ?? id;
+    return { id, sectionSlug: file.replace(/\.md$/, ''), title, markdown, checkpoints: [] };
+  });
+
+  return { chapters, exampleFiles };
 }

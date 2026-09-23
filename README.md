@@ -106,6 +106,16 @@ STEP availability depends on the geometry path; mesh-based results do not necess
 
 ## Documentation and development
 
+The six web chapters live in `docs/books/ecky-ir/missions/*.md`. Both the web
+reader and EPUB use these files and their linked `.ecky` examples. Edit these
+Markdown files for chapter changes. `npm run build:docs-site` packages the exact
+linked sources under `/docs/examples/`; `npm run build:book` produces the EPUB.
+
+The human function reference comes from the appendix in
+`docs/books/ecky-ir/ecky-ir-corpus.md`. Its generated registry appendix is
+projected without compiler metadata or duplicate entries.
+
+
 - [Modeling tutorial](public/tutorials/ecky-campaign.md) — worked examples, starting with a bracket.
 - [Language reference](public/docs/ecky-ir.md) — syntax and modeling operations.
 - [MCP tool reference](skills/ecky-mcp/reference/tools.md) — external-agent integration.
@@ -125,4 +135,4 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Geometry tests need their corresponding native runtimes or FreeCAD installation. `npm run test:rust:clean` runs `cargo check` and Rust tests in a temporary Cargo target, then cleans that target on exit.
 
-The canonical language book and agent-reference content live in [the Ecky IR corpus](docs/books/ecky-ir/ecky-ir-corpus.md). `npm run sync:book-source` projects that content into the public reference files; edit the corpus rather than those generated copies. `npm run generate:docs` synchronizes the sources and rebuilds the agent prompts, book, docs site, and MCP skill reference. Tutorials and worked examples also live under `public/tutorials/` and `docs/books/ecky-ir/`.
+The language reference, agent reference, and older standalone exercises live in [the Ecky IR corpus](docs/books/ecky-ir/ecky-ir-corpus.md). `npm run sync:book-source` projects that content into the public reference files; edit the corpus rather than those generated copies. `npm run generate:docs` synchronizes the sources and rebuilds the agent prompts, book, docs site, and MCP skill reference. Tutorials and worked examples also live under `public/tutorials/` and `docs/books/ecky-ir/`.
