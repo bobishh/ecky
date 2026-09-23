@@ -74,7 +74,10 @@ jobs:
             codex_takeover_persistence \
             component_package_contract \
             config_json_boundary \
-            context_budget_audit
+            context_budget_audit \
+            llm_eval_artifacts \
+            llm_eval_compare_cli \
+            provider_turn_intent
           do
             cargo test -p ecky_cad --test "$test_target" --all-features --verbose
           done

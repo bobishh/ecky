@@ -483,6 +483,11 @@ pub struct AppState {
     pub codex_app_server: Arc<crate::services::codex_app_server::CodexAppServerSupervisor>,
     pub agy_provider: Arc<crate::services::agy_provider::AgyProviderSupervisor>,
     pub mcp_session_registry: McpSessionRegistry,
+    /// Current provider capability policy keyed by canonical Ecky thread.
+    /// MCP enforcement reads this registry so a reused provider connection
+    /// cannot retain authority from an earlier turn.
+    pub provider_turn_policies:
+        Arc<tokio::sync::Mutex<HashMap<String, crate::provider_turn::ProviderTurnPolicy>>>,
     /// Pending user-confirmation requests keyed by requestId.
     pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
     /// Pending user-prompt requests keyed by requestId (agent waits for text/attachments from UI).
@@ -530,6 +535,28 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub async fn set_provider_turn_policy(
+        &self,
+        thread_id: &str,
+        policy: crate::provider_turn::ProviderTurnPolicy,
+    ) {
+        self.provider_turn_policies
+            .lock()
+            .await
+            .insert(thread_id.to_string(), policy);
+    }
+
+    pub async fn provider_turn_policy(
+        &self,
+        thread_id: &str,
+    ) -> Option<crate::provider_turn::ProviderTurnPolicy> {
+        self.provider_turn_policies
+            .lock()
+            .await
+            .get(thread_id)
+            .copied()
+    }
+
     /// Threads currently selected by an authoring surface.
     ///
     /// UI selection and live MCP ownership are peer projections. Neither
@@ -599,6 +626,7 @@ impl AppState {
                 enabled_groups: Arc::clone(&mcp_session_enabled_groups),
                 pending_notifications: Arc::clone(&mcp_session_pending_notifications),
             },
+            provider_turn_policies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             confirm_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             prompt_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             auto_agent_runtime: Arc::new(Mutex::new(

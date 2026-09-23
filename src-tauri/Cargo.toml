@@ -124,6 +124,11 @@ path = "src/bin/lower_ecky_ir_to_freecad.rs"
 required-features = ["tooling"]
 
 [[bin]]
+name = "compare_llm_evals"
+path = "src/bin/compare_llm_evals.rs"
+required-features = ["tooling"]
+
+[[bin]]
 name = "pack_campaign_previews"
 path = "src/bin/pack_campaign_previews.rs"
 required-features = ["tooling"]

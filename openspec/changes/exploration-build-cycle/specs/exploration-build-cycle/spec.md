@@ -185,6 +185,50 @@ It SHALL state that no promote, commit, or finalize action exists.
 - **THEN** the stable system prefix remains byte-identical
 - **AND** changing cycle state appears only after that prefix.
 
+### Requirement: Provider turns enforce prompt-based intent categorization
+
+Provider turns SHALL use prompt-based turn contracts that instruct the model to
+categorize the user turn as `ANSWER`, `INSPECT`, `MODIFY`, or `CLARIFY`. Hardcoded word
+lists or keyword-matching heuristics (WORDS) SHALL NOT be used. For `ANSWER` and
+`CLARIFY`, the model SHALL invoke no mutation tools and answer directly or ask
+clarifying questions. For `INSPECT`, the model SHALL invoke only read-only inspection
+tools. For `MODIFY`, the model SHALL perform bounded editing, preview, and verification.
+When programmatic turn policies are explicitly enforced (e.g. in test suites or
+explicit evaluation runners), Rust enforces tool allowlists and non-editing mode.
+
+#### Scenario: Status question answers without project work
+
+- **GIVEN** an unfinished authoring turn exists in provider conversation history
+- **WHEN** the user asks a status or general inquiry question
+- **THEN** the prompt-based contract categorizes the turn as `ANSWER`
+- **AND** the provider invokes no mutation tools and performs no project writes
+- **AND** no project source changes or immutable versions are created
+- **AND** the answer addresses the current question instead of resuming the repair.
+
+#### Scenario: Inspection cannot become mutation
+
+- **GIVEN** the user explicitly asks to inspect a current dimension
+- **WHEN** the turn executes under the prompt contract or an explicit inspection policy
+- **THEN** only read-only inspection tools are used
+- **AND** any mutation tool call is rejected by policy
+- **AND** the provider cannot change the project mirror through normal file editing.
+
+#### Scenario: Ambiguity fails closed
+
+- **GIVEN** a user reports an apparent geometry problem without asking to inspect or fix it
+- **WHEN** intent cannot prove the requested action
+- **THEN** the turn is handled as `CLARIFY`
+- **AND** the provider asks one concise question without tools
+- **AND** no incomplete prior mutation supplies implicit write authority.
+
+#### Scenario: Explicit modification enables bounded authoring
+
+- **GIVEN** the user explicitly asks to change a named dimension
+- **WHEN** the turn is categorized as `MODIFY`
+- **THEN** the normal inspect, edit, preview, and verify surface is available
+- **AND** that authority applies only to the current user turn
+- **AND** every changed draft still follows normal immutable-version semantics.
+
 ### Requirement: Model routing is evidence-driven and auditable
 
 The system SHALL record prompt version and selected provider/model/reasoning route for
@@ -304,3 +348,45 @@ activity, terminal state, or raw failure SHALL replace the fallback.
 - **THEN** B is version head and its raw diagnostic is inspectable
 - **AND** A's successful render may remain the active viewport projection
 - **AND** the UI identifies that head and viewport refer to different versions.
+
+### Requirement: Provider turns produce file-backed LLM eval evidence
+
+The system SHALL persist each completed Agy managed-provider turn as strict data-only
+EDN plus a deterministic Markdown report. Its schema SHALL remain provider-neutral so
+other managed providers can use the same writer. The artifact SHALL retain ordered model
+and tool activity, bounded safe tool inputs/results, route identity, timing,
+terminal outcome, classified intent, effective capability policy, policy violations,
+and immutable versions created during the turn. The system SHALL
+NOT require a JSON log format or database-backed log platform for eval replay.
+
+#### Scenario: Tool trajectory survives restart
+
+- **GIVEN** an Agy managed-provider turn emits inspect, command, edit, and verification steps
+- **WHEN** the turn terminates
+- **THEN** `run.edn` and `trajectory.edn` retain their exact order and turn identity
+- **AND** `report.md` records deterministic behavioral and outcome metrics
+- **AND** reopening the files requires no live provider process or in-memory journal.
+
+#### Scenario: Eval artifact redacts secrets and bounds output
+
+- **GIVEN** a tool input contains a token and its output exceeds the payload bound
+- **WHEN** trajectory evidence is persisted
+- **THEN** the token value is replaced by a redaction marker
+- **AND** the oversized output records a clipped value plus full SHA-256 digest
+- **AND** no JSON eval artifact is created.
+
+#### Scenario: Paired route comparison uses the same case
+
+- **GIVEN** two completed run artifacts share one case and differ in one route variable
+- **WHEN** comparison runs
+- **THEN** the Markdown comparison reports completion, first-build-green,
+  red-to-green repair, unnecessary versions, tool repetition, latency, tokens, and cost
+- **AND** comparison rejects mismatched cases or multiple changed route variables.
+
+#### Scenario: Streaming tool states count once
+
+- **GIVEN** one provider tool step emits `active` and `done` trajectory updates with
+  the same stable step identity
+- **WHEN** deterministic trajectory scoring runs
+- **THEN** the report records one tool call
+- **AND** the state transition does not count as an adjacent repeated tool call.

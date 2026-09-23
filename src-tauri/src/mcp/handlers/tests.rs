@@ -2119,6 +2119,68 @@ async fn thread_messages_get_compacts_content_and_keeps_payload_flags() {
 }
 
 #[tokio::test]
+async fn thread_messages_get_includes_provider_messages() {
+    let (state, _resolver) = seed_target().await;
+    {
+        let conn = state.db.lock().await;
+        crate::services::agy_provider::bind_owned_conversation(
+            &conn,
+            "thread-1",
+            "conv-1",
+            "Test",
+            "/workspace",
+            now_secs() as i64,
+        )
+        .unwrap();
+        crate::services::agy_provider::insert_message_with_id_and_attachments(
+            &conn,
+            "agy:user:1",
+            "thread-1",
+            "conv-1",
+            "user",
+            "делай коробку 10x10",
+            &[],
+            "success",
+            now_secs() as i64,
+        )
+        .unwrap();
+        crate::services::agy_provider::insert_message_with_id_and_attachments(
+            &conn,
+            "agy:assistant:1",
+            "thread-1",
+            "conv-1",
+            "assistant",
+            "Сделал коробку 10x10",
+            &[],
+            "success",
+            now_secs() as i64 + 1,
+        )
+        .unwrap();
+    }
+
+    let response = handle_thread_messages_get(
+        &state,
+        ThreadMessagesRequest {
+            thread_id: "thread-1".to_string(),
+            limit: Some(10),
+            before: None,
+            roles: None,
+        },
+    )
+    .await
+    .expect("thread messages");
+
+    assert!(response
+        .messages
+        .iter()
+        .any(|m| m.id == "agy:user:1" && m.content == "делай коробку 10x10"));
+    assert!(response
+        .messages
+        .iter()
+        .any(|m| m.id == "agy:assistant:1" && m.content == "Сделал коробку 10x10"));
+}
+
+#[tokio::test]
 async fn target_macro_get_returns_active_macro_payload() {
     let (state, resolver) = seed_target().await;
     let response = handle_target_macro_get(

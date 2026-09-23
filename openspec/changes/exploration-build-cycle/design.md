@@ -288,6 +288,40 @@ does not contain automatic model escalation, reasoning thresholds, or planner/au
 model splitting. Alternate model, effort, and vision routes are offline experiments;
 adopting one requires a later explicit product decision backed by recorded results.
 
+## Provider turn intent and capability policy
+
+Every provider message is routed before the tool-capable turn starts:
+
+```text
+ANSWER   explain, report status, or respond from supplied conversation context
+INSPECT  gather bounded read-only evidence, then answer
+MODIFY   perform one explicitly requested bounded authoring change and verify it
+CLARIFY  ask one question because write intent or desired outcome is ambiguous
+```
+
+Provider turns are prompt-based: the prompt contract presents the unified turn policy
+(`ANSWER`, `INSPECT`, `MODIFY`, `CLARIFY`) and the LLM itself categorizes the user's
+intent. Hardcoded word dictionaries (`ACTION_WORDS`, `INSPECT_WORDS`, `ANSWER_WORDS`)
+are an anti-pattern and are prohibited as they fail to generalize across phrasing,
+context, and languages.
+
+The unified prompt contract instructs the model:
+- `ANSWER`: explain, report status, or respond directly from conversation context without calling tools or editing files.
+- `INSPECT`: gather bounded read-only evidence using advertised inspection tools, then answer.
+- `MODIFY`: perform one explicitly requested bounded authoring change, inspect, edit, preview, and verify.
+- `CLARIFY`: ask one concise question without tools when intent or parameters are ambiguous.
+
+Where programmatic policy is enforced (e.g. in test suites or explicit read-only evaluations),
+Rust enforces tool allowlists and non-editing mode. In standard interactive turns, the
+unified prompt contract governs turn categorization. Continuation prompts explicitly
+terminate implicit carry-over: the current user message alone grants turn authority.
+A status question does not resume an incomplete repair. Unstarted prompts remain durable,
+but no older prompt may silently widen the new turn's capability policy.
+
+Turn evaluation records classified intent, effective policy, unique tool-call count,
+policy violations, and versions created. Streaming `active`/`done` updates sharing
+one provider step identity are one tool call, not repeated calls.
+
 ### Evaluation
 
 Route decisions ship only after replaying representative cycle fixtures. Compare:
@@ -303,6 +337,35 @@ Route decisions ship only after replaying representative cycle fixtures. Compare
 Test one variable at a time: prompt version, model, or reasoning effort. Record route
 metadata in cycle events. Never encode provider-specific quality claims as domain
 rules.
+
+## File-backed LLM evaluation artifacts
+
+Provider activity shown in the workbench is a live projection, not durable eval
+evidence. Completed Agy managed-provider turns therefore write one bounded artifact
+directory below
+`app_data_dir/evals/runs/<run-id>/`:
+
+```text
+run.edn          strict data-only run metadata, outcome, route, and version refs
+trajectory.edn   ordered strict-EDN event vector with safe tool inputs/results
+report.md        deterministic human-readable scores and diagnostics
+```
+
+No JSON eval artifact or eval database is introduced. Provider JSON may remain an
+upstream transport protocol, but it is decoded before persistence. Secret-shaped
+keys are redacted recursively. Oversized values are clipped with their SHA-256
+digest retained. The eval writer never stores provider credentials or unbounded
+terminal output.
+
+The artifact schema and writer are provider-neutral even though the first ingestion
+adapter is Agy. Each run binds provider conversation and turn identity to the Ecky thread, user
+prompt, configured model/effort when known, start/end timestamps, terminal state,
+ordered provider steps, and immutable versions appended during that interval.
+Deterministic scoring derives unique tool-call count, repeated-tool count, duration,
+first-build-green, completion, red-to-green repair, and unnecessary red versions.
+Paired comparison changes one route variable and emits Markdown. An optional
+telemetry exporter may later project the same bounded metadata to OpenTelemetry;
+telemetry is never the authoring or eval source of truth.
 
 ## Scheduling And Publication
 
@@ -390,3 +453,5 @@ promote/commit commands are added.
   and stale-plan risk. Evals decide.
 - Coalescing drops obsolete execution work, not appended authoring history.
 - A single running build limits throughput. MVP favors predictable state and cost.
+- File artifacts favor local reproducibility over fleet search. A later OTEL
+  exporter may index bounded metadata while large payloads remain file-backed.

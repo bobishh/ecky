@@ -725,6 +725,33 @@ impl CodexAppServerSupervisor {
         force_resume_request: bool,
         model: Option<&str>,
     ) -> AppResult<()> {
+        self.resume_thread_with_policy(
+            binding,
+            project_title,
+            mcp_endpoint,
+            handoff_context,
+            refresh_developer_instructions,
+            force_resume_request,
+            model,
+            crate::provider_turn::ProviderTurnPolicy::for_intent(
+                crate::provider_turn::ProviderTurnIntent::Modify,
+            ),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_thread_with_policy(
+        &self,
+        binding: &crate::contracts::CodexTakeoverBinding,
+        project_title: &str,
+        mcp_endpoint: &str,
+        handoff_context: &str,
+        refresh_developer_instructions: bool,
+        force_resume_request: bool,
+        model: Option<&str>,
+        policy: crate::provider_turn::ProviderTurnPolicy,
+    ) -> AppResult<()> {
         let _resume = self.inner.resume.lock().await;
         self.ensure_started().await?;
         let generation = {
@@ -747,7 +774,14 @@ impl CodexAppServerSupervisor {
         let result = self
             .request_started(
                 "thread/resume",
-                resume_params(binding, project_title, mcp_endpoint, handoff_context, model),
+                resume_params_with_policy(
+                    binding,
+                    project_title,
+                    mcp_endpoint,
+                    handoff_context,
+                    model,
+                    policy,
+                ),
             )
             .await?;
         result
@@ -842,13 +876,27 @@ impl CodexAppServerSupervisor {
         model: Option<&str>,
         attachments: &[Attachment],
     ) -> AppResult<String> {
-        let mut params = json!({
-            "threadId": thread_id,
-            "input": build_user_input(prompt, attachments)
-        });
-        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-            params["model"] = Value::String(model.trim().to_string());
-        }
+        self.start_turn_with_attachments_policy(
+            thread_id,
+            prompt,
+            model,
+            attachments,
+            crate::provider_turn::ProviderTurnPolicy::for_intent(
+                crate::provider_turn::ProviderTurnIntent::Modify,
+            ),
+        )
+        .await
+    }
+
+    pub async fn start_turn_with_attachments_policy(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        attachments: &[Attachment],
+        policy: crate::provider_turn::ProviderTurnPolicy,
+    ) -> AppResult<String> {
+        let params = turn_start_params(thread_id, prompt, model, attachments, policy);
         let result = self.request("turn/start", params).await?;
         let turn_id = result
             .get("turn")
@@ -1002,8 +1050,31 @@ pub fn resume_params(
     handoff_context: &str,
     model: Option<&str>,
 ) -> Value {
-    let mcp_endpoint =
-        crate::mcp::server::provider_bound_endpoint(mcp_endpoint, &binding.ecky_thread_id);
+    resume_params_with_policy(
+        binding,
+        project_title,
+        mcp_endpoint,
+        handoff_context,
+        model,
+        crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Modify,
+        ),
+    )
+}
+
+pub fn resume_params_with_policy(
+    binding: &crate::contracts::CodexTakeoverBinding,
+    project_title: &str,
+    mcp_endpoint: &str,
+    handoff_context: &str,
+    model: Option<&str>,
+    policy: crate::provider_turn::ProviderTurnPolicy,
+) -> Value {
+    let mcp_endpoint = crate::mcp::server::provider_bound_endpoint_with_policy(
+        mcp_endpoint,
+        &binding.ecky_thread_id,
+        policy,
+    );
     let mut params = json!({
         "threadId": binding.codex_thread_id,
         "cwd": binding.cwd,
@@ -1060,6 +1131,29 @@ pub fn start_params(
             "mcp_servers.ecky_provider_mcp.url": mcp_endpoint,
             "mcp_servers.ecky_provider_mcp.required": true,
             "mcp_servers.ecky_provider_mcp.default_tools_approval_mode": "approve"
+        }
+    });
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        params["model"] = Value::String(model.trim().to_string());
+    }
+    params
+}
+
+pub fn turn_start_params(
+    thread_id: &str,
+    prompt: &str,
+    model: Option<&str>,
+    attachments: &[Attachment],
+    policy: crate::provider_turn::ProviderTurnPolicy,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": build_user_input(&policy.wrap_user_message(prompt), attachments),
+        "approvalPolicy": if policy.allows_project_writes() { "on-request" } else { "never" },
+        "sandboxPolicy": if policy.allows_project_writes() {
+            json!({ "type": "workspaceWrite" })
+        } else {
+            json!({ "type": "readOnly", "networkAccess": false })
         }
     });
     if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
@@ -1345,7 +1439,16 @@ fn tool_activity(item: &Value) -> Option<String> {
         Some("mcpToolCall") => {
             let server = string_field(item, &["server", "serverName"]).unwrap_or("mcp");
             let tool = string_field(item, &["tool", "toolName", "name"]).unwrap_or("tool");
-            Some(format!("USING TOOL · {server}/{tool}"))
+            let full_name = format!("{server}/{tool}");
+            let params = item
+                .get("arguments")
+                .or_else(|| item.get("params"))
+                .or_else(|| item.get("input"));
+            if let Some(detail) = crate::llm_eval::format_tool_call_details(&full_name, params) {
+                Some(detail)
+            } else {
+                Some(format!("USING TOOL · {full_name}"))
+            }
         }
         Some("fileChange") => {
             let paths = item
@@ -1918,6 +2021,44 @@ mod tests {
         assert!(!should_skip_resume(Some(9), 9, true, false));
         assert!(!should_skip_resume(Some(9), 9, false, true));
         assert!(!should_skip_resume(Some(8), 9, false, false));
+    }
+
+    #[test]
+    fn codex_turn_policy_is_prompted_and_enforced_by_sandbox() {
+        let answer_policy = crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Answer,
+        );
+        let answer = turn_start_params("codex-thread", "что происходит?", None, &[], answer_policy);
+        assert_eq!(answer["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(answer["approvalPolicy"], "never");
+        assert!(answer["input"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Intent: ANSWER"));
+        let resumed = resume_params_with_policy(
+            &binding(crate::services::codex_takeover::CODEX_BOOTSTRAP_VERSION),
+            "Dryer",
+            "http://127.0.0.1:1234/mcp",
+            "handoff",
+            None,
+            answer_policy,
+        );
+        assert!(resumed["config"]["mcp_servers.ecky_provider_mcp.url"]
+            .as_str()
+            .unwrap()
+            .contains("providerTurnIntent=answer"));
+
+        let modify = turn_start_params(
+            "codex-thread",
+            "измени размер",
+            None,
+            &[],
+            crate::provider_turn::ProviderTurnPolicy::for_intent(
+                crate::provider_turn::ProviderTurnIntent::Modify,
+            ),
+        );
+        assert_eq!(modify["sandboxPolicy"]["type"], "workspaceWrite");
+        assert_eq!(modify["approvalPolicy"], "on-request");
     }
 
     #[test]

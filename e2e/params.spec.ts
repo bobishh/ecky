@@ -54,7 +54,9 @@ endsolid mock
         return callbackId;
       };
       const storedParamThread = () => {
-        const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null');
+        const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null')
+          ?? (window as any).__PARAM_LAST_DESIGN__
+          ?? null;
         if (!storedSnapshot) return null;
         return {
           id: storedSnapshot.threadId ?? 'mock-thread-1',
@@ -225,14 +227,16 @@ endsolid mock
           const modelManifest = await window.__TAURI_INTERNALS__.invoke('get_model_manifest', {
             modelId: artifactBundle.modelId,
           });
-          sessionStorage.setItem('param-last-design', JSON.stringify({
+          const storedSnapshot = {
             design: generated.design,
             threadId: generated.threadId,
             messageId: generated.messageId,
             artifactBundle,
             modelManifest,
             selectedPartId: null,
-          }));
+          };
+          (window as any).__PARAM_LAST_DESIGN__ = storedSnapshot;
+          sessionStorage.setItem('param-last-design', JSON.stringify(storedSnapshot));
           return {
             run: {
               requestId: args?.input?.requestId,

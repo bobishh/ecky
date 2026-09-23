@@ -5,7 +5,7 @@ use crate::contracts::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
 
-pub const CODEX_BOOTSTRAP_VERSION: u32 = 3;
+pub const CODEX_BOOTSTRAP_VERSION: u32 = 4;
 pub const CODEX_PROVIDER_ID: &str = "codex";
 static CODEX_QUEUE_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
@@ -381,6 +381,49 @@ pub fn upsert_agent_binding(
             ))
         },
     )
+}
+
+pub fn rotate_agent_binding(
+    conn: &Connection,
+    ecky_thread_id: &str,
+    provider: &str,
+    new_external_thread_id: &str,
+    reason: &str,
+    now: i64,
+) -> AppResult<AgentThreadBindingRecord> {
+    if let Some(existing) = get_agent_binding_for_provider(conn, ecky_thread_id, provider)? {
+        conn.execute(
+            "UPDATE agent_thread_binding_lineage
+             SET superseded_at = ?4, superseded_reason = ?5
+             WHERE ecky_thread_id = ?1 AND provider = ?2 AND external_thread_id = ?3 AND superseded_at IS NULL",
+            params![ecky_thread_id, provider, existing.external_thread_id, now, reason],
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    }
+
+    conn.execute(
+        "UPDATE agent_thread_bindings
+         SET external_thread_id = ?3, updated_at = ?4
+         WHERE ecky_thread_id = ?1 AND provider = ?2",
+        params![ecky_thread_id, provider, new_external_thread_id, now],
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO agent_thread_binding_lineage (
+            ecky_thread_id, provider, external_thread_id, activated_at,
+            superseded_at, superseded_reason
+         ) VALUES (?1, ?2, ?3, ?4, NULL, NULL)",
+        params![ecky_thread_id, provider, new_external_thread_id, now],
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+
+    get_agent_binding_for_provider(conn, ecky_thread_id, provider)?.ok_or_else(|| {
+        AppError::persistence(format!(
+            "Agent binding for Ecky thread {} disappeared after rotate.",
+            ecky_thread_id
+        ))
+    })
 }
 
 pub fn bind_owned_thread(

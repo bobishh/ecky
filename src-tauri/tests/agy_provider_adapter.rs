@@ -1,3 +1,5 @@
+use ecky_cad_lib::llm_eval::{project_agy_eval_event, EvalEventKind, EvalValue};
+use ecky_cad_lib::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
 use ecky_cad_lib::services::agy_provider::{
     parse_agy_version, project_stream_event, AgyProjectedEvent, AgyProviderSupervisor,
     MINIMUM_AGY_VERSION,
@@ -5,6 +7,71 @@ use ecky_cad_lib::services::agy_provider::{
 use serde_json::json;
 
 static AGY_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(unix)]
+#[tokio::test]
+async fn answer_turn_runs_agy_without_edit_or_auto_approval_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let _environment = AGY_ENV_LOCK.lock().await;
+    let directory = std::env::temp_dir().join(format!(
+        "ecky-agy-answer-policy-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("agy-policy-fake.py");
+    let args_file = directory.join("args.txt");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+if "--version" in sys.argv:
+    print("Antigravity CLI 1.1.15")
+    raise SystemExit(0)
+with open(os.environ["ECKY_AGY_TEST_ARGS"], "w", encoding="utf-8") as output:
+    output.write("\n".join(sys.argv[1:]))
+print(json.dumps({"event": "init", "conversation_id": "agy-policy-1", "init": {}}), flush=True)
+for line in sys.stdin:
+    json.loads(line)
+    print(json.dumps({"event": "result", "result": {
+        "conversation_id": "agy-policy-1", "status": "SUCCESS", "response": "answer"
+    }}), flush=True)
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    std::env::set_var("ECKY_AGY_BIN", &executable);
+    std::env::set_var("ECKY_AGY_TEST_ARGS", &args_file);
+
+    let supervisor = AgyProviderSupervisor::new();
+    let started = supervisor
+        .start_new_turn_with_policy(
+            directory.to_str().unwrap(),
+            "answer now",
+            None,
+            None,
+            ProviderTurnPolicy::for_intent(ProviderTurnIntent::Answer),
+        )
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), started.result)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.response, "answer");
+    let args = std::fs::read_to_string(&args_file).unwrap();
+    assert!(args.contains("--mode\naccept-edits"));
+    assert!(args.contains("--dangerously-skip-permissions"));
+
+    std::env::remove_var("ECKY_AGY_BIN");
+    std::env::remove_var("ECKY_AGY_TEST_ARGS");
+    let _ = std::fs::remove_dir_all(directory);
+}
 
 #[test]
 fn version_gate_requires_bidirectional_stream_json_release() {
@@ -69,6 +136,47 @@ fn stream_projection_exposes_public_progress_but_not_tool_stdout() {
         }
     );
     assert!(!format!("{tool:?}").contains("secret terminal dump"));
+}
+
+#[test]
+fn eval_projection_retains_safe_tool_input_output_and_exact_order_fields() {
+    let event = project_agy_eval_event(
+        &json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "agy-7",
+                "step_index": 5,
+                "state": "DONE",
+                "step_type": "tool",
+                "tool_name": "call_mcp_tool",
+                "tool_info": {
+                    "input": {
+                        "ServerName": "ecky_mcp",
+                        "ToolName": "target_meta_get",
+                        "Arguments": { "threadId": "thread-7", "token": "private" }
+                    },
+                    "output": { "ok": true, "versionId": "version-7" }
+                }
+            }
+        }),
+        123,
+    )
+    .unwrap();
+    assert_eq!(event.kind, EvalEventKind::Tool);
+    assert_eq!(event.step_index, Some(5));
+    assert_eq!(event.name.as_deref(), Some("ecky_mcp/target_meta_get"));
+    assert_eq!(event.occurred_at, 123);
+    assert!(event.input.is_some());
+    assert!(event.output.is_some());
+    let encoded = ecky_cad_lib::strict_edn::to_vec(event.input.as_ref().unwrap()).unwrap();
+    let text = String::from_utf8(encoded).unwrap();
+    assert!(text.contains("thread-7"));
+    assert!(text.contains("[REDACTED]"));
+    assert!(!text.contains("private"));
+    assert!(matches!(
+        event.output.as_ref().unwrap().value,
+        EvalValue::Map(_)
+    ));
 }
 
 #[test]
@@ -236,6 +344,12 @@ for line in sys.stdin:
         .unwrap()
         .unwrap();
     assert_eq!(first_result.response, "answer-1");
+    assert_eq!(first_result.eval_events.len(), 2);
+    assert_eq!(first_result.eval_events[0].sequence, 1);
+    assert_eq!(first_result.eval_events[0].kind, EvalEventKind::Assistant);
+    assert_eq!(first_result.eval_events[1].sequence, 2);
+    assert_eq!(first_result.eval_events[1].kind, EvalEventKind::Result);
+    assert!(first_result.completed_at >= first_result.started_at);
     let first_traces = supervisor.turn_traces("agy-test-7").await;
     assert_eq!(first_traces.len(), 1);
     assert_eq!(first_traces[0].status, "success");
@@ -525,6 +639,12 @@ for line in sys.stdin:
         .unwrap()
         .expect_err("shutdown cannot report success");
     assert!(result.message.contains("Ecky shutdown"));
+    let failed_eval = supervisor
+        .take_failed_turn_result("agy-shutdown-7", &started.turn_id)
+        .await
+        .expect("failed turns retain eval evidence for durable finalization");
+    assert_eq!(failed_eval.status, "ERROR");
+    assert!(failed_eval.completed_at >= failed_eval.started_at);
     for pid in ids {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while unsafe { libc::kill(pid, 0) } == 0 {
@@ -538,4 +658,333 @@ for line in sys.stdin:
     std::env::remove_var("ECKY_AGY_BIN");
     std::env::remove_var("ECKY_AGY_TEST_PROCESS_IDS");
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn agy_provider_compaction_rotates_external_id_and_retains_message_history() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE threads (
+             id TEXT PRIMARY KEY,
+             title TEXT NOT NULL,
+             summary TEXT NOT NULL DEFAULT '',
+             updated_at INTEGER NOT NULL
+         );
+         INSERT INTO threads (id, title, updated_at) VALUES ('ecky-1', 'One', 1);",
+    )
+    .unwrap();
+    ecky_cad_lib::services::codex_takeover::ensure_schema(&conn).unwrap();
+
+    let initial = ecky_cad_lib::services::agy_provider::bind_owned_conversation(
+        &conn,
+        "ecky-1",
+        "agy-conv-1",
+        "One",
+        "/workspace/one",
+        100,
+    )
+    .unwrap();
+    assert_eq!(initial.agy_conversation_id, "agy-conv-1");
+
+    // Add some messages under agy-conv-1
+    for i in 1..=5 {
+        ecky_cad_lib::services::agy_provider::insert_message(
+            &conn,
+            "ecky-1",
+            "agy-conv-1",
+            if i % 2 == 1 { "user" } else { "assistant" },
+            &format!("Message {i}"),
+            "success",
+            100 + i,
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        ecky_cad_lib::services::agy_provider::count_conversation_messages(
+            &conn,
+            "ecky-1",
+            "agy-conv-1"
+        )
+        .unwrap(),
+        5
+    );
+
+    // Rotate binding (compaction)
+    let rotated = ecky_cad_lib::services::agy_provider::rotate_binding(
+        &conn,
+        "ecky-1",
+        "agy-conv-2",
+        "compaction",
+        200,
+    )
+    .unwrap();
+    assert_eq!(rotated.agy_conversation_id, "agy-conv-2");
+
+    // Conversation message count for new conversation starts at 0
+    assert_eq!(
+        ecky_cad_lib::services::agy_provider::count_conversation_messages(
+            &conn,
+            "ecky-1",
+            "agy-conv-2"
+        )
+        .unwrap(),
+        0
+    );
+
+    // Old conversation message count is still 5
+    assert_eq!(
+        ecky_cad_lib::services::agy_provider::count_conversation_messages(
+            &conn,
+            "ecky-1",
+            "agy-conv-1"
+        )
+        .unwrap(),
+        5
+    );
+
+    // Insert compaction message into agy-conv-2
+    ecky_cad_lib::services::agy_provider::insert_message(
+        &conn,
+        "ecky-1",
+        "agy-conv-2",
+        "assistant",
+        "Session compacted. Earlier history is available via thread_messages_get.",
+        "success",
+        201,
+    )
+    .unwrap();
+
+    // The whole message page for ecky-1 has all 6 messages
+    let page = ecky_cad_lib::services::agy_provider::message_page(&conn, "ecky-1", None).unwrap();
+    assert_eq!(page.messages.len(), 6);
+    assert_eq!(
+        page.messages.last().unwrap().content,
+        "Session compacted. Earlier history is available via thread_messages_get."
+    );
+
+    // Current binding for ecky-1 points to agy-conv-2
+    let current = ecky_cad_lib::services::agy_provider::get_binding(&conn, "ecky-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.agy_conversation_id, "agy-conv-2");
+}
+
+#[test]
+fn stream_projection_formats_rich_details_from_parameters_and_native_tools() {
+    // 1. MCP tool with escaped quotes and specific toolSummary over generic toolAction
+    let mcp_summary = project_stream_event(&json!({
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "agy-7",
+            "step_index": 10,
+            "state": "ACTIVE",
+            "step_type": "tool",
+            "tool_name": "call_mcp_tool",
+            "tool_info": {
+                "name": "call_mcp_tool",
+                "parameters": {
+                    "ServerName": "\"ecky_mcp\"",
+                    "ToolName": "\"macro_buffer_replace_range\"",
+                    "Arguments": "{\"startLine\": 1805, \"endLine\": 1820}",
+                    "toolAction": "\"Calling MCP tool\"",
+                    "toolSummary": "\"Replace broken if with direct part invocation\""
+                }
+            }
+        }
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        mcp_summary,
+        AgyProjectedEvent::Working {
+            conversation_id: "agy-7".to_string(),
+            step_index: 10,
+            text: "WORKING · Replace broken if with direct part invocation".to_string(),
+        }
+    );
+
+    // 2. MCP tool with line range detail when summary is absent
+    let mcp_detail = project_stream_event(&json!({
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "agy-7",
+            "step_index": 11,
+            "state": "ACTIVE",
+            "step_type": "tool",
+            "tool_name": "call_mcp_tool",
+            "tool_info": {
+                "name": "call_mcp_tool",
+                "parameters": {
+                    "ServerName": "\"ecky_mcp\"",
+                    "ToolName": "\"target_macro_get\"",
+                    "Arguments": { "startLine": 1800, "endLine": 1840 }
+                }
+            }
+        }
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        mcp_detail,
+        AgyProjectedEvent::Working {
+            conversation_id: "agy-7".to_string(),
+            step_index: 11,
+            text: "USING TOOL · ecky_mcp/target_macro_get (lines 1800-1840)".to_string(),
+        }
+    );
+
+    // 3. Native run_command detail
+    let cmd = project_stream_event(&json!({
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "agy-7",
+            "step_index": 12,
+            "state": "ACTIVE",
+            "step_type": "tool",
+            "tool_name": "run_command",
+            "tool_info": {
+                "name": "run_command",
+                "parameters": {
+                    "CommandLine": "git status --porcelain"
+                }
+            }
+        }
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        cmd,
+        AgyProjectedEvent::Working {
+            conversation_id: "agy-7".to_string(),
+            step_index: 12,
+            text: "RUNNING · git status --porcelain".to_string(),
+        }
+    );
+
+    // 4. Native view_file with line numbers
+    let view = project_stream_event(&json!({
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "agy-7",
+            "step_index": 13,
+            "state": "ACTIVE",
+            "step_type": "tool",
+            "tool_name": "view_file",
+            "tool_info": {
+                "name": "view_file",
+                "parameters": {
+                    "AbsolutePath": "/Users/bogdan/projects/model.ecky",
+                    "StartLine": 1800,
+                    "EndLine": 1840
+                }
+            }
+        }
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        view,
+        AgyProjectedEvent::Working {
+            conversation_id: "agy-7".to_string(),
+            step_index: 13,
+            text: "VIEWING · model.ecky:1800-1840".to_string(),
+        }
+    );
+
+    // 5. Native replace_file_content with lines
+    let edit = project_stream_event(&json!({
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "agy-7",
+            "step_index": 14,
+            "state": "ACTIVE",
+            "step_type": "tool",
+            "tool_name": "replace_file_content",
+            "tool_info": {
+                "name": "replace_file_content",
+                "parameters": {
+                    "TargetFile": "/Users/bogdan/projects/model.ecky",
+                    "StartLine": 1805,
+                    "EndLine": 1820
+                }
+            }
+        }
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        edit,
+        AgyProjectedEvent::Working {
+            conversation_id: "agy-7".to_string(),
+            step_index: 14,
+            text: "EDITING · model.ecky (lines 1805-1820)".to_string(),
+        }
+    );
+
+    // 6. Tool failure carrying raw error detail
+    let failed = project_stream_event(&json!({
+        "event": "step_update",
+        "step_update": {
+            "conversation_id": "agy-7",
+            "step_index": 15,
+            "state": "ERROR",
+            "step_type": "tool",
+            "tool_name": "call_mcp_tool",
+            "tool_info": {
+                "name": "call_mcp_tool",
+                "parameters": {
+                    "ServerName": "ecky_mcp",
+                    "ToolName": "session_log_in"
+                },
+                "error": "No bound MCP session target is available."
+            }
+        }
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        failed,
+        AgyProjectedEvent::Working {
+            conversation_id: "agy-7".to_string(),
+            step_index: 15,
+            text: "FAILED · ecky_mcp/session_log_in: No bound MCP session target is available."
+                .to_string(),
+        }
+    );
+
+    // 7. Eval projection from real Agy parameters payload retains input and resolves tool name
+    let eval_event = project_agy_eval_event(
+        &json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "agy-7",
+                "step_index": 16,
+                "state": "ACTIVE",
+                "step_type": "tool",
+                "tool_name": "call_mcp_tool",
+                "tool_info": {
+                    "name": "call_mcp_tool",
+                    "parameters": {
+                        "ServerName": "\"ecky_mcp\"",
+                        "ToolName": "\"target_macro_get\"",
+                        "Arguments": { "startLine": 1800, "endLine": 1840 }
+                    }
+                }
+            }
+        }),
+        456,
+    )
+    .unwrap();
+    assert_eq!(eval_event.kind, EvalEventKind::Tool);
+    assert_eq!(
+        eval_event.name.as_deref(),
+        Some("ecky_mcp/target_macro_get")
+    );
+    assert_eq!(
+        eval_event.summary.as_deref(),
+        Some("USING TOOL · ecky_mcp/target_macro_get (lines 1800-1840)")
+    );
+    assert!(eval_event.input.is_some());
 }

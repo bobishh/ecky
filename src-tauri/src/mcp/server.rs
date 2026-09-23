@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 const SESSION_HEADER: &str = "Mcp-Session-Id";
 const PROVIDER_THREAD_QUERY: &str = "providerThreadId";
+const PROVIDER_TURN_INTENT_QUERY: &str = "providerTurnIntent";
 const LEASE_TTL_SECS: u64 = 45;
 const MCP_PROTOCOL_MODERN: &str = "2026-07-28";
 const MCP_PROTOCOL_LEGACY_LATEST: &str = "2025-06-18";
@@ -905,6 +906,18 @@ pub fn provider_bound_endpoint(endpoint_url: &str, thread_id: &str) -> String {
     )
 }
 
+pub fn provider_bound_endpoint_with_policy(
+    endpoint_url: &str,
+    thread_id: &str,
+    policy: crate::provider_turn::ProviderTurnPolicy,
+) -> String {
+    let endpoint = provider_bound_endpoint(endpoint_url, thread_id);
+    format!(
+        "{endpoint}&{PROVIDER_TURN_INTENT_QUERY}={}",
+        policy.intent().as_str()
+    )
+}
+
 fn provider_thread_id_from_uri(uri: &axum::http::Uri) -> Option<String> {
     uri.query().and_then(|query| {
         query
@@ -917,6 +930,108 @@ fn provider_thread_id_from_uri(uri: &axum::http::Uri) -> Option<String> {
                     .filter(|value| !value.trim().is_empty())
             })
     })
+}
+
+fn provider_turn_policy_from_uri(
+    uri: &axum::http::Uri,
+) -> Option<crate::provider_turn::ProviderTurnPolicy> {
+    uri.query()
+        .and_then(|query| {
+            query
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .find_map(|(key, value)| {
+                    (key == PROVIDER_TURN_INTENT_QUERY)
+                        .then(|| decode_query_value(value))
+                        .flatten()
+                })
+        })
+        .and_then(|value| crate::provider_turn::ProviderTurnIntent::parse(&value))
+        .map(crate::provider_turn::ProviderTurnPolicy::for_intent)
+}
+
+#[cfg(test)]
+fn provider_tool_definitions_for_uri(uri: &axum::http::Uri, tools: Vec<Value>) -> Vec<Value> {
+    let Some(policy) = provider_turn_policy_from_uri(uri) else {
+        return tools;
+    };
+    tools
+        .into_iter()
+        .filter(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| policy.allows_mcp_tool(name))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn provider_tool_allowed_for_uri(uri: &axum::http::Uri, tool_name: &str) -> AppResult<()> {
+    let Some(policy) = provider_turn_policy_from_uri(uri) else {
+        return Ok(());
+    };
+    if policy.allows_mcp_tool(tool_name) {
+        return Ok(());
+    }
+    Err(AppError::validation(format!(
+        "Provider turn intent '{}' rejects MCP tool '{tool_name}'.",
+        policy.intent().as_str()
+    )))
+}
+
+async fn provider_turn_policy_for_request(
+    state: &AppState,
+    uri: &axum::http::Uri,
+) -> Option<crate::provider_turn::ProviderTurnPolicy> {
+    if let Some(thread_id) = provider_thread_id_from_uri(uri) {
+        if let Some(policy) = state.provider_turn_policy(&thread_id).await {
+            return Some(policy);
+        }
+    }
+    provider_turn_policy_from_uri(uri)
+}
+
+async fn provider_tool_definitions_for_request(
+    state: &AppState,
+    uri: &axum::http::Uri,
+    tools: Vec<Value>,
+) -> Vec<Value> {
+    let Some(policy) = provider_turn_policy_for_request(state, uri).await else {
+        return tools;
+    };
+    tools
+        .into_iter()
+        .filter(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| policy.allows_mcp_tool(name))
+        })
+        .collect()
+}
+
+async fn provider_tool_allowed_for_request(
+    state: &AppState,
+    uri: &axum::http::Uri,
+    tool_name: &str,
+) -> AppResult<()> {
+    let Some(policy) = provider_turn_policy_for_request(state, uri).await else {
+        return Ok(());
+    };
+    if policy.allows_mcp_tool(tool_name) {
+        return Ok(());
+    }
+    Err(AppError::validation(format!(
+        "Provider turn intent '{}' rejects MCP tool '{tool_name}'.",
+        policy.intent().as_str()
+    )))
+}
+
+async fn provider_turn_policy_for_session(
+    state: &AppState,
+    session_id: &str,
+) -> Option<crate::provider_turn::ProviderTurnPolicy> {
+    let thread_id = get_session(state, session_id).await?.bound_thread_id?;
+    state.provider_turn_policy(&thread_id).await
 }
 
 async fn prebind_provider_session(
@@ -4683,7 +4798,12 @@ async fn dispatch_modern_request(
         "tools/list" => {
             let params: ToolsListParams =
                 serde_json::from_value(req.params.unwrap_or_default()).unwrap_or_default();
-            let tools = modern_tool_definitions(ecky_ast_authoring);
+            let tools = provider_tool_definitions_for_request(
+                &server.state,
+                uri,
+                modern_tool_definitions(ecky_ast_authoring),
+            )
+            .await;
             let (tools, next_cursor) =
                 paginate_tools(&tools, params.cursor.as_deref(), params.page_size);
             let mut result = json!({
@@ -4710,6 +4830,11 @@ async fn dispatch_modern_request(
             };
             if let Some(arguments) = params.arguments.as_mut().and_then(Value::as_object_mut) {
                 arguments.remove(ECKY_CONTEXT_ID);
+            }
+            if let Err(error) =
+                provider_tool_allowed_for_request(&server.state, uri, &params.name).await
+            {
+                return (StatusCode::OK, mcp_tool_error(id, &error));
             }
             let known_tool = modern_tool_definitions(ecky_ast_authoring)
                 .iter()
@@ -4991,8 +5116,16 @@ async fn dispatch_request(
             let ecky_ast_authoring = server.state.config.lock().unwrap().mcp.ecky_ast_authoring;
             let params: ToolsListParams =
                 serde_json::from_value(req.params.unwrap_or_default()).unwrap_or_default();
-            let (tools, next_cursor) =
+            let (mut tools, next_cursor) =
                 resolve_tools_list(&server.state, session_id, &params, ecky_ast_authoring).await;
+            if let Some(policy) = provider_turn_policy_for_session(&server.state, session_id).await
+            {
+                tools.retain(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| policy.allows_mcp_tool(name))
+                });
+            }
             let mut result = json!({ "tools": tools });
             if let Some(cursor) = next_cursor {
                 result["nextCursor"] = json!(cursor);
@@ -5002,6 +5135,20 @@ async fn dispatch_request(
         "tools/call" => {
             match serde_json::from_value::<CallToolParams>(req.params.unwrap_or_default()) {
                 Ok(params) => {
+                    if let Some(policy) =
+                        provider_turn_policy_for_session(&server.state, session_id).await
+                    {
+                        if !policy.allows_mcp_tool(&params.name) {
+                            return mcp_tool_error(
+                                req.id,
+                                &AppError::validation(format!(
+                                    "Provider turn intent '{}' rejects MCP tool '{}'.",
+                                    policy.intent().as_str(),
+                                    params.name
+                                )),
+                            );
+                        }
+                    }
                     let dispatch_server = server.clone();
                     let dispatch_session_id = session_id.to_string();
                     let dispatch_result = run_on_mcp_tool_dispatch_stack(move || async move {
@@ -8407,6 +8554,119 @@ mod tests {
             provider_thread_id_from_uri(&uri).as_deref(),
             Some("thread 1/ä")
         );
+    }
+
+    #[test]
+    fn provider_turn_policy_filters_discovery_and_cached_calls() {
+        let inspect = crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Inspect,
+        );
+        let endpoint =
+            provider_bound_endpoint_with_policy("http://127.0.0.1:39249/mcp", "thread-1", inspect);
+        let uri: axum::http::Uri = endpoint.parse().expect("provider endpoint URI");
+        let tools = provider_tool_definitions_for_uri(&uri, modern_tool_definitions(true));
+        let names = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"workspace_overview"));
+        assert!(names.contains(&"target_meta_get"));
+        assert!(!names.contains(&"macro_preview_render"));
+        assert!(!names.contains(&"ecky_ast_set_number"));
+        assert!(provider_tool_allowed_for_uri(&uri, "target_meta_get").is_ok());
+        assert!(provider_tool_allowed_for_uri(&uri, "ecky_ast_set_number").is_err());
+
+        let answer = crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Answer,
+        );
+        let answer_uri: axum::http::Uri =
+            provider_bound_endpoint_with_policy("http://127.0.0.1:39249/mcp", "thread-1", answer)
+                .parse()
+                .expect("answer endpoint URI");
+        assert!(
+            provider_tool_definitions_for_uri(&answer_uri, modern_tool_definitions(true))
+                .is_empty()
+        );
+        assert!(provider_tool_allowed_for_uri(&answer_uri, "workspace_overview").is_err());
+    }
+
+    #[tokio::test]
+    async fn current_thread_policy_overrides_stale_provider_connection_url() {
+        let (state, resolver) = seed_dispatch_ecky_target("(model)").await;
+        let stale_uri: axum::http::Uri = provider_bound_endpoint_with_policy(
+            "http://127.0.0.1:39249/mcp",
+            "thread-1",
+            crate::provider_turn::ProviderTurnPolicy::for_intent(
+                crate::provider_turn::ProviderTurnIntent::Modify,
+            ),
+        )
+        .parse()
+        .expect("provider endpoint URI");
+        state
+            .set_provider_turn_policy(
+                "thread-1",
+                crate::provider_turn::ProviderTurnPolicy::for_intent(
+                    crate::provider_turn::ProviderTurnIntent::Answer,
+                ),
+            )
+            .await;
+
+        assert!(provider_tool_definitions_for_request(
+            &state,
+            &stale_uri,
+            modern_tool_definitions(true),
+        )
+        .await
+        .is_empty());
+        assert!(
+            provider_tool_allowed_for_request(&state, &stale_uri, "ecky_ast_set_number")
+                .await
+                .is_err()
+        );
+
+        let session_id = "legacy-provider-session";
+        let mut session = McpSessionState::new("provider-mcp-http".into(), "Agy".into());
+        session.bound_thread_id = Some("thread-1".into());
+        state
+            .mcp_session_registry
+            .with_sessions()
+            .lock()
+            .await
+            .insert(session_id.into(), session);
+        let server = HttpServerState {
+            state: state.clone(),
+            app: resolver,
+            handle: None,
+        };
+        let listed = dispatch_request(
+            &server,
+            session_id,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/list".into(),
+                params: None,
+                id: Some(json!(1)),
+            },
+        )
+        .await;
+        assert!(listed.result.unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let rejected = dispatch_request(
+            &server,
+            session_id,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({ "name": "health_check", "arguments": {} })),
+                id: Some(json!(2)),
+            },
+        )
+        .await;
+        assert!(serde_json::to_string(&rejected)
+            .unwrap()
+            .contains("rejects MCP tool"));
     }
 
     #[tokio::test]

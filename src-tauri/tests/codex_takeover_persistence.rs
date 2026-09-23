@@ -766,3 +766,67 @@ fn failed_queue_head_blocks_overtaking_and_retry_remove_are_scoped() {
     let sending = remove_queue_item(&conn, "ecky-1", &second.id).unwrap_err();
     assert!(sending.message.contains("Use STOP"));
 }
+
+#[test]
+fn rotate_agent_binding_records_lineage_and_preserves_messages() {
+    use ecky_cad_lib::contracts::CodexDialogueMessage;
+    use ecky_cad_lib::services::codex_takeover::{
+        get_agent_binding_for_provider, list_binding_lineage, list_provider_messages,
+        persist_finished_provider_messages, rotate_agent_binding, upsert_agent_binding,
+        AgentThreadBindingRecord,
+    };
+
+    let conn = connection();
+    upsert_agent_binding(
+        &conn,
+        &AgentThreadBindingRecord {
+            ecky_thread_id: "ecky-1".to_string(),
+            provider: "agy".to_string(),
+            external_thread_id: "agy-1".to_string(),
+            external_title: "Test".to_string(),
+            external_cwd: "/workspace".to_string(),
+            bootstrap_version: 1,
+            created_at: 100,
+            updated_at: 100,
+        },
+    )
+    .unwrap();
+
+    persist_finished_provider_messages(
+        &conn,
+        "ecky-1",
+        "agy",
+        "agy-1",
+        &[CodexDialogueMessage {
+            id: "msg-1".to_string(),
+            role: "user".to_string(),
+            content: "делай катушку".to_string(),
+            status: "success".to_string(),
+            timestamp: 105,
+            attachments: vec![],
+            provider_event_kind: None,
+        }],
+    )
+    .unwrap();
+
+    let rotated = rotate_agent_binding(&conn, "ecky-1", "agy", "agy-2", "compaction", 200).unwrap();
+    assert_eq!(rotated.external_thread_id, "agy-2");
+
+    let current = get_agent_binding_for_provider(&conn, "ecky-1", "agy")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.external_thread_id, "agy-2");
+
+    let lineage = list_binding_lineage(&conn, "ecky-1", "agy").unwrap();
+    assert_eq!(lineage.len(), 2);
+    assert_eq!(lineage[0].external_thread_id, "agy-1");
+    assert_eq!(lineage[0].superseded_at, Some(200));
+    assert_eq!(lineage[0].superseded_reason.as_deref(), Some("compaction"));
+    assert_eq!(lineage[1].external_thread_id, "agy-2");
+    assert_eq!(lineage[1].activated_at, 200);
+    assert_eq!(lineage[1].superseded_at, None);
+
+    let messages = list_provider_messages(&conn, "ecky-1", "agy", 10).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "делай катушку");
+}

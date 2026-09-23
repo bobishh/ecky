@@ -2,15 +2,34 @@ use ecky_cad_lib::contracts::CodexTakeoverRuntime;
 use ecky_cad_lib::contracts::{
     Attachment, AttachmentKind, CodexDialogueMessage, CodexTakeoverBinding, ProviderEventKind,
 };
+use ecky_cad_lib::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
 use ecky_cad_lib::services::codex_app_server::{
     apply_live_notification, apply_runtime_notification, apply_start_response,
     bootstrap_instructions, message_page_params, parse_model_list_page, project_thread_messages,
     response_result_for_id, resume_params, runtime_from_turn_page, start_params,
-    take_terminal_trace, CodexAppServerSupervisor,
+    take_terminal_trace, turn_start_params, CodexAppServerSupervisor,
 };
 use serde_json::json;
 
 static CODEX_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[test]
+fn answer_turn_uses_policy_prompt_and_read_only_sandbox() {
+    let params = turn_start_params(
+        "codex-thread",
+        "почему ты не отвечаешь",
+        None,
+        &[],
+        ProviderTurnPolicy::for_intent(ProviderTurnIntent::Answer),
+    );
+
+    assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
+    assert_eq!(params["approvalPolicy"], "never");
+    assert!(params["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Intent: ANSWER"));
+}
 
 #[test]
 fn model_list_projection_uses_subscription_catalog_and_omits_hidden_entries() {
@@ -144,6 +163,26 @@ fn live_projection_streams_readable_thoughts_answer_text_and_tool_activity() {
         "USING TOOL · ecky_provider_mcp/ecky_ast_inspect"
     );
     assert_eq!(messages[2].content, "Сейчас сверяю радиус.");
+
+    apply_live_notification(
+        &mut messages,
+        "codex-7",
+        "item/started",
+        &json!({
+            "item": {
+                "id": "tool-2",
+                "type": "mcpToolCall",
+                "server": "ecky_provider_mcp",
+                "tool": "macro_buffer_replace_range",
+                "arguments": { "startLine": 1805, "endLine": 1820 }
+            }
+        }),
+        105,
+    );
+    assert_eq!(
+        messages.last().unwrap().content,
+        "USING TOOL · ecky_provider_mcp/macro_buffer_replace_range (lines 1805-1820)"
+    );
     assert_eq!(
         messages
             .iter()
@@ -153,6 +192,7 @@ fn live_projection_streams_readable_thoughts_answer_text_and_tool_activity() {
             Some(ProviderEventKind::Activity),
             Some(ProviderEventKind::Activity),
             Some(ProviderEventKind::Assistant),
+            Some(ProviderEventKind::Activity),
         ]
     );
     assert!(messages.iter().all(|message| message.status == "working"));
@@ -164,12 +204,16 @@ fn live_projection_streams_readable_thoughts_answer_text_and_tool_activity() {
         &json!({"turn": {"id": "turn-1", "status": "completed"}}),
         105,
     );
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert!(messages.iter().all(|message| message.status == "success"));
     let trace = take_terminal_trace(&mut messages, "turn-1", "success", 105).unwrap();
     assert!(messages.is_empty());
     assert_eq!(trace.status, "success");
     assert_eq!(trace.messages[2].content, "Сейчас сверяю радиус.");
+    assert_eq!(
+        trace.messages[3].content,
+        "USING TOOL · ecky_provider_mcp/macro_buffer_replace_range (lines 1805-1820)"
+    );
 }
 
 #[test]
@@ -283,7 +327,7 @@ fn resume_reconciles_one_turn_without_loading_rollout_and_history_uses_opaque_cu
     assert_eq!(resume["model"], "gpt-5.6-codex");
     assert_eq!(
         resume["config"]["mcp_servers.ecky_provider_mcp.url"],
-        "http://127.0.0.1:39249/mcp?providerThreadId=ecky-1"
+        "http://127.0.0.1:39249/mcp?providerThreadId=ecky-1&providerTurnIntent=modify"
     );
 
     let page = message_page_params("codex-7", Some("opaque:older:7".to_string()), Some("older"));

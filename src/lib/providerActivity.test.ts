@@ -142,3 +142,26 @@ test('Given interrupted provider speech between actions When projected Then orig
   ]);
   assert.deepEqual(projected.map((message) => Boolean(message.providerActivity)), [true, false, true]);
 });
+
+test('Given legacy messages with rich details When projected Then actions collapse into working activity', () => {
+  const grouped = collapseProviderActivity({
+    providerId: 'agy',
+    providerLabel: 'Agy',
+    externalConversationId: 'agy-9',
+    activeTurnId: 'turn-13',
+    messages: [
+      { id: '1', role: 'assistant', content: 'VIEWING · model.ecky:1800-1840', status: 'working', timestamp: 1 },
+      { id: '2', role: 'assistant', content: 'RUNNING · git status', status: 'working', timestamp: 2 },
+      { id: '3', role: 'assistant', content: 'EDITING · model.ecky (lines 1805-1820)', status: 'working', timestamp: 3 },
+      { id: '4', role: 'assistant', content: 'FAILED · ecky_mcp/session_log_in: No target', status: 'working', timestamp: 4 },
+    ],
+  });
+
+  assert.equal(grouped?.content, 'FAILED · ecky_mcp/session_log_in: No target');
+  assert.deepEqual(grouped?.providerActivity?.items, [
+    'VIEWING · model.ecky:1800-1840',
+    'RUNNING · git status',
+    'EDITING · model.ecky (lines 1805-1820)',
+    'FAILED · ecky_mcp/session_log_in: No target',
+  ]);
+});

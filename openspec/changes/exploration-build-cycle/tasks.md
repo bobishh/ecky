@@ -116,3 +116,38 @@
 - [x] Run exploration Playwright happy path plus red-head/pending scenario.
 - [x] Run `npm run test:unit`.
 - [x] Run `cd src-tauri && cargo check`.
+
+## 12. File-backed LLM trajectory evals
+
+- [x] Add failing Rust integration coverage for strict-EDN run/trajectory files,
+  Markdown reports, redaction, bounds, and paired comparison.
+- [x] Capture ordered Agy managed-provider assistant/tool/result steps with stable turn,
+  route, prompt, timing, and terminal identity.
+- [x] Bind each completed turn to immutable versions and verification outcomes created
+  during its exact time window.
+- [x] Persist `run.edn`, `trajectory.edn`, and `report.md`; create no JSON eval artifact
+  or eval database.
+- [x] Add deterministic trajectory/outcome graders and same-case one-variable comparison.
+- [x] Keep an exporter boundary for later OpenTelemetry projection without making OTEL
+  authoritative.
+- [x] Run strict OpenSpec validation, targeted Rust proof, and repository CI-equivalent
+  checks without staging or committing user work.
+
+## 13. Provider turn intent gate
+
+- [x] Add prompt-based turn contract instructing LLM to categorize intent as `ANSWER`,
+  `INSPECT`, `MODIFY`, or `CLARIFY`.
+- [x] Remove hardcoded word lists (`ACTION_WORDS`, `INSPECT_WORDS`, `ANSWER_WORDS`) in favor
+  of prompt-based turns.
+- [x] Put provider intent and capability policy under one Rust authority before Agy
+  or Codex turn creation.
+- [x] Run `ANSWER`, `INSPECT`, and `CLARIFY` through non-editing modes in both Agy and
+  Codex; keep editing mode exclusive to explicit `MODIFY`.
+- [x] Filter provider-bound MCP discovery for Agy and Codex by policy and reject
+  cached/direct mutation calls.
+- [x] Make continuation prompts terminate implicit prior-task authority and state the
+  exact unified prompt policy contract.
+- [x] Record intent/policy violations in file-backed evals and deduplicate tool-call
+  state transitions by stable provider step identity.
+- [x] Run strict OpenSpec validation, targeted Rust proof, and CI-equivalent checks
+  without staging or committing user work.

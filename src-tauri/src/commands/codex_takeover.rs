@@ -7,6 +7,7 @@ use crate::contracts::{
     CodexPromptInput, CodexSteerInput, CodexStopInput, CodexTakeoverBinding, CodexTakeoverSnapshot,
 };
 use crate::models::AppState;
+use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
 use crate::services::codex_takeover;
 
 static CODEX_BINDING_CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -282,6 +283,21 @@ async fn resume_binding(
     binding: &CodexTakeoverBinding,
     force_resume_request: bool,
 ) -> AppResult<()> {
+    resume_binding_with_policy(
+        state,
+        binding,
+        force_resume_request,
+        ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify),
+    )
+    .await
+}
+
+async fn resume_binding_with_policy(
+    state: &AppState,
+    binding: &CodexTakeoverBinding,
+    force_resume_request: bool,
+    policy: ProviderTurnPolicy,
+) -> AppResult<()> {
     let endpoint = require_mcp_endpoint(state)?;
     let title = project_title(state, &binding.ecky_thread_id).await?;
     let handoff = canonical_handoff(state, &binding.ecky_thread_id).await?;
@@ -289,7 +305,7 @@ async fn resume_binding(
         binding.bootstrap_version < codex_takeover::CODEX_BOOTSTRAP_VERSION;
     state
         .codex_app_server
-        .resume_thread(
+        .resume_thread_with_policy(
             binding,
             &title,
             &endpoint,
@@ -297,6 +313,7 @@ async fn resume_binding(
             refresh_developer_instructions,
             force_resume_request,
             configured_codex_model(state).as_deref(),
+            policy,
         )
         .await?;
     state
@@ -451,6 +468,11 @@ async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) ->
             return Ok(());
         }
 
+        let policy = ProviderTurnPolicy::prompt_based();
+        state
+            .set_provider_turn_policy(&binding.ecky_thread_id, policy)
+            .await;
+
         if let Err(error) = persist_latest_codex_history(state, &binding).await {
             state.push_log(format!(
                 "[CODEX] read-only history backfill failed before delivery for {}: {}",
@@ -458,7 +480,7 @@ async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) ->
                 codex_takeover::error_text(&error)
             ));
         }
-        if let Err(error) = resume_binding(state, &binding, false).await {
+        if let Err(error) = resume_binding_with_policy(state, &binding, true, policy).await {
             let claimed = {
                 let conn = state.db.lock().await;
                 codex_takeover::claim_queue_item(&conn, &head.id, now_seconds())?
@@ -487,11 +509,12 @@ async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) ->
 
         match state
             .codex_app_server
-            .start_turn_with_attachments(
+            .start_turn_with_attachments_policy(
                 &binding.codex_thread_id,
                 &head.prompt_text,
                 configured_codex_model(state).as_deref(),
                 &head.attachments,
+                policy,
             )
             .await
         {

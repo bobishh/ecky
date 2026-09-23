@@ -2,6 +2,7 @@ use crate::contracts::{
     AgyMessagePage, AgyProviderBinding, AppError, AppResult, Attachment, CodexDialogueMessage,
     CodexQueuedPrompt, CodexTakeoverRuntime, ProviderEventKind, ProviderTurnTrace,
 };
+use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
 use crate::services::provider_executable::resolve_provider_executable;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
@@ -16,7 +17,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub const AGY_PROVIDER_ID: &str = "agy";
-pub const AGY_BOOTSTRAP_VERSION: u32 = 2;
+pub const AGY_BOOTSTRAP_VERSION: u32 = 3;
 pub const MINIMUM_AGY_VERSION: (u32, u32, u32) = (1, 1, 15);
 const AGY_INIT_TIMEOUT: Duration = Duration::from_secs(20);
 const AGY_STOP_GRACE: Duration = Duration::from_secs(3);
@@ -32,13 +33,16 @@ fn normalize_model(model: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgyTurnResult {
     pub conversation_id: String,
     pub turn_id: String,
     pub status: String,
     pub response: String,
     pub error: Option<String>,
+    pub eval_events: Vec<crate::llm_eval::EvalEvent>,
+    pub started_at: i64,
+    pub completed_at: i64,
 }
 
 pub struct AgyTurnStarted {
@@ -92,6 +96,7 @@ struct AgySupervisorInner {
 struct AgySupervisorState {
     sessions: HashMap<String, AgySession>,
     turn_traces: HashMap<String, Vec<ProviderTurnTrace>>,
+    failed_eval_turns: HashMap<(String, String), AgyTurnResult>,
     stderr_tail: VecDeque<String>,
     app_handle: Option<tauri::AppHandle>,
 }
@@ -100,12 +105,15 @@ struct AgySession {
     conversation_id: Option<String>,
     model: Option<String>,
     endpoint_identity: Option<String>,
+    policy: ProviderTurnPolicy,
     stdin: Arc<Mutex<ChildStdin>>,
     pid: u32,
     process: AgyProcessIdentity,
     kill: mpsc::Sender<()>,
     runtime: CodexTakeoverRuntime,
     live_messages: Vec<CodexDialogueMessage>,
+    eval_events: Vec<crate::llm_eval::EvalEvent>,
+    eval_started_at: Option<i64>,
     init_waiter: Option<oneshot::Sender<AppResult<String>>>,
     active_result: Option<oneshot::Sender<AppResult<AgyTurnResult>>>,
 }
@@ -123,6 +131,7 @@ impl AgyProviderSupervisor {
                 state: Mutex::new(AgySupervisorState {
                     sessions: HashMap::new(),
                     turn_traces: HashMap::new(),
+                    failed_eval_turns: HashMap::new(),
                     stderr_tail: VecDeque::new(),
                     app_handle: None,
                 }),
@@ -139,14 +148,14 @@ impl AgyProviderSupervisor {
     pub async fn runtime(&self, conversation_id: &str) -> CodexTakeoverRuntime {
         self.find_session(conversation_id)
             .await
-            .map(|(_, runtime, _, _, _)| runtime)
+            .map(|(_, runtime, _, _, _, _)| runtime)
             .unwrap_or_default()
     }
 
     pub async fn live_messages(&self, conversation_id: &str) -> Vec<CodexDialogueMessage> {
         self.find_session(conversation_id)
             .await
-            .map(|(_, _, messages, _, _)| messages)
+            .map(|(_, _, messages, _, _, _)| messages)
             .unwrap_or_default()
     }
 
@@ -161,17 +170,48 @@ impl AgyProviderSupervisor {
             .unwrap_or_default()
     }
 
+    pub async fn take_failed_turn_result(
+        &self,
+        conversation_id: &str,
+        turn_id: &str,
+    ) -> Option<AgyTurnResult> {
+        self.inner
+            .state
+            .lock()
+            .await
+            .failed_eval_turns
+            .remove(&(conversation_id.to_string(), turn_id.to_string()))
+    }
+
     pub async fn has_compatible_session(
         &self,
         conversation_id: &str,
         model: Option<&str>,
         endpoint_identity: Option<&str>,
     ) -> bool {
+        self.has_compatible_session_with_policy(
+            conversation_id,
+            model,
+            endpoint_identity,
+            ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify),
+        )
+        .await
+    }
+
+    pub async fn has_compatible_session_with_policy(
+        &self,
+        conversation_id: &str,
+        model: Option<&str>,
+        endpoint_identity: Option<&str>,
+        policy: ProviderTurnPolicy,
+    ) -> bool {
         let requested_model = normalize_model(model);
         let requested_endpoint = normalize_model(endpoint_identity);
         self.find_session(conversation_id).await.is_some_and(
-            |(_, _, _, session_model, session_endpoint)| {
-                session_model == requested_model && session_endpoint == requested_endpoint
+            |(_, _, _, session_model, session_endpoint, session_policy)| {
+                session_model == requested_model
+                    && session_endpoint == requested_endpoint
+                    && session_policy == policy
             },
         )
     }
@@ -184,7 +224,8 @@ impl AgyProviderSupervisor {
     ) -> AppResult<()> {
         let _activation = self.inner.activation.lock().await;
         let requested_model = normalize_model(model);
-        if let Some((key, runtime, _, session_model, _)) = self.find_session(conversation_id).await
+        if let Some((key, runtime, _, session_model, _, _)) =
+            self.find_session(conversation_id).await
         {
             if runtime.active_turn_id.is_some() || session_model == requested_model {
                 return Ok(());
@@ -197,6 +238,7 @@ impl AgyProviderSupervisor {
                 Some(conversation_id.to_string()),
                 requested_model,
                 None,
+                ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify),
             )
             .await?;
         match tokio::time::timeout(AGY_INIT_TIMEOUT, init).await {
@@ -237,6 +279,7 @@ impl AgyProviderSupervisor {
         Vec<CodexDialogueMessage>,
         Option<String>,
         Option<String>,
+        ProviderTurnPolicy,
     )> {
         let state = self.inner.state.lock().await;
         state.sessions.iter().find_map(|(key, session)| {
@@ -247,6 +290,7 @@ impl AgyProviderSupervisor {
                     session.live_messages.clone(),
                     session.model.clone(),
                     session.endpoint_identity.clone(),
+                    session.policy,
                 )
             })
         })
@@ -259,12 +303,31 @@ impl AgyProviderSupervisor {
         model: Option<&str>,
         endpoint_identity: Option<&str>,
     ) -> AppResult<AgyTurnStarted> {
+        self.start_new_turn_with_policy(
+            cwd,
+            prompt,
+            model,
+            endpoint_identity,
+            ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify),
+        )
+        .await
+    }
+
+    pub async fn start_new_turn_with_policy(
+        &self,
+        cwd: &str,
+        prompt: &str,
+        model: Option<&str>,
+        endpoint_identity: Option<&str>,
+        policy: ProviderTurnPolicy,
+    ) -> AppResult<AgyTurnStarted> {
         let (session_key, init) = self
             .spawn_session(
                 cwd,
                 None,
                 normalize_model(model),
                 normalize_model(endpoint_identity),
+                policy,
             )
             .await?;
         let (turn_id, process, result) = self.write_prompt(&session_key, prompt).await?;
@@ -301,16 +364,37 @@ impl AgyProviderSupervisor {
         model: Option<&str>,
         endpoint_identity: Option<&str>,
     ) -> AppResult<AgyTurnStarted> {
+        self.start_turn_with_policy(
+            conversation_id,
+            cwd,
+            prompt,
+            model,
+            endpoint_identity,
+            ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify),
+        )
+        .await
+    }
+
+    pub async fn start_turn_with_policy(
+        &self,
+        conversation_id: &str,
+        cwd: &str,
+        prompt: &str,
+        model: Option<&str>,
+        endpoint_identity: Option<&str>,
+        policy: ProviderTurnPolicy,
+    ) -> AppResult<AgyTurnStarted> {
         let _activation = self.inner.activation.lock().await;
         let requested_model = normalize_model(model);
         let requested_endpoint = normalize_model(endpoint_identity);
         let session_key = match self.find_session(conversation_id).await {
-            Some((key, runtime, _, session_model, session_endpoint))
+            Some((key, runtime, _, session_model, session_endpoint, session_policy))
                 if runtime.active_turn_id.is_none() =>
             {
                 if runtime.phase == "idle"
                     && session_model == requested_model
                     && session_endpoint == requested_endpoint
+                    && session_policy == policy
                 {
                     key
                 } else {
@@ -321,6 +405,7 @@ impl AgyProviderSupervisor {
                             Some(conversation_id.to_string()),
                             requested_model.clone(),
                             requested_endpoint.clone(),
+                            policy,
                         )
                         .await?;
                     let (turn_id, process, result) = self.write_prompt(&key, prompt).await?;
@@ -354,7 +439,7 @@ impl AgyProviderSupervisor {
                     }
                 }
             }
-            Some((_, runtime, _, _, _)) => {
+            Some((_, runtime, _, _, _, _)) => {
                 return Err(AppError::conflict(format!(
                     "Agy conversation {conversation_id} already has active turn {}.",
                     runtime.active_turn_id.as_deref().unwrap_or("unknown")
@@ -367,6 +452,7 @@ impl AgyProviderSupervisor {
                         Some(conversation_id.to_string()),
                         requested_model.clone(),
                         requested_endpoint.clone(),
+                        policy,
                     )
                     .await?;
                 let (turn_id, process, result) = self.write_prompt(&key, prompt).await?;
@@ -462,6 +548,7 @@ impl AgyProviderSupervisor {
         resume_conversation_id: Option<String>,
         model: Option<String>,
         endpoint_identity: Option<String>,
+        policy: ProviderTurnPolicy,
     ) -> AppResult<(String, oneshot::Receiver<AppResult<String>>)> {
         let _startup = self.inner.startup.lock().await;
         let resolved = resolve_provider_executable("agy", "ECKY_AGY_BIN", "Antigravity CLI")?;
@@ -499,14 +586,16 @@ impl AgyProviderSupervisor {
             .arg("--print-timeout")
             .arg("30m")
             .arg("--sandbox")
-            .arg("--dangerously-skip-permissions")
+            .arg("--mode")
+            .arg(policy.execution_mode())
             .env("PATH", &resolved.spawn_path)
             .env("ECKY_PROVIDER_RUN_ID", &run_id)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .arg("--dangerously-skip-permissions");
         #[cfg(unix)]
         command.process_group(0);
         if let Some(conversation_id) = &resume_conversation_id {
@@ -550,12 +639,15 @@ impl AgyProviderSupervisor {
                 conversation_id: resume_conversation_id,
                 model,
                 endpoint_identity,
+                policy,
                 stdin,
                 pid,
                 process,
                 kill,
                 runtime: CodexTakeoverRuntime::default(),
                 live_messages: Vec::new(),
+                eval_events: Vec::new(),
+                eval_started_at: None,
                 init_waiter: Some(init_tx),
                 active_result: None,
             },
@@ -614,6 +706,8 @@ impl AgyProviderSupervisor {
                 error: None,
             };
             session.live_messages.clear();
+            session.eval_events.clear();
+            session.eval_started_at = Some(now_seconds());
             session.active_result = Some(result_tx);
             (
                 session.stdin.clone(),
@@ -657,15 +751,22 @@ impl AgyProviderSupervisor {
             match lines.next_line().await {
                 Ok(Some(line)) if line.trim().is_empty() => continue,
                 Ok(Some(line)) => match serde_json::from_str::<Value>(&line) {
-                    Ok(value) => match project_stream_event(&value) {
-                        Ok(Some(event)) => self.apply_event(&session_key, event).await,
-                        Ok(None) => {}
-                        Err(error) => {
-                            self.fail_session(&session_key, error).await;
-                            self.kill_session(&session_key).await;
-                            break;
+                    Ok(value) => {
+                        if let Some(event) =
+                            crate::llm_eval::project_agy_eval_event(&value, now_seconds())
+                        {
+                            self.append_eval_event(&session_key, event).await;
                         }
-                    },
+                        match project_stream_event(&value) {
+                            Ok(Some(event)) => self.apply_event(&session_key, event).await,
+                            Ok(None) => {}
+                            Err(error) => {
+                                self.fail_session(&session_key, error).await;
+                                self.kill_session(&session_key).await;
+                                break;
+                            }
+                        }
+                    }
                     Err(error) => {
                         self.fail_session(
                             &session_key,
@@ -689,6 +790,15 @@ impl AgyProviderSupervisor {
                 }
             }
         }
+    }
+
+    async fn append_eval_event(&self, session_key: &str, mut event: crate::llm_eval::EvalEvent) {
+        let mut state = self.inner.state.lock().await;
+        let Some(session) = state.sessions.get_mut(session_key) else {
+            return;
+        };
+        event.sequence = session.eval_events.len() as u64 + 1;
+        session.eval_events.push(event);
     }
 
     async fn read_stderr<R>(&self, stderr: R)
@@ -735,6 +845,7 @@ impl AgyProviderSupervisor {
                 mut response,
                 mut error,
             } => {
+                let completed_at = now_seconds();
                 let was_stopping = session.runtime.phase == "stopping";
                 if was_stopping {
                     status = "INTERRUPTED".to_string();
@@ -777,6 +888,9 @@ impl AgyProviderSupervisor {
                         status,
                         response,
                         error,
+                        eval_events: std::mem::take(&mut session.eval_events),
+                        started_at: session.eval_started_at.take().unwrap_or(completed_at),
+                        completed_at,
                     }));
                 }
             }
@@ -798,6 +912,19 @@ impl AgyProviderSupervisor {
         if let Some(waiter) = session.init_waiter.take() {
             let _ = waiter.send(Err(error.clone()));
         }
+        let completed_at = now_seconds();
+        let failed_eval = session.active_result.is_some().then(|| AgyTurnResult {
+            conversation_id: conversation_id
+                .clone()
+                .unwrap_or_else(|| session_key.to_string()),
+            turn_id: turn_id.clone(),
+            status: "ERROR".into(),
+            response: String::new(),
+            error: Some(super::codex_takeover::error_text(&error)),
+            eval_events: std::mem::take(&mut session.eval_events),
+            started_at: session.eval_started_at.take().unwrap_or(completed_at),
+            completed_at,
+        });
         if let Some(waiter) = session.active_result.take() {
             let _ = waiter.send(Err(error.clone()));
         }
@@ -808,6 +935,20 @@ impl AgyProviderSupervisor {
             message.status = "error".to_string();
         }
         let messages = std::mem::take(&mut session.live_messages);
+        if let Some(failed_eval) = failed_eval {
+            if state.failed_eval_turns.len() >= TURN_TRACE_LIMIT * 4 {
+                if let Some(key) = state.failed_eval_turns.keys().next().cloned() {
+                    state.failed_eval_turns.remove(&key);
+                }
+            }
+            state.failed_eval_turns.insert(
+                (
+                    failed_eval.conversation_id.clone(),
+                    failed_eval.turn_id.clone(),
+                ),
+                failed_eval,
+            );
+        }
         if let Some(conversation_id) = conversation_id.filter(|_| !messages.is_empty()) {
             push_turn_trace(
                 &mut state.turn_traces,
@@ -904,6 +1045,22 @@ impl AgyProviderSupervisor {
         if let Some((pid, kill)) = process {
             kill_owned_process_group(pid);
             let _ = kill.send(()).await;
+        }
+    }
+
+    pub async fn discard_conversation_session(&self, conversation_id: &str) {
+        let session_key = {
+            let state = self.inner.state.lock().await;
+            state.sessions.iter().find_map(|(key, session)| {
+                if session.conversation_id.as_deref() == Some(conversation_id) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(key) = session_key {
+            self.discard_session(&key).await;
         }
     }
 
@@ -1142,19 +1299,29 @@ fn find_nested_mcp_call(value: &Value) -> Option<(String, String)> {
         Value::Object(object) => {
             let server = mcp_field(object, &["ServerName", "serverName"])
                 .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty());
+                .map(|s| s.trim_matches('"').trim_matches('\'').trim())
+                .filter(|value| !value.is_empty());
             let tool = mcp_field(object, &["ToolName", "toolName"])
                 .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty());
+                .map(|s| s.trim_matches('"').trim_matches('\'').trim())
+                .filter(|value| !value.is_empty());
             if let (Some(server), Some(tool)) = (server, tool) {
                 return Some((server.to_string(), tool.to_string()));
             }
 
-            ["input", "toolInput", "tool_input", "arguments", "args"]
-                .iter()
-                .filter_map(|key| object.get(*key))
-                .find_map(find_nested_mcp_call)
-                .or_else(|| object.values().find_map(find_nested_mcp_call))
+            [
+                "parameters",
+                "params",
+                "input",
+                "toolInput",
+                "tool_input",
+                "arguments",
+                "args",
+            ]
+            .iter()
+            .filter_map(|key| object.get(*key))
+            .find_map(find_nested_mcp_call)
+            .or_else(|| object.values().find_map(find_nested_mcp_call))
         }
         Value::Array(values) => values.iter().find_map(find_nested_mcp_call),
         Value::String(text) => serde_json::from_str::<Value>(text)
@@ -1166,7 +1333,8 @@ fn find_nested_mcp_call(value: &Value) -> Option<(String, String)> {
 }
 
 fn normalize_public_tool_text(text: &str) -> Option<String> {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let unquoted = text.trim_matches('"').trim_matches('\'');
+    let text = unquoted.split_whitespace().collect::<Vec<_>>().join(" ");
     (!text.is_empty()).then_some(text)
 }
 
@@ -1194,31 +1362,102 @@ fn public_tool_text(update: &serde_json::Map<String, Value>, names: &[&str]) -> 
         .get("tool_info")
         .and_then(Value::as_object)
         .and_then(|tool_info| {
-            ["input", "toolInput", "tool_input", "arguments", "args"]
-                .iter()
-                .filter_map(|key| tool_info.get(*key))
-                .find_map(|input| public_tool_text_from_value(input, names))
+            [
+                "parameters",
+                "params",
+                "input",
+                "toolInput",
+                "tool_input",
+                "arguments",
+                "args",
+            ]
+            .iter()
+            .filter_map(|key| tool_info.get(*key))
+            .find_map(|input| public_tool_text_from_value(input, names))
         });
     direct.or(nested)
 }
 
+fn extract_tool_params<'a>(update: &'a serde_json::Map<String, Value>) -> Option<&'a Value> {
+    if let Some(tool_info) = update.get("tool_info").and_then(Value::as_object) {
+        for key in [
+            "parameters",
+            "params",
+            "input",
+            "toolInput",
+            "tool_input",
+            "arguments",
+            "args",
+        ] {
+            if let Some(val) = tool_info.get(key) {
+                return Some(val);
+            }
+        }
+    }
+    for key in [
+        "parameters",
+        "params",
+        "input",
+        "toolInput",
+        "tool_input",
+        "arguments",
+        "args",
+    ] {
+        if let Some(val) = update.get(key) {
+            return Some(val);
+        }
+    }
+    None
+}
+
 fn project_tool_activity(update: &serde_json::Map<String, Value>) -> String {
-    if let Some(action) = public_tool_text(update, &["toolAction", "tool_action"]) {
-        return format!("WORKING · {action}");
-    }
-    if let Some(summary) = public_tool_text(update, &["toolSummary", "tool_summary"]) {
-        return format!("WORKING · {summary}");
-    }
     let wrapper_name = update
         .get("tool_name")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    if wrapper_name == "call_mcp_tool" {
-        if let Some((server, tool)) = find_nested_mcp_call(&Value::Object(update.clone())) {
-            return format!("USING TOOL · {server}/{tool}");
+    let resolved_tool = if wrapper_name == "call_mcp_tool" {
+        find_nested_mcp_call(&Value::Object(update.clone()))
+            .map(|(server, tool)| format!("{server}/{tool}"))
+            .unwrap_or_else(|| wrapper_name.to_string())
+    } else {
+        wrapper_name.to_string()
+    };
+
+    let is_error = update
+        .get("state")
+        .and_then(Value::as_str)
+        .map(|s| s.eq_ignore_ascii_case("ERROR"))
+        .unwrap_or(false);
+    let error_text = update
+        .get("tool_info")
+        .and_then(Value::as_object)
+        .and_then(|info| info.get("error"))
+        .or_else(|| update.get("error"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty());
+
+    if is_error {
+        if let Some(err) = error_text {
+            return format!("FAILED · {resolved_tool}: {err}");
         }
     }
-    format!("USING TOOL · {wrapper_name}")
+
+    let action = public_tool_text(update, &["toolAction", "tool_action"]);
+    let summary = public_tool_text(update, &["toolSummary", "tool_summary"]);
+
+    if let Some(action) = action.filter(|a| !crate::llm_eval::is_generic_tool_action(a)) {
+        return format!("WORKING · {action}");
+    }
+    if let Some(summary) = summary.filter(|s| !crate::llm_eval::is_generic_tool_action(s)) {
+        return format!("WORKING · {summary}");
+    }
+
+    let params = extract_tool_params(update);
+    if let Some(detail) = crate::llm_eval::format_tool_call_details(&resolved_tool, params) {
+        return detail;
+    }
+
+    format!("USING TOOL · {resolved_tool}")
 }
 
 pub fn project_stream_event(value: &Value) -> AppResult<Option<AgyProjectedEvent>> {
@@ -1589,6 +1828,48 @@ pub fn bind_owned_conversation(
         created_at: saved.created_at,
         updated_at: saved.updated_at,
     })
+}
+
+pub fn rotate_binding(
+    conn: &Connection,
+    ecky_thread_id: &str,
+    new_conversation_id: &str,
+    reason: &str,
+    now: i64,
+) -> AppResult<AgyProviderBinding> {
+    let saved = super::codex_takeover::rotate_agent_binding(
+        conn,
+        ecky_thread_id,
+        AGY_PROVIDER_ID,
+        new_conversation_id,
+        reason,
+        now,
+    )?;
+    Ok(AgyProviderBinding {
+        ecky_thread_id: saved.ecky_thread_id,
+        agy_conversation_id: saved.external_thread_id,
+        label: saved.external_title,
+        cwd: saved.external_cwd,
+        bootstrap_version: saved.bootstrap_version,
+        created_at: saved.created_at,
+        updated_at: saved.updated_at,
+    })
+}
+
+pub fn count_conversation_messages(
+    conn: &Connection,
+    ecky_thread_id: &str,
+    conversation_id: &str,
+) -> AppResult<usize> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_provider_messages
+             WHERE ecky_thread_id = ?1 AND provider = ?2 AND external_thread_id = ?3",
+            params![ecky_thread_id, AGY_PROVIDER_ID, conversation_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    Ok(count as usize)
 }
 
 pub fn enqueue_prompt(

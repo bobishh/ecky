@@ -39,6 +39,14 @@ plan becomes stale after the first compiler, geometry, or verification result.
   interactive rebuild requests to the latest exact input while retaining every
   draft version already appended by normal authoring.
 - Define a lean prompt contract and an evidence-driven model routing policy.
+- Use prompt-based provider turns where the prompt defines the turn policy contract
+  (`ANSWER`, `INSPECT`, `MODIFY`, `CLARIFY`) and the LLM itself categorizes the turn.
+  Eliminate brittle hardcoded word lists (WORDS); ambiguous intent never grants
+  write authority.
+- Persist completed provider-turn trajectories as bounded strict-EDN files plus
+  human-readable Markdown reports so model behavior can be evaluated without a
+  database-backed log product. Tool order, safe inputs/results, timing, terminal
+  outcome, and version/verification outcomes remain replayable after restart.
 
 ## Relationship To Existing Changes
 
@@ -81,3 +89,9 @@ This change adds orchestration metadata only. It does not revise those semantics
   work automatically.
 - Model-routing experiments compare completion quality, red-to-green repair rate,
   latency, token use, and cost before any non-default route ships.
+- A provider turn with tool activity produces no JSON eval artifact: its run
+  directory contains strict `run.edn`, ordered `trajectory.edn`, and `report.md`.
+  Secret-shaped fields are redacted and oversized payloads remain digest-addressed.
+- A status/explanation message cannot mutate project source or append a version.
+  An inspection message can use bounded reads but cannot write. Only explicit
+  modification intent enables authoring tools.

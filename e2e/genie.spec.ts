@@ -173,7 +173,7 @@ test.describe('VertexGenie', () => {
   test('Given workbench loads When Ecky appears Then Three stone mascot renders in the viewport', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
-    const mascot = page.locator('.genie-stone-canvas');
+    const mascot = page.locator('.genie-layer .genie-stone-canvas');
     await expect(mascot).toBeVisible();
     await expect(page.locator('.genie-corner-svg')).toHaveCount(0);
     const nonTransparentPixels = await mascot.evaluate((canvas) => {
@@ -275,7 +275,7 @@ test.describe('VertexGenie', () => {
     }]);
 
     await page.goto('/');
-    await expect(page.locator('.genie-stone-button')).toHaveAttribute('data-seed', '314159');
+    await expect(page.locator('.genie-layer .genie-stone-button')).toHaveAttribute('data-seed', '314159');
   });
 
   test('Given Ecky thread lacks persisted mascot traits When workbench opens Then mascot keeps model fallback', async ({ page }) => {
@@ -288,14 +288,14 @@ test.describe('VertexGenie', () => {
     }]);
 
     await page.goto('/');
-    await expect(page.locator('.genie-stone-button')).toHaveAttribute('data-seed', '2352809809');
+    await expect(page.locator('.genie-layer .genie-stone-button')).toHaveAttribute('data-seed', '2352809809');
   });
 
   test('Given Ecky is dragged When user rotates the mascot Then it does not count as a poke', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
 
-    const mascot = page.locator('.genie-stone-button');
+    const mascot = page.locator('.genie-layer .genie-stone-button');
     await expect(mascot).toBeVisible();
     await expect(mascot).toHaveAttribute('data-drag-revision', '0');
 
@@ -432,7 +432,7 @@ test.describe('VertexGenie', () => {
     await installGenieMocks(page);
     await page.goto('/');
 
-    const mascot = page.locator('.genie-stone-canvas');
+    const mascot = page.locator('.genie-layer .genie-stone-canvas');
     await expect(mascot).toBeVisible();
     await expect(mascot).toHaveAttribute('data-mode', 'thinking');
   });
@@ -447,7 +447,7 @@ test.describe('VertexGenie', () => {
     });
     await page.goto('/');
 
-    const mascot = page.locator('.genie-stone-canvas');
+    const mascot = page.locator('.genie-layer .genie-stone-canvas');
     await expect(mascot).toBeVisible();
     await expect(mascot).toHaveAttribute('data-mode', 'error');
     await expect(mascot).toHaveAttribute('data-mode', 'idle', { timeout: 5000 });

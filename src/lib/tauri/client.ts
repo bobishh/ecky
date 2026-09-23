@@ -217,6 +217,12 @@ export async function removeAgyQueuedPrompt(
   return invokeCommand(commands.removeAgyQueuedPrompt(eckyThreadId, queueId));
 }
 
+export async function compactAgyProvider(
+  eckyThreadId: string,
+): Promise<AgyProviderSnapshot> {
+  return invokeCommand(commands.compactAgyProvider(eckyThreadId));
+}
+
 export async function getCodexTakeover(
   eckyThreadId: string,
 ): Promise<CodexTakeoverSnapshot | null> {

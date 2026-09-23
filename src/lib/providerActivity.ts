@@ -20,7 +20,7 @@ type ProviderTurnProjectionInput = {
   messages: ProviderLiveMessage[];
 };
 
-const LEGACY_ACTIVITY_PREFIX = /^(?:THINKING|PLAN|WORKING|USING TOOL|RUNNING|EDITING|SEARCHING|DELEGATING)\s*·/i;
+const LEGACY_ACTIVITY_PREFIX = /^(?:THINKING|PLAN|WORKING|USING TOOL|RUNNING|EDITING|WRITING|VIEWING|SEARCHING|DELEGATING|TASK|FAILED)\s*·/i;
 const TURN_RECEIVED_ACTIVITY = 'THINKING · Message received. Starting work.';
 
 function isActivityMessage(message: ProviderLiveMessage): boolean {

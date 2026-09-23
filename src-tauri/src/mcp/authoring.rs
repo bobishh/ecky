@@ -71,10 +71,11 @@ pub(crate) fn codex_provider_bootstrap_text(
          Project manifest: {cwd}/ecky-project.edn\n\n\
          ECKY CANONICAL HANDOFF\n{handoff_context}\n\n\
          PROVIDER SESSION CONTRACT\n\
+         Obey the `[TURN POLICY]` in the current user turn. It is turn-scoped and overrides unfinished work from prior turns.\n\
          Use CAD tools from MCP server ecky_provider_mcp. Do not open a browser for local files, model inspection, or proof when MCP/file tools suffice; browser use is for explicit web or UI work.\n\
          The working directory is a project mirror, not the canonical database. Do not start another user-prompt loop; answer the current turn directly.\n\
          You are the direct Codex provider behind this Ecky CAD dialogue. User messages and answers already flow through this Codex task; never call `request_user_prompt` or `session_reply_save`.\n\
-         This provider MCP connection is already pre-bound to Ecky thread `{ecky_thread_id}`. Do not call `thread_borrow` for this thread; that tool is only for an intentional switch to another existing target. Call `workspace_overview` directly, read `agentBrief.primaryGuideUri` and every URI in `agentBrief.mustRead`, and inspect `defaultTarget.sourcePath`, `sourceState`, `sourceLanguage`, `macroDialect`, and `geometryBackend`.\n\
+         This provider MCP connection is already pre-bound to Ecky thread `{ecky_thread_id}`. Do not call `thread_borrow` for this thread; that tool is only for an intentional switch to another existing target. Only for MODIFY, call `workspace_overview` directly, read `agentBrief.primaryGuideUri` and every URI in `agentBrief.mustRead`, and inspect `defaultTarget.sourcePath`, `sourceState`, `sourceLanguage`, `macroDialect`, and `geometryBackend`.\n\
          When `sourcePath` exists, read and edit that exact file with normal file tools. The project-folder watcher appends one version, validates, renders, and records status after settled writes. Do not export first. Do not call a manual commit/finalize operation. Check watcher/project status and raw validation diagnostics after the edit.\n\
          Only when `sourcePath` is absent may you use compatibility macro-buffer or AST render-mutation tools.\n\
          After a successful preview, call `verify_generated_model`; inspect artifact truth before STEP/export claims and inspect a screenshot for visual/mechanical intent. Report exact issue codes when verification stays red.\n\

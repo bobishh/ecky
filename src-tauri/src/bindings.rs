@@ -19,6 +19,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::agy_provider::stop_agy_provider,
         crate::commands::agy_provider::retry_agy_queued_prompt,
         crate::commands::agy_provider::remove_agy_queued_prompt,
+        crate::commands::agy_provider::compact_agy_provider,
         crate::commands::provider_writer::activate_provider_writer,
         crate::commands::codex_takeover::get_codex_takeover,
         crate::commands::codex_takeover::get_codex_takeover_messages,

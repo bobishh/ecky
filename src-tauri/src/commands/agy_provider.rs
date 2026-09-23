@@ -7,7 +7,8 @@ use crate::contracts::{
     AgyMessagePage, AgyMessagePageInput, AgyPromptInput, AgyProviderBinding, AgyProviderSnapshot,
     AgyStopInput, AppError, AppResult, Attachment, ProviderCapabilities,
 };
-use crate::models::AppState;
+use crate::models::{AppState, PathResolver};
+use crate::provider_turn::ProviderTurnIntent;
 use crate::services::{agy_provider, codex_takeover};
 
 static AGY_BINDING_CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -44,6 +45,47 @@ fn configured_agy_model(state: &AppState) -> Option<String> {
     (!model.is_empty()).then_some(model)
 }
 
+#[derive(Debug, Clone)]
+struct AgyEvalDispatch {
+    seed: crate::llm_eval::EvalRunSeed,
+    fallback_turn_id: String,
+    fallback_started_at: i64,
+}
+
+async fn eval_starting_identity_for(
+    state: &AppState,
+    ecky_thread_id: &str,
+) -> AppResult<Option<(String, Option<String>)>> {
+    let conn = state.db.lock().await;
+    crate::llm_eval::latest_version_identity(&conn, ecky_thread_id).map_err(AppError::persistence)
+}
+
+fn eval_run_seed(
+    binding: &AgyProviderBinding,
+    run_id: &str,
+    prompt: &str,
+    model: Option<String>,
+    starting: Option<(String, Option<String>)>,
+    turn_intent: ProviderTurnIntent,
+) -> crate::llm_eval::EvalRunSeed {
+    let (starting_version_id, starting_input_digest) =
+        starting.map_or((None, None), |(id, digest)| (Some(id), digest));
+    crate::llm_eval::EvalRunSeed {
+        run_id: run_id.to_string(),
+        thread_id: binding.ecky_thread_id.clone(),
+        external_thread_id: binding.agy_conversation_id.clone(),
+        provider: agy_provider::AGY_PROVIDER_ID.into(),
+        model,
+        effort: None,
+        prompt_version: format!("agy-provider-v{}", agy_provider::AGY_BOOTSTRAP_VERSION),
+        prompt: prompt.to_string(),
+        starting_version_id,
+        starting_input_digest,
+        expected_red_rounds: 0,
+        turn_intent,
+    }
+}
+
 fn require_mcp_endpoint(state: &AppState) -> AppResult<String> {
     let status = state.mcp_status();
     if status.running && !status.endpoint_url.trim().is_empty() {
@@ -68,6 +110,48 @@ async fn canonical_handoff(state: &AppState, ecky_thread_id: &str) -> String {
     let conn = state.db.lock().await;
     let context =
         crate::context::assemble_context(&conn, Some(ecky_thread_id.to_string()), None, None);
+    let provider_dialogue = {
+        let stmt = conn.prepare(
+            "SELECT role, content
+             FROM (
+                 SELECT role, content, created_at, id
+                 FROM agent_provider_messages
+                 WHERE ecky_thread_id = ?1
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 4
+             )
+             ORDER BY created_at ASC, id ASC",
+        );
+        match stmt {
+            Ok(mut stmt) => {
+                let rows = stmt
+                    .query_map([ecky_thread_id], |row| {
+                        let role: String = row.get(0)?;
+                        let content: String = row.get(1)?;
+                        Ok(format!(
+                            "{}: {}",
+                            role.to_uppercase(),
+                            crate::context::compact_text(&content, 2048)
+                        ))
+                    })
+                    .ok();
+                rows.map(|r| {
+                    r.filter_map(|res| res.ok())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+                .unwrap_or_default()
+            }
+            Err(_) => String::new(),
+        }
+    };
+    let recent_dialogue = if !provider_dialogue.trim().is_empty() {
+        provider_dialogue
+    } else if !context.recent_dialogue.trim().is_empty() {
+        context.recent_dialogue
+    } else {
+        "[none]".to_string()
+    };
     format!(
         "THREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nDESIGN DIGEST\n{}\n\nARTIFACT DIGEST\n{}",
         if context.summary.trim().is_empty() {
@@ -75,11 +159,7 @@ async fn canonical_handoff(state: &AppState, ecky_thread_id: &str) -> String {
         } else {
             &context.summary
         },
-        if context.recent_dialogue.trim().is_empty() {
-            "[none]"
-        } else {
-            &context.recent_dialogue
-        },
+        &recent_dialogue,
         if context.design_digest.trim().is_empty() {
             "[none]"
         } else {
@@ -141,8 +221,12 @@ async fn provider_project_cwd(
 
 const AGY_PROVIDER_TOOL_GUIDE: &str = r#"# Ecky provider tool guide
 
+- Obey the `[TURN POLICY]` in the current prompt. It is turn-scoped and overrides unfinished work from prior turns.
+- `ANSWER` and `CLARIFY`: do not call tools or inspect/edit project files. Answer or ask one concise question immediately.
+- `INSPECT`: use only advertised read-only tools. Never edit project files.
+- `MODIFY`: project writes are allowed only for the bounded change explicitly requested in the current user message.
 - Provider target is already pre-bound by Ecky. Do not call `thread_borrow` for the assigned thread. Use it only when the user explicitly asks to switch to another existing Ecky thread.
-- First call `workspace_overview`. Confirm `defaultTarget.threadId` matches the assigned thread.
+- For `INSPECT` or `MODIFY`, first call `workspace_overview`. Confirm `defaultTarget.threadId` matches the assigned thread.
 - Before editing, read `agentBrief.primaryGuideUri` and every URI in `agentBrief.mustRead` through MCP resources. Use `capability_search` and `capability_enable` before guessing specialist tool names.
 - When `defaultTarget.sourcePath` exists, inspect and edit that exact file. The watcher appends, validates, and previews settled changes. Do not export first or call a manual commit/finalize operation.
 - Follow inspect -> validate -> preview -> verify. Prefer MCP/normal file tools. Browser work is only for explicit web or UI requests.
@@ -163,10 +247,27 @@ enum AgyPromptPhase {
     Continuation,
 }
 
+#[cfg(test)]
 fn materialize_agy_mcp_config(
     cwd: &str,
     endpoint: &str,
     ecky_thread_id: &str,
+) -> AppResult<AgyWorkspaceMaterialization> {
+    materialize_agy_mcp_config_with_policy(
+        cwd,
+        endpoint,
+        ecky_thread_id,
+        crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Modify,
+        ),
+    )
+}
+
+fn materialize_agy_mcp_config_with_policy(
+    cwd: &str,
+    endpoint: &str,
+    ecky_thread_id: &str,
+    policy: crate::provider_turn::ProviderTurnPolicy,
 ) -> AppResult<AgyWorkspaceMaterialization> {
     let agents_dir = Path::new(cwd).join(".agents");
     std::fs::create_dir_all(&agents_dir).map_err(|error| {
@@ -186,7 +287,8 @@ fn materialize_agy_mcp_config(
     let path = plugin_dir.join("mcp_config.json");
     let manifest_path = plugin_dir.join("plugin.json");
     let guide_path = rules_dir.join("AGENTS.md");
-    let bound_endpoint = crate::mcp::server::provider_bound_endpoint(endpoint, ecky_thread_id);
+    let bound_endpoint =
+        crate::mcp::server::provider_bound_endpoint_with_policy(endpoint, ecky_thread_id, policy);
     let mut root = if path.exists() {
         let raw = std::fs::read_to_string(&path).map_err(|error| {
             AppError::persistence(format!("Failed to read '{}': {error}", path.display()))
@@ -244,6 +346,7 @@ fn materialize_agy_mcp_config(
     })
 }
 
+#[cfg(test)]
 fn provider_prompt(
     phase: AgyPromptPhase,
     ecky_thread_id: &str,
@@ -256,10 +359,41 @@ fn provider_prompt(
     prompt: &str,
     attachments: &[Attachment],
 ) -> String {
+    provider_prompt_with_policy(
+        phase,
+        ecky_thread_id,
+        title,
+        cwd,
+        endpoint,
+        mcp_config_path,
+        tool_guide_path,
+        handoff,
+        prompt,
+        attachments,
+        crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Modify,
+        ),
+    )
+}
+
+fn provider_prompt_with_policy(
+    phase: AgyPromptPhase,
+    ecky_thread_id: &str,
+    title: &str,
+    cwd: &str,
+    endpoint: &str,
+    mcp_config_path: &str,
+    tool_guide_path: &str,
+    handoff: &str,
+    prompt: &str,
+    attachments: &[Attachment],
+    policy: crate::provider_turn::ProviderTurnPolicy,
+) -> String {
     let attachment_manifest = build_agy_attachment_manifest(attachments);
+    let policy_prompt = policy.prompt_contract();
     if phase == AgyPromptPhase::Continuation {
         return format!(
-            "[ECKY USER TURN v{}]\nContinue the already pre-bound Ecky provider conversation. Do not call `thread_borrow`. Answer this user message directly.\n\n[USER MESSAGE]\n{prompt}{attachment_manifest}",
+            "[ECKY USER TURN v{}]\n{policy_prompt}\nThe current user message is the only authority for this turn. Do not resume unfinished work from earlier turns unless this message explicitly requests it. Continue the already pre-bound Ecky provider conversation. Do not call `thread_borrow`.\n\n[USER MESSAGE]\n{prompt}{attachment_manifest}",
             agy_provider::AGY_BOOTSTRAP_VERSION,
         );
     }
@@ -269,7 +403,7 @@ fn provider_prompt(
         AgyPromptPhase::Continuation => unreachable!(),
     };
     format!(
-        "[ECKY {phase_label} v{}]\nYou are Agy inside Ecky CAD. This provider conversation belongs only to Ecky thread {ecky_thread_id} ({title}).\nCanonical workspace: {cwd}\nWorkspace MCP config: {mcp_config_path}\nRequired MCP endpoint: {endpoint} under ecky_mcp. The workspace plugin overrides any same-named global server for this project.\nThis MCP connection is already pre-bound to thread {ecky_thread_id}. Do not call `thread_borrow`; it is only for an intentional switch to another existing target.\nRead the provider tool guide first: {tool_guide_path}. Then call `workspace_overview`, verify its target, and read `agentBrief.primaryGuideUri` plus every URI in `agentBrief.mustRead` before editing.\nUse MCP inspect -> validate -> preview -> verify for CAD changes; the bound file watcher creates the version, so do not call a manual commit/finalize operation. Never invent thread ids or import foreign conversations. Treat the context below as canonical across API/MCP/Codex/Agy switching.\nWhen useful, cite the bound source in the user-facing answer as `[model.ecky]({cwd}/model.ecky:LINE)` so Ecky can open the exact line. Do not include internal `messageId` or `modelId` fields in the user-facing answer; keep those identifiers only in internal tool evidence.\n\n{handoff}\n\n[USER MESSAGE]\n{prompt}{attachment_manifest}",
+        "[ECKY {phase_label} v{}]\n{policy_prompt}\nYou are Agy inside Ecky CAD. This provider conversation belongs only to Ecky thread {ecky_thread_id} ({title}).\nCanonical workspace: {cwd}\nWorkspace MCP config: {mcp_config_path}\nRequired MCP endpoint: {endpoint} under ecky_mcp. The workspace plugin overrides any same-named global server for this project.\nThis MCP connection is already pre-bound to thread {ecky_thread_id}. Do not call `thread_borrow`; it is only for an intentional switch to another existing target.\nRead the provider tool guide first: {tool_guide_path}. Only for MODIFY, call `workspace_overview`, verify its target, and read `agentBrief.primaryGuideUri` plus every URI in `agentBrief.mustRead` before editing.\nUse MCP inspect -> validate -> preview -> verify only for MODIFY; the bound file watcher creates the version, so do not call a manual commit/finalize operation. Never invent thread ids or import foreign conversations. Treat the context below as canonical across API/MCP/Codex/Agy switching.\nWhen useful, cite the bound source in the user-facing answer as `[model.ecky]({cwd}/model.ecky:LINE)` so Ecky can open the exact line. Do not include internal `messageId` or `modelId` fields in the user-facing answer; keep those identifiers only in internal tool evidence.\nEarlier conversation history can be inspected anytime via the MCP tool `thread_messages_get`.\n\n{handoff}\n\n[USER MESSAGE]\n{prompt}{attachment_manifest}",
         agy_provider::AGY_BOOTSTRAP_VERSION,
     )
 }
@@ -375,6 +509,7 @@ fn spawn_turn_finalizer(
     app: tauri::AppHandle,
     binding: AgyProviderBinding,
     queue_id: String,
+    eval_dispatch: AgyEvalDispatch,
     result: tokio::sync::oneshot::Receiver<AppResult<agy_provider::AgyTurnResult>>,
 ) {
     tauri::async_runtime::spawn(async move {
@@ -386,7 +521,7 @@ fn spawn_turn_finalizer(
         };
         {
             let conn = state.db.lock().await;
-            match outcome {
+            match &outcome {
                 Ok(result) if result.status == "SUCCESS" => {
                     if !result.response.trim().is_empty() {
                         let _ = agy_provider::insert_message(
@@ -427,7 +562,10 @@ fn spawn_turn_finalizer(
                     let _ = codex_takeover::complete_queue_item(&conn, &queue_id);
                 }
                 Ok(result) => {
-                    let raw = result.error.unwrap_or(result.status);
+                    let raw = result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| result.status.clone());
                     let _ = codex_takeover::fail_queue_item(&conn, &queue_id, &raw, now_seconds());
                 }
                 Err(error) => {
@@ -435,6 +573,68 @@ fn spawn_turn_finalizer(
                     let _ = codex_takeover::fail_queue_item(&conn, &queue_id, &raw, now_seconds());
                 }
             }
+        }
+        let recovered_failure = if outcome.is_err() {
+            state
+                .agy_provider
+                .take_failed_turn_result(
+                    &binding.agy_conversation_id,
+                    &eval_dispatch.fallback_turn_id,
+                )
+                .await
+        } else {
+            None
+        };
+        let started_at = outcome
+            .as_ref()
+            .map(|result| result.started_at)
+            .unwrap_or_else(|_| {
+                recovered_failure
+                    .as_ref()
+                    .map(|result| result.started_at)
+                    .unwrap_or(eval_dispatch.fallback_started_at)
+            });
+        let completed_at = outcome
+            .as_ref()
+            .map(|result| result.completed_at)
+            .unwrap_or_else(|_| {
+                recovered_failure
+                    .as_ref()
+                    .map(|result| result.completed_at)
+                    .unwrap_or_else(now_seconds)
+            });
+        let versions = {
+            let conn = state.db.lock().await;
+            crate::llm_eval::version_outcomes_for_window(
+                &conn,
+                &binding.ecky_thread_id,
+                eval_dispatch.seed.starting_version_id.as_deref(),
+                started_at,
+                completed_at,
+            )
+            .unwrap_or_else(|error| {
+                state.push_log(format!("[LLM EVAL] version linkage failed: {error}"));
+                Vec::new()
+            })
+        };
+        let run = match (outcome, recovered_failure) {
+            (Ok(result), _) | (Err(_), Some(result)) => {
+                crate::llm_eval::build_agy_eval_run(eval_dispatch.seed, result, versions)
+            }
+            (Err(error), None) => crate::llm_eval::build_failed_eval_run(
+                eval_dispatch.seed,
+                eval_dispatch.fallback_turn_id,
+                started_at,
+                completed_at,
+                codex_takeover::error_text(&error),
+                versions,
+            ),
+        };
+        match crate::llm_eval::persist_run(&app.app_data_dir(), &run) {
+            Ok(files) => {
+                state.push_log(format!("[LLM EVAL] persisted {}", files.run_dir.display()))
+            }
+            Err(error) => state.push_log(format!("[LLM EVAL] persistence failed: {error}")),
         }
         emit_provider_update(&app, &binding, "turn/terminal").await;
         let _ = dispatch_queue_for(&app, &state, &binding).await;
@@ -463,29 +663,121 @@ async fn dispatch_queue_for(
     if head.status != "queued" {
         return Ok(());
     }
-    let endpoint = require_mcp_endpoint(state)?;
-    let requested_bound_endpoint =
-        crate::mcp::server::provider_bound_endpoint(&endpoint, &binding.ecky_thread_id);
-    let warm_session = state
-        .agy_provider
-        .has_compatible_session(
+
+    let raw_prompt = head.prompt_text.trim();
+    if raw_prompt == "/compact" {
+        let now = now_seconds();
+        let claimed = {
+            let conn = state.db.lock().await;
+            codex_takeover::claim_queue_item(&conn, &head.id, now)?
+        };
+        if !claimed {
+            return Ok(());
+        }
+        state
+            .agy_provider
+            .discard_conversation_session(&binding.agy_conversation_id)
+            .await;
+        let new_conv_id = uuid::Uuid::new_v4().to_string();
+        let updated_binding = {
+            let conn = state.db.lock().await;
+            let b = agy_provider::rotate_binding(
+                &conn,
+                &binding.ecky_thread_id,
+                &new_conv_id,
+                "manual compaction",
+                now,
+            )?;
+            agy_provider::insert_message(
+                &conn,
+                &binding.ecky_thread_id,
+                &binding.agy_conversation_id,
+                "user",
+                "/compact",
+                "success",
+                now,
+            )?;
+            agy_provider::insert_message(
+                &conn,
+                &binding.ecky_thread_id,
+                &new_conv_id,
+                "assistant",
+                "Сессия Antigravity CLI скомпактизирована. Контекст очищен, история сохранена в Ecky и доступна агенту через `thread_messages_get`.",
+                "success",
+                now,
+            )?;
+            codex_takeover::complete_queue_item(&conn, &head.id)?;
+            b
+        };
+        emit_provider_update(&app, &updated_binding, "binding/compacted").await;
+        emit_provider_update(&app, &updated_binding, "queue/dispatched").await;
+        return Ok(());
+    }
+
+    let (force_compaction, effective_prompt_text) =
+        if let Some(stripped) = raw_prompt.strip_prefix("/compact ") {
+            (true, stripped.trim().to_string())
+        } else {
+            (false, head.prompt_text.clone())
+        };
+
+    let conversation_messages_count = {
+        let conn = state.db.lock().await;
+        agy_provider::count_conversation_messages(
+            &conn,
+            &binding.ecky_thread_id,
             &binding.agy_conversation_id,
-            configured_agy_model(state).as_deref(),
-            Some(&requested_bound_endpoint),
-        )
+        )?
+    };
+    let needs_compaction = force_compaction || conversation_messages_count >= 20;
+
+    let policy = crate::provider_turn::ProviderTurnPolicy::prompt_based();
+    let intent = policy.intent();
+    state
+        .set_provider_turn_policy(&binding.ecky_thread_id, policy)
         .await;
-    let prompt_phase = if warm_session {
+    let endpoint = require_mcp_endpoint(state)?;
+    let requested_bound_endpoint = crate::mcp::server::provider_bound_endpoint_with_policy(
+        &endpoint,
+        &binding.ecky_thread_id,
+        policy,
+    );
+    let warm_session = if needs_compaction {
+        state
+            .agy_provider
+            .discard_conversation_session(&binding.agy_conversation_id)
+            .await;
+        false
+    } else {
+        state
+            .agy_provider
+            .has_compatible_session_with_policy(
+                &binding.agy_conversation_id,
+                configured_agy_model(state).as_deref(),
+                Some(&requested_bound_endpoint),
+                policy,
+            )
+            .await
+    };
+    let prompt_phase = if needs_compaction {
+        AgyPromptPhase::Bootstrap
+    } else if warm_session {
         AgyPromptPhase::Continuation
     } else {
         AgyPromptPhase::Resume
     };
-    let handoff = if warm_session {
+    let handoff = if warm_session && intent == crate::provider_turn::ProviderTurnIntent::Modify {
         String::new()
     } else {
         canonical_handoff(state, &binding.ecky_thread_id).await
     };
-    let workspace = materialize_agy_mcp_config(&binding.cwd, &endpoint, &binding.ecky_thread_id)?;
-    let prompt = provider_prompt(
+    let workspace = materialize_agy_mcp_config_with_policy(
+        &binding.cwd,
+        &endpoint,
+        &binding.ecky_thread_id,
+        policy,
+    )?;
+    let prompt = provider_prompt_with_policy(
         prompt_phase,
         &binding.ecky_thread_id,
         &binding.label,
@@ -494,8 +786,9 @@ async fn dispatch_queue_for(
         &workspace.config_path,
         &workspace.guide_path,
         &handoff,
-        &head.prompt_text,
+        &effective_prompt_text,
         &head.attachments,
+        policy,
     );
     let claimed = {
         let conn = state.db.lock().await;
@@ -504,29 +797,85 @@ async fn dispatch_queue_for(
     if !claimed {
         return Ok(());
     }
-    let started = match state
-        .agy_provider
-        .start_turn(
-            &binding.agy_conversation_id,
-            &binding.cwd,
-            &prompt,
-            configured_agy_model(state).as_deref(),
-            Some(&workspace.bound_endpoint),
-        )
-        .await
-    {
-        Ok(started) => started,
-        Err(error) => {
-            let conn = state.db.lock().await;
-            codex_takeover::fail_queue_item(
-                &conn,
-                &head.id,
-                &codex_takeover::error_text(&error),
-                now_seconds(),
-            )?;
-            return Err(error);
+    let model = configured_agy_model(state);
+    let starting = eval_starting_identity_for(state, &binding.ecky_thread_id).await?;
+    let eval_seed = eval_run_seed(
+        binding,
+        &head.id,
+        &effective_prompt_text,
+        model.clone(),
+        starting,
+        intent,
+    );
+    let fallback_started_at = now_seconds();
+    let started = if needs_compaction {
+        match state
+            .agy_provider
+            .start_new_turn_with_policy(
+                &binding.cwd,
+                &prompt,
+                model.as_deref(),
+                Some(&workspace.bound_endpoint),
+                policy,
+            )
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let conn = state.db.lock().await;
+                codex_takeover::fail_queue_item(
+                    &conn,
+                    &head.id,
+                    &codex_takeover::error_text(&error),
+                    now_seconds(),
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        match state
+            .agy_provider
+            .start_turn_with_policy(
+                &binding.agy_conversation_id,
+                &binding.cwd,
+                &prompt,
+                model.as_deref(),
+                Some(&workspace.bound_endpoint),
+                policy,
+            )
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let conn = state.db.lock().await;
+                codex_takeover::fail_queue_item(
+                    &conn,
+                    &head.id,
+                    &codex_takeover::error_text(&error),
+                    now_seconds(),
+                )?;
+                return Err(error);
+            }
         }
     };
+
+    let active_binding = if needs_compaction {
+        let conn = state.db.lock().await;
+        agy_provider::rotate_binding(
+            &conn,
+            &binding.ecky_thread_id,
+            &started.conversation_id,
+            if force_compaction {
+                "manual compaction"
+            } else {
+                "auto compaction threshold"
+            },
+            now_seconds(),
+        )?
+    } else {
+        binding.clone()
+    };
+
     let persistence_result = {
         let conn = state.db.lock().await;
         (|| -> AppResult<()> {
@@ -540,10 +889,10 @@ async fn dispatch_queue_for(
             agy_provider::insert_message_with_id_and_attachments(
                 &conn,
                 &format!("agy:user:{}", head.id),
-                &binding.ecky_thread_id,
-                &binding.agy_conversation_id,
+                &active_binding.ecky_thread_id,
+                &active_binding.agy_conversation_id,
                 "user",
-                &head.prompt_text,
+                &effective_prompt_text,
                 &head.attachments,
                 "success",
                 head.created_at,
@@ -565,14 +914,69 @@ async fn dispatch_queue_for(
         )?;
         return Err(error);
     }
+    let eval_dispatch = AgyEvalDispatch {
+        seed: eval_seed,
+        fallback_turn_id: started.turn_id.clone(),
+        fallback_started_at,
+    };
     spawn_turn_finalizer(
         state.clone(),
         app.clone(),
-        binding.clone(),
+        active_binding,
         head.id,
+        eval_dispatch,
         started.result,
     );
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn compact_agy_provider(
+    ecky_thread_id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> AppResult<AgyProviderSnapshot> {
+    require_agy_provider_mode(&state)?;
+    let binding = binding_for(&state, &ecky_thread_id).await?;
+    let runtime = state
+        .agy_provider
+        .runtime(&binding.agy_conversation_id)
+        .await;
+    if runtime.active_turn_id.is_some() || runtime.phase == "stopping" {
+        return Err(AppError::conflict(
+            "Cannot compact while a turn is active or stopping.",
+        ));
+    }
+    state
+        .agy_provider
+        .discard_conversation_session(&binding.agy_conversation_id)
+        .await;
+    let new_conv_id = uuid::Uuid::new_v4().to_string();
+    let now = now_seconds();
+    let updated_binding = {
+        let conn = state.db.lock().await;
+        let b = agy_provider::rotate_binding(
+            &conn,
+            &ecky_thread_id,
+            &new_conv_id,
+            "manual compaction",
+            now,
+        )?;
+        agy_provider::insert_message(
+            &conn,
+            &ecky_thread_id,
+            &new_conv_id,
+            "assistant",
+            "Сессия Antigravity CLI скомпактизирована. Контекст очищен, история сохранена в Ecky и доступна агенту через `thread_messages_get`.",
+            "success",
+            now,
+        )?;
+        b
+    };
+    emit_provider_update(&app, &updated_binding, "binding/compacted").await;
+    emit_provider_update(&app, &updated_binding, "queue/dispatched").await;
+    snapshot_for(&state, updated_binding, None).await
 }
 
 #[tauri::command]
@@ -643,11 +1047,17 @@ pub async fn send_agy_provider_prompt(
         return send_existing(input, app, state, binding).await;
     }
     let endpoint = require_mcp_endpoint(&state)?;
+    let policy = crate::provider_turn::ProviderTurnPolicy::prompt_based();
+    let intent = policy.intent();
+    state
+        .set_provider_turn_policy(&input.ecky_thread_id, policy)
+        .await;
     let title = project_title(&state, &input.ecky_thread_id).await?;
     let cwd = provider_project_cwd(&app, &state, &input.ecky_thread_id, &title).await?;
     let handoff = canonical_handoff(&state, &input.ecky_thread_id).await;
-    let workspace = materialize_agy_mcp_config(&cwd, &endpoint, &input.ecky_thread_id)?;
-    let prompt = provider_prompt(
+    let workspace =
+        materialize_agy_mcp_config_with_policy(&cwd, &endpoint, &input.ecky_thread_id, policy)?;
+    let prompt = provider_prompt_with_policy(
         AgyPromptPhase::Bootstrap,
         &input.ecky_thread_id,
         &title,
@@ -658,14 +1068,19 @@ pub async fn send_agy_provider_prompt(
         &handoff,
         &input.prompt_text,
         &input.attachments,
+        policy,
     );
+    let model = configured_agy_model(&state);
+    let starting = eval_starting_identity_for(&state, &input.ecky_thread_id).await?;
+    let fallback_started_at = now_seconds();
     let started = state
         .agy_provider
-        .start_new_turn(
+        .start_new_turn_with_policy(
             &cwd,
             &prompt,
-            configured_agy_model(&state).as_deref(),
+            model.as_deref(),
             Some(&workspace.bound_endpoint),
+            policy,
         )
         .await?;
     let binding = {
@@ -739,11 +1154,25 @@ pub async fn send_agy_provider_prompt(
         )?;
         return Err(error);
     }
+    let eval_seed = eval_run_seed(
+        &binding,
+        &queue.id,
+        &input.prompt_text,
+        model,
+        starting,
+        intent,
+    );
+    let eval_dispatch = AgyEvalDispatch {
+        seed: eval_seed,
+        fallback_turn_id: started.turn_id.clone(),
+        fallback_started_at,
+    };
     spawn_turn_finalizer(
         state.inner().clone(),
         app,
         binding.clone(),
         queue.id,
+        eval_dispatch,
         started.result,
     );
     snapshot_for(&state, binding, None).await
@@ -870,9 +1299,34 @@ pub fn initialize_agy_queue_supervisor(state: AppState, app: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agy_attachment_manifest, materialize_agy_mcp_config, provider_prompt, AgyPromptPhase,
+        build_agy_attachment_manifest, materialize_agy_mcp_config, provider_prompt,
+        provider_prompt_with_policy, AgyPromptPhase,
     };
     use crate::contracts::{Attachment, AttachmentKind};
+    use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
+
+    #[test]
+    fn answer_policy_terminates_prior_authoring_authority() {
+        let prompt = provider_prompt_with_policy(
+            AgyPromptPhase::Continuation,
+            "ecky-thread-1",
+            "Dryer",
+            "/workspace/dryer",
+            "http://127.0.0.1:39249/mcp?providerThreadId=ecky-thread-1&providerTurnIntent=answer",
+            "/workspace/dryer/.agents/plugins/ecky-provider/mcp_config.json",
+            "/workspace/dryer/.agents/plugins/ecky-provider/rules/AGENTS.md",
+            "THREAD SUMMARY\nlarge canonical handoff",
+            "ты ответить можешь? че происходит?",
+            &[],
+            ProviderTurnPolicy::for_intent(ProviderTurnIntent::Answer),
+        );
+
+        assert!(prompt.contains("Intent: ANSWER"));
+        assert!(prompt.contains("Do not call tools"));
+        assert!(prompt.contains("Do not inspect or edit project files"));
+        assert!(prompt.contains("Do not resume unfinished work from earlier turns"));
+        assert!(prompt.contains("Answer the current user message immediately"));
+    }
 
     #[test]
     fn provider_prompt_requests_clickable_bound_source_evidence_without_internal_ids() {
@@ -911,7 +1365,7 @@ mod tests {
             &[],
         );
 
-        assert!(prompt.contains("[ECKY USER TURN v2]"));
+        assert!(prompt.contains("[ECKY USER TURN v3]"));
         assert!(prompt.contains("Increase capacity."));
         assert!(!prompt.contains("large canonical handoff"));
         assert!(!prompt.contains("THREAD BOOTSTRAP"));
@@ -977,5 +1431,27 @@ mod tests {
         assert!(manifest.contains("\"disabled\": false"));
 
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn bootstrap_and_compaction_prompt_instructs_agent_on_thread_messages_get() {
+        let prompt = provider_prompt_with_policy(
+            AgyPromptPhase::Bootstrap,
+            "ecky-thread-1",
+            "Dryer",
+            "/workspace/dryer",
+            "http://127.0.0.1:39249/mcp?providerThreadId=ecky-thread-1",
+            "/workspace/dryer/.agents/plugins/ecky-provider/mcp_config.json",
+            "/workspace/dryer/.agents/plugins/ecky-provider/rules/AGENTS.md",
+            "THREAD SUMMARY\ncompacted history",
+            "делай",
+            &[],
+            ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify),
+        );
+
+        assert!(prompt.contains("[ECKY THREAD BOOTSTRAP"));
+        assert!(prompt.contains("Earlier conversation history can be inspected anytime via the MCP tool `thread_messages_get`."));
+        assert!(prompt.contains("THREAD SUMMARY\ncompacted history"));
+        assert!(prompt.contains("[USER MESSAGE]\nделай"));
     }
 }

@@ -93,6 +93,14 @@ async removeAgyQueuedPrompt(eckyThreadId: string, queueId: string) : Promise<Res
     else return { status: "error", error: e  as any };
 }
 },
+async compactAgyProvider(eckyThreadId: string) : Promise<Result<AgyProviderSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compact_agy_provider", { eckyThreadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async activateProviderWriter(input: ProviderWriterActivationInput) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("activate_provider_writer", { input }) };

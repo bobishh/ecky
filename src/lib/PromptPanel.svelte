@@ -1450,7 +1450,7 @@
               onchange={(event) =>
                 onToggleWorkspaceCapture?.((event.currentTarget as HTMLInputElement).checked)}
             />
-            <span>SEND WORKSPACE IF NEEDED</span>
+            <span>SEND VIEWPORT IMAGE</span>
           </label>
         {/if}
       </div>
