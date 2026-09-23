@@ -1,0 +1,135 @@
+(model
+  (params
+    (number bottle_diameter 74.0 :min 60.0 :max 90.0 :label "Bottle Diameter")
+    (number wall_thickness 4.0 :min 2.0 :max 6.0 :label "Wall Thickness")
+    (number dovetail_clearance 0.2 :min 0.05 :max 0.5 :step 0.05 :label "Joint Clearance")
+    (number mating_rail_length 85.0 :min 60.0 :max 110.0 :label "Mating Rail Length")
+    (number holder_chamfer 0.8 :min 0.2 :max 1.5 :step 0.1 :label "Holder Chamfer")
+    (number front_opening_width_ratio 0.72 :min 0.55 :max 0.92 :step 0.02 :label "Front Opening Width")
+  )
+
+  (part "BottleCage"
+    (let* (
+      (dia bottle_diameter)
+      (wall wall_thickness)
+      (clr dovetail_clearance)
+      (rail_len mating_rail_length)
+
+      (in_r (+ (/ dia 2.0) 0.5))
+      (out_r (+ in_r wall))
+      (height 130.0)
+
+      (base_w 12.0)
+      (h_jt 4.5)
+      (top_w (+ base_w (* 2.0 h_jt)))
+
+      ;; Shared radial front opening. Wall and bottom ledge use same profile.
+      ;; front_opening_width_ratio controls how much side material is removed.
+      (front_sector_r (+ out_r 28.0))
+      (front_sector_side_x (* front_sector_r front_opening_width_ratio))
+      (front_sector_side_y (* front_sector_r 0.4226))
+      (front_sector_profile (polygon (list
+        (list 0.0 0.0)
+        (list front_sector_side_x front_sector_side_y)
+        (list 0.0 front_sector_r)
+        (list (- front_sector_side_x) front_sector_side_y)
+      )))
+
+      (c_out (cylinder out_r height :align '(center center center)))
+      (c_in (cylinder in_r (+ height 10.0) :align '(center center center)))
+      (cage_shell (difference c_out c_in))
+
+      (front_cut (place (location (plane :origin (list 0.0 0.0 (- (- (/ height 2.0)) 5.0))))
+                   (extrude front_sector_profile (+ height 10.0))))
+      (cage_cut1 (difference cage_shell front_cut))
+
+      (ledge_z (- (/ height 2.0)))
+      (ledge_base_raw (place (location (plane :origin (list 0.0 0.0 ledge_z))) (cylinder out_r 4.0 :align '(center center min))))
+      (ledge_base (chamfer holder_chamfer ledge_base_raw))
+      (ledge_hole (place (location (plane :origin (list 0.0 0.0 ledge_z))) (cylinder (- in_r 10.0) 10.0 :align '(center center min))))
+      (ledge_front_cut (place (location (plane :origin (list 0.0 0.0 ledge_z)))
+                         (extrude front_sector_profile 10.0)))
+      (ledge (difference ledge_base ledge_hole ledge_front_cut))
+
+      (cage_with_ledge (union cage_cut1 ledge))
+
+      (spine_w 26.0)
+      (spine_th 8.0)
+      (spine_y (+ (- out_r) 2.0))
+      (spine (place (location (plane :origin (list 0.0 spine_y 0.0)))
+                 (box spine_w spine_th height :align '(center max center))))
+
+      (cage_with_spine (union cage_with_ledge spine))
+
+      ;; Same 45-degree rail profile, expanded only by declared clearance.
+      ;; Bottom entry is open; top is a real stop with a 45-degree bevel cutter.
+      (slot_w_b (+ base_w (* 2.0 clr)))
+      (slot_w_t (+ top_w (* 2.0 clr)))
+      (slot_h_jt (+ h_jt clr))
+
+      (slot_half_b (/ slot_w_b 2.0))
+      (slot_half_t (/ slot_w_t 2.0))
+
+      (slot_poly (polygon (list
+        (list (- slot_half_b) 0.0)
+        (list slot_half_b 0.0)
+        (list slot_half_t slot_h_jt)
+        (list (- slot_half_t) slot_h_jt)
+      )))
+
+      (slot_y (- spine_y spine_th clr))
+      (slot_z (- (- (/ height 2.0)) 7.0))
+      (slot_length (+ rail_len clr))
+      (slot_cutter_raw (place (location (plane :origin (list 0.0 slot_y slot_z)))
+                         (extrude slot_poly slot_length)))
+      (entry_relief (place (location (plane :origin (list 0.0 slot_y (- slot_z 3.0))))
+                      (box (+ slot_w_t 5.0) (+ slot_h_jt 2.0) 7.0 :align '(center min min))))
+
+      ;; Bucket-style female stop: roof the slot cutter itself with 45-degree cuts.
+      ;; No separate exterior body wedge; the holder keeps the connector face clean.
+      (slot_top_z (+ slot_z slot_length))
+      (slot_roof_box_size 100.0)
+      (slot_roof_a (place (location (plane :origin (list 0.0 slot_y slot_top_z)) :rotate '(0.0 45.0 0.0))
+                     (box slot_roof_box_size slot_roof_box_size slot_roof_box_size :align '(min center min))))
+      (slot_roof_b (place (location (plane :origin (list 0.0 slot_y slot_top_z)) :rotate '(0.0 -45.0 0.0))
+                     (box slot_roof_box_size slot_roof_box_size slot_roof_box_size :align '(max center min))))
+      (slot_cutter (difference slot_cutter_raw slot_roof_a slot_roof_b))
+
+      (cage_final (difference cage_with_spine slot_cutter entry_relief))
+
+      ;; Bucket-style staggered hex grid: regular point-up hexes, no Voronoi/radius noise.
+      ;; Frame connector stays unchanged; only cage-side slot support roof is cut.
+      (cell_cut_len 100.0)
+      (cell_cols 3.0)
+      (cell_pitch_z 17.0)
+      (cell_pitch_y 16.0)
+
+      (cell_cutters
+        (repeat-union cell 18
+          (let* ((col (- cell (* cell_cols (floor (/ cell cell_cols)))))
+                 (row (floor (/ cell cell_cols)))
+                 (row_mod (- row (* 2.0 (floor (/ row 2.0)))))
+                 (row_shift (* row_mod (* 0.5 cell_pitch_y)))
+                 (base_y (+ -28.0 (* col cell_pitch_y) row_shift))
+                 (base_z (+ -43.0 (* row cell_pitch_z)))
+                 (jy base_y)
+                 (jz base_z)
+                 (hex_r 6.7)
+                 (hex_w (* 0.866 hex_r))
+                 (hex (polygon (list
+                   (list hex_r 0.0)
+                   (list (* 0.5 hex_r) hex_w)
+                   (list (* -0.5 hex_r) hex_w)
+                   (list (- hex_r) 0.0)
+                   (list (* -0.5 hex_r) (- hex_w))
+                   (list (* 0.5 hex_r) (- hex_w))
+                 ))))
+            (place (location (plane :origin (list 0.0 jy jz)) :rotate '(0.0 90.0 0.0))
+              (extrude hex cell_cut_len :symmetric #t)))))
+
+      (cage_holed (difference cage_final cell_cutters))
+    )
+      (place (location (plane :origin '(-25.0 0.0 0.0))) cage_holed)
+    )
+  )
+)

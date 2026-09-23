@@ -1,0 +1,2545 @@
+(define (dryer-body-width spool-diameter radial-clearance wall-thickness)
+  (+ spool-diameter radial-clearance radial-clearance wall-thickness wall-thickness))
+
+(define (dryer-body-depth spool-width axial-clearance wall-thickness)
+  (+ spool-width axial-clearance axial-clearance wall-thickness wall-thickness))
+
+(define (dryer-latch-axis-y body-depth catch-pin-radius catch-pin-clearance)
+  ;; Hinge outer radius = pin + fit + bore margin + 3 mm ring wall.
+  ;; Keep its outside surface exactly 1.0 mm clear of the enclosure wall.
+  (- (- 0 (/ body-depth 2))
+     (+ catch-pin-radius catch-pin-clearance 0.2 3 1)))
+
+(define (dryer-body-height
+         spool-diameter wall-thickness desiccant-height
+         spool-bottom-clearance hygrometer-zone-height)
+  (+ wall-thickness desiccant-height spool-bottom-clearance
+     spool-diameter hygrometer-zone-height))
+
+(define (dryer-spool-axis-height
+         spool-diameter wall-thickness desiccant-height
+         spool-bottom-clearance spool-axis-lift)
+  ;; Bearing hubs center the spool on the axis: no bore/axle sag correction.
+  (+ wall-thickness desiccant-height spool-bottom-clearance
+     (/ spool-diameter 2)
+     spool-axis-lift))
+
+(define (dryer-body-split-height
+         spool-diameter wall-thickness desiccant-height
+         spool-bottom-clearance spool-axis-lift)
+  ;; Keep the lower-body top and open dovetail guide 5.5 mm above the axle.
+  ;; Desiccant-height therefore raises the bed, axle, and body split together.
+  (+ wall-thickness desiccant-height spool-bottom-clearance
+     (/ spool-diameter 2)
+     spool-axis-lift
+     5.5))
+
+(define (hygrometer-bore-diameter body-diameter fit-clearance)
+  (+ body-diameter fit-clearance))
+
+;; Small interchangeable filament threads scale with nozzle line capability.
+;; Paired male/female profiles always consume the same derived dimensions.
+(define (dryer-small-thread-pitch nozzle-diameter)
+  (* nozzle-diameter 5))
+
+(define (dryer-small-thread-base-width nozzle-diameter)
+  (* nozzle-diameter 4))
+
+(define (dryer-small-thread-crest-width nozzle-diameter)
+  nozzle-diameter)
+
+(define (dryer-small-thread-depth nozzle-diameter)
+  (* nozzle-diameter 1.5))
+
+(define (dryer-thread-nozzle-value nozzle-profile)
+  (if (= nozzle-profile "0.6") 0.6 0.4))
+
+(define (dryer-dovetail-bottom-width top-width)
+  ;; Two millimetres total taper over the 12 mm engagement height.
+  ;; Each side opens by 1 mm while the support slides into its final seat.
+  (- top-width 2))
+
+;; 6002-2RS envelope shared by arbor, U cradles, and printable fit gauges.
+;; Standard size: 15 mm bore, 32 mm OD, 9 mm width.
+(define dryer-bearing-inner-radius 7.5)
+(define dryer-bearing-outer-radius 16)
+(define dryer-bearing-width 9)
+(define dryer-bearing-cradle-back-wall 1.5)
+(define dryer-wall-dovetail-projection 3.5)
+(define dryer-integrated-bearing-side-clearance 0.3)
+
+(define (dryer-bearing-outer-face spool-width axial-clearance)
+  ;; Integrated U seats use the enclosure walls as bearing thrust faces.
+  ;; No removable adapter consumes axial space.
+  (- (/ (+ spool-width axial-clearance axial-clearance) 2)
+     dryer-integrated-bearing-side-clearance))
+
+;; Shared roof-feed dimensions. The R6 thread matches the proven stamp handle.
+(define dryer-filament-thread-core-radius 6)
+(define dryer-filament-thread-radial-clearance 0.35)
+
+(define (dryer-filament-thread-major-radius nozzle-diameter)
+  (+ dryer-filament-thread-core-radius
+     (dryer-small-thread-depth nozzle-diameter)))
+
+(define (dryer-filament-ring-outer-radius nozzle-diameter)
+  (+ (dryer-filament-thread-major-radius nozzle-diameter)
+     dryer-filament-thread-radial-clearance
+     3.7))
+
+(define (dryer-filament-barb-root-radius hose-inner-diameter)
+  (- (/ hose-inner-diameter 2) 0.2))
+
+(define (dryer-filament-barb-crest-radius hose-inner-diameter)
+  (+ (/ hose-inner-diameter 2) 0.3))
+
+(define (dryer-filament-barb-tip-radius hose-inner-diameter)
+  (- (/ hose-inner-diameter 2) 0.7))
+
+(define (dryer-filament-hose-inner-radius hose-inner-diameter)
+  (/ hose-inner-diameter 2))
+
+(define (dryer-wide-hex-row
+         cut-hex-relief cell-count row-center hex-pitch hex-radius
+         hex-half-width face-y face-z cut-length)
+  ;; Disjoint cutters stay a compound. Fusing them wastes one OCCT boolean per cell.
+  (if cut-hex-relief
+    (repeat-compound cell cell-count
+      (let* ((cell-x (* (- cell row-center) hex-pitch))
+             (hex-profile
+               (polygon
+                 (list
+                   (list 0.0 hex-radius)
+                   (list hex-half-width (* 0.5 hex-radius))
+                   (list hex-half-width (* -0.5 hex-radius))
+                   (list 0.0 (- hex-radius))
+                   (list (- hex-half-width) (* -0.5 hex-radius))
+                   (list (- hex-half-width) (* 0.5 hex-radius))))))
+        (place
+          (location
+            (plane :origin (list cell-x face-y face-z))
+            :rotate '(90.0 0.0 0.0))
+          (extrude hex-profile cut-length :symmetric #t))))
+    (box 0.01 0.01 0.01)))
+
+(define (dryer-end-hex-row
+         cut-hex-relief cell-count row-center hex-pitch hex-radius
+         hex-half-width face-x face-z cut-length)
+  (if cut-hex-relief
+    (repeat-compound cell cell-count
+      (let* ((cell-y (* (- cell row-center) hex-pitch))
+             (hex-profile
+               (polygon
+                 (list
+                   (list hex-radius 0.0)
+                   (list (* 0.5 hex-radius) hex-half-width)
+                   (list (* -0.5 hex-radius) hex-half-width)
+                   (list (- hex-radius) 0.0)
+                   (list (* -0.5 hex-radius) (- hex-half-width))
+                   (list (* 0.5 hex-radius) (- hex-half-width))))))
+        (place
+          (location
+            (plane :origin (list face-x cell-y face-z))
+            :rotate '(0.0 90.0 0.0))
+          (extrude hex-profile cut-length :symmetric #t))))
+    (box 0.01 0.01 0.01)))
+
+(model
+  (params
+    ;; enclosure
+    (number wall-thickness 2.8 :label "Body / Wall thickness" :min 2.6 :max 3.6 :step 0.1 :unit length)
+    (number enclosure-corner-radius 12 :label "Body / Corner radius" :min 6 :max 18 :step 0.5 :unit length)
+    (number desiccant-bed-height 80 :label "Body / Desiccant bed height" :min 60 :max 90 :step 1 :unit length)
+    (number spool-bottom-clearance 14 :label "Body / Spool bottom clearance" :min 8 :max 20 :step 0.5 :unit length)
+    ;; New key intentionally invalidates the stale 52.6 mm UI override from the
+    ;; earlier compact STAR prototype.
+    (number spool-star-free-diameter 76.6 :label "Spool / STAR free diameter" :min 75 :max 80 :step 0.1 :unit length)
+
+    ;; recessed point-up honeycomb
+    (toggle cut-hex-relief #f :label "Hex / Cut relief")
+    (number wall-hex-radius 14 :label "Hex / Radius" :min 8 :max 14 :step 0.5 :unit length)
+
+    ;; lid
+    (number lid-clearance 0.25 :label "Lid / Outer skirt radial clearance" :min 0.15 :max 0.5 :step 0.05 :unit length)
+    (number lid-overlap-depth 7 :label "Lid / Overlap depth" :min 5 :max 10 :step 0.5 :unit length)
+    (number lid-gasket-thickness 0.6 :label "Lid / TPU gasket thickness" :min 0.4 :max 1 :step 0.1 :unit length)
+
+    ;; bearing supports / wall dovetail
+    ;; Direct Ø28 bearing contact inside the Ø52 bore offsets the spool centre by 12 mm.
+    ;; 32.8 keeps the previous physical spool height: 32.8 - 12 = 20.8 mm lift.
+    (number spool-axis-lift 32.8 :label "Spool / Bearing-axis lift" :min 20 :max 40 :step 0.1 :unit length)
+
+    ;; catches
+    (number latch-width 68 :label "Latch / Width" :min 50 :max 76 :step 1 :unit length)
+    (number catch-pin-radius 2.75 :label "Latch / D-pin radius" :min 2 :max 3.5 :step 0.25 :unit length)
+    (number catch-pin-clearance 0.25 :label "Latch / D-pin clearance" :min 0.15 :max 0.5 :step 0.05 :unit length)
+
+    ;; filament
+    (select thread-nozzle-diameter "0.6"
+      :label "Threads / Nozzle diameter"
+      :unit length
+      :options
+        (("0.4 mm" "0.4")
+         ("0.6 mm" "0.6")))
+    (number filament-channel-diameter 5 :label "Filament / Sealed path channel diameter" :min 4 :max 6 :step 0.1 :unit length)
+    (number filament-hose-inner-diameter 11 :label "Filament / TPU hose inner diameter" :min 9.5 :max 12.5 :step 0.1 :unit length)
+    (number filament-hose-length 130 :label "Filament / TPU hose length" :min 100 :max 240 :step 5 :unit length)
+    (number filament-hose-wall 1.8 :label "Filament / TPU hose wall" :min 1.5 :max 2.4 :step 0.1 :unit length)
+
+    ;; hygrometer
+    (number hygrometer-body-diameter 42 :label "Hygrometer / Body diameter" :min 40 :max 44 :step 0.1 :unit length)
+    (number hygrometer-body-clearance 0.4 :label "Hygrometer / Body fit clearance" :min 0.2 :max 0.8 :step 0.1 :unit length)
+    (number hygrometer-holder-wall 1.8 :label "Hygrometer / Holder wall" :min 1.5 :max 3 :step 0.1 :unit length)
+    (number hygrometer-wall-hole-clearance 0.6 :label "Hygrometer / Wall hole radial clearance" :min 0.4 :max 1 :step 0.05 :unit length)
+    (number hygrometer-thread-engagement 12 :label "Hygrometer thread / Engagement depth" :min 8 :max 14 :step 0.5 :unit length)
+
+    ;; preview
+    ;; New key discards the persisted false value from the old print-layout UI.
+    (toggle show-assembly #t :label "Preview / Assembly")
+
+    :relations
+      ((> wall-thickness 0.8)
+       (> enclosure-corner-radius wall-thickness)
+       (> catch-pin-radius catch-pin-clearance)
+       (> wall-thickness lid-clearance)
+       (> lid-gasket-thickness 0.1)
+       (> filament-channel-diameter 1.75)
+       (< filament-hose-length 256)
+       (> hygrometer-thread-engagement 5)))
+
+  (verify
+    (tag dryer-preview-exists)
+    (metric preview (manifest has-preview-stl))
+    (expect preview (= true)))
+
+  ;; Integrated bearing seats replace the two removable support shells.
+  ;; Declaring that count suppresses false disconnected-layout rejection.
+  (verify
+    (tag dryer-layout-components)
+    (metric components (stl connected-component-count))
+    (expect components (= 20)))
+
+  (verify
+    (tag dryer-mesh-manifold)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0)))
+
+  ;; ===========================================================================
+  ;; BODY -- separate STL
+  ;; ===========================================================================
+
+  (define-component dryer-enclosure-body
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-radial-clearance)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number enclosure-corner-radius)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (toggle cut-hex-relief)
+     (number wall-hex-radius)
+     (number wall-hex-recess-depth-local)
+     (number wall-hex-bottom-margin)
+     (number wall-hex-seam-margin)
+     (number spool-axis-lift)
+     (number axle-flat-height)
+     (number axle-flat-support-height-local)
+     (number latch-width)
+     (number latch-horizontal-offset)
+     (number catch-pin-radius)
+     (number catch-pin-clearance)
+     (number body-catch-setback))
+    (let*
+      (;; Legacy socket construction remains inert in this fork; local values
+       ;; keep its helper stages compilable without exposing dead UI controls.
+       (axle-slot-clearance 0.35)
+       (wall-dovetail-projection-local 3.5)
+       (body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-d (dryer-body-depth spool-width spool-axial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (inner-w (- body-w wall-thickness wall-thickness))
+       (inner-d (- body-d wall-thickness wall-thickness))
+       (inner-h (- body-h wall-thickness wall-thickness))
+       (inner-r (- enclosure-corner-radius wall-thickness))
+       (half-d (/ body-d 2))
+       (front-y (- 0 half-d))
+
+       (axle-z
+         (dryer-spool-axis-height
+           spool-diameter wall-thickness desiccant-height
+           spool-bottom-clearance spool-axis-lift))
+       (split-z
+         (dryer-body-split-height
+           spool-diameter wall-thickness desiccant-height
+           spool-bottom-clearance spool-axis-lift))
+
+       ;; bottom reinforcement
+       (root-size (+ wall-thickness 0.4))
+       (root-tip 0.2)
+       (root-overlap 0.15)
+       (root-z (- wall-thickness root-overlap))
+       (root-h (+ root-size root-overlap))
+       (root-base-w (- inner-w root-size root-size))
+       (root-base-d (- inner-d root-size root-size))
+       (root-base-r (- inner-r root-size))
+       (root-tip-w (- inner-w root-tip root-tip))
+       (root-tip-d (- inner-d root-tip root-tip))
+       (root-tip-r (- inner-r root-tip))
+
+       ;; female wall socket stays outside the enclosure shell
+       (axle-dovetail-depth wall-dovetail-projection-local)
+       (axle-dovetail-flare 3)
+       (axle-dovetail-root-width 20)
+       (axle-dovetail-head-width
+         (+ axle-dovetail-root-width axle-dovetail-flare axle-dovetail-flare))
+       (axle-dovetail-height 12)
+       (axle-dovetail-slot-root-width
+         (+ axle-dovetail-root-width axle-slot-clearance axle-slot-clearance))
+       (axle-dovetail-slot-head-width
+         (+ axle-dovetail-head-width axle-slot-clearance axle-slot-clearance))
+       (axle-dovetail-slot-bottom-root-width
+         (dryer-dovetail-bottom-width axle-dovetail-slot-root-width))
+       (axle-dovetail-slot-bottom-head-width
+         (dryer-dovetail-bottom-width axle-dovetail-slot-head-width))
+       (axle-dovetail-slot-depth (+ axle-dovetail-depth axle-slot-clearance))
+       (axle-socket-back-wall 1)
+       (axle-socket-projection (+ axle-dovetail-depth axle-socket-back-wall))
+       (axle-socket-side-wall 3)
+       (axle-socket-width
+         (+ axle-dovetail-slot-head-width axle-socket-side-wall axle-socket-side-wall))
+       (axle-socket-bottom-rel (- 0 axle-flat-height 2))
+       ;; Open guide runs from the axle seat to the top edge of the body.
+       ;; The spool can enter the dovetail at the enclosure opening and slide down.
+       (axle-socket-top-rel (- split-z axle-z))
+       (axle-socket-height (- axle-socket-top-rel axle-socket-bottom-rel))
+       (axle-socket-channel-low-rel
+         (- 0 axle-flat-height axle-slot-clearance))
+       (axle-socket-channel-high-rel (+ axle-socket-top-rel 0.2))
+       (axle-socket-channel-height
+         (- axle-socket-channel-high-rel axle-socket-channel-low-rel))
+       (axle-socket-taper-bottom-rel (- 0 (/ axle-dovetail-height 2)))
+       (axle-socket-taper-top-rel (/ axle-dovetail-height 2))
+       (axle-socket-lower-relief-height
+         (- axle-socket-taper-bottom-rel axle-socket-channel-low-rel))
+       (axle-socket-guide-height
+         (- axle-socket-channel-high-rel axle-socket-taper-top-rel))
+       (axle-wall-inner-y (+ front-y wall-thickness))
+       (axle-socket-inner-y (+ axle-wall-inner-y axle-socket-projection))
+
+       ;; Final variant: native 6002 U seats. Each boss overlaps the wall, captures
+       ;; 4 mm of the 8 mm bearing width, and leaves the top open for cassette
+       ;; insertion. The enclosure wall itself is the axial thrust face.
+       (integrated-bearing-clearance 0.25)
+       (integrated-seat-slot-r
+         (+ dryer-bearing-outer-radius integrated-bearing-clearance))
+       (integrated-seat-wall 3)
+       (integrated-seat-width
+         (+ integrated-seat-slot-r integrated-seat-slot-r
+            integrated-seat-wall integrated-seat-wall))
+       (integrated-seat-depth 4)
+       (integrated-seat-wall-overlap 0.4)
+       (integrated-seat-bottom-z
+         (- axle-z integrated-seat-slot-r integrated-seat-wall))
+       (integrated-seat-top-z split-z)
+       (integrated-seat-height
+         (- integrated-seat-top-z integrated-seat-bottom-z))
+       (integrated-seat-positive-y
+         (- axle-wall-inner-y integrated-seat-wall-overlap))
+       (integrated-seat-positive-depth
+         (+ integrated-seat-depth integrated-seat-wall-overlap))
+       (integrated-seat-cut-start-y axle-wall-inner-y)
+       (integrated-seat-cut-depth (+ integrated-seat-depth 4))
+
+       ;; Sloped wall thickening follows the current socket geometry.
+       (axle-support-width axle-socket-width)
+       (axle-support-depth axle-socket-projection)
+       (axle-support-front-y (+ front-y wall-thickness))
+       (axle-support-overlap 0.3)
+       (axle-support-top-z
+         (+ axle-z axle-socket-bottom-rel axle-support-overlap))
+       (axle-support-height
+         (max 4
+           (min axle-flat-support-height-local (/ axle-socket-height 4))))
+       (axle-support-slope-root-depth 0.5)
+       (axle-support-slope-top-shift
+         (/ (- axle-support-depth axle-support-slope-root-depth) 2))
+       (axle-support-slope-z (- axle-support-top-z axle-support-height))
+
+       ;; Body hexes: seven rows, centred in the safe lower panel.
+       ;; Six equal intervals make the default 30.0 mm centre pitch, matching
+       ;; the lid's 30.3 mm pitch without exposing a manual rib/gap parameter.
+       (hex-r wall-hex-radius)
+       (hex-w (* 0.8660254 hex-r))
+       ;; Auto-layout: fixed cell counts fill the safe flat panel area.
+       ;; Changing radius changes the solid gap, not the overall pattern span.
+       (hex-side-margin enclosure-corner-radius)
+       (hex-center-span-x
+         (- body-w hex-side-margin hex-side-margin hex-w hex-w))
+       (hex-center-span-y
+         (- body-d hex-side-margin hex-side-margin hex-w hex-w))
+       (hex-pitch-x (/ hex-center-span-x 5))
+       (hex-pitch-y hex-center-span-y)
+       (hex-cut-depth wall-hex-recess-depth-local)
+       (hex-cut-l (+ hex-cut-depth 0.1))
+       (front-hex-y (- (+ front-y (/ hex-cut-depth 2)) 0.05))
+       (right-hex-x (+ (- (/ body-w 2) (/ hex-cut-depth 2)) 0.05))
+       (hex-zone-bottom wall-hex-bottom-margin)
+       (hex-zone-top (- split-z wall-hex-seam-margin))
+       (hex-zone-height (- hex-zone-top hex-zone-bottom))
+       (hex-pitch-z (/ (- hex-zone-height hex-r hex-r) 6))
+       (body-hex-z0 (+ hex-zone-bottom hex-r))
+       (body-hex-z1 (+ body-hex-z0 hex-pitch-z))
+       (body-hex-z2 (+ body-hex-z1 hex-pitch-z))
+       (body-hex-z3 (+ body-hex-z2 hex-pitch-z))
+       (body-hex-z4 (+ body-hex-z3 hex-pitch-z))
+       (body-hex-z5 (+ body-hex-z4 hex-pitch-z))
+       (body-hex-z6 (+ body-hex-z5 hex-pitch-z))
+
+       ;; catches
+       (hole-r (+ catch-pin-radius catch-pin-clearance))
+       (flat-d (+ (/ catch-pin-radius 2) catch-pin-clearance))
+       (hole-profile-w (+ hole-r flat-d))
+       (hole-d (+ hole-r hole-r))
+       (ear-t 6)
+       (half-ear-t (/ ear-t 2))
+       (ear-r (+ hole-r 1.5))
+       (ear-d (+ ear-r ear-r))
+       (pin-span (+ latch-width ear-t ear-t))
+       (half-span (/ pin-span 2))
+       (front-catch-x latch-horizontal-offset)
+       (rear-catch-x (- 0 latch-horizontal-offset))
+       (rail-y
+         (dryer-latch-axis-y body-d catch-pin-radius catch-pin-clearance))
+       ;; Rotate the complete front/rear latch systems onto the left/right walls.
+       ;; Recalculate the rail from body width so the hinge keeps its 1 mm wall gap.
+       (side-rail-x
+         (dryer-latch-axis-y body-w catch-pin-radius catch-pin-clearance))
+       (side-latch-shift-x (- side-rail-x rail-y))
+       ;; End ears sit partly over the R12 enclosure corners after side rotation.
+       ;; Reach through that curved setback and retain about 1 mm solid overlap.
+       (catch-wall-overlap 4)
+       (catch-root-y (+ front-y catch-wall-overlap))
+       (support-d (- catch-root-y rail-y))
+       (body-catch-z (- split-z body-catch-setback))
+       (ear-x (- front-catch-x half-span))
+       (ear-center-x (+ ear-x half-ear-t))
+       (ear2-x (- pin-span ear-t))
+       (rear-x-shift (- rear-catch-x front-catch-x))
+       (ear-tangent-offset (/ ear-r 1.41421356))
+       (ear-tangent-y (- rail-y ear-tangent-offset))
+       (ear-gusset-run (- catch-root-y ear-tangent-y))
+       (ear-gusset-center-y (/ (+ ear-tangent-y catch-root-y) 2))
+       (ear-gusset-tip-d 0.8)
+       (ear-gusset-wall-shift (/ (- ear-gusset-run ear-gusset-tip-d) 2))
+       (ear-gusset-overlap 0.25)
+       (body-tangent-z (- body-catch-z ear-tangent-offset))
+       (body-gusset-top-z (+ body-tangent-z ear-gusset-overlap))
+       (body-gusset-z (- body-gusset-top-z ear-gusset-run)))
+
+      (build
+        (shape outer
+          (extrude
+            (rounded-rect body-w body-d enclosure-corner-radius)
+            body-h))
+
+        (shape cavity
+          (translate 0 0 wall-thickness
+            (extrude
+              (rounded-rect inner-w inner-d inner-r)
+              inner-h)))
+
+        (shape shell-solid
+          (difference outer cavity))
+
+        ;; Same vertical density as lid: 6 / 5 / 6 / 5 / 6 / 5 / 6.
+        (shape front-hex-row0
+          (dryer-wide-hex-row
+            cut-hex-relief
+            6 2.5 hex-pitch-x hex-r hex-w front-hex-y body-hex-z0 hex-cut-l))
+
+        (shape front-hex-row1
+          (dryer-wide-hex-row
+            cut-hex-relief
+            5 2 hex-pitch-x hex-r hex-w front-hex-y body-hex-z1 hex-cut-l))
+
+        (shape front-hex-row2
+          (dryer-wide-hex-row
+            cut-hex-relief
+            6 2.5 hex-pitch-x hex-r hex-w front-hex-y body-hex-z2 hex-cut-l))
+
+        (shape front-hex-row3
+          (dryer-wide-hex-row
+            cut-hex-relief
+            5 2 hex-pitch-x hex-r hex-w front-hex-y body-hex-z3 hex-cut-l))
+
+        (shape front-hex-row4
+          (dryer-wide-hex-row
+            cut-hex-relief
+            6 2.5 hex-pitch-x hex-r hex-w front-hex-y body-hex-z4 hex-cut-l))
+
+        (shape front-hex-row5
+          (dryer-wide-hex-row
+            cut-hex-relief
+            5 2 hex-pitch-x hex-r hex-w front-hex-y body-hex-z5 hex-cut-l))
+
+        (shape front-hex-row6
+          (dryer-wide-hex-row
+            cut-hex-relief
+            6 2.5 hex-pitch-x hex-r hex-w front-hex-y body-hex-z6 hex-cut-l))
+
+        (shape front-hex
+          (compound
+            front-hex-row0
+            front-hex-row1
+            front-hex-row2
+            front-hex-row3
+            front-hex-row4
+            front-hex-row5
+            front-hex-row6))
+
+        (shape rear-hex
+          (mirror "y" 0 front-hex))
+
+        ;; end faces use the same seven vertical rows.
+        (shape right-hex-row0
+          (dryer-end-hex-row
+            cut-hex-relief
+            2 0.5 hex-pitch-y hex-r hex-w right-hex-x body-hex-z0 hex-cut-l))
+
+        (shape right-hex-row1
+          (dryer-end-hex-row
+            cut-hex-relief
+            1 0 hex-pitch-y hex-r hex-w right-hex-x body-hex-z1 hex-cut-l))
+
+        (shape right-hex-row2
+          (dryer-end-hex-row
+            cut-hex-relief
+            2 0.5 hex-pitch-y hex-r hex-w right-hex-x body-hex-z2 hex-cut-l))
+
+        (shape right-hex-row3
+          (dryer-end-hex-row
+            cut-hex-relief
+            1 0 hex-pitch-y hex-r hex-w right-hex-x body-hex-z3 hex-cut-l))
+
+        (shape right-hex-row4
+          (dryer-end-hex-row
+            cut-hex-relief
+            2 0.5 hex-pitch-y hex-r hex-w right-hex-x body-hex-z4 hex-cut-l))
+
+        (shape right-hex-row5
+          (dryer-end-hex-row
+            cut-hex-relief
+            1 0 hex-pitch-y hex-r hex-w right-hex-x body-hex-z5 hex-cut-l))
+
+        (shape right-hex-row6
+          (dryer-end-hex-row
+            cut-hex-relief
+            2 0.5 hex-pitch-y hex-r hex-w right-hex-x body-hex-z6 hex-cut-l))
+
+        (shape right-hex
+          (compound
+            right-hex-row0
+            right-hex-row1
+            right-hex-row2
+            right-hex-row3
+            right-hex-row4
+            right-hex-row5
+            right-hex-row6))
+
+        (shape left-hex
+          (mirror "x" 0 right-hex))
+
+        (shape shell
+          (if cut-hex-relief
+            (difference
+              shell-solid
+              (compound front-hex rear-hex right-hex left-hex))
+            shell-solid))
+
+        ;; bottom root
+        (shape root-outer
+          (translate 0 0 root-z
+            (extrude
+              (rounded-rect inner-w inner-d inner-r)
+              root-h)))
+
+        (shape root-inner
+          (translate 0 0 (- root-z 0.1)
+            (loft
+              (+ root-h 0.2)
+              (rounded-rect root-base-w root-base-d root-base-r)
+              (rounded-rect root-tip-w root-tip-d root-tip-r))))
+
+        (shape bottom-root
+          (difference root-outer root-inner))
+
+        ;; narrow at the wall below, gently thickening toward the axle base
+        (shape front-axle-support-slope-local
+          (loft
+            axle-support-height
+            (rectangle axle-support-width axle-support-slope-root-depth)
+            (translate 0 axle-support-slope-top-shift 0
+              (rectangle axle-support-width axle-support-depth))))
+
+        (shape front-axle-support-slope
+          (translate 0 axle-support-front-y axle-support-slope-z
+            front-axle-support-slope-local))
+
+        (shape front-axle-support
+          front-axle-support-slope)
+
+        (shape rear-axle-support
+          (mirror "y" 0 front-axle-support))
+
+        ;; Socket block projects inward; its dovetail cut never touches the shell.
+        (shape front-wall-socket-positive
+          (translate
+            0
+            axle-wall-inner-y
+            (+ axle-z axle-socket-bottom-rel)
+            (box
+              axle-socket-width
+              axle-socket-projection
+              axle-socket-height
+              :align '(center min min))))
+
+        ;; Both end profiles are symmetric depth-wise dovetails. Their widths
+        ;; differ by 2 mm, forming the second taper along the insertion axis.
+        (shape front-wall-socket-channel-bottom-profile
+          (polygon
+            (list
+              (list (- 0 (/ axle-dovetail-slot-bottom-root-width 2)) 0)
+              (list (/ axle-dovetail-slot-bottom-root-width 2) 0)
+              (list (/ axle-dovetail-slot-bottom-head-width 2) (- 0 axle-dovetail-slot-depth))
+              (list (- 0 (/ axle-dovetail-slot-bottom-head-width 2)) (- 0 axle-dovetail-slot-depth)))))
+        (shape front-wall-socket-channel-top-profile
+          (polygon
+            (list
+              (list (- 0 (/ axle-dovetail-slot-root-width 2)) 0)
+              (list (/ axle-dovetail-slot-root-width 2) 0)
+              (list (/ axle-dovetail-slot-head-width 2) (- 0 axle-dovetail-slot-depth))
+              (list (- 0 (/ axle-dovetail-slot-head-width 2)) (- 0 axle-dovetail-slot-depth)))))
+        ;; Short constant relief below the seat supplies vertical fit clearance.
+        (shape front-wall-socket-channel-lower-relief
+          (translate
+            0
+            axle-socket-inner-y
+            (+ axle-z axle-socket-channel-low-rel)
+            (extrude
+              front-wall-socket-channel-bottom-profile
+              (+ axle-socket-lower-relief-height 0.05))))
+        ;; Matching 12 mm vertical wedge: narrow at the seated bottom, wide above.
+        (shape front-wall-socket-channel-taper
+          (translate
+            0
+            axle-socket-inner-y
+            (+ axle-z axle-socket-taper-bottom-rel)
+            (loft
+              axle-dovetail-height
+              front-wall-socket-channel-bottom-profile
+              front-wall-socket-channel-top-profile)))
+        ;; Wide straight guide continues from the taper to the enclosure opening.
+        (shape front-wall-socket-channel-guide
+          (translate
+            0
+            axle-socket-inner-y
+            (+ axle-z axle-socket-taper-top-rel -0.05)
+            (extrude
+              front-wall-socket-channel-top-profile
+              (+ axle-socket-guide-height 0.05))))
+        (shape front-wall-socket-channel
+          (union
+            front-wall-socket-channel-lower-relief
+            front-wall-socket-channel-taper
+            front-wall-socket-channel-guide))
+
+        (shape front-wall-socket
+          (difference
+            front-wall-socket-positive
+            front-wall-socket-channel))
+
+        (shape rear-wall-socket
+          (mirror "y" 0 front-wall-socket))
+
+        ;; Integrated open U seat. Cutter stops 0.05 mm before the enclosure
+        ;; wall, preserving a continuous thrust face and watertight shell.
+        (shape front-integrated-seat-positive
+          (translate
+            0 integrated-seat-positive-y integrated-seat-bottom-z
+            (box
+              integrated-seat-width
+              integrated-seat-positive-depth
+              integrated-seat-height
+              :align '(center min min))))
+        (shape front-integrated-seat-round-cut
+          (translate
+            0
+            (+ integrated-seat-cut-start-y integrated-seat-cut-depth)
+            axle-z
+            (rotate 90 0 0
+              (cylinder
+                integrated-seat-slot-r
+                integrated-seat-cut-depth
+                96))))
+        (shape front-integrated-seat-top-cut
+          (translate
+            (- 0 integrated-seat-slot-r)
+            integrated-seat-cut-start-y
+            axle-z
+            (box
+              (+ integrated-seat-slot-r integrated-seat-slot-r)
+              integrated-seat-cut-depth
+              (+ (- split-z axle-z) 50)
+              :align '(min min min))))
+        (shape front-integrated-seat-cut
+          (union
+            front-integrated-seat-round-cut
+            front-integrated-seat-top-cut))
+        (shape front-integrated-bearing-seat
+          (difference
+            front-integrated-seat-positive
+            front-integrated-seat-cut))
+        (shape rear-integrated-bearing-seat
+          (mirror "y" 0 front-integrated-bearing-seat))
+
+        ;; Full-thickness top edge. The lid now overlaps outside this wall.
+        (shape lower-main
+          (intersection shell
+            (box body-w body-d split-z
+              :align '(center center min))))
+
+        (shape lower-reinforced
+          (union
+            lower-main
+            bottom-root
+            front-integrated-bearing-seat
+            rear-integrated-bearing-seat))
+
+        (shape lower-body
+          lower-reinforced)
+
+        ;; D holes
+        (shape d-hole-base
+          (intersection
+            (cylinder hole-r (+ ear-t 0.4) 48)
+            (translate (- 0 flat-d) (- 0 hole-r) 0
+              (box hole-profile-w hole-d (+ ear-t 0.4)
+                :align '(min min min)))))
+
+        (shape body-d-hole
+          (rotate 0 0 -45 d-hole-base))
+
+        ;; body ears
+        (shape body-ear-root
+          (translate ear-x rail-y (- body-catch-z ear-r)
+            (box ear-t support-d ear-d :align '(min min min))))
+
+        (shape body-ear-round
+          (translate ear-x rail-y body-catch-z
+            (rotate 0 90 0
+              (cylinder ear-r ear-t 48))))
+
+        (shape body-ear-gusset-local
+          (loft
+            ear-gusset-run
+            (translate 0 ear-gusset-wall-shift 0
+              (rectangle ear-t ear-gusset-tip-d))
+            (rectangle ear-t ear-gusset-run)))
+
+        (shape body-ear-gusset
+          (translate ear-center-x ear-gusset-center-y body-gusset-z
+            body-ear-gusset-local))
+
+        (shape body-ear-positive
+          (union body-ear-root body-ear-round body-ear-gusset))
+
+        (shape body-ear
+          (difference body-ear-positive
+            (translate (- ear-x 0.2) rail-y body-catch-z
+              (rotate 0 90 0 body-d-hole))))
+
+        (shape front-body-catch
+          (union body-ear
+            (translate ear2-x 0 0 body-ear)))
+
+        (shape rear-body-catch
+          (translate rear-x-shift 0 0
+            (mirror "y" 0 front-body-catch)))
+
+        (shape left-body-catch
+          (translate side-latch-shift-x 0 0
+            (rotate 0 0 -90 front-body-catch)))
+
+        (shape right-body-catch
+          (translate (- 0 side-latch-shift-x) 0 0
+            (rotate 0 0 -90 rear-body-catch)))
+
+        ;; Long roots bridge the corner fillet; cavity clips their inner ends
+        ;; flush with the enclosure interior instead of leaving protrusions.
+        (shape left-body-catch-trimmed
+          (difference left-body-catch cavity))
+
+        (shape right-body-catch-trimmed
+          (difference right-body-catch cavity))
+
+        (result
+          (union
+            lower-body
+            left-body-catch-trimmed
+            right-body-catch-trimmed)))))
+
+  (part enclosure-body
+    (dryer-enclosure-body
+      :spool-diameter 200
+      :spool-width 75
+      :spool-radial-clearance 4
+      :spool-axial-clearance 4
+      :wall-thickness wall-thickness
+      :enclosure-corner-radius enclosure-corner-radius
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :cut-hex-relief cut-hex-relief
+      :wall-hex-radius wall-hex-radius
+      :wall-hex-recess-depth-local 0.8
+      :wall-hex-bottom-margin 8
+      :wall-hex-seam-margin 18
+      :spool-axis-lift spool-axis-lift
+      :axle-flat-height 6
+      :axle-flat-support-height-local 9
+      :latch-width latch-width
+      :latch-horizontal-offset 0
+      :catch-pin-radius catch-pin-radius
+      :catch-pin-clearance catch-pin-clearance
+      :body-catch-setback 18))
+
+  ;; ===========================================================================
+  ;; LID -- separate STL
+  ;; ===========================================================================
+
+  (define-component dryer-enclosure-lid
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-radial-clearance)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number enclosure-corner-radius)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number body-split-height-local)
+     (toggle cut-hex-relief)
+     (number wall-hex-radius)
+     (number wall-hex-recess-depth-local)
+     (number wall-hex-seam-margin)
+     (number wall-hex-top-margin)
+     (number lid-clearance)
+     (number lid-face-gap)
+     (number lid-overlap-depth)
+     (number latch-width)
+     (number latch-horizontal-offset)
+     (number catch-pin-radius)
+     (number catch-pin-clearance)
+     (number lid-catch-setback)
+     (number thread-nozzle-diameter-local)
+     (number hygrometer-diameter-local)
+     (number hygrometer-holder-wall-local)
+     (number hygrometer-ring-wall-clearance-local)
+     (number hygrometer-thread-depth-local)
+     (number lid-removal-offset)
+     (toggle assembly-preview))
+    (let*
+      ((body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-d (dryer-body-depth spool-width spool-axial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (inner-w (- body-w wall-thickness wall-thickness))
+       (inner-d (- body-d wall-thickness wall-thickness))
+       (inner-h (- body-h wall-thickness wall-thickness))
+       (inner-r (- enclosure-corner-radius wall-thickness))
+       (half-w (/ body-w 2))
+       (half-d (/ body-d 2))
+       (front-y (- 0 half-d))
+
+       (split-z body-split-height-local)
+       (lid-z (+ split-z lid-face-gap))
+       (lid-h (- body-h lid-z))
+
+       ;; Full-thickness outer skirt overlaps the unthinned body wall.
+       (lid-skirt-inner-offset lid-clearance)
+       (lid-skirt-outer-offset (+ lid-clearance wall-thickness))
+       (lid-lip-inner-w (+ body-w lid-skirt-inner-offset lid-skirt-inner-offset))
+       (lid-lip-inner-d (+ body-d lid-skirt-inner-offset lid-skirt-inner-offset))
+       (lid-lip-inner-r (+ enclosure-corner-radius lid-skirt-inner-offset))
+       (lid-lip-outer-w (+ body-w lid-skirt-outer-offset lid-skirt-outer-offset))
+       (lid-lip-outer-d (+ body-d lid-skirt-outer-offset lid-skirt-outer-offset))
+       (lid-lip-outer-r (+ enclosure-corner-radius lid-skirt-outer-offset))
+       (lid-skirt-slope-h 4)
+
+       ;; roof reinforcement
+       (root-size (+ wall-thickness 0.4))
+       (root-tip 0.2)
+       (root-overlap 0.15)
+       (roof-z (- body-h wall-thickness))
+       (root-z (- roof-z root-size))
+       (root-h (+ root-size root-overlap))
+       (root-base-w (- inner-w root-size root-size))
+       (root-base-d (- inner-d root-size root-size))
+       (root-base-r (- inner-r root-size))
+       (root-tip-w (- inner-w root-tip root-tip))
+       (root-tip-d (- inner-d root-tip root-tip))
+       (root-tip-r (- inner-r root-tip))
+
+       ;; filament
+       (filament-x (- 0 (- half-w 24)))
+       ;; Roof hole clears the male thread by 0.25 mm radially. Flange and
+       ;; retaining ring clamp the roof directly; no separate centring skirt.
+       (bushing-socket-r
+         (+ (dryer-filament-thread-major-radius
+              thread-nozzle-diameter-local)
+            0.25))
+       (bushing-socket-z (- body-h wall-thickness 0.5))
+
+       ;; roof-mounted hygrometer beside the filament outlet
+       (hygro-r (/ hygrometer-diameter-local 2))
+       (thread-r (+ hygro-r hygrometer-holder-wall-local))
+       (hygro-roof-x (+ filament-x 52))
+       (hygro-roof-y 0)
+       (male-thread-outer-r (+ thread-r hygrometer-thread-depth-local))
+       (insert-socket-r (+ male-thread-outer-r hygrometer-ring-wall-clearance-local))
+       (hygro-cut-overrun 0.3)
+       (hygro-socket-z (- body-h wall-thickness hygro-cut-overrun))
+       ;; Roof mounting needs a finished through-hole. The former vertical-print
+       ;; knockout membrane is unnecessary after moving the hygrometer to the lid.
+       (hygro-socket-l
+         (+ wall-thickness hygro-cut-overrun hygro-cut-overrun))
+
+       ;; lid hexes: 3 rows
+       (hex-r wall-hex-radius)
+       (hex-w (* 0.8660254 hex-r))
+       ;; Auto-layout uses fixed safe margins and fixed cell counts.
+       (hex-side-margin enclosure-corner-radius)
+       (hex-center-span-x
+         (- body-w hex-side-margin hex-side-margin hex-w hex-w))
+       (hex-center-span-y
+         (- body-d hex-side-margin hex-side-margin hex-w hex-w))
+       (hex-pitch-x (/ hex-center-span-x 5))
+       (hex-pitch-y hex-center-span-y)
+       (hex-cut-depth wall-hex-recess-depth-local)
+       (hex-cut-l (+ hex-cut-depth 0.1))
+       (front-hex-y (- (+ front-y (/ hex-cut-depth 2)) 0.05))
+       (right-hex-x (+ (- half-w (/ hex-cut-depth 2)) 0.05))
+       (lid-hex-zone-bottom (+ lid-z wall-hex-seam-margin))
+       (lid-hex-zone-top (- body-h wall-hex-top-margin))
+       (lid-hex-zone-height (- lid-hex-zone-top lid-hex-zone-bottom))
+       (hex-pitch-z (/ (- lid-hex-zone-height hex-r hex-r) 2))
+       (lid-hex-z0 (+ lid-hex-zone-bottom hex-r))
+       (lid-hex-z1 (+ lid-hex-z0 hex-pitch-z))
+       (lid-hex-z2 (+ lid-hex-z1 hex-pitch-z))
+
+       ;; catches
+       (hole-r (+ catch-pin-radius catch-pin-clearance))
+       (flat-d (+ (/ catch-pin-radius 2) catch-pin-clearance))
+       (hole-profile-w (+ hole-r flat-d))
+       (hole-d (+ hole-r hole-r))
+       (ear-t 6)
+       (half-ear-t (/ ear-t 2))
+       (ear-r (+ hole-r 1.5))
+       (ear-d (+ ear-r ear-r))
+       (pin-span (+ latch-width ear-t ear-t))
+       (half-span (/ pin-span 2))
+       (front-catch-x latch-horizontal-offset)
+       (rear-catch-x (- 0 latch-horizontal-offset))
+       (rail-y
+         (dryer-latch-axis-y body-d catch-pin-radius catch-pin-clearance))
+       ;; Same rigid transform as body catches; all hinge axes remain coincident.
+       (side-rail-x
+         (dryer-latch-axis-y body-w catch-pin-radius catch-pin-clearance))
+       (side-latch-shift-x (- side-rail-x rail-y))
+       ;; Match body ears: bridge the rounded corner before joining the shell.
+       (catch-wall-overlap 4)
+       (catch-root-y (+ front-y catch-wall-overlap))
+       (support-d (- catch-root-y rail-y))
+       (lid-catch-z (+ lid-z lid-catch-setback))
+       (ear-x (- front-catch-x half-span))
+       (ear-center-x (+ ear-x half-ear-t))
+       (ear2-x (- pin-span ear-t))
+       (rear-x-shift (- rear-catch-x front-catch-x))
+       (ear-tangent-offset (/ ear-r 1.41421356))
+       (ear-tangent-y (- rail-y ear-tangent-offset))
+       (ear-gusset-run (- catch-root-y ear-tangent-y))
+       (ear-gusset-center-y (/ (+ ear-tangent-y catch-root-y) 2))
+       (ear-gusset-tip-d 0.8)
+       (ear-gusset-wall-shift (/ (- ear-gusset-run ear-gusset-tip-d) 2))
+       (ear-gusset-overlap 0.25)
+       (lid-tangent-z (+ lid-catch-z ear-tangent-offset))
+       (lid-gusset-z (- lid-tangent-z ear-gusset-overlap))
+
+       (lid-print-x (+ body-w 25)))
+
+      (build
+        ;; source shell
+        (shape outer
+          (extrude
+            (rounded-rect body-w body-d enclosure-corner-radius)
+            body-h))
+
+        (shape cavity
+          (translate 0 0 wall-thickness
+            (extrude
+              (rounded-rect inner-w inner-d inner-r)
+              inner-h)))
+
+        (shape shell-solid
+          (difference outer cavity))
+
+        ;; wide lid faces: 6 / 5 / 6
+        (shape front-hex-row0
+          (dryer-wide-hex-row
+            cut-hex-relief
+            6 2.5 hex-pitch-x hex-r hex-w front-hex-y lid-hex-z0 hex-cut-l))
+
+        (shape front-hex-row1
+          (dryer-wide-hex-row
+            cut-hex-relief
+            5 2 hex-pitch-x hex-r hex-w front-hex-y lid-hex-z1 hex-cut-l))
+
+        (shape front-hex-row2
+          (dryer-wide-hex-row
+            cut-hex-relief
+            6 2.5 hex-pitch-x hex-r hex-w front-hex-y lid-hex-z2 hex-cut-l))
+
+        (shape front-hex
+          (compound front-hex-row0 front-hex-row1 front-hex-row2))
+
+        (shape rear-hex
+          (mirror "y" 0 front-hex))
+
+        ;; end faces: 2 / 1 / 2
+        (shape left-hex-row0
+          (dryer-end-hex-row
+            cut-hex-relief
+            2 0.5 hex-pitch-y hex-r hex-w (- right-hex-x) lid-hex-z0 hex-cut-l))
+
+        (shape left-hex-row1
+          (dryer-end-hex-row
+            cut-hex-relief
+            1 0 hex-pitch-y hex-r hex-w (- right-hex-x) lid-hex-z1 hex-cut-l))
+
+        (shape left-hex-row2
+          (dryer-end-hex-row
+            cut-hex-relief
+            2 0.5 hex-pitch-y hex-r hex-w (- right-hex-x) lid-hex-z2 hex-cut-l))
+
+        (shape left-hex
+          (compound left-hex-row0 left-hex-row1 left-hex-row2))
+
+        ;; Former hygrometer end is free again; restore its matching relief.
+        (shape right-hex
+          (mirror "x" 0 left-hex))
+
+        (shape shell
+          (if cut-hex-relief
+            (difference shell-solid
+              (compound front-hex rear-hex left-hex right-hex))
+            shell-solid))
+
+        ;; actual lid shell
+        (shape upper-shell
+          (intersection shell
+            (translate 0 0 lid-z
+              (box body-w body-d lid-h
+                :align '(center center min)))))
+
+        ;; Enlarged outer overlap: no fragile standing rim on the body.
+        (shape lid-lip-outer
+          (translate 0 0 (- lid-z lid-overlap-depth)
+            (extrude
+              (rounded-rect lid-lip-outer-w lid-lip-outer-d lid-lip-outer-r)
+              (+ lid-overlap-depth 0.15))))
+
+        (shape lid-lip-inner
+          (translate 0 0 (- lid-z lid-overlap-depth 0.1)
+            (extrude
+              (rounded-rect lid-lip-inner-w lid-lip-inner-d lid-lip-inner-r)
+              (+ lid-overlap-depth 0.35))))
+
+        ;; External ramp removes the square step above the overlap skirt.
+        (shape lid-skirt-slope-outer
+          (translate 0 0 lid-z
+            (loft
+              lid-skirt-slope-h
+              (rounded-rect lid-lip-outer-w lid-lip-outer-d lid-lip-outer-r)
+              (rounded-rect body-w body-d enclosure-corner-radius))))
+
+        (shape lid-skirt-slope-inner
+          (translate 0 0 (- lid-z 0.1)
+            (extrude
+              (rounded-rect inner-w inner-d inner-r)
+              (+ lid-skirt-slope-h 0.2))))
+
+        ;; roof reinforcement
+        (shape root-outer
+          (translate 0 0 root-z
+            (extrude
+              (rounded-rect inner-w inner-d inner-r)
+              root-h)))
+
+        (shape root-inner
+          (translate 0 0 (- root-z 0.1)
+            (loft
+              (+ root-h 0.2)
+              (rounded-rect root-tip-w root-tip-d root-tip-r)
+              (rounded-rect root-base-w root-base-d root-base-r))))
+
+        (shape upper-positive
+          (union
+            upper-shell
+            (difference lid-lip-outer lid-lip-inner)
+            (difference lid-skirt-slope-outer lid-skirt-slope-inner)
+            (difference root-outer root-inner)))
+
+        ;; filament + hygrometer
+        (shape filament-socket
+          (translate filament-x 0 bushing-socket-z
+            (cylinder bushing-socket-r (+ wall-thickness 1) 64)))
+
+        (shape hygrometer-socket
+          (translate hygro-roof-x hygro-roof-y hygro-socket-z
+            (cylinder insert-socket-r hygro-socket-l 128)))
+
+        (shape upper-cut
+          (difference upper-positive
+            (union filament-socket hygrometer-socket)))
+
+        ;; D hole
+        (shape d-hole-base
+          (intersection
+            (cylinder hole-r (+ ear-t 0.4) 48)
+            (translate (- 0 flat-d) (- 0 hole-r) 0
+              (box hole-profile-w hole-d (+ ear-t 0.4)
+                :align '(min min min)))))
+
+        (shape lid-d-hole
+          (rotate 0 0 -135 d-hole-base))
+
+        ;; lid ears
+        (shape lid-ear-root
+          (translate ear-x rail-y (- lid-catch-z ear-r)
+            (box ear-t support-d ear-d :align '(min min min))))
+
+        (shape lid-ear-round
+          (translate ear-x rail-y lid-catch-z
+            (rotate 0 90 0
+              (cylinder ear-r ear-t 48))))
+
+        (shape lid-ear-gusset-local
+          (loft
+            ear-gusset-run
+            (rectangle ear-t ear-gusset-run)
+            (translate 0 ear-gusset-wall-shift 0
+              (rectangle ear-t ear-gusset-tip-d))))
+
+        (shape lid-ear-gusset
+          (translate ear-center-x ear-gusset-center-y lid-gusset-z
+            lid-ear-gusset-local))
+
+        (shape lid-ear-positive
+          (union lid-ear-root lid-ear-round lid-ear-gusset))
+
+        (shape lid-ear
+          (difference lid-ear-positive
+            (translate (- ear-x 0.2) rail-y lid-catch-z
+              (rotate 0 90 0 lid-d-hole))))
+
+        (shape front-lid-catch
+          (union lid-ear
+            (translate ear2-x 0 0 lid-ear)))
+
+        (shape rear-lid-catch
+          (translate rear-x-shift 0 0
+            (mirror "y" 0 front-lid-catch)))
+
+        (shape left-lid-catch
+          (translate side-latch-shift-x 0 0
+            (rotate 0 0 -90 front-lid-catch)))
+
+        (shape right-lid-catch
+          (translate (- 0 side-latch-shift-x) 0 0
+            (rotate 0 0 -90 rear-lid-catch)))
+
+        (shape left-lid-catch-trimmed
+          (difference left-lid-catch cavity))
+
+        (shape right-lid-catch-trimmed
+          (difference right-lid-catch cavity))
+
+        (shape lid
+          (union
+            upper-cut
+            left-lid-catch-trimmed
+            right-lid-catch-trimmed))
+
+        ;; printable orientation only for lid STL
+        (shape lid-print
+          (translate lid-print-x 0 0
+            (rotate 180 0 0
+              (translate 0 0 (- 0 body-h) lid))))
+
+        (result
+          (if assembly-preview
+            (translate 0 0 lid-removal-offset lid)
+            lid-print)))))
+
+  (part enclosure-lid
+    (dryer-enclosure-lid
+      :spool-diameter 200
+      :spool-width 75
+      :spool-radial-clearance 4
+      :spool-axial-clearance 4
+      :wall-thickness wall-thickness
+      :enclosure-corner-radius enclosure-corner-radius
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :body-split-height-local
+        (dryer-body-split-height
+          200 wall-thickness desiccant-bed-height
+          spool-bottom-clearance spool-axis-lift)
+      :cut-hex-relief cut-hex-relief
+      :wall-hex-radius wall-hex-radius
+      :wall-hex-recess-depth-local 0.8
+      :wall-hex-seam-margin 18
+      :wall-hex-top-margin 8
+      :lid-clearance lid-clearance
+      ;; 0.1 mm modeled compression keeps the TPU gasket preloaded.
+      :lid-face-gap (- lid-gasket-thickness 0.1)
+      :lid-overlap-depth lid-overlap-depth
+      :latch-width latch-width
+      :latch-horizontal-offset 0
+      :catch-pin-radius catch-pin-radius
+      :catch-pin-clearance catch-pin-clearance
+      :lid-catch-setback 16
+      :thread-nozzle-diameter-local
+        (dryer-thread-nozzle-value thread-nozzle-diameter)
+      :hygrometer-diameter-local (hygrometer-bore-diameter hygrometer-body-diameter hygrometer-body-clearance)
+      :hygrometer-holder-wall-local hygrometer-holder-wall
+      :hygrometer-ring-wall-clearance-local hygrometer-wall-hole-clearance
+      :hygrometer-thread-depth-local 1.6
+      :lid-removal-offset 0
+      :assembly-preview show-assembly))
+
+  ;; Glue-on TPU lid gasket. Flat one-layer ring avoids trapping a 0.6 mm skirt
+  ;; inside the lid's 0.25 mm radial clearance.
+  (define-component dryer-lid-tpu-gasket
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-radial-clearance)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number enclosure-corner-radius)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number spool-axis-lift)
+     (number gasket-thickness)
+     (toggle assembly-preview))
+    (let*
+      ((body-w
+         (dryer-body-width
+           spool-diameter spool-radial-clearance wall-thickness))
+       (body-d
+         (dryer-body-depth
+           spool-width spool-axial-clearance wall-thickness))
+       (body-inner-w (- body-w wall-thickness wall-thickness))
+       (body-inner-d (- body-d wall-thickness wall-thickness))
+       (body-inner-r (- enclosure-corner-radius wall-thickness))
+       (split-z
+         (dryer-body-split-height
+           spool-diameter wall-thickness desiccant-height
+           spool-bottom-clearance spool-axis-lift))
+       ;; 0.2 mm inset from both body edges prevents squeeze-out into either cavity.
+       (edge-inset 0.2)
+       (gasket-outer-w (- body-w edge-inset edge-inset))
+       (gasket-outer-d (- body-d edge-inset edge-inset))
+       (gasket-outer-r (- enclosure-corner-radius edge-inset))
+       (gasket-inner-w (+ body-inner-w edge-inset edge-inset))
+       (gasket-inner-d (+ body-inner-d edge-inset edge-inset))
+       (gasket-inner-r (+ body-inner-r edge-inset))
+       (cut-overrun 0.1)
+       ;; Park beside the body with about 1 mm layout clearance.
+       (print-y (+ body-d 1.5)))
+      (build
+        (shape flange-outer
+          (extrude
+            (rounded-rect gasket-outer-w gasket-outer-d gasket-outer-r)
+            gasket-thickness))
+        (shape flange-opening
+          (translate 0 0 (- cut-overrun)
+            (extrude
+              (rounded-rect gasket-inner-w gasket-inner-d gasket-inner-r)
+              (+ gasket-thickness cut-overrun cut-overrun))))
+        (shape sealing-flange
+          (difference flange-outer flange-opening))
+        (shape gasket sealing-flange)
+        (result
+          (if assembly-preview
+            ;; Flip the printable profile: flange sits on rim, leg points down.
+            (translate 0 0 (+ split-z gasket-thickness)
+              (rotate 180 0 0 gasket))
+            (translate 0 print-y 0 gasket))))))
+
+  (part lid-tpu-gasket
+    (dryer-lid-tpu-gasket
+      :spool-diameter 200
+      :spool-width 75
+      :spool-radial-clearance 4
+      :spool-axial-clearance 4
+      :wall-thickness wall-thickness
+      :enclosure-corner-radius enclosure-corner-radius
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :spool-axis-lift spool-axis-lift
+      :gasket-thickness lid-gasket-thickness
+      :assembly-preview show-assembly))
+
+  ;; Two permanent adapters preserve compatibility with the printed enclosure.
+  ;; Their tapered dovetails stay in the wall; open cradles receive the 6002
+  ;; outer rings when the complete spool/arbor cassette is lowered into place.
+  (define-component dryer-spool-bearing-supports
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number spool-axis-lift)
+     (number wall-dovetail-projection-local)
+     (toggle assembly-preview))
+    (let*
+      ((body-d (dryer-body-depth spool-width spool-axial-clearance wall-thickness))
+       (inner-d (- body-d wall-thickness wall-thickness))
+       (axis-z
+         (dryer-spool-axis-height
+           spool-diameter wall-thickness desiccant-height
+           spool-bottom-clearance spool-axis-lift))
+       (half-d (/ inner-d 2))
+       (dovetail-depth wall-dovetail-projection-local)
+       (dovetail-flare 3)
+       (dovetail-height 12)
+       (dovetail-root-width 20)
+       (dovetail-head-width
+         (+ dovetail-root-width dovetail-flare dovetail-flare))
+       (dovetail-bottom-root-width
+         (dryer-dovetail-bottom-width dovetail-root-width))
+       (dovetail-bottom-head-width
+         (dryer-dovetail-bottom-width dovetail-head-width))
+       (socket-projection (+ dovetail-depth 1))
+       (support-root-z (- half-d socket-projection))
+       (bearing-slot-r (+ dryer-bearing-outer-radius 0.25))
+       (bearing-slot-width (+ bearing-slot-r bearing-slot-r))
+       (cradle-wall 3)
+       (cradle-depth 5.5)
+       (cradle-back-wall dryer-bearing-cradle-back-wall)
+       (bearing-cut-depth (- cradle-depth cradle-back-wall))
+       (cradle-width (+ bearing-slot-width cradle-wall cradle-wall))
+       (cradle-bottom-y (- 0 bearing-slot-r cradle-wall))
+       (cradle-top-y 6)
+       (cradle-height (- cradle-top-y cradle-bottom-y))
+       (print-x (+ spool-diameter 40))
+       (print-y (+ spool-width 60))
+       (print-spacing (+ cradle-width 8)))
+      (build
+        ;; Dovetail cross-section plus a second taper along the insertion axis.
+        ;; Source loft runs top-to-bottom; rotation maps its Z axis onto local Y.
+        (shape male-dovetail-top-profile
+          (polygon
+            (list
+              (list (- 0 (/ dovetail-root-width 2)) 0)
+              (list (/ dovetail-root-width 2) 0)
+              (list (/ dovetail-head-width 2) dovetail-depth)
+              (list (- 0 (/ dovetail-head-width 2)) dovetail-depth))))
+        (shape male-dovetail-bottom-profile
+          (polygon
+            (list
+              (list (- 0 (/ dovetail-bottom-root-width 2)) 0)
+              (list (/ dovetail-bottom-root-width 2) 0)
+              (list (/ dovetail-bottom-head-width 2) dovetail-depth)
+              (list (- 0 (/ dovetail-bottom-head-width 2)) dovetail-depth))))
+        (shape male-dovetail-height-loft
+          (loft
+            dovetail-height
+            male-dovetail-top-profile
+            male-dovetail-bottom-profile))
+        (shape male-dovetail
+          (translate 0 (/ dovetail-height 2) 0
+            (rotate 90 0 0 male-dovetail-height-loft)))
+
+        (shape cradle-positive
+          (translate
+            0 cradle-bottom-y (- 0 cradle-depth)
+            (box cradle-width cradle-height (+ cradle-depth 0.3)
+              :align '(center min min))))
+        (shape bearing-round-cut
+          (translate 0 0 (- 0 cradle-depth 0.1)
+            (cylinder bearing-slot-r (+ bearing-cut-depth 0.2) 96)))
+        (shape bearing-top-cut
+          (translate
+            (- 0 bearing-slot-r)
+            0
+            (- 0 cradle-depth 0.1)
+            (box
+              bearing-slot-width
+              (+ cradle-top-y bearing-slot-r)
+              (+ bearing-cut-depth 0.2)
+              :align '(min min min))))
+        (shape bearing-slot-cut
+          (union bearing-round-cut bearing-top-cut))
+        (shape bearing-cradle
+          (difference cradle-positive bearing-slot-cut))
+        (shape adapter-unit
+          (union male-dovetail bearing-cradle))
+
+        (shape front-adapter
+          (translate 0 0 support-root-z adapter-unit))
+        (shape rear-adapter
+          (mirror "z" 0 front-adapter))
+        (shape assembled-adapters
+          (translate 0 0 axis-z
+            (rotate 90 0 0
+              (compound front-adapter rear-adapter))))
+
+        ;; Print upright on the U bottom. The pocket opens sideways; its solid
+        ;; 1.5 mm back wall joins the cradle to the dovetail without bridging.
+        (shape print-adapter-a
+          (translate print-x print-y (- 0 cradle-bottom-y)
+            (rotate 90 0 0 adapter-unit)))
+        (shape print-adapter-b
+          (translate (+ print-x print-spacing) print-y (- 0 cradle-bottom-y)
+            (rotate 90 0 0 adapter-unit)))
+        (result
+          (if assembly-preview
+            assembled-adapters
+            (compound print-adapter-a print-adapter-b))))))
+
+  ;; One removable wheel-like cassette: a continuous compliant STAR sleeve
+  ;; and two identical half-depth keyed bearing axles.
+  (define-component dryer-spool-wheel-arbor
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number spool-axis-lift)
+     (number spool-star-free-diameter-local)
+     (toggle assembly-preview))
+    (let*
+      ((axis-z
+         (dryer-spool-axis-height
+           spool-diameter wall-thickness desiccant-height
+           spool-bottom-clearance spool-axis-lift))
+       ;; 6002 rings stop against the shallow U-pocket back walls. The STAR
+       ;; fills the remaining centre span without touching either bearing.
+       (bearing-outer-face
+         (dryer-bearing-outer-face spool-width spool-axial-clearance))
+       (bearing-inner-face (- bearing-outer-face dryer-bearing-width))
+       ;; STAR end face is the bearing stop. No wider axle shoulder: it wastes
+       ;; axial room and creates an unsupported ledge in the flat print layout.
+       (star-half bearing-inner-face)
+       (star-l (+ star-half star-half))
+       (star-r (/ spool-star-free-diameter-local 2))
+       (star-hub-r 11.2)
+       (star-blade-scale (/ star-r 38.3))
+       (star-twist-angle 18)
+       ;; Base Ø76.6 spiral: r(t) uses cubic ease from 8.7 to 37.4 mm,
+       ;; theta(t) sweeps -140..0 degrees, and edges follow its exact normal.
+       ;; XY scaling keeps the user-visible free-diameter parameter functional.
+       ;; Three long PETG blades. No separate outer hook/contact pad.
+       ;; Hex sockets and plugs print flat and transfer torque without a key.
+       ;; Bearing journals remain round because the 6002 inner race is D15.
+       (hex-k 0.8660254)
+       (axle-socket-hex-r 8.2)
+       (axle-plug-hex-r 8)
+       (axle-centre-gap 0.6)
+       (axle-plug-l (- star-half (/ axle-centre-gap 2)))
+       ;; 6002 bearing seat: nominal bore 15 mm, 0.2 mm diametral clearance.
+       (journal-r (- dryer-bearing-inner-radius 0.1))
+       ;; Clip only the keyed plug bottom to the journal tangent. Both sections
+       ;; then share one support-free print plane; the bearing journal stays round.
+       (axle-plug-flat-y (- 0 journal-r))
+       (journal-z axle-plug-l)
+       (journal-l dryer-bearing-width)
+       (snap-tip-r (- dryer-bearing-inner-radius 0.9))
+       (snap-lip-r (+ dryer-bearing-inner-radius 0.1))
+       ;; Flexible taper ends flush with the bearing. No tip projects into the
+       ;; U-pocket back wall, so the adapter needs no central relief hole.
+       (snap-head-l 0.8)
+       (snap-slot-width 1.4)
+       (snap-slot-l 6.5)
+       (snap-head-z (- (+ journal-z journal-l) snap-head-l))
+       (half-axle-total-l (+ journal-z journal-l))
+       ;; Half axles start at the centre gap, travel through the STAR, then
+       ;; expose the bearing journal and snap head outside each end.
+       (half-axle-assembly-z (/ axle-centre-gap 2))
+       (print-x (+ spool-diameter 40))
+       (print-y (+ spool-width 105))
+       (print-spacing 42))
+      (build
+        (shape axle-socket-profile
+          (polygon
+            (list
+              (list axle-socket-hex-r 0)
+              (list (/ axle-socket-hex-r 2) (* hex-k axle-socket-hex-r))
+              (list (- 0 (/ axle-socket-hex-r 2)) (* hex-k axle-socket-hex-r))
+              (list (- 0 axle-socket-hex-r) 0)
+              (list (- 0 (/ axle-socket-hex-r 2)) (- 0 (* hex-k axle-socket-hex-r)))
+              (list (/ axle-socket-hex-r 2) (- 0 (* hex-k axle-socket-hex-r))))))
+        (shape axle-plug-profile
+          (polygon
+            (list
+              (list axle-plug-hex-r 0)
+              (list (/ axle-plug-hex-r 2) (* hex-k axle-plug-hex-r))
+              (list (- 0 (/ axle-plug-hex-r 2)) (* hex-k axle-plug-hex-r))
+              (list (- 0 axle-plug-hex-r) 0)
+              (list (- 0 (/ axle-plug-hex-r 2)) axle-plug-flat-y)
+              (list (/ axle-plug-hex-r 2) axle-plug-flat-y))))
+        ;; One closed 26-span Bezier face. It follows the analytic 140-degree
+        ;; centreline, exact normal offsets, and smooth 6 -> 2.4 mm taper
+        ;; (minimum four 0.6 mm extrusion lines).
+        ;; One twist avoids the lossy chain of touching loft booleans.
+        (shape star-blade-profile
+          (make-face
+            (bezier-path
+              (list
+                (list -4.3665 -3.6639 0)
+                (list -3.8416 -4.6005 0)
+                (list -3.6156 -5.5104 0)
+                (list -3.4477 -6.3470 0)
+                (list -3.2797 -7.1836 0)
+                (list -3.1524 -8.0004 0)
+                (list -2.9240 -8.8981 0)
+                (list -2.6955 -9.7957 0)
+                (list -2.3711 -10.7700 0)
+                (list -1.8699 -11.8015 0)
+                (list -1.3686 -12.8330 0)
+                (list -0.6902 -13.9186 0)
+                (list 0.2093 -14.9810 0)
+                (list 1.1089 -16.0434 0)
+                (list 2.2299 -17.0809 0)
+                (list 3.5729 -17.9948 0)
+                (list 4.9158 -18.9087 0)
+                (list 6.4806 -19.6977 0)
+                (list 8.2222 -20.2657 0)
+                (list 9.9638 -20.8338 0)
+                (list 11.8817 -21.1798 0)
+                (list 13.8907 -21.2300 0)
+                (list 15.8997 -21.2802 0)
+                (list 17.9989 -21.0337 0)
+                (list 20.0739 -20.4539 0)
+                (list 22.1489 -19.8742 0)
+                (list 24.1985 -18.9607 0)
+                (list 26.0949 -17.7242 0)
+                (list 27.9914 -16.4878 0)
+                (list 29.7333 -14.9284 0)
+                (list 31.1979 -13.1085 0)
+                (list 32.6626 -11.2885 0)
+                (list 33.8486 -9.2084 0)
+                (list 34.6583 -6.9796 0)
+                (list 35.4679 -4.7507 0)
+                (list 35.8999 -2.3740 0)
+                (list 35.9000 0 0)
+                (list 36.7000 0 0)
+                (list 37.5000 0 0)
+                (list 38.3000 0 0)
+                (list 38.2999 -2.6622 0)
+                (list 37.8159 -5.3161 0)
+                (list 36.9143 -7.7990 0)
+                (list 36.0126 -10.2818 0)
+                (list 34.6947 -12.5928 0)
+                (list 33.0704 -14.6142 0)
+                (list 31.4461 -16.6356 0)
+                (list 29.5169 -18.3672 0)
+                (list 27.4162 -19.7446 0)
+                (list 25.3154 -21.1221 0)
+                (list 23.0446 -22.1457 0)
+                (list 20.7397 -22.8059 0)
+                (list 18.4349 -23.4662 0)
+                (list 16.0972 -23.7637 0)
+                (list 13.8461 -23.7381 0)
+                (list 11.5950 -23.7126 0)
+                (list 9.4313 -23.3649 0)
+                (list 7.4423 -22.7722 0)
+                (list 5.4533 -22.1795 0)
+                (list 3.6394 -21.3430 0)
+                (list 2.0455 -20.3616 0)
+                (list 0.4516 -19.3802 0)
+                (list -0.9223 -18.2551 0)
+                (list -2.0773 -17.0906 0)
+                (list -3.2322 -15.9261 0)
+                (list -4.1686 -14.7228 0)
+                (list -4.9306 -13.5782 0)
+                (list -5.6926 -12.4337 0)
+                (list -6.2814 -11.3466 0)
+                (list -6.7734 -10.4110 0)
+                (list -7.2655 -9.4755 0)
+                (list -7.6682 -8.6887 0)
+                (list -8.0376 -8.1785 0)
+                (list -8.4070 -7.6683 0)
+                (list -8.7284 -7.4887 0)
+                (list -8.9627 -7.5206 0)
+                (list -7.4306 -6.2350 0)
+                (list -5.8985 -4.9495 0)
+                (list -4.3665 -3.6639 0)))))
+        (shape star-blade-long
+          (scale star-blade-scale star-blade-scale 1
+            (twist star-l star-twist-angle star-blade-profile)))
+        ;; Explicit solids prevent open top/bottom seams in folder-sync.
+        (shape star-blade-a star-blade-long)
+        (shape star-blade-b
+          (rotate 0 0 120 star-blade-long))
+        (shape star-blade-c
+          (rotate 0 0 240 star-blade-long))
+        (shape star-hub-positive
+          (translate 0 0 (- 0 star-half)
+            (cylinder star-hub-r star-l 96)))
+        (shape star-positive
+          (union
+            star-hub-positive
+            (translate 0 0 (- 0 star-half) star-blade-a)
+            (translate 0 0 (- 0 star-half) star-blade-b)
+            (translate 0 0 (- 0 star-half) star-blade-c)))
+        (shape star-bore
+          (translate 0 0 (- 0 star-half 0.2)
+            (extrude axle-socket-profile (+ star-l 0.4))))
+        (shape star-sleeve
+          (difference star-positive star-bore))
+
+        ;; Identical half axles enter from both sides and meet at the centre gap.
+        ;; R0.2 circumradius clearance avoids a 32 mm press fit.
+        (shape axle-plug
+          (extrude axle-plug-profile axle-plug-l))
+        (shape axle-journal
+          (translate 0 0 journal-z
+            (cylinder journal-r journal-l 64)))
+        (shape axle-snap-head
+          (translate 0 0 snap-head-z
+            (cone snap-lip-r snap-tip-r snap-head-l 64)))
+        (shape half-axle-positive
+          (union axle-plug axle-journal axle-snap-head))
+        (shape axle-snap-slot
+          (translate
+            (- 0 (/ snap-slot-width 2))
+            -12
+            (- half-axle-total-l snap-slot-l)
+            (box snap-slot-width 24 (+ snap-slot-l 0.2)
+              :align '(min min min))))
+        (shape axle-print-flat-cut
+          (translate
+            0 (- 0 journal-r) -0.1
+            (box 20 4 (+ half-axle-total-l 0.2)
+              :align '(center max min))))
+        (shape half-axle
+          (difference
+            half-axle-positive
+            axle-snap-slot
+            axle-print-flat-cut))
+
+        (shape assembled-cassette-local
+          (compound
+            star-sleeve
+            (translate 0 0 half-axle-assembly-z half-axle)
+            (translate 0 0 (- 0 half-axle-assembly-z)
+              (mirror "z" 0 half-axle))))
+        (shape assembled-cassette
+          (translate 0 0 axis-z
+            (rotate 90 0 0 assembled-cassette-local)))
+
+        ;; STAR prints vertically. The keyed plug flat and round journal share
+        ;; the same tangent plane, so each half axle prints without supports.
+        (shape print-star
+          (translate print-x print-y star-half star-sleeve))
+        (shape print-half-axle-a
+          (translate
+            (+ print-x 52)
+            (+ print-y half-axle-total-l)
+            journal-r
+            (rotate 90 0 0 half-axle)))
+        (shape print-half-axle-b
+          (translate
+            (+ print-x 52 print-spacing)
+            (+ print-y half-axle-total-l)
+            journal-r
+            (rotate 90 0 0 half-axle)))
+        (result
+          (if assembly-preview
+            assembled-cassette
+            (compound print-star print-half-axle-a print-half-axle-b))))))
+
+  (part spool-wheel-arbor
+    (dryer-spool-wheel-arbor
+      :spool-diameter 200
+      :spool-width 75
+      :spool-axial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :spool-axis-lift spool-axis-lift
+      :spool-star-free-diameter-local spool-star-free-diameter
+      :assembly-preview show-assembly))
+
+  ;; Exact 6002-2RS envelopes. Assembly mode shows the purchased bearings in
+  ;; their U seats; print mode emits two sacrificial rings for fit testing.
+  (define-component dryer-bearing-fit-gauges
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number spool-axis-lift)
+     (toggle assembly-preview))
+    (let*
+      ((axis-z
+         (dryer-spool-axis-height
+           spool-diameter wall-thickness desiccant-height
+           spool-bottom-clearance spool-axis-lift))
+       (bearing-outer-face
+         (dryer-bearing-outer-face spool-width spool-axial-clearance))
+       (bearing-inner-face (- bearing-outer-face dryer-bearing-width))
+       (print-x (+ spool-diameter 85))
+       (print-y (+ spool-width 175)))
+      (build
+        (shape bearing-positive
+          (cylinder dryer-bearing-outer-radius dryer-bearing-width 96))
+        (shape bearing-bore
+          (translate 0 0 -0.1
+            (cylinder
+              dryer-bearing-inner-radius
+              (+ dryer-bearing-width 0.2)
+              64)))
+        (shape bearing-ring
+          (difference bearing-positive bearing-bore))
+        (shape front-bearing-local
+          (translate 0 0 bearing-inner-face bearing-ring))
+        (shape rear-bearing-local
+          (translate 0 0 (- 0 bearing-inner-face)
+            (mirror "z" 0 bearing-ring)))
+        (shape assembled-bearings
+          (translate 0 0 axis-z
+            (rotate 90 0 0
+              (compound front-bearing-local rear-bearing-local))))
+        (shape print-bearing-a
+          (translate print-x print-y 0 bearing-ring))
+        (shape print-bearing-b
+          (translate (+ print-x 34) print-y 0 bearing-ring))
+        (result
+          (if assembly-preview
+            assembled-bearings
+            (compound print-bearing-a print-bearing-b))))))
+
+  (part bearing-fit-gauges
+    (dryer-bearing-fit-gauges
+      :spool-diameter 200
+      :spool-width 75
+      :spool-axial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :spool-axis-lift spool-axis-lift
+      :assembly-preview show-assembly))
+
+  ;; One flat sacrificial 6002 gauge. Export this part alone to test the U seat
+  ;; and Ø11.8 snap journal before the purchased bearings arrive.
+  (part bearing-print-gauge
+    (translate 0 64 0
+      (difference
+        (cylinder dryer-bearing-outer-radius dryer-bearing-width 96)
+        (translate 0 0 -0.1
+          (cylinder
+            dryer-bearing-inner-radius
+            (+ dryer-bearing-width 0.2)
+            64)))))
+
+  ;; removable C-latches
+  (define-component dryer-c-latches
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-radial-clearance)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number body-split-height-local)
+     (number lid-face-gap)
+     (number latch-width)
+     (number latch-horizontal-offset)
+     (number catch-pin-radius)
+     (number catch-pin-clearance)
+     (number body-catch-setback)
+     (number lid-catch-setback)
+     (number latch-removal-offset)
+     (toggle assembly-preview))
+    (let*
+      ((body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-d (dryer-body-depth spool-width spool-axial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (split-z body-split-height-local)
+       (lid-z (+ split-z lid-face-gap))
+       (rail-y
+         (dryer-latch-axis-y body-d catch-pin-radius catch-pin-clearance))
+       (side-rail-x
+         (dryer-latch-axis-y body-w catch-pin-radius catch-pin-clearance))
+       (side-latch-shift-x (- side-rail-x rail-y))
+       (body-z (- split-z body-catch-setback))
+       (lid-catch-z (+ lid-z lid-catch-setback))
+       (r (+ catch-pin-radius 0.25))
+       (wall 3)
+       (clearance catch-pin-clearance)
+       (lobe-r 1.5)
+       (latch-shorten 1.8)
+       (preload (if assembly-preview 0 1.2))
+       (half-preload (/ preload 2))
+       ;; Full hinge ring and spine share one wall thickness and one tangent.
+       (loop-inner-r (+ r clearance 0.2))
+       (loop-wall wall)
+       (loop-outer-r (+ loop-inner-r loop-wall))
+       (loop-center-y rail-y)
+       (loop-center-z lid-catch-z)
+       (spine-inner-y (- loop-center-y loop-inner-r))
+       (spine-y (- spine-inner-y wall))
+       ;; Captive upper hinge: the spine terminates into a full round bearing.
+       (upper-z lid-catch-z)
+       (lower-inner-z (+ (- body-z r clearance) latch-shorten half-preload))
+       (lower-z (- lower-inner-z wall))
+       (lobe-y (+ rail-y r))
+       (arm-end-y (+ lobe-y lobe-r))
+       (lower-lobe-z (- lower-inner-z 0.5))
+       ;; Nominal width is the ear-to-ear gap. Leave 0.6 mm per side for FDM fit.
+       (latch-side-clearance 0.6)
+       (latch-body-width (- latch-width latch-side-clearance latch-side-clearance))
+       (x (- latch-horizontal-offset (/ latch-body-width 2)))
+       (height (- upper-z lower-z))
+       (arm-d (- arm-end-y spine-y))
+       (mid-z (/ (+ upper-z lower-z) 2))
+       (tail-run 5)
+       (tail-overlap 0.6)
+       (tail-curl 0.8)
+       ;; Preserve the outward curl, but grow the round grip to meet the
+       ;; opposite tab face tangentially instead of exposing a sharp corner.
+       (tail-tip-r (+ (/ wall 2) tail-curl))
+       (tail-height (+ tail-run tail-overlap))
+       (tail-tip-y (- (+ spine-y (/ wall 2)) tail-curl))
+       (lower-tail-z (- lower-z tail-run))
+       (lower-tail-tip-z (- lower-z tail-run))
+       (rear-shift (- 0 latch-horizontal-offset latch-horizontal-offset))
+       (print-x (+ body-w 180))
+       (print-y-step 30)
+       (print-lift (+ (/ latch-body-width 2) 0.4))
+       ;; Shallow recessed no-moisture badge on the broad latch face.
+       (badge-cut-depth 0.8)
+       (badge-cut-overrun 0.1)
+       (badge-cut-l (+ badge-cut-depth badge-cut-overrun badge-cut-overrun))
+       (badge-face-y (+ spine-y (/ badge-cut-depth 2)))
+       (badge-center-x (+ x (/ latch-body-width 2)))
+       (badge-center-z mid-z)
+       (badge-r 14.5)
+       (badge-ring-width 3)
+       (badge-inner-r (- badge-r badge-ring-width))
+       (badge-slash-width 3.5)
+       (badge-slash-length 34))
+      (build
+        (shape front-positive
+          (union
+            (translate x spine-y lower-z
+              (box latch-body-width wall height :align '(min min min)))
+            (translate x spine-y lower-z
+              (box latch-body-width arm-d wall :align '(min min min)))
+            ;; Positive hinge stock. Bore is cut after every union below.
+            (translate x loop-center-y loop-center-z
+              (rotate 0 90 0
+                (cylinder loop-outer-r latch-body-width 96)))
+            (translate x lobe-y lower-lobe-z
+              (rotate 0 90 0
+                (cylinder lobe-r latch-body-width 48)))
+            ;; Full-width pull tabs stay parallel to the enclosure wall.
+            ;; Hinge side has no finger tab; lower removable side keeps one.
+            (translate x spine-y lower-tail-z
+              (box latch-body-width wall tail-height
+                :align '(min min min)))
+            (translate x tail-tip-y lower-tail-tip-z
+              (rotate 0 90 0
+                (cylinder tail-tip-r latch-body-width 48)))))
+        (shape badge-ring-cutter
+          (place
+            (location
+              (plane
+                :origin (list badge-center-x badge-face-y badge-center-z))
+              :rotate '(90 0 0))
+            (extrude
+              (ring badge-r badge-inner-r 96)
+              badge-cut-l
+              :symmetric #t)))
+        (shape badge-drop-cutter
+          (place
+            (location
+              (plane
+                :origin (list badge-center-x badge-face-y badge-center-z))
+              :rotate '(90 0 0))
+            (extrude
+              (rounded-polygon
+                (list
+                  (list 0 8)
+                  (list 3.8 2.7)
+                  (list 5.5 -1.7)
+                  (list 4.6 -5.5)
+                  (list 0 -8)
+                  (list -4.6 -5.5)
+                  (list -5.5 -1.7)
+                  (list -3.8 2.7))
+                1)
+              badge-cut-l
+              :symmetric #t)))
+        (shape badge-slash-cutter
+          (place
+            (location
+              (plane
+                :origin (list badge-center-x badge-face-y badge-center-z))
+              :rotate '(90 0 0))
+            (extrude
+              (rotate 0 0 -45
+                (rectangle badge-slash-length badge-slash-width))
+              badge-cut-l
+              :symmetric #t)))
+        (shape badge-cutter
+          (union
+            badge-ring-cutter
+            badge-drop-cutter
+            badge-slash-cutter))
+        (shape hinge-bore
+          (translate (- x 0.2) loop-center-y loop-center-z
+            (rotate 0 90 0
+              (cylinder loop-inner-r (+ latch-body-width 0.4) 96))))
+        ;; Final subtraction guarantees a hollow captive ring. The spine cannot
+        ;; refill the bore and the 0.2 mm overrun removes coplanar end faces.
+        (shape front
+          (difference front-positive hinge-bore badge-cutter))
+        (shape rear
+          (translate rear-shift 0 0
+            (mirror "y" 0 front)))
+        (shape left
+          (translate side-latch-shift-x 0 0
+            (rotate 0 0 -90 front)))
+        (shape right
+          (translate (- 0 side-latch-shift-x) 0 0
+            (rotate 0 0 -90 rear)))
+        (shape print-latch
+          (translate 0 0 print-lift
+            (rotate 0 -90 0
+              (translate
+                (- 0 latch-horizontal-offset)
+                (- 0 rail-y)
+                (- 0 mid-z)
+                front))))
+        (result
+          (if assembly-preview
+            (repeat-compound side 2
+              (if (= side 0)
+                (translate (- 0 latch-removal-offset) 0 0 left)
+                (translate latch-removal-offset 0 0 right)))
+            (repeat-compound copy 2
+              (translate print-x (+ -35 (* copy print-y-step)) 0
+                print-latch)))))))
+
+  (part c-latches
+    (dryer-c-latches
+      :spool-diameter 200
+      :spool-width 75
+      :spool-radial-clearance 4
+      :spool-axial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :body-split-height-local
+        (dryer-body-split-height
+          200 wall-thickness desiccant-bed-height
+          spool-bottom-clearance spool-axis-lift)
+      :lid-face-gap (- lid-gasket-thickness 0.1)
+      :latch-width latch-width
+      :latch-horizontal-offset 0
+      :catch-pin-radius catch-pin-radius
+      :catch-pin-clearance catch-pin-clearance
+      :body-catch-setback 18
+      :lid-catch-setback 16
+      :latch-removal-offset 0
+      :assembly-preview show-assembly))
+
+  ;; four D pins from one repeated component body
+  (define-component dryer-catch-pins
+    ((number spool-diameter)
+     (number spool-width)
+     (number spool-radial-clearance)
+     (number spool-axial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number body-split-height-local)
+     (number lid-face-gap)
+     (number latch-width)
+     (number latch-horizontal-offset)
+     (number catch-pin-radius)
+     (number catch-pin-clearance)
+     (number body-catch-setback)
+     (number lid-catch-setback)
+     (number lid-removal-offset)
+     (toggle assembly-preview))
+    (let*
+      ((body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-d (dryer-body-depth spool-width spool-axial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (split-z body-split-height-local)
+       (lid-z (+ split-z lid-face-gap))
+       (rail-y
+         (dryer-latch-axis-y body-d catch-pin-radius catch-pin-clearance))
+       (side-rail-x
+         (dryer-latch-axis-y body-w catch-pin-radius catch-pin-clearance))
+       (side-latch-shift-x (- side-rail-x rail-y))
+       (body-z (- split-z body-catch-setback))
+       (lid-catch-z (+ lid-z lid-catch-setback))
+       (r (+ catch-pin-radius 0.25))
+       (flat (/ r 2))
+       (diameter (+ r r))
+       (profile-w (+ r flat))
+       (ear-t 6)
+       (span (+ latch-width ear-t ear-t))
+       (pin-end-clearance 0.3)
+       (length (- span pin-end-clearance pin-end-clearance))
+       (half-l (/ length 2))
+       (front-x latch-horizontal-offset)
+       (rear-shift (- 0 latch-horizontal-offset latch-horizontal-offset))
+       (print-x (+ body-w 205))
+       (print-y 15)
+       (spacing (+ diameter 8)))
+      (build
+        (shape base
+          (intersection
+            (cylinder r length 48)
+            (translate (- 0 flat) (- 0 r) 0
+              (box profile-w diameter length
+                :align '(min min min)))))
+        (shape body-local
+          (rotate 0 0 -45 base))
+        (shape lid-local
+          (rotate 0 0 -135 base))
+        (shape front-body
+          (translate front-x rail-y body-z
+            (rotate 0 90 0
+              (translate 0 0 (- 0 half-l)
+                body-local))))
+        (shape front-lid
+          (translate 0 0 lid-removal-offset
+            (translate front-x rail-y lid-catch-z
+              (rotate 0 90 0
+                (translate 0 0 (- 0 half-l)
+                  lid-local)))))
+        (shape front-pair
+          (compound front-body front-lid))
+        (shape rear-pair
+          (translate rear-shift 0 0
+            (mirror "y" 0 front-pair)))
+        (shape left-pair
+          (translate side-latch-shift-x 0 0
+            (rotate 0 0 -90 front-pair)))
+        (shape right-pair
+          (translate (- 0 side-latch-shift-x) 0 0
+            (rotate 0 0 -90 rear-pair)))
+        (result
+          (if assembly-preview
+            (repeat-compound side 2
+              (if (= side 0) left-pair right-pair))
+            (repeat-compound copy 4
+              (translate (+ print-x (* copy spacing)) print-y 0
+                (if (< copy 2) body-local lid-local))))))))
+
+  (part catch-pins
+    (dryer-catch-pins
+      :spool-diameter 200
+      :spool-width 75
+      :spool-radial-clearance 4
+      :spool-axial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :body-split-height-local
+        (dryer-body-split-height
+          200 wall-thickness desiccant-bed-height
+          spool-bottom-clearance spool-axis-lift)
+      :lid-face-gap (- lid-gasket-thickness 0.1)
+      :latch-width latch-width
+      :latch-horizontal-offset 0
+      :catch-pin-radius catch-pin-radius
+      :catch-pin-clearance catch-pin-clearance
+      :body-catch-setback 18
+      :lid-catch-setback 16
+      :lid-removal-offset 0
+      :assembly-preview show-assembly))
+
+  ;; Inner half of the roof bulkhead. Insert from inside until the flange seats
+  ;; against the lid; the smooth stem crosses the lid and the thread stays above it.
+  (define-component dryer-filament-inner-feedthrough
+    ((number spool-diameter)
+     (number spool-radial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number filament-channel-diameter)
+     (number filament-hose-inner-diameter-local)
+     (number thread-nozzle-diameter-local)
+     (number lid-removal-offset)
+     (toggle assembly-preview))
+    (let*
+      ((body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (roof-inner-z (- body-h wall-thickness))
+       (axis-x (- 0 (- (/ body-w 2) 24)))
+       (passage-r (/ filament-channel-diameter 2))
+       (flange-r
+         (dryer-filament-ring-outer-radius thread-nozzle-diameter-local))
+       (flange-h 2.5)
+       (stem-r dryer-filament-thread-core-radius)
+       (stem-z (- flange-h 0.2))
+       (stem-l (+ wall-thickness 0.4))
+       (retaining-thread-r dryer-filament-thread-core-radius)
+       (retaining-thread-depth
+         (dryer-small-thread-depth thread-nozzle-diameter-local))
+       (thread-root-overlap 0.3)
+       (thread-ridge-r
+         (- retaining-thread-r thread-root-overlap))
+       (thread-ridge-depth
+         (+ retaining-thread-depth thread-root-overlap))
+       (thread-major-r
+         (+ retaining-thread-r retaining-thread-depth))
+       (thread-pitch
+         (dryer-small-thread-pitch thread-nozzle-diameter-local))
+       (thread-base-width
+         (dryer-small-thread-base-width thread-nozzle-diameter-local))
+       (thread-crest-width
+         (dryer-small-thread-crest-width thread-nozzle-diameter-local))
+       (retaining-thread-z (+ flange-h wall-thickness))
+       (retaining-thread-l 7.2)
+       (thread-top-z (+ retaining-thread-z retaining-thread-l))
+       ;; TPU hose has Ø11 bore by default. Lid barb crest
+       ;; adds 0.6 mm diametral interference; straight filament path stays Ø5.
+       (barb-root-r
+         (dryer-filament-barb-root-radius filament-hose-inner-diameter-local))
+       (barb-crest-r
+         (dryer-filament-barb-crest-radius filament-hose-inner-diameter-local))
+       (barb-tip-r
+         (dryer-filament-barb-tip-radius filament-hose-inner-diameter-local))
+       (barb-root-chamfer-z (- thread-top-z 0.2))
+       (barb-root-chamfer-h 3)
+       ;; Keep whole barb below retaining-ring bore so ring installs first.
+       (barb-root-chamfer-r barb-crest-r)
+       (barb-z (+ thread-top-z 2.3))
+       (barb-h 10)
+       (top-z (+ barb-z barb-h))
+       (hole-start -0.3)
+       (hole-l (+ top-z 0.6)))
+      (build
+        ;; Explicit overlapping core + ridge avoids the direct-OCCT `thread`
+        ;; primitive collapsing to a smooth cylinder at this small radius.
+        (shape male-thread-core
+          (translate 0 0 retaining-thread-z
+            (cylinder retaining-thread-r retaining-thread-l 64)))
+        (shape male-thread-ridge
+          (translate 0 0 retaining-thread-z
+            (helical-ridge
+              :radius thread-ridge-r
+              :pitch thread-pitch
+              :height retaining-thread-l
+              :depth thread-ridge-depth
+              :base-width thread-base-width
+              :crest-width thread-crest-width)))
+        (shape male-thread-unclipped
+          (union male-thread-core male-thread-ridge))
+        (shape male-thread-envelope
+          (translate 0 0 retaining-thread-z
+            (cylinder thread-major-r retaining-thread-l 96)))
+        (shape male-thread
+          (intersection male-thread-unclipped male-thread-envelope))
+        (shape positive
+          (union
+            (chamfer 0.8 :edges "bottom"
+              (cylinder flange-r flange-h 64))
+            (translate 0 0 stem-z
+              (cylinder stem-r stem-l 64))
+            male-thread
+            (translate 0 0 barb-root-chamfer-z
+              (cone
+                barb-root-chamfer-r
+                barb-root-r
+                barb-root-chamfer-h
+                64))
+            (translate 0 0 barb-z
+              (cylinder barb-root-r barb-h 48))
+            (translate 0 0 (+ barb-z 2.5)
+              (cone barb-crest-r barb-root-r 2 48))
+            (translate 0 0 (+ barb-z 7)
+              (cone barb-crest-r barb-tip-r 3 48))))
+        (shape filament-passage
+          (translate 0 0 hole-start
+            (cylinder passage-r hole-l 64)))
+        (shape finished
+          (difference positive filament-passage))
+        (result
+          (if assembly-preview
+            (translate axis-x 0
+              (+ (- roof-inner-z flange-h) lid-removal-offset)
+              finished)
+            (translate (+ body-w 25) 65 0
+              finished))))))
+
+  (part filament-inner-feedthrough
+    (dryer-filament-inner-feedthrough
+      :spool-diameter 200
+      :spool-radial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :filament-channel-diameter filament-channel-diameter
+      :filament-hose-inner-diameter-local filament-hose-inner-diameter
+      :thread-nozzle-diameter-local
+        (dryer-thread-nozzle-value thread-nozzle-diameter)
+      :lid-removal-offset 0
+      :assembly-preview show-assembly))
+
+  ;; Open retaining ring. It slides over the hose barb, then its female thread
+  ;; clamps the inner flange against the lid. Both ends remain support-free.
+  (define-component dryer-filament-retaining-ring
+    ((number spool-diameter)
+     (number spool-radial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number thread-nozzle-diameter-local)
+     (number lid-removal-offset)
+     (toggle assembly-preview))
+    (let*
+      ((body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (axis-x (- 0 (- (/ body-w 2) 24)))
+       (thread-r dryer-filament-thread-core-radius)
+       (thread-clearance dryer-filament-thread-radial-clearance)
+       (thread-depth
+         (dryer-small-thread-depth thread-nozzle-diameter-local))
+       (thread-pitch
+         (dryer-small-thread-pitch thread-nozzle-diameter-local))
+       (thread-base-width
+         (dryer-small-thread-base-width thread-nozzle-diameter-local))
+       (thread-crest-width
+         (dryer-small-thread-crest-width thread-nozzle-diameter-local))
+       (thread-axial-clearance 0.35)
+       (tap-base-width (+ thread-base-width thread-axial-clearance))
+       (tap-crest-width (+ thread-crest-width thread-axial-clearance))
+       (collar-h 7.2)
+       (thread-l collar-h)
+       (thread-minor-r (+ thread-r thread-clearance))
+       (thread-entry-h 1.5)
+       (thread-entry-r (+ thread-minor-r thread-depth 0.15))
+       (thread-cut-start (- thread-entry-h 0.4))
+       (thread-cut-l (+ (- thread-l thread-cut-start) 0.3))
+       (collar-r
+         (dryer-filament-ring-outer-radius thread-nozzle-diameter-local))
+       (print-x (+ body-w 45)))
+      (build
+        (shape positive
+          (chamfer 0.7 :edges "top"
+            (cylinder collar-r collar-h 64)))
+        (shape female-thread-cutter
+          (translate 0 0 thread-cut-start
+            (tapped-hole
+              :radius (+ thread-r thread-clearance)
+              :pitch thread-pitch
+              :length thread-cut-l
+              :depth thread-depth
+              :base-width tap-base-width
+              :crest-width tap-crest-width)))
+        (shape female-thread-entry
+          (translate 0 0 -0.3
+            ;; Full-major-radius counterbore removes the helix where it crosses
+            ;; the bottom face. It also gives the printed male thread a lead-in.
+            (cylinder thread-entry-r thread-entry-h 64)))
+        (shape finished
+          ;; Separate cuts avoid a coincident inner edge at the ring bottom.
+          (difference
+            positive
+            female-thread-entry
+            female-thread-cutter))
+        (result
+          (if assembly-preview
+            (translate axis-x 0
+              (+ body-h lid-removal-offset)
+              finished)
+            (translate print-x 65 0 finished))))))
+
+  (part filament-retaining-ring
+    (dryer-filament-retaining-ring
+      :spool-diameter 200
+      :spool-radial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :thread-nozzle-diameter-local
+        (dryer-thread-nozzle-value thread-nozzle-diameter)
+      :lid-removal-offset 0
+      :assembly-preview show-assembly))
+
+  ;; Straight TPU hose prints vertically. One end slips over the hard P2S
+  ;; guide; the other stretches over the lid barb. Lead-ins ease installation.
+  (define-component dryer-filament-tpu-hose
+    ((number spool-diameter)
+     (number spool-radial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number filament-hose-inner-diameter-local)
+     (number filament-hose-length)
+     (number filament-hose-wall)
+     (toggle assembly-preview))
+    (let*
+      ((body-w
+         (dryer-body-width
+           spool-diameter spool-radial-clearance wall-thickness))
+       (body-h
+         (dryer-body-height
+           spool-diameter wall-thickness desiccant-height
+           spool-bottom-clearance hygrometer-zone-height))
+       (axis-x (- 0 (- (/ body-w 2) 24)))
+       ;; Feedthrough barb begins 9.5 mm above the enclosure roof.
+       (hose-seat-z (+ body-h 9.5))
+       (hose-inner-r
+         (dryer-filament-hose-inner-radius
+           filament-hose-inner-diameter-local))
+       (hose-outer-r (+ hose-inner-r filament-hose-wall))
+       (entry-r (+ hose-inner-r 0.4))
+       (entry-h 2)
+       (cut-overrun 0.3)
+       (print-x (+ body-w 95)))
+      (build
+        (shape hose-positive
+          (cylinder hose-outer-r filament-hose-length 64))
+        (shape hose-bore
+          (translate 0 0 (- cut-overrun)
+            (cylinder
+              hose-inner-r
+              (+ filament-hose-length cut-overrun cut-overrun)
+              64)))
+        (shape bottom-lead-in
+          (translate 0 0 (- cut-overrun)
+            (cone entry-r hose-inner-r (+ entry-h cut-overrun) 64)))
+        (shape top-lead-in
+          (translate 0 0 (- filament-hose-length entry-h)
+            (cone
+              hose-inner-r entry-r (+ entry-h cut-overrun) 64)))
+        (shape finished
+          (difference
+            hose-positive
+            (union hose-bore bottom-lead-in top-lead-in)))
+        (result
+          (if assembly-preview
+            (translate axis-x 0 hose-seat-z finished)
+            (translate print-x 65 0 finished))))))
+
+  (part filament-tpu-hose
+    (dryer-filament-tpu-hose
+      :spool-diameter 200
+      :spool-radial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :filament-hose-inner-diameter-local filament-hose-inner-diameter
+      :filament-hose-length filament-hose-length
+      :filament-hose-wall filament-hose-wall
+      :assembly-preview show-assembly))
+
+  ;; hygrometer female threaded insert
+  (define-component dryer-hygrometer-thread-insert
+    ((number spool-diameter)
+     (number spool-radial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number hygrometer-diameter-local)
+     (number hygrometer-holder-wall-local)
+     (number hygrometer-insert-skirt-width-local)
+     (number hygrometer-thread-pitch-local)
+     (number hygrometer-thread-depth-local)
+     (number hygrometer-thread-base-width-local)
+     (number hygrometer-thread-crest-width-local)
+     (number hygrometer-thread-engagement-local)
+     (number hygrometer-thread-clearance-local)
+     (number lid-removal-offset)
+     (toggle assembly-preview))
+    (let*
+      ((pocket-r (/ hygrometer-diameter-local 2))
+       (thread-r (+ pocket-r hygrometer-holder-wall-local))
+       (body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (filament-x (- 0 (- (/ body-w 2) 24)))
+       (hygro-roof-x (+ filament-x 52))
+       (roof-inner-z (- body-h wall-thickness))
+       (bore-r (+ thread-r hygrometer-thread-clearance-local))
+       (thread-axial-clearance 0.3)
+       (tap-base-width (+ hygrometer-thread-base-width-local thread-axial-clearance))
+       (tap-crest-width (+ hygrometer-thread-crest-width-local thread-axial-clearance))
+       (outer-r (+ thread-r hygrometer-thread-depth-local 2.5))
+       (female-ring-depth hygrometer-thread-engagement-local)
+       (skirt-h 2)
+       (height female-ring-depth)
+       (skirt-r (+ outer-r hygrometer-insert-skirt-width-local))
+       (thread-overrun 0.6)
+       (thread-l (+ height thread-overrun)))
+      (build
+        (shape positive
+          (union
+            (cylinder outer-r height 128)
+            (chamfer 0.6 :edges "top"
+              (cylinder skirt-r skirt-h 128))))
+        ;; Female thread cutter: central bore plus printable helical relief.
+        (shape thread-cutter
+          (translate 0 0 -0.3
+            (tapped-hole
+              :radius bore-r
+              :pitch hygrometer-thread-pitch-local
+              :length thread-l
+              :depth hygrometer-thread-depth-local
+              :base-width tap-base-width
+              :crest-width tap-crest-width)))
+        (shape finished
+          (difference positive thread-cutter))
+        (result
+          (if assembly-preview
+            (translate hygro-roof-x 0 (+ roof-inner-z lid-removal-offset)
+              (rotate 180 0 0 finished))
+            (translate
+              (+ body-w 100)
+              -90
+              0
+              finished))))))
+
+  (part hygrometer-thread-insert
+    (dryer-hygrometer-thread-insert
+      :spool-diameter 200
+      :spool-radial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :hygrometer-diameter-local (hygrometer-bore-diameter hygrometer-body-diameter hygrometer-body-clearance)
+      :hygrometer-holder-wall-local hygrometer-holder-wall
+      :hygrometer-insert-skirt-width-local 5
+      :hygrometer-thread-pitch-local 5
+      :hygrometer-thread-depth-local 1.6
+      :hygrometer-thread-base-width-local 4
+      :hygrometer-thread-crest-width-local 1.4
+      :hygrometer-thread-engagement-local hygrometer-thread-engagement
+      :hygrometer-thread-clearance-local 0.6
+      :lid-removal-offset 0
+      :assembly-preview show-assembly))
+
+  ;; hygrometer male cartridge
+  (define-component dryer-hygrometer-cartridge
+    ((number spool-diameter)
+     (number spool-radial-clearance)
+     (number wall-thickness)
+     (number desiccant-height)
+     (number spool-bottom-clearance)
+     (number hygrometer-zone-height)
+     (number hygrometer-diameter-local)
+     (number hygrometer-holder-wall-local)
+     (number hygrometer-thread-pitch-local)
+     (number hygrometer-thread-depth-local)
+     (number hygrometer-thread-base-width-local)
+     (number hygrometer-thread-crest-width-local)
+     (number hygrometer-thread-engagement-local)
+     (number lid-removal-offset)
+     (toggle assembly-preview))
+    (let*
+      ((pocket-r (/ hygrometer-diameter-local 2))
+       (thread-r (+ pocket-r hygrometer-holder-wall-local))
+       (body-w (dryer-body-width spool-diameter spool-radial-clearance wall-thickness))
+       (body-h (dryer-body-height spool-diameter wall-thickness desiccant-height spool-bottom-clearance hygrometer-zone-height))
+       (filament-x (- 0 (- (/ body-w 2) 24)))
+       (hygro-roof-x (+ filament-x 52))
+       (thread-end-clearance 0.25)
+       (flange-h 2)
+       (thread-l
+         (- (+ flange-h wall-thickness hygrometer-thread-engagement-local)
+            thread-end-clearance))
+       (flange-z 0)
+       (total-l thread-l)
+       (assembly-origin-z (+ body-h flange-h lid-removal-offset))
+       (grip-extra-radius 8)
+       (grip-r (+ thread-r hygrometer-thread-depth-local grip-extra-radius))
+       (bore-overrun 5))
+      (build
+        (shape hygrometer-pocket
+          (translate 0 0 (- 0 bore-overrun)
+            (cylinder pocket-r (+ total-l bore-overrun bore-overrun) 128)))
+        (shape positive
+          (union
+            (thread
+              :radius thread-r
+              :pitch hygrometer-thread-pitch-local
+              :length thread-l
+              :depth hygrometer-thread-depth-local
+              :base-width hygrometer-thread-base-width-local
+              :crest-width hygrometer-thread-crest-width-local)
+            (translate 0 0 flange-z
+              (chamfer 0.8 :edges "top"
+                (cylinder grip-r flange-h 12)))))
+        (shape finished
+          (difference positive hygrometer-pocket))
+        (result
+          (if assembly-preview
+            (translate hygro-roof-x 0 assembly-origin-z
+              (rotate 180 0 0 finished))
+            (translate
+              (+ body-w 100)
+              120
+              0.8
+              finished))))))
+
+  (part hygrometer-cartridge
+    (dryer-hygrometer-cartridge
+      :spool-diameter 200
+      :spool-radial-clearance 4
+      :wall-thickness wall-thickness
+      :desiccant-height desiccant-bed-height
+      :spool-bottom-clearance spool-bottom-clearance
+      :hygrometer-zone-height 52
+      :hygrometer-diameter-local (hygrometer-bore-diameter hygrometer-body-diameter hygrometer-body-clearance)
+      :hygrometer-holder-wall-local hygrometer-holder-wall
+      :hygrometer-thread-pitch-local 5
+      :hygrometer-thread-depth-local 1.6
+      :hygrometer-thread-base-width-local 4
+      :hygrometer-thread-crest-width-local 1.4
+      :hygrometer-thread-engagement-local hygrometer-thread-engagement
+      :lid-removal-offset 0
+      :assembly-preview show-assembly))
+
+  ;; Component-thread advisories share the normalized Direct OCCT environment.
+)

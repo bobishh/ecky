@@ -4,10 +4,9 @@
   import ReadOnlyEckySource from './ReadOnlyEckySource.svelte';
   import {
     modelShowcaseVariants,
-    type ModelShowcaseVariant,
   } from './modelShowcaseManifest';
 
-  let selectedId = $state('bicycle-bottle-holder');
+  let selectedId = $state(modelShowcaseVariants[0].id);
   let codeOpen = $state(false);
   let copyState = $state<'idle' | 'copied' | 'error'>('idle');
   let codeButton: HTMLButtonElement | null = $state(null);
@@ -120,9 +119,6 @@
     copyResetTimer = setTimeout(() => (copyState = 'idle'), 1800);
   }
 
-  function partDownloadLabel(part: ModelShowcaseVariant['parts'][number]): string {
-    return `DOWNLOAD ${part.label}`;
-  }
 </script>
 
 {#if selected}
@@ -140,7 +136,7 @@
         <div class="workbench-controls">
           <div class="source-static" aria-label="Model format">
             <span>FORMAT</span>
-            <strong>.ECKY + STL</strong>
+            <strong>.ECKY + ZIP</strong>
           </div>
           <button class="workbench-code" type="button" bind:this={codeButton} onclick={openCode}>SEE CODE</button>
         </div>
@@ -170,9 +166,11 @@
           size={620}
           initialYaw={selected.view.yaw}
           initialPitch={selected.view.pitch}
-          parts={selected.parts.map(({ url, color }) => ({ url, color }))}
+          parts={(selected.preview?.parts ?? selected.parts).map(({ url, color }) => ({ url, color }))}
+          upAxis={selected.preview?.upAxis ?? 'y'}
+          label={`${selected.title}${selected.preview?.layout === 'assembly' ? ', assembled' : ''} — drag to rotate`}
         />
-        <div class="viewport-hint">DRAG TO ORBIT</div>
+        <div class="viewport-hint">{selected.preview?.layout === 'assembly' ? 'ASSEMBLED VIEW · ' : ''}DRAG TO ORBIT</div>
       </div>
 
       {#if codeOpen}
@@ -223,11 +221,9 @@
     </div>
 
     <div class="model-downloads" aria-label="Model downloads">
-      {#each selected.parts as part}
-        <a class="model-download model-download--primary" href={part.url} download={part.downloadName}>
-          {partDownloadLabel(part)}
-        </a>
-      {/each}
+      <a class="model-download model-download--primary" href={selected.archiveUrl} download={selected.archiveDownloadName}>
+        DOWNLOAD ZIP
+      </a>
       {#each selectedSources as source}
         <a class="model-download" href={source.url} download={source.downloadName}>
           {selectedSources.length === 1 ? 'DOWNLOAD .ECKY' : `DOWNLOAD ${source.label} SOURCE`}
@@ -339,7 +335,7 @@
   }
 
   .model-strip__label { padding-top: 9px; color: var(--secondary); }
-  .model-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+  .model-options { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; min-width: 0; }
 
   .model-choice {
     min-width: 0;

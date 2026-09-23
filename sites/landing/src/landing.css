@@ -595,3 +595,27 @@ code {
     text-align: center;
   }
 }
+
+/* Readable project notes below the model workbench. */
+.readme-section { overflow:hidden; padding-block:3rem; border-top:1px solid var(--border); }
+.source-explainer { display:grid; grid-template-columns:1fr 1.1fr; gap:3rem; overflow:hidden; }
+.readme-row { display:grid; grid-template-columns:1fr 2fr; gap:3rem; overflow:hidden; }
+.readme-section h2 { font:600 clamp(1.5rem,3vw,2rem)/1.2 var(--font-display); letter-spacing:-.03em; margin:.5rem 0 1.3rem; }
+.readme-prose { min-width:0; max-width:660px; overflow:hidden; font:18px/1.7 system-ui,-apple-system,sans-serif; }
+.readme-prose p { margin:0 0 1.2rem; }
+.readme-prose code { font-size:.82em; }
+.text-link { color:var(--secondary); text-decoration:underline; text-underline-offset:4px; }
+.source-example { align-self:start; min-width:0; overflow:hidden; border:1px solid var(--border-bright); background:#111524; }
+.source-filename { padding:.6rem 1.2rem; border-bottom:1px solid var(--border); color:var(--text-dim); font-size:.75rem; }
+.source-example pre { padding:1.2rem; overflow:auto; font:13px/1.8 var(--font-mono); }
+.source-example pre code { background:none; padding:0; color:var(--text); }
+.reading-links { display:grid; gap:0; margin:2rem 0; overflow:hidden; border-block:1px solid var(--border); }
+.reading-links a { display:block; padding:1.2rem 0; }
+.reading-links a + a { border-top:1px solid var(--border); }
+.reading-links strong { display:block; color:var(--secondary); font-weight:500; }
+.reading-links span { display:block; margin-top:.3rem; color:var(--text-dim); font-size:1rem; }
+.project-note { color:var(--text-dim); font-size:1rem; }
+.hero-lede,.hero-summary,.models-head p { font-family:system-ui,-apple-system,sans-serif; }
+.hero-lede { font-size:1.2rem; }
+.hero-summary { font-size:1rem; }
+@media (max-width:760px) { .source-explainer,.readme-row { grid-template-columns:1fr; gap:1.2rem; } .readme-section { padding-block:2rem; } .readme-prose { font-size:17px; } .source-example pre { font-size:12px; } }

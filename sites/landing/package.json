@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:unit": "node --test src/showcase/*.test.mjs && python3 -m unittest discover -s scripts -p 'test_*.py'",
+    "models:package": "python3 scripts/package_models.py"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",

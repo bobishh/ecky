@@ -1,0 +1,69 @@
+(model
+  (params
+    (number frame_dia 30.0 :min 20.0 :max 50.0 :label "Frame Diameter")
+    (number clip_thick 3.0 :min 2.0 :max 6.0 :label "Clip Thickness")
+    (number rail_length 85.0 :min 60.0 :max 110.0 :label "Rail Length")
+  )
+
+  (part "FrameMountRail"
+    (let* (
+      (rail_len rail_length)
+
+      ;; Fixed connector geometry matches current BottleCage female slot.
+      (base_w 12.0)
+      (h_jt 4.5)
+      (top_w (+ base_w (* 2.0 h_jt)))
+
+      (half_base (/ base_w 2.0))
+      (half_top (/ top_w 2.0))
+
+      (plate_w 24.0)
+      (plate_h 6.0)
+      (plate_len rail_len)
+      (plate_base (box plate_w plate_h plate_len :align '(center max center)))
+
+      (f_dia frame_dia)
+      (c_th clip_thick)
+      (f_r (/ f_dia 2.0))
+      (c_out_r (+ f_r c_th))
+      (f_cy (- (- plate_h) f_r))
+
+      (c_shell_out (place (location (plane :origin (list 0.0 f_cy 0.0)))
+                          (cylinder c_out_r plate_len :align '(center center center))))
+      (c_shell_in (place (location (plane :origin (list 0.0 f_cy 0.0)))
+                         (cylinder f_r (+ plate_len 10.0) :align '(center center center))))
+      (c_body (difference c_shell_out c_shell_in))
+
+      (open_w (* f_dia 0.75))
+      (open_cut (place (location (plane :origin (list 0.0 f_cy 0.0)))
+                       (box open_w (* c_out_r 2.0) (+ plate_len 10.0) :align '(center max center))))
+      (c_snapper (difference c_body open_cut))
+
+      (mount_body (union plate_base c_snapper))
+
+      (rail_poly (polygon (list
+        (list (- half_base) 0.0)
+        (list half_base 0.0)
+        (list half_top h_jt)
+        (list (- half_top) h_jt)
+      )))
+
+      (rail_male_raw (place (location (plane :origin (list 0.0 0.0 (* -0.5 rail_len))))
+                       (extrude rail_poly rail_len)))
+
+      ;; 45-degree roofed cap from earlier good male version; avoids a support-hungry block.
+      (rail_roof (place (location (plane :origin (list 0.0 0.0 (* 0.5 rail_len))))
+                        (union
+                          (place (location (plane :origin '(0 0 0)) :rotate '(0 45 0))
+                            (box 40 40 40 :align '(min center min)))
+                          (place (location (plane :origin '(0 0 0)) :rotate '(0 -45 0))
+                            (box 40 40 40 :align '(max center min))))))
+
+      (rail_male (difference rail_male_raw rail_roof))
+      (mount_base_final (union mount_body rail_male))
+    )
+      ;; Grounded Z for standalone printing.
+      (place (location (plane :origin (list 0.0 0.0 (/ rail_len 2.0)))) mount_base_final)
+    )
+  )
+)

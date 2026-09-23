@@ -1,47 +1,19 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import EckyMascot from './EckyMascot.svelte';
   import ModelWorkbench from './showcase/ModelWorkbench.svelte';
 
   const repoUrl = 'https://github.com/bobishh/ecky';
   const chaptersUrl = '/docs/chapters/';
   const referenceUrl = '/docs/';
-  const heroInvariants = [
-    'keep every dimension named',
-    'keep fit relationships explicit',
-    'keep source inspectable',
-    'keep exports reproducible',
-  ];
-
-  let heroInvariantIndex = $state(0);
-  const heroInvariant = $derived(heroInvariants[heroInvariantIndex]);
-
-  onMount(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const timer = window.setInterval(() => {
-      heroInvariantIndex = (heroInvariantIndex + 1) % heroInvariants.length;
-    }, 2_400);
-    return () => window.clearInterval(timer);
-  });
-
-  const facts = [
-    {
-      title: 'A solid you can keep editing',
-      body: 'Ecky renders B-rep geometry through Open CASCADE Technology (OCCT), a CAD kernel. Change dimensions, inspect faces and edges, then export STEP or STL.',
-    },
-    {
-      title: 'Readable source, bounded vocabulary',
-      body: 'The model produces .ecky: a small, inspectable modeling language—not arbitrary generated Python. You can edit the source and rerender the same part.',
-    },
-    {
-      title: 'Checks travel with the geometry',
-      body: 'Declare requirements beside a model. Ecky validates source, previews the result, and records the check before an agent-authored version is saved.',
-    },
-    {
-      title: 'Local app, ordinary files',
-      body: 'Use a configured Gemini, OpenAI-compatible, or local Ollama provider. Ecky keeps source and saved versions locally; .ecky files remain files you can inspect.',
-    },
-  ];
+  const sourceExample = `(model
+  (params
+    (number width 60mm :min 20 :max 120)
+    (number thickness 4mm :min 2 :max 10))
+  (part plate
+    (difference
+      (box width 30 thickness)
+      (translate 0 0 -1
+        (cylinder 3 (+ thickness 2))))))`;
 </script>
 
 <nav class="nav">
@@ -61,16 +33,10 @@
 <header class="hero" id="case-study">
   <div class="hero-intro">
     <div class="hero-copy">
-      <span class="kicker">LOCAL DESKTOP AI-ASSISTED CAD · V0.0.1 PRE-RELEASE</span>
-      <h1 class="hero-title">Make parts with AI. Keep the model.</h1>
-      <p class="hero-invariant-line" aria-label={`make weird shit / ${heroInvariant}`}>
-        <span class="hero-invariant-prefix">make weird shit /</span>
-        <span class="hero-invariant-value" data-testid="hero-invariant" aria-hidden="true">{heroInvariant}</span>
-      </p>
-      <p class="hero-lede">Ecky is local desktop CAD for technical makers and developers. Describe a part; inspect or edit the readable <code>.ecky</code> source behind its CAD solid.</p>
-      <p class="hero-summary">
-        The gallery uses real source and downloadable STLs, not mockups. Experimental pre-release: build from source and verify fit before manufacturing.
-      </p>
+      <span class="kicker">EXPERIMENTAL DESKTOP CAD · V0.0.1</span>
+      <h1 class="hero-title">Parametric parts from code.</h1>
+      <p class="hero-lede">Ecky is a desktop CAD app for parts you want to 3D print. Write a model in a small Lisp-style language, adjust its dimensions, and export the geometry. There is optional AI assistance for writing and changing the source.</p>
+      <p class="hero-summary">I bought a 3D printer and started writing FreeCAD macros. That grew into a language and a desktop app. Ecky is still a personal experiment: build from source; expect bugs and breaking changes.</p>
       <div class="hero-cta">
         <a class="btn btn-primary" href={chaptersUrl}>Read the chapters</a>
         <a class="btn" href="#models">Inspect working models</a>
@@ -82,38 +48,48 @@
   </div>
   <div id="models">
     <div class="models-head">
-      <span class="kicker">REAL MODELS · SOURCE + STL</span>
-      <p>Open the source, orbit the exported parts, and download the same artifacts.</p>
+      <span class="kicker">EXAMPLE PROJECTS · SOURCE + ZIP</span>
+      <p>Inspect the source, rotate the geometry, or download all parts and source together as a ZIP.</p>
     </div>
     <ModelWorkbench />
   </div>
 </header>
 
-<section class="section">
-  <div class="section-head">
-    <span class="kicker">WHAT MAKES THIS DIFFERENT</span>
-    <h2>Review the model. Then change it.</h2>
-    <p class="section-sub">A prompt starts the work. Source, solid, and checks stay available when it is time to inspect what actually happened.</p>
-  </div>
-  <div class="feature-grid">
-    {#each facts as fact}
-      <article class="feature-card">
-        <h3>{fact.title}</h3>
-        <p>{fact.body}</p>
-      </article>
-    {/each}
+<section class="section readme-section" id="source">
+  <div class="source-explainer">
+    <div class="readme-prose">
+      <span class="kicker">THE SOURCE</span>
+      <h2>A model is a text file.</h2>
+      <p>This is a complete <code>.ecky</code> model: a plate with a 6 mm hole. The box adds material; the cylinder cuts it away.</p>
+      <p><code>width</code> and <code>thickness</code> become controls in the app. Change the width and the plate grows around the centered hole. The cutter follows the thickness, so the hole stays open.</p>
+      <a class="text-link" href="/docs/primitive-signatures/#box">Read the geometry functions →</a>
+    </div>
+    <div class="source-example"><div class="source-filename">plate.ecky</div><pre><code>{sourceExample}</code></pre></div>
   </div>
 </section>
 
-<section class="cta-section" id="learn">
-  <div class="cta-card">
-    <span class="kicker">LEARN ECKY</span>
-    <h2>Learn Ecky through six practical chapters.</h2>
-    <p>The chapters move from a connected bracket through parameters, patterns, named fits, and a multipart mechanism. The function reference stays separate for exact forms and signatures.</p>
-    <div class="cta-row">
-      <a class="btn btn-primary" href={chaptersUrl}>Read the chapters</a>
-      <a class="btn" href={referenceUrl}>Function reference</a>
-      <a class="btn" href="/docs/ecky-ir-field-guide.epub" download>Download EPUB</a>
+<section class="section readme-section" id="workflow">
+  <div class="readme-row">
+    <h2>What happens in the app</h2>
+    <div class="readme-prose">
+      <p>Edit the source in Ecky or save it from your own editor. The app rebuilds the model and shows the result beside the code. Previous revisions, including failed ones, stay in the project history.</p>
+      <p>You can also ask an agent for a change. Use Codex in Ecky, an API provider, or an external agent through MCP. The result is the same editable source. Inspect it, adjust the parameters, and export STL or STEP when the model supports it.</p>
+      <p>No AI account is needed for manual modeling. Files and history stay local; a remote provider receives the model context sent with your request.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section readme-section" id="learn">
+  <div class="readme-row">
+    <h2>Try it</h2>
+    <div class="readme-prose">
+      <p>Ecky currently runs from source. Setup needs Node.js, Rust, Tauri prerequisites, and the native geometry runtime. The repository has the installation steps.</p>
+      <a class="text-link" href={repoUrl + '#running-from-source'} target="_blank" rel="noreferrer">Build instructions ↗</a>
+      <div class="reading-links">
+        <a href={chaptersUrl}><strong>Start with a bracket</strong><span>Two boxes, one union, then a dimension change. Continue into fits and larger models.</span></a>
+        <a href={referenceUrl}><strong>Function reference</strong><span>Look up arguments, return types, selectors, and examples while writing a model.</span></a>
+      </div>
+      <p class="project-note">The language and app are under development. A successful render does not prove a part will fit or hold a load. Print small fit samples before a full assembly.</p>
     </div>
   </div>
 </section>

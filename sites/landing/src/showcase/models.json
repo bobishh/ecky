@@ -1,0 +1,362 @@
+[
+  {
+    "id": "iphone-case",
+    "label": "PHONE CASE",
+    "title": "iPhone 17e TPU case",
+    "note": "Voronoi back, reinforced edges, and an integrated TPU camera island.",
+    "sourceUrl": "/models/iphone-case/iphone-case.ecky",
+    "sourceDownloadName": "iphone-case.ecky",
+    "view": {
+      "yaw": 0.12,
+      "pitch": -0.08
+    },
+    "parts": [
+      {
+        "label": "Iphone 17e Tpu Case",
+        "url": "/models/iphone-case/iphone-17e-tpu-case.stl",
+        "downloadName": "iphone-17e-tpu-case.stl",
+        "color": "#c8924f"
+      }
+    ],
+    "archiveUrl": "/models/iphone-case/iphone-case.zip",
+    "archiveDownloadName": "iphone-case.zip",
+    "snapshot": {
+      "modelId": "generated-direct-occt-30bc31de37a6",
+      "sourceSha256": "6d1090bf159d32e116454f3a5257387cf9736d619a7f720e44243c14075c5d5d"
+    }
+  },
+  {
+    "id": "filament-dryer",
+    "label": "FILAMENT DRYER",
+    "title": "Filament dryer enclosure",
+    "note": "Assembled enclosure with lid, latches, and feedthrough. ZIP contains all 13 print parts.",
+    "sourceUrl": "/models/filament-dryer/filament-dryer.ecky",
+    "sourceDownloadName": "filament-dryer.ecky",
+    "view": {
+      "yaw": -0.55,
+      "pitch": 0.28
+    },
+    "parts": [
+      {
+        "label": "Enclosure Body",
+        "url": "/models/filament-dryer/enclosure-body.stl",
+        "downloadName": "enclosure-body.stl",
+        "color": "#c8924f"
+      },
+      {
+        "label": "Enclosure Lid",
+        "url": "/models/filament-dryer/enclosure-lid.stl",
+        "downloadName": "enclosure-lid.stl",
+        "color": "#729887"
+      },
+      {
+        "label": "Lid Tpu Gasket",
+        "url": "/models/filament-dryer/lid-tpu-gasket.stl",
+        "downloadName": "lid-tpu-gasket.stl",
+        "color": "#dab87a"
+      },
+      {
+        "label": "Spool Wheel Arbor",
+        "url": "/models/filament-dryer/spool-wheel-arbor.stl",
+        "downloadName": "spool-wheel-arbor.stl",
+        "color": "#8b91a6"
+      },
+      {
+        "label": "Bearing Fit Gauges",
+        "url": "/models/filament-dryer/bearing-fit-gauges.stl",
+        "downloadName": "bearing-fit-gauges.stl",
+        "color": "#987055"
+      },
+      {
+        "label": "Bearing Print Gauge",
+        "url": "/models/filament-dryer/bearing-print-gauge.stl",
+        "downloadName": "bearing-print-gauge.stl",
+        "color": "#c8924f"
+      },
+      {
+        "label": "C Latches",
+        "url": "/models/filament-dryer/c-latches.stl",
+        "downloadName": "c-latches.stl",
+        "color": "#729887"
+      },
+      {
+        "label": "Catch Pins",
+        "url": "/models/filament-dryer/catch-pins.stl",
+        "downloadName": "catch-pins.stl",
+        "color": "#dab87a"
+      },
+      {
+        "label": "Filament Inner Feedthrough",
+        "url": "/models/filament-dryer/filament-inner-feedthrough.stl",
+        "downloadName": "filament-inner-feedthrough.stl",
+        "color": "#8b91a6"
+      },
+      {
+        "label": "Filament Retaining Ring",
+        "url": "/models/filament-dryer/filament-retaining-ring.stl",
+        "downloadName": "filament-retaining-ring.stl",
+        "color": "#987055"
+      },
+      {
+        "label": "Filament Tpu Hose",
+        "url": "/models/filament-dryer/filament-tpu-hose.stl",
+        "downloadName": "filament-tpu-hose.stl",
+        "color": "#c8924f"
+      },
+      {
+        "label": "Hygrometer Thread Insert",
+        "url": "/models/filament-dryer/hygrometer-thread-insert.stl",
+        "downloadName": "hygrometer-thread-insert.stl",
+        "color": "#729887"
+      },
+      {
+        "label": "Hygrometer Cartridge",
+        "url": "/models/filament-dryer/hygrometer-cartridge.stl",
+        "downloadName": "hygrometer-cartridge.stl",
+        "color": "#dab87a"
+      }
+    ],
+    "archiveUrl": "/models/filament-dryer/filament-dryer.zip",
+    "archiveDownloadName": "filament-dryer.zip",
+    "snapshot": {
+      "modelId": "generated-direct-occt-a8482d92aaae",
+      "sourceSha256": "9bfd84e76c625c5c07dd26296262c5556346801b1ed308414451765a9f06aff6"
+    },
+    "preview": {
+      "layout": "assembly",
+      "upAxis": "z",
+      "parts": [
+        {
+          "label": "Enclosure Body",
+          "url": "/models/previews/dryer-enclosure-body-7ae53c706ee0.stl",
+          "downloadName": "dryer-enclosure-body-7ae53c706ee0.stl",
+          "color": "#c8924f"
+        },
+        {
+          "label": "Enclosure Lid",
+          "url": "/models/previews/dryer-enclosure-lid-1ccbc6d7183c.stl",
+          "downloadName": "dryer-enclosure-lid-1ccbc6d7183c.stl",
+          "color": "#729887"
+        },
+        {
+          "label": "Lid Tpu Gasket",
+          "url": "/models/previews/dryer-lid-tpu-gasket-872316ebb7e5.stl",
+          "downloadName": "dryer-lid-tpu-gasket-872316ebb7e5.stl",
+          "color": "#dab87a"
+        },
+        {
+          "label": "Spool Wheel Arbor",
+          "url": "/models/previews/dryer-spool-wheel-arbor-7a3d6054e925.stl",
+          "downloadName": "dryer-spool-wheel-arbor-7a3d6054e925.stl",
+          "color": "#8b91a6"
+        },
+        {
+          "label": "Bearing Fit Gauges",
+          "url": "/models/previews/dryer-bearing-fit-gauges-673a047a1f41.stl",
+          "downloadName": "dryer-bearing-fit-gauges-673a047a1f41.stl",
+          "color": "#987055"
+        },
+        {
+          "label": "C Latches",
+          "url": "/models/previews/dryer-c-latches-19aeb854f78b.stl",
+          "downloadName": "dryer-c-latches-19aeb854f78b.stl",
+          "color": "#729887"
+        },
+        {
+          "label": "Catch Pins",
+          "url": "/models/previews/dryer-catch-pins-a79af4f80b60.stl",
+          "downloadName": "dryer-catch-pins-a79af4f80b60.stl",
+          "color": "#dab87a"
+        },
+        {
+          "label": "Filament Inner Feedthrough",
+          "url": "/models/previews/dryer-filament-inner-feedthrough-88f91e2645c0.stl",
+          "downloadName": "dryer-filament-inner-feedthrough-88f91e2645c0.stl",
+          "color": "#8b91a6"
+        },
+        {
+          "label": "Filament Retaining Ring",
+          "url": "/models/previews/dryer-filament-retaining-ring-eafaba62b7d2.stl",
+          "downloadName": "dryer-filament-retaining-ring-eafaba62b7d2.stl",
+          "color": "#987055"
+        },
+        {
+          "label": "Filament Tpu Hose",
+          "url": "/models/previews/dryer-filament-tpu-hose-1dd76de51b22.stl",
+          "downloadName": "dryer-filament-tpu-hose-1dd76de51b22.stl",
+          "color": "#c8924f"
+        },
+        {
+          "label": "Hygrometer Thread Insert",
+          "url": "/models/previews/dryer-hygrometer-thread-insert-cf19f2943e5d.stl",
+          "downloadName": "dryer-hygrometer-thread-insert-cf19f2943e5d.stl",
+          "color": "#729887"
+        },
+        {
+          "label": "Hygrometer Cartridge",
+          "url": "/models/previews/dryer-hygrometer-cartridge-d487010808a9.stl",
+          "downloadName": "dryer-hygrometer-cartridge-d487010808a9.stl",
+          "color": "#dab87a"
+        }
+      ],
+      "provenance": {
+        "modelId": "generated-direct-occt-6acb7a797888",
+        "sourceSha256": "9bfd84e76c625c5c07dd26296262c5556346801b1ed308414451765a9f06aff6",
+        "parameters": {
+          "catch-pin-clearance": 0.25,
+          "catch-pin-radius": 2.5,
+          "cut-hex-relief": true,
+          "desiccant-bed-height": 80,
+          "enclosure-corner-radius": 12,
+          "filament-channel-diameter": 5,
+          "filament-hose-inner-diameter": 11,
+          "filament-hose-length": 130,
+          "filament-hose-wall": 1.8,
+          "hygrometer-body-clearance": 0.4,
+          "hygrometer-body-diameter": 42,
+          "hygrometer-holder-wall": 1.8,
+          "hygrometer-thread-engagement": 12,
+          "hygrometer-wall-hole-clearance": 0.6,
+          "latch-width": 68,
+          "lid-clearance": 0.25,
+          "lid-gasket-thickness": 0.6,
+          "lid-overlap-depth": 7,
+          "show-assembly": true,
+          "spool-axis-lift": 31.8,
+          "spool-bottom-clearance": 14,
+          "spool-star-free-diameter": 76.6,
+          "thread-nozzle-diameter": "0.6",
+          "wall-hex-radius": 14,
+          "wall-thickness": 2.8
+        }
+      }
+    }
+  },
+  {
+    "id": "sara-brushing-board",
+    "label": "SARA’S BOARD",
+    "title": "Sara’s tooth-brushing board",
+    "note": "Weekly chart with morning, afternoon, and evening slots, a tooth token, and a stand.",
+    "sourceUrl": "/models/sara-brushing-board/sara-brushing-board.ecky",
+    "sourceDownloadName": "sara-brushing-board.ecky",
+    "view": {
+      "yaw": 0.08,
+      "pitch": -0.12
+    },
+    "parts": [
+      {
+        "label": "Board",
+        "url": "/models/sara-brushing-board/board.stl",
+        "downloadName": "board.stl",
+        "color": "#c8924f"
+      },
+      {
+        "label": "Tooth Token",
+        "url": "/models/sara-brushing-board/tooth-token.stl",
+        "downloadName": "tooth-token.stl",
+        "color": "#729887"
+      },
+      {
+        "label": "Stand",
+        "url": "/models/sara-brushing-board/stand.stl",
+        "downloadName": "stand.stl",
+        "color": "#dab87a"
+      }
+    ],
+    "archiveUrl": "/models/sara-brushing-board/sara-brushing-board.zip",
+    "archiveDownloadName": "sara-brushing-board.zip",
+    "snapshot": {
+      "modelId": "generated-direct-occt-9bbfe3272b82",
+      "sourceSha256": "1ca1d8c19acd6e6b93b97d7ab085c67af6a7f0bb9e21e8fe5a0a3e8454559104"
+    }
+  },
+  {
+    "id": "fold-spoon-rest",
+    "label": "FOLD",
+    "title": "Fold spoon rest",
+    "note": "A single continuous round cord forms the base and four upright folds.",
+    "sourceUrl": "/models/fold-spoon-rest/fold-spoon-rest.ecky",
+    "sourceDownloadName": "fold-spoon-rest.ecky",
+    "view": {
+      "yaw": 0.3,
+      "pitch": -0.55
+    },
+    "parts": [
+      {
+        "label": "Spoon Rest",
+        "url": "/models/fold-spoon-rest/spoon-rest.stl",
+        "downloadName": "spoon-rest.stl",
+        "color": "#c8924f"
+      }
+    ],
+    "archiveUrl": "/models/fold-spoon-rest/fold-spoon-rest.zip",
+    "archiveDownloadName": "fold-spoon-rest.zip",
+    "snapshot": {
+      "modelId": "generated-direct-occt-82842b10c6e3",
+      "sourceSha256": "f8b4bd0484a851bc715b7a5f5471d23a0c0b29286367ce66c9579b0ecf701114"
+    }
+  },
+  {
+    "id": "bicycle-bottle-holder",
+    "label": "BOTTLE HOLDER",
+    "title": "Bicycle bottle holder + frame mount rail",
+    "note": "Bottle cage with the frame rail seated in its rear dovetail. ZIP contains separate print parts.",
+    "sourceUrl": "/models/bicycle-bottle-holder/bicycle-bottle-holder.ecky",
+    "sourceDownloadName": "bicycle-bottle-holder.ecky",
+    "sourceLabel": "BOTTLE HOLDER",
+    "companionSources": [
+      {
+        "label": "FRAME MOUNT RAIL",
+        "url": "/models/bicycle-bottle-holder/bottle-holder-frame-mount-rail.ecky",
+        "downloadName": "bottle-holder-frame-mount-rail.ecky"
+      }
+    ],
+    "view": {
+      "yaw": -0.55,
+      "pitch": 0.35
+    },
+    "parts": [
+      {
+        "label": "Bottle holder",
+        "url": "/models/bicycle-bottle-holder/bicycle-bottle-holder.stl",
+        "downloadName": "bicycle-bottle-holder.stl",
+        "color": "#c8924f"
+      },
+      {
+        "label": "Frame mount rail",
+        "url": "/models/bicycle-bottle-holder/bottle-holder-frame-mount-rail.stl",
+        "downloadName": "bottle-holder-frame-mount-rail.stl",
+        "color": "#729887"
+      }
+    ],
+    "archiveUrl": "/models/bicycle-bottle-holder/bicycle-bottle-holder.zip",
+    "archiveDownloadName": "bicycle-bottle-holder.zip",
+    "preview": {
+      "layout": "assembly",
+      "upAxis": "z",
+      "parts": [
+        {
+          "label": "Bottle holder",
+          "url": "/models/previews/bottle-0-833ea1bdb127.stl",
+          "downloadName": "bottle-0-833ea1bdb127.stl",
+          "color": "#c8924f"
+        },
+        {
+          "label": "Frame mount rail",
+          "url": "/models/previews/bottle-1-09834892a1da.stl",
+          "downloadName": "bottle-1-09834892a1da.stl",
+          "color": "#729887"
+        }
+      ],
+      "provenance": {
+        "railTranslation": [
+          -25,
+          -47.5,
+          -72
+        ],
+        "sourceSha256": "4097ee305a539b38532f295a2fb6dac701ae7aef2a7497c78bd540b9f6bbef4f",
+        "railSourceSha256": "0f3d4da01cffe9842edc1ec5fee372ca8c562ff002372a9fbd975063e8e35135"
+      }
+    }
+  }
+]

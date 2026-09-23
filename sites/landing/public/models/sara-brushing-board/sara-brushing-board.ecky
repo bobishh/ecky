@@ -1,0 +1,134 @@
+(model
+  (params
+    (number board_w 176 :label "Board Width" :min 140 :max 200 :step 2 :unit "mm")
+    (number board_h 214 :label "Board Height" :min 180 :max 240 :step 2 :unit "mm")
+    (number board_t 5.0 :label "Board Thickness" :min 4.0 :max 7.0 :step 0.5 :unit "mm")
+    (number mag_dia 5.3 :label "Magnet Diameter" :min 3.0 :max 8.0 :step 0.1 :unit "mm")
+    (number mag_h 2.2 :label "Magnet Depth" :min 1.5 :max 3.5 :step 0.1 :unit "mm")
+    (number token_t 4.5 :label "Token Thickness" :min 3.0 :max 6.0 :step 0.2 :unit "mm")
+    (select font_choice "Futura" :label "Font Family" :unit text :options (("Futura" "Futura") ("Arial" "Arial")))
+    (number day_font_size 5.6 :label "Day Label Size" :min 4.0 :max 8.0 :step 0.2 :unit "mm")
+    (number title_font_size 8.5 :label "Title Font Size" :min 6.0 :max 12.0 :step 0.5 :unit "mm")
+    (number routine_font_size 6.0 :label "Routine Font Size" :min 4.0 :max 8.0 :step 0.2 :unit "mm"))
+
+  (verify
+    (tag mesh-clean)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0)))
+  (verify
+    (tag preview-exists)
+    (metric preview (manifest has-model-stl))
+    (expect preview (= true)))
+  (verify
+    (tag board-grounded)
+    (metric contact (stl bed-contact-area-ratio board))
+    (expect contact (>= 0.4)))
+  (verify
+    (tag magnet-cavities)
+    (metric comps (stl connected-component-count))
+    (expect comps (= 25)))
+
+  (part board
+    (let* ((mag_r (/ mag_dia 2.0))
+           ;; Ergonomic socket silhouette matching token
+           (socket_pts '((0.0 5.3)
+                         (0.9 6.4) (2.0 7.4) (3.3 7.9) (4.7 7.6) (5.8 6.7) (6.6 5.3) (6.8 3.7)
+                         (6.6 2.0) (6.0 0.2) (5.5 -1.5) (5.1 -3.2)
+                         (4.8 -4.8) (4.4 -6.4) (3.5 -7.6) (2.4 -7.6) (1.6 -6.5) (1.2 -4.8)
+                         (0.8 -3.4) (0.0 -2.2) (-0.8 -3.4)
+                         (-1.2 -4.8) (-1.6 -6.5) (-2.4 -7.6) (-3.5 -7.6) (-4.4 -6.4) (-4.8 -4.8)
+                         (-5.1 -3.2) (-5.5 -1.5) (-6.0 0.2) (-6.6 2.0)
+                         (-6.8 3.7) (-6.6 5.3) (-5.8 6.7) (-4.7 7.6) (-3.3 7.9) (-2.0 7.4) (-0.9 6.4)))
+           ;; Compound cell: pocket for tooth token + internal press-fit magnet hole
+           (cell_cutout
+             (union
+               (translate 0 0 (- board_t 0.9) (extrude (polygon socket_pts) 1.2))
+               (translate 0 0 1.0 (cylinder mag_r mag_h 20))))
+           ;; 7 rows (days) x 3 cols (morning, day, evening)
+           ;; Centers: X = [6, 36, 66], Y from +44 down to -88 (step -22)
+           (all_cells (translate 6 44 0 (grid-array 7 3 30 -22 cell_cutout)))
+           ;; Main board body
+           (slab (extrude (rounded-rect board_w board_h 6) board_t))
+           (base (difference slab all_cells))
+           ;; Day labels plaques (left column)
+           (day_plaques
+             (translate -52 44 (- board_t 0.4)
+               (grid-array 7 1 0 -22 (extrude (rounded-rect 54 15 3) 0.8))))
+           ;; Clean text labels (embossed 1.0mm) with selectable font and parametric sizes
+           (labels
+             (union
+               (translate -74 41.8 (- board_t 0.1) (extrude (text "Понедельник" day_font_size :font font_choice) 1.0))
+               (translate -74 19.8 (- board_t 0.1) (extrude (text "Вторник" day_font_size :font font_choice) 1.0))
+               (translate -74 -2.2 (- board_t 0.1) (extrude (text "Среда" day_font_size :font font_choice) 1.0))
+               (translate -74 -24.2 (- board_t 0.1) (extrude (text "Четверг" day_font_size :font font_choice) 1.0))
+               (translate -74 -46.2 (- board_t 0.1) (extrude (text "Пятница" day_font_size :font font_choice) 1.0))
+               (translate -74 -68.2 (- board_t 0.1) (extrude (text "Суббота" day_font_size :font font_choice) 1.0))
+               (translate -74 -90.2 (- board_t 0.1) (extrude (text "Воскресенье" day_font_size :font font_choice) 1.0))
+               (translate -3 60 (- board_t 0.1) (extrude (text "Утро" routine_font_size :font font_choice) 1.0))
+               (translate 28 60 (- board_t 0.1) (extrude (text "День" routine_font_size :font font_choice) 1.0))
+               (translate 57 60 (- board_t 0.1) (extrude (text "Вечер" routine_font_size :font font_choice) 1.0))
+               (translate -65 86 (- board_t 0.1) (extrude (text "Сара чистит зубки" title_font_size :font font_choice) 1.0))))
+           ;; Routine header icons (Sun, Cloud, Moon)
+           (icons
+             (union
+               ;; Morning Sun at (6, 74)
+               (translate 6 74 (- board_t 0.1)
+                 (union
+                   (cylinder 3.2 1.0 20)
+                   (translate 0 4.2 0 (cylinder 0.7 1.0 12))
+                   (translate 0 -4.2 0 (cylinder 0.7 1.0 12))
+                   (translate 4.2 0 0 (cylinder 0.7 1.0 12))
+                   (translate -4.2 0 0 (cylinder 0.7 1.0 12))
+                   (translate 3.0 3.0 0 (cylinder 0.7 1.0 12))
+                   (translate -3.0 3.0 0 (cylinder 0.7 1.0 12))
+                   (translate 3.0 -3.0 0 (cylinder 0.7 1.0 12))
+                   (translate -3.0 -3.0 0 (cylinder 0.7 1.0 12))))
+               ;; Day Cloud at (36, 74)
+               (translate 36 74 (- board_t 0.1)
+                 (union
+                   (translate 0 1.5 0 (cylinder 2.8 1.0 16))
+                   (translate -2.0 -1.0 0 (cylinder 2.0 1.0 16))
+                   (translate 2.0 -1.0 0 (cylinder 2.0 1.0 16))
+                   (translate 0 -1.0 0 (extrude (rounded-rect 5.5 2.5 1.0) 1.0))))
+               ;; Night Moon at (66, 74)
+               (translate 66 74 (- board_t 0.1)
+                 (difference
+                   (cylinder 3.4 1.0 20)
+                   (translate 1.8 1.0 -0.1 (cylinder 3.0 1.2 20)))))))
+      (union base day_plaques labels icons)))
+
+  (part tooth_token
+    (let* ((mag_r (/ mag_dia 2.0))
+           ;; Smooth 38-point ergonomic tooth polygon (width 13.0mm x height 14.5mm)
+           (tooth_pts '((0.0 4.8)
+                        (0.8 5.8) (1.8 6.7) (3.0 7.2) (4.3 6.9) (5.3 6.1) (6.0 4.8) (6.2 3.4)
+                        (6.0 1.8) (5.5 0.2) (5.0 -1.4) (4.6 -3.0)
+                        (4.4 -4.6) (4.0 -6.0) (3.2 -7.0) (2.2 -7.0) (1.5 -6.0) (1.1 -4.5)
+                        (0.7 -3.2) (0.0 -2.0) (-0.7 -3.2)
+                        (-1.1 -4.5) (-1.5 -6.0) (-2.2 -7.0) (-3.2 -7.0) (-4.0 -6.0) (-4.4 -4.6)
+                        (-4.6 -3.0) (-5.0 -1.4) (-5.5 0.2) (-6.0 1.8)
+                        (-6.2 3.4) (-6.0 4.8) (-5.3 6.1) (-4.3 6.9) (-3.0 7.2) (-1.8 6.7) (-0.8 5.8)))
+           (solid (extrude (polygon tooth_pts) token_t))
+           (mag (translate 0 0.5 0.9 (cylinder mag_r mag_h 20)))
+           (eye1 (translate -2.1 2.0 (- token_t 0.7) (cylinder 0.7 1.0 16)))
+           (eye2 (translate 2.1 2.0 (- token_t 0.7) (cylinder 0.7 1.0 16)))
+           (smile (translate 0 -0.4 (- token_t 0.7) (extrude (slot-overall 3.4 0.9) 0.6))))
+      (translate 115 0 0
+        (difference solid (union mag eye1 eye2 smile)))))
+
+  (part stand
+    (let* ((stand_w (+ board_w 8.0))
+           (stand_d 76.0)
+           (stand_h 24.0)
+           (slot_w (+ board_w 2.0))
+           (slot_t (+ board_t 0.6))
+           (tray_w (- stand_w 14.0))
+           (body (extrude (rounded-rect stand_w stand_d 8.0) stand_h))
+           ;; Slot parametrically adapts to board_w and board_t!
+           (board_slot (translate 0 22.0 (- stand_h 16.0)
+                         (extrude (rounded-rect slot_w slot_t 2.5) 17.0)))
+           ;; Spacious tray parametrically adapts to stand_w!
+           (token_tray (translate 0 -14.0 (- stand_h 15.0)
+                         (extrude (rounded-rect tray_w 36.0 6.0) 16.0))))
+      (translate 0 -160 0
+        (difference body (union board_slot token_tray))))))

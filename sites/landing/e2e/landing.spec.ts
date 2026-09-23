@@ -11,15 +11,12 @@ import { expect, test } from '@playwright/test';
  */
 
 test.describe('Ecky landing', () => {
-  test('Given the explanatory hero When motion is allowed Then the weird-shit subheader rotates concrete CAD invariants', async ({ page }) => {
+  test('Given the README tone When the landing opens Then the product and optional AI are explained plainly', async ({ page }) => {
     await page.goto('/');
-
-    await expect(page.getByRole('heading', { name: 'Make parts with AI. Keep the model.' })).toBeVisible();
-    await expect(page.getByText('make weird shit /', { exact: true })).toBeVisible();
-
-    const invariant = page.getByTestId('hero-invariant');
-    await expect(invariant).toHaveText('keep every dimension named');
-    await expect(invariant).not.toHaveText('keep every dimension named', { timeout: 4_000 });
+    await expect(page.getByRole('heading', { name: 'Parametric parts from code.' })).toBeVisible();
+    await expect(page.locator('.hero-lede')).toContainText('optional AI assistance');
+    await expect(page.locator('body')).not.toContainText(/\bshit\b/i);
+    await expect(page.locator('#workflow')).toContainText('including failed ones');
   });
 
   test('Given the app mark When favicon renders Then it matches the canonical Ecky face', async ({ page }) => {
@@ -46,9 +43,9 @@ test.describe('Ecky landing', () => {
 
     await expect(page.locator('.nav')).toContainText('Ecky CAD');
     const hero = page.locator('.hero');
-    await expect(hero.getByRole('heading', { name: 'Make parts with AI. Keep the model.' })).toBeVisible();
-    await expect(hero.getByText(/LOCAL DESKTOP AI-ASSISTED CAD/)).toBeVisible();
-    await expect(hero.getByText(/inspect or edit the readable .ecky source/i)).toBeVisible();
+    await expect(hero.getByRole('heading', { name: 'Parametric parts from code.' })).toBeVisible();
+    await expect(hero.getByText(/EXPERIMENTAL DESKTOP CAD/)).toBeVisible();
+    await expect(hero.getByText(/optional AI assistance/i)).toBeVisible();
     await expect(hero.getByTestId('model-workbench')).toBeVisible();
 
     await expect(page.getByRole('link', { name: 'Download', exact: true })).toHaveCount(0);
@@ -57,7 +54,7 @@ test.describe('Ecky landing', () => {
     await expect(page.locator('a[href*="/releases"]')).toHaveCount(0);
     await expect(hero.getByRole('link', { name: 'Read the chapters' })).toHaveAttribute('href', '/docs/chapters/');
     await expect(hero.getByRole('link', { name: 'Inspect working models' })).toHaveAttribute('href', '#models');
-    await expect(hero.getByRole('link', { name: 'DOWNLOAD BOTTLE HOLDER STL' })).toBeVisible();
+    await expect(hero.getByRole('link', { name: 'DOWNLOAD ZIP' })).toBeVisible();
 
     expect(errors, 'page opened with no console errors').toEqual([]);
   });
@@ -105,15 +102,16 @@ test.describe('Ecky landing', () => {
     await expect(mascot).toHaveCSS('pointer-events', 'auto');
     await expect(canvas).toHaveCSS('touch-action', 'none');
 
+    await canvas.scrollIntoViewIfNeeded();
     const box = await canvas.boundingBox();
     expect(box, 'mobile mascot has a measurable canvas').not.toBeNull();
     expect(box?.x).toBeGreaterThanOrEqual(0);
     expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390);
 
     const before = await canvas.screenshot();
-    await page.mouse.move((box?.x ?? 0) + 45, (box?.y ?? 0) + 95);
+    await page.mouse.move((box?.x ?? 0) + (box?.width ?? 0) * 0.25, (box?.y ?? 0) + (box?.height ?? 0) * 0.5);
     await page.mouse.down();
-    await page.mouse.move((box?.x ?? 0) + 145, (box?.y ?? 0) + 70, { steps: 6 });
+    await page.mouse.move((box?.x ?? 0) + (box?.width ?? 0) * 0.75, (box?.y ?? 0) + (box?.height ?? 0) * 0.3, { steps: 6 });
     await page.mouse.up();
     const after = await canvas.screenshot();
     expect(after, 'drag produces a new rendered mascot pose').not.toEqual(before);
@@ -123,34 +121,14 @@ test.describe('Ecky landing', () => {
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(scrollBefore);
   });
 
-  test('Given the product boundaries section When scrolled Then four concrete capabilities render', async ({ page }) => {
+  test('Given project notes When read Then setup, history and provider boundaries are explicit', async ({ page }) => {
     await page.goto('/');
-
-    const grids = page.locator('.feature-grid');
-    await expect(grids).toHaveCount(1);
-
-    const features = grids.first().locator('.feature-card');
-    await expect(features).toHaveCount(4);
-    await expect(features.first()).toContainText(/solid you can keep editing/i);
-  });
-
-  test('Given project claims When page opens Then facts, limits, and origin are explicit', async ({ page }) => {
-    await page.goto('/');
-
-    await expect(page.locator('.hero-summary')).toContainText(/Experimental pre-release.*build from source/i);
-    await expect(page.getByRole('heading', { name: 'Make parts with AI. Keep the model.' })).toBeVisible();
-    await expect(page.getByText(/inspect or edit the readable .ecky source/i)).toBeVisible();
-    await expect(page.getByText(/30 named parameters.*2 verification clauses.*6,750-triangle STL/i)).toHaveCount(0);
-
-    const facts = page.locator('.feature-grid').first();
-    await expect(facts).toContainText('A solid you can keep editing');
-    await expect(facts).toContainText('Readable source, bounded vocabulary');
-    await expect(facts).toContainText('Checks travel with the geometry');
-    await expect(facts).toContainText('Local app, ordinary files');
-    await expect(facts).not.toContainText('AI magic');
-
-    await expect(page.getByRole('heading', { name: 'Learn Ecky through six practical chapters.' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Function reference' })).toHaveAttribute('href', '/docs/');
+    await expect(page.locator('.hero-summary')).toContainText(/build from source; expect bugs/i);
+    await expect(page.locator('#source pre')).toContainText('(model');
+    await expect(page.locator('#workflow')).toContainText('No AI account is needed');
+    await expect(page.locator('#workflow')).toContainText('remote provider receives');
+    await expect(page.locator('#learn')).toContainText('Node.js, Rust');
+    await expect(page.getByRole('link', { name: /Function reference/ })).toHaveAttribute('href', '/docs/');
   });
 
   test('Given a 390px viewport When navigation renders Then every link stays on one line', async ({ page }) => {
@@ -193,7 +171,7 @@ test.describe('Ecky landing', () => {
     expect((await indexNowKey.text()).trim()).toBe('69a8ca5615ffe76f7e56f6a662beaf6a');
   });
 
-  test('Given the showcase section When page loads Then the live STL viewer mounts the fresh two-thread bottle holder', async ({ page }) => {
+  test('Given the showcase section When page loads Then the live STL viewer mounts the current phone case', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
     page.on('console', (msg) => {
@@ -204,7 +182,7 @@ test.describe('Ecky landing', () => {
     // The vignette renders the real exported STL; interaction/content are
     // specified in case-workbench.spec.ts.
     const caseStudy = page.locator('#case-study');
-    await expect(caseStudy.getByRole('heading', { name: 'Make parts with AI. Keep the model.' })).toBeVisible();
+    await expect(caseStudy.getByRole('heading', { name: 'Parametric parts from code.' })).toBeVisible();
 
     const viewer = caseStudy.locator('.viewer canvas');
     await expect(viewer).toBeVisible();
@@ -222,12 +200,11 @@ test.describe('Ecky landing', () => {
     expect(errors, 'STL viewer loaded the mesh without errors').toEqual([]);
   });
 
-  test('Given learning routes When the page opens Then chapters, reference, and EPUB stay separate', async ({ page }) => {
+  test('Given learning routes When the page opens Then chapters and reference are linked', async ({ page }) => {
     await page.goto('/');
 
     const learn = page.locator('#learn');
-    await expect(learn.getByRole('link', { name: 'Read the chapters' })).toHaveAttribute('href', '/docs/chapters/');
-    await expect(learn.getByRole('link', { name: 'Function reference' })).toHaveAttribute('href', '/docs/');
-    await expect(learn.getByRole('link', { name: 'Download EPUB' })).toHaveAttribute('download', '');
+    await expect(learn.getByRole('link', { name: /Start with a bracket/ })).toHaveAttribute('href', '/docs/chapters/');
+    await expect(learn.getByRole('link', { name: /Function reference/ })).toHaveAttribute('href', '/docs/');
   });
 });

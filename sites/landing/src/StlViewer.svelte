@@ -1,15 +1,18 @@
 <script lang="ts">
   import * as THREE from 'three';
+  import { fitModelGroup } from './showcase/fitModel.js';
+  import { preparePreviewGeometry } from './showcase/previewGeometry.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 
   // Renders real Ecky output: the actual STL meshes produced by the OCCT kernel
-  // from a committed .ecky model. Not a mockup — these are the exported parts.
+  // from a saved .ecky version.
   type Part = { url: string; color: string; opacity?: number };
 
   let {
     parts,
     size = 360,
     interactive = true,
+    upAxis = 'y',
     initialYaw = 0.12,
     initialPitch = -0.08,
     label = 'A real model rendered by Ecky — drag to rotate',
@@ -17,6 +20,7 @@
     parts: Part[];
     size?: number;
     interactive?: boolean;
+    upAxis?: 'y' | 'z';
     initialYaw?: number;
     initialPitch?: number;
     label?: string;
@@ -54,6 +58,7 @@
       r = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
       r.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       r.outputColorSpace = THREE.SRGBColorSpace;
+      r.toneMapping = THREE.ACESFilmicToneMapping;
     } catch (error) {
       status = 'error';
       errorMessage = error instanceof Error ? error.message : String(error);
@@ -75,15 +80,15 @@
     const group = new THREE.Group();
     scene.add(group);
     const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 2000);
-    // Visible height at z=180 ≈ 2*180*tan(15°) ≈ 96 units; fits a 64-unit model.
+    // An 80-unit bounding sphere fits at every orbit angle.
     camera.position.set(0, 0, 180);
     camera.lookAt(0, 0, 0);
 
-    scene.add(new THREE.AmbientLight(0x9fb7a6, 1.1));
-    const key = new THREE.DirectionalLight(0xdce8db, 2.2);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x263044, 2.0));
+    const key = new THREE.DirectionalLight(0xfff5e8, 3.0);
     key.position.set(-60, 80, 100);
     scene.add(key);
-    const rim = new THREE.DirectionalLight(0x6fae8a, 1.0);
+    const rim = new THREE.DirectionalLight(0xd9e8ff, 1.8);
     rim.position.set(70, -40, 60);
     scene.add(rim);
 
@@ -103,19 +108,7 @@
     let failures = 0;
     const finalize = () => {
       if (!active || failures > 0 || meshes.length === 0) return;
-      const box = new THREE.Box3();
-      for (const m of meshes) box.expandByObject(m);
-      // The STLs share one coordinate frame (same as the kernel emitted them),
-      // so do NOT per-part center — that would collapse the assembly. Offset
-      // the whole group by the combined centroid and scale to fit.
-      const center = box.getCenter(new THREE.Vector3());
-      const dims = box.getSize(new THREE.Vector3());
-      const maxDim = Math.max(dims.x, dims.y, dims.z) || 1;
-      // Fit longest dimension to ~64 units of camera space (~67% of view).
-      const scale = 64 / maxDim;
-      group.scale.setScalar(scale);
-      // Move the group's centroid to the origin (apply in local units, pre-scale).
-      group.position.copy(center).multiplyScalar(-scale);
+      fitModelGroup(group, meshes);
       status = 'ready';
       render();
     };
@@ -133,16 +126,22 @@
             geometry.dispose();
             return;
           }
-          geometry.computeVertexNormals();
+          const prepared = preparePreviewGeometry(geometry, upAxis);
+          if (prepared !== geometry) geometry.dispose();
           const material = new THREE.MeshStandardMaterial({
             color: new THREE.Color(part.color),
             metalness: 0.08,
-            roughness: 0.55,
+            roughness: 0.7,
             transparent: (part.opacity ?? 1) < 1,
             opacity: part.opacity ?? 1,
             flatShading: false,
           });
-          const mesh = new THREE.Mesh(geometry, material);
+          const mesh = new THREE.Mesh(prepared, material);
+          const edges = new THREE.LineSegments(
+            new THREE.EdgesGeometry(prepared, 35),
+            new THREE.LineBasicMaterial({ color: 0x202634, transparent: true, opacity: 0.22 }),
+          );
+          mesh.add(edges);
           group.add(mesh);
           meshes.push(mesh);
           pending -= 1;
@@ -165,6 +164,12 @@
       resizeObserver.disconnect();
       if (renderScene === render) renderScene = null;
       for (const m of meshes) {
+        for (const child of m.children) {
+          if (child instanceof THREE.LineSegments) {
+            child.geometry.dispose();
+            (child.material as THREE.Material).dispose();
+          }
+        }
         m.geometry.dispose();
         (m.material as THREE.Material).dispose();
       }
