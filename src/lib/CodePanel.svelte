@@ -80,6 +80,7 @@
       state: startState,
       parent: editorContainer
     });
+    focusHighlightedLine();
   });
 
   onDestroy(() => {
@@ -123,6 +124,7 @@
         extensions: editorExtensions(sourceLanguage),
       }),
     );
+    focusHighlightedLine();
   });
 </script>
 

@@ -125,7 +125,7 @@
     hydrateActiveRenderSnapshot,
     RenderSnapshotMismatch,
   } from './lib/stores/activeRenderSnapshot';
-  import { resolveCodeModalSource, type CodeModalSourceAuthority } from './lib/codeModalSource';
+  import { loadBoundCodeReference, resolveCodeModalSource, type CodeModalSourceAuthority } from './lib/codeModalSource';
   import { selectProjectFolderWatchEvent } from './lib/projectFolderWatchEvents';
   import {
     deriveThreadAttentionIds,
@@ -661,6 +661,21 @@ import {
       showWindow('code');
       return;
     }
+    let referencedSource: Awaited<ReturnType<typeof getProjectSource>> | null = null;
+    if (seed?.expectedSourcePath) {
+      try {
+        referencedSource = await loadBoundCodeReference(
+          seed.expectedSourcePath,
+          () => getProjectSource(sourceThreadId),
+        );
+        if (openRequest !== codeModalOpenRequest || $activeThreadId !== sourceThreadId) return;
+      } catch (error) {
+        const message = `Source Error: ${formatBackendError(error)}`;
+        if (seed.throwSourceError) throw new Error(message);
+        session.setError(message);
+        return;
+      }
+    }
     const current = get(workingCopy);
     const versionManifest = activeVersionMessage?.modelManifest ?? activeModelManifest ?? null;
     const foreignEvidenceMode = !seed?.expectedSourcePath && isForeignCadEvidence(versionManifest);
@@ -716,7 +731,7 @@ import {
         renderSnapshot.threadId === sourceThreadId &&
         renderSnapshot.artifactBundle.modelId === loadedModelId,
     );
-    let initialCode = seed?.code ?? (
+    let initialCode = referencedSource?.source ?? seed?.code ?? (
       activeRenderMatchesViewport
         ? renderSnapshot?.design.macroCode ?? current.macroCode
         : current.macroCode
@@ -760,18 +775,11 @@ import {
 
     let boundSource;
     try {
-      boundSource = await getProjectSource(sourceThreadId);
+      boundSource = referencedSource ?? await getProjectSource(sourceThreadId);
       if (openRequest !== codeModalOpenRequest || !$windowStore.code.visible) return;
     } catch (error) {
       const message = `Source Error: ${formatBackendError(error)}`;
       if (seed?.throwSourceError) throw new Error(message);
-      session.setError(message);
-      return;
-    }
-
-    if (seed?.expectedSourcePath && boundSource.file !== seed.expectedSourcePath) {
-      const message = `Source Error: referenced model no longer matches current thread source. Referenced: ${seed.expectedSourcePath}. Current: ${boundSource.file}.`;
-      if (seed.throwSourceError) throw new Error(message);
       session.setError(message);
       return;
     }
