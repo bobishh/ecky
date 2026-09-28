@@ -1378,7 +1378,7 @@ fn public_tool_text(update: &serde_json::Map<String, Value>, names: &[&str]) -> 
     direct.or(nested)
 }
 
-fn extract_tool_params<'a>(update: &'a serde_json::Map<String, Value>) -> Option<&'a Value> {
+fn extract_tool_params(update: &serde_json::Map<String, Value>) -> Option<&Value> {
     if let Some(tool_info) = update.get("tool_info").and_then(Value::as_object) {
         for key in [
             "parameters",

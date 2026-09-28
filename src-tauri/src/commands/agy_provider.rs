@@ -159,7 +159,7 @@ async fn canonical_handoff(state: &AppState, ecky_thread_id: &str) -> String {
         } else {
             &context.summary
         },
-        &recent_dialogue,
+        recent_dialogue,
         if context.design_digest.trim().is_empty() {
             "[none]"
         } else {

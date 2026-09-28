@@ -54,6 +54,7 @@ fn native_mesh_render_succeeds_from_worker_thread_with_small_stack() {
                 None,
                 &resolver,
             )
+            .map_err(|error| error.to_string())
         })
         .expect("spawn small stack thread");
 

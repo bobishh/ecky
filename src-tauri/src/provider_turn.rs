@@ -65,17 +65,14 @@ impl ProviderTurnPolicy {
     }
 
     pub fn allows_any_tool(self) -> bool {
-        match self.explicit_intent {
-            Some(ProviderTurnIntent::Answer) => false,
-            _ => true,
-        }
+        !matches!(self.explicit_intent, Some(ProviderTurnIntent::Answer))
     }
 
     pub fn allows_project_writes(self) -> bool {
-        match self.explicit_intent {
-            Some(ProviderTurnIntent::Modify) | None => true,
-            _ => false,
-        }
+        matches!(
+            self.explicit_intent,
+            Some(ProviderTurnIntent::Modify) | None
+        )
     }
 
     pub fn intent(self) -> ProviderTurnIntent {

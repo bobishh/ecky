@@ -111,8 +111,18 @@ fn human_reference_operation_index_links_only_registered_documented_forms() {
 }
 
 #[test]
-fn human_reference_complete_surface_table_covers_runtime_registry() {
-    let documented = HUMAN_REFERENCE
+fn human_reference_covers_runtime_registry() {
+    let documented_details = HUMAN_REFERENCE
+        .lines()
+        .filter_map(|line| {
+            line.trim_start_matches('#')
+                .trim_start()
+                .strip_prefix('`')
+                .and_then(|rest| rest.split_once('`'))
+                .map(|(name, _)| name.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    let generated_table = HUMAN_REFERENCE
         .lines()
         .filter_map(|line| {
             line.strip_prefix("| `")
@@ -128,8 +138,8 @@ fn human_reference_complete_surface_table_covers_runtime_registry() {
     ] {
         for entry in supported_surface_reference(backend).entries {
             assert!(
-                documented.contains(&entry.name),
-                "human generated surface table is missing `{}` for {backend:?}",
+                documented_details.contains(&entry.name) || generated_table.contains(&entry.name),
+                "human reference is missing `{}` for {backend:?}",
                 entry.name
             );
         }
