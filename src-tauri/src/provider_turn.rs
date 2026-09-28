@@ -123,6 +123,64 @@ impl ProviderTurnPolicy {
             Some(ProviderTurnIntent::Inspect) => READ_ONLY_MCP_TOOLS.contains(&name),
         }
     }
+
+    pub fn wrap_user_message_for_turn(self, message: &str, turn_nonce: &str) -> String {
+        format!(
+            "[ECKY TURN WRAPPER v1:{turn_nonce}]\n{}\n[ECKY END TURN WRAPPER v1:{turn_nonce}]",
+            self.wrap_user_message(message)
+        )
+    }
+}
+
+pub fn unwrap_user_message(content: &str) -> Option<String> {
+    if let Some((header, remainder)) = content.split_once('\n') {
+        if let Some(nonce) = header
+            .strip_prefix("[ECKY TURN WRAPPER v1:")
+            .and_then(|value| value.strip_suffix(']'))
+            .filter(|nonce| uuid::Uuid::parse_str(nonce).is_ok())
+        {
+            let ending = format!("\n[ECKY END TURN WRAPPER v1:{nonce}]");
+            if let Some(body) = turn_wrapper_body(remainder, &ending) {
+                if let Some(user_message) = unwrap_legacy_user_message(body) {
+                    return Some(user_message);
+                }
+            }
+        }
+    }
+
+    unwrap_legacy_user_message(content)
+}
+
+fn turn_wrapper_body<'a>(remainder: &'a str, ending: &str) -> Option<&'a str> {
+    if let Some(body) = remainder.strip_suffix(ending) {
+        return Some(body);
+    }
+    let ending_start = remainder.find(ending)?;
+    let tail = &remainder[ending_start + ending.len()..];
+    if tail.starts_with("\n\n[ATTACHMENT NOTES]\n") || tail.starts_with("\n\n[CAD ATTACHMENTS]\n") {
+        Some(&remainder[..ending_start])
+    } else {
+        None
+    }
+}
+
+fn unwrap_legacy_user_message(content: &str) -> Option<String> {
+    let policies = [
+        ProviderTurnPolicy::prompt_based(),
+        ProviderTurnPolicy::for_intent(ProviderTurnIntent::Answer),
+        ProviderTurnPolicy::for_intent(ProviderTurnIntent::Inspect),
+        ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify),
+        ProviderTurnPolicy::for_intent(ProviderTurnIntent::Clarify),
+    ];
+    // Older provider turns did not have a nonce. Decode only the exact wrappers
+    // emitted by those versions; ordinary user-authored marker text stays intact.
+    for policy in policies {
+        let legacy = policy.wrap_user_message("");
+        if let Some(user_message) = content.strip_prefix(&legacy) {
+            return Some(user_message.to_string());
+        }
+    }
+    None
 }
 
 const READ_ONLY_MCP_TOOLS: &[&str] = &[
@@ -166,7 +224,8 @@ pub fn classify_turn_intent(message: &str) -> ProviderTurnIntent {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_turn_intent, ProviderTurnIntent, ProviderTurnPolicy, UNIFIED_TURN_POLICY_PROMPT,
+        classify_turn_intent, unwrap_user_message, ProviderTurnIntent, ProviderTurnPolicy,
+        UNIFIED_TURN_POLICY_PROMPT,
     };
 
     #[test]
@@ -212,6 +271,25 @@ mod tests {
         assert!(prompt.contains(UNIFIED_TURN_POLICY_PROMPT));
         assert!(prompt.contains("[USER MESSAGE]"));
         assert!(prompt.ends_with("любой запрос"));
+    }
+
+    #[test]
+    fn provider_user_projection_decodes_only_exact_turn_wrapper() {
+        let original = "Keep [USER MESSAGE] in my authored text.";
+        let wrapped = ProviderTurnPolicy::prompt_based()
+            .wrap_user_message_for_turn(original, "00000000-0000-4000-8000-000000000001");
+        assert_eq!(unwrap_user_message(&wrapped).as_deref(), Some(original));
+        assert_eq!(
+            unwrap_user_message(&wrapped.replace(
+                "[ECKY END TURN WRAPPER v1:00000000-0000-4000-8000-000000000001]",
+                "[ECKY END TURN WRAPPER v1:00000000-0000-4000-8000-000000000002]",
+            )),
+            None
+        );
+        assert_eq!(
+            unwrap_user_message("Please keep [USER MESSAGE] exactly as typed."),
+            None
+        );
     }
 
     #[test]

@@ -217,6 +217,52 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 pub fn backfill_provider_thread_projection(conn: &Connection) -> rusqlite::Result<()> {
+    let legacy_titles = {
+        let mut statement = conn.prepare(
+            "SELECT threads.id, threads.title, (
+                 SELECT content
+                 FROM agent_provider_messages
+                 WHERE ecky_thread_id = threads.id
+                   AND role = 'user'
+                   AND trim(content) != ''
+                 ORDER BY created_at ASC, id ASC
+                 LIMIT 1
+             ), threads.created_at, threads.updated_at
+             FROM threads
+             WHERE EXISTS (
+                   SELECT 1 FROM agent_provider_messages
+                   WHERE ecky_thread_id = threads.id
+               )",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (thread_id, existing_title, content, created_at, updated_at) in legacy_titles {
+        let Some(content) = content else {
+            continue;
+        };
+        let raw_title = provider_thread_title(&content);
+        let public_title = provider_thread_title(&public_provider_content("user", content));
+        let replace = (existing_title == "Untitled design" && created_at == updated_at)
+            || existing_title == raw_title.unwrap_or_default();
+        let Some(title) = public_title.filter(|title| replace && *title != existing_title) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE threads SET title = ?1 WHERE id = ?2 AND title = ?3",
+            params![title, thread_id, existing_title],
+        )?;
+    }
     conn.execute(
         "UPDATE threads
          SET updated_at = MAX(
@@ -226,19 +272,7 @@ pub fn backfill_provider_thread_projection(conn: &Connection) -> rusqlite::Resul
                      FROM agent_provider_messages AS provider_message
                      WHERE provider_message.ecky_thread_id = threads.id
                  ), updated_at + 1)
-             ),
-             title = CASE
-                 WHEN title = 'Untitled design' THEN COALESCE((
-                     SELECT substr(trim(replace(replace(content, char(10), ' '), char(13), ' ')), 1, 80)
-                     FROM agent_provider_messages
-                     WHERE ecky_thread_id = threads.id
-                       AND role = 'user'
-                       AND trim(content) != ''
-                     ORDER BY created_at ASC, id ASC
-                     LIMIT 1
-                 ), title)
-                 ELSE title
-             END
+             )
          WHERE threads.created_at = threads.updated_at
            AND EXISTS (
                SELECT 1 FROM agent_provider_messages
@@ -509,6 +543,7 @@ pub fn persist_finished_provider_messages(
         .iter()
         .filter(|message| is_finished_provider_message_status(&message.status))
     {
+        let content = public_provider_content(&message.role, message.content.clone());
         let changed = tx
             .execute(
                 "INSERT INTO agent_provider_messages (
@@ -540,7 +575,7 @@ pub fn persist_finished_provider_messages(
                     provider,
                     external_thread_id,
                     message.role,
-                    message.content,
+                    content,
                     serde_json::to_string(&message.attachments)
                         .map_err(|error| AppError::persistence(error.to_string()))?,
                     message.status,
@@ -553,7 +588,7 @@ pub fn persist_finished_provider_messages(
             activity_at = activity_at.max(message.timestamp);
             first_user_title = first_user_title.or_else(|| {
                 (message.role == "user")
-                    .then(|| provider_thread_title(&message.content))
+                    .then(|| provider_thread_title(&content))
                     .flatten()
             });
         }
@@ -583,6 +618,14 @@ fn provider_thread_title(content: &str) -> Option<String> {
     let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = normalized.chars().take(80).collect::<String>();
     (!title.is_empty()).then_some(title)
+}
+
+fn public_provider_content(role: &str, content: String) -> String {
+    if role == "user" {
+        crate::provider_turn::unwrap_user_message(&content).unwrap_or(content)
+    } else {
+        content
+    }
 }
 
 pub fn persist_provider_turn_user_input(
@@ -661,10 +704,12 @@ pub fn list_provider_messages(
         .map_err(|error| AppError::persistence(error.to_string()))?;
     let rows = stmt
         .query_map(params![ecky_thread_id, provider, limit as i64], |row| {
+            let role: String = row.get(1)?;
+            let content: String = row.get(2)?;
             Ok(CodexDialogueMessage {
                 id: row.get(0)?,
-                role: row.get(1)?,
-                content: row.get(2)?,
+                role: role.clone(),
+                content: public_provider_content(&role, content),
                 attachments: decode_queue_attachments(row.get(3)?)?,
                 status: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -722,10 +767,12 @@ pub fn provider_message_page(
         .query_map(
             params![ecky_thread_id, provider, boundary_timestamp, boundary_id],
             |row| {
+                let role: String = row.get(1)?;
+                let content: String = row.get(2)?;
                 Ok(CodexDialogueMessage {
                     id: row.get(0)?,
-                    role: row.get(1)?,
-                    content: row.get(2)?,
+                    role: role.clone(),
+                    content: public_provider_content(&role, content),
                     attachments: decode_queue_attachments(row.get(3)?)?,
                     status: row.get(4)?,
                     timestamp: row.get(5)?,
@@ -1264,8 +1311,25 @@ mod tests {
         )
         .unwrap();
 
+        let wrapped = crate::provider_turn::ProviderTurnPolicy::prompt_based()
+            .wrap_user_message("Use this image.");
+        conn.execute(
+            "UPDATE agent_provider_messages SET content = ?1 WHERE id = 'codex:codex-thread:turn-1:user:0'",
+            [&wrapped],
+        )
+        .unwrap();
+
+        let leaked_title = provider_thread_title(&wrapped).unwrap();
+        conn.execute(
+            "UPDATE threads SET title = ?1, updated_at = updated_at + 1 WHERE id = 'ecky-thread'",
+            [leaked_title],
+        )
+        .unwrap();
+        backfill_provider_thread_projection(&conn).unwrap();
+
         let page = provider_message_page(&conn, "ecky-thread", CODEX_PROVIDER_ID, None).unwrap();
         assert_eq!(page.messages[0].attachments, vec![attachment]);
+        assert_eq!(page.messages[0].content, "Use this image.");
         let (title, created_at, updated_at): (String, i64, i64) = conn
             .query_row(
                 "SELECT title, created_at, updated_at FROM threads WHERE id = 'ecky-thread'",

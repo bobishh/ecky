@@ -1146,9 +1146,10 @@ pub fn turn_start_params(
     attachments: &[Attachment],
     policy: crate::provider_turn::ProviderTurnPolicy,
 ) -> Value {
+    let turn_nonce = uuid::Uuid::new_v4().to_string();
     let mut params = json!({
         "threadId": thread_id,
-        "input": build_user_input(&policy.wrap_user_message(prompt), attachments),
+        "input": build_user_input(&policy.wrap_user_message_for_turn(prompt, &turn_nonce), attachments),
         "approvalPolicy": if policy.allows_project_writes() { "on-request" } else { "never" },
         "sandboxPolicy": if policy.allows_project_writes() {
             json!({ "type": "workspaceWrite" })
@@ -1875,6 +1876,10 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
                         .filter(|input| input.get("type").and_then(Value::as_str) == Some("text"))
                         .filter_map(|input| input.get("text").and_then(Value::as_str))
                         .filter(|text| !text.trim().is_empty())
+                        .map(|text| {
+                            crate::provider_turn::unwrap_user_message(text)
+                                .unwrap_or_else(|| text.to_string())
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     let attachments = item_content
@@ -2137,6 +2142,41 @@ mod tests {
             Some("data:image/png;base64,abc")
         );
         assert_eq!(messages[0].attachments[1].name, "reference.png");
+    }
+
+    #[test]
+    fn provider_thread_projection_hides_internal_turn_policy_but_keeps_user_text() {
+        let original = "Покажи, что изменилось после проверки.";
+        let wrapped = crate::provider_turn::ProviderTurnPolicy::prompt_based()
+            .wrap_user_message_for_turn(original, "00000000-0000-4000-8000-000000000001");
+        let provider_input = build_user_input(
+            &wrapped,
+            &[crate::contracts::Attachment {
+                path: String::new(),
+                name: "reference.png".to_string(),
+                explanation: "Keep the rim visible.".to_string(),
+                data_url: Some("data:image/png;base64,abc".to_string()),
+                kind: crate::contracts::AttachmentKind::Image,
+            }],
+        );
+        let messages = project_turn_messages(
+            "codex-thread",
+            &[json!({
+                "id": "turn-1",
+                "status": "completed",
+                "startedAt": 10,
+                "completedAt": 11,
+                "items": [{
+                    "id": "user-item",
+                    "type": "userMessage",
+                    "content": [{"type": "text", "text": provider_input[0]["text"]}]
+                }]
+            })],
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, original);
+        assert!(!messages[0].content.contains("ATTACHMENT NOTES"));
     }
 
     #[test]

@@ -153,3 +153,13 @@
   state transitions by stable provider step identity.
 - [x] Run strict OpenSpec validation, targeted Rust proof, and CI-equivalent checks
   without staging or committing user work.
+
+## 14. Keep provider policy wrappers private
+
+- [x] Preserve original provider user input separately from transport-only turn
+  policy wrappers.
+- [x] Project current and legacy wrapped turns as original user text in provider
+  dialogue and persisted history.
+- [x] Add failure-first Rust projection and persisted-history coverage plus a
+  Playwright dialogue contract check.
+- [x] Run focused Rust and provider dialogue browser checks; do not stage or commit.

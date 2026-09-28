@@ -300,6 +300,25 @@ async function bootProviderDialogue(page: Page) {
 }
 
 test.describe('Codex provider integration', () => {
+  test('Given provider projection contains original text When dialogue opens Then user sees no internal turn policy', async ({ page }) => {
+    const original = 'Покажи, что изменилось после проверки.';
+    await installProviderMocks(page, 'happy', true);
+    await page.addInitScript(({ original }) => {
+      (window as any).__CODEX_SNAPSHOT__.messages[0].content = original;
+    }, { original });
+    await bootProviderDialogue(page);
+
+    await expect(page.getByText(original, { exact: true })).toBeVisible();
+    await expect(page.getByText('[TURN POLICY]', { exact: false })).toHaveCount(0);
+    await expect(page.getByText('[USER MESSAGE]', { exact: false })).toHaveCount(0);
+
+    await page.reload();
+    await selectCodexProvider(page);
+    await openDialogue(page);
+    await expect(page.getByText(original, { exact: true })).toBeVisible();
+    await expect(page.getByText('[TURN POLICY]', { exact: false })).toHaveCount(0);
+  });
+
   test('Given bound Codex and Agy conversations When each Ecky thread opens Then both read Ecky history without provider writer activation', async ({ page }) => {
     await installProviderMocks(page, 'happy', true);
     await bootProviderDialogue(page);

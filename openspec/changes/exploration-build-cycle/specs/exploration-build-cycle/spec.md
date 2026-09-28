@@ -325,6 +325,19 @@ turn is active before its first public activity event arrives, the dialogue SHAL
 project a receipt/working fallback from that backend runtime state. Exact provider
 activity, terminal state, or raw failure SHALL replace the fallback.
 
+Provider dialogue SHALL expose the original user text while keeping transport-only
+turn policy wrappers private. Rust SHALL preserve the original input in durable
+provider history and unwrap only an exact current or legacy wrapper when projecting
+provider-owned history.
+
+#### Scenario: Provider turn policy stays out of user dialogue
+
+- **GIVEN** a provider turn was sent with an internal turn policy wrapper
+- **WHEN** live, persisted, or reloaded dialogue is projected
+- **THEN** Ecky shows the original user text
+- **AND** policy instructions and wrapper markers remain hidden
+- **AND** ordinary user-authored marker text remains unchanged.
+
 #### Scenario: Active provider turn acknowledges receipt before thinking arrives
 
 - **GIVEN** the backend accepted a provider turn and reports its exact active turn ID
