@@ -86,6 +86,7 @@
     loadVersion,
     refreshHistory,
     refreshThreadHistoryProjection,
+    projectSelectedVersionOutcome,
     loadOlderThreadMessages,
     rememberCommittedVersionMessage,
     projectWorkspaceProjection,
@@ -4284,6 +4285,12 @@ import {
       const changedThreadId = event.payload?.threadId ?? null;
       if (currentThreadId && (!changedThreadId || changedThreadId === currentThreadId)) {
         await refreshThreadHistoryProjection(currentThreadId, event.payload?.revision ?? null);
+        if (
+          event.payload?.messageId &&
+          (event.payload.kind === 'parameterVersionRendered' || event.payload.kind === 'parameterVersionFailed')
+        ) {
+          await projectSelectedVersionOutcome(currentThreadId, event.payload.messageId);
+        }
       } else {
         await refreshHistory();
       }

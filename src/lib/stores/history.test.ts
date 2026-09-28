@@ -12,6 +12,7 @@ import {
   resolveProjectedPageState,
   projectHistorySummaries,
   threadMessagePageState,
+  projectSelectedVersionOutcome,
 } from './history';
 import type { Thread } from '../types/domain';
 import { activeThreadIdStore, activeVersionId } from './domainState';
@@ -104,6 +105,47 @@ function sampleThread(id: string, messages: Message[] = []): Thread {
     status: 'active',
   };
 }
+
+test('background render replaces the selected pending version runtime without another render', async () => {
+  activeThreadIdStore.set('thread-render');
+  activeVersionId.set('pending');
+  session.setStlUrl('/tmp/old.stl');
+  session.setModelRuntime(sampleBundle('old', '/tmp/old.stl'), sampleManifest('old'));
+  const completed = sampleMessage('pending', sampleBundle('flange-69', '/tmp/flange-69.stl'), sampleManifest('flange-69'));
+  completed.output = {
+    title: 'Flange', versionName: '69 mm', response: 'Parameter version appended.', interactionMode: 'tune',
+    macroCode: '(model)', sourceLanguage: 'ecky', geometryBackend: 'build123d', uiSpec: { fields: [] }, initialParams: {},
+  };
+  historyStore.set([sampleThread('thread-render', [completed])]);
+  await projectSelectedVersionOutcome('thread-render', 'pending', async () => completed);
+  assert.equal(get(session).artifactBundle?.modelId, 'flange-69');
+  assert.match(get(session).stlUrl!, /flange-69/);
+  assert.equal(get(activeVersionId), 'pending');
+});
+
+test('background render failure exposes raw error while preserving last good viewport', async () => {
+  activeThreadIdStore.set('thread-render');
+  activeVersionId.set('pending');
+  session.setStlUrl('/tmp/old.stl');
+  session.setModelRuntime(sampleBundle('old', '/tmp/old.stl'), sampleManifest('old'));
+  const failed = { ...sampleMessage('pending', sampleBundle('old', '/tmp/old.stl'), sampleManifest('old')), status: 'error' as const, artifactBundle: null, modelManifest: null, content: 'OCCT Boolean failed: flange cutter has no intersection' };
+  await projectSelectedVersionOutcome('thread-render', 'pending', async () => failed);
+  assert.equal(get(session).error, failed.content);
+  assert.equal(get(session).artifactBundle?.modelId, 'old');
+  assert.equal(get(session).stlUrl, '/tmp/old.stl');
+});
+
+test('background render cannot override a version selected while its detail is loading', async () => {
+  activeThreadIdStore.set('thread-render');
+  activeVersionId.set('pending');
+  session.setModelRuntime(sampleBundle('other', '/tmp/other.stl'), sampleManifest('other'));
+  await projectSelectedVersionOutcome('thread-render', 'pending', async () => {
+    activeVersionId.set('other');
+    return sampleMessage('pending', sampleBundle('flange-69', '/tmp/flange-69.stl'), sampleManifest('flange-69'));
+  });
+  assert.equal(get(activeVersionId), 'other');
+  assert.equal(get(session).artifactBundle?.modelId, 'other');
+});
 
 test('history refresh replaces a cleared draft target with the newest committed exact version', () => {
   const older = sampleMessage(

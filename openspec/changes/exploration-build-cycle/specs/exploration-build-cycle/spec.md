@@ -349,6 +349,21 @@ activity, terminal state, or raw failure SHALL replace the fallback.
 - **AND** A's successful render may remain the active viewport projection
 - **AND** the UI identifies that head and viewport refer to different versions.
 
+#### Scenario: Background parameter render updates the selected viewport
+
+- **GIVEN** a parameter edit appended version B and its render is pending
+- **AND** the viewport still displays version A's successful artifact
+- **WHEN** Rust reports that B rendered successfully
+- **THEN** the UI loads B's exact persisted runtime without another render or version append
+- **AND** a completion for a version or thread no longer selected cannot replace the viewport.
+
+#### Scenario: Background parameter render failure retains the last good viewport
+
+- **GIVEN** parameter version B is selected while version A's artifact remains visible
+- **WHEN** Rust reports that B failed rendering
+- **THEN** the UI exposes B's raw backend diagnostic
+- **AND** A's successful runtime remains visible.
+
 ### Requirement: Provider turns produce file-backed LLM eval evidence
 
 The system SHALL persist each completed Agy managed-provider turn as strict data-only

@@ -94,6 +94,8 @@
   bubble copy without a separate status bar.
 - [x] Project immediate message-received activity from an accepted provider turn,
   then yield to exact provider thinking or raw terminal failure.
+- [x] Project background parameter render completion onto the still-selected version;
+  prove pending-to-success viewport replacement and raw failure with last-good retention.
 - [x] Compare ordinary versions; add no candidate UI tier.
 - [x] Keep raw failure/evidence detail collapsed under owning version/cycle event.
 - [x] Verify Tactical Midnight styling, square borders, bounded overflow, and desktop

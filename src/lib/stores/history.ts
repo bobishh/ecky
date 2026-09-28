@@ -515,6 +515,30 @@ export async function loadVersion(
   return Boolean(runtime.bundle);
 }
 
+/** Project completed backend work only onto its still-selected version. */
+export async function projectSelectedVersionOutcome(
+  threadId: string,
+  messageId: string,
+  readVersion: typeof getThreadMessageVersion = getThreadMessageVersion,
+): Promise<void> {
+  const isSelected = () => get(activeThreadId) === threadId && get(activeVersionId) === messageId;
+  if (!isSelected()) return;
+  const version = await readVersion(threadId, messageId);
+  if (!version || version.id !== messageId || !isSelected()) return;
+  history.update((threads) => mergeCommittedVersionMessage(threads, threadId, '', version));
+  if (version.status === 'error') {
+    session.setError(version.content || version.output?.response || 'Version render failed.');
+    return;
+  }
+  if (
+    version.status === 'success' &&
+    hasConsistentRuntimePayload(version.artifactBundle, version.modelManifest) &&
+    !sameArtifactVersion(version.artifactBundle, get(session).artifactBundle)
+  ) {
+    await loadVersion(version, threadId, { persistSnapshot: false });
+  }
+}
+
 export async function loadFromHistory(thread: Thread) {
   const targetThreadId = thread.id;
   const existingThread = get(history).find((candidate) => candidate.id === targetThreadId);

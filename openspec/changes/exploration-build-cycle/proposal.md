@@ -35,6 +35,9 @@ plan becomes stale after the first compiler, geometry, or verification result.
 - Make the Rust controller the only lifecycle authority. Frontend code may submit,
   answer, stop, and project events, but SHALL NOT own retry loops, budget,
   phase transitions, queue arbitration, or completion decisions.
+- Project background parameter-render outcomes onto the still-selected version:
+  load its successful persisted runtime or expose its raw failure while retaining
+  the last-good viewport, without another render or version append.
 - Run at most one expensive build for a cycle at a time. Coalesce unstarted
   interactive rebuild requests to the latest exact input while retaining every
   draft version already appended by normal authoring.

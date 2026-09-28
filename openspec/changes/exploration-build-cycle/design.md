@@ -207,6 +207,14 @@ An application-window reload can lose ephemeral UI projection without changing
 the durable cycle. Process restart marks unproven in-flight backend work
 interrupted and never reconstructs authority from Svelte stores.
 
+Persisted parameter applies may return while their Rust render is still working.
+The `parameterVersionRendered` / `parameterVersionFailed` history events therefore
+refresh the exact selected version's outcome as well as its timeline row. Successful
+completion loads that version's persisted runtime; failure exposes its raw diagnostic
+while retaining the last-good viewport. Selection identity is checked before and after
+the detail read so a stale completion cannot switch the user's thread or version.
+This is UI projection only and performs no render, retry, or version append.
+
 ## Prompt Contract
 
 ### Current split

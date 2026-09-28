@@ -15,7 +15,7 @@ async function openSeededMacroMap(page: Page) {
 
 test.describe('ParamPanel Persistence', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route(/\/mock\.stl(?:\?.*)?$/, async (route) => {
+    await page.route(/\/(?:mock|model)\.stl(?:\?.*)?$/, async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'model/stl',
@@ -48,6 +48,13 @@ endsolid mock
       };
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
       let nextCallbackId = 1;
+      const eventHandlers = new Map<string, number[]>();
+      (window as any).__emitTauriEvent = (event: string, payload: unknown) => {
+        for (const callbackId of eventHandlers.get(event) ?? []) {
+          const callback = (window as any)[`_${callbackId}`];
+          if (typeof callback === 'function') callback({ event, id: callbackId, payload });
+        }
+      };
       window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
         const callbackId = nextCallbackId++;
         (window as unknown as Record<string, unknown>)[`_${callbackId}`] = callback;
@@ -65,8 +72,8 @@ endsolid mock
           messages: [{
             id: storedSnapshot.messageId ?? 'mock-msg-1',
             role: 'assistant',
-            content: '',
-            status: 'success',
+            content: storedSnapshot.status === 'error' ? storedSnapshot.design.response : '',
+            status: storedSnapshot.status ?? 'success',
             output: storedSnapshot.design,
             artifactBundle: storedSnapshot.artifactBundle,
             modelManifest: storedSnapshot.modelManifest,
@@ -87,7 +94,12 @@ endsolid mock
 
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         (window as any).__PARAM_CALLS__.push({ cmd, args });
-        if (cmd === 'plugin:event|listen') return Number(args?.handler ?? 0);
+        if (cmd === 'plugin:event|listen') {
+          const event = String(args?.event ?? '');
+          const handler = Number(args?.handler ?? 0);
+          eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
+          return handler;
+        }
         if (cmd === 'plugin:event|unlisten') return null;
         if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
         if (cmd === 'get_authoring_graph') {
@@ -1062,6 +1074,12 @@ endsolid mock
             messages: [],
           };
         }
+        if (cmd === 'get_thread_messages_page') {
+          return { messages: storedParamThread()?.messages ?? [], hasMore: false, nextBefore: null };
+        }
+        if (cmd === 'get_thread_message_version') {
+          return storedParamThread()?.messages.find((message: any) => message.id === args?.messageId) ?? null;
+        }
         if (cmd === 'save_model_manifest') {
           if (args?.manifest?.sourceLanguage === 'ecky') {
             sessionStorage.setItem('param-last-design', JSON.stringify({
@@ -1831,6 +1849,61 @@ endsolid mock
     await expect(page.getByText(/APPLY QUEUED/)).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled({ timeout: 150 });
   });
+
+  for (const outcome of ['success', 'error'] as const) {
+    test(`Given parameter rendering is pending When background render reports ${outcome} Then viewport projects exact outcome`, async ({ page }) => {
+      await page.getByRole('button', { name: 'DIALOGUE' }).click();
+      await page.fill('textarea.prompt-input', 'make a param box');
+      await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+      await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+      const input = page.locator('.param-panel input.param-input').first();
+      await expect(input).toBeVisible();
+      const viewport = page.locator('.viewport-area .viewer-shell');
+      const oldKey = await viewport.getAttribute('data-model-key');
+      expect(oldKey).toBeTruthy();
+      await page.evaluate(() => ((window as any).__PARAM_DELAY_APPLY__ = true));
+      await input.fill('69');
+      await page.getByRole('button', { name: 'APPLY' }).click();
+      await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled();
+      await expect(viewport).toHaveAttribute('data-model-key', oldKey!);
+
+      let meshRequested = false;
+      await page.route(/\/flange-69\/model\.stl(?:\?.*)?$/, async route => {
+        meshRequested = true;
+        await route.fulfill({ status: 200, contentType: 'model/stl', body: 'solid flange\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 69 0 0\nvertex 0 69 0\nendloop\nendfacet\nendsolid flange\n' });
+      });
+      await page.evaluate(outcome => {
+        const stored = JSON.parse(sessionStorage.getItem('param-last-design')!);
+        stored.status = outcome;
+        if (outcome === 'success') {
+          stored.artifactBundle = { ...stored.artifactBundle, modelId: 'flange-69', contentHash: 'hash-flange-69', modelStlPath: '/flange-69/model.stl', viewerAssets: [] };
+          stored.modelManifest = { ...stored.modelManifest, modelId: 'flange-69' };
+        } else {
+          stored.design.response = 'OCCT Boolean failed: flange cutter has no intersection';
+          stored.artifactBundle = null;
+          stored.modelManifest = null;
+        }
+        sessionStorage.setItem('param-last-design', JSON.stringify(stored));
+        (window as any).__emitTauriEvent('history-updated', {
+          threadId: stored.threadId, messageId: stored.messageId, revision: 100,
+          kind: outcome === 'success' ? 'parameterVersionRendered' : 'parameterVersionFailed',
+        });
+      }, outcome);
+
+      if (outcome === 'success') {
+        await expect(viewport).toHaveAttribute('data-model-key', /flange-69/);
+        await expect.poll(() => meshRequested).toBe(true);
+        await expect(viewport.locator('.viewer-host')).toHaveAttribute('data-model-status', 'loaded');
+        await expect(input).toHaveValue('69');
+      } else {
+        await expect(page.locator('.agent-notification-center')).toContainText('OCCT Boolean failed: flange cutter has no intersection');
+        await expect(viewport).toHaveAttribute('data-model-key', oldKey!);
+        expect(meshRequested).toBe(false);
+      }
+      const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+      expect(calls.filter((call: any) => call.cmd === 'apply_manual_parameters')).toHaveLength(1);
+    });
+  }
 
   test('Given text font select When font changes Then UI stages it and Apply rerenders with the family', async ({ page }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
