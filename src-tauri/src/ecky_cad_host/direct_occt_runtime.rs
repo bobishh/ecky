@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -579,6 +579,14 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         cad_text_font_path,
     )?;
     let model_id = model_id_from_hash(&content_hash);
+    // Different render requests can converge on the same immutable model id
+    // (for example, when only their previous-manifest context differs). Keep
+    // one writer at a time so a failed render cannot remove another render's
+    // completed bundle during partial-output cleanup.
+    let bundle_lock = direct_occt_bundle_lock(&model_id);
+    let _bundle_guard = bundle_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(cached) = read_complete_cached_bundle(app, &model_id, &content_hash) {
         return Ok(cached);
     }
@@ -770,6 +778,21 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
     write_complete_cached_bundle_digests(&bundle_dir, &stored.0)?;
     remember_complete_cached_bundle(&bundle_dir, &content_hash, &stored);
     Ok(stored)
+}
+
+fn direct_occt_bundle_lock(model_id: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(model_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(model_id.to_string(), Arc::downgrade(&lock));
+    lock
 }
 
 fn apply_direct_occt_model_metadata(document: &mut DocumentMetadata, program: &CoreProgram) {
@@ -3327,6 +3350,39 @@ mod tests {
     use crate::ecky_core_ir::CoreSelectorTagKind;
     use crate::models::PathResolver;
     use std::path::PathBuf;
+
+    #[test]
+    fn renders_for_same_model_id_serialize_bundle_replacement() {
+        let model_id = format!("generated-direct-occt-lock-{}", uuid::Uuid::new_v4());
+        let ready = Arc::new(std::sync::Barrier::new(3));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let workers = (0..2)
+            .map(|_| {
+                let model_id = model_id.clone();
+                let ready = Arc::clone(&ready);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    let bundle_lock = direct_occt_bundle_lock(&model_id);
+                    ready.wait();
+                    let _guard = bundle_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .collect::<Vec<_>>();
+        ready.wait();
+        for worker in workers {
+            worker.join().expect("render worker");
+        }
+
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[derive(Clone)]
     struct TestResolver {
