@@ -438,6 +438,9 @@ test.describe('VertexGenie', () => {
   });
 
   test('Given backend reports an agent error When reaction expires Then Ecky returns from red error state', async ({ page }) => {
+    const start = new Date('2026-01-01T00:00:00Z');
+    await page.clock.install({ time: start });
+    await page.clock.pauseAt(start);
     await installGenieMocks(page, {
       connectionState: 'error',
       phase: 'error',
@@ -446,10 +449,13 @@ test.describe('VertexGenie', () => {
       activityLabel: null,
     });
     await page.goto('/');
+    await page.clock.runFor(1000);
 
     const mascot = page.locator('.genie-layer .genie-stone-canvas');
     await expect(mascot).toBeVisible();
     await expect(mascot).toHaveAttribute('data-mode', 'error');
+    await page.clock.fastForward(3000);
+    await page.clock.runFor(16);
     await expect(mascot).toHaveAttribute('data-mode', 'idle', { timeout: 5000 });
   });
 

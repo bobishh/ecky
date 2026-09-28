@@ -894,6 +894,9 @@ test.describe('Codex provider integration', () => {
     await expect(activity.locator('.provider-working__summary')).toContainText('ecky_ast_inspect');
     await expect(page.locator('.trail-assistant').filter({ hasText: 'Сейчас сверяю радиус и глубину посадки.' })).toBeVisible();
     await expect(activity.getByRole('listitem').filter({ hasText: 'Проверяю доступную глубину резьбы.' })).toBeVisible();
+    expect(await page.evaluate(() =>
+      (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'get_codex_takeover').length,
+    )).toBe(readsBefore);
     await page.evaluate(() => {
       const snapshot = (window as any).__CODEX_SNAPSHOT__;
       const trace = {
@@ -916,7 +919,7 @@ test.describe('Codex provider integration', () => {
     await page.waitForTimeout(350);
     expect(await page.evaluate(() =>
       (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'get_codex_takeover').length,
-    )).toBe(readsBefore);
+    )).toBe(readsBefore + 1);
   });
 
   test('Given a provider turn starts before activity arrives When thinking or failure follows Then Ecky confirms receipt and yields to exact provider state', async ({ page }) => {
@@ -1022,9 +1025,14 @@ test.describe('Codex provider integration', () => {
       (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'idle', activeTurnId: null, error: null };
       (window as any).__EMIT_CODEX_EVENT__('thread/status/changed');
     });
-    await expect.poll(async () => page.evaluate(() =>
+    await expect(page.getByRole('button', { name: 'STOP' })).toBeDisabled();
+    const queueRows = page.getByRole('region', { name: 'Codex prompt queue' }).locator('.codex-queue__item');
+    await expect(queueRows).toHaveCount(2);
+    await expect(queueRows.nth(0)).toContainText('Polish bearing bore.');
+    await expect(queueRows.nth(1)).toContainText('Then add inspection fillets.');
+    expect(await page.evaluate(() =>
       (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'dispatch_codex_prompt_queue').length,
-    )).toBe(1);
+    )).toBe(0);
   });
 
   test('Given an active Codex turn When Cmd+Enter is pressed Then input steers visibly instead of entering FIFO', async ({ page }) => {

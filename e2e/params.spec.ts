@@ -1322,7 +1322,7 @@ endsolid mock
     await expect(page.locator('.macro-ast-node-param input.param-input').first()).toBeFocused();
   });
 
-  test('Given Ecky macro with control views When Parameters reopens Then the views persistence surface remains available', async ({
+  test('Given Ecky macro with control views When Parameters reopens Then controls remain available and views persist as metadata', async ({
     page,
   }) => {
     await openSeededMacroMap(page);
@@ -1336,7 +1336,9 @@ endsolid mock
     await expect.soft(
       page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Parameters', exact: true }),
     ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'VIEWS', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'VIEWS', exact: true })).toHaveCount(0);
+    await expect(page.getByPlaceholder('Search controls...')).toBeVisible();
+    await expect(page.locator('.param-panel input.param-input').first()).toBeVisible();
 
     const persistedControlViews = await page.evaluate(() =>
       JSON.parse(sessionStorage.getItem('param-last-design') || 'null')
@@ -1772,6 +1774,7 @@ endsolid mock
   });
 
   test('Given edited defaults When Save Values runs Then one Rust intent persists and returns canonical projection', async ({ page }) => {
+    await page.clock.install();
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a param box');
     await page.locator('textarea.prompt-input').press(
@@ -1784,6 +1787,7 @@ endsolid mock
     const historyReadsBefore = await page.evaluate(() => (window as any).__PARAM_CALLS__
       .filter((entry: { cmd: string }) => entry.cmd === 'get_history').length);
 
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 100));
     await page.getByRole('button', { name: 'SAVE VALUES' }).click();
 
     await expect(page.getByRole('button', { name: 'SAVED' })).toBeVisible();
