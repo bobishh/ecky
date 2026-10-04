@@ -1403,6 +1403,33 @@ enabled = params.get("enabled", False)
     }
 
     #[test]
+    fn parse_macro_params_preserves_cyrillic_labels_and_choices() {
+        let parsed = parse_macro_params(
+            r#"(define base-size 10)
+              (model
+                (params
+                  (select pattern_mode "scales" :label "Узор"
+                    :options (("Японская чешуя" "scales") ("Радиальная паутинка" "web")))
+                  (toggle through_pattern #f :label "Сквозной узор"))
+                (part body (box base-size 10 2)))"#
+                .to_string(),
+        );
+
+        assert_eq!(parsed.fields.len(), 2);
+        match &parsed.fields[0] {
+            UiField::Select { label, options, .. } => {
+                assert_eq!(label, "Узор");
+                assert_eq!(options[0].label, "Японская чешуя");
+                assert_eq!(options[1].label, "Радиальная паутинка");
+            }
+            other => panic!("expected select, got {other:?}"),
+        }
+        assert!(
+            matches!(&parsed.fields[1], UiField::Checkbox { label, .. } if label == "Сквозной узор")
+        );
+    }
+
+    #[test]
     fn derive_framework_controls_rejects_missing_controls() {
         let macro_code = r#"
 from cad_sdk import number

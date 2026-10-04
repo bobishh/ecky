@@ -122,6 +122,7 @@ where
     O: PersistenceOps,
 {
     with_lock(config_dir, || {
+        config.jev_classifier.validate()?;
         let mut warnings = normalization_messages(normalize_legacy_config_for_edn(&mut config));
         write_canonical(config_dir, &config, &mut warnings, ops)?;
         let cleanup_pending = !delete_legacy_json(config_dir, &mut warnings, ops);
@@ -505,6 +506,7 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: None,
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: EngineKind::EckyIrV0,
             default_source_language: SourceLanguage::EckyIrV0,
             default_geometry_backend: GeometryBackend::EckyRust,

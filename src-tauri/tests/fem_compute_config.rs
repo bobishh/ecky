@@ -24,6 +24,7 @@ fn fem_compute_policy_round_trips_through_canonical_edn_value() {
         has_seen_onboarding: true,
         connection_type: None,
         provider_models: ProviderModels::default(),
+        jev_classifier: Default::default(),
         default_engine_kind: EngineKind::EckyIrV0,
         default_source_language: SourceLanguage::EckyIrV0,
         default_geometry_backend: GeometryBackend::EckyRust,

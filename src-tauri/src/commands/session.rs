@@ -10,6 +10,7 @@ use crate::db;
 use crate::mcp::runtime;
 use crate::models::{AppState, ViewportScreenshotCapture};
 use crate::services::agent_dialogue;
+use crate::services::managed_jev_trace;
 
 fn encode_control_key(key: &str) -> Option<u8> {
     if key.eq_ignore_ascii_case("space") {
@@ -913,6 +914,201 @@ async fn resolve_agent_prompt_impl(
     input: crate::contracts::ResolveAgentPromptInput,
     state: &AppState,
 ) -> AppResult<()> {
+    resolve_agent_prompt_with_classifier(input, state, None).await
+}
+
+async fn classify_managed_prompt(
+    input: &crate::contracts::ResolveAgentPromptInput,
+    state: &AppState,
+    classifier: Option<&dyn crate::jev_classifier::TurnClassifier>,
+) -> AppResult<
+    Option<(
+        String,
+        String,
+        crate::provider_turn::ProviderTurnPolicy,
+        crate::llm_eval::EvalRun,
+    )>,
+> {
+    let config = state.config.lock().unwrap().jev_classifier.clone();
+    if !config.enabled {
+        return Ok(None);
+    }
+    config.validate()?;
+    let (thread_id, session_id) = state
+        .prompt_waits
+        .lock()
+        .unwrap()
+        .get(&input.request_id)
+        .and_then(|control| {
+            control
+                .thread_id
+                .clone()
+                .map(|thread_id| (thread_id, control.session_id.clone()))
+        })
+        .ok_or_else(|| AppError::validation("Managed Jev request has no bound Ecky thread."))?;
+    let (summary, recent, starting_identity) = {
+        let conn = state.db.lock().await;
+        let summary = crate::db::get_thread_summary(&conn, &thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .unwrap_or_default();
+        let identity = crate::llm_eval::latest_version_identity(&conn, &thread_id)
+            .map_err(AppError::persistence)?;
+        let recent = crate::db::get_thread_messages(&conn, &thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .into_iter()
+            .rev()
+            .take(crate::jev_classifier::MAX_RECENT_MESSAGES)
+            .map(|message| crate::jev_classifier::RecentMessage {
+                role: message.role.as_str().to_owned(),
+                content: message.content,
+            })
+            .collect::<Vec<_>>();
+        (summary, recent, identity)
+    };
+    let attachments = input
+        .attachments
+        .iter()
+        .map(|attachment| crate::jev_classifier::AttachmentModality {
+            kind: attachment.kind.as_str().to_owned(),
+            explanation: attachment.explanation.clone(),
+        })
+        .collect();
+    let request = crate::jev_classifier::ClassifierRequest::bounded(
+        &input.prompt_text,
+        recent,
+        &summary,
+        "Ecky-owned managed MCP user request",
+        attachments,
+        Vec::new(),
+    );
+    let route = match classifier {
+        Some(classifier) => classifier.classify(request.clone()).await?,
+        None => {
+            crate::jev_classifier::classify_configured_request(&config, request.clone()).await?
+        }
+    };
+    if route.model.is_some() {
+        return Err(AppError::provider(
+            "Managed MCP provider does not support a verified model override.",
+        ));
+    }
+    let current_config = state.config.lock().unwrap().jev_classifier.clone();
+    if current_config.enabled != config.enabled || current_config.api_key != config.api_key {
+        return Err(AppError::conflict(
+            "Jev configuration changed before managed MCP delivery; retry this request.",
+        ));
+    }
+    let current_identity = {
+        let conn = state.db.lock().await;
+        crate::llm_eval::latest_version_identity(&conn, &thread_id)
+            .map_err(AppError::persistence)?
+    };
+    if current_identity != starting_identity {
+        return Err(AppError::conflict(
+            "Managed MCP artifact changed before Jev route delivery.",
+        ));
+    }
+    let current_thread_id = state
+        .prompt_waits
+        .lock()
+        .unwrap()
+        .get(&input.request_id)
+        .and_then(|control| control.thread_id.clone());
+    if current_thread_id.as_deref() != Some(&thread_id)
+        || !state
+            .prompt_channels
+            .lock()
+            .await
+            .contains_key(&input.request_id)
+    {
+        return Err(AppError::conflict(
+            "Managed MCP request changed before Jev route delivery.",
+        ));
+    }
+    let policy = crate::provider_turn::ProviderTurnPolicy::routed(route.intent, route.answer_first);
+    let trace = managed_jev_trace::accepted_run(
+        &thread_id,
+        &session_id,
+        &input.prompt_text,
+        &request,
+        &route,
+        starting_identity,
+    );
+    Ok(Some((thread_id, session_id, policy, trace)))
+}
+
+async fn resolve_agent_prompt_with_classifier(
+    input: crate::contracts::ResolveAgentPromptInput,
+    state: &AppState,
+    classifier: Option<&dyn crate::jev_classifier::TurnClassifier>,
+) -> AppResult<()> {
+    let managed_route = match classify_managed_prompt(&input, state, classifier).await {
+        Ok(route) => route,
+        Err(error) => {
+            let control = state
+                .prompt_waits
+                .lock()
+                .unwrap()
+                .get(&input.request_id)
+                .cloned();
+            if state.config.lock().unwrap().jev_classifier.enabled {
+                if let Some(control) = control {
+                    if let Some(thread_id) = control.thread_id {
+                        let run = managed_jev_trace::failed_run(
+                            &thread_id,
+                            &control.session_id,
+                            &input.prompt_text,
+                            &error,
+                        );
+                        managed_jev_trace::persist_if_app_handle(state, &run)?;
+                    }
+                }
+            }
+            return Err(error);
+        }
+    };
+    if let Some((_thread_id, session_id, _policy, trace)) = managed_route.as_ref() {
+        let previous_pending = {
+            let runs = state.managed_jev_runs.lock().await;
+            runs.contains_key(session_id)
+        };
+        if previous_pending {
+            managed_jev_trace::finish_run(
+                state,
+                session_id,
+                "Managed agent opened another request before saving a final reply.",
+                true,
+            )
+            .await?;
+        }
+        managed_jev_trace::persist_if_app_handle(state, trace)?;
+    }
+    if let Some((thread_id, _session_id, policy, trace)) = managed_route.as_ref() {
+        let message_id = input.message_ids.first().or(input.message_id.as_ref());
+        let conn = state.db.lock().await;
+        crate::services::jev_classifications::save_accepted(
+            &conn,
+            thread_id,
+            "managedMcp",
+            &input.request_id,
+            message_id.map(String::as_str),
+            policy.intent(),
+            &trace
+                .route
+                .jev
+                .as_ref()
+                .expect("accepted Jev route")
+                .intent_probabilities,
+            chrono::Utc::now().timestamp(),
+        )?;
+        if let Some(app) = state.app_handle.lock().unwrap().clone() {
+            use tauri::Emitter;
+            let _ = app.emit(
+                "jev-classification-accepted",
+                serde_json::json!({"threadId": thread_id}),
+            );
+        }
+    }
     let request_id = input.request_id.clone();
 
     // Wake a frozen active-mode agent before unblocking its HTTP request.
@@ -955,29 +1151,74 @@ async fn resolve_agent_prompt_impl(
                 .as_secs();
         }
     }
-    let staged_attachments = stage_prompt_attachments(
+    let staged_attachments = match stage_prompt_attachments(
         state,
         &request_id,
         prompt_control
             .as_ref()
             .map(|control| control.session_id.as_str()),
         &input.attachments,
-    )?;
+    ) {
+        Ok(attachments) => attachments,
+        Err(error) => {
+            if let Some((_thread_id, _session_id, _policy, trace)) = managed_route.as_ref() {
+                let failed = managed_jev_trace::failed_delivery(trace.clone(), &error);
+                managed_jev_trace::persist_if_app_handle(state, &failed)?;
+            }
+            return Err(error);
+        }
+    };
     let mut delivered_input = input.clone();
     delivered_input.attachments = staged_attachments.clone();
+    if let Some((thread_id, _session_id, policy, _trace)) = managed_route.as_ref() {
+        state.set_provider_turn_policy(thread_id, *policy).await;
+        delivered_input.prompt_text = policy
+            .wrap_user_message_for_turn(&input.prompt_text, &uuid::Uuid::new_v4().to_string());
+    } else if let Some(thread_id) = prompt_control
+        .as_ref()
+        .and_then(|control| control.thread_id.as_deref())
+    {
+        state
+            .set_provider_turn_policy(
+                thread_id,
+                crate::provider_turn::ProviderTurnPolicy::prompt_based(),
+            )
+            .await;
+    }
 
     let mut channels = state.prompt_channels.lock().await;
     if let Some(tx) = channels.remove(&request_id) {
-        let _ = tx.send(Ok(delivered_input.clone()));
+        let managed_session_id = managed_route.as_ref().map(|route| route.1.clone());
+        if let Some((_thread_id, session_id, _policy, trace)) = managed_route {
+            state
+                .managed_jev_runs
+                .lock()
+                .await
+                .insert(session_id, trace);
+        }
+        let delivered = tx.send(Ok(delivered_input.clone())).is_ok();
+        drop(channels);
+        if let Some(session_id) = managed_session_id {
+            if delivered {
+                managed_jev_trace::mark_delivered(state, &session_id).await?;
+            } else {
+                let error = AppError::conflict("Managed prompt receiver closed before delivery.");
+                managed_jev_trace::finish_run(state, &session_id, &error.message, true).await?;
+                return Err(error);
+            }
+        }
     } else {
-        return Err(AppError::not_found(format!(
-            "No pending prompt request with id: {}",
-            request_id
-        )));
+        let error =
+            AppError::not_found(format!("No pending prompt request with id: {}", request_id));
+        if let Some((_thread_id, _session_id, _policy, trace)) = managed_route.as_ref() {
+            let failed = managed_jev_trace::failed_delivery(trace.clone(), &error);
+            managed_jev_trace::persist_if_app_handle(state, &failed)?;
+        }
+        return Err(error);
     }
 
     let reply_content = agent_dialogue::build_user_reply_message_content(
-        &delivered_input.prompt_text,
+        &input.prompt_text,
         &delivered_input.attachments,
     );
     let mut working_message_ids = if !delivered_input.message_ids.is_empty() {
@@ -1073,10 +1314,19 @@ pub(crate) async fn auto_deliver_queued_prompt_batch(
     thread_id: &str,
     state: &AppState,
 ) -> AppResult<bool> {
+    auto_deliver_queued_prompt_batch_with_classifier(request_id, thread_id, state, None).await
+}
+
+async fn auto_deliver_queued_prompt_batch_with_classifier(
+    request_id: &str,
+    thread_id: &str,
+    state: &AppState,
+    classifier: Option<&dyn crate::jev_classifier::TurnClassifier>,
+) -> AppResult<bool> {
     let Some(batch) = collect_queued_prompt_batch(thread_id, state).await? else {
         return Ok(false);
     };
-    let delivered = resolve_agent_prompt_impl(
+    let delivered = resolve_agent_prompt_with_classifier(
         crate::contracts::ResolveAgentPromptInput {
             request_id: request_id.to_string(),
             prompt_text: batch.prompt_text,
@@ -1085,6 +1335,7 @@ pub(crate) async fn auto_deliver_queued_prompt_batch(
             attachments: batch.attachments,
         },
         state,
+        classifier,
     )
     .await;
     match delivered {
@@ -1092,6 +1343,61 @@ pub(crate) async fn auto_deliver_queued_prompt_batch(
         Err(error) => {
             let channel_still_pending = state.prompt_channels.lock().await.contains_key(request_id);
             if channel_still_pending {
+                let route_failed_before_delivery =
+                    state.config.lock().unwrap().jev_classifier.enabled
+                        && state.prompt_waits.lock().unwrap().contains_key(request_id);
+                if route_failed_before_delivery {
+                    {
+                        let conn = state.db.lock().await;
+                        for message_id in &batch.message_ids {
+                            crate::db::update_message_status_and_output(
+                                &conn,
+                                message_id,
+                                crate::db::MessageStatusUpdate {
+                                    status: &crate::contracts::MessageStatus::Error,
+                                    output: None,
+                                    usage: None,
+                                    artifact_bundle: None,
+                                    model_manifest: None,
+                                    structural_verification: None,
+                                    visual_kind: None,
+                                    content: None,
+                                },
+                            )
+                            .map_err(|failure| AppError::persistence(failure.to_string()))?;
+                        }
+                    }
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    agent_dialogue::add_dialogue_message(
+                        state,
+                        thread_id,
+                        &crate::contracts::Message {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            role: crate::contracts::MessageRole::Assistant,
+                            content: error.message.clone(),
+                            status: crate::contracts::MessageStatus::Error,
+                            output: None,
+                            usage: None,
+                            artifact_bundle: None,
+                            model_manifest: None,
+                            structural_verification: None,
+                            agent_origin: None,
+                            image_data: None,
+                            visual_kind: None,
+                            attachment_images: Vec::new(),
+                            timestamp,
+                        },
+                    )
+                    .await?;
+                    state.emit_history_changed(
+                        Some(thread_id.to_string()),
+                        batch.message_ids.last().cloned(),
+                        "messageUpdated",
+                    );
+                }
                 Err(error)
             } else {
                 eprintln!(
@@ -1242,6 +1548,7 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: None,
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -1384,6 +1691,336 @@ mod tests {
                 crate::contracts::MessageStatus::Working,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn managed_prompt_delivery_uses_global_jev_contract_before_agent_receives_text() {
+        use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
+
+        let conn = crate::db::init_db(&test_db_path("managed-jev-delivery")).expect("db");
+        let mut config = test_config();
+        config.jev_classifier.enabled = true;
+        config.jev_classifier.api_key = "fixture-token".into();
+        let state = AppState::new(config, None, conn);
+        let queued = queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: Some("thread-managed-jev".into()),
+                prompt_text: "Explain current geometry.".into(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("queue");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .prompt_channels
+            .lock()
+            .await
+            .insert("request-managed-jev".into(), tx);
+        state.prompt_waits.lock().unwrap().insert(
+            "request-managed-jev".into(),
+            crate::models::PromptResumeState {
+                pgid: None,
+                agent_label: "Managed agent".into(),
+                session_id: "session-managed-jev".into(),
+                thread_id: Some(queued.thread_id.clone()),
+            },
+        );
+        let classifier = crate::jev_classifier::MockJevClassifier::fixed(
+            crate::jev_classifier::AcceptedRoute::test_route(
+                ProviderTurnIntent::Answer,
+                None,
+                false,
+            ),
+        );
+
+        assert!(auto_deliver_queued_prompt_batch_with_classifier(
+            "request-managed-jev",
+            &queued.thread_id,
+            &state,
+            Some(&classifier),
+        )
+        .await
+        .expect("delivery"));
+        let delivered = rx.await.expect("channel").expect("prompt");
+        assert!(delivered.prompt_text.contains("Intent: ANSWER"));
+        assert!(delivered.prompt_text.contains("Explain current geometry."));
+        assert_eq!(
+            state.provider_turn_policy(&queued.thread_id).await,
+            Some(ProviderTurnPolicy::for_intent(ProviderTurnIntent::Answer))
+        );
+        let conn = state.db.lock().await;
+        let messages = crate::db::get_thread_messages(&conn, &queued.thread_id).expect("history");
+        assert_eq!(messages[0].content, "Explain current geometry.");
+        let classifications =
+            crate::services::jev_classifications::list_for_thread(&conn, &queued.thread_id)
+                .unwrap();
+        assert_eq!(classifications.len(), 1);
+        assert_eq!(classifications[0].intent, "answer");
+        assert_eq!(
+            classifications[0].message_id.as_deref(),
+            Some(queued.message_id.as_str())
+        );
+        let traces = state.managed_jev_runs.lock().await;
+        let run = traces
+            .get("session-managed-jev")
+            .expect("one in-flight managed trace");
+        assert_eq!(run.prompt, "Explain current geometry.");
+        assert_eq!(run.route.provider, "managed-mcp");
+        assert!(run.route.jev.is_some());
+        assert_eq!(run.events[0].name.as_deref(), Some("request"));
+        assert_eq!(run.events[1].name.as_deref(), Some("jev"));
+        assert_eq!(run.events[2].name.as_deref(), Some("delivery"));
+        assert_eq!(run.events[2].state, "done");
+        let pending = run.clone();
+        drop(traces);
+        let root = std::env::temp_dir().join(format!("managed-jev-eval-{}", uuid::Uuid::new_v4()));
+        managed_jev_trace::persist_to(&root, &pending).expect("persist running trace");
+        let restored_pending =
+            crate::llm_eval::read_run(&root.join("evals/runs").join(&pending.run_id))
+                .expect("read running trace");
+        assert_eq!(restored_pending.status, "running");
+        assert_eq!(restored_pending.events[2].state, "done");
+        let mut before_delivery = pending.clone();
+        before_delivery.events[2].state = "pending".into();
+        let stage_error = AppError::internal("Attachment staging failed before delivery.");
+        let failed_delivery = managed_jev_trace::failed_delivery(before_delivery, &stage_error);
+        assert_eq!(failed_delivery.status, "error");
+        assert_eq!(failed_delivery.events[2].state, "error");
+        managed_jev_trace::persist_to(&root, &failed_delivery)
+            .expect("persist strict pre-delivery trace");
+        let restored_failure =
+            crate::llm_eval::read_run(&root.join("evals/runs").join(&pending.run_id))
+                .expect("read pre-delivery trace");
+        assert_eq!(
+            restored_failure.raw_error.as_deref(),
+            Some(stage_error.message.as_str())
+        );
+        let trace_run_id = managed_jev_trace::tool_started(
+            &state,
+            "session-managed-jev",
+            "session_reply_save",
+            Some(serde_json::json!({"body": "Current geometry has two ribs."})),
+        )
+        .await
+        .expect("managed trace run id");
+        managed_jev_trace::tool_finished(
+            &state,
+            "session-managed-jev",
+            &trace_run_id,
+            "session_reply_save",
+            &Ok(serde_json::json!({"saved": true})),
+        )
+        .await;
+        let completed = managed_jev_trace::finish_run(
+            &state,
+            "session-managed-jev",
+            "Current geometry has two ribs.",
+            false,
+        )
+        .await
+        .expect("finish trace")
+        .expect("managed trace");
+        assert_eq!(completed.status, "success");
+        assert!(completed.turn_id.is_empty());
+        assert_eq!(completed.events.len(), 6);
+        assert!(completed.policy_violations.is_empty());
+        managed_jev_trace::persist_to(&root, &completed).expect("persist strict EDN trace");
+        let restored = crate::llm_eval::read_run(&root.join("evals/runs").join(&completed.run_id))
+            .expect("read strict EDN trace");
+        assert_eq!(restored.events.len(), 6);
+        assert_eq!(
+            restored.response.as_deref(),
+            Some("Current geometry has two ribs.")
+        );
+        std::fs::remove_dir_all(root).expect("remove test eval");
+    }
+
+    #[tokio::test]
+    async fn managed_trace_does_not_attach_previous_prompt_result_to_next_request() {
+        let conn = crate::db::init_db(&test_db_path("managed-jev-trace-race")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let request = crate::jev_classifier::ClassifierRequest::bounded(
+            "First request",
+            Vec::new(),
+            "",
+            "managed request",
+            Vec::new(),
+            Vec::new(),
+        );
+        let route = crate::jev_classifier::AcceptedRoute::test_route(
+            crate::provider_turn::ProviderTurnIntent::Answer,
+            None,
+            false,
+        );
+        let first = managed_jev_trace::accepted_run(
+            "thread-1",
+            "session-1",
+            "First request",
+            &request,
+            &route,
+            None,
+        );
+        state
+            .managed_jev_runs
+            .lock()
+            .await
+            .insert("session-1".into(), first);
+        let first_run_id =
+            managed_jev_trace::tool_started(&state, "session-1", "request_user_prompt", None)
+                .await
+                .expect("first run id");
+        managed_jev_trace::finish_run(
+            &state,
+            "session-1",
+            "Agent requested another prompt before replying.",
+            true,
+        )
+        .await
+        .expect("close first");
+        let second = managed_jev_trace::accepted_run(
+            "thread-1",
+            "session-1",
+            "Second request",
+            &request,
+            &route,
+            None,
+        );
+        state
+            .managed_jev_runs
+            .lock()
+            .await
+            .insert("session-1".into(), second);
+        managed_jev_trace::tool_finished(
+            &state,
+            "session-1",
+            &first_run_id,
+            "request_user_prompt",
+            &Ok(serde_json::json!({"promptText": "Second request"})),
+        )
+        .await;
+        let runs = state.managed_jev_runs.lock().await;
+        let current = runs.get("session-1").expect("second run");
+        assert_eq!(current.prompt, "Second request");
+        assert_eq!(current.events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn managed_prompt_without_jev_token_keeps_agent_waiting_and_message_pending() {
+        let conn = crate::db::init_db(&test_db_path("managed-jev-missing-token")).expect("db");
+        let mut config = test_config();
+        config.jev_classifier.enabled = true;
+        let state = AppState::new(config, None, conn);
+        let queued = queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: Some("thread-managed-blocked".into()),
+                prompt_text: "Change the bracket.".into(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("queue");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state
+            .prompt_channels
+            .lock()
+            .await
+            .insert("request-managed-blocked".into(), tx);
+        state.prompt_waits.lock().unwrap().insert(
+            "request-managed-blocked".into(),
+            crate::models::PromptResumeState {
+                pgid: None,
+                agent_label: "Managed agent".into(),
+                session_id: "session-managed-blocked".into(),
+                thread_id: Some(queued.thread_id.clone()),
+            },
+        );
+
+        let error =
+            auto_deliver_queued_prompt_batch("request-managed-blocked", &queued.thread_id, &state)
+                .await
+                .expect_err("missing Jev token");
+        assert!(error.message.contains("Jev API token"));
+        assert!(state
+            .prompt_channels
+            .lock()
+            .await
+            .contains_key("request-managed-blocked"));
+        assert!(state
+            .prompt_waits
+            .lock()
+            .unwrap()
+            .contains_key("request-managed-blocked"));
+        assert!(state
+            .provider_turn_policy(&queued.thread_id)
+            .await
+            .is_none());
+        let conn = state.db.lock().await;
+        let messages = crate::db::get_thread_messages(&conn, &queued.thread_id).expect("history");
+        assert_eq!(messages[0].status, crate::contracts::MessageStatus::Error);
+        assert!(messages.iter().any(|message| {
+            message.role == crate::contracts::MessageRole::Assistant
+                && message.status == crate::contracts::MessageStatus::Error
+                && message.content.contains("Jev API token")
+        }));
+    }
+
+    #[tokio::test]
+    async fn managed_prompt_restores_prompt_based_policy_when_jev_disabled() {
+        use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
+
+        let conn = crate::db::init_db(&test_db_path("managed-jev-disabled")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        state
+            .set_provider_turn_policy(
+                "thread-managed-disabled",
+                ProviderTurnPolicy::for_intent(ProviderTurnIntent::Answer),
+            )
+            .await;
+        let queued = queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: Some("thread-managed-disabled".into()),
+                prompt_text: "Build a bracket.".into(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("queue");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .prompt_channels
+            .lock()
+            .await
+            .insert("request-managed-disabled".into(), tx);
+        state.prompt_waits.lock().unwrap().insert(
+            "request-managed-disabled".into(),
+            crate::models::PromptResumeState {
+                pgid: None,
+                agent_label: "Managed agent".into(),
+                session_id: "session-managed-disabled".into(),
+                thread_id: Some(queued.thread_id.clone()),
+            },
+        );
+
+        assert!(auto_deliver_queued_prompt_batch(
+            "request-managed-disabled",
+            &queued.thread_id,
+            &state,
+        )
+        .await
+        .expect("delivery"));
+        assert_eq!(
+            rx.await.expect("channel").expect("prompt").prompt_text,
+            "Build a bracket."
+        );
+        assert_eq!(
+            state.provider_turn_policy(&queued.thread_id).await,
+            Some(ProviderTurnPolicy::prompt_based())
+        );
+        assert!(state.managed_jev_runs.lock().await.is_empty());
     }
 
     #[tokio::test]

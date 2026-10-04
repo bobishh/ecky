@@ -16,8 +16,8 @@ without exposing or importing unrelated Codex conversations.
   `CODEX` initially.
 - Keep Projects/Ecky thread list as the only user-facing conversation index.
 - Lazily create one persisted Codex execution thread on the first provider-mode
-  message from an unbound Ecky thread. Retain it as the current cursor through
-  foreign-writer conflicts; delivery retries the same cursor with bounded backoff.
+  message from an unbound Ecky thread. On foreign-writer conflict, rotate once to
+  a new Ecky-owned cursor and deliver the same queued prompt automatically.
 - Hide external conversation ids and lifecycle controls. No discovery, takeover,
   release, or foreign-thread picker exists in Dialogue.
 - Bootstrap thread/start and thread/resume with Ecky's stable provider prompt,
@@ -26,6 +26,8 @@ without exposing or importing unrelated Codex conversations.
   so switching among API, MCP, and Provider retains “what are we building?” context.
 - Persist finished provider turns in Ecky and page them by opaque local cursor. Keep
   user, generated-image, and completed Ecky sketch-tool result metadata with each normalized message so visuals and native sketch evidence survive reload.
+  Render queued prompt images while provider delivery waits; clear the owning thread's
+  viewport-capture preference and exit Draw mode after acceptance.
   Keep
   read-only provider backfill, FIFO queue, exact-turn steer, stop,
   timeout recovery, and compaction-safe completion semantics.
@@ -43,8 +45,8 @@ without exposing or importing unrelated Codex conversations.
   `provider:codex`.
 - Ecky transcript is finished-history authority. The bound external provider
   thread is the current execution cursor; Ecky persists normalized turns and
-  lineage for supported provider replacement, while an active-writer conflict
-  retains the same binding and bounded provider-neutral handoff summary.
+  lineage for provider replacement. An active-writer conflict creates a new
+  cursor with bounded canonical handoff while the old cursor remains in lineage.
 - Normal submit during active work queues. `STEER` mutates current turn only. `STOP`
   interrupts current turn only.
 - Compaction is progress. Only terminal turn state advances FIFO.

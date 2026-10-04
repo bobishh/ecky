@@ -5,7 +5,7 @@
 //! in from the caller.
 
 use crate::commands::generation::{
-    classify_intent_core, finalize_generation_core, generate_design_core, init_generation_core,
+    finalize_generation_core, generate_design_core, init_generation_core,
     persist_generation_draft_in_db, persist_structural_verification_core, ClassifyIntentCoreInput,
     FinalizeGenerationCoreInput, GenerateDesignCoreInput, InitGenerationCoreInput,
 };
@@ -21,6 +21,7 @@ use crate::db;
 use crate::models::{AppState, PathResolver};
 use crate::services::render_snapshot::{build_render_snapshot, RenderSnapshotInput};
 use crate::{build_queue::BuildKind, exploration_run_registry::AdmissionError};
+use sha2::Digest;
 use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
@@ -165,7 +166,9 @@ async fn run_admitted(
     .is_some_and(|packet| {
         packet.state.phase == crate::contracts::exploration_cycle::CyclePhase::AwaitingInput
     });
-    if input.base_version_id.is_some() || awaiting_input {
+    let version_bound_run = input.base_version_id.is_some() || awaiting_input;
+    let jev_enabled = state.config.lock().unwrap().jev_classifier.enabled;
+    if version_bound_run && !jev_enabled {
         return run_cycle_admitted(input, state, app).await;
     }
     let max_attempts = state
@@ -174,7 +177,25 @@ async fn run_admitted(
         .map_err(|_| AppError::persistence("Config lock poisoned."))?
         .max_generation_attempts
         .max(1);
-    let intent = classify_intent_core(
+    let started_at = chrono::Utc::now().timestamp();
+    let starting = {
+        let db = state.db.lock().await;
+        crate::llm_eval::latest_version_identity(&db, &input.thread_id)
+            .map_err(AppError::persistence)?
+    };
+    let engine = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|_| AppError::persistence("Config lock poisoned."))?;
+        config
+            .engines
+            .iter()
+            .find(|candidate| candidate.id == config.selected_engine_id)
+            .cloned()
+    };
+    let eval_run_id = uuid::Uuid::new_v4().to_string();
+    let classification = crate::commands::generation::classify_intent_with_route_core(
         ClassifyIntentCoreInput {
             prompt: input.prompt.clone(),
             thread_id: Some(input.thread_id.clone()),
@@ -184,13 +205,400 @@ async fn run_admitted(
         },
         state,
     )
-    .await
-    .ok();
-    if intent
+    .await;
+    let (intent, route) = match classification {
+        Ok(classification) => classification,
+        Err(error) => {
+            if jev_enabled {
+                persist_api_classification_failure(
+                    &input,
+                    app,
+                    &eval_run_id,
+                    engine.as_ref(),
+                    starting,
+                    started_at,
+                    &error,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
+    if let Some(route) = route.as_ref() {
+        let conn = state.db.lock().await;
+        crate::services::jev_classifications::save_accepted(
+            &conn,
+            &input.thread_id,
+            "api",
+            &input.request_id,
+            None,
+            route.intent,
+            &route.action_probabilities,
+            chrono::Utc::now().timestamp(),
+        )?;
+        if let Some(app) = state.app_handle.lock().unwrap().clone() {
+            use tauri::Emitter;
+            let _ = app.emit(
+                "jev-classification-accepted",
+                serde_json::json!({"threadId": input.thread_id}),
+            );
+        }
+    }
+    let result = run_admitted_routed(
+        input.clone(),
+        state,
+        app,
+        max_attempts,
+        version_bound_run,
+        intent,
+    )
+    .await;
+    if let Some(route) = route {
+        persist_api_route_trace(
+            &input,
+            state,
+            engine.as_ref(),
+            &eval_run_id,
+            starting,
+            started_at,
+            &route,
+            &result,
+            app,
+        )
+        .await;
+    }
+    result
+}
+
+async fn persist_api_classification_failure(
+    input: &StartExplorationRunInput,
+    app: &dyn PathResolver,
+    run_id: &str,
+    engine: Option<&crate::contracts::Engine>,
+    starting: Option<(String, Option<String>)>,
+    started_at: i64,
+    error: &AppError,
+) {
+    let completed_at = chrono::Utc::now().timestamp();
+    let (starting_version_id, starting_input_digest) =
+        starting.map_or((None, None), |(id, digest)| (Some(id), digest));
+    let seed = crate::llm_eval::EvalRunSeed {
+        run_id: run_id.to_string(),
+        thread_id: input.thread_id.clone(),
+        external_thread_id: String::new(),
+        provider: engine
+            .map(|value| value.provider.clone())
+            .unwrap_or_else(|| "api".into()),
+        model: engine.map(|value| value.model.clone()),
+        effort: None,
+        prompt_version: "api-generation-v1".into(),
+        prompt: input.prompt.clone(),
+        starting_version_id,
+        starting_input_digest,
+        expected_red_rounds: 0,
+        turn_intent: crate::provider_turn::ProviderTurnIntent::Clarify,
+        answer_first_required: false,
+        jev_route: None,
+    };
+    let raw_error = error
+        .details
+        .clone()
+        .unwrap_or_else(|| error.message.clone());
+    let events = vec![
+        crate::llm_eval::EvalEvent {
+            sequence: 0,
+            step_index: None,
+            kind: crate::llm_eval::EvalEventKind::System,
+            state: "admitted".into(),
+            name: Some("request".into()),
+            summary: Some("API generation request admitted".into()),
+            input: Some(crate::llm_eval::EvalPayload::new(serde_json::json!({
+                "requestId": input.request_id,
+                "promptSha256": format!("sha256:{:x}", sha2::Sha256::digest(input.prompt.as_bytes())),
+                "promptChars": input.prompt.chars().count(),
+            }))),
+            output: None,
+            error: None,
+            occurred_at: started_at,
+        },
+        crate::llm_eval::EvalEvent {
+            sequence: 1,
+            step_index: None,
+            kind: crate::llm_eval::EvalEventKind::System,
+            state: "error".into(),
+            name: Some("jev.classification".into()),
+            summary: Some("Jev classification failed before provider dispatch".into()),
+            input: None,
+            output: None,
+            error: Some(raw_error.clone()),
+            occurred_at: completed_at,
+        },
+    ];
+    let run = crate::llm_eval::build_api_eval_run(
+        seed,
+        "",
+        started_at,
+        completed_at,
+        "failed_pre_dispatch",
+        None,
+        Some(raw_error),
+        events,
+        Vec::new(),
+        None,
+    );
+    if let Err(persist_error) = crate::llm_eval::persist_run(&app.app_data_dir(), &run) {
+        eprintln!("Unable to persist API Jev classifier failure trace: {persist_error}");
+    }
+}
+
+async fn persist_api_route_trace(
+    input: &StartExplorationRunInput,
+    state: &AppState,
+    engine: Option<&crate::contracts::Engine>,
+    run_id: &str,
+    starting: Option<(String, Option<String>)>,
+    started_at: i64,
+    route: &crate::jev_classifier::AcceptedRoute,
+    result: &AppResult<ExplorationRunOutput>,
+    app: &dyn PathResolver,
+) {
+    let completed_at = chrono::Utc::now().timestamp();
+    let (versions, outcome) = {
+        let db = state.db.lock().await;
+        let starting_id = starting.as_ref().map(|(id, _)| id.as_str());
+        let versions = crate::llm_eval::version_outcomes_for_window(
+            &db,
+            &input.thread_id,
+            starting_id,
+            started_at,
+            completed_at,
+        )
+        .unwrap_or_default();
+        let response = result
+            .as_ref()
+            .ok()
+            .and_then(|output| output.response_text.clone());
+        (versions, response)
+    };
+    let raw_error = result
         .as_ref()
-        .is_some_and(|decision| decision.intent_mode.eq_ignore_ascii_case("question"))
-    {
+        .err()
+        .map(|error| {
+            error
+                .details
+                .clone()
+                .unwrap_or_else(|| error.message.clone())
+        })
+        .or_else(|| {
+            result
+                .as_ref()
+                .ok()
+                .and_then(|output| output.raw_error.clone())
+        });
+    let usage = result
+        .as_ref()
+        .ok()
+        .and_then(|output| output.usage.as_ref())
+        .map(|usage| crate::llm_eval::EvalUsage {
+            input_tokens: Some(usage.input_tokens),
+            output_tokens: Some(usage.output_tokens),
+            estimated_cost_usd: usage.estimated_cost_usd,
+        });
+    let mut events = vec![crate::llm_eval::EvalEvent {
+        sequence: 0,
+        step_index: None,
+        kind: crate::llm_eval::EvalEventKind::System,
+        state: "accepted".into(),
+        name: Some("jev.route".into()),
+        summary: Some(format!(
+            "Jev selected {} for API execution",
+            route.intent.as_str()
+        )),
+        input: Some(crate::llm_eval::EvalPayload::new(serde_json::json!({
+            "requestId": input.request_id,
+            "promptSha256": format!("sha256:{:x}", sha2::Sha256::digest(input.prompt.as_bytes())),
+            "promptChars": input.prompt.chars().count(),
+            "contextTruncated": route.context_truncated,
+            "currentPromptTruncated": route.current_prompt_truncated,
+            "classifierModel": route.classifier_model,
+            "classifierInputTokens": route.classifier_input_tokens,
+            "classifierOutputTokens": route.classifier_output_tokens,
+        }))),
+        output: Some(crate::llm_eval::EvalPayload::new(serde_json::json!({
+            "intent": route.intent.as_str(),
+            "intentConfidence": route.action_confidence,
+            "intentProbabilities": route.action_probabilities,
+            "answerRequested": route.answer_requested,
+            "answerFirst": route.answer_first,
+            "model": route.model,
+            "modelReason": route.model_reason,
+            "classifierLatencyMs": route.classifier_latency_ms,
+        }))),
+        error: None,
+        occurred_at: started_at,
+    }];
+    events.push(crate::llm_eval::EvalEvent {
+        sequence: 1,
+        step_index: None,
+        kind: crate::llm_eval::EvalEventKind::System,
+        state: "attempted".into(),
+        name: Some("delivery".into()),
+        summary: Some(
+            "Accepted route handed to API adapter; provider dispatch not independently observed"
+                .into(),
+        ),
+        input: Some(crate::llm_eval::EvalPayload::new(serde_json::json!({
+            "provider": engine.map(|engine| engine.provider.as_str()),
+            "model": engine.map(|engine| engine.model.as_str()),
+            "routeModel": route.model,
+        }))),
+        output: None,
+        error: None,
+        occurred_at: started_at,
+    });
+    if let Some(response) = outcome.as_ref() {
+        events.push(crate::llm_eval::EvalEvent {
+            sequence: events.len() as u64,
+            step_index: None,
+            kind: crate::llm_eval::EvalEventKind::Assistant,
+            state: "completed".into(),
+            name: Some("api.provider_response".into()),
+            summary: Some("API provider returned response".into()),
+            input: None,
+            output: Some(crate::llm_eval::EvalPayload::new(
+                serde_json::json!({"response": response, "providerTurnId": null}),
+            )),
+            error: None,
+            occurred_at: completed_at,
+        });
+    }
+    if let Ok(output) = result.as_ref() {
+        events.push(crate::llm_eval::EvalEvent {
+            sequence: events.len() as u64,
+            step_index: None,
+            kind: crate::llm_eval::EvalEventKind::System,
+            state: "terminal".into(),
+            name: Some("api.outcome".into()),
+            summary: Some(format!("API exploration reached {:?}", output.phase)),
+            input: None,
+            output: Some(crate::llm_eval::EvalPayload::new(serde_json::json!({
+                "phase": format!("{:?}", output.phase),
+                "messageId": output.message_id,
+                "cycleId": output.cycle_id,
+                "publicationAllowed": output.publication_allowed,
+                "responsePresent": output.response_text.is_some(),
+                "verificationPassed": output.structural_verification.as_ref().map(|result| result.passed),
+                "versionsCreated": versions.iter().map(|version| version.version_id.as_str()).collect::<Vec<_>>(),
+            }))),
+            error: None,
+            occurred_at: completed_at,
+        });
+    }
+    if let Some(error) = raw_error.as_ref() {
+        events.push(crate::llm_eval::EvalEvent {
+            sequence: events.len() as u64,
+            step_index: None,
+            kind: crate::llm_eval::EvalEventKind::System,
+            state: "error".into(),
+            name: Some("api.execution_error".into()),
+            summary: Some(
+                "API route ended with an error; provider dispatch not independently observed"
+                    .into(),
+            ),
+            input: None,
+            output: None,
+            error: Some(error.clone()),
+            occurred_at: completed_at,
+        });
+    }
+    let (starting_version_id, starting_input_digest) =
+        starting.map_or((None, None), |(id, digest)| (Some(id), digest));
+    let eval_route = crate::llm_eval::EvalJevRoute {
+        policy_version: route.policy_version.to_string(),
+        intent_confidence_threshold: crate::jev_classifier::ACTION_CONFIDENCE_MIN,
+        intent_margin_threshold: crate::jev_classifier::ACTION_MARGIN_MIN,
+        model_confidence_threshold: crate::jev_classifier::ACTION_CONFIDENCE_MIN,
+        model_margin_threshold: crate::jev_classifier::ACTION_MARGIN_MIN,
+        intent_confidence: route.action_confidence,
+        intent_probabilities: route.action_probabilities.clone(),
+        answer_requested: route.answer_requested,
+        answer_first: route.answer_first,
+        model_ceiling: engine.map(|engine| engine.model.clone()),
+        model_confidence: Some(route.model_confidence),
+        model_probabilities: route.model_probabilities.clone(),
+        model_reason: route.model_reason.clone(),
+        context_truncated: route.context_truncated,
+        current_prompt_truncated: route.current_prompt_truncated,
+        classifier_input_tokens: route.classifier_input_tokens,
+        classifier_output_tokens: route.classifier_output_tokens,
+        classifier_model: route.classifier_model.clone(),
+        classifier_latency_ms: route.classifier_latency_ms,
+        model_catalog_version: route.model_catalog_version.clone(),
+        model_catalog_valid_until: route.model_catalog_valid_until.clone(),
+        native_tool_coverage: crate::llm_eval::unknown_native_tool_coverage(),
+    };
+    let seed = crate::llm_eval::EvalRunSeed {
+        run_id: run_id.to_string(),
+        thread_id: input.thread_id.clone(),
+        external_thread_id: String::new(),
+        provider: engine
+            .map(|engine| engine.provider.clone())
+            .unwrap_or_else(|| "api".into()),
+        model: engine.map(|engine| engine.model.clone()),
+        effort: None,
+        prompt_version: "api-generation-v1".into(),
+        prompt: input.prompt.clone(),
+        starting_version_id,
+        starting_input_digest,
+        expected_red_rounds: 0,
+        turn_intent: route.intent,
+        answer_first_required: route.answer_first,
+        jev_route: Some(eval_route),
+    };
+    let status = if raw_error.is_some() {
+        "error"
+    } else if result.as_ref().ok().is_some_and(|output| {
+        matches!(
+            output.phase,
+            ExplorationRunPhase::Stopped
+                | ExplorationRunPhase::Interrupted
+                | ExplorationRunPhase::Superseded
+        )
+    }) {
+        "interrupted"
+    } else {
+        "success"
+    };
+    let run = crate::llm_eval::build_api_eval_run(
+        seed,
+        String::new(),
+        started_at,
+        completed_at,
+        status,
+        outcome,
+        raw_error,
+        events,
+        versions,
+        usage,
+    );
+    if let Err(error) = crate::llm_eval::persist_run(&app.app_data_dir(), &run) {
+        eprintln!("Unable to persist API Jev eval trace: {error}");
+    }
+}
+
+async fn run_admitted_routed(
+    input: StartExplorationRunInput,
+    state: &AppState,
+    app: &dyn PathResolver,
+    max_attempts: u32,
+    version_bound_run: bool,
+    intent: crate::contracts::IntentDecision,
+) -> AppResult<ExplorationRunOutput> {
+    if intent.intent_mode.eq_ignore_ascii_case("question") {
         return run_question_only(input, state, app, max_attempts).await;
+    }
+    if version_bound_run {
+        return run_cycle_admitted(input, state, app).await;
     }
     let message_id = {
         let configured_root = state.config.lock().unwrap().projects_root.clone();
@@ -201,6 +609,7 @@ async fn run_admitted(
                 prompt: input.prompt.clone(),
                 attachments: Some(input.attachments.clone()),
                 image_data: input.image_data.clone(),
+                classification_request_id: Some(input.request_id.clone()),
             },
             state,
             app,
@@ -637,6 +1046,7 @@ async fn run_cycle_admitted(
             prompt: input.prompt.clone(),
             attachments: Some(input.attachments.clone()),
             image_data: input.image_data.clone(),
+            classification_request_id: Some(input.request_id.clone()),
         },
         state,
         app,
@@ -1250,6 +1660,7 @@ async fn run_question_only(
             prompt: input.prompt.clone(),
             attachments: Some(input.attachments.clone()),
             image_data: input.image_data.clone(),
+            classification_request_id: Some(input.request_id.clone()),
         },
         state,
         app,

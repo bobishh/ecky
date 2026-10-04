@@ -34,7 +34,7 @@ lineage. The provider-global conversation index SHALL NOT be exposed.
 - **GIVEN** an Ecky thread already bound to Codex
 - **WHEN** user switches away and later returns to Provider
 - **THEN** Ecky renders its locally persisted provider timeline without resuming a writer
-- **AND** creates no replacement while loading history or handling a writer conflict
+- **AND** creates no replacement merely by loading history
 
 #### Scenario: Stored Codex cursor has another active writer
 
@@ -42,17 +42,26 @@ lineage. The provider-global conversation index SHALL NOT be exposed.
 - **AND** another Codex client owns the current external writer
 - **WHEN** Ecky dispatches a queued prompt
 - **THEN** Ecky read-only backfills any available finished turns
-- **AND** retains the same current binding, external thread id, and provider history
-- **AND** keeps the same queued prompt at the FIFO head with the precise raw provider error
-- **AND** schedules a delayed retry using the existing queue recovery path
-- **AND** does not create a replacement thread, unsubscribe, kill, or interrupt the other client
+- **AND** starts one new Ecky-owned Codex execution cursor with canonical context
+- **AND** rotates the binding while retaining old cursor lineage and normalized provider history
+- **AND** sends the same queued FIFO head through the new cursor without user retry
+- **AND** retains the precise raw provider error in the delivery eval trace
+- **AND** does not unsubscribe, kill, or interrupt the other client
 
-#### Scenario: Foreign writer conflict resolves
+#### Scenario: Replacement cursor cannot immediately deliver
 
-- **GIVEN** a queued prompt remains bound to the same Codex external thread after an active-writer error
-- **WHEN** a later bounded retry finds that the foreign writer has released the thread
-- **THEN** Ecky resumes and delivers the queued prompt to that same external thread id
-- **AND** the Ecky binding and finished provider history remain continuous
+- **GIVEN** a queued prompt already caused one writer-conflict rotation
+- **WHEN** the replacement cursor also reports an active writer
+- **THEN** Ecky keeps the same FIFO head and schedules delayed retry
+- **AND** it does not create another cursor for that queued prompt
+- **AND** Dialogue shows pending automatic delivery rather than a raw writer-lock error
+
+#### Scenario: Sending while the stored cursor has another writer
+
+- **GIVEN** an Ecky thread has a stored Codex cursor held by another client
+- **WHEN** the user submits a prompt
+- **THEN** Ecky persists the prompt before any writer resume attempt
+- **AND** the controller applies the writer-conflict recovery path without rejecting submission
 
 #### Scenario: Start fails
 
@@ -162,6 +171,21 @@ SHALL NOT replace already visible Ecky messages or versions.
 - **AND** read-only Codex backfill may restore missing image metadata from `image` or `localImage` input blocks
 - **AND** an attachment-free later projection does not erase an already persisted image
 
+#### Scenario: Queued provider image appears while delivery is pending
+
+- **GIVEN** a provider prompt with an image is accepted into Ecky's durable queue
+- **WHEN** provider delivery is still pending
+- **THEN** Dialogue renders the queued image beside its queued prompt
+- **AND** the visible attachment comes from the returned queue item or submitted draft
+
+#### Scenario: Workspace capture controls reset after accepted send
+
+- **GIVEN** `SEND VIEWPORT IMAGE` is enabled and Draw mode is active for the owning thread
+- **WHEN** the provider accepts the prompt
+- **THEN** `SEND VIEWPORT IMAGE` is unchecked for that thread
+- **AND** Draw mode exits even when the canvas has no marks
+- **AND** a thread switch during delivery does not reset the newly active thread's Draw mode
+
 #### Scenario: Codex generated image survives history reload
 
 - **GIVEN** a completed owned Codex turn contains an `imageGeneration` output
@@ -210,6 +234,31 @@ lines from visible/copyable answer text.
 Normal submit during active work SHALL append durable FIFO. `STEER` SHALL target exact
 active turn. `STOP` SHALL interrupt exact active turn without discarding FIFO.
 
+#### Scenario: Steering a routed active turn
+
+- **GIVEN** Jev accepted a policy for an active Codex turn
+- **WHEN** user selects `STEER`
+- **THEN** Ecky freshly routes the steer when global Jev is enabled and sends it to that exact turn without adding a FIFO row
+- **AND** the active turn model remains unchanged
+- **AND** accepted policy and probabilities bind to the exact persisted steer message
+- **AND** answer-first policy requires a new assistant item after that steer
+- **AND** classifier failure or stale state prevents delivery and preserves prior policy.
+
+#### Scenario: Provider acknowledgement is pending or fails
+
+- **WHEN** user submits a provider prompt or steers an active Codex turn
+- **THEN** a local pending copy appears before backend acknowledgement
+- **AND** backend acceptance replaces it with durable queue or transcript state
+- **AND** rejection removes the pending copy, restores an untouched draft, and displays the raw error.
+
+#### Scenario: Captured sketch travels with provider message
+
+- **GIVEN** the user adds a drawing to a Codex send or exact-turn STEER
+- **WHEN** drawing capture succeeds
+- **THEN** the backend receives the text, drawing image, and selected attachments as one provider message
+- **AND** a capture error prevents text-only delivery and retains the drawing and draft
+- **AND** a new drawing made while acknowledgement is pending remains available after success.
+
 #### Scenario: User selects a Codex model
 
 - **WHEN** user persists a nonblank Codex model id in Provider settings
@@ -220,7 +269,7 @@ active turn. `STOP` SHALL interrupt exact active turn without discarding FIFO.
 #### Scenario: Provider delivery is slow
 
 - **WHEN** user submits a provider prompt
-- **THEN** a local `QUEUED` user item paints immediately
+- **THEN** a local `PENDING` queue row paints immediately and becomes durable `QUEUED` on acknowledgement
 - **AND** the composer accepts another prompt without waiting for app-server delivery
 - **AND** backend enqueue returns before asynchronous turn dispatch
 - **AND** accepted provider transcript replaces the optimistic copy

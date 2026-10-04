@@ -41,7 +41,6 @@
   } from './lib/capture/captureWorkspaceState';
   import {
     windowStore,
-    windowLayoutRemembered,
     loadLayoutForThread,
     loadAppWindowLayout,
     showWindow,
@@ -52,7 +51,6 @@
     closeWindow as closeWindowStore,
     hardFlush as hardFlushWindowLayout,
     teardown as teardownWindowStore,
-    setThreadWindowLayoutRemembered,
     type WindowId,
   } from './lib/stores/windowStore';
   import type { DockLauncherAction } from './lib/workbench/dock';
@@ -166,6 +164,7 @@ import {
     type AgentDraftFeedback,
   } from './lib/agents/draftFeedback';
   import {
+    captureWorkspaceReference,
     isWorkspaceCaptureEnabled,
     readWorkspaceCapturePrefs,
     setWorkspaceCaptureEnabled,
@@ -277,6 +276,7 @@ import {
     getAgyProvider,
     getAgyProviderMessages,
     getCodexTakeover,
+    getJevClassificationResults,
     getCodexTakeoverMessages,
     getAgentDraftPreview,
     getActiveAgentSessions,
@@ -337,6 +337,7 @@ import {
     type CodexTakeoverSnapshot,
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
+  import type { ClassificationResult } from './lib/tauri/contracts';
   import type {
     CaptureCropBounds,
     CaptureGuideResultProvenance,
@@ -471,6 +472,7 @@ import {
     hasDrawing: () => boolean;
     getCanvas: () => HTMLCanvasElement | null;
     clear: () => void;
+    getRevision: () => number;
   };
 
   type ThreadPhase = Request['phase'] | 'idle' | 'booting';
@@ -1051,6 +1053,16 @@ import {
   const visibleAgentTerminal = $derived($visibleAgentTerminalStore);
   const activeAgentTerminalAttention = $derived($agentTerminalAttentionStore);
   const activeThread = $derived($history.find((t) => t.id === $activeThreadId));
+  let classificationResults = $state<ClassificationResult[]>([]);
+  async function refreshClassificationResults(threadId: string) {
+    const results = await getJevClassificationResults(threadId);
+    if ($activeThreadId === threadId) classificationResults = Array.isArray(results) ? results : [];
+  }
+  $effect(() => {
+    const threadId = $activeThreadId;
+    classificationResults = [];
+    if (threadId) void refreshClassificationResults(threadId).catch(() => {});
+  });
   const codexDialogueStateStore = writable(createProviderDialogueState());
   const agyDialogueStateStore = writable(createProviderDialogueState());
   const codexDialogueState = $derived($codexDialogueStateStore);
@@ -1226,17 +1238,20 @@ import {
     }
   }
 
-  async function handleCodexSteer(prompt: string) {
+  async function handleCodexSteer(prompt: string, attachments: Attachment[]) {
     const snapshot = codexTakeoverSnapshot;
     const expectedTurnId = snapshot?.runtime.activeTurnId;
     if (!snapshot || !expectedTurnId) throw new Error('No active Codex turn to steer.');
     try {
+      const prepared = await prepareDialogueAttachments(attachments, snapshot.binding.eckyThreadId);
       const next = await steerCodexTakeover({
         eckyThreadId: snapshot.binding.eckyThreadId,
         promptText: prompt,
         expectedTurnId,
+        attachments: prepared.attachments,
       });
       applyCodexTakeoverSnapshot(next, true, true);
+      prepared.clearDrawingAfterSend?.();
     } catch (error) {
       setProviderError(formatBackendError(error));
       throw error;
@@ -3377,6 +3392,18 @@ import {
     drawMode = false;
   }
 
+  function finishPromptWorkspaceSend(
+    threadId: string,
+    clearDrawingAfterSend: (() => void) | null,
+  ) {
+    const next = setWorkspaceCaptureEnabled(workspaceCapturePrefs, threadId, false);
+    workspaceCapturePrefs = next;
+    writeWorkspaceCapturePrefs(next);
+    if (get(activeThreadId) !== threadId) return;
+    clearDrawingAfterSend?.();
+    drawMode = false;
+  }
+
   async function capturePromptWorkspaceImageData(): Promise<string | null> {
     if (!viewerComponent) return null;
     return viewerComponent.captureScreenshot(liveOverlayCanvas(true));
@@ -3385,28 +3412,35 @@ import {
   async function prepareDialogueAttachments(
     attachments: Attachment[],
     targetThreadId: string | null,
-  ): Promise<{ attachments: Attachment[]; clearDrawingAfterSend: boolean }> {
+  ): Promise<{ attachments: Attachment[]; clearDrawingAfterSend: (() => void) | null }> {
     const hadDrawing = drawingOverlay?.hasDrawing() ?? drawingOverlayDirty;
+    const capturedOverlay = drawingOverlay;
+    const capturedRevision = capturedOverlay?.getRevision();
+    const capturedThreadId = get(activeThreadId);
 
     let nextAttachments = attachments;
     if (sendWorkspaceCaptureForActiveThread || hadDrawing) {
-      const dataUrl = await capturePromptWorkspaceImageData();
-      if (dataUrl) {
-        const workspaceAttachment = await preparePromptWorkspaceCapture({
+      const workspaceAttachment = await captureWorkspaceReference(
+        capturePromptWorkspaceImageData,
+        (dataUrl) => preparePromptWorkspaceCapture({
           dataUrl,
           threadId: targetThreadId,
           name: hadDrawing ? 'workspace-annotated.png' : 'workspace-view.png',
           explanation: hadDrawing
             ? 'Current workspace view with annotated content.'
             : 'Current workspace view.',
-        });
-        nextAttachments = [...attachments, workspaceAttachment];
-      }
+        }),
+      );
+      nextAttachments = [...attachments, workspaceAttachment];
     }
 
     return {
       attachments: await preparePromptAttachments(nextAttachments),
-      clearDrawingAfterSend: hadDrawing,
+      clearDrawingAfterSend: hadDrawing ? () => {
+        if (drawingOverlay === capturedOverlay
+          && drawingOverlay?.getRevision() === capturedRevision
+          && get(activeThreadId) === capturedThreadId) clearPromptDrawingOverlay();
+      } : null,
     };
   }
 
@@ -3934,7 +3968,7 @@ import {
       return;
     }
     let preparedAttachments: Attachment[] = attachments;
-    let clearDrawingAfterSend = false;
+    let clearDrawingAfterSend: (() => void) | null = null;
     try {
       const prepared = await prepareDialogueAttachments(
         attachments,
@@ -3948,9 +3982,7 @@ import {
         promptText,
         attachments: preparedAttachments,
       });
-      if (clearDrawingAfterSend) {
-        clearPromptDrawingOverlay();
-      }
+      finishPromptWorkspaceSend(promptThreadId, clearDrawingAfterSend);
       if (result.outcome === 'queued') {
         addOptimisticQueuedAgentMessage(
           result.threadId,
@@ -3999,7 +4031,7 @@ import {
               true,
             );
           }
-          if (prepared.clearDrawingAfterSend) clearPromptDrawingOverlay();
+          finishPromptWorkspaceSend(eckyThreadId, prepared.clearDrawingAfterSend);
         } catch (error) {
           setProviderError(formatBackendError(error));
           throw error;
@@ -4010,7 +4042,7 @@ import {
       case 'generate':    await handleGenerate(prompt, attachments, { uiDeps: requestOrchestratorUiDeps }); break;
       case 'mcp-idle': {
         let preparedAttachments: Attachment[] = attachments;
-        let clearDrawingAfterSend = false;
+        let clearDrawingAfterSend: (() => void) | null = null;
         try {
           const prepared = await prepareDialogueAttachments(
             attachments,
@@ -4053,9 +4085,7 @@ import {
             );
           }
           adoptWorkspaceCapturePreference(queuedMessage.threadId);
-          if (clearDrawingAfterSend) {
-            clearPromptDrawingOverlay();
-          }
+          finishPromptWorkspaceSend(queuedMessage.threadId, clearDrawingAfterSend);
         } catch (e) {
           removeOptimisticQueuedAgentMessage(optimisticId);
           session.setError(`Agent Queue Error: ${formatBackendError(e)}`);
@@ -4487,6 +4517,14 @@ import {
       'codex-provider-updated',
       (event) => scheduleCodexTakeoverRefresh(event.payload),
     ) : noopUnlisten;
+    const unlistenJevClassification = canListenToTauri ? listen<{ threadId: string }>(
+      'jev-classification-accepted',
+      (event) => {
+        if (event.payload.threadId === get(activeThreadId)) {
+          void refreshClassificationResults(event.payload.threadId).catch(() => {});
+        }
+      },
+    ) : noopUnlisten;
     const unlistenAgyProvider = canListenToTauri ? listen<{
       conversationId?: string | null;
       method: string;
@@ -4534,6 +4572,7 @@ import {
       void unlistenTerminal.then(fn => fn());
       void unlistenWorkingVersion.then(fn => fn());
       void unlistenCodexTakeover.then(fn => fn());
+      void unlistenJevClassification.then(fn => fn());
       void unlistenAgyProvider.then(fn => fn());
       if (codexTakeoverRefreshTimer) clearTimeout(codexTakeoverRefreshTimer);
       if (agyProviderRefreshTimer) clearTimeout(agyProviderRefreshTimer);
@@ -5718,7 +5757,6 @@ import {
     bind:overlayActionsEl
     onActivateWindow={handleDockWindowActivate}
     onDrawToggle={() => {
-      if (drawMode) drawingOverlay?.clear();
       drawMode = !drawMode;
     }}
     onCloseView={() => currentView.set('workbench')}
@@ -5937,8 +5975,6 @@ import {
 
     {#snippet dialogueContent()}
       <DialogueWindowContent
-        rememberLayout={$windowLayoutRemembered}
-        onRememberLayoutChange={(remember) => void setThreadWindowLayoutRemembered(remember)}
         activeThreadId={$activeThreadId}
         bind:activeVersionId={$activeVersionId}
         promptProps={{
@@ -5955,6 +5991,7 @@ import {
           onRetryCodexQueue: handleRetryCodexQueue,
           onRemoveCodexQueue: handleRemoveCodexQueue,
           messages: activeThreadDialogueMessages,
+          classificationResults,
           captureRuns: captureHistoryRuns,
           messagesLoading: $activeThreadMessagesLoading,
           messagesHasMore: activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false,

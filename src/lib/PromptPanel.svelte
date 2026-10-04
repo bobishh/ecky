@@ -32,7 +32,7 @@
   } from './threadTimeline';
   import { modelEngineLabel } from './modelEngineLabel';
   import type { DialogueState } from './composables/dialogueState';
-  import type { AgyProviderSnapshot, CodexTakeoverSnapshot } from './tauri/contracts';
+  import type { AgyProviderSnapshot, CodexQueuedPrompt, CodexTakeoverSnapshot } from './tauri/contracts';
   import type { AuthoredVerifyChip } from './controllers/structuralVerification';
   import { buildVersionAuthoredVerifyChipMap } from './versionAuthoredVerifyCards';
   import {
@@ -41,6 +41,9 @@
     type ProviderCodeReference,
   } from './providerMessagePresentation';
   import { explorationCycleUiCopy, type ExplorationCyclePacket } from './explorationCycle';
+  import { codexQueueErrorCopy } from './providerQueuePresentation';
+  import type { ClassificationResult } from './tauri/contracts';
+  import JevClassificationBadges from './JevClassificationBadges.svelte';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -74,6 +77,8 @@
     leaseId: string | null;
   };
 
+  type PendingProviderPrompt = CodexQueuedPrompt & { knownQueueIds: string[]; previewAttachments: Attachment[] };
+
   let {
     onGenerate,
     isGenerating = false,
@@ -88,6 +93,7 @@
     onRetryCodexQueue,
     onRemoveCodexQueue,
     messages = [],
+    classificationResults = [],
     captureRuns = [],
     messagesLoading = false,
     messagesHasMore = false,
@@ -118,11 +124,12 @@
     codexTakeover?: CodexTakeoverSnapshot | AgyProviderSnapshot | null;
     codexTakeoverError?: string | null;
     onLoadEarlierCodexMessages?: () => Promise<void>;
-    onSteerCodexTakeover?: (prompt: string) => Promise<void>;
+    onSteerCodexTakeover?: (prompt: string, attachments: Attachment[]) => Promise<void>;
     onStopCodexTakeover?: () => Promise<void>;
     onRetryCodexQueue?: (queueId: string) => Promise<void>;
     onRemoveCodexQueue?: (queueId: string) => Promise<void>;
     messages?: Message[];
+    classificationResults?: ClassificationResult[];
     captureRuns?: CaptureRun[];
     messagesLoading?: boolean;
     messagesHasMore?: boolean;
@@ -153,8 +160,26 @@
 
   let prompt = $state('');
   let attachments = $state<Attachment[]>([]);
+  let pendingProviderPrompts = $state<PendingProviderPrompt[]>([]);
+  let pendingSteer = $state<Message | null>(null);
   let providerCodeReferenceError = $state<{ messageId: string; text: string } | null>(null);
-  const visibleProviderQueue = $derived(codexTakeover?.queue.filter((item) => item.status !== 'sending') ?? []);
+  const visibleProviderQueue = $derived.by(() => {
+    const confirmed = codexTakeover?.queue.filter((item) => item.canCancel || item.status !== 'sending') ?? [];
+    const matchedQueueIds = new Set<string>();
+    const pending = pendingProviderPrompts.filter((item) => {
+      if (item.eckyThreadId !== activeThreadId) return false;
+      const match = confirmed.find((queued) =>
+        queued.promptText === item.promptText
+        && !item.knownQueueIds.includes(queued.id)
+        && !matchedQueueIds.has(queued.id));
+      if (!match) return true;
+      matchedQueueIds.add(match.id);
+      return false;
+    });
+    return [...confirmed, ...pending];
+  });
+  const classificationByMessage = $derived(new Map(classificationResults.filter((result) => result.messageId).map((result) => [result.messageId, result])));
+  const classificationByRequest = $derived(new Map(classificationResults.map((result) => [result.requestId, result])));
   let isDragging = $state(false);
   let versionToDelete = $state<VersionMessage | null>(null);
   let visualLoupe = $state<VisualLoupeState | null>(null);
@@ -193,6 +218,16 @@
     return message.providerActivity?.phase === 'interrupted' || message.providerActivity?.phase === 'error';
   }
 
+  function providerQueueImageSources(item: CodexQueuedPrompt & { previewAttachments?: Attachment[] }): string[] {
+    const prepared = item.attachments
+      ?.filter((attachment) => attachment.kind === 'image')
+      .map((attachment) => attachment.dataUrl || toAssetUrl(attachment.path)) ?? [];
+    const draft = item.previewAttachments
+      ?.filter((attachment) => attachment.type === 'image')
+      .map((attachment) => attachment.dataUrl || toAssetUrl(attachment.path)) ?? [];
+    return prepared.length > 0 ? prepared.filter(Boolean) : draft.filter(Boolean);
+  }
+
   function toggleProviderWorking(message: Message, event: MouseEvent) {
     event.preventDefault();
     providerWorkingExpanded = {
@@ -226,15 +261,33 @@
   }
 
   async function steerCodex() {
-    if (!onSteerCodexTakeover || codexControlBusy || !prompt.trim()) return;
+    if (!onSteerCodexTakeover || codexControlBusy || (!prompt.trim() && attachments.length === 0)) return;
     codexControlBusy = true;
     codexControlAction = 'steer';
     const currentPrompt = prompt;
+    const currentAttachments = [...attachments];
+    const scopeKey = currentDraftScopeKey(activeThreadId);
+    pendingSteer = {
+      id: `optimistic-steer-${Date.now()}`,
+      role: 'user',
+      content: currentPrompt,
+      status: 'pending',
+      timestamp: Math.floor(Date.now() / 1000),
+    };
+    prompt = '';
+    attachments = [];
+    persistPromptDraftNow(scopeKey, '');
     try {
-      await onSteerCodexTakeover(currentPrompt);
-      prompt = '';
-      persistPromptDraftNow(currentDraftScopeKey(activeThreadId), '');
+      await onSteerCodexTakeover(currentPrompt, currentAttachments);
+    } catch (error) {
+      if (currentDraftScopeKey(activeThreadId) === scopeKey && !prompt.trim() && attachments.length === 0) {
+        prompt = currentPrompt;
+        attachments = currentAttachments;
+        persistPromptDraftNow(scopeKey, currentPrompt);
+      }
+      console.error('Failed to steer Codex turn:', error);
     } finally {
+      pendingSteer = null;
       codexControlBusy = false;
       codexControlAction = null;
     }
@@ -563,6 +616,22 @@
       const currentPrompt = prompt;
       const currentAttachments = [...attachments];
       const scopeKey = currentDraftScopeKey(activeThreadId);
+      const pendingQueueId = dialogueState.mode === 'provider' && activeThreadId
+        ? `optimistic-provider-${Date.now()}-${currentSubmission}`
+        : null;
+      if (pendingQueueId) {
+        pendingProviderPrompts = [...pendingProviderPrompts, {
+          id: pendingQueueId,
+          eckyThreadId: activeThreadId!,
+          promptText: currentPrompt,
+          previewAttachments: currentAttachments,
+          knownQueueIds: codexTakeover?.queue.map((item) => item.id) ?? [],
+          status: 'pending',
+          error: null,
+          createdAt: Math.floor(Date.now() / 1000),
+          updatedAt: Math.floor(Date.now() / 1000),
+        }];
+      }
       try {
         prompt = '';
         attachments = [];
@@ -590,6 +659,7 @@
         }
         console.error('Failed to submit prompt:', error);
       } finally {
+        if (pendingQueueId) pendingProviderPrompts = pendingProviderPrompts.filter((item) => item.id !== pendingQueueId);
         isSubmitting = false;
       }
     }
@@ -740,7 +810,7 @@
     };
   }
 
-  const timelineMessages = $derived(threadTimelineMessages(messages));
+  const timelineMessages = $derived(threadTimelineMessages(pendingSteer ? [...messages, pendingSteer] : messages));
   const filteredTimelineMessages = $derived.by(() => {
     const query = timelineSearch.trim().toLocaleLowerCase();
     return timelineMessages.filter((message) => {
@@ -1328,6 +1398,9 @@
               PREVIEW TRUNCATED · {msg.contentObservedBytes ?? '?'} BYTES OBSERVED · {msg.contentAllowedBytes ?? 8192} ALLOWED · OPEN VERSION FOR DETAIL
             </div>
           {/if}
+          {#if msg.role === 'user' && classificationByMessage.get(msg.id)}
+            <JevClassificationBadges result={classificationByMessage.get(msg.id)!} />
+          {/if}
           {#if providerCodeReferenceError?.messageId === msg.id}
             <div class="provider-code-reference-error" role="alert">
               {providerCodeReferenceError.text}
@@ -1373,9 +1446,24 @@
     {#if visibleProviderQueue.length}
       <div class="codex-queue" role="region" aria-label={`${dialogueState.mode === 'provider' ? dialogueState.label : 'Provider'} prompt queue`}>
         {#each visibleProviderQueue as item, index (item.id)}
+          {@const queueError = dialogueState.mode === 'provider' && dialogueState.providerId === 'codex'
+            ? codexQueueErrorCopy(item.status, item.error)
+            : item.error}
+          {@const queuedImageSources = providerQueueImageSources(item)}
           <div class="codex-queue__item" class:codex-queue__item--failed={item.status === 'failed'}>
             <span>#{index + 1} {item.status.toUpperCase()}</span>
             <strong>{item.promptText}</strong>
+            {#if queuedImageSources.length > 0}
+              <div class="codex-queue__images" aria-label="Queued attachments">
+                {#each queuedImageSources as imageSrc, attachmentIndex (`${item.id}-${attachmentIndex}`)}
+                  <img src={imageSrc} alt="Queued attachment preview" />
+                {/each}
+              </div>
+            {/if}
+            {#if classificationByRequest.get(item.id)}
+              <JevClassificationBadges result={classificationByRequest.get(item.id)!} />
+            {/if}
+            {#if !item.id.startsWith('optimistic-provider-')}
             <div class="codex-queue__actions">
               {#if item.status === 'failed'}
                 <AsyncActionButton
@@ -1386,7 +1474,7 @@
                   action={() => onRetryCodexQueue?.(item.id)}
                 />
               {/if}
-              {#if item.status !== 'sending'}
+              {#if item.canCancel || item.status !== 'sending'}
                 <AsyncActionButton
                   className="btn btn-xs btn-ghost"
                   label="REMOVE"
@@ -1396,7 +1484,8 @@
                 />
               {/if}
             </div>
-            {#if item.error}<small role="alert">{item.error}</small>{/if}
+            {/if}
+            {#if queueError}<small role={item.status === 'failed' ? 'alert' : 'status'}>{queueError}</small>{/if}
           </div>
         {/each}
       </div>
@@ -1460,7 +1549,7 @@
             <button
               class="btn provider-control provider-control--steer"
               type="button"
-              disabled={codexControlBusy || isSubmitting || !prompt.trim()}
+              disabled={codexControlBusy || isSubmitting || (!prompt.trim() && attachments.length === 0)}
               onclick={steerCodex}
             >{codexControlAction === 'steer' ? 'STEERING…' : 'STEER'}</button>
           {/if}
@@ -1655,6 +1744,8 @@
   .codex-queue__item--failed { border-color: var(--red); }
   .codex-queue__item span { color: var(--primary); font-size: var(--ui-font-caption); }
   .codex-queue__item strong { color: var(--text); font-size: var(--ui-font-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .codex-queue__images { grid-column: 1 / -1; display: flex; gap: 6px; overflow: hidden; }
+  .codex-queue__images img { width: 72px; height: 54px; object-fit: cover; border: 1px solid var(--bg-300); }
   .codex-queue__item small { grid-column: 1 / -1; color: var(--red); white-space: pre-wrap; }
   .codex-queue__actions { display: flex; gap: 4px; }
 
@@ -2237,6 +2328,7 @@
     -webkit-user-select: text;
     user-select: text;
   }
+
 
   .provider-code-reference-error {
     max-width: 100%;

@@ -125,6 +125,14 @@
   Markdown reports, redaction, bounds, and paired comparison.
 - [x] Capture ordered Agy managed-provider assistant/tool/result steps with stable turn,
   route, prompt, timing, and terminal identity.
+- [x] Capture queued Codex success/error/interrupted turns and app-server exit in the
+  same writer, with original prompt, tool item identity, route, and version linkage.
+- [x] Retain completed Codex evidence until file persistence succeeds; prove disk-write
+  retry, capture bounds, malformed start cleanup, and response-first route metadata.
+- [x] Preserve nonempty Agy terminal-error answers, including recovered failed results,
+  without hiding the terminal diagnostic or changing queue error status.
+- [ ] Journal pending/active Codex evidence across a full Ecky process crash; terminal
+  files survive restart, but unfinished or unflushed capture remains memory-only.
 - [x] Bind each completed turn to immutable versions and verification outcomes created
   during its exact time window.
 - [x] Persist `run.edn`, `trajectory.edn`, and `report.md`; create no JSON eval artifact
@@ -163,3 +171,26 @@
 - [x] Add failure-first Rust projection and persisted-history coverage plus a
   Playwright dialogue contract check.
 - [x] Run focused Rust and provider dialogue browser checks; do not stage or commit.
+
+## 15. Experimental Jev extension
+
+- [x] Link the separate `experimental-jev-routing` proposal/design/spec/tasks while
+  retaining default prompt routing and existing Rust lifecycle/version authority.
+- [x] Record historical Codex-only intent/model routing, settings, tested native/MCP
+  boundaries, and eval capture under that change. This is not global proof.
+- [ ] Implement and prove the revised global Jev route for application-owned API,
+  Codex, Agy, and managed MCP requests without a mandatory Codex hook.
+- [ ] Follow up labeled replay/calibration, live cost/completion evaluation and Agy
+  command interception; preserve the limitations recorded in that change.
+- [x] Route each exact-turn Codex `STEER` through global Jev when enabled, preserve
+  the active model, bind fresh classification to its persisted message, and reject
+  stale/failed routes before delivery.
+- [x] Keep normal queued submit as a separate Rust-owned request.
+
+## 16. Codex writer contention
+
+- [x] Add failing outer Dialogue flow for queued writer contention and eventual delivery.
+- [x] Add failing Rust dispatch flow for automatic cursor rotation and same FIFO delivery.
+- [x] Persist user prompts before resuming existing Codex cursors; rotate one new cursor on writer conflict while retaining lineage, history, and raw eval evidence.
+- [x] Project transient contention as automatic waiting while keeping terminal failures raw.
+- [ ] Verify focused Rust/browser checks, strict spec validation, and installed app replacement.

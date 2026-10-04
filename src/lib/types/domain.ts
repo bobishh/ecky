@@ -330,6 +330,7 @@ export interface AppConfig {
     codex: string;
     agy: string;
   };
+  jevClassifier: { enabled: boolean; apiKey: string };
   defaultEngineKind: EngineKind;
   defaultSourceLanguage: SourceLanguage;
   defaultGeometryBackend: GeometryBackend;
@@ -1345,6 +1346,10 @@ export function normalizeConfig(
     providerModels: {
       codex: `${(config as AppConfig).providerModels?.codex ?? ""}`.trim(),
       agy: `${(config as AppConfig).providerModels?.agy ?? ""}`.trim(),
+    },
+    jevClassifier: {
+      enabled: (config as AppConfig).jevClassifier?.enabled === true,
+      apiKey: (config as AppConfig).jevClassifier?.apiKey ?? "",
     },
     defaultEngineKind:
       normalizeEngineKindValue((config as AppConfig).defaultEngineKind) ??

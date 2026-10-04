@@ -56,7 +56,7 @@ fn env_path_override(name: &str) -> Option<PathBuf> {
         .filter(|path| !path.as_os_str().is_empty())
 }
 
-impl PathResolver for tauri::AppHandle {
+impl<R: tauri::Runtime> PathResolver for tauri::AppHandle<R> {
     fn app_config_dir(&self) -> PathBuf {
         env_path_override("ECKY_APP_CONFIG_DIR")
             .unwrap_or_else(|| self.path().app_config_dir().unwrap())
@@ -486,8 +486,11 @@ pub struct AppState {
     /// Current provider capability policy keyed by canonical Ecky thread.
     /// MCP enforcement reads this registry so a reused provider connection
     /// cannot retain authority from an earlier turn.
-    pub provider_turn_policies:
-        Arc<tokio::sync::Mutex<HashMap<String, crate::provider_turn::ProviderTurnPolicy>>>,
+    pub provider_turn_policies: Arc<tokio::sync::Mutex<HashMap<String, ProviderTurnPolicyEntry>>>,
+    /// Serializes exact-turn Codex STEER admission and delivery per Ecky thread.
+    pub codex_steer_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// In-flight managed MCP request traces keyed by the real managed session id.
+    pub managed_jev_runs: Arc<tokio::sync::Mutex<HashMap<String, crate::llm_eval::EvalRun>>>,
     /// Pending user-confirmation requests keyed by requestId.
     pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
     /// Pending user-prompt requests keyed by requestId (agent waits for text/attachments from UI).
@@ -534,27 +537,147 @@ pub struct AppState {
     pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderTurnPolicySnapshot {
+    generation: uuid::Uuid,
+    pub policy: crate::provider_turn::ProviderTurnPolicy,
+}
+
+impl ProviderTurnPolicySnapshot {
+    fn new(policy: crate::provider_turn::ProviderTurnPolicy) -> Self {
+        Self {
+            generation: uuid::Uuid::new_v4(),
+            policy,
+        }
+    }
+}
+
+pub struct ProviderTurnPolicyLease {
+    installed: ProviderTurnPolicySnapshot,
+    previous: Option<ProviderTurnPolicyEntry>,
+}
+
+#[derive(Clone)]
+pub struct ProviderTurnPolicyEntry {
+    snapshot: ProviderTurnPolicySnapshot,
+    answer_baseline: HashSet<String>,
+}
+
 impl AppState {
     pub async fn set_provider_turn_policy(
         &self,
         thread_id: &str,
         policy: crate::provider_turn::ProviderTurnPolicy,
     ) {
-        self.provider_turn_policies
-            .lock()
-            .await
-            .insert(thread_id.to_string(), policy);
+        self.provider_turn_policies.lock().await.insert(
+            thread_id.to_string(),
+            ProviderTurnPolicyEntry {
+                snapshot: ProviderTurnPolicySnapshot::new(policy),
+                answer_baseline: HashSet::new(),
+            },
+        );
+    }
+
+    pub async fn clear_provider_turn_policy(&self, thread_id: &str) {
+        self.provider_turn_policies.lock().await.remove(thread_id);
     }
 
     pub async fn provider_turn_policy(
         &self,
         thread_id: &str,
     ) -> Option<crate::provider_turn::ProviderTurnPolicy> {
+        self.provider_turn_policy_snapshot(thread_id)
+            .await
+            .map(|snapshot| snapshot.policy)
+    }
+
+    pub async fn provider_turn_policy_snapshot(
+        &self,
+        thread_id: &str,
+    ) -> Option<ProviderTurnPolicySnapshot> {
         self.provider_turn_policies
             .lock()
             .await
             .get(thread_id)
-            .copied()
+            .map(|entry| entry.snapshot)
+    }
+
+    /// Install only while the captured request still owns the policy. No guard
+    /// survives this method, so provider IO and MCP policy reads stay independent.
+    pub async fn install_provider_turn_policy(
+        &self,
+        thread_id: &str,
+        expected: Option<ProviderTurnPolicySnapshot>,
+        policy: crate::provider_turn::ProviderTurnPolicy,
+    ) -> AppResult<ProviderTurnPolicyLease> {
+        self.install_provider_turn_policy_with_answer_baseline(
+            thread_id,
+            expected,
+            policy,
+            HashSet::new(),
+        )
+        .await
+    }
+
+    pub async fn install_provider_turn_policy_with_answer_baseline(
+        &self,
+        thread_id: &str,
+        expected: Option<ProviderTurnPolicySnapshot>,
+        policy: crate::provider_turn::ProviderTurnPolicy,
+        answer_baseline: HashSet<String>,
+    ) -> AppResult<ProviderTurnPolicyLease> {
+        let mut policies = self.provider_turn_policies.lock().await;
+        let previous = policies.get(thread_id).cloned();
+        if previous.as_ref().map(|entry| entry.snapshot) != expected {
+            return Err(AppError::conflict(
+                "Provider request policy changed before STEER delivery.",
+            ));
+        }
+        let installed = ProviderTurnPolicySnapshot::new(policy);
+        policies.insert(
+            thread_id.to_owned(),
+            ProviderTurnPolicyEntry {
+                snapshot: installed,
+                answer_baseline,
+            },
+        );
+        Ok(ProviderTurnPolicyLease {
+            installed,
+            previous,
+        })
+    }
+
+    /// A failed delivery may restore its own policy, never a successor's policy.
+    pub async fn rollback_provider_turn_policy(
+        &self,
+        thread_id: &str,
+        lease: ProviderTurnPolicyLease,
+    ) {
+        let mut policies = self.provider_turn_policies.lock().await;
+        if policies.get(thread_id).map(|entry| entry.snapshot) != Some(lease.installed) {
+            return;
+        }
+        if let Some(previous) = lease.previous {
+            policies.insert(thread_id.to_owned(), previous);
+        } else {
+            policies.remove(thread_id);
+        }
+    }
+
+    pub async fn provider_answer_first_satisfied(
+        &self,
+        thread_id: &str,
+        assistant_item_ids: &HashSet<String>,
+    ) -> bool {
+        self.provider_turn_policies
+            .lock()
+            .await
+            .get(thread_id)
+            .is_some_and(|entry| {
+                assistant_item_ids
+                    .iter()
+                    .any(|id| !entry.answer_baseline.contains(id))
+            })
     }
 
     /// Threads currently selected by an authoring surface.
@@ -627,6 +750,8 @@ impl AppState {
                 pending_notifications: Arc::clone(&mcp_session_pending_notifications),
             },
             provider_turn_policies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            codex_steer_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            managed_jev_runs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             confirm_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             prompt_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             auto_agent_runtime: Arc::new(Mutex::new(
@@ -1307,6 +1432,7 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: None,
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: EngineKind::Freecad,
             default_source_language: SourceLanguage::LegacyPython,
             default_geometry_backend: GeometryBackend::Freecad,
@@ -1320,6 +1446,106 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
         crate::capture_runs::ensure_schema(&conn).expect("capture schema");
         AppState::new(minimal_config(), None, conn)
+    }
+
+    #[tokio::test]
+    async fn provider_policy_lease_cannot_replace_or_restore_a_successor() {
+        use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
+        let state = state();
+        let modify = ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify);
+        let inspect = ProviderTurnPolicy::for_intent(ProviderTurnIntent::Inspect);
+        state.set_provider_turn_policy("thread-1", modify).await;
+        let captured = state.provider_turn_policy_snapshot("thread-1").await;
+        state.set_provider_turn_policy("thread-1", modify).await;
+        assert!(
+            state
+                .install_provider_turn_policy("thread-1", captured, inspect)
+                .await
+                .is_err(),
+            "a successor with identical permissions still owns a different request"
+        );
+        let current = state.provider_turn_policy_snapshot("thread-1").await;
+        let lease = state
+            .install_provider_turn_policy("thread-1", current, inspect)
+            .await
+            .unwrap();
+        assert_eq!(state.provider_turn_policy("thread-1").await, Some(inspect));
+        state.set_provider_turn_policy("thread-1", modify).await;
+        state.rollback_provider_turn_policy("thread-1", lease).await;
+        assert_eq!(state.provider_turn_policy("thread-1").await, Some(modify));
+    }
+
+    #[tokio::test]
+    async fn provider_policy_lease_rolls_back_only_its_failed_delivery_without_holding_registry() {
+        use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
+        let state = state();
+        let modify = ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify);
+        let answer = ProviderTurnPolicy::for_intent(ProviderTurnIntent::Answer);
+        state.set_provider_turn_policy("thread-1", modify).await;
+        let captured = state.provider_turn_policy_snapshot("thread-1").await;
+        let lease = state
+            .install_provider_turn_policy("thread-1", captured, answer)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            assert_eq!(state.provider_turn_policy("thread-1").await, Some(answer));
+            state
+                .set_provider_turn_policy("unrelated-thread", modify)
+                .await;
+        })
+        .await
+        .expect("provider IO must not hold the global policy registry");
+        state.rollback_provider_turn_policy("thread-1", lease).await;
+        assert_eq!(state.provider_turn_policy("thread-1").await, Some(modify));
+        let missing = state.provider_turn_policy_snapshot("new-thread").await;
+        let lease = state
+            .install_provider_turn_policy("new-thread", missing, answer)
+            .await
+            .unwrap();
+        state
+            .rollback_provider_turn_policy("new-thread", lease)
+            .await;
+        assert_eq!(state.provider_turn_policy("new-thread").await, None);
+    }
+
+    #[tokio::test]
+    async fn provider_policy_lease_requires_a_fresh_answer_for_each_steering_request() {
+        use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
+        let state = state();
+        let policy = ProviderTurnPolicy::routed(ProviderTurnIntent::Modify, true);
+        state.set_provider_turn_policy("thread-1", policy).await;
+        let snapshot = state.provider_turn_policy_snapshot("thread-1").await;
+        let earlier_answer = HashSet::from(["assistant-original".to_owned()]);
+        let lease = state
+            .install_provider_turn_policy_with_answer_baseline(
+                "thread-1",
+                snapshot,
+                policy,
+                earlier_answer.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !state
+                .provider_answer_first_satisfied("thread-1", &earlier_answer)
+                .await
+        );
+        let new_answer = HashSet::from([
+            "assistant-original".to_owned(),
+            "assistant-steer".to_owned(),
+        ]);
+        assert!(
+            state
+                .provider_answer_first_satisfied("thread-1", &new_answer)
+                .await
+        );
+        state.rollback_provider_turn_policy("thread-1", lease).await;
+        assert!(
+            state
+                .provider_answer_first_satisfied("thread-1", &earlier_answer)
+                .await,
+            "failed steering restores the earlier request's answer evidence"
+        );
     }
 
     #[tokio::test]

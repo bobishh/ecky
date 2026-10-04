@@ -1,7 +1,18 @@
+import type { Attachment } from '../types/domain';
+
 const WORKSPACE_CAPTURE_STORAGE_KEY = 'ecky:thread-workspace-capture:v1';
 const NEW_THREAD_SCOPE_KEY = '__new__';
 
 export type ThreadWorkspaceCapturePrefs = Record<string, boolean>;
+
+export async function captureWorkspaceReference(
+  capture: () => Promise<string | null>,
+  stage: (dataUrl: string) => Promise<Attachment>,
+): Promise<Attachment> {
+  const dataUrl = await capture();
+  if (!dataUrl) throw new Error('Workspace image capture failed. Drawing retained; message was not sent.');
+  return stage(dataUrl);
+}
 
 export function workspaceCaptureScopeKey(threadId: string | null | undefined): string {
   const normalized = `${threadId ?? ''}`.trim();

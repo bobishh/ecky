@@ -2412,23 +2412,39 @@ async fn spawn_agent_once(state: &AppState, agent: &AutoAgent) -> AppResult<()> 
     );
 
     state.push_log(format!("[SUPERVISOR] {}", status_text));
-    let mut runtime = runtime_registry(state);
-    runtime.update_by_id(&agent.id, |entry| {
-        entry.pid = None;
-        entry.session_id = None;
-        entry.phase = phase;
-        entry.busy = false;
-        entry.activity_label = None;
-        entry.activity_started_at = None;
-        entry.attention_kind = None;
-        entry.status_text = Some(status_text.clone());
-        entry.last_error = last_error.clone();
-        entry.llm_model_label = None;
-    });
+    {
+        let mut runtime = runtime_registry(state);
+        runtime.update_by_id(&agent.id, |entry| {
+            entry.pid = None;
+            entry.session_id = None;
+            entry.phase = phase;
+            entry.busy = false;
+            entry.activity_label = None;
+            entry.activity_started_at = None;
+            entry.attention_kind = None;
+            entry.status_text = Some(status_text.clone());
+            entry.last_error = last_error.clone();
+            entry.llm_model_label = None;
+        });
+    }
     if let Some(session_id) = previous_session_id {
+        if let Err(error) = finalize_managed_trace_on_exit(state, &session_id, &status_text).await {
+            state.push_log(format!(
+                "[SUPERVISOR] Failed to persist managed Jev trace for {}: {}",
+                agent.label, error.message
+            ));
+        }
         clear_live_session_for_disconnect(state, &session_id, &status_text);
     }
     Ok(())
+}
+
+async fn finalize_managed_trace_on_exit(
+    state: &AppState,
+    session_id: &str,
+    status_text: &str,
+) -> AppResult<Option<crate::llm_eval::EvalRun>> {
+    crate::services::managed_jev_trace::finish_run(state, session_id, status_text, true).await
 }
 
 pub async fn stop_primary_auto_agent(
@@ -3237,6 +3253,50 @@ mod tests {
 
     use crate::contracts::McpConfig;
 
+    #[tokio::test]
+    async fn managed_jev_trace_closes_when_agent_exits_without_reply() {
+        let state = test_state(test_config(None));
+        let request = crate::jev_classifier::ClassifierRequest::bounded(
+            "Inspect the current model.",
+            Vec::new(),
+            "",
+            "managed request",
+            Vec::new(),
+            Vec::new(),
+        );
+        let route = crate::jev_classifier::AcceptedRoute::test_route(
+            crate::provider_turn::ProviderTurnIntent::Inspect,
+            None,
+            false,
+        );
+        let run = crate::services::managed_jev_trace::accepted_run(
+            "thread-1",
+            "session-1",
+            "Inspect the current model.",
+            &request,
+            &route,
+            None,
+        );
+        state
+            .managed_jev_runs
+            .lock()
+            .await
+            .insert("session-1".into(), run);
+
+        let completed =
+            finalize_managed_trace_on_exit(&state, "session-1", "Agent process exited.")
+                .await
+                .expect("close trace")
+                .expect("pending managed trace");
+
+        assert_eq!(completed.status, "error");
+        assert_eq!(
+            completed.raw_error.as_deref(),
+            Some("Agent process exited.")
+        );
+        assert!(state.managed_jev_runs.lock().await.is_empty());
+    }
+
     fn test_config(primary_agent_id: Option<&str>) -> Config {
         Config {
             engines: vec![],
@@ -3260,6 +3320,7 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: Some("mcp".to_string()),
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,

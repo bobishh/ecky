@@ -215,6 +215,7 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: None,
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,

@@ -14,7 +14,7 @@
 ## 3. Owned Codex lifecycle
 
 - [x] 3.1 Add app-server `thread/start`, `thread/name/set`, and cleanup of failed binding.
-- [x] 3.2 Lazily ensure binding from first send; resume current cursor and retry same cursor on foreign writer conflict.
+- [x] 3.2 Lazily ensure binding from first send; writer-conflict recovery now rotates one cursor under section 8.
 - [x] 3.3 Resolve deterministic Ecky project cwd and keep one-to-one provider-neutral schema.
 
 ## 4. Context continuity
@@ -60,10 +60,31 @@
 - [x] 7.1 Persist normalized finished provider messages in Ecky and cursor-page them without provider I/O.
 - [x] 7.2 Render local Codex history before any background reconciliation; never activate writer on Dialogue open.
 - [x] 7.3 Retain provider binding lineage across supported external cursor replacement.
-- [x] 7.4 Preserve current Codex thread on active-writer conflict; carry durable history forward through delayed FIFO retry.
+- [x] 7.4 Preserve durable history and old cursor lineage on active-writer conflict; section 8 supersedes same-cursor retry.
 - [x] 7.5 Keep queued prompt durable across active-writer conflict and persist accepted user item under stable turn identity.
 - [x] 7.6 Green focused Rust/Playwright proof, strict OpenSpec validation, production app build, and installed app smoke.
 - [x] 7.7 Persist provider user attachments, recover Codex image blocks, and render images after history reload.
 - [x] 7.8 Persist completed Codex-generated image outputs and render them as assistant timeline images after history reload.
 - [x] 7.9 Persist completed Ecky sketch MCP results as concise assistant timeline evidence without replacing canonical source.
 - [x] 7.10 Advance thread activity and derive a still-default title when provider history is persisted; backfill older provider-only threads.
+
+## 8. Writer contention recovery
+
+- [x] 8.1 Submit to durable FIFO before attempting to resume the stored writer.
+- [x] 8.2 Rotate once to a new Ecky-owned Codex cursor on active-writer conflict, preserving old cursor lineage and normalized timeline.
+- [x] 8.3 Keep raw conflict in delivery evidence, show automatic pending state in Dialogue, and retain delayed retry after a second conflict.
+- [x] 8.4 Verify focused tests, strict spec, and installed app replacement.
+
+## 9. Exact steering and pending message presentation
+
+- [x] Classify each Jev-enabled Codex `STEER` for its exact active turn; preserve model, reject stale/failed routes before delivery, bind evidence to its persisted message, and avoid FIFO.
+- [x] Paint provider send and steer before backend acknowledgement; restore untouched drafts and show raw errors on rejection.
+- [x] Reconcile identical pending prompts against newly accepted queue IDs without hiding earlier identical rows.
+- [x] Prove routed steering with Rust and pending, accepted, rejected, and repeated-input flows with Playwright.
+
+## 10. Sent image and workspace controls
+
+- [x] Render provider image attachments with the backend-owned pending queue item and submitted draft preview.
+- [x] Clear the owning thread's viewport-capture preference and exit Draw mode after acceptance.
+- [x] Remove the unused Remember layout checkbox from Dialogue.
+- [x] Prove queued image rendering, successful control reset, and failure-state draft retention with Playwright.

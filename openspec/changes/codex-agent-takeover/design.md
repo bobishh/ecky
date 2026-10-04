@@ -29,8 +29,8 @@ as third connection type and `CODEX` as its current provider choice.
 `agent_thread_bindings` remains keyed by Ecky thread id and uniquely constrains
 `(provider, external_thread_id)`. It stores the current provider execution cursor,
 not conversation authority. `agent_thread_binding_lineage` records historical cursors
-only when a supported provider lifecycle explicitly replaces one; an active-writer
-conflict never changes this binding.
+only when a supported provider lifecycle explicitly replaces one. A writer conflict
+rotates to one new Ecky-owned execution cursor for the queued request.
 First provider-mode submit executes:
 
 1. read existing provider binding;
@@ -49,14 +49,15 @@ never resumes a provider writer, creates a thread, or calls `thread/list`. A
 read-only background `thread/turns/list` backfill may reconcile finished turns into
 Ecky without delaying Dialogue.
 
-If delivery finds that another Codex client still owns the stored writer, Ecky
-backfills readable finished turns, retains the current binding and external id, and
-keeps the same queued prompt at the FIFO head with the raw provider error. The
-supervisor retries that head on the existing delayed schedule after the writer may
-have become available. Ecky does not create a replacement thread, unsubscribe, kill,
-or retry in a tight loop. The installed Codex 0.153.4 app-server protocol exposes no
-writer release or claim-transfer method; `thread/unsubscribe` only changes this
-client's subscription and is not a takeover path.
+If delivery finds that another Codex client owns the stored writer, Ecky backfills
+readable finished turns, starts one new Ecky-owned thread with canonical handoff
+context, and rotates the current cursor. The old cursor stays in lineage and
+normalized history stays in the same Ecky timeline. The same claimed FIFO head is
+sent through the new cursor. A rotation marker tied to that queue ID prevents
+unbounded new threads if the replacement also conflicts; then normal delayed retry
+keeps the head. The raw provider error remains in delivery eval evidence; Dialogue
+projects transient contention as automatic waiting. There is no supported writer
+claim-transfer method; `thread/unsubscribe` changes only this client's subscription.
 
 ## Prompt Bootstrap and Cross-Mode Handoff
 
@@ -117,7 +118,9 @@ FIFO states: `queued`, `sending`, `failed`. Startup recovers stale `sending` to
 `queued`. Submit persists enqueue, returns its snapshot, then dispatches outside the
 request path. Frontend paints a local queued copy before backend acknowledgement and
 reconciles it against the accepted provider user item. Failed head blocks overtaking
-and exposes raw provider error/retry/remove. Both `turn/completed` and terminal
+and exposes raw provider error/retry/remove. A queued writer conflict is transient:
+Dialogue shows automatic pending delivery and the eval trace retains the raw
+diagnostic. Both `turn/completed` and terminal
 `thread/status/changed` advance the next FIFO item.
 
 Queue ownership uses an atomic `queued`→`sending` row claim. No process-wide dispatch
@@ -126,6 +129,12 @@ Enqueue and terminal app-server events wake the supervisor immediately; one-seco
 polling remains recovery only. Existing bindings dispatch from their stored cwd;
 workspace refresh is not placed ahead of every message.
 
+The composer also paints an exact-turn `STEER` as a temporary pending user item
+before backend acknowledgement. On rejection it removes that item, restores the
+draft when the user has not written a replacement, and displays the raw error.
+On acceptance the provider transcript replaces the temporary item. Temporary
+presentation state never owns queue delivery.
+
 ## UI
 
 Dialogue has no provider binding bar, takeover button, picker, id, or release action.
@@ -133,8 +142,11 @@ Provider mode reuses normal trail/composer. Ecky messages, authored versions, Co
 messages, and local queued prompts form one timeline; provider snapshot arrival never
 replaces Ecky history. Timeline controls provide text search plus `ALL`/`VERSIONS`
 filter. It also adds unified pagination, queue, `STEER`, and `STOP` when applicable.
-Raw adapter errors appear in Dialogue. Persisted user, generated image, and Ecky sketch tool results render through
+Terminal raw adapter errors appear in Dialogue. Persisted user, generated image, and Ecky sketch tool results render through
 the same trail visual path after reload.
+Queued prompt images render from the backend queue snapshot or submitted draft while
+delivery waits. Acceptance clears the owning thread's viewport-capture preference and
+exits Draw mode; failed delivery keeps the composer draft available for retry.
 
 Provider final-answer presentation is derived from the raw durable transcript. A
 Markdown link targeting an absolute `model.ecky:LINE` becomes a Tactical Midnight
@@ -160,7 +172,7 @@ square borders.
 - Compaction never clears active turn or dispatches queue.
 - Mode switching never deletes durable transcript or binding lineage. Returning to
   Provider displays Ecky history immediately. Delivery resumes the current cursor;
-  another client's writer lock leaves the cursor and FIFO prompt intact for delayed
-  retry.
+  another client's writer lock rotates one execution cursor while keeping the FIFO
+  prompt and Ecky history intact.
 - Codex desktop presence or task visibility never becomes a delivery prerequisite.
 - Config persistence errors are global `ECKY APP` notifications, never thread bubbles.

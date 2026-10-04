@@ -3,8 +3,8 @@
 use super::config::VisionCapability;
 use super::{
     AppError, AppResult, Asset, AutoAgent, Config, Engine, EngineKind, FemComputeConfig,
-    FemComputeQuality, GeometryBackend, McpConfig, McpMode, MicrowaveConfig, ProviderModels,
-    SourceLanguage, VoiceConfig,
+    FemComputeQuality, GeometryBackend, JevClassifierConfig, McpConfig, McpMode, MicrowaveConfig,
+    ProviderModels, SourceLanguage, VoiceConfig,
 };
 use crate::steel_data::{validate_steel_data, SteelDataValue};
 use std::collections::{HashMap, HashSet};
@@ -62,6 +62,7 @@ fn opt_int<T: Into<i64> + Copy>(value: Option<T>) -> SteelDataValue {
 }
 
 pub fn encode_config(config: &Config) -> AppResult<SteelDataValue> {
+    config.jev_classifier.validate()?;
     unique_ids(config.engines.iter().map(|x| x.id.as_str()), "engines")?;
     unique_ids(config.assets.iter().map(|x| x.id.as_str()), "assets")?;
     unique_ids(
@@ -145,6 +146,19 @@ pub fn encode_config(config: &Config) -> AppResult<SteelDataValue> {
                 (
                     "agy",
                     SteelDataValue::String(config.provider_models.agy.clone()),
+                ),
+            ]),
+        ),
+        (
+            "jev-classifier",
+            map(vec![
+                (
+                    "enabled",
+                    SteelDataValue::Bool(config.jev_classifier.enabled),
+                ),
+                (
+                    "api-key",
+                    SteelDataValue::String(config.jev_classifier.api_key.clone()),
                 ),
             ]),
         ),
@@ -392,6 +406,7 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
             "has-seen-onboarding",
             "connection-type",
             "provider-models",
+            "jev-classifier",
             "default-engine-kind",
             "default-source-language",
             "default-geometry-backend",
@@ -470,6 +485,25 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
                     agy: fields
                         .optional("agy")
                         .map(|value| string(value, "provider-models.agy"))
+                        .transpose()?
+                        .unwrap_or_default(),
+                })
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        jev_classifier: root
+            .optional("jev-classifier")
+            .map(|value| -> AppResult<JevClassifierConfig> {
+                let fields = Fields::new(value, "jev-classifier", &["enabled", "api-key"])?;
+                Ok(JevClassifierConfig {
+                    enabled: fields
+                        .optional("enabled")
+                        .map(|value| boolean(value, "jev-classifier.enabled"))
+                        .transpose()?
+                        .unwrap_or(false),
+                    api_key: fields
+                        .optional("api-key")
+                        .map(|value| string(value, "jev-classifier.api-key"))
                         .transpose()?
                         .unwrap_or_default(),
                 })
@@ -918,6 +952,7 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: None,
             provider_models: ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: EngineKind::EckyIrV0,
             default_source_language: SourceLanguage::EckyIrV0,
             default_geometry_backend: GeometryBackend::Freecad,

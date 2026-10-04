@@ -1,8 +1,8 @@
 use ecky_cad_lib::llm_eval::{
-    build_agy_eval_run, build_failed_eval_run, case_id, compare_runs, latest_version_identity,
-    persist_run, read_run, score_run, version_outcomes_for_window, EvalCase, EvalEvent,
-    EvalEventKind, EvalPayload, EvalRoute, EvalRun, EvalRunSeed, EvalTurnPolicy, EvalUsage,
-    EvalVersionOutcome,
+    build_agy_eval_run, build_api_eval_run, build_failed_eval_run, case_id, compare_runs,
+    latest_version_identity, persist_run, read_run, score_run, version_outcomes_for_window,
+    EvalCase, EvalEvent, EvalEventKind, EvalPayload, EvalRoute, EvalRun, EvalRunSeed,
+    EvalTurnPolicy, EvalUsage, EvalVersionOutcome,
 };
 use ecky_cad_lib::provider_turn::ProviderTurnIntent;
 use ecky_cad_lib::services::agy_provider::AgyTurnResult;
@@ -13,6 +13,259 @@ fn temp_root() -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("ecky-llm-eval-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     root
+}
+
+#[test]
+fn pre_dispatch_failure_roundtrips_without_provider_turn_or_events() {
+    let root = temp_root();
+    let mut run = fixture_run("pre-dispatch-blocked", "gpt-5.6-luna");
+    run.turn_id.clear();
+    run.status = "failed_pre_dispatch".into();
+    run.response = None;
+    run.raw_error =
+        Some("PreToolUse route gate failed before turn/start: review via /hooks".into());
+    run.events.clear();
+    run.versions.clear();
+    let files = persist_run(&root, &run).unwrap();
+    let read = read_run(&files.run_dir).unwrap();
+    assert_eq!(read.status, "failed_pre_dispatch");
+    assert!(read.turn_id.is_empty());
+    assert_eq!(read.prompt, run.prompt);
+    assert_eq!(read.route.jev, run.route.jev);
+    assert!(read.raw_error.unwrap().contains("/hooks"));
+    assert!(read.events.is_empty());
+    assert!(read.versions.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_dispatch_failure_retains_request_and_jev_system_trace_without_provider_events() {
+    let root = temp_root();
+    let mut run = fixture_run("jev-pre-dispatch-trace", "gpt-5.6-luna");
+    run.turn_id.clear();
+    run.status = "failed_pre_dispatch".into();
+    run.response = None;
+    run.raw_error = Some("Jev classifier unavailable".into());
+    run.versions.clear();
+    run.events = vec![
+        EvalEvent {
+            sequence: 1,
+            step_index: None,
+            kind: EvalEventKind::System,
+            state: "admitted".into(),
+            name: Some("request".into()),
+            summary: Some("User request admitted".into()),
+            input: Some(EvalPayload::new(json!({"prompt": "Change bracket"}))),
+            output: None,
+            error: None,
+            occurred_at: 100,
+        },
+        EvalEvent {
+            sequence: 2,
+            step_index: None,
+            kind: EvalEventKind::System,
+            state: "error".into(),
+            name: Some("jev".into()),
+            summary: Some("Jev classification failed".into()),
+            input: None,
+            output: None,
+            error: Some("Jev classifier unavailable".into()),
+            occurred_at: 101,
+        },
+    ];
+    let files = persist_run(&root, &run).expect("pre-dispatch trace");
+    let read = read_run(&files.run_dir).expect("strict EDN trace");
+    assert!(read.turn_id.is_empty());
+    assert_eq!(read.events.len(), 2);
+    assert_eq!(read.events[0].name.as_deref(), Some("request"));
+    assert_eq!(read.events[1].name.as_deref(), Some("jev"));
+
+    run.events.push(EvalEvent {
+        sequence: 3,
+        step_index: None,
+        kind: EvalEventKind::Tool,
+        state: "done".into(),
+        name: Some("ecky_ast_set_number".into()),
+        summary: None,
+        input: None,
+        output: None,
+        error: None,
+        occurred_at: 102,
+    });
+    assert!(persist_run(&root, &run).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn managed_mcp_trace_roundtrips_without_invented_provider_turn_id() {
+    let root = temp_root();
+    let mut run = fixture_run("managed-mcp-no-native-turn", "external-default");
+    run.route.provider = "managed-mcp".into();
+    run.turn_id.clear();
+    run.versions.clear();
+    run.raw_error = None;
+    run.events = vec![EvalEvent {
+        sequence: 1,
+        step_index: None,
+        kind: EvalEventKind::System,
+        state: "admitted".into(),
+        name: Some("request".into()),
+        summary: Some("Managed request admitted".into()),
+        input: Some(EvalPayload::new(json!({"prompt": "answer"}))),
+        output: None,
+        error: None,
+        occurred_at: 100,
+    }];
+    let files = persist_run(&root, &run).expect("managed trace");
+    let read = read_run(&files.run_dir).expect("strict EDN trace");
+    assert_eq!(read.route.provider, "managed-mcp");
+    assert!(read.turn_id.is_empty());
+    assert_eq!(read.events[0].name.as_deref(), Some("request"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn api_jev_trace_roundtrips_route_provider_outcome_usage_and_versions() {
+    let root = temp_root();
+    let mut seed_run = fixture_run("api-jev", "gpt-5.6-luna");
+    seed_run.route.provider = "openai-compatible".into();
+    seed_run.route.jev = Some(jev_route());
+    let seed = EvalRunSeed {
+        run_id: seed_run.run_id,
+        thread_id: seed_run.thread_id,
+        external_thread_id: String::new(),
+        provider: "openai-compatible".into(),
+        model: Some("gpt-5.6-luna".into()),
+        effort: None,
+        prompt_version: "api-generation-v1".into(),
+        prompt: seed_run.prompt,
+        starting_version_id: Some("version-a".into()),
+        starting_input_digest: Some("sha256:start".into()),
+        expected_red_rounds: 0,
+        turn_intent: ProviderTurnIntent::Answer,
+        answer_first_required: false,
+        jev_route: seed_run.route.jev,
+    };
+    let run = build_api_eval_run(
+        seed,
+        "",
+        100,
+        103,
+        "success",
+        Some("Bracket dimensions are 40 × 20 mm.".into()),
+        None,
+        vec![
+            EvalEvent {
+                sequence: 0,
+                step_index: None,
+                kind: EvalEventKind::System,
+                state: "accepted".into(),
+                name: Some("jev.route".into()),
+                summary: Some("Jev selected question".into()),
+                input: Some(EvalPayload::new(json!({"promptSha256": "sha256:redacted"}))),
+                output: Some(EvalPayload::new(
+                    json!({"intent": "answer", "confidence": 0.91}),
+                )),
+                error: None,
+                occurred_at: 100,
+            },
+            EvalEvent {
+                sequence: 1,
+                step_index: None,
+                kind: EvalEventKind::Assistant,
+                state: "completed".into(),
+                name: Some("api.provider_response".into()),
+                summary: Some("API provider returned response".into()),
+                input: None,
+                output: Some(EvalPayload::new(
+                    json!({"response": "Bracket dimensions are 40 × 20 mm."}),
+                )),
+                error: None,
+                occurred_at: 103,
+            },
+            EvalEvent {
+                sequence: 2,
+                step_index: None,
+                kind: EvalEventKind::System,
+                state: "terminal".into(),
+                name: Some("api.outcome".into()),
+                summary: Some("API exploration reached Completed".into()),
+                input: None,
+                output: Some(EvalPayload::new(json!({
+                    "phase": "Completed",
+                    "versionsCreated": []
+                }))),
+                error: None,
+                occurred_at: 103,
+            },
+        ],
+        Vec::new(),
+        Some(EvalUsage {
+            input_tokens: Some(14),
+            output_tokens: Some(9),
+            estimated_cost_usd: None,
+        }),
+    );
+    let files = persist_run(&root, &run).unwrap();
+    let loaded = read_run(&files.run_dir).unwrap();
+    assert!(loaded.turn_id.is_empty());
+    assert_eq!(loaded.external_thread_id, "");
+    assert_eq!(loaded.run_id, "api-jev");
+    assert_eq!(loaded.status, "success");
+    assert_eq!(loaded.route.jev.as_ref().unwrap().intent_confidence, 0.91);
+    assert_eq!(
+        loaded.route.jev.as_ref().unwrap().native_tool_coverage,
+        "unknown"
+    );
+    assert_eq!(
+        loaded.response.as_deref(),
+        Some("Bracket dimensions are 40 × 20 mm.")
+    );
+    assert_eq!(loaded.usage.as_ref().unwrap().input_tokens, Some(14));
+    assert_eq!(loaded.events.len(), 5);
+    assert_eq!(loaded.events[0].name.as_deref(), Some("request"));
+    assert_eq!(loaded.events[1].name.as_deref(), Some("jev.route"));
+    assert_eq!(loaded.events[2].name.as_deref(), Some("delivery"));
+    assert_eq!(
+        loaded.events[3].name.as_deref(),
+        Some("api.provider_response")
+    );
+    assert_eq!(loaded.events[4].name.as_deref(), Some("api.outcome"));
+    assert!(loaded.versions.is_empty());
+    let report = fs::read_to_string(&files.report_md).expect("human-readable trace");
+    assert!(report.contains("## Event timeline"));
+    assert!(report.contains("| 0 | request |"));
+    assert!(report.contains("| 1 | jev.route |"));
+    assert!(report.contains("| 4 | api.outcome |"));
+    assert!(report.contains("Provider-native tool coverage: `unknown`"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn jev_route() -> ecky_cad_lib::llm_eval::EvalJevRoute {
+    ecky_cad_lib::llm_eval::EvalJevRoute {
+        policy_version: "jev-v1".into(),
+        intent_confidence_threshold: 0.65,
+        intent_margin_threshold: 0.15,
+        model_confidence_threshold: 0.65,
+        model_margin_threshold: 0.15,
+        intent_confidence: 0.91,
+        intent_probabilities: std::collections::BTreeMap::from([("question".into(), 0.91)]),
+        answer_requested: true,
+        answer_first: false,
+        model_ceiling: Some("gpt-5.6-luna".into()),
+        model_confidence: None,
+        model_probabilities: std::collections::BTreeMap::new(),
+        model_reason: "configured API model retained".into(),
+        context_truncated: false,
+        current_prompt_truncated: false,
+        classifier_input_tokens: Some(12),
+        classifier_output_tokens: Some(4),
+        classifier_model: Some("jev-1.13.0".into()),
+        classifier_latency_ms: Some(60),
+        model_catalog_version: None,
+        model_catalog_valid_until: None,
+        native_tool_coverage: ecky_cad_lib::llm_eval::unknown_native_tool_coverage(),
+    }
 }
 
 fn fixture_run(run_id: &str, model: &str) -> EvalRun {
@@ -35,6 +288,7 @@ fn fixture_run(run_id: &str, model: &str) -> EvalRun {
             model: Some(model.into()),
             effort: Some("high".into()),
             prompt_version: "agy-provider-v2".into(),
+            jev: None,
         },
         prompt: "ловушка висит в воздухе бро".into(),
         started_at: 100,
@@ -235,6 +489,8 @@ fn completed_agy_turn_builds_provider_neutral_run_bound_to_changed_versions() {
             starting_input_digest: Some("sha256:start".into()),
             expected_red_rounds: 0,
             turn_intent: ProviderTurnIntent::Modify,
+            answer_first_required: false,
+            jev_route: None,
         },
         result,
         changed,
@@ -289,6 +545,8 @@ fn provider_transport_failure_still_builds_terminal_eval_run() {
         starting_input_digest: None,
         expected_red_rounds: 0,
         turn_intent: ProviderTurnIntent::Modify,
+        answer_first_required: false,
+        jev_route: None,
     };
 
     let run = build_failed_eval_run(seed, "turn-failed", 100, 105, "provider exited", Vec::new());

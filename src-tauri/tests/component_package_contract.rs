@@ -362,6 +362,7 @@ fn test_config() -> Config {
         has_seen_onboarding: true,
         connection_type: None,
         provider_models: ecky_cad_lib::contracts::ProviderModels::default(),
+        jev_classifier: Default::default(),
         default_engine_kind: EngineKind::Freecad,
         default_source_language: SourceLanguage::LegacyPython,
         default_geometry_backend: GeometryBackend::Freecad,

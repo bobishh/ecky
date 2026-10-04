@@ -17,9 +17,17 @@ const DEFAULT_CODEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const CODEX_TRANSCRIPT_PAGE_SIZE: u32 = 30;
 const STDERR_TAIL_LINES: usize = 80;
 const TERMINAL_TURN_MEMORY: usize = 256;
+const CODEX_EVAL_EVENT_LIMIT: usize = 4_096;
 const LIVE_MESSAGE_LIMIT: usize = 256;
 const LIVE_MESSAGE_CHAR_LIMIT: usize = 16_384;
 const TURN_TRACE_LIMIT: usize = 24;
+
+fn codex_now_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 #[derive(Clone)]
 pub struct CodexAppServerSupervisor {
     inner: Arc<SupervisorInner>,
@@ -29,10 +37,12 @@ struct SupervisorInner {
     state: Mutex<SupervisorState>,
     startup: Mutex<()>,
     resume: Mutex<()>,
+    hook_descriptor_path: std::sync::Mutex<std::path::PathBuf>,
 }
 
 struct SupervisorState {
     process: Option<SupervisorProcess>,
+    codex_executable_path: Option<std::path::PathBuf>,
     generation: u64,
     next_request_id: u64,
     pending: HashMap<u64, oneshot::Sender<AppResult<Value>>>,
@@ -41,9 +51,35 @@ struct SupervisorState {
     live_messages: HashMap<String, Vec<CodexDialogueMessage>>,
     turn_traces: HashMap<String, Vec<ProviderTurnTrace>>,
     resumed_threads: HashMap<String, u64>,
+    thread_model_providers: HashMap<String, String>,
+    routed_config_baselines: HashMap<String, Value>,
+    routed_delivery_pending: HashSet<String>,
     terminal_turns: HashSet<String>,
     terminal_turn_order: VecDeque<String>,
+    pending_eval_seeds: HashMap<String, PendingCodexEval>,
+    active_eval_runs: HashMap<String, ActiveCodexEval>,
+    completed_eval_runs: VecDeque<crate::llm_eval::EvalRun>,
+    reported_eval_persistence_errors: HashSet<String>,
     app_handle: Option<tauri::AppHandle>,
+}
+
+struct PendingCodexEval {
+    seed: crate::llm_eval::EvalRunSeed,
+    started_at: i64,
+    redaction_secret: Option<String>,
+}
+
+struct ActiveCodexEval {
+    seed: crate::llm_eval::EvalRunSeed,
+    redaction_secret: Option<String>,
+    turn_id: String,
+    started_at: i64,
+    events: Vec<crate::llm_eval::EvalEvent>,
+    invocation_steps: HashMap<String, i64>,
+    seen_invocation_states: HashSet<String>,
+    assistant_message_items: HashSet<String>,
+    next_step_index: i64,
+    omitted_reasons: HashMap<&'static str, u64>,
 }
 
 #[derive(Clone)]
@@ -66,6 +102,7 @@ impl CodexAppServerSupervisor {
             inner: Arc::new(SupervisorInner {
                 state: Mutex::new(SupervisorState {
                     process: None,
+                    codex_executable_path: None,
                     generation: 0,
                     next_request_id: 1,
                     pending: HashMap::new(),
@@ -74,14 +111,41 @@ impl CodexAppServerSupervisor {
                     live_messages: HashMap::new(),
                     turn_traces: HashMap::new(),
                     resumed_threads: HashMap::new(),
+                    thread_model_providers: HashMap::new(),
+                    routed_config_baselines: HashMap::new(),
+                    routed_delivery_pending: HashSet::new(),
                     terminal_turns: HashSet::new(),
                     terminal_turn_order: VecDeque::new(),
+                    pending_eval_seeds: HashMap::new(),
+                    active_eval_runs: HashMap::new(),
+                    completed_eval_runs: VecDeque::new(),
+                    reported_eval_persistence_errors: HashSet::new(),
                     app_handle: None,
                 }),
                 startup: Mutex::new(()),
                 resume: Mutex::new(()),
+                hook_descriptor_path: std::sync::Mutex::new(
+                    crate::services::codex_pre_tool_hook::runtime_descriptor_path(),
+                ),
             }),
         }
+    }
+
+    fn hook_descriptor_path(&self) -> std::path::PathBuf {
+        self.inner
+            .hook_descriptor_path
+            .lock()
+            .map(|path| path.clone())
+            .unwrap_or_else(|_| crate::services::codex_pre_tool_hook::runtime_descriptor_path())
+    }
+
+    #[cfg(test)]
+    pub fn set_hook_descriptor_path_for_test(&self, path: std::path::PathBuf) {
+        *self
+            .inner
+            .hook_descriptor_path
+            .lock()
+            .expect("hook descriptor lock") = path;
     }
 
     pub async fn set_app_handle(&self, app_handle: tauri::AppHandle) {
@@ -99,6 +163,30 @@ impl CodexAppServerSupervisor {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
+    pub async fn set_runtime_for_test(&self, thread_id: &str, runtime: CodexTakeoverRuntime) {
+        self.inner
+            .state
+            .lock()
+            .await
+            .runtimes
+            .insert(thread_id.to_string(), runtime);
+    }
+
+    #[cfg(test)]
+    pub async fn set_live_messages_for_test(
+        &self,
+        thread_id: &str,
+        messages: Vec<CodexDialogueMessage>,
+    ) {
+        self.inner
+            .state
+            .lock()
+            .await
+            .live_messages
+            .insert(thread_id.to_string(), messages);
+    }
+
     pub async fn live_messages(&self, thread_id: &str) -> Vec<CodexDialogueMessage> {
         self.inner
             .state
@@ -110,6 +198,26 @@ impl CodexAppServerSupervisor {
             .unwrap_or_default()
     }
 
+    pub async fn thread_model_provider(&self, thread_id: &str) -> Option<String> {
+        self.inner
+            .state
+            .lock()
+            .await
+            .thread_model_providers
+            .get(thread_id)
+            .cloned()
+    }
+
+    pub async fn account_type(&self) -> AppResult<String> {
+        let result = self.request("account/read", json!({})).await?;
+        result
+            .get("account")
+            .and_then(|account| account.get("type"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| AppError::parse("Codex account/read result missed account.type."))
+    }
+
     pub async fn turn_traces(&self, thread_id: &str) -> Vec<ProviderTurnTrace> {
         self.inner
             .state
@@ -119,6 +227,202 @@ impl CodexAppServerSupervisor {
             .get(thread_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub async fn take_completed_eval_runs(&self) -> Vec<crate::llm_eval::EvalRun> {
+        self.inner
+            .state
+            .lock()
+            .await
+            .completed_eval_runs
+            .drain(..)
+            .collect()
+    }
+
+    pub async fn completed_eval_runs(&self) -> Vec<crate::llm_eval::EvalRun> {
+        self.inner
+            .state
+            .lock()
+            .await
+            .completed_eval_runs
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn model_for_turn(&self, thread_id: &str, turn_id: &str) -> Option<String> {
+        let state = self.inner.state.lock().await;
+        let key = terminal_turn_key(thread_id, turn_id);
+        state
+            .active_eval_runs
+            .get(&key)
+            .and_then(|capture| capture.seed.model.clone())
+            .or_else(|| {
+                state
+                    .completed_eval_runs
+                    .iter()
+                    .find(|run| run.external_thread_id == thread_id && run.turn_id == turn_id)
+                    .and_then(|run| run.route.model.clone())
+            })
+    }
+
+    #[cfg(test)]
+    pub async fn push_completed_eval_run_for_test(&self, run: crate::llm_eval::EvalRun) {
+        self.inner
+            .state
+            .lock()
+            .await
+            .completed_eval_runs
+            .push_back(run);
+    }
+
+    pub async fn record_pre_dispatch_eval_failure(
+        &self,
+        seed: crate::llm_eval::EvalRunSeed,
+        redaction_secret: Option<&str>,
+        diagnostic: &str,
+        events: Vec<crate::llm_eval::EvalEvent>,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut capture = ActiveCodexEval {
+            seed,
+            redaction_secret: None,
+            turn_id: String::new(),
+            started_at: now,
+            events,
+            invocation_steps: HashMap::new(),
+            seen_invocation_states: HashSet::new(),
+            assistant_message_items: HashSet::new(),
+            next_step_index: 0,
+            omitted_reasons: HashMap::new(),
+        };
+        let mut raw_error = Some(diagnostic.to_string());
+        let mut terminal_output = None;
+        if let Some(secret) = redaction_secret {
+            redact_active_eval_secret(&mut capture, &mut raw_error, &mut terminal_output, secret);
+        }
+        let run = crate::llm_eval::build_codex_eval_run(
+            capture.seed,
+            "",
+            now,
+            now,
+            "failed_pre_dispatch",
+            None,
+            raw_error,
+            capture.events,
+            Vec::new(),
+        );
+        self.inner
+            .state
+            .lock()
+            .await
+            .completed_eval_runs
+            .push_back(run);
+    }
+
+    pub async fn append_steer_eval_events(
+        &self,
+        ecky_thread_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+        mut events: Vec<crate::llm_eval::EvalEvent>,
+        secret: Option<&str>,
+    ) {
+        let now = codex_now_seconds();
+        let mut state = self.inner.state.lock().await;
+        let key = terminal_turn_key(thread_id, turn_id);
+        if let Some(capture) = state.active_eval_runs.get_mut(&key) {
+            for mut event in events.drain(..) {
+                if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
+                    redact_steer_event(&mut event, secret);
+                }
+                append_codex_eval_event(capture, event);
+            }
+            return;
+        }
+        if let Some(run) = state
+            .completed_eval_runs
+            .iter_mut()
+            .find(|run| run.external_thread_id == thread_id && run.turn_id == turn_id)
+        {
+            for mut event in events.drain(..) {
+                if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
+                    redact_steer_event(&mut event, secret);
+                }
+                event.sequence = run.events.len() as u64 + 1;
+                run.events.push(event);
+            }
+            run.completed_at = now;
+            return;
+        }
+        // Keep an exact-turn trace if the provider capture was unavailable.
+        let mut seed = crate::llm_eval::EvalRunSeed {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            thread_id: ecky_thread_id.to_string(),
+            external_thread_id: thread_id.to_string(),
+            provider: crate::services::codex_takeover::CODEX_PROVIDER_ID.into(),
+            model: None,
+            effort: None,
+            prompt_version: format!(
+                "codex-steer-{}",
+                crate::jev_classifier::CLASSIFIER_POLICY_VERSION
+            ),
+            prompt: String::new(),
+            starting_version_id: None,
+            starting_input_digest: None,
+            expected_red_rounds: 0,
+            turn_intent: crate::provider_turn::ProviderTurnIntent::Answer,
+            answer_first_required: false,
+            jev_route: None,
+        };
+        let mut capture = ActiveCodexEval {
+            seed: seed.clone(),
+            redaction_secret: None,
+            turn_id: turn_id.to_string(),
+            started_at: now,
+            events,
+            invocation_steps: HashMap::new(),
+            seen_invocation_states: HashSet::new(),
+            assistant_message_items: HashSet::new(),
+            next_step_index: 0,
+            omitted_reasons: HashMap::new(),
+        };
+        let mut raw_error = None;
+        let mut terminal_output = None;
+        if let Some(secret) = secret {
+            redact_active_eval_secret(&mut capture, &mut raw_error, &mut terminal_output, secret);
+        }
+        seed = capture.seed;
+        let run = crate::llm_eval::build_codex_eval_run(
+            seed,
+            turn_id,
+            now,
+            now,
+            "steer_trace",
+            None,
+            None,
+            capture.events,
+            Vec::new(),
+        );
+        state.completed_eval_runs.push_back(run);
+    }
+
+    pub async fn acknowledge_eval_run(&self, run_id: &str) {
+        let mut state = self.inner.state.lock().await;
+        state.completed_eval_runs.retain(|run| run.run_id != run_id);
+        state.reported_eval_persistence_errors.remove(run_id);
+    }
+
+    pub async fn should_report_eval_persistence_error(&self, run_id: &str) -> bool {
+        self.inner
+            .state
+            .lock()
+            .await
+            .reported_eval_persistence_errors
+            .insert(run_id.to_string())
     }
 
     pub async fn record_external_turn_started(&self, thread_id: &str, turn_id: &str) {
@@ -169,9 +473,9 @@ impl CodexAppServerSupervisor {
         }
 
         let resolved = resolve_provider_executable("codex", "ECKY_CODEX_BIN", "Codex CLI")?;
-        let mut child = Command::new(&resolved.path)
-            .arg("app-server")
-            .arg("--stdio")
+        let mut command = Command::new(&resolved.path);
+        command.arg("app-server").arg("--stdio");
+        let mut child = command
             .env("PATH", &resolved.spawn_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -208,6 +512,7 @@ impl CodexAppServerSupervisor {
                 kill,
                 initialized: false,
             });
+            state.codex_executable_path = Some(resolved.path.clone());
             generation
         };
 
@@ -429,61 +734,67 @@ impl CodexAppServerSupervisor {
             {
                 return;
             }
-            let (live_messages, turn_traces, runtime_snapshot) =
-                if let Some(thread_id) = thread_id.as_deref() {
-                    if method == "turn/completed" {
-                        if let Some(turn_id) = params
-                            .get("turn")
-                            .and_then(|turn| turn.get("id"))
-                            .and_then(Value::as_str)
-                        {
-                            remember_terminal_turn(&mut state, thread_id, turn_id);
-                        }
+            let (live_messages, turn_traces, runtime_snapshot) = if let Some(thread_id) =
+                thread_id.as_deref()
+            {
+                if method == "turn/completed" {
+                    if let Some(turn_id) = params
+                        .get("turn")
+                        .and_then(|turn| turn.get("id"))
+                        .and_then(Value::as_str)
+                    {
+                        remember_terminal_turn(&mut state, thread_id, turn_id);
                     }
-                    let runtime = state.runtimes.entry(thread_id.to_string()).or_default();
-                    apply_runtime_notification(runtime, method, &params);
-                    let runtime_snapshot = runtime.clone();
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
-                    let terminal_trace = {
-                        let live_messages = state
-                            .live_messages
-                            .entry(thread_id.to_string())
-                            .or_default();
-                        apply_live_notification(live_messages, thread_id, method, &params, now);
-                        if method == "turn/completed" {
-                            let turn = params.get("turn").unwrap_or(&params);
-                            turn.get("id").and_then(Value::as_str).and_then(|turn_id| {
-                                take_terminal_trace(
-                                    live_messages,
-                                    turn_id,
-                                    codex_turn_trace_status(&params),
-                                    now,
-                                )
-                            })
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(trace) = terminal_trace {
-                        push_turn_trace(&mut state.turn_traces, thread_id, trace);
-                    }
+                }
+                let runtime = state.runtimes.entry(thread_id.to_string()).or_default();
+                apply_runtime_notification(runtime, method, &params);
+                let runtime_snapshot = runtime.clone();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let terminal_trace = {
                     let live_messages = state
                         .live_messages
-                        .get(thread_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    let turn_traces = state
-                        .turn_traces
-                        .get(thread_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    (live_messages, turn_traces, Some(runtime_snapshot))
-                } else {
-                    (Vec::new(), Vec::new(), None)
+                        .entry(thread_id.to_string())
+                        .or_default();
+                    apply_live_notification(live_messages, thread_id, method, &params, now);
+                    if method == "turn/completed" {
+                        let turn = params.get("turn").unwrap_or(&params);
+                        turn.get("id").and_then(Value::as_str).and_then(|turn_id| {
+                            take_terminal_trace(
+                                live_messages,
+                                turn_id,
+                                codex_turn_trace_status(&params),
+                                now,
+                            )
+                        })
+                    } else {
+                        None
+                    }
                 };
+                let terminal_eval_run =
+                    project_codex_eval_notification(&mut state, thread_id, method, &params, now);
+                if let Some(run) = terminal_eval_run {
+                    state.completed_eval_runs.push_back(run);
+                }
+                if let Some(trace) = terminal_trace {
+                    push_turn_trace(&mut state.turn_traces, thread_id, trace);
+                }
+                let live_messages = state
+                    .live_messages
+                    .get(thread_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let turn_traces = state
+                    .turn_traces
+                    .get(thread_id)
+                    .cloned()
+                    .unwrap_or_default();
+                (live_messages, turn_traces, Some(runtime_snapshot))
+            } else {
+                (Vec::new(), Vec::new(), None)
+            };
             (
                 state.app_handle.clone(),
                 live_messages,
@@ -564,10 +875,43 @@ impl CodexAppServerSupervisor {
             state.resumed_threads.clear();
             state.terminal_turns.clear();
             state.terminal_turn_order.clear();
+            // Process loss ends any in-flight delivery window. Keep baselines
+            // so the next normal resume can restore native settings.
+            state.routed_delivery_pending.clear();
             let terminal_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
+            let active_evals = std::mem::take(&mut state.active_eval_runs);
+            for (_, capture) in active_evals {
+                state
+                    .completed_eval_runs
+                    .push_back(finish_codex_eval_capture(
+                        capture,
+                        terminal_at,
+                        "error",
+                        Some(error.message.clone()),
+                        None,
+                    ));
+            }
+            let pending_evals = std::mem::take(&mut state.pending_eval_seeds);
+            for (thread_id, pending) in pending_evals {
+                let turn_id = state
+                    .runtimes
+                    .get(&thread_id)
+                    .and_then(|runtime| runtime.active_turn_id.clone())
+                    .unwrap_or_default();
+                let capture = active_eval_from_pending(pending, turn_id);
+                state
+                    .completed_eval_runs
+                    .push_back(finish_codex_eval_capture(
+                        capture,
+                        terminal_at,
+                        "error",
+                        Some(error.message.clone()),
+                        None,
+                    ));
+            }
             let interrupted_live = std::mem::take(&mut state.live_messages);
             for (thread_id, mut messages) in interrupted_live {
                 if messages.is_empty() {
@@ -578,7 +922,7 @@ impl CodexAppServerSupervisor {
                     .runtimes
                     .get(&thread_id)
                     .and_then(|runtime| runtime.active_turn_id.clone())
-                    .unwrap_or_else(|| format!("process-error-{terminal_at}"));
+                    .unwrap_or_default();
                 push_turn_trace(
                     &mut state.turn_traces,
                     &thread_id,
@@ -658,6 +1002,9 @@ impl CodexAppServerSupervisor {
         state
             .runtimes
             .insert(summary.id.clone(), CodexTakeoverRuntime::default());
+        state
+            .thread_model_providers
+            .insert(summary.id.clone(), summary.model_provider.clone());
         state.live_messages.remove(&summary.id);
         state.resumed_threads.insert(summary.id.clone(), generation);
         Ok(summary)
@@ -706,13 +1053,189 @@ impl CodexAppServerSupervisor {
         Ok(models)
     }
 
+    /// Read the effective native Codex hooks for the bound project directory.
+    /// Jev dispatch uses this as a fail-closed trust check; it never writes
+    /// trust state or bypasses Codex's review flow.
+    pub async fn list_hooks(&self, cwd: &str) -> AppResult<Value> {
+        self.request("hooks/list", json!({ "cwds": [cwd] })).await
+    }
+
+    async fn codex_feature_enablement(&self, thread_id: &str) -> AppResult<Value> {
+        let required = [
+            "shell_tool",
+            "unified_exec",
+            "multi_agent",
+            "apps",
+            "view_image",
+        ];
+        let mut cursor = None::<String>;
+        let mut seen_cursors = HashSet::new();
+        let mut values = serde_json::Map::new();
+        loop {
+            let page = self
+                .request(
+                    "experimentalFeature/list",
+                    json!({"threadId": thread_id, "cursor": cursor, "limit": 100}),
+                )
+                .await?;
+            for feature in page
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(name) = feature.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if required.contains(&name) {
+                    if let Some(enabled) = feature.get("enabled").and_then(Value::as_bool) {
+                        values.insert(name.to_string(), Value::Bool(enabled));
+                    }
+                }
+            }
+            cursor = next_feature_cursor(&page, &mut seen_cursors)?;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let missing = required
+            .iter()
+            .filter(|name| !values.contains_key(**name))
+            .copied()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(AppError::provider(format!(
+                "Codex could not confirm current native-tool feature settings: {}. Restart Codex and retry.",
+                missing.join(", ")
+            )));
+        }
+        Ok(Value::Object(values))
+    }
+
+    pub async fn resume_with_routed_hook(
+        &self,
+        binding: &crate::contracts::CodexTakeoverBinding,
+        project_title: &str,
+        mcp_endpoint: &str,
+        handoff_context: &str,
+        model: Option<&str>,
+        policy: crate::provider_turn::ProviderTurnPolicy,
+        command: &str,
+    ) -> AppResult<String> {
+        let _resume = self.inner.resume.lock().await;
+        let descriptor = crate::services::codex_pre_tool_hook::runtime_descriptor_at(
+            &self.hook_descriptor_path(),
+        )
+        .map_err(|_| {
+            AppError::provider(
+                "Ecky routed turns require the loopback PreToolUse callback. Restart Ecky and retry.",
+            )
+        })?;
+        let callback = descriptor
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !callback.starts_with("http://127.0.0.1:")
+            || !callback.contains("/codex-pre-tool-hook/")
+            || descriptor.get("token").and_then(Value::as_str).is_none()
+        {
+            return Err(AppError::provider(
+                "Ecky routed turns require a valid loopback PreToolUse callback. Restart Ecky and retry.",
+            ));
+        }
+        let params = resume_params_with_routed_hook(
+            binding,
+            project_title,
+            mcp_endpoint,
+            handoff_context,
+            model,
+            policy,
+            command,
+        );
+        let selected_executable = self
+            .inner
+            .state
+            .lock()
+            .await
+            .codex_executable_path
+            .clone()
+            .ok_or_else(|| AppError::provider("Codex executable selection is unavailable."))?;
+        let review_diagnostic =
+            codex_hook_review_diagnostic(&selected_executable, &binding.cwd, command)?;
+        let effective = self
+            .request(
+                "config/read",
+                json!({"cwd": binding.cwd, "includeLayers": false}),
+            )
+            .await?;
+        let config = effective
+            .get("config")
+            .ok_or_else(|| AppError::parse("Codex config/read result is missing config."))?;
+        let baseline_features = self
+            .codex_feature_enablement(&binding.codex_thread_id)
+            .await?;
+        let baseline = native_config_baseline(config, &baseline_features)?;
+        self.inner
+            .state
+            .lock()
+            .await
+            .routed_config_baselines
+            .entry(binding.codex_thread_id.clone())
+            .or_insert(baseline);
+        let result = self.request_started("thread/resume", params).await?;
+        let hooks = self.list_hooks(&binding.cwd).await?;
+        let hash = verify_owned_pre_tool_hook(&hooks, &binding.cwd, command)
+            .map_err(|_| AppError::provider(review_diagnostic.clone()))?;
+        // Trust can change between registration and the queued turn. Read the
+        // effective hook again immediately before returning control to dispatch.
+        let hooks = self.list_hooks(&binding.cwd).await?;
+        let current_hash = verify_owned_pre_tool_hook(&hooks, &binding.cwd, command)
+            .map_err(|_| AppError::provider(review_diagnostic.clone()))?;
+        if current_hash != hash {
+            return Err(AppError::provider(review_diagnostic));
+        }
+        let thread = result
+            .get("thread")
+            .ok_or_else(|| AppError::parse("Codex thread/resume result is missing thread."))?;
+        let provider = parse_thread_summary(thread)?.model_provider;
+        let mut state = self.inner.state.lock().await;
+        let generation = state
+            .process
+            .as_ref()
+            .map(|process| process.generation)
+            .ok_or_else(|| {
+                AppError::provider("Codex app-server exited after hook registration.")
+            })?;
+        state
+            .thread_model_providers
+            .insert(binding.codex_thread_id.clone(), provider);
+        state
+            .resumed_threads
+            .insert(binding.codex_thread_id.clone(), generation);
+        state
+            .routed_delivery_pending
+            .insert(binding.codex_thread_id.clone());
+        Ok(hash)
+    }
+
     pub async fn delete_thread(&self, thread_id: &str) -> AppResult<()> {
         self.request("thread/delete", json!({ "threadId": thread_id }))
             .await?;
         let mut state = self.inner.state.lock().await;
         state.runtimes.remove(thread_id);
         state.resumed_threads.remove(thread_id);
+        state.routed_delivery_pending.remove(thread_id);
+        state.routed_config_baselines.remove(thread_id);
         Ok(())
+    }
+
+    pub async fn mark_routed_delivery_pending(&self, thread_id: &str) {
+        self.inner
+            .state
+            .lock()
+            .await
+            .routed_delivery_pending
+            .insert(thread_id.to_string());
     }
 
     pub async fn resume_thread(
@@ -761,32 +1284,51 @@ impl CodexAppServerSupervisor {
                 .as_ref()
                 .map(|process| process.generation)
                 .ok_or_else(|| AppError::provider("Codex app-server is not running."))?;
+            if state
+                .runtimes
+                .get(&binding.codex_thread_id)
+                .is_some_and(|runtime| runtime.active_turn_id.is_some())
+                || routed_delivery_blocks_normal_resume(&state, &binding.codex_thread_id)
+            {
+                return Ok(());
+            }
             if should_skip_resume(
                 state.resumed_threads.get(&binding.codex_thread_id).copied(),
                 generation,
                 refresh_developer_instructions,
-                force_resume_request,
+                force_resume_request
+                    || state
+                        .routed_config_baselines
+                        .contains_key(&binding.codex_thread_id),
             ) {
                 return Ok(());
             }
             generation
         };
-        let result = self
-            .request_started(
-                "thread/resume",
-                resume_params_with_policy(
-                    binding,
-                    project_title,
-                    mcp_endpoint,
-                    handoff_context,
-                    model,
-                    policy,
-                ),
-            )
-            .await?;
-        result
+        let restore_config = self
+            .inner
+            .state
+            .lock()
+            .await
+            .routed_config_baselines
+            .get(&binding.codex_thread_id)
+            .cloned();
+        let mut params = resume_params_with_policy(
+            binding,
+            project_title,
+            mcp_endpoint,
+            handoff_context,
+            model,
+            policy,
+        );
+        if let Some(config) = restore_config.as_ref() {
+            merge_config_overrides(&mut params, config);
+        }
+        let result = self.request_started("thread/resume", params).await?;
+        let thread = result
             .get("thread")
             .ok_or_else(|| AppError::parse("Codex thread/resume result is missing thread."))?;
+        let model_provider = parse_thread_summary(thread)?.model_provider;
         let mut runtime = CodexTakeoverRuntime::default();
         if let Some(turn) = result
             .get("initialTurnsPage")
@@ -808,7 +1350,18 @@ impl CodexAppServerSupervisor {
             .await
             .runtimes
             .insert(binding.codex_thread_id.clone(), runtime);
+        self.inner
+            .state
+            .lock()
+            .await
+            .thread_model_providers
+            .insert(binding.codex_thread_id.clone(), model_provider);
         let mut state = self.inner.state.lock().await;
+        if restore_config.is_some() {
+            state
+                .routed_config_baselines
+                .remove(&binding.codex_thread_id);
+        }
         if state
             .process
             .as_ref()
@@ -896,15 +1449,133 @@ impl CodexAppServerSupervisor {
         attachments: &[Attachment],
         policy: crate::provider_turn::ProviderTurnPolicy,
     ) -> AppResult<String> {
+        self.start_turn_with_attachments_policy_and_eval(
+            thread_id,
+            prompt,
+            model,
+            attachments,
+            policy,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn start_turn_with_eval_seed(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        attachments: &[Attachment],
+        policy: crate::provider_turn::ProviderTurnPolicy,
+        seed: crate::llm_eval::EvalRunSeed,
+    ) -> AppResult<String> {
+        self.start_turn_with_eval_seed_and_secret(
+            thread_id,
+            prompt,
+            model,
+            attachments,
+            policy,
+            seed,
+            None,
+        )
+        .await
+    }
+
+    pub async fn start_turn_with_eval_seed_and_secret(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        attachments: &[Attachment],
+        policy: crate::provider_turn::ProviderTurnPolicy,
+        seed: crate::llm_eval::EvalRunSeed,
+        redaction_secret: Option<&str>,
+    ) -> AppResult<String> {
+        self.start_turn_with_attachments_policy_and_eval(
+            thread_id,
+            prompt,
+            model,
+            attachments,
+            policy,
+            Some(seed),
+            redaction_secret,
+        )
+        .await
+    }
+
+    async fn start_turn_with_attachments_policy_and_eval(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        attachments: &[Attachment],
+        policy: crate::provider_turn::ProviderTurnPolicy,
+        eval_seed: Option<crate::llm_eval::EvalRunSeed>,
+        redaction_secret: Option<&str>,
+    ) -> AppResult<String> {
         let params = turn_start_params(thread_id, prompt, model, attachments, policy);
-        let result = self.request("turn/start", params).await?;
-        let turn_id = result
+        if let Some(seed) = eval_seed {
+            self.inner.state.lock().await.pending_eval_seeds.insert(
+                thread_id.to_string(),
+                PendingCodexEval {
+                    seed,
+                    started_at: codex_now_seconds(),
+                    redaction_secret: redaction_secret
+                        .filter(|secret| !secret.is_empty())
+                        .map(str::to_owned),
+                },
+            );
+        }
+        let result = match self.request("turn/start", params).await {
+            Ok(result) => result,
+            Err(error) => {
+                let mut state = self.inner.state.lock().await;
+                state.routed_delivery_pending.remove(thread_id);
+                if let Some(pending) = state.pending_eval_seeds.remove(thread_id) {
+                    let completed_at = codex_now_seconds();
+                    state
+                        .completed_eval_runs
+                        .push_back(finish_pending_codex_eval(
+                            pending,
+                            String::new(),
+                            completed_at,
+                            "error",
+                            Some(error.message.clone()),
+                        ));
+                }
+                return Err(error);
+            }
+        };
+        let Some(turn_id) = result
             .get("turn")
             .and_then(|turn| turn.get("id"))
             .and_then(Value::as_str)
-            .ok_or_else(|| AppError::parse("Codex turn/start result is missing turn id."))?
-            .to_string();
+            .map(str::to_string)
+        else {
+            let error = AppError::parse("Codex turn/start result is missing turn id.");
+            let mut state = self.inner.state.lock().await;
+            state.routed_delivery_pending.remove(thread_id);
+            if let Some(pending) = state.pending_eval_seeds.remove(thread_id) {
+                let completed_at = codex_now_seconds();
+                state
+                    .completed_eval_runs
+                    .push_back(finish_pending_codex_eval(
+                        pending,
+                        String::new(),
+                        completed_at,
+                        "error",
+                        Some(error.message.clone()),
+                    ));
+            }
+            return Err(error);
+        };
         let mut state = self.inner.state.lock().await;
+        state.routed_delivery_pending.remove(thread_id);
+        ensure_codex_eval_capture(&mut state, thread_id, &turn_id);
+        if let Some(turn) = result.get("turn") {
+            apply_codex_reported_route(&mut state, thread_id, &turn_id, turn);
+        }
         let already_terminal = state
             .terminal_turns
             .contains(&terminal_turn_key(thread_id, &turn_id));
@@ -933,12 +1604,31 @@ impl CodexAppServerSupervisor {
         prompt: &str,
         attachments: &[Attachment],
     ) -> AppResult<()> {
+        self.steer_turn_with_attachments_and_policy(
+            thread_id,
+            expected_turn_id,
+            prompt,
+            attachments,
+            crate::provider_turn::ProviderTurnPolicy::prompt_based(),
+        )
+        .await
+    }
+
+    pub async fn steer_turn_with_attachments_and_policy(
+        &self,
+        thread_id: &str,
+        expected_turn_id: &str,
+        prompt: &str,
+        attachments: &[Attachment],
+        policy: crate::provider_turn::ProviderTurnPolicy,
+    ) -> AppResult<()> {
+        let wrapped = policy.wrap_user_message_for_turn(prompt, &uuid::Uuid::new_v4().to_string());
         self.request(
             "turn/steer",
             json!({
                 "threadId": thread_id,
                 "expectedTurnId": expected_turn_id,
-                "input": build_user_input(prompt, attachments)
+                "input": build_user_input(&wrapped, attachments)
             }),
         )
         .await?;
@@ -959,6 +1649,47 @@ impl CodexAppServerSupervisor {
         }
         Ok(())
     }
+}
+
+fn redact_steer_event(event: &mut crate::llm_eval::EvalEvent, secret: &str) {
+    replace_known_secret(&mut event.state, secret);
+    for text in [&mut event.name, &mut event.summary].into_iter().flatten() {
+        replace_known_secret(text, secret);
+    }
+    if let Some(text) = &mut event.error {
+        replace_known_secret(text, secret);
+    }
+    if let Some(payload) = &mut event.input {
+        redact_eval_payload_secret(payload, secret);
+    }
+    if let Some(payload) = &mut event.output {
+        redact_eval_payload_secret(payload, secret);
+    }
+}
+
+fn next_feature_cursor(page: &Value, seen: &mut HashSet<String>) -> AppResult<Option<String>> {
+    let cursor = page
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| !seen.insert(cursor.clone()))
+    {
+        return Err(AppError::parse(
+            "Codex experimentalFeature/list repeated a pagination cursor.",
+        ));
+    }
+    Ok(cursor)
+}
+
+fn routed_delivery_blocks_normal_resume(state: &SupervisorState, thread_id: &str) -> bool {
+    state.routed_delivery_pending.contains(thread_id)
+        || (state.routed_config_baselines.contains_key(thread_id)
+            && state
+                .runtimes
+                .get(thread_id)
+                .is_some_and(|runtime| runtime.active_turn_id.is_some()))
 }
 
 /// Translate Ecky attachments into Codex app-server UserInput blocks. CAD files
@@ -1096,13 +1827,172 @@ pub fn resume_params_with_policy(
         "config": {
             "mcp_servers.ecky_provider_mcp.url": mcp_endpoint,
             "mcp_servers.ecky_provider_mcp.required": true,
-            "mcp_servers.ecky_provider_mcp.default_tools_approval_mode": "approve"
+            "mcp_servers.ecky_provider_mcp.default_tools_approval_mode": "approve",
         }
     });
     if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
         params["model"] = Value::String(model.trim().to_string());
     }
     params
+}
+
+pub fn resume_params_with_routed_hook(
+    binding: &crate::contracts::CodexTakeoverBinding,
+    project_title: &str,
+    mcp_endpoint: &str,
+    handoff_context: &str,
+    model: Option<&str>,
+    policy: crate::provider_turn::ProviderTurnPolicy,
+    _command: &str,
+) -> Value {
+    let mut params = resume_params_with_policy(
+        binding,
+        project_title,
+        mcp_endpoint,
+        handoff_context,
+        model,
+        policy,
+    );
+    params["config"]["features.shell_tool"] = Value::Bool(false);
+    params["config"]["features.unified_exec"] = Value::Bool(false);
+    params["config"]["features.multi_agent"] = Value::Bool(false);
+    params["config"]["features.apps"] = Value::Bool(false);
+    params["config"]["features.view_image"] = Value::Bool(false);
+    params["config"]["web_search"] = Value::String("disabled".to_string());
+    params
+}
+
+fn native_config_baseline(config: &Value, feature_enablement: &Value) -> AppResult<Value> {
+    let features = feature_enablement
+        .as_object()
+        .ok_or_else(|| AppError::parse("Codex experimentalFeature/list result is invalid."))?;
+    let mut baseline = serde_json::Map::new();
+    for name in [
+        "shell_tool",
+        "unified_exec",
+        "multi_agent",
+        "apps",
+        "view_image",
+    ] {
+        let enabled = features
+            .get(name)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| AppError::parse(format!("Codex feature state '{name}' is unknown.")))?;
+        baseline.insert(format!("features.{name}"), Value::Bool(enabled));
+    }
+    // Ecky's resumed turns use workspace-write sandbox. Official local-chat
+    // defaults in that sandbox to cached search when config omits this setting.
+    let web_search = config
+        .get("web_search")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| Value::String("cached".into()));
+    baseline.insert("web_search".into(), web_search);
+    Ok(Value::Object(baseline))
+}
+
+fn merge_config_overrides(params: &mut Value, overrides: &Value) {
+    let Some(target) = params.get_mut("config").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(values) = overrides.as_object() {
+        target.extend(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
+}
+
+pub fn codex_pre_tool_hook_command() -> AppResult<String> {
+    let executable = std::env::current_exe().map_err(|error| {
+        AppError::internal(format!("Cannot locate Ecky hook executable: {error}"))
+    })?;
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    Ok(format!(
+        "{} --ecky-codex-pre-tool-hook || exit 2",
+        quote(&executable.to_string_lossy())
+    ))
+}
+
+fn codex_startup_hook_override(command: &str) -> AppResult<String> {
+    let command = serde_json::to_string(command).map_err(|error| {
+        AppError::internal(format!("Cannot encode Codex hook command: {error}"))
+    })?;
+    Ok(format!(
+        "hooks.PreToolUse=[{{matcher=\".*\",hooks=[{{type=\"command\",command={command},timeout=5}}]}}]"
+    ))
+}
+
+fn codex_hook_review_diagnostic(
+    executable: &std::path::Path,
+    cwd: &str,
+    hook_command: &str,
+) -> AppResult<String> {
+    let startup_override = codex_startup_hook_override(hook_command)?;
+    let shell_quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let command = format!(
+        "{} -C {} -c {}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(cwd),
+        shell_quote(&startup_override)
+    );
+    Ok(format!(
+        "Ecky routed turns require its exact trusted startup PreToolUse hook. Run {command}, then /hooks; trust only this exact hook, then retry."
+    ))
+}
+
+#[cfg(test)]
+fn codex_startup_hook_override_if_available(path: &std::path::Path) -> AppResult<Option<String>> {
+    if crate::services::codex_pre_tool_hook::runtime_descriptor_at(&path.to_path_buf()).is_err() {
+        return Ok(None);
+    }
+    let command = codex_pre_tool_hook_command()?;
+    codex_startup_hook_override(&command).map(Some)
+}
+
+fn verify_owned_pre_tool_hook(
+    hooks: &Value,
+    expected_cwd: &str,
+    expected_command: &str,
+) -> AppResult<String> {
+    let found = hooks
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("cwd").and_then(Value::as_str) == Some(expected_cwd))
+        .flat_map(|entry| {
+            entry
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .find(|hook| {
+            hook.get("eventName").and_then(Value::as_str) == Some("preToolUse")
+                && hook.get("enabled").and_then(Value::as_bool) == Some(true)
+                && hook.get("source").and_then(Value::as_str) == Some("sessionFlags")
+                && matches!(
+                    hook.get("trustStatus").and_then(Value::as_str),
+                    Some("trusted" | "managed")
+                )
+                && hook.get("matcher").and_then(Value::as_str) == Some(".*")
+                && hook.get("async").and_then(Value::as_bool) == Some(false)
+                && hook.get("timeoutSec").and_then(Value::as_u64) == Some(5)
+                && hook
+                    .get("currentHash")
+                    .and_then(Value::as_str)
+                    .is_some_and(|hash| !hash.is_empty())
+                && hook.get("command").and_then(Value::as_str) == Some(expected_command)
+                && hook.get("handlerType").and_then(Value::as_str) == Some("command")
+        });
+    found
+        .and_then(|hook| hook.get("currentHash").and_then(Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| AppError::provider(
+            "Ecky routed turns require the exact trusted startup PreToolUse hook. Restart Ecky to show the exact review command, then run /hooks and trust only that hook.",
+        ))
 }
 
 pub fn start_params(
@@ -1130,7 +2020,7 @@ pub fn start_params(
         "config": {
             "mcp_servers.ecky_provider_mcp.url": mcp_endpoint,
             "mcp_servers.ecky_provider_mcp.required": true,
-            "mcp_servers.ecky_provider_mcp.default_tools_approval_mode": "approve"
+            "mcp_servers.ecky_provider_mcp.default_tools_approval_mode": "approve",
         }
     });
     if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
@@ -1362,6 +2252,583 @@ fn codex_turn_trace_status(params: &Value) -> &'static str {
         Some("interrupted" | "canceled" | "cancelled") => "interrupted",
         _ => "error",
     }
+}
+
+fn ensure_codex_eval_capture(state: &mut SupervisorState, thread_id: &str, turn_id: &str) {
+    let key = terminal_turn_key(thread_id, turn_id);
+    if state.active_eval_runs.contains_key(&key) {
+        return;
+    }
+    if let Some(pending) = state.pending_eval_seeds.remove(thread_id) {
+        state
+            .active_eval_runs
+            .insert(key, active_eval_from_pending(pending, turn_id.to_string()));
+    }
+}
+
+fn active_eval_from_pending(pending: PendingCodexEval, turn_id: String) -> ActiveCodexEval {
+    ActiveCodexEval {
+        seed: pending.seed,
+        redaction_secret: pending.redaction_secret,
+        turn_id,
+        started_at: pending.started_at,
+        events: Vec::new(),
+        invocation_steps: HashMap::new(),
+        seen_invocation_states: HashSet::new(),
+        assistant_message_items: HashSet::new(),
+        next_step_index: 0,
+        omitted_reasons: HashMap::new(),
+    }
+}
+
+fn finish_pending_codex_eval(
+    pending: PendingCodexEval,
+    turn_id: String,
+    completed_at: i64,
+    status: &str,
+    raw_error: Option<String>,
+) -> crate::llm_eval::EvalRun {
+    finish_codex_eval_capture(
+        active_eval_from_pending(pending, turn_id),
+        completed_at,
+        status,
+        raw_error,
+        None,
+    )
+}
+
+fn apply_codex_reported_route(
+    state: &mut SupervisorState,
+    thread_id: &str,
+    turn_id: &str,
+    turn: &Value,
+) {
+    let model = turn
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let effort = turn
+        .get("reasoningEffort")
+        .or_else(|| turn.get("effort"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let key = terminal_turn_key(thread_id, turn_id);
+    if let Some(capture) = state.active_eval_runs.get_mut(&key) {
+        if model.is_some() {
+            capture.seed.model = model.clone();
+        }
+        if effort.is_some() {
+            capture.seed.effort = effort.clone();
+        }
+    }
+    for run in &mut state.completed_eval_runs {
+        if run.turn_id == turn_id && run.external_thread_id == thread_id {
+            if model.is_some() {
+                run.route.model = model.clone();
+            }
+            if effort.is_some() {
+                run.route.effort = effort.clone();
+            }
+        }
+    }
+}
+
+fn append_codex_eval_event(capture: &mut ActiveCodexEval, mut event: crate::llm_eval::EvalEvent) {
+    if capture.events.len() >= CODEX_EVAL_EVENT_LIMIT.saturating_sub(2) {
+        note_codex_eval_omission(capture, "event-limit");
+        return;
+    }
+    event.sequence = capture.events.len() as u64 + 1;
+    capture.events.push(event);
+}
+
+fn note_codex_eval_omission(capture: &mut ActiveCodexEval, reason: &'static str) {
+    let count = capture.omitted_reasons.entry(reason).or_default();
+    *count = count.saturating_add(1);
+}
+
+fn append_codex_eval_terminal_event(
+    capture: &mut ActiveCodexEval,
+    mut event: crate::llm_eval::EvalEvent,
+) {
+    if capture.events.len() >= CODEX_EVAL_EVENT_LIMIT {
+        return;
+    }
+    event.sequence = capture.events.len() as u64 + 1;
+    capture.events.push(event);
+}
+
+fn replace_known_secret(value: &mut String, secret: &str) {
+    if !secret.is_empty() {
+        *value = value.replace(secret, "[REDACTED]");
+    }
+}
+
+fn redact_json_secret(value: &mut Value, secret: &str) {
+    match value {
+        Value::String(text) => replace_known_secret(text, secret),
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| redact_json_secret(value, secret)),
+        Value::Object(fields) => {
+            let previous = std::mem::take(fields);
+            for (mut key, mut child) in previous {
+                replace_known_secret(&mut key, secret);
+                redact_json_secret(&mut child, secret);
+                let base = key.clone();
+                let mut suffix = 1usize;
+                while fields.contains_key(&key) {
+                    key = format!("{base}#{suffix}");
+                    suffix += 1;
+                }
+                fields.insert(key, child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_eval_payload_secret(payload: &mut crate::llm_eval::EvalPayload, secret: &str) {
+    fn redact_typed(value: &mut crate::llm_eval::EvalValue, secret: &str) {
+        match value {
+            crate::llm_eval::EvalValue::String(text) => replace_known_secret(text, secret),
+            crate::llm_eval::EvalValue::List(values) => {
+                for value in values {
+                    redact_typed(value, secret);
+                }
+            }
+            crate::llm_eval::EvalValue::Map(fields) => {
+                let mut seen = HashSet::new();
+                for field in fields {
+                    replace_known_secret(&mut field.key, secret);
+                    let base = field.key.clone();
+                    let mut suffix = 1usize;
+                    while !seen.insert(field.key.clone()) {
+                        field.key = format!("{base}#{suffix}");
+                        suffix += 1;
+                    }
+                    redact_typed(&mut field.value, secret);
+                }
+            }
+            _ => {}
+        }
+    }
+    redact_typed(&mut payload.value, secret);
+}
+
+fn redact_probability_keys(values: &mut std::collections::BTreeMap<String, f64>, secret: &str) {
+    *values = std::mem::take(values)
+        .into_iter()
+        .map(|(mut key, probability)| {
+            replace_known_secret(&mut key, secret);
+            (key, probability)
+        })
+        .collect();
+}
+
+fn redact_active_eval_secret(
+    capture: &mut ActiveCodexEval,
+    raw_error: &mut Option<String>,
+    terminal_output: &mut Option<Value>,
+    secret: &str,
+) {
+    replace_known_secret(&mut capture.seed.prompt, secret);
+    replace_known_secret(&mut capture.seed.provider, secret);
+    replace_known_secret(&mut capture.seed.prompt_version, secret);
+    if let Some(effort) = &mut capture.seed.effort {
+        replace_known_secret(effort, secret);
+    }
+    if let Some(model) = &mut capture.seed.model {
+        replace_known_secret(model, secret);
+    }
+    if let Some(evidence) = &mut capture.seed.jev_route {
+        replace_known_secret(&mut evidence.policy_version, secret);
+        if let Some(model) = &mut evidence.model_ceiling {
+            replace_known_secret(model, secret);
+        }
+        replace_known_secret(&mut evidence.model_reason, secret);
+        if let Some(model) = &mut evidence.classifier_model {
+            replace_known_secret(model, secret);
+        }
+        if let Some(version) = &mut evidence.model_catalog_version {
+            replace_known_secret(version, secret);
+        }
+        if let Some(expiry) = &mut evidence.model_catalog_valid_until {
+            replace_known_secret(expiry, secret);
+        }
+        redact_probability_keys(&mut evidence.intent_probabilities, secret);
+        redact_probability_keys(&mut evidence.model_probabilities, secret);
+    }
+    for event in &mut capture.events {
+        replace_known_secret(&mut event.state, secret);
+        if let Some(value) = &mut event.name {
+            replace_known_secret(value, secret);
+        }
+        if let Some(value) = &mut event.summary {
+            replace_known_secret(value, secret);
+        }
+        if let Some(value) = &mut event.error {
+            replace_known_secret(value, secret);
+        }
+        if let Some(payload) = &mut event.input {
+            redact_eval_payload_secret(payload, secret);
+        }
+        if let Some(payload) = &mut event.output {
+            redact_eval_payload_secret(payload, secret);
+        }
+    }
+    if let Some(error) = raw_error {
+        replace_known_secret(error, secret);
+    }
+    if let Some(output) = terminal_output {
+        redact_json_secret(output, secret);
+    }
+}
+
+fn remove_null_object_fields(value: Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .filter(|(_, value)| !value.is_null())
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn finish_codex_eval_capture(
+    mut capture: ActiveCodexEval,
+    completed_at: i64,
+    status: &str,
+    mut raw_error: Option<String>,
+    mut terminal_output: Option<Value>,
+) -> crate::llm_eval::EvalRun {
+    if let Some(secret) = capture.redaction_secret.take() {
+        redact_active_eval_secret(&mut capture, &mut raw_error, &mut terminal_output, &secret);
+    }
+    if !capture.omitted_reasons.is_empty() {
+        if capture.events.len() >= CODEX_EVAL_EVENT_LIMIT {
+            capture.events.pop();
+        }
+        let mut reasons = capture.omitted_reasons.iter().collect::<Vec<_>>();
+        reasons.sort_by_key(|(reason, _)| **reason);
+        let summary = reasons
+            .into_iter()
+            .map(|(reason, count)| format!("{reason}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        append_codex_eval_terminal_event(
+            &mut capture,
+            crate::llm_eval::EvalEvent {
+                sequence: 0,
+                step_index: None,
+                kind: crate::llm_eval::EvalEventKind::System,
+                state: "capture-incomplete".into(),
+                name: Some("capture-incomplete".into()),
+                summary: Some(summary),
+                input: None,
+                output: None,
+                error: None,
+                occurred_at: completed_at,
+            },
+        );
+    }
+    if !capture.turn_id.is_empty() {
+        append_codex_eval_terminal_event(
+            &mut capture,
+            crate::llm_eval::EvalEvent {
+                sequence: 0,
+                step_index: None,
+                kind: crate::llm_eval::EvalEventKind::System,
+                state: status.into(),
+                name: Some("turn/terminal".into()),
+                summary: None,
+                input: None,
+                output: terminal_output.map(crate::llm_eval::EvalPayload::new),
+                error: raw_error.clone(),
+                occurred_at: completed_at,
+            },
+        );
+    }
+    let response = capture
+        .events
+        .iter()
+        .filter(|event| event.kind == crate::llm_eval::EvalEventKind::Assistant)
+        .filter_map(|event| event.output.as_ref())
+        .filter_map(|payload| match &payload.value {
+            crate::llm_eval::EvalValue::String(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    crate::llm_eval::build_codex_eval_run(
+        capture.seed,
+        capture.turn_id,
+        capture.started_at,
+        completed_at,
+        status,
+        (!response.trim().is_empty()).then_some(response),
+        raw_error,
+        capture.events,
+        Vec::new(),
+    )
+}
+
+fn project_codex_eval_notification(
+    state: &mut SupervisorState,
+    thread_id: &str,
+    method: &str,
+    params: &Value,
+    now: i64,
+) -> Option<crate::llm_eval::EvalRun> {
+    let turn = params.get("turn").unwrap_or(params);
+    let turn_id = turn
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("turnId").and_then(Value::as_str))
+        .or_else(|| {
+            state
+                .runtimes
+                .get(thread_id)
+                .and_then(|runtime| runtime.active_turn_id.as_deref())
+        })
+        .map(str::to_string);
+    if method == "turn/started" {
+        if let Some(turn_id) = turn_id.as_deref() {
+            ensure_codex_eval_capture(state, thread_id, turn_id);
+        }
+    }
+    let turn_id = turn_id.as_deref()?;
+    let key = terminal_turn_key(thread_id, turn_id);
+    if method == "turn/completed" {
+        apply_codex_reported_route(state, thread_id, turn_id, turn);
+    }
+    let capture = state.active_eval_runs.get_mut(&key)?;
+    if matches!(method, "item/started" | "item/completed") {
+        let item = params.get("item").unwrap_or(params);
+        let item_type = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if item_type == "agentMessage" {
+            let Some(item_id) = item.get("id").and_then(Value::as_str) else {
+                note_codex_eval_omission(capture, "assistant-missing-item-id");
+                return None;
+            };
+            if method == "item/completed" {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    if !capture.assistant_message_items.contains(item_id) {
+                        if capture.assistant_message_items.len() >= CODEX_EVAL_EVENT_LIMIT / 2 {
+                            note_codex_eval_omission(capture, "assistant-item-limit");
+                        } else {
+                            capture.assistant_message_items.insert(item_id.to_string());
+                            append_codex_eval_event(
+                                capture,
+                                crate::llm_eval::EvalEvent {
+                                    sequence: 0,
+                                    step_index: None,
+                                    kind: crate::llm_eval::EvalEventKind::Assistant,
+                                    state: "completed".into(),
+                                    name: Some("agentMessage".into()),
+                                    summary: None,
+                                    input: None,
+                                    output: Some(crate::llm_eval::EvalPayload::new(Value::String(
+                                        text.into(),
+                                    ))),
+                                    error: None,
+                                    occurred_at: now,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+        let Some(item_id) = item.get("id").and_then(Value::as_str) else {
+            note_codex_eval_omission(capture, "missing-item-id");
+            return None;
+        };
+        if matches!(
+            item_type,
+            "userMessage" | "reasoning" | "plan" | "compaction"
+        ) {
+            return None;
+        }
+        if !matches!(
+            item_type,
+            "commandExecution" | "mcpToolCall" | "fileChange" | "webSearch" | "collabToolCall"
+        ) {
+            note_codex_eval_omission(capture, "unsupported-item-type");
+            return None;
+        }
+        let state_identity = format!("{item_id}:{method}");
+        if capture.seen_invocation_states.contains(&state_identity) {
+            return None;
+        }
+        let existing_step = capture.invocation_steps.get(item_id).copied();
+        let orphan_completion = method == "item/completed" && existing_step.is_none();
+        if orphan_completion {
+            note_codex_eval_omission(capture, "completed-without-start");
+        }
+        if existing_step.is_none() && capture.invocation_steps.len() >= CODEX_EVAL_EVENT_LIMIT / 2 {
+            note_codex_eval_omission(capture, "invocation-limit");
+            return None;
+        }
+        capture.seen_invocation_states.insert(state_identity);
+        let invocation_step = if let Some(step) = existing_step {
+            step
+        } else {
+            let step = capture.next_step_index;
+            capture.next_step_index += 1;
+            capture.invocation_steps.insert(item_id.to_string(), step);
+            step
+        };
+        let identity = serde_json::json!({
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "itemId": item_id,
+            "invocationId": item_id,
+        });
+        let input = (method == "item/started").then(|| {
+            let args = item
+                .get("arguments")
+                .or_else(|| item.get("params"))
+                .or_else(|| item.get("input"));
+            crate::llm_eval::EvalPayload::new(remove_null_object_fields(serde_json::json!({
+                "identity": identity,
+                "itemType": item_type,
+                "toolName": item.get("toolName").or_else(|| item.get("tool")),
+                "serverName": item.get("serverName").or_else(|| item.get("server")),
+                "arguments": args,
+                "command": item.get("command"),
+                "changes": item.get("changes"),
+                "query": item.get("query"),
+            })))
+        });
+        let has_result = [
+            "result",
+            "output",
+            "aggregatedOutput",
+            "exitCode",
+            "status",
+            "error",
+        ]
+        .iter()
+        .any(|field| item.get(*field).is_some());
+        let output = (method == "item/completed" && has_result).then(|| {
+            crate::llm_eval::EvalPayload::new(remove_null_object_fields(serde_json::json!({
+                "identity": identity,
+                "itemType": item_type,
+                "toolName": item.get("toolName").or_else(|| item.get("tool")),
+                "serverName": item.get("serverName").or_else(|| item.get("server")),
+                "result": item.get("result"),
+                "output": item.get("output"),
+                "aggregatedOutput": item.get("aggregatedOutput"),
+                "exitCode": item.get("exitCode"),
+                "status": item.get("status"),
+                "error": item.get("error"),
+            })))
+        });
+        append_codex_eval_event(
+            capture,
+            crate::llm_eval::EvalEvent {
+                sequence: 0,
+                step_index: Some(invocation_step),
+                kind: if method == "item/started" {
+                    crate::llm_eval::EvalEventKind::Tool
+                } else {
+                    crate::llm_eval::EvalEventKind::Result
+                },
+                state: if method == "item/started" {
+                    "started"
+                } else if orphan_completion {
+                    "completed-without-start"
+                } else if has_result {
+                    "completed"
+                } else {
+                    "completed-result-missing"
+                }
+                .into(),
+                name: Some(if item_type == "mcpToolCall" {
+                    let server = item
+                        .get("serverName")
+                        .or_else(|| item.get("server"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("mcp");
+                    let tool = item
+                        .get("toolName")
+                        .or_else(|| item.get("tool"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    format!("{server}/{tool}")
+                } else {
+                    item_type.to_string()
+                }),
+                summary: Some(format!("{thread_id}/{turn_id}/{item_id}")),
+                input,
+                output,
+                error: item
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                occurred_at: now,
+            },
+        );
+    } else if method == "item/agentMessage/delta" {
+        if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+            if let Some(item_id) = params.get("itemId").and_then(Value::as_str) {
+                if capture.assistant_message_items.len() >= CODEX_EVAL_EVENT_LIMIT / 2
+                    && !capture.assistant_message_items.contains(item_id)
+                {
+                    note_codex_eval_omission(capture, "assistant-item-limit");
+                    return None;
+                }
+                capture.assistant_message_items.insert(item_id.to_string());
+            } else {
+                note_codex_eval_omission(capture, "assistant-missing-item-id");
+            }
+            append_codex_eval_event(
+                capture,
+                crate::llm_eval::EvalEvent {
+                    sequence: 0,
+                    step_index: None,
+                    kind: crate::llm_eval::EvalEventKind::Assistant,
+                    state: "delta".into(),
+                    name: Some("agentMessage".into()),
+                    summary: None,
+                    input: None,
+                    output: Some(crate::llm_eval::EvalPayload::new(Value::String(
+                        delta.into(),
+                    ))),
+                    error: None,
+                    occurred_at: now,
+                },
+            );
+        }
+    }
+    if method != "turn/completed" {
+        return None;
+    }
+    let status = codex_turn_trace_status(params);
+    let raw_error = turn
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let capture = state.active_eval_runs.remove(&key)?;
+    Some(finish_codex_eval_capture(
+        capture,
+        now,
+        status,
+        raw_error,
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "status": turn.get("status"),
+            "error": turn.get("error"),
+        })),
+    ))
 }
 
 fn mark_live_messages_terminal(messages: &mut [CodexDialogueMessage], status: &str) {
@@ -1981,6 +3448,211 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
 mod tests {
     use super::*;
 
+    #[test]
+    fn codex_eval_capture_reserves_incomplete_and_terminal_events_at_limit() {
+        let seed = crate::llm_eval::EvalRunSeed {
+            run_id: "run-limit".into(),
+            thread_id: "ecky-thread".into(),
+            external_thread_id: "codex-thread".into(),
+            provider: "codex".into(),
+            model: None,
+            effort: None,
+            prompt_version: "codex-v1".into(),
+            prompt: "prompt".into(),
+            starting_version_id: None,
+            starting_input_digest: None,
+            expected_red_rounds: 0,
+            turn_intent: crate::provider_turn::ProviderTurnIntent::Modify,
+            answer_first_required: false,
+            jev_route: None,
+        };
+        let mut capture = ActiveCodexEval {
+            seed,
+            redaction_secret: None,
+            turn_id: "turn-1".into(),
+            started_at: 1,
+            events: Vec::new(),
+            invocation_steps: HashMap::new(),
+            seen_invocation_states: HashSet::new(),
+            assistant_message_items: HashSet::new(),
+            next_step_index: 0,
+            omitted_reasons: HashMap::new(),
+        };
+        for _ in 0..(CODEX_EVAL_EVENT_LIMIT + 10) {
+            append_codex_eval_event(
+                &mut capture,
+                crate::llm_eval::EvalEvent {
+                    sequence: 0,
+                    step_index: None,
+                    kind: crate::llm_eval::EvalEventKind::Assistant,
+                    state: "delta".into(),
+                    name: Some("agentMessage".into()),
+                    summary: None,
+                    input: None,
+                    output: None,
+                    error: None,
+                    occurred_at: 2,
+                },
+            );
+        }
+        let run = finish_codex_eval_capture(
+            capture,
+            3,
+            "success",
+            None,
+            Some(serde_json::json!({"status": "completed"})),
+        );
+        assert_eq!(run.events.len(), CODEX_EVAL_EVENT_LIMIT);
+        assert_eq!(
+            run.events.last().unwrap().name.as_deref(),
+            Some("turn/terminal")
+        );
+        assert!(run
+            .events
+            .iter()
+            .any(|event| event.name.as_deref() == Some("capture-incomplete")));
+        assert!(run
+            .events
+            .iter()
+            .zip(run.events.iter().skip(1))
+            .all(|(a, b)| a.sequence < b.sequence));
+    }
+
+    #[test]
+    fn codex_eval_capture_redacts_configured_key_before_edn_and_markdown_export() {
+        let secret = "exact-jev-token-123";
+        let seed = crate::llm_eval::EvalRunSeed {
+            run_id: "run-redaction".into(),
+            thread_id: "ecky-thread".into(),
+            external_thread_id: "codex-thread".into(),
+            provider: "codex".into(),
+            model: None,
+            effort: None,
+            prompt_version: "codex-v1".into(),
+            prompt: format!("user asked {secret}"),
+            starting_version_id: None,
+            starting_input_digest: None,
+            expected_red_rounds: 0,
+            turn_intent: crate::provider_turn::ProviderTurnIntent::Answer,
+            answer_first_required: false,
+            jev_route: Some(crate::llm_eval::EvalJevRoute {
+                policy_version: "route-v1".into(),
+                intent_confidence_threshold: 0.65,
+                intent_margin_threshold: 0.15,
+                model_confidence_threshold: 0.65,
+                model_margin_threshold: 0.15,
+                intent_confidence: 0.9,
+                intent_probabilities: std::collections::BTreeMap::new(),
+                answer_requested: true,
+                answer_first: false,
+                model_ceiling: None,
+                model_confidence: None,
+                model_probabilities: std::collections::BTreeMap::new(),
+                model_reason: format!("reason {secret}"),
+                context_truncated: false,
+                current_prompt_truncated: false,
+                classifier_input_tokens: Some(1),
+                classifier_output_tokens: Some(1),
+                classifier_model: Some(format!("model {secret}")),
+                classifier_latency_ms: Some(1),
+                model_catalog_version: None,
+                model_catalog_valid_until: None,
+                native_tool_coverage: crate::llm_eval::unknown_native_tool_coverage(),
+            }),
+        };
+        let mut object = serde_json::Map::new();
+        object.insert(secret.to_string(), Value::String(secret.into()));
+        let mut response_payload =
+            crate::llm_eval::EvalPayload::new(Value::String(format!("answer {secret}")));
+        response_payload.truncated = true;
+        let capture = ActiveCodexEval {
+            seed: seed.clone(),
+            redaction_secret: Some(secret.into()),
+            turn_id: "turn-1".into(),
+            started_at: 1,
+            events: vec![
+                crate::llm_eval::EvalEvent {
+                    sequence: 1,
+                    step_index: None,
+                    kind: crate::llm_eval::EvalEventKind::Tool,
+                    state: "completed".into(),
+                    name: Some("tool".into()),
+                    summary: Some(format!("summary {secret}")),
+                    input: Some(crate::llm_eval::EvalPayload::new(Value::Object(object))),
+                    output: None,
+                    error: Some(format!("error {secret}")),
+                    occurred_at: 2,
+                },
+                crate::llm_eval::EvalEvent {
+                    sequence: 2,
+                    step_index: None,
+                    kind: crate::llm_eval::EvalEventKind::Assistant,
+                    state: "completed".into(),
+                    name: Some("agentMessage".into()),
+                    summary: None,
+                    input: None,
+                    output: Some(response_payload),
+                    error: None,
+                    occurred_at: 2,
+                },
+            ],
+            invocation_steps: HashMap::new(),
+            seen_invocation_states: HashSet::new(),
+            assistant_message_items: HashSet::new(),
+            next_step_index: 0,
+            omitted_reasons: HashMap::new(),
+        };
+        let run = finish_codex_eval_capture(
+            capture,
+            3,
+            "success",
+            Some(format!("terminal error {secret}")),
+            Some(serde_json::json!({"echo": secret})),
+        );
+        assert_eq!(run.thread_id, "ecky-thread");
+        assert_eq!(run.response.as_deref(), Some("answer [REDACTED]"));
+        let output = run.events[1].output.as_ref().unwrap();
+        assert!(output.truncated);
+        assert!(matches!(
+            output.value,
+            crate::llm_eval::EvalValue::String(_)
+        ));
+        let serialized = serde_json::to_string(&run).unwrap();
+        assert!(!serialized.contains(secret));
+        let failed = finish_pending_codex_eval(
+            PendingCodexEval {
+                seed,
+                started_at: 1,
+                redaction_secret: Some(secret.into()),
+            },
+            String::new(),
+            4,
+            "error",
+            Some(format!("start failed {secret}")),
+        );
+        assert!(
+            failed.turn_id.is_empty(),
+            "failed turn/start has no provider turn ID"
+        );
+        assert_eq!(failed.status, "error");
+        assert!(failed.events.is_empty());
+        assert!(!serde_json::to_string(&failed).unwrap().contains(secret));
+
+        let root =
+            std::env::temp_dir().join(format!("ecky-eval-redaction-{}", uuid::Uuid::new_v4()));
+        let files = crate::llm_eval::persist_run(&root, &run).unwrap();
+        for path in [files.run_edn, files.trajectory_edn, files.report_md] {
+            let content = std::fs::read_to_string(path).unwrap();
+            assert!(!content.contains(secret));
+        }
+        let failed_files = crate::llm_eval::persist_run(&root, &failed).unwrap();
+        let persisted_failed = crate::llm_eval::read_run(&failed_files.run_dir).unwrap();
+        assert!(persisted_failed.turn_id.is_empty());
+        assert_eq!(persisted_failed.status, "error");
+        assert!(persisted_failed.events.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn binding(bootstrap_version: u32) -> crate::contracts::CodexTakeoverBinding {
         crate::contracts::CodexTakeoverBinding {
             ecky_thread_id: "ecky-thread".to_string(),
@@ -2018,6 +3690,277 @@ mod tests {
         assert!(start_instructions.contains("Do not call `thread_borrow` for this thread"));
         assert!(start_instructions.contains("edit that exact file"));
         assert!(!start_instructions.contains("preview -> commit"));
+        // Baseline thread creation/resume must preserve Codex's prior tool
+        // configuration. Jev must prove a scoped native boundary before turn
+        // dispatch; global config overrides would silently change disabled mode.
+        for params in [&start, &resume] {
+            assert!(params["config"]["features.shell_tool"].is_null());
+            assert!(params["config"]["features.unified_exec"].is_null());
+            assert!(params["config"]["features.multi_agent"].is_null());
+            assert!(params["config"]["features.apps"].is_null());
+            assert!(params["config"]["tools.view_image"].is_null());
+            assert!(params["config"]["web_search"].is_null());
+        }
+    }
+
+    #[test]
+    fn routed_resume_scopes_tool_flags_without_mutating_normal_config() {
+        let policy = crate::provider_turn::ProviderTurnPolicy::routed(
+            crate::provider_turn::ProviderTurnIntent::Answer,
+            false,
+        );
+        let params = resume_params_with_routed_hook(
+            &binding(crate::services::codex_takeover::CODEX_BOOTSTRAP_VERSION),
+            "Dryer",
+            "http://127.0.0.1:39249/mcp",
+            "handoff",
+            None,
+            policy,
+            "/Applications/Ecky.app/Contents/MacOS/ecky --ecky-codex-pre-tool-hook http://127.0.0.1:39249/codex-pre-tool-hook || exit 2",
+        );
+        assert!(params["config"]["hooks"].is_null());
+        assert_eq!(params["config"]["features.shell_tool"], false);
+        assert_eq!(params["config"]["features.view_image"], false);
+        assert!(params["config"]["tools.view_image"].is_null());
+        assert_eq!(params["config"]["web_search"], "disabled");
+    }
+
+    #[test]
+    fn routed_config_baseline_uses_effective_features_and_web_search_defaults() {
+        let features = json!({
+            "shell_tool": true,
+            "unified_exec": false,
+            "multi_agent": true,
+            "apps": false,
+            "view_image": true
+        });
+        let defaults = native_config_baseline(&json!({}), &features).unwrap();
+        assert_eq!(defaults["features.shell_tool"], true);
+        assert_eq!(defaults["features.unified_exec"], false);
+        assert_eq!(defaults["features.view_image"], true);
+        assert_eq!(defaults["web_search"], "cached");
+        let explicit = native_config_baseline(&json!({"web_search": "live"}), &features).unwrap();
+        assert_eq!(explicit["web_search"], "live");
+    }
+
+    #[tokio::test]
+    async fn accepted_routed_resume_blocks_activation_restore_before_turn_start() {
+        let supervisor = CodexAppServerSupervisor::new();
+        let thread_id = "codex-thread-routed-pending";
+        let original_baseline = json!({
+            "features.shell_tool": true,
+            "features.unified_exec": true,
+            "features.view_image": true,
+            "web_search": "live"
+        });
+        {
+            let mut state = supervisor.inner.state.lock().await;
+            state
+                .routed_config_baselines
+                .insert(thread_id.to_string(), original_baseline.clone());
+            state.routed_delivery_pending.insert(thread_id.to_string());
+            state
+                .runtimes
+                .insert(thread_id.to_string(), CodexTakeoverRuntime::default());
+            assert!(state.runtimes[thread_id].active_turn_id.is_none());
+            assert!(routed_delivery_blocks_normal_resume(&state, thread_id));
+            // Activation takes the same resume mutex as routed dispatch, sees
+            // this marker before reading/removing the restore baseline.
+            assert_eq!(state.routed_config_baselines[thread_id], original_baseline);
+
+            // Turn/start response transitions atomically from pending to active.
+            state.routed_delivery_pending.remove(thread_id);
+            state.runtimes.get_mut(thread_id).unwrap().active_turn_id = Some("turn-1".into());
+            assert!(routed_delivery_blocks_normal_resume(&state, thread_id));
+            assert_eq!(state.routed_config_baselines[thread_id], original_baseline);
+
+            // Only terminal completion makes baseline restoration eligible.
+            state.runtimes.get_mut(thread_id).unwrap().active_turn_id = None;
+            assert!(!routed_delivery_blocks_normal_resume(&state, thread_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn process_exit_before_turn_start_persists_failure_without_provider_turn_id() {
+        let supervisor = CodexAppServerSupervisor::new();
+        let thread_id = "ecky-process-exit";
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let (kill, mut kill_request) = mpsc::channel(1);
+        let generation = 9;
+        {
+            let mut state = supervisor.inner.state.lock().await;
+            state.process = Some(SupervisorProcess {
+                generation,
+                stdin,
+                kill,
+                initialized: true,
+            });
+            state.pending_eval_seeds.insert(
+                thread_id.into(),
+                PendingCodexEval {
+                    seed: crate::llm_eval::EvalRunSeed {
+                        run_id: "run-process-exit".into(),
+                        thread_id: thread_id.into(),
+                        external_thread_id: "codex-process-exit".into(),
+                        provider: "codex".into(),
+                        model: None,
+                        effort: None,
+                        prompt_version: "codex-v1".into(),
+                        prompt: "process exits before turn response".into(),
+                        starting_version_id: None,
+                        starting_input_digest: None,
+                        expected_red_rounds: 0,
+                        turn_intent: crate::provider_turn::ProviderTurnIntent::Answer,
+                        answer_first_required: false,
+                        jev_route: None,
+                    },
+                    started_at: 10,
+                    redaction_secret: None,
+                },
+            );
+            state
+                .runtimes
+                .insert(thread_id.into(), CodexTakeoverRuntime::default());
+        }
+
+        supervisor
+            .invalidate_process(generation, AppError::provider("fake Codex child exited"))
+            .await;
+        assert!(kill_request.try_recv().is_ok());
+        child.kill().await.unwrap();
+        let failed = supervisor.completed_eval_runs().await.pop().unwrap();
+        assert!(
+            failed.turn_id.is_empty(),
+            "unknown provider turn must stay unknown"
+        );
+        assert_eq!(failed.status, "error");
+        assert!(failed.events.is_empty());
+        assert!(failed.raw_error.is_some());
+        let root = std::env::temp_dir().join(format!("ecky-process-exit-{}", uuid::Uuid::new_v4()));
+        let files = crate::llm_eval::persist_run(&root, &failed).unwrap();
+        let persisted = crate::llm_eval::read_run(&files.run_dir).unwrap();
+        assert!(persisted.turn_id.is_empty());
+        assert_eq!(persisted.status, "error");
+        assert!(persisted.events.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn experimental_feature_pagination_rejects_repeated_cursor() {
+        let mut seen = HashSet::new();
+        assert_eq!(
+            next_feature_cursor(&json!({"nextCursor": "page-2"}), &mut seen).unwrap(),
+            Some("page-2".into())
+        );
+        assert!(next_feature_cursor(&json!({"nextCursor": "page-2"}), &mut seen).is_err());
+        assert_eq!(
+            next_feature_cursor(&json!({"nextCursor": null}), &mut seen).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_hook_override_is_stable_and_matches_all_tools() {
+        let command = codex_pre_tool_hook_command().unwrap();
+        let config = codex_startup_hook_override(&command).unwrap();
+        assert!(config.contains("hooks.PreToolUse"));
+        assert!(config.contains("matcher=\".*\""));
+        assert!(config.contains("timeout=5"));
+        assert_eq!(command, codex_pre_tool_hook_command().unwrap());
+    }
+
+    #[test]
+    fn review_command_quotes_executable_cwd_and_exact_startup_override() {
+        let executable =
+            std::path::Path::new("/Applications/Codex O'Neil.app/Contents/MacOS/codex");
+        let cwd = "/Users/test/Project O'Neil";
+        let hook_command = "/Applications/Ecky O'Neil.app/Contents/MacOS/ecky --ecky-codex-pre-tool-hook || exit 2";
+        let diagnostic = codex_hook_review_diagnostic(executable, cwd, hook_command).unwrap();
+        let exact_override = codex_startup_hook_override(hook_command).unwrap();
+        let shell_quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let expected = format!(
+            "{} -C {} -c {}",
+            shell_quote(executable.to_str().unwrap()),
+            shell_quote(cwd),
+            shell_quote(&exact_override)
+        );
+        assert!(diagnostic.contains(&expected), "{diagnostic}");
+        assert!(diagnostic.contains("/hooks"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("trust only this exact hook"),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn missing_callback_descriptor_keeps_disabled_startup_unchanged() {
+        let directory =
+            std::env::temp_dir().join(format!("ecky-hook-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let descriptor = directory.join("missing.json");
+        assert_eq!(
+            codex_startup_hook_override_if_available(&descriptor).unwrap(),
+            None
+        );
+        crate::services::codex_pre_tool_hook::write_runtime_descriptor_at(
+            &descriptor,
+            "http://127.0.0.1:39249/codex-pre-tool-hook/test-token",
+            "test-token",
+        )
+        .unwrap();
+        assert!(codex_startup_hook_override_if_available(&descriptor)
+            .unwrap()
+            .is_some());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn native_hook_gate_requires_exact_enabled_trusted_hash() {
+        let command =
+            "ecky --ecky-codex-pre-tool-hook http://127.0.0.1:39249/codex-pre-tool-hook || exit 2";
+        let base_hook = json!({
+            "eventName": "preToolUse",
+            "enabled": true,
+            "source": "sessionFlags",
+            "matcher": ".*",
+            "async": false,
+            "timeoutSec": 5,
+            "trustStatus": "trusted",
+            "currentHash": "sha256:abc",
+            "handlerType": "command",
+            "command": command
+        });
+        let response = json!({"data":[{"cwd":"/tmp/dryer","hooks":[base_hook]}]});
+        assert_eq!(
+            verify_owned_pre_tool_hook(&response, "/tmp/dryer", command).unwrap(),
+            "sha256:abc"
+        );
+
+        for (field, value) in [
+            ("trustStatus", json!("untrusted")),
+            ("enabled", json!(false)),
+            ("currentHash", json!("")),
+            ("source", json!("user")),
+            ("command", json!("other command")),
+            ("matcher", json!("^Bash$")),
+            ("async", json!(true)),
+            ("timeoutSec", json!(30)),
+        ] {
+            let mut bad = base_hook.clone();
+            bad[field] = value;
+            assert!(verify_owned_pre_tool_hook(
+                &json!({"data":[{"cwd":"/tmp/dryer","hooks":[bad]}]}),
+                "/tmp/dryer",
+                command
+            )
+            .is_err());
+        }
+        assert!(verify_owned_pre_tool_hook(&response, "/tmp/other", command).is_err());
     }
 
     #[test]

@@ -84,6 +84,9 @@
   if (!config.providerModels) {
     config.providerModels = { codex: '', agy: '' };
   }
+  if (!config.jevClassifier) {
+    config.jevClassifier = { enabled: false, apiKey: '' };
+  }
 
   function deriveConnectionType(): ConnectionType {
     if (config.connectionType?.startsWith('provider:')) return 'provider';
@@ -631,6 +634,9 @@
       config.femCompute.maximumWallTimeMinutes = Math.min(1440, Math.max(1, config.femCompute.maximumWallTimeMinutes || 30));
       config.femCompute.maximumMemoryMiB = Math.min(1_048_576, Math.max(256, config.femCompute.maximumMemoryMiB || 8192));
       config.femCompute.threadCount = Math.min(256, Math.max(0, config.femCompute.threadCount || 0));
+      if (config.jevClassifier.enabled && !config.jevClassifier.apiKey.trim()) {
+        throw new Error('Jev API token is required when classifier is enabled');
+      }
       if (onsave) await onsave();
       message = 'Registry saved successfully.';
     } catch (e: unknown) {
@@ -1303,6 +1309,19 @@
           <div class="field-help">
             New generated threads inherit this source and backend by default. Imported FCStd threads stay FreeCAD Python.
           </div>
+        </div>
+
+        <div class="field">
+          <label class="checkbox-label">
+            <input type="checkbox" bind:checked={config.jevClassifier.enabled} />
+            Experimental Jev classifier
+          </label>
+          <div class="field-help">Classify each application-owned request across API, Codex, Agy, and managed MCP connections.</div>
+        </div>
+        <div class="field">
+          <label for="jev-token">TypeSafe API token</label>
+          <input id="jev-token" type="password" class="input-mono" autocomplete="off" spellcheck="false" bind:value={config.jevClassifier.apiKey} />
+          <div class="field-help">Stored in local settings. Used when the classifier is enabled.</div>
         </div>
 
         {#if connectionType === 'api_key'}

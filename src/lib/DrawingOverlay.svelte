@@ -41,6 +41,7 @@
   let dragAnchor: Point | null = null;
   let dragOriginal: Shape | null = null;
   let _dirty = false;
+  let revision = 0;
   let nextId = 1;
   let resizeObserver: ResizeObserver | undefined;
 
@@ -66,12 +67,14 @@
 
   export function getCanvas(): HTMLCanvasElement | null { return canvasEl; }
   export function hasDrawing(): boolean { return _dirty; }
+  export function getRevision(): number { return revision; }
   function setDirty(next: boolean) {
     if (_dirty === next) return;
     _dirty = next;
     onDirtyChange?.(next);
   }
   export function clear() {
+    revision += 1;
     shapes = [];
     currentShape = null;
     isDrawing = false;
@@ -159,6 +162,7 @@
     }
 
     isDrawing = true;
+    revision += 1;
     canvasEl.setPointerCapture(e.pointerId);
     const scaledWidth = selectedSize * dprScale();
 
@@ -178,11 +182,13 @@
       const dy = pos.y - dragAnchor.y;
       const id = selectedId;
       shapes = shapes.map((s) => (s.id === id ? translateShape(dragOriginal!, dx, dy) : s));
+      revision += 1;
       redrawAll();
       return;
     }
 
     if (!isDrawing || !currentShape) return;
+    revision += 1;
     const pos = getPos(e);
 
     if (currentShape.type === 'pen') {
@@ -197,6 +203,7 @@
   function handlePointerUp() {
     if (isDrawing && currentShape) {
       shapes = [...shapes, currentShape];
+      revision += 1;
       currentShape = null;
       setDirty(true);
     }
@@ -284,6 +291,8 @@
   function deleteSelected() {
     if (selectedId == null) return;
     shapes = shapes.filter((s) => s.id !== selectedId);
+    revision += 1;
+    setDirty(shapes.length > 0);
     selectedId = null;
     redrawAll();
   }
@@ -294,6 +303,7 @@
         ...shapes,
         { id: nextId++, type: 'text', color: selectedColor, fontSize: textFontSize(selectedSize), pos: textInputPos, text: textInputValue.trim() },
       ];
+      revision += 1;
       setDirty(true);
       redrawAll();
     }
@@ -309,6 +319,8 @@
   function undo() {
     if (shapes.length === 0) return;
     shapes = shapes.slice(0, -1);
+    revision += 1;
+    setDirty(shapes.length > 0);
     redrawAll();
   }
 

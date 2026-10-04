@@ -25,6 +25,7 @@ fn run(run_id: &str, model: &str) -> EvalRun {
             model: Some(model.into()),
             effort: None,
             prompt_version: "agy-provider-v2".into(),
+            jev: None,
         },
         prompt: "repair fixture".into(),
         started_at: 10,

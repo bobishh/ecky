@@ -22,6 +22,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::agy_provider::compact_agy_provider,
         crate::commands::provider_writer::activate_provider_writer,
         crate::commands::codex_takeover::get_codex_takeover,
+        crate::commands::jev_classifications::get_jev_classification_results,
         crate::commands::codex_takeover::get_codex_takeover_messages,
         crate::commands::codex_takeover::send_codex_takeover_prompt,
         crate::commands::codex_takeover::steer_codex_takeover,

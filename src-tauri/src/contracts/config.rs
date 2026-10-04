@@ -249,6 +249,36 @@ pub struct ProviderModels {
     pub agy: String,
 }
 
+#[derive(Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct JevClassifierConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl JevClassifierConfig {
+    pub fn validate(&self) -> super::AppResult<()> {
+        if self.enabled && self.api_key.trim().is_empty() {
+            return Err(super::AppError::validation(
+                "Jev API token is required when classifier is enabled",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for JevClassifierConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JevClassifierConfig")
+            .field("enabled", &self.enabled)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -277,6 +307,8 @@ pub struct Config {
     pub connection_type: Option<String>,
     #[serde(default)]
     pub provider_models: ProviderModels,
+    #[serde(default)]
+    pub jev_classifier: JevClassifierConfig,
     #[serde(default = "default_engine_kind")]
     pub default_engine_kind: EngineKind,
     #[serde(default = "default_source_language")]

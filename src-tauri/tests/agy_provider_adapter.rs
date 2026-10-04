@@ -772,6 +772,52 @@ fn agy_provider_compaction_rotates_external_id_and_retains_message_history() {
 }
 
 #[test]
+fn errored_agy_turn_keeps_nonempty_answer_with_error_status() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE threads (
+             id TEXT PRIMARY KEY,
+             title TEXT NOT NULL,
+             summary TEXT NOT NULL DEFAULT '',
+             updated_at INTEGER NOT NULL
+         );
+         INSERT INTO threads (id, title, updated_at) VALUES ('ecky-error', 'One', 1);",
+    )
+    .unwrap();
+    ecky_cad_lib::services::codex_takeover::ensure_schema(&conn).unwrap();
+    ecky_cad_lib::services::agy_provider::bind_owned_conversation(
+        &conn,
+        "ecky-error",
+        "agy-error",
+        "One",
+        "/workspace/one",
+        1,
+    )
+    .unwrap();
+
+    let result = ecky_cad_lib::services::agy_provider::AgyTurnResult {
+        conversation_id: "agy-error".into(),
+        turn_id: "turn-error".into(),
+        status: "ERROR".into(),
+        response: "Useful completed answer".into(),
+        error: Some("RESOURCE_EXHAUSTED (code 429)".into()),
+        eval_events: Vec::new(),
+        started_at: 10,
+        completed_at: 20,
+    };
+
+    ecky_cad_lib::services::agy_provider::persist_terminal_answer(&conn, "ecky-error", &result)
+        .unwrap();
+
+    let page =
+        ecky_cad_lib::services::agy_provider::message_page(&conn, "ecky-error", None).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].content, "Useful completed answer");
+    assert_eq!(page.messages[0].status, "error");
+}
+
+#[test]
 fn stream_projection_formats_rich_details_from_parameters_and_native_tools() {
     // 1. MCP tool with escaped quotes and specific toolSummary over generic toolAction
     let mcp_summary = project_stream_event(&json!({

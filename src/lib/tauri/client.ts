@@ -68,6 +68,7 @@ import {
   type CodexMessagePage,
   type CodexMessagePageInput,
   type CodexPromptInput,
+  type ClassificationResult,
   type CodexSteerInput,
   type CodexStopInput,
   type CodexTakeoverSnapshot,
@@ -229,6 +230,12 @@ export async function getCodexTakeover(
   return invokeCommand(commands.getCodexTakeover(eckyThreadId));
 }
 
+export async function getJevClassificationResults(
+  threadId: string,
+): Promise<ClassificationResult[]> {
+  return invokeCommand(commands.getJevClassificationResults(threadId));
+}
+
 export async function getCodexTakeoverMessages(
   input: CodexMessagePageInput,
 ): Promise<CodexMessagePage> {
@@ -245,9 +252,12 @@ export async function sendCodexTakeoverPrompt(
 }
 
 export async function steerCodexTakeover(
-  input: CodexSteerInput,
+  input: Omit<CodexSteerInput, 'attachments'> & { attachments?: Attachment[] },
 ): Promise<CodexTakeoverSnapshot> {
-  return invokeCommand(commands.steerCodexTakeover(input));
+  return invokeCommand(commands.steerCodexTakeover({
+    ...input,
+    attachments: (input.attachments ?? []).map(toContractAttachment),
+  }));
 }
 
 export async function stopCodexTakeover(

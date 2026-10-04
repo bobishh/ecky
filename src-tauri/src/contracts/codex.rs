@@ -98,6 +98,8 @@ pub struct CodexQueuedPrompt {
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     pub status: String,
+    #[serde(default)]
+    pub can_cancel: bool,
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,

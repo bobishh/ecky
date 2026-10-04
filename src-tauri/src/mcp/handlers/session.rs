@@ -522,6 +522,90 @@ pub async fn handle_mark_as_read(
     })
 }
 
+pub async fn handle_session_answer_save(
+    state: &AppState,
+    req: SessionReplySaveRequest,
+    ctx: &AgentContext,
+) -> AppResult<SessionReplySaveResponse> {
+    if req.fatal {
+        return Err(AppError::validation(
+            "session_answer_save cannot end a managed turn.",
+        ));
+    }
+    let ctx = ctx.with_override(&req.identity);
+    let body = req.body.trim();
+    if body.is_empty() {
+        return Err(AppError::validation(
+            "session_answer_save requires a non-empty body.",
+        ));
+    }
+    let target = if let Some(thread_id) = req.thread_id.clone() {
+        agent_dialogue::SessionThreadTarget {
+            thread_id,
+            message_id: req.message_id.clone(),
+            model_id: None,
+        }
+    } else {
+        agent_dialogue::resolve_session_thread_target(state, &ctx.session_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::validation(
+                    "No active session target is available for session_answer_save.",
+                )
+            })?
+    };
+    ensure_thread_claim(state, &ctx, &target.thread_id, false).await?;
+    let timestamp = now_secs();
+    let message_id = Uuid::new_v4().to_string();
+    agent_dialogue::add_dialogue_message(
+        state,
+        &target.thread_id,
+        &crate::contracts::Message {
+            id: message_id.clone(),
+            role: crate::contracts::MessageRole::Assistant,
+            content: body.to_string(),
+            status: crate::contracts::MessageStatus::Success,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: Some(agent_dialogue::build_agent_origin(
+                &dialogue_identity(&ctx),
+                timestamp,
+            )),
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+            timestamp,
+        },
+    )
+    .await?;
+    state.emit_history_changed(
+        Some(target.thread_id.clone()),
+        Some(message_id.clone()),
+        "messageCreated",
+    );
+    push_trace_event(
+        state,
+        &ctx,
+        TraceEvent {
+            thread_id: Some(target.thread_id.clone()),
+            message_id: Some(message_id.clone()),
+            model_id: target.model_id,
+            phase: "working",
+            kind: "answer_first_save",
+            summary: summarize_user_facing_text(body),
+            details: None,
+        },
+    );
+    Ok(SessionReplySaveResponse {
+        thread_id: target.thread_id,
+        message_id,
+        fatal: false,
+    })
+}
+
 pub async fn handle_session_reply_save(
     state: &AppState,
     req: SessionReplySaveRequest,

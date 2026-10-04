@@ -1167,6 +1167,7 @@ pub async fn init_generation_attempt(
             prompt,
             attachments,
             image_data,
+            classification_request_id: None,
         },
         state.inner(),
         &app,
@@ -1180,6 +1181,7 @@ pub(crate) struct InitGenerationCoreInput {
     pub prompt: String,
     pub attachments: Option<Vec<Attachment>>,
     pub image_data: Option<String>,
+    pub classification_request_id: Option<String>,
 }
 
 pub(crate) async fn init_generation_core(
@@ -1192,6 +1194,7 @@ pub(crate) async fn init_generation_core(
         prompt,
         attachments,
         image_data,
+        classification_request_id,
     } = input;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1231,6 +1234,22 @@ pub(crate) async fn init_generation_core(
         };
         db::add_message_checked(&db, &thread_id, &user_msg)
             .map_err(|err| AppError::persistence(err.to_string()))?;
+        if let Some(request_id) = classification_request_id.as_deref() {
+            crate::services::jev_classifications::bind_message(
+                &db,
+                &thread_id,
+                "api",
+                request_id,
+                &user_message_id,
+            )?;
+            if let Some(app) = state.app_handle.lock().unwrap().clone() {
+                use tauri::Emitter;
+                let _ = app.emit(
+                    "jev-classification-accepted",
+                    serde_json::json!({"threadId": thread_id}),
+                );
+            }
+        }
         persist_user_prompt_references(
             &db,
             &thread_id,
@@ -1670,6 +1689,23 @@ pub(crate) async fn classify_intent_core(
     input: ClassifyIntentCoreInput,
     state: &AppState,
 ) -> AppResult<IntentDecision> {
+    classify_intent_with_route_core(input, state)
+        .await
+        .map(|(decision, _)| decision)
+}
+
+pub(crate) async fn classify_intent_with_route_core(
+    input: ClassifyIntentCoreInput,
+    state: &AppState,
+) -> AppResult<(IntentDecision, Option<crate::jev_classifier::AcceptedRoute>)> {
+    classify_intent_with_route_with_classifier(input, state, None).await
+}
+
+async fn classify_intent_with_route_with_classifier(
+    input: ClassifyIntentCoreInput,
+    state: &AppState,
+    classifier: Option<&dyn crate::jev_classifier::TurnClassifier>,
+) -> AppResult<(IntentDecision, Option<crate::jev_classifier::AcceptedRoute>)> {
     let ClassifyIntentCoreInput {
         prompt,
         thread_id,
@@ -1713,7 +1749,72 @@ pub(crate) async fn classify_intent_core(
         } else {
             prompt
         };
-    let images = prepare_images(image_data, attachments);
+    let images = prepare_images(image_data, attachments.clone());
+    let jev_config = state.config.lock().unwrap().jev_classifier.clone();
+    if jev_config.enabled {
+        let attachment_modalities = attachments
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|attachment| crate::jev_classifier::AttachmentModality {
+                kind: attachment.kind.as_str().to_owned(),
+                explanation: attachment.explanation.clone(),
+            })
+            .chain(
+                images
+                    .iter()
+                    .map(|_| crate::jev_classifier::AttachmentModality {
+                        kind: "image".into(),
+                        explanation: "inline image supplied with current request".into(),
+                    }),
+            )
+            .collect();
+        let request = crate::jev_classifier::ClassifierRequest::bounded(
+            &prompt,
+            std::iter::empty(),
+            backend_context.as_deref().unwrap_or_default(),
+            &format!(
+                "API engine {}; configured model ceiling {}",
+                engine.provider,
+                if engine.model.trim().is_empty() {
+                    "provider default"
+                } else {
+                    engine.model.trim()
+                }
+            ),
+            attachment_modalities,
+            Vec::new(),
+        );
+        let mut route = match classifier {
+            Some(classifier) => classifier.classify(request).await?,
+            None => {
+                crate::jev_classifier::classify_configured_request(&jev_config, request).await?
+            }
+        };
+        if route.model.is_some() {
+            return Err(AppError::validation(
+                "Jev returned an unverified model override for this API engine.",
+            ));
+        }
+        route.model_reason = format!(
+            "configured API model retained ({}); no verified comparable discovered model catalog",
+            engine.model
+        );
+        let answer_only = !matches!(
+            route.intent,
+            crate::provider_turn::ProviderTurnIntent::Modify
+        );
+        return Ok((
+            IntentDecision {
+                intent_mode: if answer_only { "question" } else { "design" }.into(),
+                confidence: route.action_confidence as f32,
+                response: format!("Jev selected {} contract.", route.intent.as_str()),
+                final_response: None,
+                usage: None,
+            },
+            Some(route),
+        ));
+    }
     match llm::classify_intent(&engine, &prompt, backend_context.as_deref(), images).await {
         Ok(classification) => {
             let llm::IntentClassification {
@@ -1727,19 +1828,22 @@ pub(crate) async fn classify_intent_core(
             } else {
                 final_response.clone()
             };
-            Ok(IntentDecision {
-                intent_mode: if explicit_question_only {
-                    "question".to_string()
-                } else {
-                    intent
+            Ok((
+                IntentDecision {
+                    intent_mode: if explicit_question_only {
+                        "question".to_string()
+                    } else {
+                        intent
+                    },
+                    confidence,
+                    response,
+                    final_response,
+                    usage: classification.usage,
                 },
-                confidence,
-                response,
-                final_response,
-                usage: classification.usage,
-            })
+                None,
+            ))
         }
-        Err(_) => Ok(fallback_intent(&prompt)),
+        Err(_) => Ok((fallback_intent(&prompt), None)),
     }
 }
 
@@ -1841,6 +1945,7 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: None,
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: EngineKind::Freecad,
             default_source_language: SourceLanguage::LegacyPython,
             default_geometry_backend: GeometryBackend::Freecad,
@@ -1848,6 +1953,123 @@ mod tests {
             max_verify_attempts: 0,
             projects_root: None,
         }
+    }
+
+    #[tokio::test]
+    async fn api_jev_failure_stops_before_selected_engine_dispatch() {
+        struct FailingJev;
+        impl crate::jev_classifier::TurnClassifier for FailingJev {
+            fn classify<'a>(
+                &'a self,
+                _request: crate::jev_classifier::ClassifierRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = crate::contracts::AppResult<
+                                crate::jev_classifier::AcceptedRoute,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async {
+                    Err(crate::contracts::AppError::provider(
+                        "Jev fixture denied route",
+                    ))
+                })
+            }
+        }
+
+        let mut config = test_config();
+        config.engines.push(crate::contracts::Engine {
+            id: "api-engine".into(),
+            name: "API engine".into(),
+            provider: "openai".into(),
+            api_key: "fixture-provider-token".into(),
+            model: "gpt-5.6-sol".into(),
+            light_model: String::new(),
+            base_url: "http://127.0.0.1:1/v1".into(),
+            enabled: true,
+            vision_overrides: Default::default(),
+        });
+        config.selected_engine_id = "api-engine".into();
+        config.jev_classifier.enabled = true;
+        config.jev_classifier.api_key = "fixture-jev-token".into();
+        let conn = crate::db::init_db(&test_db_path("api-jev-failure")).expect("db");
+        let state = AppState::new(config, None, conn);
+        let error = super::classify_intent_with_route_with_classifier(
+            super::ClassifyIntentCoreInput {
+                prompt: "Explain bracket dimensions".into(),
+                thread_id: None,
+                context: None,
+                image_data: None,
+                attachments: None,
+            },
+            &state,
+            Some(&FailingJev),
+        )
+        .await
+        .expect_err("Jev failure blocks provider route");
+        assert_eq!(error.message, "Jev fixture denied route");
+    }
+
+    #[tokio::test]
+    async fn api_jev_route_retains_configured_model_and_rejects_unverified_override() {
+        let mut config = test_config();
+        config.engines.push(crate::contracts::Engine {
+            id: "api-engine".into(),
+            name: "API engine".into(),
+            provider: "openai".into(),
+            api_key: "fixture-provider-token".into(),
+            model: "gpt-5.6-sol".into(),
+            light_model: String::new(),
+            base_url: "http://127.0.0.1:1/v1".into(),
+            enabled: true,
+            vision_overrides: Default::default(),
+        });
+        config.selected_engine_id = "api-engine".into();
+        config.jev_classifier.enabled = true;
+        config.jev_classifier.api_key = "fixture-jev-token".into();
+        let conn = crate::db::init_db(&test_db_path("api-jev-model")).expect("db");
+        let state = AppState::new(config, None, conn);
+        let input = super::ClassifyIntentCoreInput {
+            prompt: "Explain bracket dimensions".into(),
+            thread_id: None,
+            context: None,
+            image_data: None,
+            attachments: None,
+        };
+        let retained = crate::jev_classifier::MockJevClassifier::fixed(
+            crate::jev_classifier::AcceptedRoute::test_route(
+                crate::provider_turn::ProviderTurnIntent::Answer,
+                None,
+                false,
+            ),
+        );
+        let (_, route) = super::classify_intent_with_route_with_classifier(
+            input.clone(),
+            &state,
+            Some(&retained),
+        )
+        .await
+        .expect("valid route");
+        assert!(route
+            .unwrap()
+            .model_reason
+            .contains("configured API model retained"));
+
+        let unverified = crate::jev_classifier::MockJevClassifier::fixed(
+            crate::jev_classifier::AcceptedRoute::test_route(
+                crate::provider_turn::ProviderTurnIntent::Answer,
+                Some("gpt-5.6-luna".into()),
+                false,
+            ),
+        );
+        let error =
+            super::classify_intent_with_route_with_classifier(input, &state, Some(&unverified))
+                .await
+                .expect_err("unverified API override");
+        assert!(error.message.contains("unverified model override"));
     }
 
     fn prompt_context_with_last_output(macro_dialect: MacroDialect) -> PromptContext {

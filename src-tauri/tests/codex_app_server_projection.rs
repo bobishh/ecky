@@ -2,6 +2,7 @@ use ecky_cad_lib::contracts::CodexTakeoverRuntime;
 use ecky_cad_lib::contracts::{
     Attachment, AttachmentKind, CodexDialogueMessage, CodexTakeoverBinding, ProviderEventKind,
 };
+use ecky_cad_lib::llm_eval::{read_run, EvalRunSeed};
 use ecky_cad_lib::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
 use ecky_cad_lib::services::codex_app_server::{
     apply_live_notification, apply_runtime_notification, apply_start_response,
@@ -12,6 +13,333 @@ use ecky_cad_lib::services::codex_app_server::{
 use serde_json::json;
 
 static CODEX_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_terminal_turns_persist_strict_eval_runs_for_success_error_and_interrupt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _environment = CODEX_ENV_LOCK.lock().await;
+    let test_id = uuid::Uuid::new_v4().to_string();
+    let directory = std::env::temp_dir().join(format!("ecky-codex-eval-{test_id}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("fake-codex");
+    std::fs::write(
+        &executable,
+        r##"#!/usr/bin/env python3
+import json, sys
+turn = 0
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method == "turn/start":
+        turn += 1
+        params = message["params"]
+        tid = "turn-" + str(turn)
+        status = ["completed", "failed", "interrupted"][turn - 1]
+        if turn == 1:
+            print(json.dumps({"id": message["id"], "result": {"turn": {"id": tid, "model": "gpt-5.6", "effort": "high"}}}), flush=True)
+        def notify(method, params):
+            print(json.dumps({"method": method, "params": params}), flush=True)
+        notify("turn/started", {"threadId": params["threadId"], "turn": {"id": tid}})
+        notify("item/started", {"threadId": params["threadId"], "turnId": tid, "item": {"id": "tool-1", "type": "commandExecution", "command": "echo check"}})
+        notify("item/completed", {"threadId": params["threadId"], "turnId": tid, "item": {"id": "tool-1", "type": "commandExecution", "command": "echo check", "aggregatedOutput": "checked", "exitCode": 0}})
+        notify("item/completed", {"threadId": params["threadId"], "turnId": tid, "item": {"id": "orphan-tool", "type": "commandExecution", "aggregatedOutput": "result without start"}})
+        if turn == 1:
+            notify("item/completed", {"threadId": params["threadId"], "turnId": tid, "item": {"id": "answer-1", "type": "agentMessage", "text": "Useful answer"}})
+        else:
+            notify("item/agentMessage/delta", {"threadId": params["threadId"], "turnId": tid, "itemId": "answer-1", "delta": "Useful answer"})
+        err = {"message": "provider diagnostic"} if status == "failed" else None
+        notify("turn/completed", {"threadId": params["threadId"], "turn": {"id": tid, "status": status, "error": err}})
+        notify("turn/completed", {"threadId": params["threadId"], "turn": {"id": tid, "status": status, "error": err}})
+        if turn != 1:
+            print(json.dumps({"id": message["id"], "result": {"turn": {"id": tid, "model": "gpt-5.6"}}}), flush=True)
+"##,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    std::env::set_var("ECKY_CODEX_BIN", &executable);
+    let supervisor = CodexAppServerSupervisor::new();
+
+    for (index, intent) in [
+        ProviderTurnIntent::Modify,
+        ProviderTurnIntent::Modify,
+        ProviderTurnIntent::Modify,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = EvalRunSeed {
+            run_id: format!("codex-eval-{index}"),
+            thread_id: "ecky-1".into(),
+            external_thread_id: "codex-7".into(),
+            provider: "codex".into(),
+            model: (index != 0).then(|| "gpt-5.6".into()),
+            effort: Some("medium".into()),
+            prompt_version: "codex-app-server-v1".into(),
+            prompt: format!("original prompt {index}"),
+            starting_version_id: Some("version-start".into()),
+            starting_input_digest: Some("sha256:start".into()),
+            expected_red_rounds: 0,
+            turn_intent: intent,
+            answer_first_required: false,
+            jev_route: None,
+        };
+        supervisor
+            .start_turn_with_eval_seed(
+                "codex-7",
+                "wire prompt",
+                None,
+                &[],
+                ProviderTurnPolicy::prompt_based(),
+                seed,
+            )
+            .await
+            .unwrap();
+    }
+
+    let runs = supervisor.take_completed_eval_runs().await;
+    assert_eq!(runs.len(), 3);
+    let expected = ["success", "error", "interrupted"];
+    for (run, status) in runs.iter().zip(expected) {
+        assert_eq!(run.status, status);
+        assert_eq!(run.thread_id, "ecky-1");
+        assert!(run
+            .response
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Useful answer"));
+        assert!(run
+            .events
+            .iter()
+            .any(|event| event.name.as_deref() == Some("commandExecution")));
+        let files = ecky_cad_lib::llm_eval::persist_run(&directory, run).unwrap();
+        assert!(
+            files.run_edn.exists() && files.trajectory_edn.exists() && files.report_md.exists()
+        );
+        assert_eq!(read_run(&files.run_dir).unwrap(), *run);
+    }
+    assert_eq!(runs[0].route.model.as_deref(), Some("gpt-5.6"));
+    assert_eq!(runs[0].route.effort.as_deref(), Some("high"));
+    assert!(runs[1]
+        .raw_error
+        .as_deref()
+        .unwrap()
+        .contains("provider diagnostic"));
+    assert!(runs[0]
+        .events
+        .iter()
+        .any(|event| event.state == "completed-without-start"));
+    assert!(runs[0]
+        .events
+        .iter()
+        .any(|event| event.state == "capture-incomplete"));
+    let invocation = runs[0]
+        .events
+        .iter()
+        .find(|event| event.name.as_deref() == Some("commandExecution"))
+        .unwrap();
+    let args = serde_json::to_string(&invocation.input).unwrap();
+    let result = runs[0]
+        .events
+        .iter()
+        .find(|event| {
+            event.name.as_deref() == Some("commandExecution")
+                && event.kind == ecky_cad_lib::llm_eval::EvalEventKind::Result
+        })
+        .unwrap();
+    let output = serde_json::to_string(&result.output).unwrap();
+    assert!(args.contains("echo check"));
+    assert!(!args.contains("command\\\":null"));
+    assert!(output.contains("checked"));
+    std::env::remove_var("ECKY_CODEX_BIN");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn malformed_start_response_finalizes_its_seed_without_leaking_to_next_turn() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _environment = CODEX_ENV_LOCK.lock().await;
+    let test_id = uuid::Uuid::new_v4().to_string();
+    let directory = std::env::temp_dir().join(format!("ecky-codex-malformed-{test_id}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("fake-codex");
+    std::fs::write(
+        &executable,
+        r##"#!/usr/bin/env python3
+import json, sys
+turn = 0
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method == "turn/start":
+        turn += 1
+        params = message["params"]
+        if turn == 1:
+            print(json.dumps({"id": message["id"], "result": {"turn": {"status": "failed"}}}), flush=True)
+            continue
+        tid = "valid-turn"
+        print(json.dumps({"method": "turn/started", "params": {"threadId": params["threadId"], "turn": {"id": tid}}}), flush=True)
+        print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": params["threadId"], "turnId": tid, "itemId": "answer", "delta": "valid answer"}}), flush=True)
+        print(json.dumps({"method": "turn/completed", "params": {"threadId": params["threadId"], "turn": {"id": tid, "status": "completed"}}}), flush=True)
+        print(json.dumps({"id": message["id"], "result": {"turn": {"id": tid}}}), flush=True)
+"##,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    std::env::set_var("ECKY_CODEX_BIN", &executable);
+    let supervisor = CodexAppServerSupervisor::new();
+    let seed = |run_id: &str, prompt: &str| EvalRunSeed {
+        run_id: run_id.into(),
+        thread_id: "ecky-malformed".into(),
+        external_thread_id: "codex-malformed".into(),
+        provider: "codex".into(),
+        model: None,
+        effort: None,
+        prompt_version: "codex-app-server-v1".into(),
+        prompt: prompt.into(),
+        starting_version_id: None,
+        starting_input_digest: None,
+        expected_red_rounds: 0,
+        turn_intent: ProviderTurnIntent::Modify,
+        answer_first_required: false,
+        jev_route: None,
+    };
+    let policy = ProviderTurnPolicy::prompt_based();
+    let malformed = supervisor
+        .start_turn_with_eval_seed(
+            "codex-malformed",
+            "malformed prompt",
+            None,
+            &[],
+            policy,
+            seed("malformed-run", "malformed prompt"),
+        )
+        .await;
+    assert!(malformed.is_err());
+    supervisor
+        .start_turn_with_eval_seed(
+            "codex-malformed",
+            "valid prompt",
+            None,
+            &[],
+            policy,
+            seed("valid-run", "valid prompt"),
+        )
+        .await
+        .unwrap();
+
+    let runs = supervisor.take_completed_eval_runs().await;
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].run_id, "malformed-run");
+    assert_eq!(runs[0].status, "error");
+    assert!(runs[0]
+        .raw_error
+        .as_deref()
+        .unwrap()
+        .contains("missing turn id"));
+    assert_eq!(runs[1].run_id, "valid-run");
+    assert_eq!(runs[1].status, "success");
+    assert_eq!(runs[1].prompt, "valid prompt");
+    assert!(runs[1]
+        .response
+        .as_deref()
+        .unwrap()
+        .contains("valid answer"));
+    let _ = std::fs::remove_dir_all(directory);
+    std::env::remove_var("ECKY_CODEX_BIN");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_server_exit_finalizes_active_eval_once_with_partial_answer_and_diagnostic() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _environment = CODEX_ENV_LOCK.lock().await;
+    let test_id = uuid::Uuid::new_v4().to_string();
+    let directory = std::env::temp_dir().join(format!("ecky-codex-eval-exit-{test_id}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("fake-codex");
+    std::fs::write(
+        &executable,
+        r##"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method == "turn/start":
+        params = message["params"]
+        print(json.dumps({"method": "turn/started", "params": {"threadId": params["threadId"], "turn": {"id": "turn-crash"}}}), flush=True)
+        print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": params["threadId"], "turnId": "turn-crash", "itemId": "answer", "delta": "partial answer"}}), flush=True)
+        print(json.dumps({"id": message["id"], "result": {"turn": {"id": "turn-crash"}}}), flush=True)
+        raise SystemExit(0)
+"##,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    std::env::set_var("ECKY_CODEX_BIN", &executable);
+    let supervisor = CodexAppServerSupervisor::new();
+    let seed = EvalRunSeed {
+        run_id: "codex-eval-process-exit".into(),
+        thread_id: "ecky-1".into(),
+        external_thread_id: "codex-7".into(),
+        provider: "codex".into(),
+        model: Some("gpt-5.6".into()),
+        effort: None,
+        prompt_version: "codex-app-server-v1".into(),
+        prompt: "original prompt".into(),
+        starting_version_id: None,
+        starting_input_digest: None,
+        expected_red_rounds: 0,
+        turn_intent: ProviderTurnIntent::Modify,
+        answer_first_required: false,
+        jev_route: None,
+    };
+    let _ = supervisor
+        .start_turn_with_eval_seed(
+            "codex-7",
+            "wire prompt",
+            None,
+            &[],
+            ProviderTurnPolicy::prompt_based(),
+            seed,
+        )
+        .await;
+
+    let mut runs = Vec::new();
+    for _ in 0..50 {
+        runs = supervisor.take_completed_eval_runs().await;
+        if !runs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "error");
+    assert!(runs[0]
+        .raw_error
+        .as_deref()
+        .unwrap()
+        .contains("Codex app-server exited"));
+    assert_eq!(runs[0].response.as_deref(), Some("partial answer"));
+    assert!(supervisor.take_completed_eval_runs().await.is_empty());
+    std::env::remove_var("ECKY_CODEX_BIN");
+    let _ = std::fs::remove_dir_all(directory);
+}
 
 #[test]
 fn answer_turn_uses_policy_prompt_and_read_only_sandbox() {

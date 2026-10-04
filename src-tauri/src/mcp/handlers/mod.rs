@@ -102,9 +102,9 @@ pub use session::{
     handle_concept_preview_save, handle_delete_thread, handle_finalize_thread,
     handle_long_action_clear, handle_long_action_notice, handle_mark_as_read,
     handle_request_user_prompt, handle_session_activity_clear, handle_session_activity_set,
-    handle_session_log_in, handle_session_log_out, handle_session_reply_save,
-    handle_session_resume, handle_thread_borrow, handle_thread_create, handle_thread_list,
-    handle_thread_meta_get, handle_user_confirm_request,
+    handle_session_answer_save, handle_session_log_in, handle_session_log_out,
+    handle_session_reply_save, handle_session_resume, handle_thread_borrow, handle_thread_create,
+    handle_thread_list, handle_thread_meta_get, handle_user_confirm_request,
 };
 pub use system::{handle_health_check, handle_ui_dispatch};
 pub use target_detail::handle_target_detail_get;

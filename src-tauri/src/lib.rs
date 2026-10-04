@@ -61,6 +61,7 @@ pub mod freecad;
 pub mod freecad_library;
 pub mod gmsh_mesher;
 mod image_sampling;
+pub mod jev_classifier;
 pub mod legacy_python_to_ecky_ir;
 pub mod lithophane;
 pub mod llm;
@@ -619,6 +620,7 @@ pub fn run() {
         has_seen_onboarding: false,
         connection_type: None,
         provider_models: crate::contracts::ProviderModels::default(),
+        jev_classifier: Default::default(),
         default_engine_kind: crate::contracts::EngineKind::Freecad,
         default_source_language: crate::contracts::SourceLanguage::LegacyPython,
         default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -887,6 +889,7 @@ mod tests {
             has_seen_onboarding: false,
             connection_type: None,
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
             default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
             default_geometry_backend: crate::contracts::GeometryBackend::Build123d,

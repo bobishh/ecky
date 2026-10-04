@@ -18,6 +18,7 @@ pub mod fem;
 pub mod generation;
 pub mod history;
 pub mod inline_component_import;
+pub mod jev_classifications;
 pub mod library_panel;
 pub mod macro_ast;
 pub mod mission_evaluation;

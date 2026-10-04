@@ -1,12 +1,12 @@
 use ecky_cad_lib::contracts::{Attachment, AttachmentKind, CodexDialogueMessage};
 use ecky_cad_lib::services::codex_takeover::{
-    bind_owned_thread, build_provider_handoff_summary, claim_queue_item, complete_queue_item,
-    defer_queue_item, enqueue_prompt, enqueue_prompt_with_attachments, ensure_schema,
-    fail_queue_item, get_agent_binding_for_provider, get_binding, list_binding_lineage,
-    list_provider_messages, list_queue, mark_queue_sending, pending_queue_bindings,
-    persist_finished_provider_messages, persist_provider_turn_user_input, provider_message_page,
-    recover_retryable_failures, recover_stale_sending, remove_queue_item, retry_queue_item,
-    upsert_agent_binding, AgentThreadBindingRecord,
+    begin_queue_delivery, bind_owned_thread, build_provider_handoff_summary, claim_queue_item,
+    complete_queue_item, defer_queue_item, enqueue_prompt, enqueue_prompt_with_attachments,
+    ensure_schema, fail_queue_item, get_agent_binding_for_provider, get_binding,
+    list_binding_lineage, list_provider_messages, list_queue, mark_queue_sending,
+    pending_queue_bindings, persist_finished_provider_messages, persist_provider_turn_user_input,
+    provider_message_page, recover_retryable_failures, recover_stale_sending, remove_queue_item,
+    retry_queue_item, upsert_agent_binding, AgentThreadBindingRecord,
 };
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
@@ -763,6 +763,7 @@ fn failed_queue_head_blocks_overtaking_and_retry_remove_are_scoped() {
     retry_queue_item(&conn, "ecky-1", &first.id, 160).unwrap();
     remove_queue_item(&conn, "ecky-1", &first.id).unwrap();
     mark_queue_sending(&conn, &second.id, 170).unwrap();
+    assert!(begin_queue_delivery(&conn, &second.id, 171).unwrap());
     let sending = remove_queue_item(&conn, "ecky-1", &second.id).unwrap_err();
     assert!(sending.message.contains("Use STOP"));
 }

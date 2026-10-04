@@ -16,8 +16,8 @@ mod config;
 mod config_edn;
 pub use config::{
     AppLogEntry, Asset, AutoAgent, Config, Engine, FemComputeConfig, FemComputeQuality,
-    FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest, McpConfig,
-    McpMode, MicrowaveConfig, ProviderModels, VoiceConfig,
+    FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest,
+    JevClassifierConfig, McpConfig, McpMode, MicrowaveConfig, ProviderModels, VoiceConfig,
 };
 pub use config_edn::{
     decode_config, encode_config, normalize_legacy_config_for_edn, ConfigNormalizationWarning,

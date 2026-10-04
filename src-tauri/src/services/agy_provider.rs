@@ -1904,6 +1904,7 @@ pub fn enqueue_prompt_with_attachments(
         prompt_text: prompt_text.to_string(),
         attachments: attachments.to_vec(),
         status: "queued".to_string(),
+        can_cancel: true,
         error: None,
         created_at: now,
         updated_at: now,
@@ -1943,6 +1944,7 @@ pub fn list_queue(conn: &Connection, ecky_thread_id: &str) -> AppResult<Vec<Code
                 prompt_text: row.get(2)?,
                 attachments: decode_queue_attachments(row.get(3)?)?,
                 status: row.get(4)?,
+                can_cancel: row.get::<_, String>(4)? != "sending",
                 error: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
@@ -1999,6 +2001,7 @@ pub fn queue_head(conn: &Connection, ecky_thread_id: &str) -> AppResult<Option<C
                 prompt_text: row.get(2)?,
                 attachments: decode_queue_attachments(row.get(3)?)?,
                 status: row.get(4)?,
+                can_cancel: row.get::<_, String>(4)? != "sending",
                 error: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
@@ -2046,17 +2049,34 @@ pub fn retry_queue_item(
 }
 
 pub fn remove_queue_item(conn: &Connection, ecky_thread_id: &str, id: &str) -> AppResult<()> {
-    let status: Option<String> = conn
+    let status: Option<(String, bool)> = conn
         .query_row(
-            "SELECT status FROM agent_prompt_queue WHERE id = ?1 AND ecky_thread_id = ?2 AND provider = ?3",
+            "SELECT status, dispatch_started FROM agent_prompt_queue WHERE id = ?1 AND ecky_thread_id = ?2 AND provider = ?3",
             params![id, ecky_thread_id, AGY_PROVIDER_ID],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
         )
         .optional()
         .map_err(|error| AppError::persistence(error.to_string()))?;
-    match status.as_deref() {
-        Some("sending") => Err(AppError::conflict(format!(
-            "Agy queue item {id} is already sending. Use STOP for active work."
+    match status {
+        Some((status, false)) if status == "sending" => {
+            let removed = conn
+                .execute(
+                    "DELETE FROM agent_prompt_queue
+                     WHERE id = ?1 AND ecky_thread_id = ?2 AND provider = ?3
+                       AND status = 'sending' AND dispatch_started = 0",
+                    params![id, ecky_thread_id, AGY_PROVIDER_ID],
+                )
+                .map_err(|error| AppError::persistence(error.to_string()))?;
+            if removed == 1 {
+                Ok(())
+            } else {
+                Err(AppError::conflict(format!(
+                    "Agy queue item {id} crossed the provider delivery boundary. Use STOP."
+                )))
+            }
+        }
+        Some((status, true)) if status == "sending" => Err(AppError::conflict(format!(
+            "Agy queue item {id} crossed the provider delivery boundary. Use STOP."
         ))),
         Some(_) => {
             conn.execute(
@@ -2091,6 +2111,36 @@ pub fn insert_message(
         status,
         now,
     )
+}
+
+/// Keep any provider-produced answer even when its terminal transport status is
+/// an error. The message status remains truthful so answer content cannot mask
+/// quota, authorization, or transport diagnostics.
+pub fn persist_terminal_answer(
+    conn: &Connection,
+    ecky_thread_id: &str,
+    result: &AgyTurnResult,
+) -> AppResult<Option<CodexDialogueMessage>> {
+    if result.response.trim().is_empty()
+        || matches!(result.status.as_str(), "CANCELED" | "INTERRUPTED")
+    {
+        return Ok(None);
+    }
+    let status = if result.status == "SUCCESS" {
+        "success"
+    } else {
+        "error"
+    };
+    insert_message(
+        conn,
+        ecky_thread_id,
+        &result.conversation_id,
+        "assistant",
+        &result.response,
+        status,
+        result.completed_at,
+    )
+    .map(Some)
 }
 
 pub fn insert_message_with_id(

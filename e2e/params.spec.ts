@@ -1787,7 +1787,7 @@ endsolid mock
     const historyReadsBefore = await page.evaluate(() => (window as any).__PARAM_CALLS__
       .filter((entry: { cmd: string }) => entry.cmd === 'get_history').length);
 
-    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 100));
+    await page.clock.runFor(100);
     await page.getByRole('button', { name: 'SAVE VALUES' }).click();
 
     await expect(page.getByRole('button', { name: 'SAVED' })).toBeVisible();

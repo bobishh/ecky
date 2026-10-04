@@ -5,8 +5,9 @@ use crate::contracts::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
 
-pub const CODEX_BOOTSTRAP_VERSION: u32 = 4;
+pub const CODEX_BOOTSTRAP_VERSION: u32 = 5;
 pub const CODEX_PROVIDER_ID: &str = "codex";
+pub const JEV_CLASSIFIER_ERROR_PREFIX: &str = "Jev classifier failed; automatic retry disabled.";
 static CODEX_QUEUE_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 pub fn notify_queue_supervisor() {
@@ -56,7 +57,12 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         [],
         |row| row.get(0),
     )?;
-    let (queue_has_provider, queue_has_attachments) = if binding_exists {
+    let (
+        queue_has_provider,
+        queue_has_attachments,
+        queue_has_dispatch_started,
+        queue_has_failure_phase,
+    ) = if binding_exists {
         let mut stmt = conn.prepare("PRAGMA table_info(agent_prompt_queue)")?;
         let columns = stmt
             .query_map([], |row| row.get::<_, String>(1))?
@@ -64,9 +70,11 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         (
             columns.iter().any(|column| column == "provider"),
             columns.iter().any(|column| column == "attachments_json"),
+            columns.iter().any(|column| column == "dispatch_started"),
+            columns.iter().any(|column| column == "failure_phase"),
         )
     } else {
-        (true, true)
+        (true, true, true, true)
     };
     if binding_exists && !queue_has_provider {
         conn.execute_batch(
@@ -97,6 +105,8 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
                 prompt_text TEXT NOT NULL,
                 attachments_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL CHECK(status IN ('queued', 'sending', 'failed')),
+                dispatch_started INTEGER NOT NULL DEFAULT 0,
+                failure_phase TEXT,
                 error TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
@@ -104,6 +114,7 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
                     REFERENCES agent_thread_bindings(ecky_thread_id, provider) ON DELETE CASCADE
              );
              INSERT INTO agent_prompt_queue
+                (id, ecky_thread_id, provider, prompt_text, attachments_json, status, error, created_at, updated_at)
                 SELECT q.id, q.ecky_thread_id, b.provider, q.prompt_text, '[]', q.status,
                        q.error, q.created_at, q.updated_at
                 FROM agent_prompt_queue_legacy q
@@ -116,6 +127,18 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     if queue_has_provider && !queue_has_attachments {
         conn.execute(
             "ALTER TABLE agent_prompt_queue ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    if queue_has_provider && !queue_has_dispatch_started {
+        conn.execute(
+            "ALTER TABLE agent_prompt_queue ADD COLUMN dispatch_started INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if queue_has_provider && !queue_has_failure_phase {
+        conn.execute(
+            "ALTER TABLE agent_prompt_queue ADD COLUMN failure_phase TEXT",
             [],
         )?;
     }
@@ -139,6 +162,8 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             prompt_text TEXT NOT NULL,
             attachments_json TEXT NOT NULL DEFAULT '[]',
             status TEXT NOT NULL CHECK(status IN ('queued', 'sending', 'failed')),
+            dispatch_started INTEGER NOT NULL DEFAULT 0,
+            failure_phase TEXT,
             error TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
@@ -330,6 +355,25 @@ pub fn get_binding(
     )
 }
 
+pub fn get_binding_by_codex_thread_id(
+    conn: &Connection,
+    codex_thread_id: &str,
+) -> AppResult<Option<CodexTakeoverBinding>> {
+    let ecky_thread_id = conn
+        .query_row(
+            "SELECT ecky_thread_id FROM agent_thread_bindings
+             WHERE provider = ?1 AND external_thread_id = ?2",
+            params![CODEX_PROVIDER_ID, codex_thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    ecky_thread_id
+        .map(|thread_id| get_binding(conn, &thread_id))
+        .transpose()
+        .map(Option::flatten)
+}
+
 pub fn ensure_external_thread_available(
     conn: &Connection,
     ecky_thread_id: &str,
@@ -425,8 +469,12 @@ pub fn rotate_agent_binding(
     reason: &str,
     now: i64,
 ) -> AppResult<AgentThreadBindingRecord> {
-    if let Some(existing) = get_agent_binding_for_provider(conn, ecky_thread_id, provider)? {
-        conn.execute(
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    if let Some(existing) = get_agent_binding_for_provider(&transaction, ecky_thread_id, provider)?
+    {
+        transaction.execute(
             "UPDATE agent_thread_binding_lineage
              SET superseded_at = ?4, superseded_reason = ?5
              WHERE ecky_thread_id = ?1 AND provider = ?2 AND external_thread_id = ?3 AND superseded_at IS NULL",
@@ -435,29 +483,46 @@ pub fn rotate_agent_binding(
         .map_err(|error| AppError::persistence(error.to_string()))?;
     }
 
-    conn.execute(
-        "UPDATE agent_thread_bindings
+    transaction
+        .execute(
+            "UPDATE agent_thread_bindings
          SET external_thread_id = ?3, updated_at = ?4
          WHERE ecky_thread_id = ?1 AND provider = ?2",
-        params![ecky_thread_id, provider, new_external_thread_id, now],
-    )
-    .map_err(|error| AppError::persistence(error.to_string()))?;
+            params![ecky_thread_id, provider, new_external_thread_id, now],
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
 
-    conn.execute(
-        "INSERT OR IGNORE INTO agent_thread_binding_lineage (
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO agent_thread_binding_lineage (
             ecky_thread_id, provider, external_thread_id, activated_at,
             superseded_at, superseded_reason
          ) VALUES (?1, ?2, ?3, ?4, NULL, NULL)",
-        params![ecky_thread_id, provider, new_external_thread_id, now],
-    )
-    .map_err(|error| AppError::persistence(error.to_string()))?;
+            params![ecky_thread_id, provider, new_external_thread_id, now],
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
 
-    get_agent_binding_for_provider(conn, ecky_thread_id, provider)?.ok_or_else(|| {
-        AppError::persistence(format!(
-            "Agent binding for Ecky thread {} disappeared after rotate.",
-            ecky_thread_id
-        ))
-    })
+    let binding = get_agent_binding_for_provider(&transaction, ecky_thread_id, provider)?
+        .ok_or_else(|| {
+            AppError::persistence(format!(
+                "Agent binding for Ecky thread {} disappeared after rotate.",
+                ecky_thread_id
+            ))
+        })?;
+    transaction
+        .commit()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    Ok(binding)
+}
+
+pub fn writer_conflict_rotated_for_queue(conn: &Connection, queue_id: &str) -> AppResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_thread_binding_lineage
+         WHERE provider = ?1 AND superseded_reason = ?2)",
+        params![CODEX_PROVIDER_ID, format!("writer-conflict:{queue_id}")],
+        |row| row.get(0),
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))
 }
 
 pub fn bind_owned_thread(
@@ -920,6 +985,7 @@ pub fn enqueue_prompt_with_attachments(
         prompt_text: prompt_text.to_string(),
         attachments: attachments.to_vec(),
         status: "queued".to_string(),
+        can_cancel: true,
         error: None,
         created_at: now,
         updated_at: now,
@@ -945,7 +1011,7 @@ pub fn enqueue_prompt_with_attachments(
 pub fn list_queue(conn: &Connection, ecky_thread_id: &str) -> AppResult<Vec<CodexQueuedPrompt>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, ecky_thread_id, prompt_text, attachments_json, status, error, created_at, updated_at
+            "SELECT id, ecky_thread_id, prompt_text, attachments_json, status, error, created_at, updated_at, dispatch_started
              FROM agent_prompt_queue
              WHERE ecky_thread_id = ?1 AND provider = ?2
              ORDER BY created_at ASC, id ASC",
@@ -953,15 +1019,18 @@ pub fn list_queue(conn: &Connection, ecky_thread_id: &str) -> AppResult<Vec<Code
         .map_err(|error| AppError::persistence(error.to_string()))?;
     let rows = stmt
         .query_map(params![ecky_thread_id, CODEX_PROVIDER_ID], |row| {
+            let status: String = row.get(4)?;
+            let dispatch_started: i64 = row.get(8)?;
             Ok(CodexQueuedPrompt {
                 id: row.get(0)?,
                 ecky_thread_id: row.get(1)?,
                 prompt_text: row.get(2)?,
                 attachments: decode_queue_attachments(row.get(3)?)?,
-                status: row.get(4)?,
+                status: status.clone(),
                 error: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                can_cancel: status != "sending" || dispatch_started == 0,
             })
         })
         .map_err(|error| AppError::persistence(error.to_string()))?;
@@ -1036,6 +1105,7 @@ pub fn recover_retryable_failures(conn: &Connection, now: i64) -> AppResult<usiz
         "UPDATE agent_prompt_queue
          SET status = 'queued', updated_at = ?1
          WHERE status = 'failed'
+           AND coalesce(failure_phase, 'provider-delivery') = 'provider-delivery'
            AND (
                lower(coalesce(error, '')) LIKE '%already has an active writer%'
                OR lower(coalesce(error, '')) LIKE '%already has an active or pending turn%'
@@ -1048,6 +1118,20 @@ pub fn recover_retryable_failures(conn: &Connection, now: i64) -> AppResult<usiz
         [now],
     )
     .map_err(|error| AppError::persistence(error.to_string()))
+}
+
+pub fn fail_classifier_queue_item(
+    conn: &Connection,
+    id: &str,
+    error: &str,
+    now: i64,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE agent_prompt_queue SET status = 'failed', error = ?2, failure_phase = 'jev-classifier', updated_at = ?3 WHERE id = ?1",
+        params![id, format!("{JEV_CLASSIFIER_ERROR_PREFIX} {error}"), now],
+    )
+    .map_err(|db_error| AppError::persistence(db_error.to_string()))?;
+    Ok(())
 }
 
 pub fn is_retryable_delivery_error(error: &str) -> bool {
@@ -1107,22 +1191,25 @@ pub fn record_bootstrap_version(
 
 pub fn queue_head(conn: &Connection, ecky_thread_id: &str) -> AppResult<Option<CodexQueuedPrompt>> {
     conn.query_row(
-        "SELECT id, ecky_thread_id, prompt_text, attachments_json, status, error, created_at, updated_at
+        "SELECT id, ecky_thread_id, prompt_text, attachments_json, status, error, created_at, updated_at, dispatch_started
          FROM agent_prompt_queue
          WHERE ecky_thread_id = ?1 AND provider = ?2
          ORDER BY created_at ASC, id ASC
          LIMIT 1",
         params![ecky_thread_id, CODEX_PROVIDER_ID],
         |row| {
+            let status: String = row.get(4)?;
+            let dispatch_started: i64 = row.get(8)?;
             Ok(CodexQueuedPrompt {
                 id: row.get(0)?,
                 ecky_thread_id: row.get(1)?,
                 prompt_text: row.get(2)?,
                 attachments: decode_queue_attachments(row.get(3)?)?,
-                status: row.get(4)?,
+                status: status.clone(),
                 error: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                can_cancel: status != "sending" || dispatch_started == 0,
             })
         },
     )
@@ -1139,8 +1226,19 @@ pub fn claim_queue_item(conn: &Connection, id: &str, now: i64) -> AppResult<bool
     let changed = conn
         .execute(
             "UPDATE agent_prompt_queue
-             SET status = 'sending', error = NULL, updated_at = ?2
+             SET status = 'sending', error = NULL, failure_phase = NULL, dispatch_started = 0, updated_at = ?2
              WHERE id = ?1 AND status = 'queued'",
+            params![id, now],
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    Ok(changed == 1)
+}
+
+pub fn begin_queue_delivery(conn: &Connection, id: &str, now: i64) -> AppResult<bool> {
+    let changed = conn
+        .execute(
+            "UPDATE agent_prompt_queue SET dispatch_started = 1, updated_at = ?2
+             WHERE id = ?1 AND status = 'sending' AND dispatch_started = 0",
             params![id, now],
         )
         .map_err(|error| AppError::persistence(error.to_string()))?;
@@ -1169,7 +1267,7 @@ pub fn complete_queue_item(conn: &Connection, id: &str) -> AppResult<()> {
 pub fn fail_queue_item(conn: &Connection, id: &str, error: &str, now: i64) -> AppResult<()> {
     conn.execute(
         "UPDATE agent_prompt_queue
-         SET status = 'failed', error = ?2, updated_at = ?3
+         SET status = 'failed', error = ?2, failure_phase = 'provider-delivery', updated_at = ?3
          WHERE id = ?1",
         params![id, error, now],
     )
@@ -1194,7 +1292,7 @@ pub fn retry_queue_item(
     let changed = conn
         .execute(
             "UPDATE agent_prompt_queue
-             SET status = 'queued', error = NULL, updated_at = ?3
+             SET status = 'queued', error = NULL, failure_phase = NULL, dispatch_started = 0, updated_at = ?3
              WHERE id = ?1 AND ecky_thread_id = ?2 AND status = 'failed'",
             params![id, ecky_thread_id, now],
         )
@@ -1209,19 +1307,24 @@ pub fn retry_queue_item(
 }
 
 pub fn remove_queue_item(conn: &Connection, ecky_thread_id: &str, id: &str) -> AppResult<()> {
-    let status: Option<String> = conn
+    let status: Option<(String, bool, String)> = conn
         .query_row(
-            "SELECT status FROM agent_prompt_queue WHERE id = ?1 AND ecky_thread_id = ?2",
+            "SELECT status, dispatch_started, provider FROM agent_prompt_queue WHERE id = ?1 AND ecky_thread_id = ?2",
             params![id, ecky_thread_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0, row.get(2)?)),
         )
         .optional()
         .map_err(|error| AppError::persistence(error.to_string()))?;
-    match status.as_deref() {
-        Some("sending") => Err(AppError::conflict(format!(
-            "Codex queue item {id} is already sending. Use STOP for active work."
-        ))),
-        Some(_) => {
+    match status {
+        Some((status, false, provider)) if status == "sending" && provider == CODEX_PROVIDER_ID => {
+            conn.execute(
+                "DELETE FROM agent_prompt_queue WHERE id = ?1 AND ecky_thread_id = ?2 AND status = 'sending' AND dispatch_started = 0",
+                params![id, ecky_thread_id],
+            )
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+            Ok(())
+        }
+        Some((status, _, _)) if status != "sending" => {
             conn.execute(
                 "DELETE FROM agent_prompt_queue WHERE id = ?1 AND ecky_thread_id = ?2",
                 params![id, ecky_thread_id],
@@ -1229,6 +1332,9 @@ pub fn remove_queue_item(conn: &Connection, ecky_thread_id: &str, id: &str) -> A
             .map_err(|error| AppError::persistence(error.to_string()))?;
             Ok(())
         }
+        Some(_) => Err(AppError::conflict(format!(
+            "Codex queue item {id} has crossed dispatch boundary. Use STOP after turn starts."
+        ))),
         None => Err(AppError::not_found(format!(
             "Codex queue item {id} was not found."
         ))),
@@ -1254,6 +1360,100 @@ mod tests {
         assert_eq!(
             decode_provider_message_cursor(&cursor).unwrap(),
             (42, "codex:item-7".to_string())
+        );
+    }
+
+    #[test]
+    fn queue_cancel_and_delivery_start_are_atomic_boundary() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads VALUES ('ecky-thread', 'Thread', 1, 1)",
+            [],
+        )
+        .unwrap();
+        ensure_schema(&conn).unwrap();
+        upsert_agent_binding(
+            &conn,
+            &AgentThreadBindingRecord {
+                ecky_thread_id: "ecky-thread".into(),
+                provider: CODEX_PROVIDER_ID.into(),
+                external_thread_id: "codex-thread".into(),
+                external_title: "Thread".into(),
+                external_cwd: "/tmp".into(),
+                bootstrap_version: CODEX_BOOTSTRAP_VERSION,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
+        .unwrap();
+        let cancelled = enqueue_prompt(&conn, "ecky-thread", "cancel while routing", 2).unwrap();
+        assert!(claim_queue_item(&conn, &cancelled.id, 3).unwrap());
+        assert!(list_queue(&conn, "ecky-thread").unwrap()[0].can_cancel);
+        remove_queue_item(&conn, "ecky-thread", &cancelled.id).unwrap();
+        assert!(!begin_queue_delivery(&conn, &cancelled.id, 4).unwrap());
+
+        let delivered = enqueue_prompt(&conn, "ecky-thread", "cross delivery boundary", 5).unwrap();
+        assert!(claim_queue_item(&conn, &delivered.id, 6).unwrap());
+        assert!(begin_queue_delivery(&conn, &delivered.id, 7).unwrap());
+        assert!(!list_queue(&conn, "ecky-thread").unwrap()[0].can_cancel);
+        assert!(remove_queue_item(&conn, "ecky-thread", &delivered.id).is_err());
+    }
+
+    #[test]
+    fn classifier_retry_ownership_uses_persisted_phase_not_error_prefix() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads VALUES ('ecky-thread', 'Thread', 1, 1)",
+            [],
+        )
+        .unwrap();
+        ensure_schema(&conn).unwrap();
+        upsert_agent_binding(
+            &conn,
+            &AgentThreadBindingRecord {
+                ecky_thread_id: "ecky-thread".into(),
+                provider: CODEX_PROVIDER_ID.into(),
+                external_thread_id: "codex-thread".into(),
+                external_title: "Thread".into(),
+                external_cwd: "/tmp".into(),
+                bootstrap_version: CODEX_BOOTSTRAP_VERSION,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
+        .unwrap();
+
+        let classifier = enqueue_prompt(&conn, "ecky-thread", "classify", 2).unwrap();
+        fail_classifier_queue_item(
+            &conn,
+            &classifier.id,
+            "client-disconnected; already has an active writer",
+            3,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE agent_prompt_queue SET error = 'client-disconnected; already has an active writer' WHERE id = ?1",
+            [&classifier.id],
+        )
+        .unwrap();
+        assert_eq!(recover_retryable_failures(&conn, 4).unwrap(), 0);
+
+        let delivery = enqueue_prompt(&conn, "ecky-thread", "deliver", 5).unwrap();
+        fail_queue_item(&conn, &delivery.id, "client-disconnected", 6).unwrap();
+        assert_eq!(recover_retryable_failures(&conn, 7).unwrap(), 1);
+        assert_eq!(
+            list_queue(&conn, "ecky-thread").unwrap()[0].id,
+            classifier.id
         );
     }
 

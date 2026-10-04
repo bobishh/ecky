@@ -40,6 +40,7 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     hasSeenOnboarding: true,
     connectionType: null,
     providerModels: { codex: '', agy: '' },
+  jevClassifier: { enabled: false, apiKey: '' },
     defaultEngineKind: 'freecad',
     defaultSourceLanguage: 'legacyPython',
     defaultGeometryBackend: 'freecad',

@@ -41,6 +41,7 @@ export const config = writable<AppConfig>({
   hasSeenOnboarding: false,
   connectionType: null,
   providerModels: { codex: '', agy: '' },
+  jevClassifier: { enabled: false, apiKey: '' },
   defaultEngineKind: 'ecky',
   defaultSourceLanguage: 'ecky',
   defaultGeometryBackend: 'mesh',

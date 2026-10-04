@@ -307,11 +307,31 @@ MODIFY   perform one explicitly requested bounded authoring change and verify it
 CLARIFY  ask one question because write intent or desired outcome is ambiguous
 ```
 
-Provider turns are prompt-based: the prompt contract presents the unified turn policy
+Default provider turns are prompt-based: the prompt contract presents the unified turn policy
 (`ANSWER`, `INSPECT`, `MODIFY`, `CLARIFY`) and the LLM itself categorizes the user's
 intent. Hardcoded word dictionaries (`ACTION_WORDS`, `INSPECT_WORDS`, `ANSWER_WORDS`)
 are an anti-pattern and are prohibited as they fail to generalize across phrasing,
 context, and languages.
+
+The revised `experimental-jev-routing` contract adds one explicitly enabled global
+Rust route for every application-owned API, Codex, Agy, and managed MCP request.
+Jev classifies bounded context; Rust selects the prompt contract and a model only
+when an adapter has a verified comparable ceiling. Existing provider ownership
+executes the result. Codex hooks are optional native enforcement, never a Jev
+prerequisite. The previous Codex-only implementation remains historical baseline;
+current cross-adapter tasks record global implementation proof. The route remains off by default; confidence
+blocker thresholds and live-account quality remain uncalibrated. The selected
+typed action is preserved for moderate scores; only a strong blocking-fact
+judgment or truncated current input forces Clarify. Accepted classification is
+projected with action probabilities through a separate result keyed to the request and message, never by
+expanding the message payload. It adds no exploration
+controller, version lifecycle, or per-call Jev authorization.
+Each Codex `STEER` is freshly classified by global Jev when enabled. Accepted intent
+updates the Rust MCP policy for that exact active turn and wraps only that steer
+message; the turn's model remains fixed. Classification failure or stale
+turn/config/binding/artifact prevents delivery and leaves the prior policy unchanged.
+A normal
+`SEND`/`QUEUE` enters Rust FIFO and receives a separate route when dispatched.
 
 The unified prompt contract instructs the model:
 - `ANSWER`: explain, report status, or respond directly from conversation context without calling tools or editing files.
@@ -349,7 +369,7 @@ rules.
 ## File-backed LLM evaluation artifacts
 
 Provider activity shown in the workbench is a live projection, not durable eval
-evidence. Completed Agy managed-provider turns therefore write one bounded artifact
+evidence. Terminal Agy and queued Codex managed-provider turns write one bounded artifact
 directory below
 `app_data_dir/evals/runs/<run-id>/`:
 
@@ -365,8 +385,8 @@ keys are redacted recursively. Oversized values are clipped with their SHA-256
 digest retained. The eval writer never stores provider credentials or unbounded
 terminal output.
 
-The artifact schema and writer are provider-neutral even though the first ingestion
-adapter is Agy. Each run binds provider conversation and turn identity to the Ecky thread, user
+The artifact schema and writer are provider-neutral. Agy and Codex ingestion bind
+provider conversation and turn identity to the Ecky thread, original queued user
 prompt, configured model/effort when known, start/end timestamps, terminal state,
 ordered provider steps, and immutable versions appended during that interval.
 Deterministic scoring derives unique tool-call count, repeated-tool count, duration,
@@ -374,6 +394,30 @@ first-build-green, completion, red-to-green repair, and unnecessary red versions
 Paired comparison changes one route variable and emits Markdown. An optional
 telemetry exporter may later project the same bounded metadata to OpenTelemetry;
 telemetry is never the authoring or eval source of truth.
+
+Codex captures success, error, interruption, and app-server subprocess exit through
+the existing Rust queue supervisor. Tool item IDs bind started/completed transitions
+to one invocation; user and assistant items do not become tools. Missing identities,
+unsupported items, orphan completions, and capture limits are explicit incomplete
+evidence. Capture reserves space for both that diagnostic and terminal status.
+An active-writer delivery conflict before provider turn identity is recorded as a
+failed attempt with the raw diagnostic. Rust creates one new Ecky-owned execution
+cursor for the queued request, preserves old cursor lineage and normalized history,
+and delivers the same FIFO head. A second conflict for that queue ID waits for
+bounded retry rather than creating unbounded threads. Dialogue projects transient
+contention as waiting; terminal provider failures still expose their raw body.
+App-server-reported model/effort override configured route metadata when present;
+an absent configured or reported value remains unknown.
+
+The supervisor acknowledges a Codex run only after version linkage and file writes
+succeed. Failed writes or version queries retry the same run ID. Saved files survive
+restart; pending and active Codex capture remains in memory, so an abrupt full Ecky
+process exit can lose unfinished or unflushed evidence. This change does not claim
+an incremental durable capture journal.
+
+Agy preserves a nonempty terminal answer even when the provider reports an error,
+including a recovered failed result. The dialogue status and queue error remain
+truthful; retained answer content never converts a provider failure to success.
 
 ## Scheduling And Publication
 

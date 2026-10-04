@@ -28,13 +28,48 @@ pub struct EvalCase {
     pub expected_red_rounds: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EvalRoute {
     pub provider: String,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub prompt_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<EvalJevRoute>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalJevRoute {
+    pub policy_version: String,
+    pub intent_confidence_threshold: f64,
+    pub intent_margin_threshold: f64,
+    pub model_confidence_threshold: f64,
+    pub model_margin_threshold: f64,
+    pub intent_confidence: f64,
+    pub intent_probabilities: std::collections::BTreeMap<String, f64>,
+    pub answer_requested: bool,
+    pub answer_first: bool,
+    pub model_ceiling: Option<String>,
+    pub model_confidence: Option<f64>,
+    pub model_probabilities: std::collections::BTreeMap<String, f64>,
+    pub model_reason: String,
+    pub context_truncated: bool,
+    #[serde(default)]
+    pub current_prompt_truncated: bool,
+    pub classifier_input_tokens: Option<u64>,
+    pub classifier_output_tokens: Option<u64>,
+    pub classifier_model: Option<String>,
+    pub classifier_latency_ms: Option<u64>,
+    pub model_catalog_version: Option<String>,
+    pub model_catalog_valid_until: Option<String>,
+    #[serde(default = "unknown_native_tool_coverage")]
+    pub native_tool_coverage: String,
+}
+
+pub fn unknown_native_tool_coverage() -> String {
+    "unknown".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -52,21 +87,27 @@ pub struct EvalTurnPolicy {
     pub allows_tools: bool,
     pub allows_project_writes: bool,
     pub execution_mode: String,
+    #[serde(default)]
+    pub answer_first_required: bool,
 }
 
 impl EvalTurnPolicy {
     pub fn for_intent(intent: crate::provider_turn::ProviderTurnIntent) -> Self {
-        let policy = crate::provider_turn::ProviderTurnPolicy::for_intent(intent);
+        Self::from_policy(crate::provider_turn::ProviderTurnPolicy::for_intent(intent))
+    }
+
+    fn from_policy(policy: crate::provider_turn::ProviderTurnPolicy) -> Self {
         Self {
-            intent,
+            intent: policy.intent(),
             allows_tools: policy.allows_any_tool(),
             allows_project_writes: policy.allows_project_writes(),
             execution_mode: policy.execution_mode().to_string(),
+            answer_first_required: policy.requires_answer_first(),
         }
     }
 
     fn runtime_policy(&self) -> crate::provider_turn::ProviderTurnPolicy {
-        crate::provider_turn::ProviderTurnPolicy::for_intent(self.intent)
+        crate::provider_turn::ProviderTurnPolicy::routed(self.intent, self.answer_first_required)
     }
 }
 
@@ -189,7 +230,7 @@ pub struct EvalScores {
     pub estimated_cost_usd: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EvalRunFiles {
     pub run_dir: PathBuf,
     pub run_edn: PathBuf,
@@ -197,7 +238,7 @@ pub struct EvalRunFiles {
     pub report_md: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EvalRunSeed {
     pub run_id: String,
     pub thread_id: String,
@@ -211,6 +252,8 @@ pub struct EvalRunSeed {
     pub starting_input_digest: Option<String>,
     pub expected_red_rounds: u32,
     pub turn_intent: crate::provider_turn::ProviderTurnIntent,
+    pub answer_first_required: bool,
+    pub jev_route: Option<EvalJevRoute>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,7 +370,7 @@ pub fn evaluate_policy_violations(run: &EvalRun) -> Vec<String> {
             continue;
         }
         let tool_name = event.name.as_deref().unwrap_or("unknown");
-        if !policy.allows_any_tool() || !policy.allows_mcp_tool(tool_name) {
+        if !policy.allows_mcp_tool(tool_name) {
             violations.push(format!(
                 "tool `{tool_name}` is not allowed for {} intent",
                 turn_policy.intent.as_str()
@@ -624,6 +667,57 @@ pub fn build_failed_eval_run(
     )
 }
 
+pub fn build_codex_eval_run(
+    seed: EvalRunSeed,
+    turn_id: impl Into<String>,
+    started_at: i64,
+    completed_at: i64,
+    status: impl Into<String>,
+    response: Option<String>,
+    raw_error: Option<String>,
+    events: Vec<EvalEvent>,
+    versions: Vec<EvalVersionOutcome>,
+) -> EvalRun {
+    build_eval_run(
+        seed,
+        turn_id.into(),
+        started_at,
+        completed_at,
+        status.into(),
+        response,
+        raw_error,
+        events,
+        versions,
+    )
+}
+
+pub fn build_api_eval_run(
+    seed: EvalRunSeed,
+    turn_id: impl Into<String>,
+    started_at: i64,
+    completed_at: i64,
+    status: impl Into<String>,
+    response: Option<String>,
+    raw_error: Option<String>,
+    events: Vec<EvalEvent>,
+    versions: Vec<EvalVersionOutcome>,
+    usage: Option<EvalUsage>,
+) -> EvalRun {
+    let mut run = build_eval_run(
+        seed,
+        turn_id.into(),
+        started_at,
+        completed_at,
+        status.into(),
+        response,
+        raw_error,
+        events,
+        versions,
+    );
+    run.usage = usage;
+    run
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_eval_run(
     seed: EvalRunSeed,
@@ -633,9 +727,102 @@ fn build_eval_run(
     status: String,
     response: Option<String>,
     raw_error: Option<String>,
-    events: Vec<EvalEvent>,
+    mut events: Vec<EvalEvent>,
     versions: Vec<EvalVersionOutcome>,
 ) -> EvalRun {
+    if let Some(route) = seed
+        .jev_route
+        .as_ref()
+        .filter(|_| seed.provider != "managed-mcp")
+    {
+        let names = events
+            .iter()
+            .filter_map(|event| event.name.as_deref())
+            .collect::<HashSet<_>>();
+        let mut initial = Vec::new();
+        if !names.contains("request") {
+            initial.push(EvalEvent {
+                sequence: 0,
+                step_index: None,
+                kind: EvalEventKind::System,
+                state: "admitted".into(),
+                name: Some("request".into()),
+                summary: Some("Application-owned provider request admitted".into()),
+                input: Some(EvalPayload::new(serde_json::json!({
+                    "promptSha256": format!("sha256:{:x}", Sha256::digest(seed.prompt.as_bytes())),
+                    "promptChars": seed.prompt.chars().count(),
+                    "threadId": seed.thread_id.clone(),
+                    "externalThreadId": seed.external_thread_id.clone(),
+                }))),
+                output: None,
+                error: None,
+                occurred_at: started_at,
+            });
+        }
+        if !names.contains("jev") && !names.contains("jev.route") {
+            initial.push(EvalEvent {
+                sequence: 0,
+                step_index: None,
+                kind: EvalEventKind::System,
+                state: "accepted".into(),
+                name: Some("jev".into()),
+                summary: Some("Jev accepted typed route for provider request".into()),
+                input: Some(EvalPayload::new(serde_json::json!({
+                    "policyVersion": route.policy_version.clone(),
+                    "promptTruncated": route.current_prompt_truncated,
+                    "contextTruncated": route.context_truncated,
+                    "classifierModel": route.classifier_model.clone(),
+                    "classifierInputTokens": route.classifier_input_tokens,
+                    "classifierOutputTokens": route.classifier_output_tokens,
+                    "classifierLatencyMs": route.classifier_latency_ms,
+                }))),
+                output: Some(EvalPayload::new(serde_json::json!({
+                    "intent": seed.turn_intent.as_str(),
+                    "intentConfidence": route.intent_confidence,
+                    "intentProbabilities": route.intent_probabilities,
+                    "answerRequested": route.answer_requested,
+                    "answerFirst": route.answer_first,
+                    "model": route.model_ceiling,
+                    "modelConfidence": route.model_confidence,
+                    "modelProbabilities": route.model_probabilities,
+                    "modelReason": route.model_reason.clone(),
+                }))),
+                error: None,
+                occurred_at: started_at,
+            });
+        }
+        if !names.contains("delivery")
+            && !names.contains("provider.dispatch")
+            && !names.contains("api.provider_dispatch")
+        {
+            initial.push(EvalEvent {
+                sequence: 0,
+                step_index: None,
+                kind: EvalEventKind::System,
+                state: "attempted".into(),
+                name: Some("delivery".into()),
+                summary: Some("Accepted route handed to owning provider adapter".into()),
+                input: Some(EvalPayload::new(serde_json::json!({
+                    "provider": seed.provider.clone(),
+                    "model": seed.model.clone(),
+                }))),
+                output: None,
+                error: None,
+                occurred_at: started_at,
+            });
+        }
+        initial.append(&mut events);
+        initial.sort_by_key(|event| match event.name.as_deref() {
+            Some("request") => 0,
+            Some("jev" | "jev.route") => 1,
+            Some("delivery" | "provider.dispatch" | "api.provider_dispatch") => 2,
+            _ => 3,
+        });
+        events = initial;
+    }
+    for (sequence, event) in events.iter_mut().enumerate() {
+        event.sequence = sequence as u64;
+    }
     let case = EvalCase {
         case_id: case_id(&seed.prompt, seed.starting_input_digest.as_deref()),
         objective: seed.prompt.clone(),
@@ -659,6 +846,7 @@ fn build_eval_run(
             model: seed.model,
             effort: seed.effort,
             prompt_version: seed.prompt_version,
+            jev: seed.jev_route,
         },
         prompt: seed.prompt,
         started_at,
@@ -666,7 +854,12 @@ fn build_eval_run(
         status,
         response,
         raw_error,
-        turn_policy: Some(EvalTurnPolicy::for_intent(seed.turn_intent)),
+        turn_policy: Some(EvalTurnPolicy::from_policy(
+            crate::provider_turn::ProviderTurnPolicy::routed(
+                seed.turn_intent,
+                seed.answer_first_required,
+            ),
+        )),
         policy_violations: Vec::new(),
         events,
         versions,
@@ -1087,7 +1280,7 @@ fn render_report(run: &EvalRun, scores: &EvalScores) -> String {
         .as_ref()
         .map(|policy| (policy.intent.as_str(), policy.execution_mode.as_str()))
         .unwrap_or(("unknown", "unknown"));
-    format!(
+    let mut report = format!(
         "# LLM eval: {}\n\n- Run: `{}`\n- Provider: `{}`\n- Model: `{}`\n- Intent: `{}`\n- Execution mode: `{}`\n- Status: `{}`\n\n| Metric | Value |\n| --- | ---: |\n| Completed | {} |\n| Terminal success | {} |\n| Tool calls | {} |\n| Repeated adjacent tools | {} |\n| Policy violations | {} |\n| Versions | {} |\n| Red versions | {} |\n| Unnecessary versions | {} |\n| First build green | {} |\n| Red-to-green repair | {} |\n| Duration ms | {} |\n| Tokens | {} |\n| Cost USD | {} |\n",
         run.case.case_id,
         run.run_id,
@@ -1109,7 +1302,35 @@ fn render_report(run: &EvalRun, scores: &EvalScores) -> String {
         scores.duration_ms,
         display_optional(scores.total_tokens),
         display_cost(scores.estimated_cost_usd),
-    )
+    );
+    if let Some(jev) = &run.route.jev {
+        report.push_str(&format!(
+            "\nProvider-native tool coverage: `{}`\n",
+            report_cell(&jev.native_tool_coverage)
+        ));
+    }
+    report.push_str("\n## Event timeline\n\n| # | Event | Kind | State | Time (Unix s) | Summary | Error |\n| ---: | --- | --- | --- | ---: | --- | --- |\n");
+    for event in &run.events {
+        let kind = format!("{:?}", event.kind).to_ascii_lowercase();
+        report.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            event.sequence,
+            report_cell(event.name.as_deref().unwrap_or("unknown")),
+            kind,
+            report_cell(&event.state),
+            event.occurred_at,
+            report_cell(event.summary.as_deref().unwrap_or("")),
+            report_cell(event.error.as_deref().unwrap_or("")),
+        ));
+    }
+    report.push_str("\nFull redacted event payloads: `trajectory.edn`.\n");
+    report
+}
+
+fn report_cell(value: &str) -> String {
+    sanitize_text(value)
+        .replace('|', "\\|")
+        .replace(['\r', '\n'], " ")
 }
 
 fn validate_run(run: &EvalRun) -> Result<(), String> {
@@ -1123,7 +1344,6 @@ fn validate_run(run: &EvalRun) -> Result<(), String> {
         ("run id", run.run_id.as_str()),
         ("case id", run.case.case_id.as_str()),
         ("thread id", run.thread_id.as_str()),
-        ("turn id", run.turn_id.as_str()),
     ] {
         if value.is_empty()
             || !value
@@ -1134,6 +1354,69 @@ fn validate_run(run: &EvalRun) -> Result<(), String> {
                 "Eval {label} contains unsafe path or identity characters."
             ));
         }
+    }
+    let missing_provider_turn_failure = run.turn_id.is_empty();
+    if !missing_provider_turn_failure {
+        let value = run.turn_id.as_str();
+        if value.is_empty()
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_.:".contains(character))
+        {
+            return Err("Eval turn id contains unsafe path or identity characters.".into());
+        }
+    } else if run.route.provider == "managed-mcp" && !run.external_thread_id.trim().is_empty() {
+        let terminal_status_valid = match run.status.as_str() {
+            "running" => run.response.is_none() && run.raw_error.is_none(),
+            "success" => run.response.is_some() && run.raw_error.is_none(),
+            "error" | "failed_pre_dispatch" => run.raw_error.is_some(),
+            _ => false,
+        };
+        if !terminal_status_valid
+            || run
+                .events
+                .iter()
+                .any(|event| event.kind == EvalEventKind::Assistant)
+            || (run.status == "failed_pre_dispatch"
+                && (run
+                    .events
+                    .iter()
+                    .any(|event| event.kind != EvalEventKind::System)
+                    || !run.versions.is_empty()))
+        {
+            return Err("Managed MCP run without a native provider turn ID has invalid status or invented provider events.".into());
+        }
+    } else if run.route.prompt_version == "api-generation-v1" && run.external_thread_id.is_empty() {
+        let status_valid = match run.status.as_str() {
+            "success" => run.raw_error.is_none(),
+            "error" | "failed_pre_dispatch" => run.raw_error.is_some(),
+            "interrupted" => true,
+            _ => false,
+        };
+        if !status_valid
+            || run.events.iter().any(|event| {
+                !matches!(event.kind, EvalEventKind::System | EvalEventKind::Assistant)
+            })
+            || (run.status == "failed_pre_dispatch"
+                && (run
+                    .events
+                    .iter()
+                    .any(|event| event.kind != EvalEventKind::System)
+                    || !run.versions.is_empty()))
+        {
+            return Err("Stateless API run without a native provider turn ID has invalid status or invented provider events.".into());
+        }
+    } else if !matches!(run.status.as_str(), "failed_pre_dispatch" | "error")
+        || run
+            .events
+            .iter()
+            .any(|event| event.kind != EvalEventKind::System)
+        || !run.versions.is_empty()
+        || run.raw_error.is_none()
+    {
+        return Err(
+            "Failure without a provider turn ID must have diagnostic and no provider/tool events or versions.".into(),
+        );
     }
     if run.completed_at < run.started_at {
         return Err("Eval completion precedes start.".into());
@@ -1259,7 +1542,22 @@ fn sanitize_text_unbounded(value: &str) -> String {
         )
         .expect("static secret regex")
     });
-    regex.replace_all(value, "$1$2[REDACTED]").into_owned()
+    let assigned = regex.replace_all(value, "$1$2[REDACTED]").into_owned();
+    static BEARER: OnceLock<Regex> = OnceLock::new();
+    let bearer = BEARER.get_or_init(|| {
+        Regex::new(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*").expect("static bearer regex")
+    });
+    static API_TOKEN: OnceLock<Regex> = OnceLock::new();
+    let api_token = API_TOKEN
+        .get_or_init(|| Regex::new(r"\bsk-[A-Za-z0-9_-]{16,}\b").expect("static API token regex"));
+    let bearer = bearer.replace_all(&assigned, "$1[REDACTED]");
+    api_token.replace_all(&bearer, "[REDACTED]").into_owned()
+}
+
+/// Remove common credential assignments and bearer/API tokens before a bounded
+/// context payload is sent to the experimental classifier.
+pub fn redact_sensitive_text(value: &str) -> String {
+    sanitize_text_unbounded(value)
 }
 
 fn version_green(version: &EvalVersionOutcome) -> bool {

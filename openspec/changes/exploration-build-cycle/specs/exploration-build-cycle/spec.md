@@ -187,7 +187,7 @@ It SHALL state that no promote, commit, or finalize action exists.
 
 ### Requirement: Provider turns enforce prompt-based intent categorization
 
-Provider turns SHALL use prompt-based turn contracts that instruct the model to
+Default provider turns SHALL use prompt-based turn contracts that instruct the model to
 categorize the user turn as `ANSWER`, `INSPECT`, `MODIFY`, or `CLARIFY`. Hardcoded word
 lists or keyword-matching heuristics (WORDS) SHALL NOT be used. For `ANSWER` and
 `CLARIFY`, the model SHALL invoke no mutation tools and answer directly or ask
@@ -195,6 +195,31 @@ clarifying questions. For `INSPECT`, the model SHALL invoke only read-only inspe
 tools. For `MODIFY`, the model SHALL perform bounded editing, preview, and verification.
 When programmatic turn policies are explicitly enforced (e.g. in test suites or
 explicit evaluation runners), Rust enforces tool allowlists and non-editing mode.
+
+An explicitly enabled routing experiment SHALL preserve this default when disabled
+and SHALL obey the separate `experimental-jev-routing` capability contract. It
+SHALL NOT replace the exploration controller, redefine immutable versions, or
+grant writes through ambiguous intent or classifier failure. This extension is
+global across application-owned provider requests; provider-native hooks SHALL
+NOT be a prerequisite for Jev classification. A moderate binary `no` confidence
+SHALL NOT alone turn an accepted Modify action into Clarify. Accepted classification
+probabilities SHALL project from a separate request/message result, leaving message payloads
+unchanged. Every new exact-turn Codex `STEER` SHALL pass through global Jev when
+enabled, receive its own prompt contract and Rust MCP policy, and retain the active
+turn's model. Jev context SHALL combine bounded persisted dialogue with the current
+public live user and assistant items, de-duplicate by item identity, unwrap injected
+turn guidance from user content, preserve provider order for equal timestamps, and
+exclude private reasoning and activity events. A classifier error or stale turn,
+config, binding, or artifact SHALL
+prevent delivery and leave the previous policy unchanged. When Jev is disabled,
+STEER SHALL make no classifier call. Accepted probabilities SHALL bind to the exact
+persisted steer message. Route and delivery evidence SHALL name each steer request
+and the exact active provider turn. An answer-first requirement on a new STEER SHALL
+be satisfied only by a distinct assistant item emitted after that STEER, never by an
+earlier answer from the active turn. STEER SHALL NOT turn into a new queued request;
+normal submit starts a separate routed
+request through Rust FIFO. This extension is specified
+separately; its unchecked global implementation tasks are not completed proof.
 
 #### Scenario: Status question answers without project work
 
@@ -379,13 +404,51 @@ provider-owned history.
 
 ### Requirement: Provider turns produce file-backed LLM eval evidence
 
-The system SHALL persist each completed Agy managed-provider turn as strict data-only
+The system SHALL persist each terminal Agy or queued Codex managed-provider turn as strict data-only
 EDN plus a deterministic Markdown report. Its schema SHALL remain provider-neutral so
 other managed providers can use the same writer. The artifact SHALL retain ordered model
 and tool activity, bounded safe tool inputs/results, route identity, timing,
 terminal outcome, classified intent, effective capability policy, policy violations,
 and immutable versions created during the turn. The system SHALL
 NOT require a JSON log format or database-backed log platform for eval replay.
+
+#### Scenario: Foreign Codex writer does not block Ecky prompt submission
+
+- **GIVEN** a queued Codex request targets an Ecky-owned cursor held by another writer
+- **WHEN** Rust dispatches that request
+- **THEN** Rust records the raw delivery diagnostic, rotates once to a new owned execution cursor, and delivers the same FIFO head
+- **AND** normalized Ecky history and old cursor lineage remain intact
+- **AND** a second conflict for the same queue item falls back to delayed retry rather than creating unbounded cursors.
+
+#### Scenario: Codex terminal evidence shares the existing writer
+
+- **GIVEN** a queued Codex turn produces tools and an assistant answer
+- **WHEN** it succeeds, fails, is interrupted, or its app-server subprocess exits
+- **THEN** the existing writer records original prompt, route and policy, terminal
+  diagnostic, ordered invocation identities, and versions created during the turn
+- **AND** repeated item state notifications count as one tool invocation
+- **AND** incomplete or bounded evidence is explicitly marked rather than fabricated.
+
+#### Scenario: Codex persistence failure retains evidence for retry
+
+- **GIVEN** a terminal Codex run awaits persistence in the running Ecky process
+- **WHEN** version lookup or file writing fails
+- **THEN** the supervisor retains that run and retries its same identity
+- **AND** acknowledges it only after successful version linkage and file writing.
+
+#### Scenario: Codex delivery fails before provider identity exists
+
+- **GIVEN** a queued Codex attempt has no provider turn ID
+- **WHEN** delivery fails or its app-server subprocess exits
+- **THEN** its error artifact keeps a unique local run ID, empty provider turn ID, and actual redacted diagnostic
+- **AND** no synthetic provider identity or unrelated version from the same time window is recorded.
+
+#### Scenario: Agy terminal error does not discard its answer
+
+- **GIVEN** a terminal Agy result or recovered failed result contains a useful answer
+- **WHEN** the provider reports a quota or transport error
+- **THEN** the answer remains in dialogue history with error status
+- **AND** the queue and eval retain the actual terminal diagnostic.
 
 #### Scenario: Tool trajectory survives restart
 

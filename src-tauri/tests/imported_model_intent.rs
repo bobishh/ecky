@@ -43,6 +43,7 @@ fn test_config(projects_root: PathBuf) -> Config {
         has_seen_onboarding: true,
         connection_type: None,
         provider_models: Default::default(),
+        jev_classifier: Default::default(),
         default_engine_kind: ecky_cad_lib::contracts::EngineKind::EckyIrV0,
         default_source_language: SourceLanguage::EckyIrV0,
         default_geometry_backend: GeometryBackend::EckyRust,

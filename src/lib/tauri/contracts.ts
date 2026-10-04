@@ -117,6 +117,14 @@ async getCodexTakeover(eckyThreadId: string) : Promise<Result<CodexTakeoverSnaps
     else return { status: "error", error: e  as any };
 }
 },
+async getJevClassificationResults(threadId: string) : Promise<Result<ClassificationResult[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_jev_classification_results", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getCodexTakeoverMessages(input: CodexMessagePageInput) : Promise<Result<CodexMessagePage, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_codex_takeover_messages", { input }) };
@@ -1781,12 +1789,13 @@ export type CaptureSurfaceNeighborhood = { neighborhoodId: string; landmarkId: s
 export type CaptureSurfaceRegion = { regionId: string; sourceMeshContentDigest: string; triangleIndices: number[]; landmarkIds: string[]; primitiveCandidateIds: string[]; kind: CaptureSurfaceRegionKind; areaSourceUnitsSquared: number; boundaryEdgeCount: number; ignored: boolean }
 export type CaptureSurfaceRegionKind = "plane" | "cylinder" | "cone" | "sphere" | "freeform" | "ignoredDamage"
 export type CaptureSymmetryCompletion = { kind: "none" } | { kind: "half"; planeId: string } | { kind: "quarter"; firstPlaneId: string; secondPlaneId: string }
+export type ClassificationResult = { threadId: string; provider: string; requestId: string; messageId: string | null; intent: string; actionProbabilities: Partial<{ [key in string]: number }>; acceptedAt: number }
 export type ClearSketchPreviewDraftRequest = { scopeId?: string | null }
 export type CodexDialogueMessage = { id: string; role: string; content: string; status: string; timestamp: number; attachments?: Attachment[]; providerEventKind?: ProviderEventKind | null }
 export type CodexMessagePage = { messages: CodexDialogueMessage[]; nextCursor: string | null; backwardsCursor: string | null }
 export type CodexMessagePageInput = { eckyThreadId: string; cursor: string | null; direction: string | null }
 export type CodexPromptInput = { eckyThreadId: string; promptText: string; attachments?: Attachment[] }
-export type CodexQueuedPrompt = { id: string; eckyThreadId: string; promptText: string; attachments?: Attachment[]; status: string; error: string | null; createdAt: number; updatedAt: number }
+export type CodexQueuedPrompt = { id: string; eckyThreadId: string; promptText: string; attachments?: Attachment[]; status: string; canCancel?: boolean; error: string | null; createdAt: number; updatedAt: number }
 export type CodexSteerInput = { eckyThreadId: string; promptText: string; expectedTurnId: string; attachments?: Attachment[] }
 export type CodexStopInput = { eckyThreadId: string; turnId: string }
 export type CodexTakeoverBinding = { eckyThreadId: string; codexThreadId: string; label: string; cwd: string; bootstrapVersion: number; createdAt: number; updatedAt: number }
@@ -1889,7 +1898,7 @@ export type ComponentPayloadKind = "source" | "step"
 export type ComponentPlacementEvidence = { instanceId: string; componentId: string; sourcePortRef: PortReference; targetPortRef: PortReference; placementFrame: PortFrame; normalMode: ComponentMateNormalMode; rollDegrees: number; offset: [number, number, number]; mirrorAxis?: ComponentMirrorAxis | null; mateStatus: ComponentMateStatus; resolvedFitValues: Partial<{ [key in string]: ComponentInterfaceValue }>; diagnostics: string[]; sourceStart?: number | null; sourceEnd?: number | null }
 export type ComponentPort = { portId: string; typeId: string; targetIds?: string[]; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
 export type ComponentStoreGcReport = { deletedPackageDigests: string[]; retainedPackageDigests: string[] }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; femCompute?: FemComputeConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; providerModels?: ProviderModels; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number;
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; femCompute?: FemComputeConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; providerModels?: ProviderModels; jevClassifier?: JevClassifierConfig; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number;
 /**
  * Filesystem root for exported project folders. Blank/None uses the
  * default `<app_data>/projects`. See `filesystem-project-mirror`.
@@ -2047,6 +2056,7 @@ export type InstalledComponentRuntime = { installedSource: InstalledComponentSou
 export type InstalledComponentSource = { packageId: string; version: string; packageDisplayName: string; packageDir: string; component: ComponentDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; sourcePath: string }
 export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
 export type InteractionMode = "design" | "question" | "tune"
+export type JevClassifierConfig = { enabled?: boolean; apiKey?: string }
 export type KeepoutVolumeKind = "box" | "cylinder" | "sphere" | "custom"
 export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null; targetRef?: AuthoringTargetRef | null }
 export type LibraryPanelIntent = { kind: "loadComponents" } | { kind: "installPackage"; archivePath: string } | { kind: "loadFreecad"; query: string; page: number } | { kind: "setFreecadRoot"; root: string; query: string }

@@ -42,14 +42,27 @@ plan becomes stale after the first compiler, geometry, or verification result.
   interactive rebuild requests to the latest exact input while retaining every
   draft version already appended by normal authoring.
 - Define a lean prompt contract and an evidence-driven model routing policy.
-- Use prompt-based provider turns where the prompt defines the turn policy contract
+- By default, use prompt-based provider turns where the prompt defines the turn policy contract
   (`ANSWER`, `INSPECT`, `MODIFY`, `CLARIFY`) and the LLM itself categorizes the turn.
   Eliminate brittle hardcoded word lists (WORDS); ambiguous intent never grants
   write authority.
+- Implement the opt-in global `experimental-jev-routing` extension: one Rust-owned
+  Jev intent/prompt route for every application-owned API, Codex, Agy, and managed
+  MCP request. Provider-specific model selection remains within its verified
+  ceiling. Native hook enforcement is separate from Jev activation. Routing
+  preserves selected action under moderate confidence and projects an accepted
+  classification probabilities from a separate request/message result. It remains off by
+  default and exploration/version ownership stays unchanged. Existing
+  Codex-only fixture proof does not establish global behavior, live classifier
+  quality, cost savings, or universal native-tool coverage by itself.
 - Persist completed provider-turn trajectories as bounded strict-EDN files plus
   human-readable Markdown reports so model behavior can be evaluated without a
   database-backed log product. Tool order, safe inputs/results, timing, terminal
   outcome, and version/verification outcomes remain replayable after restart.
+- Extend the existing writer to queued Codex turns, including failure, interruption,
+  and app-server exit. Retry failed persistence without acknowledging lost evidence.
+  Preserve useful Agy answers alongside terminal provider errors. Unfinished Codex
+  capture is not yet durable across a full Ecky process exit.
 
 ## Relationship To Existing Changes
 

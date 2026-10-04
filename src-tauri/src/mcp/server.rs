@@ -10,7 +10,7 @@ use crate::mcp::handlers::AgentContext;
 use crate::models::{
     AppState, McpSessionState, McpTargetRef, PathResolver, ViewportScreenshotCapture,
 };
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -278,6 +278,7 @@ struct HttpServerState {
     state: AppState,
     app: Arc<dyn PathResolver + Send + Sync>,
     handle: Option<tauri::AppHandle>,
+    codex_hook_token: String,
 }
 
 fn require_server_handle<'a>(
@@ -960,7 +961,7 @@ fn provider_tool_definitions_for_uri(uri: &axum::http::Uri, tools: Vec<Value>) -
         .filter(|tool| {
             tool.get("name")
                 .and_then(Value::as_str)
-                .is_some_and(|name| policy.allows_mcp_tool(name))
+                .is_some_and(|name| name != "session_answer_save" && policy.allows_mcp_tool(name))
         })
         .collect()
 }
@@ -999,12 +1000,15 @@ async fn provider_tool_definitions_for_request(
     let Some(policy) = provider_turn_policy_for_request(state, uri).await else {
         return tools;
     };
+    if policy.requires_answer_first() && !provider_answer_first_satisfied(state, uri).await {
+        return Vec::new();
+    }
     tools
         .into_iter()
         .filter(|tool| {
             tool.get("name")
                 .and_then(Value::as_str)
-                .is_some_and(|name| policy.allows_mcp_tool(name))
+                .is_some_and(|name| name != "session_answer_save" && policy.allows_mcp_tool(name))
         })
         .collect()
 }
@@ -1017,13 +1021,50 @@ async fn provider_tool_allowed_for_request(
     let Some(policy) = provider_turn_policy_for_request(state, uri).await else {
         return Ok(());
     };
-    if policy.allows_mcp_tool(tool_name) {
+    if tool_name != "session_answer_save"
+        && policy.allows_mcp_tool(tool_name)
+        && (!policy.requires_answer_first() || provider_answer_first_satisfied(state, uri).await)
+    {
         return Ok(());
     }
     Err(AppError::validation(format!(
-        "Provider turn intent '{}' rejects MCP tool '{tool_name}'.",
+        "Provider turn intent '{}' rejects MCP tool '{tool_name}' or requires a user-facing answer first.",
         policy.intent().as_str()
     )))
+}
+
+async fn provider_answer_first_satisfied(state: &AppState, uri: &axum::http::Uri) -> bool {
+    let Some(ecky_thread_id) = provider_thread_id_from_uri(uri) else {
+        return false;
+    };
+    provider_answer_first_satisfied_for_thread(state, &ecky_thread_id).await
+}
+
+async fn provider_answer_first_satisfied_for_thread(
+    state: &AppState,
+    ecky_thread_id: &str,
+) -> bool {
+    let binding = {
+        let conn = state.db.lock().await;
+        match crate::services::codex_takeover::get_binding(&conn, ecky_thread_id) {
+            Ok(Some(binding)) => binding,
+            _ => return false,
+        }
+    };
+    let assistant_item_ids = state
+        .codex_app_server
+        .live_messages(&binding.codex_thread_id)
+        .await
+        .into_iter()
+        .filter(|message| {
+            message.provider_event_kind == Some(crate::contracts::ProviderEventKind::Assistant)
+                && !message.content.trim().is_empty()
+        })
+        .map(|message| message.id)
+        .collect::<std::collections::HashSet<_>>();
+    state
+        .provider_answer_first_satisfied(ecky_thread_id, &assistant_item_ids)
+        .await
 }
 
 async fn provider_turn_policy_for_session(
@@ -1032,6 +1073,40 @@ async fn provider_turn_policy_for_session(
 ) -> Option<crate::provider_turn::ProviderTurnPolicy> {
     let thread_id = get_session(state, session_id).await?.bound_thread_id?;
     state.provider_turn_policy(&thread_id).await
+}
+
+async fn provider_answer_first_satisfied_for_session(state: &AppState, session_id: &str) -> bool {
+    {
+        let runs = state.managed_jev_runs.lock().await;
+        if let Some(run) = runs.get(session_id) {
+            return run.events.iter().any(|event| {
+                event.kind == crate::llm_eval::EvalEventKind::Result
+                    && event.name.as_deref() == Some("session_answer_save")
+                    && event.state == "done"
+            });
+        }
+    }
+    let Some(thread_id) = get_session(state, session_id)
+        .await
+        .and_then(|session| session.bound_thread_id)
+    else {
+        return false;
+    };
+    provider_answer_first_satisfied_for_thread(state, &thread_id).await
+}
+
+fn managed_session_tool_allowed(
+    policy: crate::provider_turn::ProviderTurnPolicy,
+    tool_name: &str,
+    answer_first_satisfied: bool,
+) -> bool {
+    policy.allows_mcp_tool(tool_name)
+        && (!policy.requires_answer_first()
+            || if answer_first_satisfied {
+                tool_name != "session_answer_save"
+            } else {
+                tool_name == "session_answer_save"
+            })
 }
 
 async fn prebind_provider_session(
@@ -2950,7 +3025,8 @@ pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
         // ── Project files ──────────────────────────────────────────────────
         "project_folder_export" | "project_folder_status" => CapabilityGroup::ProjectFiles,
         // ── Session activity & notices ─────────────────────────────────────
-        "session_reply_save"
+        "session_answer_save"
+        | "session_reply_save"
         | "session_activity_set"
         | "session_activity_clear"
         | "long_action_notice"
@@ -4102,6 +4178,18 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             )
         }),
         json!({
+            "name": "session_answer_save",
+            "description": "Publish the required public answer for a Jev answer-first managed turn before any inspection or edit tool. Keeps the request working; use session_reply_save after the action finishes.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("body", json!({ "type": "string" }))
+                ],
+                &["body"],
+            )
+        }),
+        json!({
             "name": "session_reply_save",
             "description": "Save one final assistant reply into the current thread history. Use this for final user-facing text or fatal turn-ending errors, not for step-by-step progress. After saving the final reply for a turn, immediately call request_user_prompt again.",
             "inputSchema": with_identity(
@@ -4655,6 +4743,10 @@ pub async fn serve_http_on_port(
     };
 
     let endpoint_url = format!("http://127.0.0.1:{}/mcp", actual_port);
+    let codex_hook_token = crate::services::codex_pre_tool_hook::write_runtime_descriptor(
+        &format!("http://127.0.0.1:{actual_port}"),
+    )
+    .unwrap_or_default();
     eprintln!("[MCP] Listening on {}", endpoint_url);
     {
         let mut status = state.mcp_status.lock().unwrap();
@@ -4667,6 +4759,12 @@ pub async fn serve_http_on_port(
         let conn = state.db.lock().await;
         let _ = crate::db::delete_all_agent_sessions(&conn);
     }
+    let server_state = HttpServerState {
+        state: state.clone(),
+        app,
+        handle: Some(handle),
+        codex_hook_token,
+    };
     let router = Router::new()
         .route(
             "/mcp",
@@ -4674,11 +4772,11 @@ pub async fn serve_http_on_port(
                 .delete(handle_http_delete)
                 .get(handle_http_get),
         )
-        .with_state(HttpServerState {
-            state: state.clone(),
-            app,
-            handle: Some(handle),
-        });
+        .route(
+            "/codex-pre-tool-hook/{token}",
+            post(handle_codex_pre_tool_hook),
+        )
+        .with_state(server_state.clone());
     let result = axum::serve(listener, router).await;
     if let Err(err) = &result {
         state.set_mcp_status(false, Some(err.to_string()));
@@ -4686,6 +4784,89 @@ pub async fn serve_http_on_port(
         state.set_mcp_status(false, None);
     }
     result.map_err(io::Error::other)
+}
+
+async fn handle_codex_pre_tool_hook(
+    State(server): State<HttpServerState>,
+    Path(token): Path<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    if server.codex_hook_token != token {
+        return Json(json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Ecky hook capability expired; tool call denied."
+        }}));
+    }
+    Json(codex_pre_tool_hook_decision(&server.state, &payload).await)
+}
+
+async fn codex_pre_tool_hook_decision(state: &AppState, payload: &Value) -> Value {
+    let allow = || {
+        json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow"
+        }})
+    };
+    let deny = |reason: &str| {
+        json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason
+        }})
+    };
+    let Some(codex_thread_id) = payload.get("session_id").and_then(Value::as_str) else {
+        return deny("Ecky could not identify this Codex thread; tool call denied.");
+    };
+    let Some(tool_name) = payload.get("tool_name").and_then(Value::as_str) else {
+        return deny("Ecky could not identify this native tool; tool call denied.");
+    };
+    if payload.get("hook_event_name").and_then(Value::as_str) != Some("PreToolUse") {
+        return deny("Ecky received an unexpected hook event; tool call denied.");
+    }
+    let binding = {
+        let conn = state.db.lock().await;
+        match crate::services::codex_takeover::get_binding_by_codex_thread_id(
+            &conn,
+            codex_thread_id,
+        ) {
+            Ok(Some(binding)) => binding,
+            _ => return deny("This Codex thread is not bound to Ecky; tool call denied."),
+        }
+    };
+    let runtime = state.codex_app_server.runtime(codex_thread_id).await;
+    if runtime.phase != "active" || runtime.active_turn_id.is_none() {
+        return deny("No active Ecky-authorized Codex turn; tool call denied.");
+    }
+    if payload.get("turn_id").and_then(Value::as_str) != runtime.active_turn_id.as_deref() {
+        return deny("Codex hook turn identity is stale; tool call denied.");
+    }
+    let Some(policy) = state.provider_turn_policy(&binding.ecky_thread_id).await else {
+        return allow();
+    };
+    if !native_tool_allowed_by_policy(Some(policy), tool_name)
+        || (policy.requires_answer_first()
+            && !provider_answer_first_satisfied_for_thread(state, &binding.ecky_thread_id).await)
+    {
+        return deny("Ecky turn policy or answer-first requirement denied this tool call.");
+    }
+    json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}})
+}
+
+fn native_tool_allowed_by_policy(
+    policy: Option<crate::provider_turn::ProviderTurnPolicy>,
+    tool_name: &str,
+) -> bool {
+    let Some(policy) = policy else {
+        return true;
+    };
+    if policy.is_prompt_based() {
+        return true;
+    }
+    let Some(tool) = tool_name.strip_prefix("mcp__ecky_provider_mcp__") else {
+        return false;
+    };
+    policy.allows_mcp_tool(tool)
 }
 
 async fn handle_http_get(State(_server): State<HttpServerState>, headers: HeaderMap) -> Response {
@@ -5120,10 +5301,32 @@ async fn dispatch_request(
                 resolve_tools_list(&server.state, session_id, &params, ecky_ast_authoring).await;
             if let Some(policy) = provider_turn_policy_for_session(&server.state, session_id).await
             {
+                let answer_first_satisfied = !policy.requires_answer_first()
+                    || provider_answer_first_satisfied_for_session(&server.state, session_id).await;
+                let completion_tools: &[&str] =
+                    if policy.requires_answer_first() && !answer_first_satisfied {
+                        &["session_answer_save"]
+                    } else {
+                        &["session_reply_save", "request_user_prompt"]
+                    };
+                for tool in tool_definitions_with_ast_enabled(ecky_ast_authoring) {
+                    let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if completion_tools.contains(&name)
+                        && !tools.iter().any(|existing| {
+                            existing.get("name").and_then(Value::as_str) == Some(name)
+                        })
+                    {
+                        tools.push(tool);
+                    }
+                }
                 tools.retain(|tool| {
                     tool.get("name")
                         .and_then(Value::as_str)
-                        .is_some_and(|name| policy.allows_mcp_tool(name))
+                        .is_some_and(|name| {
+                            managed_session_tool_allowed(policy, name, answer_first_satisfied)
+                        })
                 });
             }
             let mut result = json!({ "tools": tools });
@@ -5138,23 +5341,85 @@ async fn dispatch_request(
                     if let Some(policy) =
                         provider_turn_policy_for_session(&server.state, session_id).await
                     {
-                        if !policy.allows_mcp_tool(&params.name) {
+                        let answer_first_satisfied = !policy.requires_answer_first()
+                            || provider_answer_first_satisfied_for_session(
+                                &server.state,
+                                session_id,
+                            )
+                            .await;
+                        if !managed_session_tool_allowed(
+                            policy,
+                            &params.name,
+                            answer_first_satisfied,
+                        ) {
                             return mcp_tool_error(
                                 req.id,
                                 &AppError::validation(format!(
-                                    "Provider turn intent '{}' rejects MCP tool '{}'.",
+                                    "Provider turn intent '{}' rejects MCP tool '{}' or requires a user-facing answer first.",
                                     policy.intent().as_str(),
                                     params.name
                                 )),
                             );
                         }
                     }
+                    let trace_tool_name = params.name.clone();
+                    let trace_arguments = params.arguments.clone();
+                    let final_reply = (trace_tool_name == "session_reply_save")
+                        .then(|| {
+                            trace_arguments.as_ref().and_then(|arguments| {
+                                arguments.get("body").and_then(Value::as_str).map(|body| {
+                                    (
+                                        body.to_string(),
+                                        arguments
+                                            .get("fatal")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                    )
+                                })
+                            })
+                        })
+                        .flatten();
+                    let trace_run_id = crate::services::managed_jev_trace::tool_started(
+                        &server.state,
+                        session_id,
+                        &trace_tool_name,
+                        trace_arguments,
+                    )
+                    .await;
                     let dispatch_server = server.clone();
                     let dispatch_session_id = session_id.to_string();
                     let dispatch_result = run_on_mcp_tool_dispatch_stack(move || async move {
                         dispatch_tool_call(&dispatch_server, &dispatch_session_id, params).await
                     })
                     .await;
+                    let trace_result = dispatch_result
+                        .as_ref()
+                        .map(|(value, _)| value.clone())
+                        .map_err(Clone::clone);
+                    if let Some(run_id) = trace_run_id {
+                        crate::services::managed_jev_trace::tool_finished(
+                            &server.state,
+                            session_id,
+                            &run_id,
+                            &trace_tool_name,
+                            &trace_result,
+                        )
+                        .await;
+                    }
+                    if dispatch_result.is_ok() {
+                        if let Some((response, fatal)) = final_reply {
+                            if let Err(error) = crate::services::managed_jev_trace::finish_run(
+                                &server.state,
+                                session_id,
+                                &response,
+                                fatal,
+                            )
+                            .await
+                            {
+                                return mcp_tool_error(req.id, &error);
+                            }
+                        }
+                    }
                     match dispatch_result {
                         Ok((value, next_target)) => {
                             if next_target.is_some() {
@@ -7732,6 +7997,30 @@ async fn dispatch_tool_call(
                 handlers::handle_session_reply_save(&server.state, req, &current_ctx).await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
+        "session_answer_save" => {
+            let accepted = server
+                .state
+                .managed_jev_runs
+                .lock()
+                .await
+                .get(session_id)
+                .is_some_and(|run| {
+                    run.turn_policy
+                        .as_ref()
+                        .is_some_and(|policy| policy.answer_first_required)
+                        && run.status == "running"
+                });
+            if !accepted {
+                return Err(AppError::validation(
+                    "session_answer_save requires an active managed Jev answer-first turn.",
+                ));
+            }
+            let req: SessionReplySaveRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response =
+                handlers::handle_session_answer_save(&server.state, req, &current_ctx).await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
         "session_activity_set" => {
             let req: SessionActivitySetRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
@@ -8039,6 +8328,231 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    #[test]
+    fn native_hook_preserves_legacy_and_applies_routed_mcp_policy() {
+        assert!(native_tool_allowed_by_policy(None, "Bash"));
+        assert!(native_tool_allowed_by_policy(None, "view_image"));
+        assert!(native_tool_allowed_by_policy(
+            Some(crate::provider_turn::ProviderTurnPolicy::prompt_based()),
+            "Bash"
+        ));
+        assert!(native_tool_allowed_by_policy(
+            Some(crate::provider_turn::ProviderTurnPolicy::prompt_based()),
+            "view_image"
+        ));
+        let answer = crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Answer,
+        );
+        assert!(!native_tool_allowed_by_policy(Some(answer), "Bash"));
+        assert!(!native_tool_allowed_by_policy(
+            Some(answer),
+            "mcp__ecky_provider_mcp__workspace_overview"
+        ));
+        let inspect = crate::provider_turn::ProviderTurnPolicy::for_intent(
+            crate::provider_turn::ProviderTurnIntent::Inspect,
+        );
+        assert!(native_tool_allowed_by_policy(
+            Some(inspect),
+            "mcp__ecky_provider_mcp__workspace_overview"
+        ));
+        assert!(!native_tool_allowed_by_policy(
+            Some(inspect),
+            "mcp__ecky_provider_mcp__ecky_ast_set_number"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compiled_hook_worker_calls_rust_callback_and_propagates_deny() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let directory =
+            std::env::temp_dir().join(format!("ecky-hook-e2e-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token = "test-capability-token";
+        crate::services::codex_pre_tool_hook::write_runtime_descriptor_at(
+            &directory.join("ecky/codex-pre-tool-hook.json"),
+            &format!("http://{address}/codex-pre-tool-hook/{token}"),
+            token,
+        )
+        .unwrap();
+        let app_root = directory.join("project");
+        std::fs::create_dir_all(&app_root).unwrap();
+        let conn = crate::db::init_db(&directory.join("ecky.sqlite")).unwrap();
+        let state = AppState::new(test_config(), None, conn);
+        {
+            let conn = state.db.lock().await;
+            crate::services::codex_takeover::ensure_schema(&conn).unwrap();
+            crate::db::create_or_update_thread(&conn, "ecky-thread", "Hook test", 1, None).unwrap();
+            crate::services::codex_takeover::bind_owned_thread(
+                &conn,
+                "ecky-thread",
+                "codex-thread",
+                "Hook test",
+                "/tmp/hook-test",
+                1,
+            )
+            .unwrap();
+        }
+        let http_state = HttpServerState {
+            state: state.clone(),
+            app: Arc::new(TestPathResolver { root: app_root }),
+            handle: None,
+            codex_hook_token: token.to_string(),
+        };
+        let router = Router::new()
+            .route(
+                "/codex-pre-tool-hook/{token}",
+                post(handle_codex_pre_tool_hook),
+            )
+            .with_state(http_state);
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let executable = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .join("ecky_cad");
+        assert!(
+            executable.is_file(),
+            "compiled Ecky executable missing: {}",
+            executable.display()
+        );
+        let invoke = |request: Value| {
+            let mut child = Command::new(&executable)
+                .arg("--ecky-codex-pre-tool-hook")
+                .env("TMPDIR", &directory)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(serde_json::to_string(&request).unwrap().as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status.code(), Some(0));
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        };
+        let response = invoke(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "unbound-codex-thread",
+            "turn_id": "turn-e2e",
+            "tool_use_id": "tool-e2e",
+            "tool_name": "Bash",
+            "tool_input": {"command": "touch SHOULD_NOT_RUN"}
+        }));
+        assert_eq!(
+            response["hookSpecificOutput"]["hookEventName"],
+            "PreToolUse"
+        );
+        assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("not bound"));
+
+        state
+            .codex_app_server
+            .set_runtime_for_test(
+                "codex-thread",
+                crate::contracts::CodexTakeoverRuntime {
+                    phase: "active".into(),
+                    active_turn_id: Some("turn-e2e".into()),
+                    error: None,
+                },
+            )
+            .await;
+        state
+            .set_provider_turn_policy(
+                "ecky-thread",
+                crate::provider_turn::ProviderTurnPolicy::for_intent(
+                    crate::provider_turn::ProviderTurnIntent::Answer,
+                ),
+            )
+            .await;
+        let answer_denied = invoke(json!({
+            "hook_event_name": "PreToolUse", "session_id": "codex-thread",
+            "turn_id": "turn-e2e", "tool_use_id": "tool-e2e", "tool_name": "Bash"
+        }));
+        assert_eq!(
+            answer_denied["hookSpecificOutput"]["permissionDecision"],
+            "deny"
+        );
+        let stale_denied = invoke(json!({
+            "hook_event_name": "PreToolUse", "session_id": "codex-thread",
+            "turn_id": "stale-turn", "tool_use_id": "tool-e2e", "tool_name": "Bash"
+        }));
+        assert!(
+            stale_denied["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("stale")
+        );
+        state
+            .set_provider_turn_policy(
+                "ecky-thread",
+                crate::provider_turn::ProviderTurnPolicy::routed(
+                    crate::provider_turn::ProviderTurnIntent::Inspect,
+                    true,
+                ),
+            )
+            .await;
+        let before_answer = invoke(json!({
+            "hook_event_name": "PreToolUse", "session_id": "codex-thread",
+            "turn_id": "turn-e2e", "tool_use_id": "tool-e2e",
+            "tool_name": "mcp__ecky_provider_mcp__workspace_overview"
+        }));
+        assert_eq!(
+            before_answer["hookSpecificOutput"]["permissionDecision"],
+            "deny"
+        );
+        state
+            .codex_app_server
+            .set_live_messages_for_test(
+                "codex-thread",
+                vec![crate::contracts::CodexDialogueMessage {
+                    id: "answer".into(),
+                    role: "assistant".into(),
+                    content: "I'll inspect the project.".into(),
+                    status: "success".into(),
+                    timestamp: 1,
+                    attachments: Vec::new(),
+                    provider_event_kind: Some(crate::contracts::ProviderEventKind::Assistant),
+                }],
+            )
+            .await;
+        let after_answer = invoke(json!({
+            "hook_event_name": "PreToolUse", "session_id": "codex-thread",
+            "turn_id": "turn-e2e", "tool_use_id": "tool-e2e",
+            "tool_name": "mcp__ecky_provider_mcp__workspace_overview"
+        }));
+        assert_eq!(
+            after_answer["hookSpecificOutput"]["permissionDecision"],
+            "allow"
+        );
+        state
+            .set_provider_turn_policy(
+                "ecky-thread",
+                crate::provider_turn::ProviderTurnPolicy::prompt_based(),
+            )
+            .await;
+        let legacy = invoke(json!({
+            "hook_event_name": "PreToolUse", "session_id": "codex-thread",
+            "turn_id": "turn-e2e", "tool_use_id": "tool-e2e", "tool_name": "Bash"
+        }));
+        assert_eq!(legacy["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        server.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     struct TestPathResolver {
         root: PathBuf,
     }
@@ -8072,6 +8586,7 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: None,
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -8151,6 +8666,7 @@ mod tests {
             has_seen_onboarding: true,
             connection_type: Some("api_key".to_string()),
             provider_models: crate::contracts::ProviderModels::default(),
+            jev_classifier: Default::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -8186,6 +8702,7 @@ mod tests {
                 has_seen_onboarding: true,
                 connection_type: Some("mcp".to_string()),
                 provider_models: crate::contracts::ProviderModels::default(),
+                jev_classifier: Default::default(),
                 default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
                 default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
                 default_geometry_backend: crate::contracts::GeometryBackend::EckyRust,
@@ -8372,6 +8889,7 @@ mod tests {
             state,
             app: resolver,
             handle: None,
+            codex_hook_token: String::new(),
         }
     }
 
@@ -8428,6 +8946,7 @@ mod tests {
             state,
             app: resolver,
             handle: None,
+            codex_hook_token: String::new(),
         }
     }
 
@@ -8516,6 +9035,7 @@ mod tests {
             state,
             app: resolver,
             handle: None,
+            codex_hook_token: String::new(),
         };
 
         let response =
@@ -8583,11 +9103,214 @@ mod tests {
             provider_bound_endpoint_with_policy("http://127.0.0.1:39249/mcp", "thread-1", answer)
                 .parse()
                 .expect("answer endpoint URI");
-        assert!(
-            provider_tool_definitions_for_uri(&answer_uri, modern_tool_definitions(true))
-                .is_empty()
-        );
+        let answer_tools =
+            provider_tool_definitions_for_uri(&answer_uri, modern_tool_definitions(true));
+        let answer_names = answer_tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(answer_names.contains(&"session_reply_save"));
+        assert!(!answer_names.contains(&"target_meta_get"));
+        assert!(provider_tool_allowed_for_uri(&answer_uri, "session_reply_save").is_ok());
         assert!(provider_tool_allowed_for_uri(&answer_uri, "workspace_overview").is_err());
+    }
+
+    #[tokio::test]
+    async fn managed_answer_first_saves_public_answer_before_edit_and_keeps_trace_open() {
+        let server = test_dispatch_server("(model)", "managed-answer-first").await;
+        server.state.config.lock().unwrap().connection_type = Some("mcp".into());
+        {
+            let conn = server.state.db.lock().await;
+            crate::db::add_message(
+                &conn,
+                "thread-1",
+                &crate::contracts::Message {
+                    id: "user-answer-first".into(),
+                    role: crate::contracts::MessageRole::User,
+                    content: "Explain the rib, then change its height.".into(),
+                    status: crate::contracts::MessageStatus::Working,
+                    output: None,
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    structural_verification: None,
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now_secs(),
+                },
+            )
+            .expect("working user message");
+        }
+        {
+            let mut sessions = server
+                .state
+                .mcp_session_registry
+                .with_sessions()
+                .lock()
+                .await;
+            let session = sessions.get_mut("managed-answer-first").expect("session");
+            session.client_kind = "managed-mcp-http".into();
+            session.current_turn_id = Some("turn-answer-first".into());
+            session.current_turn_thread_id = Some("thread-1".into());
+            session.current_turn_working_message_ids = vec!["user-answer-first".into()];
+        }
+        let request = crate::jev_classifier::ClassifierRequest::bounded(
+            "Explain the rib, then change its height.",
+            Vec::new(),
+            "",
+            "managed request",
+            Vec::new(),
+            Vec::new(),
+        );
+        let route = crate::jev_classifier::AcceptedRoute::test_route(
+            crate::provider_turn::ProviderTurnIntent::Modify,
+            None,
+            true,
+        );
+        let run = crate::services::managed_jev_trace::accepted_run(
+            "thread-1",
+            "managed-answer-first",
+            "Explain the rib, then change its height.",
+            &request,
+            &route,
+            None,
+        );
+        server
+            .state
+            .managed_jev_runs
+            .lock()
+            .await
+            .insert("managed-answer-first".into(), run);
+        server
+            .state
+            .set_provider_turn_policy(
+                "thread-1",
+                crate::provider_turn::ProviderTurnPolicy::routed(
+                    crate::provider_turn::ProviderTurnIntent::Modify,
+                    true,
+                ),
+            )
+            .await;
+
+        let available = dispatch_request(
+            &server,
+            "managed-answer-first",
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/list".into(),
+                params: Some(json!({})),
+                id: Some(json!(1)),
+            },
+        )
+        .await;
+        let available_names = available.result.as_ref().expect("tools/list")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(available_names, vec!["session_answer_save"]);
+
+        let denied = dispatch_tool_call_jsonrpc(
+            &server,
+            "managed-answer-first",
+            "ecky_ast_set_number",
+            json!({}),
+        )
+        .await;
+        assert_eq!(
+            denied
+                .result
+                .as_ref()
+                .and_then(|value| value.get("isError")),
+            Some(&json!(true)),
+            "edit must wait for public answer"
+        );
+
+        let answer = dispatch_tool_call_jsonrpc(
+            &server,
+            "managed-answer-first",
+            "session_answer_save",
+            json!({"body": "The rib currently supports the top shelf."}),
+        )
+        .await;
+        assert_ne!(
+            answer
+                .result
+                .as_ref()
+                .and_then(|value| value.get("isError")),
+            Some(&json!(true)),
+            "{answer:?}"
+        );
+        let messages = {
+            let conn = server.state.db.lock().await;
+            crate::db::get_thread_messages(&conn, "thread-1").expect("messages")
+        };
+        assert!(messages.iter().any(|message| {
+            message.role == crate::contracts::MessageRole::Assistant
+                && message.content == "The rib currently supports the top shelf."
+        }));
+        assert!(messages.iter().any(|message| {
+            message.id == "user-answer-first"
+                && message.status == crate::contracts::MessageStatus::Working
+        }));
+        assert!(server
+            .state
+            .managed_jev_runs
+            .lock()
+            .await
+            .contains_key("managed-answer-first"));
+        assert!(
+            provider_answer_first_satisfied_for_session(&server.state, "managed-answer-first")
+                .await
+        );
+        let available = dispatch_request(
+            &server,
+            "managed-answer-first",
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/list".into(),
+                params: Some(json!({})),
+                id: Some(json!(2)),
+            },
+        )
+        .await;
+        assert!(available.result.as_ref().expect("tools/list")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "session_reply_save"));
+        let final_reply = dispatch_tool_call_jsonrpc(
+            &server,
+            "managed-answer-first",
+            "session_reply_save",
+            json!({"body": "The rib height was updated and verified."}),
+        )
+        .await;
+        assert_ne!(
+            final_reply
+                .result
+                .as_ref()
+                .and_then(|value| value.get("isError")),
+            Some(&json!(true)),
+            "{final_reply:?}"
+        );
+        assert!(!server
+            .state
+            .managed_jev_runs
+            .lock()
+            .await
+            .contains_key("managed-answer-first"));
+        let messages = {
+            let conn = server.state.db.lock().await;
+            crate::db::get_thread_messages(&conn, "thread-1").expect("messages")
+        };
+        assert!(messages.iter().any(|message| {
+            message.id == "user-answer-first"
+                && message.status == crate::contracts::MessageStatus::Success
+        }));
     }
 
     #[tokio::test]
@@ -8637,6 +9360,7 @@ mod tests {
             state: state.clone(),
             app: resolver,
             handle: None,
+            codex_hook_token: String::new(),
         };
         let listed = dispatch_request(
             &server,
@@ -11870,6 +12594,7 @@ mod tests {
             state,
             app: resolver,
             handle: None,
+            codex_hook_token: String::new(),
         };
 
         let compact = dispatch_request(

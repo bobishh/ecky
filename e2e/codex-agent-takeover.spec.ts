@@ -51,6 +51,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
     const w = window as any;
     localStorage.clear();
     w.__CODEX_CALLS__ = [];
+    w.__JEV_CLASSIFICATIONS__ = JSON.parse(sessionStorage.getItem('e2e-jev-classifications') || '[]');
     w.__CODEX_BINDING__ = initiallyBound ? structuredClone(binding) : null;
     w.__CODEX_SNAPSHOT__ = structuredClone(initialSnapshot);
     if (persistedImage) {
@@ -69,6 +70,24 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
     w.__PROVIDER_WRITER_ACTIVATION_ERROR__ = null;
     w.__PROJECT_SOURCE_ERROR__ = null;
     w.__PENDING_CODEX_SENDS__ = [];
+    w.__PENDING_CODEX_ACKS__ = [];
+    w.__PENDING_CODEX_STEERS__ = [];
+    w.__RESOLVE_CODEX_ACK__ = () => {
+      const pending = w.__PENDING_CODEX_ACKS__.shift();
+      if (pending) pending.resolve(structuredClone(w.__CODEX_SNAPSHOT__));
+    };
+    w.__REJECT_CODEX_ACK__ = (reason: string) => {
+      const pending = w.__PENDING_CODEX_ACKS__.shift();
+      if (pending) pending.reject(reason);
+    };
+    w.__REJECT_CODEX_STEER__ = (reason: string) => {
+      const pending = w.__PENDING_CODEX_STEERS__.shift();
+      if (pending) pending.reject(reason);
+    };
+    w.__RESOLVE_CODEX_STEER__ = () => {
+      const pending = w.__PENDING_CODEX_STEERS__.shift();
+      if (pending) pending.resolve(structuredClone(w.__CODEX_SNAPSHOT__));
+    };
     w.__PENDING_QUEUE_REMOVALS__ = [];
     w.__RESOLVE_QUEUE_REMOVE__ = () => {
       const pending = w.__PENDING_QUEUE_REMOVALS__.shift();
@@ -165,6 +184,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
       if (cmd === 'check_freecad') return true;
       if (cmd === 'get_default_macro') return '(model)';
       if (cmd === 'get_history') return [structuredClone(eckyThread)];
+      if (cmd === 'get_jev_classification_results') return structuredClone(w.__JEV_CLASSIFICATIONS__);
       if (cmd === 'get_thread') return structuredClone(eckyThread);
       if (cmd === 'get_thread_messages_page') return { messages: structuredClone(eckyThread.messages), hasMore: false, nextBefore: null };
       if (cmd === 'get_project_source') {
@@ -187,9 +207,13 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
       if (cmd === 'prepare_prompt_attachments') {
         return ((args?.attachments as any[]) ?? []).map((attachment: any) => ({
           ...attachment,
-          path: `/workspace/gearbox/.ecky/attachments/${attachment.name}`,
-          dataUrl: null,
+          path: attachment.dataUrl ? '' : `/workspace/gearbox/.ecky/attachments/${attachment.name}`,
+          dataUrl: attachment.dataUrl ?? null,
         }));
+      }
+      if (cmd === 'prepare_prompt_workspace_capture') {
+        const input = args?.input as any;
+        return { path: '', name: input?.name, explanation: input?.explanation, dataUrl: input?.dataUrl, kind: 'image' };
       }
       if (cmd === 'activate_provider_writer') {
         if (w.__PROVIDER_WRITER_ACTIVATION_ERROR__) throw w.__PROVIDER_WRITER_ACTIVATION_ERROR__;
@@ -204,11 +228,19 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         nextCursor: null, backwardsCursor: 'newer-cursor-2',
       };
       if (cmd === 'send_codex_takeover_prompt') {
-        const prompt = String((args?.input as any)?.promptText ?? '');
+        const input = args?.input as any;
+        const prompt = String(input?.promptText ?? '');
+        if (w.__DELAY_CODEX_ACK__) {
+          return new Promise((resolve, reject) => w.__PENDING_CODEX_ACKS__.push({ resolve, reject }));
+        }
         if (mode === 'delayed') {
           const queued = {
             id: 'queue-delayed', eckyThreadId: eckyThread.id, promptText: prompt,
-            attachments: [], status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300,
+            attachments: (input?.attachments ?? []).map((attachment: any) => ({
+              ...attachment,
+              dataUrl: attachment.dataUrl ?? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+            })),
+            status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300,
           };
           w.__PENDING_CODEX_SENDS__.push({ prompt });
           w.__CODEX_SNAPSHOT__.queue = [queued];
@@ -254,10 +286,24 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
       if (cmd === 'retry_agy_queued_prompt' || cmd === 'remove_agy_queued_prompt') return structuredClone(w.__AGY_SNAPSHOT__);
       if (cmd === 'steer_codex_takeover') {
         const prompt = String((args?.input as any)?.promptText ?? '');
-        w.__CODEX_SNAPSHOT__.messages.push({
+        if (w.__DELAY_CODEX_STEER__) {
+          return new Promise((resolve, reject) => w.__PENDING_CODEX_STEERS__.push({ resolve, reject }));
+        }
+        const message = {
           id: `codex:steer:${w.__CODEX_SNAPSHOT__.messages.length}`,
           role: 'user', content: prompt, status: 'success', timestamp: Math.floor(Date.now() / 1000),
-        });
+          attachments: (args?.input as any)?.attachments ?? [],
+        };
+        w.__CODEX_SNAPSHOT__.messages.push(message);
+        if (w.__STEER_CLASSIFICATION__) {
+          w.__JEV_CLASSIFICATIONS__.push({
+            ...w.__STEER_CLASSIFICATION__, threadId: eckyThread.id, provider: 'codex',
+            requestId: 'steer-request-1', messageId: message.id, acceptedAt: message.timestamp,
+          });
+          w.__EVENT_HANDLERS__['jev-classification-accepted']?.({
+            event: 'jev-classification-accepted', id: 1, payload: { threadId: eckyThread.id },
+          });
+        }
         return structuredClone(w.__CODEX_SNAPSHOT__);
       }
       if (cmd === 'stop_codex_takeover') { w.__CODEX_SNAPSHOT__.runtime.phase = 'stopping'; return structuredClone(w.__CODEX_SNAPSHOT__); }
@@ -267,6 +313,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         if (item) { item.status = 'queued'; item.error = null; } return structuredClone(w.__CODEX_SNAPSHOT__);
       }
       if (cmd === 'remove_codex_queued_prompt') {
+        if (w.__QUEUE_REMOVE_ERROR__) throw w.__QUEUE_REMOVE_ERROR__;
         if (w.__DELAY_QUEUE_REMOVE__) {
           return new Promise((resolve) => w.__PENDING_QUEUE_REMOVALS__.push({ queueId: String(args?.queueId ?? ''), resolve }));
         }
@@ -297,6 +344,27 @@ async function openDialogue(page: Page) {
 async function bootProviderDialogue(page: Page) {
   await page.goto('/'); await selectCodexProvider(page); await openDialogue(page);
   await expect(page.getByRole('button', { name: 'TAKE OVER CODEX' })).toHaveCount(0);
+}
+
+async function drawViewportAnnotation(page: Page, offset = 0) {
+  if (!await page.locator('.draw-toolbar').isVisible()) await page.locator('[data-dock-id="draw"]').click();
+  await expect(page.locator('.draw-toolbar')).toBeVisible();
+  const bounds = await page.locator('.drawing-canvas').boundingBox();
+  if (!bounds) throw new Error('Drawing canvas unavailable');
+  const point = await page.locator('.drawing-canvas').evaluate((canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    for (let y = 80; y < rect.height - 80; y += 100) {
+      for (let x = 40; x < rect.width - 120; x += 100) {
+        if (document.elementFromPoint(rect.x + x, rect.y + y) === canvas && document.elementFromPoint(rect.x + x + 80, rect.y + y + 40) === canvas) return { x: rect.x + x, y: rect.y + y };
+      }
+    }
+    throw new Error('No exposed drawing area');
+  });
+  await page.mouse.move(point.x, point.y + offset);
+  await page.mouse.down();
+  await page.mouse.move(point.x + 80, point.y + 40 + offset, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.getByText('Enabled automatically because the current viewport has annotated content.')).toBeVisible();
 }
 
 test.describe('Codex provider integration', () => {
@@ -347,7 +415,7 @@ test.describe('Codex provider integration', () => {
 
   test('Given Codex has another active writer When Ecky thread opens Then durable Ecky history renders without owner error', async ({ page }) => {
     await installProviderMocks(page, 'happy', true);
-    await page.goto('/');
+    await bootProviderDialogue(page);
     await page.evaluate(() => {
       (window as any).__PROVIDER_WRITER_ACTIVATION_ERROR__ = 'thread codex-owned-by-ecky-7 already has an active writer';
     });
@@ -360,6 +428,38 @@ test.describe('Codex provider integration', () => {
     expect(calls.some((call: any) => call.cmd === 'activate_provider_writer'
       && call.args?.input?.provider === 'codex')).toBe(false);
     expect(calls.some((call: any) => call.cmd === 'get_codex_takeover')).toBe(true);
+  });
+
+  test('Given queued Codex delivery waits for another writer When Dialogue refreshes Then user sees automatic wait and later delivery', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.queue = [{
+        id: 'queue-writer-wait', eckyThreadId: 'ecky-thread-1', promptText: 'Add mounting ribs.',
+        attachments: [], status: 'queued', canCancel: true,
+        error: 'thread codex-owned-by-ecky-7 already has an active writer',
+        createdAt: 1, updatedAt: 2,
+      }];
+    });
+    await selectCodexProvider(page);
+    await openDialogue(page);
+
+    const queue = page.getByRole('region', { name: 'Codex prompt queue' });
+    await expect(queue).toContainText('Add mounting ribs.');
+    await expect(queue).toContainText('Codex is busy. This request will send automatically when ready.');
+    await expect(queue).not.toContainText('already has an active writer');
+    await expect(queue.getByRole('button', { name: 'RETRY' })).toHaveCount(0);
+
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.queue = [];
+      (window as any).__CODEX_SNAPSHOT__.messages.push({
+        id: 'codex:user-writer-wait', role: 'user', content: 'Add mounting ribs.',
+        status: 'success', timestamp: 3,
+      });
+      (window as any).__EMIT_CODEX_EVENT__('queue/dispatched');
+    });
+    await expect(queue).toHaveCount(0);
+    await expect(page.locator('.trail-user').filter({ hasText: 'Add mounting ribs.' })).toBeVisible();
   });
 
   test('Given Provider settings When AGY is selected Then Dialogue routes the Ecky thread to the Agy adapter', async ({ page }) => {
@@ -764,6 +864,301 @@ test.describe('Codex provider integration', () => {
     await expect(page.getByText('Housing V1 generated.')).toBeVisible();
   });
 
+  test('Given a queued provider image When delivery is pending Then its image appears with the queued message', async ({ page }) => {
+    await installProviderMocks(page, 'delayed', true); await bootProviderDialogue(page);
+    await page.evaluate(() => {
+      const container = document.querySelector('.prompt-container');
+      if (!container) throw new Error('Prompt container missing');
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['image'], 'queued-reference.png', { type: 'image/png' }));
+      container.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    });
+    await expect(page.locator('.attachment-item')).toContainText('queued-reference.png');
+    await page.locator('.prompt-input').fill('Inspect this reference.');
+    await page.getByRole('button', { name: 'SEND TO CODEX' }).click();
+
+    const queued = page.getByRole('region', { name: 'Codex prompt queue' });
+    await expect(queued).toContainText('Inspect this reference.');
+    const image = queued.getByAltText('Queued attachment preview');
+    await expect(image).toBeVisible();
+    await expect(image).toHaveJSProperty('naturalWidth', 1);
+  });
+
+  test('Given a send is awaiting acceptance When capture is enabled and Draw is active Then acceptance clears both controls', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true); await bootProviderDialogue(page);
+    await page.evaluate(() => { (window as any).__DELAY_CODEX_ACK__ = true; });
+    const input = page.getByPlaceholder(/Type a question or design change/i);
+    await input.fill('Check this viewport.');
+    await page.getByRole('button', { name: 'SEND TO CODEX' }).click();
+    await expect(input).toHaveValue('');
+
+    const captureCheckbox = page.locator('.workspace-capture-toggle input');
+    await captureCheckbox.check();
+    await page.locator('[data-dock-id="draw"]').click();
+    await expect(page.locator('.draw-toolbar')).toBeVisible();
+    await page.evaluate(() => (window as any).__RESOLVE_CODEX_ACK__());
+
+    await expect(captureCheckbox).not.toBeChecked();
+    await expect(page.locator('.draw-toolbar')).toHaveCount(0);
+  });
+
+  test('Given slow acknowledgement When user sends Then pending prompt paints immediately and failure restores draft', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/'); await selectCodexProvider(page);
+    await openDialogue(page);
+    await page.evaluate(() => { (window as any).__DELAY_CODEX_ACK__ = true; });
+    const input = page.getByPlaceholder(/Type a question or design change/i);
+    await input.fill('Check bearing clearance.');
+    await page.getByRole('button', { name: 'SEND TO CODEX' }).click();
+    await expect(input).toHaveValue('');
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' })).toContainText('Check bearing clearance.');
+    await page.evaluate(() => (window as any).__REJECT_CODEX_ACK__('queue write failed: disk full'));
+    await expect(input).toHaveValue('Check bearing clearance.');
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' })).toHaveCount(0);
+    await expect(page.getByText('queue write failed: disk full')).toBeVisible();
+  });
+
+  test('Given pending provider input When backend accepts it Then one durable copy replaces the pending row', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/'); await selectCodexProvider(page);
+    await openDialogue(page);
+    await page.evaluate(() => { (window as any).__DELAY_CODEX_ACK__ = true; });
+    const input = page.getByPlaceholder(/Type a question or design change/i);
+    await input.fill('Check bearing clearance.');
+    await page.getByRole('button', { name: 'SEND TO CODEX' }).click();
+    const queue = page.getByRole('region', { name: 'Codex prompt queue' });
+    await expect(queue.locator('.codex-queue__item')).toHaveCount(1);
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__CODEX_SNAPSHOT__.queue = [{
+        id: 'queue-accepted', eckyThreadId: 'ecky-thread-1', promptText: 'Check bearing clearance.',
+        status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300,
+      }];
+      w.__RESOLVE_CODEX_ACK__();
+    });
+    await expect(queue.locator('.codex-queue__item')).toHaveCount(1);
+    await expect(queue).toContainText('Check bearing clearance.');
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__CODEX_SNAPSHOT__.queue = [];
+      w.__CODEX_SNAPSHOT__.messages.push({
+        id: 'codex:accepted-bearing', role: 'user', content: 'Check bearing clearance.',
+        status: 'success', timestamp: 1787263400,
+      });
+      w.__EMIT_CODEX_EVENT__('turn/completed');
+    });
+    await expect(queue).toHaveCount(0);
+    await expect(page.locator('.trail-user').filter({ hasText: 'Check bearing clearance.' })).toHaveCount(1);
+  });
+
+  test('Given an identical queued prompt When user sends it again Then the new pending input remains visible', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/'); await selectCodexProvider(page);
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__CODEX_SNAPSHOT__.queue = [{
+        id: 'queue-existing', eckyThreadId: 'ecky-thread-1', promptText: 'Check bearing clearance.',
+        status: 'queued', error: null, createdAt: 1787263200, updatedAt: 1787263200,
+      }];
+    });
+    await openDialogue(page);
+    await page.evaluate(() => (window as any).__EMIT_CODEX_EVENT__('queue/updated'));
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' })).toContainText('Check bearing clearance.');
+    await page.evaluate(() => { (window as any).__DELAY_CODEX_ACK__ = true; });
+    await page.getByPlaceholder(/Type a question or design change/i).fill('Check bearing clearance.');
+    await page.getByRole('button', { name: 'SEND TO CODEX' }).click();
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' }).locator('.codex-queue__item')).toHaveCount(2);
+    await page.evaluate(() => (window as any).__REJECT_CODEX_ACK__('queue write failed: disk full'));
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' }).locator('.codex-queue__item')).toHaveCount(1);
+  });
+
+  test('Given active Codex turn When steering acknowledgement is slow Then user sees pending steer and failure restores draft', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'active', activeTurnId: 'turn-steer', error: null };
+    });
+    await selectCodexProvider(page); await openDialogue(page);
+    await page.evaluate(() => { (window as any).__DELAY_CODEX_STEER__ = true; });
+    const input = page.getByPlaceholder(/Type a question or design change/i);
+    await input.fill('Keep ribs symmetric.');
+    await page.getByRole('button', { name: 'STEER' }).click();
+    await expect(input).toHaveValue('');
+    await expect(page.locator('.trail-user').filter({ hasText: 'Keep ribs symmetric.' })).toHaveCount(1);
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' })).toHaveCount(0);
+    await page.evaluate(() => (window as any).__REJECT_CODEX_STEER__('turn/steer failed: active turn changed'));
+    await expect(input).toHaveValue('Keep ribs symmetric.');
+    await expect(page.locator('.trail-user').filter({ hasText: 'Keep ribs symmetric.' })).toHaveCount(0);
+    await expect(page.getByText('turn/steer failed: active turn changed')).toBeVisible();
+  });
+
+  test('Given an image reference during an active turn When steering Then the exact turn receives the image and the composer clears it', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'active', activeTurnId: 'turn-steer', error: null };
+    });
+    await selectCodexProvider(page); await openDialogue(page);
+    await page.locator('.prompt-container').evaluate((container) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['image'], 'steer-reference.png', { type: 'image/png' }));
+      container.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    });
+    await expect(page.locator('.attachment-item')).toContainText('steer-reference.png');
+    await page.locator('.att-explanation').fill('Inspect the highlighted shoulder.');
+    await page.locator('.prompt-input').fill('Check this image first.');
+    await page.getByRole('button', { name: 'STEER', exact: true }).click();
+    await expect.poll(async () => page.evaluate(() => (window as any).__CODEX_CALLS__
+      .find((call: any) => call.cmd === 'steer_codex_takeover')?.args?.input?.attachments)).toEqual([{
+      path: '/workspace/gearbox/.ecky/attachments/steer-reference.png', name: 'steer-reference.png',
+      explanation: 'Inspect the highlighted shoulder.', dataUrl: null, kind: 'image',
+    }]);
+    await expect(page.locator('.attachment-item')).toHaveCount(0);
+    await expect(page.locator('.prompt-input')).toHaveValue('');
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' })).toHaveCount(0);
+  });
+
+  test('Given an annotated viewport When exiting DRAW and steering Then the sent image retains the actual strokes', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/');
+    await page.evaluate(() => { (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'active', activeTurnId: 'turn-steer', error: null }; });
+    await selectCodexProvider(page); await openDialogue(page);
+    await drawViewportAnnotation(page);
+    await page.locator('[data-dock-id="draw"]').click();
+    await page.locator('.prompt-input').fill('Inspect the red drawing.');
+    await page.getByRole('button', { name: 'STEER', exact: true }).click();
+    await expect.poll(async () => page.evaluate(() => (window as any).__CODEX_CALLS__
+      .find((call: any) => call.cmd === 'steer_codex_takeover')?.args?.input?.attachments?.[0]?.dataUrl)).toMatch(/^data:image\//);
+    const redPixels = await page.evaluate(async () => {
+      const attachment = (window as any).__CODEX_CALLS__.find((call: any) => call.cmd === 'steer_codex_takeover').args.input.attachments[0];
+      const img = new Image(); img.src = attachment.dataUrl; await img.decode();
+      const canvas = document.createElement('canvas'); canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext('2d')!; ctx.drawImage(img, 0, 0);
+      const pixels = ctx.getImageData(0, 0, img.width, img.height).data;
+      let count = 0;
+      for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 130 && pixels[i] > pixels[i + 1] * 1.5 && pixels[i] > pixels[i + 2] * 1.5) count++;
+      return count;
+    });
+    expect(redPixels).toBeGreaterThan(80);
+    await expect(page.locator('.trail-user').filter({ hasText: 'Inspect the red drawing.' }).locator('.trail-image')).toHaveCount(1);
+    await expect(page.getByText('Enabled automatically because the current viewport has annotated content.')).toHaveCount(0);
+  });
+
+  test('Given viewport capture fails When steering Then no provider call occurs and the drawing and draft remain', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/');
+    await page.evaluate(() => { (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'active', activeTurnId: 'turn-steer', error: null }; });
+    await selectCodexProvider(page); await openDialogue(page);
+    await drawViewportAnnotation(page);
+    await page.evaluate(() => {
+      const original = HTMLCanvasElement.prototype.getContext;
+      (window as any).__RESTORE_CANVAS_CONTEXT__ = () => { HTMLCanvasElement.prototype.getContext = original; };
+      HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...args: any[]) {
+        if (args[0] === '2d' && !this.isConnected) return null;
+        return (original as any).apply(this, args);
+      } as any;
+    });
+    await page.locator('.prompt-input').fill('Check the drawing.');
+    await page.getByRole('button', { name: 'STEER', exact: true }).click();
+    await expect(page.locator('.provider-conversation-error')).toContainText('Workspace image capture failed');
+    await expect(page.locator('.prompt-input')).toHaveValue('Check the drawing.');
+    await expect(page.getByText('Enabled automatically because the current viewport has annotated content.')).toBeVisible();
+    expect(await page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'steer_codex_takeover'))).toHaveLength(0);
+    await page.evaluate(() => (window as any).__RESTORE_CANVAS_CONTEXT__());
+  });
+
+  test('Given Jev rejects a drawn steering request When failure returns Then drawing and reference draft remain available', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'active', activeTurnId: 'turn-steer', error: null };
+      (window as any).__DELAY_CODEX_STEER__ = true;
+    });
+    await selectCodexProvider(page); await openDialogue(page);
+    await drawViewportAnnotation(page);
+    await page.locator('.prompt-input').fill('Inspect my drawing.');
+    await page.getByRole('button', { name: 'STEER', exact: true }).click();
+    await expect(page.locator('.prompt-input')).toHaveValue('');
+    await expect.poll(() => page.evaluate(() => (window as any).__PENDING_CODEX_STEERS__.length)).toBe(1);
+    await page.evaluate(() => (window as any).__REJECT_CODEX_STEER__('Jev classifier failed: HTTP 429 raw rate-limit body'));
+    await expect(page.locator('.provider-conversation-error')).toContainText('HTTP 429 raw rate-limit body');
+    await expect(page.locator('.prompt-input')).toHaveValue('Inspect my drawing.');
+    await expect(page.getByText('Enabled automatically because the current viewport has annotated content.')).toBeVisible();
+    await expect(page.locator('.trail-user').filter({ hasText: 'Inspect my drawing.' })).toHaveCount(0);
+  });
+
+  test('Given a drawing changes while STEER is pending When delivery succeeds Then the newer drawing is retained', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'active', activeTurnId: 'turn-steer', error: null };
+      (window as any).__DELAY_CODEX_STEER__ = true;
+    });
+    await selectCodexProvider(page); await openDialogue(page);
+    await drawViewportAnnotation(page);
+    await page.locator('.prompt-input').fill('Inspect this stroke.');
+    await page.getByRole('button', { name: 'STEER', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__PENDING_CODEX_STEERS__.length)).toBe(1);
+    await drawViewportAnnotation(page, 20);
+    await page.evaluate(() => (window as any).__RESOLVE_CODEX_STEER__());
+    await expect(page.getByRole('button', { name: 'STEER', exact: true })).toBeVisible();
+    await expect(page.getByText('Enabled automatically because the current viewport has annotated content.')).toBeVisible();
+  });
+
+  test('Given a fresh STEER classification When backend accepts it Then probabilities appear under that steering message', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.runtime = { phase: 'active', activeTurnId: 'turn-steer', error: null };
+      (window as any).__STEER_CLASSIFICATION__ = {
+        intent: 'inspect', actionProbabilities: { answer: 0.02, plan: 0.01, clarify: 0.02, inspect: 0.85, modify: 0.1 },
+      };
+    });
+    await selectCodexProvider(page); await openDialogue(page);
+    await page.locator('.prompt-input').fill('Measure the highlighted shoulder.');
+    await page.getByRole('button', { name: 'STEER', exact: true }).click();
+    const message = page.locator('.trail-user').filter({ hasText: 'Measure the highlighted shoulder.' });
+    await expect(message.getByLabel('Jev classification')).toContainText(/ANSWER 2%.*PLAN 1%.*CLARIFY 2%.*INSPECT 85%.*MODIFY 10%/);
+    await expect(message.getByText('INSPECT 85%')).toHaveClass(/jev-classification__badge--selected/);
+    await expect(page.locator('.trail-user').filter({ hasText: 'Keep wall thickness at 3 mm.' }).getByLabel('Jev classification')).toHaveCount(0);
+  });
+
+  test('Given Jev accepts a route after a message appears When provider state refreshes Then its classification appears below that message and survives reload', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true);
+    await bootProviderDialogue(page);
+    const request = page.locator('.trail-user').filter({ hasText: 'Keep wall thickness at 3 mm.' });
+    await expect(request).toBeVisible();
+    await expect(request.getByLabel('Jev classification')).toHaveCount(0);
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__JEV_CLASSIFICATIONS__ = [{
+        threadId: 'ecky-thread-1', provider: 'codex', requestId: 'queue-1',
+        messageId: 'codex:user-1', intent: 'modify',
+        actionProbabilities: { answer: 0.02, plan: 0.01, clarify: 0.03, inspect: 0.01, modify: 0.93 },
+        acceptedAt: 1787263000,
+      }];
+      sessionStorage.setItem('e2e-jev-classifications', JSON.stringify(w.__JEV_CLASSIFICATIONS__));
+      w.__EVENT_HANDLERS__['jev-classification-accepted']?.({
+        event: 'jev-classification-accepted', id: 1, payload: { threadId: 'ecky-thread-1' },
+      });
+    });
+    await expect(request.getByLabel('Jev classification')).toContainText(/ANSWER 2%.*PLAN 1%.*CLARIFY 3%.*INSPECT 1%.*MODIFY 93%/);
+    await expect(request.getByText('MODIFY 93%')).toHaveClass(/jev-classification__badge--selected/);
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__CODEX_SNAPSHOT__.queue = [{
+        id: 'queue-next', eckyThreadId: 'ecky-thread-1', promptText: 'Inspect fit.',
+        status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300,
+      }];
+      w.__JEV_CLASSIFICATIONS__.push({
+        threadId: 'ecky-thread-1', provider: 'codex', requestId: 'queue-next',
+        messageId: null, intent: 'inspect',
+        actionProbabilities: { answer: 0.04, plan: 0.06, clarify: 0.1, inspect: 0.7, modify: 0.1 },
+        acceptedAt: 1787263300,
+      });
+      w.__EMIT_CODEX_EVENT__('queue/updated');
+      w.__EVENT_HANDLERS__['jev-classification-accepted']?.({
+        event: 'jev-classification-accepted', id: 2, payload: { threadId: 'ecky-thread-1' },
+      });
+    });
+    await expect(page.getByRole('region', { name: 'Codex prompt queue' }).getByLabel('Jev classification')).toContainText('INSPECT 70%');
+    await page.reload();
+    await selectCodexProvider(page);
+    await openDialogue(page);
+    await expect(page.locator('.trail-user').filter({ hasText: 'Keep wall thickness at 3 mm.' }).getByLabel('Jev classification')).toContainText('MODIFY 93%');
+  });
+
   test('Given Codex thread creation fails When first message is sent Then raw error remains and retry succeeds', async ({ page }) => {
     await installProviderMocks(page, 'startFailure'); await bootProviderDialogue(page);
     const input = page.getByPlaceholder(/Type a question or design change/i);
@@ -1093,6 +1488,50 @@ test.describe('Codex provider integration', () => {
     await page.evaluate(() => (window as any).__RESOLVE_QUEUE_REMOVE__());
     await expect(queue).not.toContainText('First queued prompt.');
     await expect(queue).toContainText('Second queued prompt.');
+  });
+
+  test('Given Jev classification pending When user removes request Then cancellation stays pending until Rust confirms', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__DELAY_QUEUE_REMOVE__ = true;
+      (window as any).__CODEX_SNAPSHOT__.queue = [{
+        id: 'queue-routing', eckyThreadId: 'ecky-thread-1', promptText: 'Explain then change the ribs.',
+        status: 'sending', canCancel: true, error: null, createdAt: 1, updatedAt: 1,
+      }];
+    });
+    await selectCodexProvider(page);
+    await openDialogue(page);
+    const queue = page.getByRole('region', { name: 'Codex prompt queue' });
+    await expect(queue).toContainText('Explain then change the ribs.');
+    await expect(queue.getByLabel('Jev classification')).toHaveCount(0);
+    await queue.getByRole('button', { name: 'REMOVE', exact: true }).click();
+    await expect(queue.getByRole('button', { name: 'REMOVING…' })).toBeDisabled();
+    await expect(queue).toContainText('Explain then change the ribs.');
+    await page.evaluate(() => (window as any).__RESOLVE_QUEUE_REMOVE__());
+    await expect(queue).toHaveCount(0);
+    const calls = await page.evaluate(() => (window as any).__CODEX_CALLS__);
+    expect(calls.filter((call: any) => call.cmd === 'remove_codex_queued_prompt')).toHaveLength(1);
+    expect(calls.filter((call: any) => call.cmd === 'stop_codex_takeover')).toHaveLength(0);
+  });
+
+  test('Given Jev cancellation loses dispatch race When Rust rejects removal Then request and diagnostic remain', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__QUEUE_REMOVE_ERROR__ = 'Codex queue item already dispatched. Use STOP for active work.';
+      (window as any).__CODEX_SNAPSHOT__.queue = [{
+        id: 'queue-routing', eckyThreadId: 'ecky-thread-1', promptText: 'Explain then change the ribs.',
+        status: 'sending', canCancel: true, error: null, createdAt: 1, updatedAt: 1,
+      }];
+    });
+    await selectCodexProvider(page);
+    await openDialogue(page);
+    const queue = page.getByRole('region', { name: 'Codex prompt queue' });
+    await queue.getByRole('button', { name: 'REMOVE', exact: true }).click();
+    await expect(page.getByText('Codex queue item already dispatched. Use STOP for active work.', { exact: true })).toBeVisible();
+    await expect(queue).toContainText('Explain then change the ribs.');
+    await expect(queue.getByRole('button', { name: 'REMOVE', exact: true })).toBeEnabled();
   });
 
   test('Given owned conversation When turn start fails Then transcript and retryable FIFO remain', async ({ page }) => {
