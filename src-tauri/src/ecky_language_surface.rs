@@ -1394,7 +1394,7 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "bspline" => ref_entry(name, "cadOp", "(bspline points :closed #t|#f)", "sketch", "Builds a 2D B-spline sketch from control points.", true, support, "(bspline points :closed #t)", &[]),
         "extrude" => ref_entry(name, "cadOp", "(extrude sketch-or-image height [:symmetric #t|#f] [:width w] [:depth d] [:fit contain|stretch] [:threshold 0..1] [:foreground dark|light])", "solid", "Extrudes a sketch, or traces raster foreground coverage into contours before the same extrusion. One raster dimension preserves source aspect ratio; two contain and center by default. `:fit stretch` explicitly fills a non-matching box.", true, support, "(extrude image-path 3 :width 40 :depth 30 :fit contain :threshold 0.5 :foreground dark)", &["Raster options apply only when the first operand is an image path.", "Raster input requires at least one of `:width` or `:depth`.", "Transparent pixels remain empty for both foreground modes."]),
         "revolve" => ref_entry(name, "cadOp", "(revolve sketch angle)", "solid", "Revolves a sketch profile around an axis.", true, support, "(revolve profile 360)", &[]),
-        "loft" => ref_entry(name, "cadOp", "(loft sketch...)", "solid", "Creates a solid through multiple sketch sections.", true, support, "(loft bottom top)", &[]),
+        "loft" => ref_entry(name, "cadOp", "(loft distance profile1 profile2 ...)", "solid", "Creates a solid through at least two sketch profiles across the given distance.", true, support, "(loft 30mm (circle 10mm) (rounded-rect 12mm 8mm 2mm))", &["The first argument is a numeric distance. Use 0 for sections already positioned in space.", "`apply` does not support `loft`; pass profiles as explicit arguments."]),
         "sweep" => ref_entry(name, "cadOp", "(sweep profile path)", "solid", "Sweeps a profile along a path.", true, support, "(sweep (circle 2 16) rail)", &[]),
         "helical-ridge" => ref_entry(name, "cadOp", "(helical-ridge :radius r :pitch p :height h :base-width w :crest-width w :depth d [:female #t] [:clearance c] [:lefthand #t])", "solid", "Creates a printable trapezoid ridge swept along a cylindrical helix.", true, support, "(helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)", &["Use the same radius, pitch, and height for the matching female groove cutter; set `:female #t` plus clearance to expand its envelope."]),
         "shell" => ref_entry(name, "cadOp", "(shell thickness [:faces selector] solid)", "solid", "Hollows or thickens a solid by wall thickness. Exact backends also accept `:faces` with `target-id:<id>` or `target-ids:<id>|<id>` to choose shell opening faces.", true, support, "(shell 2 :faces \"target-id:body:face:0-0-20:1256.637\" (cylinder 20 80))", &[]),
@@ -1717,6 +1717,10 @@ mod tests {
         };
 
         assert_eq!(lookup("mirror").signature, "(mirror axis offset geometry)");
+        assert_eq!(
+            lookup("loft").signature,
+            "(loft distance profile1 profile2 ...)"
+        );
         assert_eq!(
             lookup("taper").signature,
             "(taper height scale sketch) or (taper height scale-x scale-y sketch)"

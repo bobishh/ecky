@@ -346,7 +346,7 @@ a `[...]` note marks a backend restriction.
 (bspline points :closed #t)  ; Builds a 2D B-spline sketch from control points.
 (extrude image-path 3 :width 40 :depth 30 :fit contain :threshold 0.5 :foreground dark)  ; Extrudes a sketch, or traces raster foreground coverage into contours before the same extrusion. One raster dimension preserves source aspect ratio; two contain and center by default. `:fit stretch` explicitly fills a non-matching box.
 (revolve profile 360)  ; Revolves a sketch profile around an axis.
-(loft bottom top)  ; Creates a solid through multiple sketch sections.
+(loft 30mm (circle 10mm) (rounded-rect 12mm 8mm 2mm))  ; Creates a solid through at least two sketch profiles across the given distance.
 (sweep (circle 2 16) rail)  ; Sweeps a profile along a path.
 (helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)  ; Creates a printable trapezoid ridge swept along a cylindrical helix.
 (thread :radius 8 :pitch 2 :length 16 :depth 1)  ; Parametric helical thread: a core cylinder plus a `helical-ridge` (male), or a ridge cutter (`:female`). `:iso "M4"` decodes a metric designation into pitch/radius.

@@ -1359,6 +1359,7 @@ Documented forms and operations. Select a name to open its signature.
 | [`shape`](#shape) | Forms and Structure |
 | [`shell`](#shell) | Surface and Path Signatures |
 | [`sphere`](#sphere) | Primitive Signatures |
+| [`surface-trim`](#surface-trim) | Special / Custom Operations |
 | [`svg`](#svg) | Primitive Signatures |
 | [`sweep`](#sweep) | Surface and Path Signatures |
 | [`taper`](#taper) | Surface and Path Signatures |
@@ -2897,7 +2898,7 @@ Additional callable forms and helpers. Entries already explained in the precedin
 | `list` | expressionForm | `(list value...)` | freecad, legacy-build123d, mesh/native | Builds a list value. | `(list x y z)` |
 | `list?` | booleanHelper | `(list? value)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(list? '())` |
 | `location` | cadOp | `(location frame :offset '(x y z) :rotate '(x y z))` | freecad, legacy-build123d, mesh/native | Creates a placement from a frame and optional local transform. | `(location (plane :origin '(80 0 6)) :rotate '(0 90 0))` |
-| `loft` | cadOp | `(loft sketch...)` | freecad, legacy-build123d, mesh/native | Creates a solid through multiple sketch sections. | `(loft bottom top)` |
+| `loft` | cadOp | `(loft distance profile1 profile2 ...)` | freecad, legacy-build123d, mesh/native | Creates a solid through at least two sketch profiles across the given distance. | `(loft 30mm (circle 10mm) (rounded-rect 12mm 8mm 2mm))` |
 | `logistic-bifurcation-points` | pointListHelper | `(logistic-bifurcation-points r-count samples transient scale)` | freecad, legacy-build123d, mesh/native | Builds deterministic points from the logistic map bifurcation diagram. | `(logistic-bifurcation-points 24 8 16 30)` |
 | `lorenz-points` | pointListHelper | `(lorenz-points count dt scale)` | freecad, legacy-build123d, mesh/native | Samples a deterministic Lorenz attractor projection. | `(lorenz-points 80 0.01 4)` |
 | `make-face` | cadOp | `(make-face sketch)` | freecad, legacy-build123d, mesh/native | Turns a closed sketch into a face-like profile for downstream ops. | `(make-face (polygon points))` |

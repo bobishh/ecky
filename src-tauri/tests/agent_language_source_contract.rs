@@ -182,3 +182,40 @@ fn canonical_references_explain_live_packages_locks_and_native_step_truth() {
         );
     }
 }
+
+#[test]
+fn published_native_loft_reference_compiles_with_explicit_distance() {
+    let reference = supported_surface_reference(GeometryBackend::EckyRust);
+    let loft = reference
+        .entries
+        .iter()
+        .find(|entry| entry.name == "loft")
+        .unwrap();
+    assert!(
+        loft.signature.contains("distance"),
+        "native loft reference must document required distance: {}",
+        loft.signature
+    );
+    let source = format!("(model (part body {}))", loft.example);
+    ecky_cad_lib::ecky_scheme::compile_to_core_program(&source)
+        .expect("published native loft example must compile without invented bindings");
+}
+
+#[test]
+fn book_surface_table_matches_published_loft_signature() {
+    let reference = supported_surface_reference(GeometryBackend::EckyRust);
+    let loft = reference
+        .entries
+        .iter()
+        .find(|entry| entry.name == "loft")
+        .unwrap();
+    let corpus = include_str!("../../docs/books/ecky-ir/ecky-ir-corpus.md");
+    let row = corpus
+        .lines()
+        .find(|line| line.starts_with("| `loft` |"))
+        .expect("book must include loft surface reference");
+    assert!(
+        row.contains(&format!("`{}`", loft.signature)),
+        "book loft signature must match published MCP reference: {row}"
+    );
+}

@@ -67,6 +67,7 @@ Documented forms and operations. Select a name to open its signature.
 | [`shape`](#shape) | Forms and Structure |
 | [`shell`](#shell) | Surface and Path Signatures |
 | [`sphere`](#sphere) | Primitive Signatures |
+| [`surface-trim`](#surface-trim) | Special / Custom Operations |
 | [`svg`](#svg) | Primitive Signatures |
 | [`sweep`](#sweep) | Surface and Path Signatures |
 | [`taper`](#taper) | Surface and Path Signatures |
