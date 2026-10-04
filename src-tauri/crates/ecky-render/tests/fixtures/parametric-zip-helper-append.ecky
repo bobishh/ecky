@@ -1,0 +1,32 @@
+(define (grown-section t scale height body-width bend twist base-width base-depth base-height)
+  (translate (* bend t)
+    (* bend 0.16 (sin (* pi t)))
+    (+ base-height (* t (- height base-height)))
+    (rotate 0 0 (* twist t)
+      (extrude
+        (ellipse
+          (* scale (/ (+ body-width base-width) 4))
+          (* scale (/ (+ body-width base-depth) 4)))
+        1))))
+(model
+  (params
+    (number height 190 :min 160 :max 220)
+    (number body-width 45 :min 36 :max 52)
+    (number bend 12 :min 0 :max 20)
+    (number twist-angle 32 :min -50 :max 50)
+    (number base-width 90 :min 80 :max 110)
+    (number base-depth 72 :min 64 :max 90)
+    (number base-height 18 :min 14 :max 24))
+  (part body
+    (apply compound
+      (append
+        (map (lambda ((t scale))
+               (grown-section t scale height body-width bend twist-angle
+                 base-width base-depth base-height))
+             (zip (list 0 0.08 0.16 0.24 0.32 0.4 0.48)
+                  (list 0.88 0.94 0.99 1 0.94 0.79 0.6)))
+        (map (lambda ((t scale))
+               (grown-section t scale height body-width bend twist-angle
+                 base-width base-depth base-height))
+             (zip (list 0.06 0.14 0.27 0.43 0.58 0.72 0.82 0.88 0.92 0.95 0.975 0.99 0.997 1)
+                  (list 0.86 0.79 0.87 0.97 1 0.96 0.89 0.80 0.67 0.52 0.37 0.235 0.13 0.006)))))))

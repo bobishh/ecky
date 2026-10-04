@@ -1,0 +1,44 @@
+; Separate organic silhouette experiment. Unvalidated TPU concept.
+; Section table: normalized axial position, X radius, Y radius.
+(define (grown-section z rx ry height bend twist base-height)
+  (let* ((t (clamp (/ (- z base-height) (- height base-height)) 0 1))
+         (cx (* bend (smoothstep 0 1 t)))
+         (cy (* bend 0.16 (sin (* pi t))))
+         (angle (* twist (smoothstep 0 1 t))))
+    (translate cx cy z (rotate 0 0 angle (ellipse rx ry)))))
+
+(model
+  (meta :title "Grown form — separate TPU experiment")
+  (params
+    (number height 190mm :label "Total height" :min 160mm :max 220mm :step 1mm)
+    (number body-width 45mm :label "Maximum body width" :min 36mm :max 52mm :step 1mm)
+    (number bend 12mm :label "Tip lateral bend" :min 0mm :max 20mm :step 1mm)
+    (number twist-angle 32deg :label "Body twist" :min -50deg :max 50deg :step 1deg)
+    (number base-width 90mm :label "Base width" :min 80mm :max 110mm :step 1mm)
+    (number base-depth 72mm :label "Base depth" :min 64mm :max 90mm :step 1mm)
+    (number base-height 18mm :label "Base flare height" :min 14mm :max 24mm :step 1mm))
+  (verify (tag one-body)
+    (metric components (stl connected-component-count)) (expect components (= 1)))
+  (verify (tag manifold)
+    (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))
+  (verify (tag closed-surface)
+    (metric open-edges (stl boundary-edge-count)) (expect open-edges (= 0)))
+  (part grown-body
+    (let* ((rx (/ body-width 2)) (ry (* rx 0.91))
+           (bx (/ base-width 2)) (by (/ base-depth 2))
+           (body-span (- height base-height))
+           (base-sections
+             (map (lambda ((t s))
+               (grown-section (* t base-height) (* bx s) (* by s)
+                 height bend twist-angle base-height))
+               (zip (list 0 0.04 0.14 0.28 0.48 0.72 1)
+                    (list 0.88 0.94 0.99 1 0.94 0.79 0.60))))
+           (body-sections
+             (map (lambda ((t s))
+               (grown-section (+ base-height (* t body-span)) (* rx s) (* ry s)
+                 height bend twist-angle base-height))
+               (zip (list 0.06 0.14 0.27 0.43 0.58 0.72 0.82 0.88 0.92 0.95 0.975 0.99 0.997 1)
+                    (list 0.86 0.79 0.87 0.97 1 0.96 0.89 0.80 0.67 0.52 0.37 0.235 0.13 0.006)))))
+      (build
+        (shape continuous-envelope (apply loft (append base-sections body-sections)))
+        (result continuous-envelope)))))

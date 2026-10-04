@@ -29,3 +29,25 @@ map scope; this previously failed manifest publication after successful export.
 Dialect inference skips Scheme comment lines beginning with any semicolon count,
 including a single semicolon. Header comments must not route valid Ecky source
 through Python control extraction and silently erase the version controls.
+
+Sequence-source parsing is context-specific. Expanded Steel syntax can erase the
+distinction between a two/three-number `(list ...)` and a point-shaped list, so
+`map`, `zip`, `flat-map`, `concat-map`, and `append` parse these source positions
+as sequences. Geometry expressions retain existing Point2/Point3 inference.
+
+Expanded-AST compilation remains primary. Runtime fallback may still succeed for
+forms outside its expanded subset; if fallback fails too, retain a non-internal
+expanded diagnostic. This keeps precise metadata and unsupported-operation errors
+from being replaced by eager symbolic arithmetic errors. A quoted tuple source to
+destructuring `map` remains unsupported and reports concise `zip`/static
+`enumerate` guidance rather than a debug representation of the quoted AST.
+
+The live `grown-form-zip-regression.ecky` file is an invalid-input diagnostic
+fixture, not a geometry source to repair. Its `(apply loft (append ...))` omits
+the required leading loft distance. Compiler coverage separately uses a valid
+seven-control helper/zip/map/append/compound fixture; no live project source or
+history is edited.
+
+The published surface reference must match `loft distance profile1 profile2 ...`.
+The shipped reference example and compiler-signature test provide the check; the
+source-language docs must not advertise `loft` without distance.

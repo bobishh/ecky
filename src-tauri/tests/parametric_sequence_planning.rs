@@ -11,6 +11,43 @@ use std::path::PathBuf;
 struct TempPathResolver {
     root: PathBuf,
 }
+
+#[test]
+fn given_zip_helper_append_when_controls_change_then_native_geometry_changes() {
+    let program = compile_to_core_program(include_str!(
+        "../crates/ecky-render/tests/fixtures/parametric-zip-helper-append.ecky"
+    ))
+    .expect("supported helper/map/append source must compile symbolically");
+    let initial = plan_core_program_with_params(&program, &DesignParams::new())
+        .expect("native helper geometry must plan at default values");
+    assert_eq!(
+        initial.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Extrude)
+            .count(),
+        21
+    );
+    for (key, value) in [
+        ("height", 210.0),
+        ("body-width", 50.0),
+        ("bend", 18.0),
+        ("twist-angle", 40.0),
+        ("base-width", 100.0),
+        ("base-depth", 80.0),
+        ("base-height", 22.0),
+    ] {
+        let parameters = [(key.into(), ParamValue::Number(value))]
+            .into_iter()
+            .collect();
+        let changed = plan_core_program_with_params(&program, &parameters)
+            .expect("native planner must evaluate helper parameters at current values");
+        assert_ne!(
+            initial.parts[0].commands, changed.parts[0].commands,
+            "control {key} must affect geometry rather than remain a dead UI field"
+        );
+    }
+}
 impl PathResolver for TempPathResolver {
     fn app_config_dir(&self) -> PathBuf {
         self.root.join("config")

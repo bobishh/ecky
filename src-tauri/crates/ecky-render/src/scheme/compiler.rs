@@ -206,18 +206,24 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
         let legacy_source = lower_component_placement_source(&legacy_source)?;
         let legacy_source = lower_component_definitions_source(&legacy_source)?;
 
+        let mut expanded_error = None;
         if can_use_expanded_ast(&legacy_source) {
             match compile_to_core_program_from_expanded_ast_legacy(&legacy_source) {
                 Ok(program) => return verify_compiled_core_program(program, source),
                 Err(error) if error.message.contains("analysis-to-geometry cycle") => {
                     return Err(error)
                 }
-                Err(_) => {}
+                Err(error) => expanded_error = Some(error),
             }
         }
 
-        return compile_to_core_program_via_runtime(&legacy_source)
-            .and_then(|program| verify_compiled_core_program(program, source));
+        return match compile_to_core_program_via_runtime(&legacy_source) {
+            Ok(program) => verify_compiled_core_program(program, source),
+            Err(runtime_error) => match expanded_error {
+                Some(error) if expanded_ast_error_is_authoritative(&error) => Err(error),
+                _ => Err(runtime_error),
+            },
+        };
     }
 
     let expanded_source = lower_component_placement_source(source)?;
@@ -227,18 +233,28 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     let runtime_source = lower_component_placement_source(&runtime_source)?;
     let runtime_source = lower_component_definitions_source(&runtime_source)?;
 
+    let mut expanded_error = None;
     if can_use_expanded_ast(&expanded_source) {
         match compile_to_core_program_from_expanded_ast(&expanded_source) {
             Ok(program) => return verify_compiled_core_program(program, source),
             Err(error) if error.message.contains("analysis-to-geometry cycle") => {
                 return Err(error)
             }
-            Err(_) => {}
+            Err(error) => expanded_error = Some(error),
         }
     }
 
-    compile_to_core_program_via_runtime(&runtime_source)
-        .and_then(|program| verify_compiled_core_program(program, source))
+    match compile_to_core_program_via_runtime(&runtime_source) {
+        Ok(program) => verify_compiled_core_program(program, source),
+        Err(runtime_error) => match expanded_error {
+            Some(error) if expanded_ast_error_is_authoritative(&error) => Err(error),
+            _ => Err(runtime_error),
+        },
+    }
+}
+
+fn expanded_ast_error_is_authoritative(error: &CompilerError) -> bool {
+    error.kind != CompilerErrorKind::Internal
 }
 
 fn validate_surface_form_contracts(source: &str) -> CoreResult<()> {
@@ -1188,6 +1204,16 @@ fn rewrite_map_destructuring(
     body_source: &str,
     source: &ExprKind,
 ) -> CoreResult<String> {
+    if matches!(source, ExprKind::Quote(_)) {
+        return Err(CompilerError::new(
+            CompilerErrorKind::UnsupportedFeature,
+            "`map` tuple destructuring does not accept quoted tuple data; use `zip` or static `enumerate` as the source.",
+        )
+        .with_help(
+            "For paired sequences, write `(map (lambda ((x y)) ...) (zip xs ys))`. For a static indexed sequence, use `(enumerate values)`.",
+        )
+        .with_span(expr_source_span(source).unwrap_or(SourceSpan::new(None, 0, 0))));
+    }
     let source_items = expr_list_items(source, "`map` destructuring source")?;
     let source_head = source_items
         .first()
@@ -3644,10 +3670,7 @@ fn wrap_expanded_ast_source(source: &str) -> (String, Vec<u32>) {
     let mut normalized = String::with_capacity(source.len() + 32);
     let mut normalized_offsets = vec![0u32];
     let bytes = source.as_bytes();
-    let mut index = 0usize;
-
-    while index < bytes.len() {
-        let byte = bytes[index];
+    for (index, ch) in source.char_indices() {
         let prev = index
             .checked_sub(1)
             .and_then(|prev_index| bytes.get(prev_index).copied());
@@ -3656,14 +3679,15 @@ fn wrap_expanded_ast_source(source: &str) -> (String, Vec<u32>) {
             || prev.is_some_and(|value| matches!(value, b' ' | b'\n' | b'\r' | b'\t' | b'('));
         let next_starts_keyword = next.is_some_and(|value| value.is_ascii_alphabetic());
 
-        if byte == b':' && prev_is_keyword_boundary && next_starts_keyword {
+        if ch == ':' && prev_is_keyword_boundary && next_starts_keyword {
             normalized.push('#');
             normalized_offsets.push(index as u32);
         }
 
-        normalized.push(byte as char);
-        normalized_offsets.push((index + 1) as u32);
-        index += 1;
+        normalized.push(ch);
+        for byte_offset in 0..ch.len_utf8() {
+            normalized_offsets.push((index + byte_offset + 1) as u32);
+        }
     }
 
     let prelude = expanded_ast_source_prelude();
@@ -5862,7 +5886,7 @@ fn parse_expanded_node(
                     } else if op_name == "analysis" {
                         return Err(CompilerError::new(
                             CompilerErrorKind::TypeMismatch,
-                            "Analysis declarations are top-level metadata and cannot be used as geometry.",
+                            "analysis declarations are top-level metadata and cannot be used as geometry.",
                         ));
                     } else if matches!(op_name.as_str(), "fem-max" | "fem-min") {
                         return Err(CompilerError::new(
@@ -6498,7 +6522,7 @@ fn parse_expanded_append_node(
     let nodes = args
         .iter()
         .map(|arg| {
-            parse_expanded_node(
+            parse_expanded_sequence_source(
                 arg,
                 next_node,
                 param_ids,
@@ -6679,7 +6703,7 @@ fn parse_expanded_map_node(
     let parsed_sources = args[1..]
         .iter()
         .map(|arg| {
-            parse_expanded_node(
+            parse_expanded_sequence_source(
                 arg,
                 next_node,
                 param_ids,
@@ -6738,6 +6762,45 @@ fn parse_expanded_map_node(
         .collect::<CoreResult<Vec<_>>>()?;
     let value_kind = infer_list_value_kind(&mapped);
     Ok((CoreNodeKind::List(mapped), value_kind))
+}
+
+fn parse_expanded_sequence_source(
+    value: &ExprKind,
+    next_node: &mut u64,
+    param_ids: &BTreeMap<String, ParamId>,
+    helpers: &ExpandedHelperMap,
+    node_refs: &BTreeMap<String, NodeId>,
+    local_names: &BTreeSet<String>,
+    helper_stack: &BTreeSet<String>,
+) -> CoreResult<CoreNode> {
+    if let ExprKind::List(list) = value {
+        if is_point_literal_expr(&list.args) {
+            let (kind, _) = parse_expanded_list_node(
+                &list.args,
+                next_node,
+                param_ids,
+                helpers,
+                node_refs,
+                local_names,
+                helper_stack,
+            )?;
+            return Ok(core_node_with_span(
+                alloc_node_id(next_node),
+                kind,
+                CoreValueKind::List,
+                expr_source_span(value),
+            ));
+        }
+    }
+    parse_expanded_node(
+        value,
+        next_node,
+        param_ids,
+        helpers,
+        node_refs,
+        local_names,
+        helper_stack,
+    )
 }
 
 fn parse_expanded_dynamic_map_node(
@@ -6889,7 +6952,11 @@ fn parse_expanded_apply_node(
     if !is_apply_splice_operation(&target_name) {
         return Err(CompilerError::new(
             CompilerErrorKind::UnsupportedFeature,
-            format!("`apply` currently supports CAD variadic operations, got `{target_name}`."),
+            if target_name == "loft" {
+                "`apply` does not support `loft`; use `(loft distance profile1 profile2 ...)` with explicit profiles.".to_string()
+            } else {
+                format!("`apply` currently supports CAD variadic operations, got `{target_name}`.")
+            },
         )
         .with_span(expr_source_span(&args[0]).unwrap_or(SourceSpan::new(None, 0, 0))));
     }
@@ -8061,7 +8128,7 @@ fn collect_sequence_sources(
 ) -> CoreResult<Vec<Vec<CoreNode>>> {
     args.iter()
         .map(|arg| {
-            let node = parse_expanded_node(
+            let node = parse_expanded_sequence_source(
                 arg,
                 next_node,
                 param_ids,
@@ -11134,7 +11201,7 @@ fn parse_node(
                     } else if op_name == "analysis" {
                         return Err(CompilerError::new(
                             CompilerErrorKind::TypeMismatch,
-                            "Analysis declarations are top-level metadata and cannot be used as geometry.",
+                            "analysis declarations are top-level metadata and cannot be used as geometry.",
                         ));
                     } else if matches!(op_name.as_str(), "fem-max" | "fem-min") {
                         return Err(CompilerError::new(
@@ -12280,6 +12347,16 @@ fn normalize_keyword(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expanded_source_wrapper_preserves_utf8_labels_and_byte_offsets() {
+        let source = "(select mode \"scales\" :label \"Узор\")";
+        let (wrapped, offsets) = wrap_expanded_ast_source(source);
+        assert!(wrapped.ends_with("(select mode \"scales\" #:label \"Узор\")"));
+        assert_eq!(offsets.len(), wrapped.len() + 1);
+        assert_eq!(offsets.last().copied(), Some(source.len() as u32));
+    }
+
     #[test]
     fn compiles_parameter_dependent_flat_map_without_eager_evaluation() {
         let program = compile_to_core_program_from_expanded_ast(
@@ -13167,6 +13244,59 @@ mod tests {
             assert!(bindings[1].name.contains("y"), "{}", bindings[1].name);
             assert!(matches!(body.kind, CoreNodeKind::List(_)));
         }
+    }
+
+    #[test]
+    fn expanded_ast_zip_map_helper_keeps_symbolic_parameter_arguments() {
+        let source = include_str!("../../tests/fixtures/grown-form-zip-regression.ecky");
+        let error = compile_to_core_program_from_expanded_ast(source)
+            .expect_err("the live source has an unsupported apply-loft call");
+        assert!(
+            expanded_ast_error_is_authoritative(&error),
+            "valid user error must survive runtime fallback: {error}"
+        );
+    }
+
+    #[test]
+    fn expanded_ast_zip_map_helper_append_keeps_parameter_references() {
+        let source = include_str!("../../tests/fixtures/parametric-zip-helper-append.ecky");
+        compile_to_core_program_from_expanded_ast(source)
+            .expect("expanded AST must retain helper parameter references in zip/map/append");
+    }
+
+    #[test]
+    fn map_source_treats_three_numeric_list_values_as_sequence_not_point() {
+        for sequence in ["(list 0 1)", "(list 0 0.5 1)"] {
+            let source = format!(
+                r#"
+            (define (section i width) (box (* width (+ i 1)) 1 1))
+            (model
+              (params (number body-width 45))
+              (part body
+                (apply compound
+                  (map (lambda (i) (section i body-width)) {sequence}))))
+            "#
+            );
+            compile_to_core_program_from_expanded_ast(&source)
+                .unwrap_or_else(|error| panic!("sequence {sequence} must compile: {error}"));
+        }
+    }
+
+    #[test]
+    fn failed_runtime_fallback_preserves_primary_parse_diagnostic() {
+        let source = r#"
+            (model
+              (meta :title "Xeno Bloom" units strict)
+              (params (number body-radius 12))
+              (part body (cylinder (/ body-radius 2) 10)))
+        "#;
+        let error = compile_to_core_program_from_expanded_ast(source)
+            .expect_err("meta clause has invalid arity");
+        assert_eq!(error.kind, CompilerErrorKind::Parse);
+        assert!(
+            expanded_ast_error_is_authoritative(&error),
+            "failed fallback must retain exact primary parse diagnostic: {error}"
+        );
     }
 
     #[test]
