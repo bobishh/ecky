@@ -1,5 +1,6 @@
 <script lang="ts">
   import 'katex/dist/katex.min.css';
+  import { CodexVoiceMedia } from './audio/codexVoice';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { readFile } from '@tauri-apps/plugin-fs';
@@ -9,7 +10,7 @@
   import AsyncActionButton from './components/AsyncActionButton.svelte';
   import ProviderMarkdown from './ProviderMarkdown.svelte';
   import Viewer from './Viewer.svelte';
-  import { appendTranscriptToPrompt, createPromptAudioRecorder, type PromptAudioRecorder } from './audio/pushToTalk';
+  import { appendTranscriptToPrompt, createPromptAudioRecorder, supportsPromptVoiceInput, type PromptAudioRecorder } from './audio/pushToTalk';
   import { formatBackendError, getThreadMessageVersion, releaseVersionPreview, transcribePromptAudio } from './tauri/client';
   import { resolveVersionLoupeRuntime } from './versionLoupeRuntime';
   import type {
@@ -199,7 +200,13 @@
   let timelineFilter = $state<'all' | 'versions'>('all');
   let timelineSearch = $state('');
   let timelineScopeThreadId = $state<string | null>(null);
+  let codexVoice = $state<CodexVoiceMedia | null>(null);
+  let codexVoiceState = $state<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  let codexVoiceStatus = $state('');
+  let codexVoiceScope: string | null = null;
+  const codexVoiceAvailable = $derived(dialogueState.mode === 'provider' && dialogueState.providerId === 'codex');
   const voiceBusy = $derived(voiceState === 'listening' || voiceState === 'transcribing');
+  const voiceInputAvailable = $derived(supportsPromptVoiceInput(dialogueState));
   const hasImageAttachments = $derived(attachments.some((attachment) => attachment.type === 'image'));
   const promptPlaceholder = $derived(
     dialogueState.mode === 'provider' && codexTakeover?.runtime.activeTurnId
@@ -390,15 +397,53 @@
     schedulePromptDraftPersist(currentDraftScopeKey(activeThreadId), prompt);
   }
 
+  async function toggleCodexVoice() {
+    if (codexVoice) {
+      const media = codexVoice;
+      codexVoice = null;
+      codexVoiceState = 'idle';
+      codexVoiceStatus = '';
+      try { await media.close(); }
+      catch (error) { codexVoiceState = 'error'; codexVoiceStatus = formatBackendError(error); }
+      return;
+    }
+    if (!codexVoiceAvailable || !activeThreadId) return;
+    codexVoiceScope = activeThreadId;
+    const media = new CodexVoiceMedia(activeThreadId, undefined, (state, detail) => {
+      if (codexVoice !== media) return;
+      codexVoiceState = state === 'closed' ? 'idle' : state;
+      codexVoiceStatus = detail ?? (state === 'connecting' ? 'CONNECTING CODEX VOICE…' : state === 'connected' ? 'CODEX VOICE · LISTENING' : '');
+      if (state === 'closed' || state === 'error') codexVoice = null;
+    });
+    codexVoice = media;
+    await media.connect();
+  }
+
+  $effect(() => {
+    if (codexVoiceAvailable && activeThreadId === codexVoiceScope) return;
+    const media = codexVoice;
+    codexVoice = null;
+    codexVoiceState = 'idle';
+    codexVoiceStatus = '';
+    if (media) void media.close().catch((error) => { codexVoiceStatus = formatBackendError(error); codexVoiceState = 'error'; });
+  });
+
+  onDestroy(() => {
+    cancelVoiceInput();
+    if (codexVoice) void codexVoice.close().catch(() => {});
+  });
+
   async function startVoiceInput() {
-    if (voiceBusy || isGenerating || isSubmitting) return;
+    if (!voiceInputAvailable || voiceBusy || isGenerating || isSubmitting) return;
     const recorder = createPromptAudioRecorder();
     voiceRecorder = recorder;
     voiceState = 'listening';
     voiceStatus = 'LISTENING';
     try {
       await recorder.start();
+      if (!voiceInputAvailable) recorder.cancel();
     } catch (error) {
+      if (!voiceInputAvailable) return;
       voiceRecorder = null;
       voiceState = 'error';
       voiceStatus = formatBackendError(error);
@@ -406,6 +451,10 @@
   }
 
   async function finishVoiceInput() {
+    if (!voiceInputAvailable) {
+      cancelVoiceInput();
+      return;
+    }
     if (voiceState !== 'listening' || !voiceRecorder) return;
     const recorder = voiceRecorder;
     voiceRecorder = null;
@@ -413,6 +462,11 @@
     voiceStatus = 'TRANSCRIBING';
     try {
       const capture = await recorder.stop();
+      if (!voiceInputAvailable) {
+        voiceState = 'idle';
+        voiceStatus = '';
+        return;
+      }
       const transcript = await transcribePromptAudio({
         base64Data: capture.base64Data,
         mimeType: capture.mimeType,
@@ -438,6 +492,10 @@
       voiceStatus = '';
     }
   }
+
+  $effect(() => {
+    if (!voiceInputAvailable) cancelVoiceInput();
+  });
 
   function handleVoicePointerDown(event: PointerEvent) {
     event.preventDefault();
@@ -1562,27 +1620,39 @@
             >{codexControlAction === 'stop' || codexTakeover.runtime.phase === 'stopping' ? 'STOPPING…' : 'STOP'}</button>
           {/if}
         {/if}
-        <button
-          class="btn btn-xs btn-ghost voice-btn"
-          class:voice-btn--active={voiceState === 'listening'}
-          class:voice-btn--busy={voiceState === 'transcribing'}
-          aria-label="Start voice input"
-          title="Hold to record voice input"
-          disabled={isGenerating || isSubmitting || voiceState === 'transcribing'}
-          onpointerdown={handleVoicePointerDown}
-          onpointerup={handleVoicePointerUp}
-          onpointercancel={cancelVoiceInput}
-          onkeydown={handleVoiceKeydown}
-          onkeyup={handleVoiceKeyup}
-        >
-          {#if voiceState === 'listening'}
-            ⏹ LISTENING
-          {:else if voiceState === 'transcribing'}
-            … TRANSCRIBING
-          {:else}
-            🎙 VOICE
-          {/if}
-        </button>
+        {#if codexVoiceAvailable}
+          <button
+            class="btn btn-xs btn-ghost voice-btn"
+            class:voice-btn--active={codexVoiceState === 'connected'}
+            class:voice-btn--busy={codexVoiceState === 'connecting'}
+            aria-label={codexVoice ? 'Stop Codex voice conversation' : 'Start Codex voice conversation'}
+            title={activeThreadId ? 'Talk with Codex and hear its replies' : 'Open an Ecky thread to talk with Codex'}
+            disabled={!activeThreadId}
+            onclick={toggleCodexVoice}
+          >{codexVoice ? '⏹ END VOICE' : '🎙 VOICE'}</button>
+        {:else if voiceInputAvailable}
+          <button
+            class="btn btn-xs btn-ghost voice-btn"
+            class:voice-btn--active={voiceState === 'listening'}
+            class:voice-btn--busy={voiceState === 'transcribing'}
+            aria-label="Start voice input"
+            title="Hold to record voice input"
+            disabled={isGenerating || isSubmitting || voiceState === 'transcribing'}
+            onpointerdown={handleVoicePointerDown}
+            onpointerup={handleVoicePointerUp}
+            onpointercancel={cancelVoiceInput}
+            onkeydown={handleVoiceKeydown}
+            onkeyup={handleVoiceKeyup}
+          >
+            {#if voiceState === 'listening'}
+              ⏹ LISTENING
+            {:else if voiceState === 'transcribing'}
+              … TRANSCRIBING
+            {:else}
+              🎙 VOICE
+            {/if}
+          </button>
+        {/if}
         <button class="btn btn-xs btn-ghost" onclick={addAttachment} title={dialogueState.mode === 'generate' && imageAttachmentUnavailableReason ? `${imageAttachmentUnavailableReason} — image refs will be dropped` : 'Attach images or reference CAD files'}>
           📎 ATTACH REFERENCE
         </button>
@@ -1608,7 +1678,10 @@
         </button>
       </div>
     </div>
-    {#if voiceStatus}
+    {#if codexVoiceAvailable && codexVoiceStatus}
+      <div class="voice-status" class:voice-status--error={codexVoiceState === 'error'}>{codexVoiceStatus}</div>
+    {/if}
+    {#if voiceInputAvailable && voiceStatus}
       <div class="voice-status" class:voice-status--error={voiceState === 'error'}>{voiceStatus}</div>
     {/if}
     {#if workspaceCaptureHint}

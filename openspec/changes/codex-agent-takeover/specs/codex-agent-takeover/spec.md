@@ -2,6 +2,84 @@
 
 ## ADDED Requirements
 
+### Requirement: Codex Provider owns bidirectional voice
+
+Codex Provider SHALL offer explicit native realtime voice with audio input and audio
+output on its Ecky-owned Codex execution cursor. Rust SHALL own session start/stop,
+SDP negotiation, exact session identity, errors and completed transcript persistence.
+Frontend SHALL own media transport only. Provider/MCP SHALL NOT fall back to standalone
+NVIDIA Speech; Rust SHALL reject direct standalone STT in those modes before I/O.
+
+#### Scenario: User talks with Codex
+
+- **GIVEN** Codex Provider and an open Ecky thread
+- **WHEN** the user starts `VOICE`
+- **THEN** Rust ensures its owned thread and starts native realtime with audio output
+- **AND** startup explicitly selects realtime `v3` so the native runtime sends AVAS-required `OpenAI-Alpha: quicksilver=v2`
+- **AND** microphone and spoken replies share that session and account
+- **AND** completed user/assistant speech persists in the same local provider timeline
+- **AND** no separate transcription or speech synthesis provider is called
+
+#### Scenario: Native delegation stays outside public dialogue
+
+- **GIVEN** native voice emits a completed speech segment and an internal `<realtime_delegation>` user item
+- **WHEN** Ecky projects, persists, or pages the provider history
+- **THEN** the speech segment remains visible with its native identity
+- **AND** the internal delegation envelope and its repeated transcript are excluded
+- **AND** previously persisted delegation rows are excluded before pagination limits without deleting raw history
+- **AND** ordinary messages, quoted examples, and incomplete envelopes remain visible
+
+#### Scenario: Codex cannot start voice
+
+- **WHEN** realtime negotiation or microphone acquisition fails
+- **THEN** the raw diagnostic is visible
+- **AND** local microphone and playback resources are released
+- **AND** the text composer remains usable
+
+#### Scenario: Voice startup overlaps an existing policy boundary
+
+- **GIVEN** a text turn is active or experimental Jev routing is enabled
+- **WHEN** the user starts voice
+- **THEN** Rust rejects startup with the exact limitation
+- **AND** the current turn policy is not weakened or bypassed
+
+#### Scenario: Voice ends during pending startup
+
+- **GIVEN** voice startup or microphone permission is pending
+- **WHEN** the user ends voice, switches thread/mode, or closes Dialogue
+- **THEN** microphone and playback close immediately when available
+- **AND** any late microphone tracks are stopped
+- **AND** a late backend acknowledgement is stopped by its exact session id
+- **AND** no late startup can stop a newer session
+
+#### Scenario: API recording crosses a mode switch
+
+- **GIVEN** API voice capture is listening
+- **WHEN** the user switches to Codex Provider
+- **THEN** API capture is canceled without standalone transcription
+- **AND** Codex voice is available through its separate native control
+
+### Requirement: Codex catalog and dialogue share the selected runtime
+
+Explicit `ECKY_CODEX_BIN` SHALL win executable selection. Otherwise macOS SHALL prefer
+the installed desktop bundle, then existing PATH discovery. Catalog, text turns and
+realtime SHALL use that same supervisor executable. Model options SHALL come from live
+`model/list`, never a manually maintained fallback catalog.
+
+#### Scenario: Desktop is newer than the PATH CLI
+
+- **GIVEN** an installed Codex desktop runtime and an older PATH CLI
+- **WHEN** Provider fetches models and sends a turn
+- **THEN** both operations use the desktop runtime
+- **AND** newly available returned model ids appear in the dropdown
+
+#### Scenario: Explicit runtime override is unavailable
+
+- **GIVEN** ECKY_CODEX_BIN explicitly names an unavailable executable
+- **WHEN** Provider starts
+- **THEN** the raw missing-executable error is returned
+- **AND** it does not silently select another runtime
+
 ### Requirement: Provider mode is explicit configuration
 
 Settings SHALL expose `API KEY`, `MCP`, and `PROVIDER`. Provider SHALL select an

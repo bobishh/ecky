@@ -66,6 +66,62 @@ pub fn resolve_provider_executable(
     Ok(ResolvedProviderExecutable { path, spawn_path })
 }
 
+/// Use the desktop's bundled runtime so Provider models and protocol match the
+/// signed-in desktop. An explicit override remains authoritative on every platform.
+pub fn resolve_codex_executable() -> AppResult<ResolvedProviderExecutable> {
+    let process_path = std::env::var_os("PATH").map(|value| value.to_string_lossy().into_owned());
+    let login_path = current_login_shell_path();
+    let home = current_home_dir();
+    let spawn_path = build_provider_spawn_path(
+        process_path.as_deref(),
+        login_path.as_deref(),
+        home.as_deref(),
+    )
+    .ok_or_else(|| AppError::provider("Codex could not build a process PATH."))?;
+    let mut candidates = Vec::new();
+    #[cfg(target_os = "macos")]
+    for applications in home
+        .iter()
+        .map(|home| home.join("Applications"))
+        .chain([PathBuf::from("/Applications")])
+    {
+        for app in ["Codex.app", "ChatGPT.app"] {
+            candidates.push(
+                applications
+                    .join(app)
+                    .join("Contents/Resources/codex-cli/bin/codex"),
+            );
+        }
+    }
+    let override_command = std::env::var("ECKY_CODEX_BIN").ok();
+    let path = resolve_codex_executable_from_sources(
+        override_command.as_deref(),
+        &candidates,
+        &spawn_path,
+    )?;
+    Ok(ResolvedProviderExecutable { path, spawn_path })
+}
+
+pub fn resolve_codex_executable_from_sources(
+    override_command: Option<&str>,
+    desktop_candidates: &[PathBuf],
+    spawn_path: &OsStr,
+) -> AppResult<PathBuf> {
+    let override_command = override_command.filter(|value| !value.trim().is_empty());
+    if override_command.is_none() {
+        if let Some(candidate) = desktop_candidates
+            .iter()
+            .find(|path| is_executable_file(path))
+        {
+            return Ok(candidate.clone());
+        }
+    }
+    let command = override_command.unwrap_or("codex");
+    resolve_provider_executable_from_path(command, spawn_path).ok_or_else(|| AppError::provider(format!(
+        "Codex executable '{command}' was not found. Searched PATH: {}. Set ECKY_CODEX_BIN to its absolute executable path.", spawn_path.to_string_lossy()
+    )))
+}
+
 pub fn resolve_provider_executable_from_sources(
     command: &str,
     process_path: Option<&str>,
@@ -224,6 +280,18 @@ mod tests {
             permissions.set_mode(0o755);
             fs::set_permissions(path, permissions).expect("chmod executable");
         }
+    }
+
+    #[test]
+    fn explicit_codex_override_never_silently_falls_back_to_desktop() {
+        let root = temp_root();
+        let desktop = root.join("desktop/codex");
+        write_executable(&desktop);
+        let path = std::env::join_paths([root.join("bin")]).unwrap();
+        let error = resolve_codex_executable_from_sources(Some("missing-codex"), &[desktop], &path)
+            .unwrap_err();
+        assert!(error.message.contains("missing-codex"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

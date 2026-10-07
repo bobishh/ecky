@@ -88,3 +88,17 @@
 - [x] Clear the owning thread's viewport-capture preference and exit Draw mode after acceptance.
 - [x] Remove the unused Remember layout checkbox from Dialogue.
 - [x] Prove queued image rendering, successful control reset, and failure-state draft retention with Playwright.
+
+## 11. Native Codex voice and runtime catalog
+
+- [x] Reject standalone NVIDIA Speech under Provider/MCP and cancel API capture on mode switch.
+- [x] Add failing outer tests for native spoken replies and raw realtime startup failure.
+- [x] Add native realtime start/stop with exact owned session identity to the existing Rust supervisor.
+- [x] Add WebRTC microphone/playback transport and explicit Codex voice control; retain API STT and hide unsupported Agy/MCP voice.
+- [x] Persist completed native speech items into the existing provider timeline.
+- [x] Prefer installed desktop runtime for catalog/turns/voice while preserving explicit overrides and PATH fallback.
+- [x] Prove voice happy/failure/pending cleanup, current model dropdown, Rust compilation, frontend checks and strict specs.
+- [x] Stop pending startup before acknowledgement and route early native errors by exact session identity.
+- [x] Require explicit native realtime v3 and prove the AVAS-compatible startup payload.
+- [x] Exclude native delegation envelopes from projection, persistence, and legacy history pages while retaining real speech and ordinary messages.
+- [ ] Verify live authenticated audio negotiation and actual microphone/playback on the target desktop.

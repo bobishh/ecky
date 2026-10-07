@@ -109,6 +109,22 @@ async activateProviderWriter(input: ProviderWriterActivationInput) : Promise<Res
     else return { status: "error", error: e  as any };
 }
 },
+async startCodexVoice(input: CodexVoiceStartInput) : Promise<Result<CodexVoiceConnection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_codex_voice", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async stopCodexVoice(input: CodexVoiceStopInput) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_codex_voice", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getCodexTakeover(eckyThreadId: string) : Promise<Result<CodexTakeoverSnapshot | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_codex_takeover", { eckyThreadId }) };
@@ -1801,6 +1817,9 @@ export type CodexStopInput = { eckyThreadId: string; turnId: string }
 export type CodexTakeoverBinding = { eckyThreadId: string; codexThreadId: string; label: string; cwd: string; bootstrapVersion: number; createdAt: number; updatedAt: number }
 export type CodexTakeoverRuntime = { phase: string; activeTurnId: string | null; error: string | null }
 export type CodexTakeoverSnapshot = { binding: CodexTakeoverBinding; messages: CodexDialogueMessage[]; liveMessages: CodexDialogueMessage[]; turnTraces: ProviderTurnTrace[]; nextCursor: string | null; backwardsCursor: string | null; runtime: CodexTakeoverRuntime; queue: CodexQueuedPrompt[] }
+export type CodexVoiceConnection = { threadId: string; sessionId: string; sdp: string }
+export type CodexVoiceStartInput = { eckyThreadId: string; sessionId: string; sdp: string }
+export type CodexVoiceStopInput = { eckyThreadId: string; sessionId: string }
 export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null;
 /**
  * Optional live-reference export symbol selecting the top-level

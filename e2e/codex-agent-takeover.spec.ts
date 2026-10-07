@@ -172,7 +172,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         return {
           models: provider === 'agy'
             ? ['gemini-3.7-flash-high', 'claude-sonnet-4-6']
-            : ['gpt-5.6', 'gpt-5.6-mini'],
+            : ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra'],
           isLive: true,
         };
       }
@@ -729,14 +729,14 @@ test.describe('Codex provider integration', () => {
     await settings.getByRole('button', { name: 'FETCH MODELS' }).click();
     const modelField = settings.locator('.provider-model-field');
     await modelField.locator('.select-trigger').click();
-    await expect(modelField.getByRole('button', { name: 'gpt-5.6', exact: true })).toBeVisible();
+    await expect(modelField.getByRole('button', { name: 'gpt-6.1-sol', exact: true })).toBeVisible();
     await expect(modelField.getByRole('button', { name: 'gpt-4o', exact: true })).toHaveCount(0);
-    await modelField.getByRole('button', { name: 'gpt-5.6', exact: true }).click();
+    await modelField.getByRole('button', { name: 'gpt-6.1-sol', exact: true }).click();
     await settings.getByRole('button', { name: 'SAVE REGISTRY' }).click();
 
     const calls = await page.evaluate(() => (window as any).__CODEX_CALLS__);
     expect(calls.some((call: any) => call.cmd === 'list_provider_models' && call.args?.provider === 'codex')).toBe(true);
-    expect(calls.findLast((call: any) => call.cmd === 'save_config')?.args?.config?.providerModels?.codex).toBe('gpt-5.6');
+    expect(calls.findLast((call: any) => call.cmd === 'save_config')?.args?.config?.providerModels?.codex).toBe('gpt-6.1-sol');
   });
 
   test('Given provider model discovery fails When models are fetched Then raw provider error remains visible', async ({ page }) => {
@@ -1582,4 +1582,117 @@ test.describe('Codex provider integration', () => {
     await expect(page.locator('.genie-bubble').filter({ hasText: 'Config Save Error' })).toHaveCount(0);
     await expect(page.locator('.genie-bubble').filter({ hasText: 'invalid config field connection-type' })).toHaveCount(0);
   });
+});
+
+async function installRealtimeMediaMocks(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as any;
+    w.__VOICE_MEDIA__ = [];
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args: any) => {
+      if (cmd === 'start_codex_voice') {
+        w.__CODEX_CALLS__.push({ cmd, args });
+        if (w.__VOICE_ERROR__) throw { code: 'provider', message: w.__VOICE_ERROR__ };
+        const answer = { sessionId: args.input.sessionId, threadId: 'codex-owned-by-ecky-7', sdp: 'answer-sdp' };
+        if (w.__VOICE_PENDING__) return new Promise((resolve) => { w.__VOICE_RESOLVE__ = () => resolve(answer); });
+        return answer;
+      }
+      if (cmd === 'stop_codex_voice') {
+        w.__CODEX_CALLS__.push({ cmd, args });
+        return null;
+      }
+      return invoke(cmd, args);
+    };
+    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { value: async () => {
+      w.__VOICE_MEDIA__.push('microphone');
+      const stream = new MediaStream();
+      (stream as any).getTracks = () => [{ stop: () => w.__VOICE_MEDIA__.push('microphone-stop') }];
+      return stream;
+    }});
+    w.RTCPeerConnection = class {
+      localDescription: any;
+      connectionState = 'new';
+      ontrack: any;
+      onconnectionstatechange: any;
+      addTrack() { w.__VOICE_MEDIA__.push('send-audio'); }
+      createDataChannel() { return { close() {} }; }
+      async createOffer() { return { type: 'offer', sdp: 'offer-sdp' }; }
+      async setLocalDescription(offer: any) { this.localDescription = offer; }
+      async setRemoteDescription(answer: any) {
+        w.__VOICE_MEDIA__.push(answer.sdp);
+        this.ontrack?.({ streams: [new MediaStream()] });
+        this.connectionState = 'connected';
+        this.onconnectionstatechange?.();
+      }
+      close() { w.__VOICE_MEDIA__.push('peer-close'); }
+    };
+    HTMLMediaElement.prototype.play = async function () { w.__VOICE_MEDIA__.push('play-reply'); };
+  });
+}
+
+test('Given Codex Provider When voice starts Then microphone and spoken replies share its native session', async ({ page }) => {
+  await installProviderMocks(page, 'happy', true);
+  await installRealtimeMediaMocks(page);
+  await bootProviderDialogue(page);
+  await page.getByRole('button', { name: 'Start Codex voice conversation' }).click();
+  await expect(page.getByRole('button', { name: 'Stop Codex voice conversation' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__VOICE_MEDIA__)).toContain('play-reply');
+  const calls = await page.evaluate(() => (window as any).__CODEX_CALLS__);
+  expect(calls.find((call: any) => call.cmd === 'start_codex_voice').args.input).toMatchObject({ eckyThreadId: eckyThread.id, sdp: 'offer-sdp' });
+  expect(calls.some((call: any) => call.cmd === 'transcribe_prompt_audio')).toBe(false);
+  await page.getByRole('button', { name: 'Stop Codex voice conversation' }).click();
+  await expect(page.getByRole('button', { name: 'Start Codex voice conversation' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__VOICE_MEDIA__)).toContain('microphone-stop');
+  await expect.poll(() => page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'stop_codex_voice').length)).toBe(1);
+});
+
+test('Given Codex voice startup fails When provider rejects Then raw error appears and microphone stops', async ({ page }) => {
+  await installProviderMocks(page, 'happy', true);
+  await installRealtimeMediaMocks(page);
+  await bootProviderDialogue(page);
+  await page.evaluate(() => { (window as any).__VOICE_ERROR__ = '403 realtime access denied by provider'; });
+  await page.getByRole('button', { name: 'Start Codex voice conversation' }).click();
+  await expect(page.locator('.voice-status')).toContainText('403 realtime access denied by provider');
+  await expect.poll(() => page.evaluate(() => (window as any).__VOICE_MEDIA__)).toContain('microphone-stop');
+});
+
+test('Given Codex voice negotiation is pending When provider changes Then microphone stops and late session closes', async ({ page }) => {
+  await installProviderMocks(page, 'happy', true);
+  await installRealtimeMediaMocks(page);
+  await bootProviderDialogue(page);
+  await page.evaluate(() => { (window as any).__VOICE_PENDING__ = true; });
+  await page.getByRole('button', { name: 'Start Codex voice conversation' }).click();
+  await expect(page.locator('.voice-status')).toContainText('CONNECTING');
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__VOICE_RESOLVE__)).toBe('function');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const settings = page.locator('[data-window-id="settings"]');
+  await settings.getByRole('button', { name: 'PROVIDER', exact: true }).click();
+  await settings.getByRole('button', { name: 'AGY', exact: true }).click();
+  await settings.getByRole('button', { name: 'SAVE REGISTRY' }).click();
+  await expect(page.getByRole('button', { name: 'Start Codex voice conversation' })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as any).__VOICE_MEDIA__)).toContain('microphone-stop');
+  await page.evaluate(() => (window as any).__VOICE_RESOLVE__());
+  await expect.poll(() => page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'stop_codex_voice').length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__VOICE_MEDIA__)).not.toContain('play-reply');
+});
+
+test('Given native Codex voice error arrives before SDP acknowledgement When negotiation is pending Then raw failure stops microphone', async ({ page }) => {
+  await installProviderMocks(page, 'happy', true);
+  await installRealtimeMediaMocks(page);
+  await bootProviderDialogue(page);
+  await page.evaluate(() => { (window as any).__VOICE_PENDING__ = true; });
+  await page.getByRole('button', { name: 'Start Codex voice conversation' }).click();
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__VOICE_RESOLVE__)).toBe('function');
+  await page.evaluate(() => {
+    const w = window as any;
+    const sessionId = w.__CODEX_CALLS__.findLast((call: any) => call.cmd === 'start_codex_voice').args.input.sessionId;
+    w.__EVENT_HANDLERS__['codex-voice-event']({ payload: {
+      threadId: 'codex-owned-by-ecky-7', sessionId,
+      method: 'thread/realtime/error', params: { message: '503 native voice sideband rejected (raw)' },
+    } });
+  });
+  await expect(page.locator('.voice-status')).toContainText('503 native voice sideband rejected (raw)');
+  await expect.poll(() => page.evaluate(() => (window as any).__VOICE_MEDIA__)).toContain('microphone-stop');
+  await page.evaluate(() => (window as any).__VOICE_RESOLVE__());
+  expect(await page.evaluate(() => (window as any).__VOICE_MEDIA__)).not.toContain('play-reply');
 });

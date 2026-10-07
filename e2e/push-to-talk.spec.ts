@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 
-function installPromptVoiceMocks() {
+function installPromptVoiceMocks(connectionType: string | null = null) {
   return async ({ page }: { page: Page }) => {
-    await page.addInitScript(() => {
+    await page.addInitScript((connectionType) => {
       const mockWindow = window as any;
       localStorage.clear();
       mockWindow.__VOICE_RECORDER_CALLS__ = [];
@@ -18,7 +18,7 @@ function installPromptVoiceMocks() {
         voice: { sttLanguageCode: 'en-US' },
         mcp: { mode: 'passive', autoAgents: [] },
         hasSeenOnboarding: true,
-        connectionType: null,
+        connectionType,
         defaultEngineKind: 'freecad',
         defaultSourceLanguage: 'legacyPython',
         defaultGeometryBackend: 'freecad',
@@ -95,7 +95,7 @@ function installPromptVoiceMocks() {
         }
         return null;
       };
-    });
+    }, connectionType);
   };
 }
 
@@ -144,7 +144,7 @@ test.describe('Push to talk', () => {
   test('Given App STT language, saving routes push-to-talk through that language', async ({ page }) => {
     await page.goto('/');
     await page.locator('button[title="Settings"]').click();
-    await page.getByRole('button', { name: 'APP' }).click();
+    await page.getByRole('button', { name: 'APP', exact: true }).click();
 
     const languageInput = page.getByLabel('STT LANGUAGE CODE');
     await expect(languageInput).toBeVisible();
@@ -169,4 +169,54 @@ test.describe('Push to talk', () => {
       languageCode: 'ru-RU',
     });
   });
+
+  for (const pendingPermission of [false, true]) {
+    test(`Given API microphone ${pendingPermission ? 'permission is pending' : 'is listening'} When mode changes to Codex Then capture is canceled without STT`, async ({ page }) => {
+      await page.goto('/');
+      await page.getByRole('button', { name: 'DIALOGUE' }).click();
+      if (pendingPermission) {
+        await page.evaluate(() => {
+          const w = window as any;
+          w.__ECKY_TEST_AUDIO_RECORDER__.start = () => {
+            w.__VOICE_RECORDER_CALLS__.push('start');
+            return new Promise<void>((resolve) => { w.__RESOLVE_MICROPHONE__ = resolve; });
+          };
+        });
+      }
+      await page.getByRole('button', { name: /start voice input/i }).evaluate((element) => {
+        element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }));
+      });
+      await expect(page.locator('.voice-status')).toContainText('LISTENING');
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      const settings = page.locator('[data-window-id="settings"]');
+      await settings.getByRole('button', { name: 'PROVIDER', exact: true }).click();
+      await settings.getByRole('button', { name: 'SAVE REGISTRY' }).click();
+      await settings.locator('.window-close').click();
+
+      await expect(page.getByRole('button', { name: 'SEND TO CODEX' })).toBeVisible();
+      await expect(page.getByRole('button', { name: /start voice input/i })).toHaveCount(0);
+      await expect.poll(() => page.evaluate(() => (window as any).__VOICE_RECORDER_CALLS__)).toEqual(['start', 'cancel']);
+      if (pendingPermission) {
+        await page.evaluate(() => (window as any).__RESOLVE_MICROPHONE__());
+        await expect.poll(() => page.evaluate(() => (window as any).__VOICE_RECORDER_CALLS__)).toEqual(['start', 'cancel', 'cancel']);
+      }
+      await expect(page.evaluate(() => (window as any).__TRANSCRIBE_CALLS__)).resolves.toEqual([]);
+    });
+  }
 });
+
+for (const provider of ['codex', 'agy']) {
+  test(`Given ${provider} provider When Dialogue opens Then standalone transcription is unavailable`, async ({ page }) => {
+    await installPromptVoiceMocks(`provider:${provider}`)({ page });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+    await expect(page.getByRole('button', { name: `SEND TO ${provider.toUpperCase()}` })).toBeVisible();
+    await expect(page.getByRole('button', { name: /start voice input/i })).toHaveCount(0);
+    if (provider === 'codex') await expect(page.getByRole('button', { name: 'Start Codex voice conversation' })).toBeVisible();
+    if (provider === 'agy') await expect(page.getByRole('button', { name: 'Start Codex voice conversation' })).toHaveCount(0);
+    await expect(page.locator('.prompt-input')).toBeEditable();
+    await expect(page.evaluate(() => (window as any).__VOICE_RECORDER_CALLS__)).resolves.toEqual([]);
+    await expect(page.evaluate(() => (window as any).__TRANSCRIBE_CALLS__)).resolves.toEqual([]);
+  });
+}

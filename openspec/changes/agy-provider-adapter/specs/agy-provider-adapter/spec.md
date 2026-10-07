@@ -176,6 +176,16 @@ between turns.
 
 Submit SHALL durably enqueue and return immediately. Agy SHALL expose stop and SHALL
 not expose steer until its protocol documents an exact active-turn steering command.
+Agy SHALL omit `VOICE` while stream-json supports only text blocks and SHALL NOT
+route voice recordings to standalone NVIDIA Speech.
+
+#### Scenario: Agy has no integrated voice input
+
+- **GIVEN** `provider:agy` uses text-only stream-json input
+- **WHEN** Dialogue opens
+- **THEN** the text composer and `SEND TO AGY` remain available
+- **AND** `VOICE` is absent
+- **AND** direct standalone STT calls fail before NVIDIA provider I/O
 
 #### Scenario: User sends while Agy works
 

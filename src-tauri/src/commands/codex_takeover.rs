@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::Digest;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::contracts::{
     AppError, AppResult, CodexDialogueMessage, CodexMessagePage, CodexMessagePageInput,
@@ -3619,4 +3619,111 @@ for line in sys.stdin:
 
         let _ = std::fs::remove_dir_all(directory);
     }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn start_codex_voice(
+    input: crate::contracts::CodexVoiceStartInput,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::contracts::CodexVoiceConnection> {
+    require_codex_provider_mode(&state)?;
+    if input.session_id.trim().is_empty() || input.sdp.trim().is_empty() {
+        return Err(AppError::validation(
+            "Codex voice requires a session identity and an audio SDP offer.",
+        ));
+    }
+    if state.config.lock().unwrap().jev_classifier.enabled {
+        return Err(AppError::validation("Codex native realtime delegation does not expose pre-turn Jev routing. Disable experimental Jev routing before starting voice."));
+    }
+    let binding = ensure_binding(&app, &state, &input.ecky_thread_id).await?;
+    let runtime = state
+        .codex_app_server
+        .runtime(&binding.codex_thread_id)
+        .await;
+    if runtime.active_turn_id.is_some() {
+        return Err(AppError::validation(
+            "Wait for the current Codex turn before starting voice.",
+        ));
+    }
+    let policy = ProviderTurnPolicy::prompt_based();
+    state
+        .set_provider_turn_policy(&binding.ecky_thread_id, policy)
+        .await;
+    resume_binding_with_policy(&state, &binding, true, policy).await?;
+    let sdp = state
+        .codex_app_server
+        .start_realtime(&binding.codex_thread_id, &input.session_id, &input.sdp)
+        .await?;
+    if state
+        .codex_app_server
+        .realtime_session_canceled(&input.session_id)
+        .await
+    {
+        let _ = state
+            .codex_app_server
+            .stop_realtime(&binding.codex_thread_id, &input.session_id)
+            .await;
+        return Err(AppError::provider("Codex voice startup was canceled."));
+    }
+    // A mode switch during network negotiation must not leave a live microphone session.
+    if let Err(error) = require_codex_provider_mode(&state) {
+        let _ = state
+            .codex_app_server
+            .stop_realtime(&binding.codex_thread_id, &input.session_id)
+            .await;
+        return Err(error);
+    }
+    Ok(crate::contracts::CodexVoiceConnection {
+        thread_id: binding.codex_thread_id,
+        session_id: input.session_id,
+        sdp,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn stop_codex_voice(
+    input: crate::contracts::CodexVoiceStopInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    // Stop remains available after a mode switch; identity still binds exact owned session.
+    state
+        .codex_app_server
+        .cancel_realtime_session(&input.session_id)
+        .await;
+    let binding = {
+        let conn = state.db.lock().await;
+        codex_takeover::get_binding(&conn, &input.ecky_thread_id)?
+    };
+    match binding {
+        Some(binding) => {
+            state
+                .codex_app_server
+                .stop_realtime(&binding.codex_thread_id, &input.session_id)
+                .await
+        }
+        None => Ok(()), // Cancellation may arrive before lazy binding creation.
+    }
+}
+
+pub(crate) async fn persist_realtime_message(
+    app: &tauri::AppHandle,
+    thread_id: &str,
+    message: CodexDialogueMessage,
+) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    let binding = {
+        let conn = state.db.lock().await;
+        codex_takeover::get_binding_by_codex_thread_id(&conn, thread_id)?
+    }
+    .ok_or_else(|| AppError::not_found("Codex voice transcript has no owned Ecky binding."))?;
+    persist_codex_messages(&state, &binding, &[message]).await?;
+    app.emit(
+        "codex-provider-updated",
+        serde_json::json!({"threadId": thread_id, "method": "history/persisted"}),
+    )
+    .map_err(|error| AppError::internal(error.to_string()))?;
+    Ok(())
 }

@@ -71,6 +71,9 @@ import {
   type ClassificationResult,
   type CodexSteerInput,
   type CodexStopInput,
+  type CodexVoiceConnection,
+  type CodexVoiceStartInput,
+  type CodexVoiceStopInput,
   type CodexTakeoverSnapshot,
   type ExplorationRunOutput,
   type StartExplorationRunInput,
@@ -1930,3 +1933,11 @@ export async function saveThreadWindowLayout(threadId: string, layout: ThreadWin
 export type { AppLogEntry };
 export type { VisualVerificationResult };
 export type { StructuralVerificationResult };
+
+export async function startCodexVoice(input: CodexVoiceStartInput): Promise<CodexVoiceConnection> {
+  return invokeCommand(commands.startCodexVoice(input));
+}
+
+export async function stopCodexVoice(input: CodexVoiceStopInput): Promise<void> {
+  await invokeCommand(commands.stopCodexVoice(input));
+}

@@ -831,3 +831,73 @@ fn rotate_agent_binding_records_lineage_and_preserves_messages() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].content, "делай катушку");
 }
+
+#[test]
+fn completed_native_voice_replies_share_durable_provider_timeline_without_duplicates() {
+    use ecky_cad_lib::services::codex_app_server::project_realtime_transcript;
+    let conn = connection();
+    bind_owned_thread(&conn, "ecky-1", "codex-voice", "One", "/workspace/one", 1).unwrap();
+    let messages: Vec<_> = [("spoken-user", "user", "Привет"), ("spoken-answer", "assistant", "Привет, слушаю")]
+        .into_iter().enumerate().map(|(index, (id, role, text))| {
+            project_realtime_transcript("codex-voice", &serde_json::json!({
+                "id": id, "type": "transcriptSegment", "realtimeSessionId": "session", "role": role, "text": text
+            }), 10 + index as i64).unwrap()
+        }).collect();
+    assert_eq!(
+        persist_finished_provider_messages(&conn, "ecky-1", "codex", "codex-voice", &messages)
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        persist_finished_provider_messages(&conn, "ecky-1", "codex", "codex-voice", &messages)
+            .unwrap(),
+        0
+    );
+    let page = provider_message_page(&conn, "ecky-1", "codex", None).unwrap();
+    assert_eq!(page.messages, messages);
+}
+
+#[test]
+fn native_voice_history_excludes_delegation_packets_including_legacy_rows() {
+    use ecky_cad_lib::services::codex_app_server::project_turn_messages;
+    let conn = connection();
+    bind_owned_thread(&conn, "ecky-1", "voice", "One", "/workspace/one", 1).unwrap();
+    let packet = "<realtime_delegation>\n<input>Перемести крепление сверху.</input>\n<transcript_delta>user: Привет\nassistant: Слушаю</transcript_delta>\n</realtime_delegation>";
+    let projected = project_turn_messages("voice", &[serde_json::json!({
+        "id": "handoff", "status": "completed", "startedAt": 10,
+        "items": [
+            {"id": "internal", "type": "userMessage", "content": [{"type": "text", "text": packet}]},
+            {"id": "answer", "type": "agentMessage", "text": "Крепление перенесено."}
+        ]
+    })]);
+    assert_eq!(projected.len(), 1, "delegation is transport context, not another user utterance");
+    assert_eq!(projected[0].role, "assistant");
+    let mut messages = projected;
+    let mut internal = messages[0].clone();
+    internal.id = "legacy-packet".into();
+    internal.role = "user".into();
+    internal.content = packet.into();
+    messages.push(internal.clone());
+    assert_eq!(persist_finished_provider_messages(&conn, "ecky-1", "codex", "voice", &messages).unwrap(), 1);
+    // Simulate already-persisted packets without running the new write guard.
+    for ordinal in 0..35 {
+        conn.execute("INSERT INTO agent_provider_messages (id, ecky_thread_id, provider, external_thread_id, role, content, attachments_json, status, created_at) VALUES (?1, 'ecky-1', 'codex', 'voice', 'user', ?2, '[]', 'success', 100)", params![format!("old-packet-{ordinal}"), packet]).unwrap();
+    }
+    assert_eq!(list_provider_messages(&conn, "ecky-1", "codex", 1).unwrap(), vec![messages[0].clone()]);
+    let page = provider_message_page(&conn, "ecky-1", "codex", None).unwrap();
+    assert_eq!(page.messages, vec![messages[0].clone()]);
+    assert!(page.next_cursor.is_none(), "hidden packets must not consume page slots");
+    // Quotes and partial envelopes remain real user messages, including legacy reads.
+    for (ordinal, text) in [
+        "Explain <realtime_delegation><input>example</input></realtime_delegation>",
+        "<realtime_delegation><input>unfinished",
+    ].into_iter().enumerate() {
+        let mut ordinary = internal.clone();
+        ordinary.id = format!("ordinary-{ordinal}");
+        ordinary.content = text.into();
+        ordinary.timestamp = 200 + ordinal as i64;
+        assert_eq!(persist_finished_provider_messages(&conn, "ecky-1", "codex", "voice", &[ordinary.clone()]).unwrap(), 1);
+        assert_eq!(list_provider_messages(&conn, "ecky-1", "codex", 1).unwrap(), vec![ordinary.clone()]);
+        assert!(provider_message_page(&conn, "ecky-1", "codex", None).unwrap().messages.contains(&ordinary));
+    }
+}

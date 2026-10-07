@@ -146,3 +146,26 @@ pub struct CodexStopInput {
     pub ecky_thread_id: String,
     pub turn_id: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexVoiceStartInput {
+    pub ecky_thread_id: String,
+    pub session_id: String,
+    pub sdp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexVoiceConnection {
+    pub thread_id: String,
+    pub session_id: String,
+    pub sdp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexVoiceStopInput {
+    pub ecky_thread_id: String,
+    pub session_id: String,
+}

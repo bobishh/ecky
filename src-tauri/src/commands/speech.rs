@@ -107,6 +107,13 @@ fn is_nvidia_engine(engine: &Engine) -> bool {
 }
 
 fn selected_nvidia_speech_engine(config: &Config) -> AppResult<NvidiaSpeechEngine> {
+    if let Some(connection_type) = config.connection_type.as_deref() {
+        if connection_type.starts_with("provider:") || connection_type == "mcp" {
+            return Err(AppError::provider(format!(
+                "Voice input is not supported for {connection_type}. Standalone NVIDIA Speech transcription is available only in API mode."
+            )));
+        }
+    }
     let selected = config
         .engines
         .iter()
@@ -379,6 +386,20 @@ mod tests {
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,
+        }
+    }
+
+    #[test]
+    fn managed_dialogue_never_falls_back_to_nvidia_speech() {
+        for connection_type in ["provider:codex", "provider:agy", "mcp"] {
+            let mut cfg = config(
+                vec![engine("nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nim-key", true)],
+                "nim",
+            );
+            cfg.connection_type = Some(connection_type.to_string());
+            let err = selected_nvidia_speech_engine(&cfg).expect_err("managed dialogue must reject standalone STT");
+            assert!(err.message.contains(connection_type));
+            assert!(err.message.contains("not supported"));
         }
     }
 

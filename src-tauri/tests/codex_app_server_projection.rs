@@ -927,3 +927,95 @@ for line in sys.stdin:
     std::env::remove_var("ECKY_CODEX_TEST_REQUESTS");
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn codex_runtime_matches_desktop_catalog_before_older_path_cli() {
+    use ecky_cad_lib::services::provider_executable::resolve_codex_executable_from_sources;
+    let root = std::env::temp_dir().join(format!("ecky-codex-runtime-{}", uuid::Uuid::new_v4()));
+    let desktop = root.join("desktop/codex");
+    let path_cli = root.join("bin/codex");
+    for executable in [&desktop, &path_cli] {
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(executable, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path = std::env::join_paths([path_cli.parent().unwrap()]).unwrap();
+    assert_eq!(
+        resolve_codex_executable_from_sources(None, &[desktop.clone()], &path).unwrap(),
+        desktop
+    );
+    assert_eq!(
+        resolve_codex_executable_from_sources(
+            Some(path_cli.to_str().unwrap()),
+            &[desktop.clone()],
+            &path
+        )
+        .unwrap(),
+        path_cli
+    );
+    std::fs::remove_file(&desktop).unwrap();
+    assert_eq!(
+        resolve_codex_executable_from_sources(None, &[desktop], &path).unwrap(),
+        path_cli
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_voice_uses_native_audio_negotiation_and_exact_session_stop() {
+    use std::os::unix::fs::PermissionsExt;
+    let _environment = CODEX_ENV_LOCK.lock().await;
+    let directory = std::env::temp_dir().join(format!("ecky-codex-voice-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex");
+    std::fs::write(&executable, r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    method = m.get('method')
+    if 'id' not in m: continue
+    if method == 'thread/realtime/start':
+        p = m['params']
+        assert p['threadId'] == 'owned-thread'
+        assert p['outputModality'] == 'audio'
+        assert p.get('version') == 'v3', 'AVAS requires realtime v3 for OpenAI-Alpha: quicksilver=v2'
+        assert p['transport'] == {'type': 'webrtc', 'sdp': 'offer'}
+        assert p['realtimeSessionId'] == 'voice-session'
+        assert 'model' not in p
+        print(json.dumps({'method': 'thread/realtime/sdp', 'params': {'threadId': p['threadId'], 'sdp': 'answer'}}), flush=True)
+    elif method == 'thread/realtime/stop':
+        assert m['params']['threadId'] == 'owned-thread'
+    print(json.dumps({'id': m['id'], 'result': {}}), flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let previous = std::env::var_os("ECKY_CODEX_BIN");
+    std::env::set_var("ECKY_CODEX_BIN", &executable);
+    let supervisor = CodexAppServerSupervisor::new();
+    let answer = supervisor
+        .start_realtime("owned-thread", "voice-session", "offer")
+        .await
+        .unwrap();
+    assert_eq!(answer, "answer");
+    assert!(supervisor
+        .start_realtime("owned-thread", "another-session", "offer")
+        .await
+        .is_err());
+    assert!(supervisor
+        .stop_realtime("owned-thread", "stale-session")
+        .await
+        .is_err());
+    supervisor
+        .stop_realtime("owned-thread", "voice-session")
+        .await
+        .unwrap();
+    match previous {
+        Some(value) => std::env::set_var("ECKY_CODEX_BIN", value),
+        None => std::env::remove_var("ECKY_CODEX_BIN"),
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

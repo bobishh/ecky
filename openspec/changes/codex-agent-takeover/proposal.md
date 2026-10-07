@@ -38,8 +38,14 @@ without exposing or importing unrelated Codex conversations.
 
 ## Product Decisions
 
+- Codex Provider offers native bidirectional realtime voice on its owned thread.
+  Audio output and voice input use the account-authenticated app-server; ordinary
+  text/image model modalities do not describe the separate realtime route.
+- Prefer the installed desktop Codex runtime for catalog, turns, and voice; explicit
+  ECKY_CODEX_BIN wins, PATH is fallback. Model ids come from live model/list only.
+- Provider and MCP dialogue never fall back to standalone NVIDIA Speech.
 - Ecky thread owns provider conversation. External provider history is not an index.
-- Binding creation is lazy on first message. Opening an unused Ecky thread creates no
+- Binding creation is lazy on first message or explicit voice start. Opening an unused Ecky thread creates no
   external junk conversation.
 - `connectionType` stores provider choice as `provider:<adapter-id>`; currently
   `provider:codex`.

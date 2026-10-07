@@ -2,7 +2,7 @@ use crate::contracts::{
     AppError, AppResult, Attachment, AttachmentKind, CodexDialogueMessage, CodexMessagePage,
     CodexTakeoverRuntime, CodexThreadSummary, ProviderTurnTrace,
 };
-use crate::services::provider_executable::resolve_provider_executable;
+use crate::services::provider_executable::resolve_codex_executable;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
@@ -40,7 +40,14 @@ struct SupervisorInner {
     hook_descriptor_path: std::sync::Mutex<std::path::PathBuf>,
 }
 
+struct RealtimeSession {
+    session_id: String,
+    negotiation: Option<oneshot::Sender<AppResult<String>>>,
+}
+
 struct SupervisorState {
+    realtime_sessions: HashMap<String, RealtimeSession>,
+    canceled_realtime_sessions: VecDeque<String>,
     process: Option<SupervisorProcess>,
     codex_executable_path: Option<std::path::PathBuf>,
     generation: u64,
@@ -101,6 +108,8 @@ impl CodexAppServerSupervisor {
         Self {
             inner: Arc::new(SupervisorInner {
                 state: Mutex::new(SupervisorState {
+                    realtime_sessions: HashMap::new(),
+                    canceled_realtime_sessions: VecDeque::new(),
                     process: None,
                     codex_executable_path: None,
                     generation: 0,
@@ -472,7 +481,7 @@ impl CodexAppServerSupervisor {
             }
         }
 
-        let resolved = resolve_provider_executable("codex", "ECKY_CODEX_BIN", "Codex CLI")?;
+        let resolved = resolve_codex_executable()?;
         let mut command = Command::new(&resolved.path);
         command.arg("app-server").arg("--stdio");
         let mut child = command
@@ -725,6 +734,74 @@ impl CodexAppServerSupervisor {
             .get("threadId")
             .and_then(Value::as_str)
             .map(str::to_string);
+        if method.starts_with("thread/realtime/") {
+            let (app_handle, session_id) = {
+                let mut state = self.inner.state.lock().await;
+                if state
+                    .process
+                    .as_ref()
+                    .is_none_or(|process| process.generation != generation)
+                {
+                    return;
+                }
+                if let Some(thread_id) = thread_id.as_deref() {
+                    if let Some(session) = state.realtime_sessions.get_mut(thread_id) {
+                        let negotiated = match method {
+                            "thread/realtime/sdp" => params
+                                .get("sdp")
+                                .and_then(Value::as_str)
+                                .map(|sdp| Ok(sdp.to_string())),
+                            "thread/realtime/error" => Some(Err(AppError::provider(
+                                params
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Codex realtime error")
+                                    .to_string(),
+                            ))),
+                            "thread/realtime/closed" => Some(Err(AppError::provider(
+                                params
+                                    .get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Codex realtime closed before audio connected")
+                                    .to_string(),
+                            ))),
+                            _ => None,
+                        };
+                        if let Some(result) = negotiated {
+                            if let Some(sender) = session.negotiation.take() {
+                                let _ = sender.send(result);
+                            }
+                        }
+                    }
+                }
+                let session_id = thread_id
+                    .as_deref()
+                    .and_then(|id| state.realtime_sessions.get(id))
+                    .map(|session| session.session_id.clone());
+                (state.app_handle.clone(), session_id)
+            };
+            if let (Some(app), Some(thread_id)) = (app_handle, thread_id.as_deref()) {
+                if method == "thread/realtime/item/completed" {
+                    if let Some(message) = params.get("item").and_then(|item| {
+                        project_realtime_transcript(thread_id, item, codex_now_seconds())
+                    }) {
+                        if let Err(error) =
+                            crate::commands::codex_takeover::persist_realtime_message(
+                                &app, thread_id, message,
+                            )
+                            .await
+                        {
+                            let _ = app.emit("codex-voice-event", json!({"threadId": thread_id, "sessionId": session_id, "method": "thread/realtime/error", "params": {"message": error.message}}));
+                        }
+                    }
+                }
+                let _ = app.emit(
+                    "codex-voice-event",
+                    json!({"threadId": thread_id, "sessionId": session_id, "method": method, "params": params}),
+                );
+            }
+            return;
+        }
         let (app_handle, live_messages, turn_traces, runtime_snapshot) = {
             let mut state = self.inner.state.lock().await;
             if state
@@ -862,7 +939,7 @@ impl CodexAppServerSupervisor {
     }
 
     async fn invalidate_process(&self, generation: u64, error: AppError) {
-        let (pending, app_handle, thread_ids, kill) = {
+        let (pending, app_handle, thread_ids, voice_thread_ids, kill) = {
             let mut state = self.inner.state.lock().await;
             if state
                 .process
@@ -934,6 +1011,16 @@ impl CodexAppServerSupervisor {
                     },
                 );
             }
+            let voice_thread_ids = state
+                .realtime_sessions
+                .iter()
+                .map(|(id, session)| (id.clone(), session.session_id.clone()))
+                .collect::<Vec<_>>();
+            for (_, mut session) in state.realtime_sessions.drain() {
+                if let Some(sender) = session.negotiation.take() {
+                    let _ = sender.send(Err(error.clone()));
+                }
+            }
             let pending = state
                 .pending
                 .drain()
@@ -945,7 +1032,13 @@ impl CodexAppServerSupervisor {
                 runtime.active_turn_id = None;
                 runtime.error = Some(error.message.clone());
             }
-            (pending, state.app_handle.clone(), thread_ids, kill)
+            (
+                pending,
+                state.app_handle.clone(),
+                thread_ids,
+                voice_thread_ids,
+                kill,
+            )
         };
         if let Some(kill) = kill {
             let _ = kill.send(()).await;
@@ -954,6 +1047,9 @@ impl CodexAppServerSupervisor {
             let _ = sender.send(Err(error.clone()));
         }
         if let Some(app_handle) = app_handle {
+            for (thread_id, session_id) in voice_thread_ids {
+                let _ = app_handle.emit("codex-voice-event", json!({"threadId": thread_id, "sessionId": session_id, "method": "thread/realtime/error", "params": {"message": error.message}}));
+            }
             for thread_id in thread_ids {
                 let _ = app_handle.emit(
                     "codex-provider-updated",
@@ -1017,6 +1113,120 @@ impl CodexAppServerSupervisor {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn cancel_realtime_session(&self, session_id: &str) {
+        let mut state = self.inner.state.lock().await;
+        if !state
+            .canceled_realtime_sessions
+            .iter()
+            .any(|id| id == session_id)
+        {
+            state
+                .canceled_realtime_sessions
+                .push_back(session_id.to_string());
+            while state.canceled_realtime_sessions.len() > TERMINAL_TURN_MEMORY {
+                state.canceled_realtime_sessions.pop_front();
+            }
+        }
+    }
+
+    pub async fn realtime_session_canceled(&self, session_id: &str) -> bool {
+        self.inner
+            .state
+            .lock()
+            .await
+            .canceled_realtime_sessions
+            .iter()
+            .any(|id| id == session_id)
+    }
+
+    pub async fn start_realtime(
+        &self,
+        thread_id: &str,
+        session_id: &str,
+        sdp: &str,
+    ) -> AppResult<String> {
+        if self.realtime_session_canceled(session_id).await {
+            return Err(AppError::provider("Codex voice startup was canceled."));
+        }
+        self.ensure_started().await?;
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self.inner.state.lock().await;
+            if state
+                .canceled_realtime_sessions
+                .iter()
+                .any(|id| id == session_id)
+            {
+                return Err(AppError::provider("Codex voice startup was canceled."));
+            }
+            if state.realtime_sessions.contains_key(thread_id) {
+                return Err(AppError::validation(
+                    "Codex voice conversation is already active or connecting.",
+                ));
+            }
+            state.realtime_sessions.insert(
+                thread_id.to_string(),
+                RealtimeSession {
+                    session_id: session_id.to_string(),
+                    negotiation: Some(sender),
+                },
+            );
+        }
+        let result = async {
+            self.request("thread/realtime/start", json!({
+                "threadId": thread_id,
+                "realtimeSessionId": session_id,
+                "outputModality": "audio",
+                // Native v3 selects FramelessBidi and OpenAI-Alpha: quicksilver=v2.
+                // Omitting this defaults WebRTC to v1, which AVAS now rejects.
+                "version": "v3",
+                "transport": { "type": "webrtc", "sdp": sdp },
+                "flushTranscriptTailOnSessionEnd": false,
+                "realtimeStartInstructions": crate::provider_turn::ProviderTurnPolicy::unified_prompt_contract(),
+            })).await?;
+            tokio::time::timeout(Duration::from_secs(45), receiver).await
+                .map_err(|_| AppError::provider("Codex realtime did not return its SDP answer within 45 seconds."))?
+                .map_err(|_| AppError::provider("Codex voice negotiation was canceled."))?
+        }.await;
+        if result.is_err() {
+            // Stop only this owned session. A stale startup cannot stop its successor.
+            let _ = self.stop_realtime(thread_id, session_id).await;
+        }
+        result
+    }
+
+    pub async fn stop_realtime(&self, thread_id: &str, session_id: &str) -> AppResult<()> {
+        {
+            let mut state = self.inner.state.lock().await;
+            let Some(session) = state.realtime_sessions.get_mut(thread_id) else {
+                return Ok(());
+            };
+            if session.session_id != session_id {
+                return Err(AppError::validation(
+                    "Codex voice stop targets a stale session.",
+                ));
+            }
+            if let Some(sender) = session.negotiation.take() {
+                let _ = sender.send(Err(AppError::provider(
+                    "Codex voice negotiation was canceled.",
+                )));
+            }
+        }
+        let result = self
+            .request("thread/realtime/stop", json!({"threadId": thread_id}))
+            .await
+            .map(|_| ());
+        let mut state = self.inner.state.lock().await;
+        if state
+            .realtime_sessions
+            .get(thread_id)
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            state.realtime_sessions.remove(thread_id);
+        }
+        result
     }
 
     pub async fn list_models(&self) -> AppResult<Vec<String>> {
@@ -3347,6 +3557,7 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
                             crate::provider_turn::unwrap_user_message(text)
                                 .unwrap_or_else(|| text.to_string())
                         })
+                        .filter(|text| !crate::services::codex_takeover::is_realtime_delegation(text))
                         .collect::<Vec<_>>()
                         .join("\n");
                     let attachments = item_content
@@ -3444,9 +3655,64 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
     messages
 }
 
+pub fn project_realtime_transcript(
+    thread_id: &str,
+    item: &Value,
+    timestamp: i64,
+) -> Option<CodexDialogueMessage> {
+    if item.get("type")?.as_str()? != "transcriptSegment" {
+        return None;
+    }
+    let role = item.get("role")?.as_str()?;
+    if !matches!(role, "user" | "assistant") {
+        return None;
+    }
+    let text = item.get("text")?.as_str()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(CodexDialogueMessage {
+        id: format!("codex:{thread_id}:realtime:{}", item.get("id")?.as_str()?),
+        role: role.to_string(),
+        content: text.to_string(),
+        status: "success".to_string(),
+        timestamp,
+        attachments: Vec::new(),
+        provider_event_kind: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn canceled_voice_start_cannot_launch_a_late_provider_session() {
+        let supervisor = CodexAppServerSupervisor::new();
+        supervisor.cancel_realtime_session("canceled-session").await;
+        let error = supervisor
+            .start_realtime("thread", "canceled-session", "offer")
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("canceled"));
+        assert!(supervisor.inner.state.lock().await.process.is_none());
+    }
+
+    #[test]
+    fn voice_transcript_projection_keeps_native_item_identity_and_roles() {
+        let item = json!({"id":"spoken-1", "realtimeSessionId":"session", "type":"transcriptSegment", "role":"assistant", "text":"Привет"});
+        let message = project_realtime_transcript("thread", &item, 42).unwrap();
+        assert_eq!(message.id, "codex:thread:realtime:spoken-1");
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.content, "Привет");
+        assert_eq!(message.status, "success");
+        assert!(project_realtime_transcript(
+            "thread",
+            &json!({"id":"started", "type":"realtimeSessionStarted"}),
+            42
+        )
+        .is_none());
+    }
 
     #[test]
     fn codex_eval_capture_reserves_incomplete_and_terminal_events_at_limit() {

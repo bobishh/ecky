@@ -591,6 +591,23 @@ fn is_finished_provider_message_status(status: &str) -> bool {
     matches!(status, "success" | "error" | "interrupted" | "discarded")
 }
 
+pub fn is_realtime_delegation(content: &str) -> bool {
+    let content = content.trim_matches([' ', '\t', '\r', '\n']);
+    content.starts_with("<realtime_delegation>")
+        && content.ends_with("</realtime_delegation>")
+        && content.contains("<input>")
+        && content.contains("</input>")
+}
+
+// Apply before LIMIT so legacy transport packets cannot fill a public history page.
+// Keep this predicate aligned with is_realtime_delegation; retain raw legacy rows.
+const PUBLIC_PROVIDER_MESSAGE_SQL: &str = "NOT (
+    provider = 'codex' AND role = 'user'
+    AND trim(content, ' ' || char(9) || char(13) || char(10))
+        GLOB '<realtime_delegation>*</realtime_delegation>'
+    AND instr(content, '<input>') > 0 AND instr(content, '</input>') > 0
+)";
+
 pub fn persist_finished_provider_messages(
     conn: &Connection,
     ecky_thread_id: &str,
@@ -609,6 +626,9 @@ pub fn persist_finished_provider_messages(
         .filter(|message| is_finished_provider_message_status(&message.status))
     {
         let content = public_provider_content(&message.role, message.content.clone());
+        if provider == CODEX_PROVIDER_ID && message.role == "user" && is_realtime_delegation(&content) {
+            continue;
+        }
         let changed = tx
             .execute(
                 "INSERT INTO agent_provider_messages (
@@ -755,17 +775,18 @@ pub fn list_provider_messages(
     limit: usize,
 ) -> AppResult<Vec<CodexDialogueMessage>> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id, role, content, attachments_json, status, created_at
              FROM (
                  SELECT id, role, content, attachments_json, status, created_at
                  FROM agent_provider_messages
                  WHERE ecky_thread_id = ?1 AND provider = ?2
+                   AND {PUBLIC_PROVIDER_MESSAGE_SQL}
                  ORDER BY created_at DESC, id DESC
                  LIMIT ?3
              ) recent
-             ORDER BY created_at ASC, id ASC",
-        )
+             ORDER BY created_at ASC, id ASC"
+        ))
         .map_err(|error| AppError::persistence(error.to_string()))?;
     let rows = stmt
         .query_map(params![ecky_thread_id, provider, limit as i64], |row| {
@@ -819,14 +840,15 @@ pub fn provider_message_page(
     let boundary_timestamp = boundary.as_ref().map(|(timestamp, _)| *timestamp);
     let boundary_id = boundary.as_ref().map(|(_, id)| id.as_str());
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id, role, content, attachments_json, status, created_at
              FROM agent_provider_messages
              WHERE ecky_thread_id = ?1 AND provider = ?2
+               AND {PUBLIC_PROVIDER_MESSAGE_SQL}
                AND (?3 IS NULL OR created_at < ?3 OR (created_at = ?3 AND id < ?4))
              ORDER BY created_at DESC, id DESC
-             LIMIT 31",
-        )
+             LIMIT 31"
+        ))
         .map_err(|error| AppError::persistence(error.to_string()))?;
     let rows = stmt
         .query_map(
@@ -1344,6 +1366,15 @@ pub fn remove_queue_item(conn: &Connection, ecky_thread_id: &str, id: &str) -> A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_delegation_is_internal_only_for_complete_native_envelopes() {
+        assert!(is_realtime_delegation(" \n<realtime_delegation>\n<input>Move mount.</input>\n<transcript_delta>user: Hello</transcript_delta>\n</realtime_delegation>\n"));
+        assert!(!is_realtime_delegation("Move mount."));
+        assert!(!is_realtime_delegation("Explain <realtime_delegation><input>text</input></realtime_delegation>"));
+        assert!(!is_realtime_delegation("<realtime_delegation><input>unfinished"));
+        assert!(!is_realtime_delegation("<realtime_delegation>example</realtime_delegation>"));
+    }
 
     #[test]
     fn durable_provider_history_accepts_only_terminal_messages() {

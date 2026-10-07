@@ -51,3 +51,8 @@
 - [x] 5.6 Live Agy stream smoke and Codex app-server handshake against installed CLIs.
 - [x] 5.7 Green source-reference happy/failure Playwright, prompt tests, strict validation, and installed build.
 - [x] 5.8 Green shutdown subtree, crash-recovery lease, prompt-budget, and provider regression verification.
+
+## 6. Unsupported voice input
+
+- [x] Hide Agy voice control and reject standalone NVIDIA STT fallback.
+- [x] Prove Agy text composer remains available without recording or STT requests.

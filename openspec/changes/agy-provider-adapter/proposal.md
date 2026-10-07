@@ -16,6 +16,8 @@ context when switching modes.
 - Inject Ecky thread identity, canonical handoff, project cwd, and workspace MCP
   configuration into the first Antigravity turn.
 - Expose adapter capabilities so Dialogue does not offer unsupported steering.
+- Omit unsupported voice input; stream-json documents text blocks only, and Agy
+  dialogue must not route recordings to standalone NVIDIA Speech.
 
 ## Impact
 

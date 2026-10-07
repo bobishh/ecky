@@ -104,6 +104,11 @@ changes cannot read as chat prose.
 
 ## Stop and steer
 
+Agy stream-json accepts only text input blocks. Its interactive CLI `/voice` and
+`mic-serve` features do not supply an audio input contract for Ecky's headless
+adapter. Dialogue therefore omits `VOICE`; standalone NVIDIA STT is rejected in Agy
+provider mode before remote I/O.
+
 Agy stream input documents only `user` events. Therefore Agy does not claim steer.
 Dialogue omits `STEER` when adapter capabilities say false. Every Agy CLI starts in an
 isolated process group. `STOP` sends SIGINT to that exact group. If no terminal result

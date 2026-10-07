@@ -137,6 +137,42 @@ presentation state never owns queue delivery.
 
 ## UI
 
+Codex `VOICE` starts a bidirectional native realtime conversation on the existing
+owned execution cursor. Rust ensures/resumes the binding and owns start/stop,
+exclusive session identity, SDP negotiation, raw errors, and transcript persistence.
+The frontend owns only microphone tracks, RTCPeerConnection, audio playback, and
+projection of transport state. It creates an audio offer with a realtime data channel;
+Rust calls `thread/realtime/start` with explicit `version: "v3"`, audio output and
+WebRTC transport. Native v3 selects FramelessBidi with `OpenAI-Alpha: quicksilver=v2`,
+required by AVAS; omitted versions default to incompatible WebRTC v1. Rust returns
+the asynchronous `thread/realtime/sdp` answer. No API key, standalone STT or TTS route
+is introduced. The realtime model is runtime-selected; it is not the selected text
+model. Native handoffs run on that same Codex thread with Ecky's existing bootstrap,
+MCP tools, and prompt-based turn policy. CAD lifecycle remains controller-owned.
+Until native realtime exposes a pre-turn routing interception, Rust rejects voice
+startup while experimental Jev routing is enabled; it never silently bypasses that gate.
+Startup also rejects an active text turn instead of changing its policy.
+
+Completed native `transcriptSegment` items persist under stable native item ids into
+the existing provider timeline and refresh Dialogue. Complete native
+`<realtime_delegation>` user envelopes are internal transport context, not duplicate
+spoken utterances: exclude them during turn projection and durable writes. Public
+history reads exclude legacy envelopes before their limit/cursor calculation while
+retaining raw stored rows. Quoted examples and incomplete envelopes remain visible.
+Stop, thread/mode switch, or
+component destruction closes microphone and playback immediately and stops the exact
+owned backend session, including a late startup acknowledgement. Startup failure
+releases local audio and preserves the raw provider error. No automatic recording or
+provider session starts on Dialogue open. macOS bundles declare microphone usage.
+API mode retains hold-to-transcribe. Agy and MCP omit unsupported voice. Rust rejects
+standalone NVIDIA Speech under Provider/MCP before remote I/O.
+
+One Codex executable resolver serves all supervisor operations. Explicit
+`ECKY_CODEX_BIN` remains authoritative. On macOS the installed desktop bundle is
+preferred over a PATH CLI so its live `model/list` matches the desktop's runtime;
+without a bundle the existing PATH search remains fallback. Catalog discovery stays
+live, cursor-paged and error-reporting; no guessed model list is added.
+
 Dialogue has no provider binding bar, takeover button, picker, id, or release action.
 Provider mode reuses normal trail/composer. Ecky messages, authored versions, Codex
 messages, and local queued prompts form one timeline; provider snapshot arrival never

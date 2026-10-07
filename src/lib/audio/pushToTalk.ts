@@ -1,3 +1,9 @@
+import type { DialogueState } from '../composables/dialogueState';
+
+export function supportsPromptVoiceInput(dialogueState: DialogueState): boolean {
+  return dialogueState.mode === 'generate';
+}
+
 export interface PromptAudioCapture {
   base64Data: string;
   mimeType: string;

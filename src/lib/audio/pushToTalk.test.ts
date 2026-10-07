@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { appendTranscriptToPrompt, encodePcm16Wav } from './pushToTalk';
+import { appendTranscriptToPrompt, encodePcm16Wav, supportsPromptVoiceInput } from './pushToTalk';
+
+test('voice capture cannot route managed-provider or MCP dialogue to separate STT', () => {
+  assert.equal(supportsPromptVoiceInput({ mode: 'generate' }), true);
+  assert.equal(supportsPromptVoiceInput({ mode: 'mcp-idle' }), false);
+  assert.equal(supportsPromptVoiceInput({ mode: 'agent-reply', requestId: 'request', agentLabel: 'Codex' }), false);
+  for (const providerId of ['codex', 'agy']) {
+    assert.equal(supportsPromptVoiceInput({
+      mode: 'provider', providerId, externalConversationId: null,
+      label: providerId, supportsSteer: false, supportsStop: true,
+    }), false);
+  }
+});
 
 test('encodePcm16Wav writes mono PCM WAV header and clamps samples', () => {
   const wav = encodePcm16Wav(new Float32Array([-2, 0, 2]), 16_000);
