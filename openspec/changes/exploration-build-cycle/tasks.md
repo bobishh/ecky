@@ -194,3 +194,11 @@
 - [x] Persist user prompts before resuming existing Codex cursors; rotate one new cursor on writer conflict while retaining lineage, history, and raw eval evidence.
 - [x] Project transient contention as automatic waiting while keeping terminal failures raw.
 - [ ] Verify focused Rust/browser checks, strict spec validation, and installed app replacement.
+
+## Durable rendered previews
+
+- [x] Prove background renders retain per-version PNGs across restart and red head.
+- [x] Create deterministic STL thumbnails in shared Rust persistence before cleanup.
+- [x] Recover available legacy meshes without CAD rebuild or version append.
+- [x] Replace stale images on changed runtime; preserve matching viewport images.
+- [x] Prove project card ready and pending/error behavior with isolated Playwright.

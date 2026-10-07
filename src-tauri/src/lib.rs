@@ -40,6 +40,7 @@ pub mod context;
 pub mod context_envelope;
 pub mod contracts;
 pub mod db;
+mod version_thumbnail;
 pub mod displacement;
 pub mod ecky_cad_host;
 pub mod ecky_core_ir;

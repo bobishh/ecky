@@ -77,6 +77,8 @@
   let trashLoadMoreBusy = $state(false);
 
   let previewImages = $state<Record<string, string | null>>({});
+  const previewRevisions = new Map<string, string>();
+  const previewRequests = new Map<string, number>();
 
   let showNewChooser = $state(false);
   let showImport = $state(false);
@@ -98,6 +100,7 @@
       }>).detail;
       if (!detail?.threadId || !detail.imageData) return;
 
+      previewRequests.set(detail.threadId, (previewRequests.get(detail.threadId) ?? 0) + 1);
       previewImages = {
         ...previewImages,
         [detail.threadId]: detail.imageData,
@@ -114,46 +117,49 @@
 
   function projectPreviewCard(node: HTMLElement, project: Thread) {
     let currentProject = project;
+    let visible = typeof IntersectionObserver === 'undefined';
+    let destroyed = false;
+    const revision = (thread: Thread) => [thread.updatedAt, thread.versionCount,
+      thread.pendingCount, thread.errorCount, thread.status].join(':');
 
     const fetch = async () => {
       const threadId = currentProject.id;
-      if (previewImages[threadId] !== undefined) return;
-
-      previewImages = { ...previewImages, [threadId]: null };
+      const key = revision(currentProject);
+      if (previewRevisions.get(threadId) === key) return;
+      previewRevisions.set(threadId, key);
+      const request = (previewRequests.get(threadId) ?? 0) + 1;
+      previewRequests.set(threadId, request);
       try {
         const imageData = await getThreadPreview(threadId);
-        if (previewImages[threadId]) return;
-        previewImages = { ...previewImages, [threadId]: imageData };
+        if (destroyed || previewRequests.get(threadId) !== request) return;
+        // Retain the last good image while a newer render is pending or failed.
+        previewImages = { ...previewImages, [threadId]: imageData || previewImages[threadId] || null };
       } catch (error) {
+        if (previewRequests.get(threadId) === request) previewRevisions.delete(threadId);
         console.error(`Failed to fetch project preview for ${threadId}:`, formatBackendError(error));
       }
     };
 
-    if (typeof IntersectionObserver === 'undefined') {
+    const update = (nextProject: Thread) => {
+      currentProject = nextProject;
+      if (visible) void fetch();
+    };
+    if (visible) {
       void fetch();
-      return {
-        update(nextProject: Thread) {
-          currentProject = nextProject;
-          void fetch();
-        },
-      };
+      return { update, destroy() { destroyed = true; } };
     }
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void fetch();
+        visible = entries.some((entry) => entry.isIntersecting);
+        if (visible) void fetch();
       },
       { root: node.closest('.scrollable'), rootMargin: '240px 0px' },
     );
     observer.observe(node);
-
     return {
-      update(nextProject: Thread) {
-        currentProject = nextProject;
-      },
-      destroy() {
-        observer.disconnect();
-      },
+      update,
+      destroy() { destroyed = true; observer.disconnect(); },
     };
   }
 

@@ -114,7 +114,21 @@ function installProjectSwitcherMocks(options?: {
           (window as any)[`_${id}`] = callback;
           return id;
         };
+        const eventHandlers: Record<string, number[]> = {};
+        mockWindow.__SET_PROJECT_PREVIEW__ = (id: string, image: string | null) => {
+          threadPreviews[id] = image;
+          const thread = mutableHistory.find((item: any) => item.id === id);
+          if (thread) thread.updatedAt = Number(thread.updatedAt) + 1;
+          for (const handler of eventHandlers['history-updated'] ?? []) {
+            mockWindow[`_${handler}`]({ event: 'history-updated', payload: { threadId: id } });
+          }
+        };
         window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === 'plugin:event|listen') {
+            (eventHandlers[String(args?.event)] ??= []).push(Number(args?.handler));
+            return args?.handler;
+          }
+          if (cmd === 'plugin:event|unlisten') return null;
           mockWindow.__PROJECTS_CALLS__.push({ cmd, args });
           if (cmd === 'get_boot_projection') {
             return {
@@ -836,7 +850,7 @@ test.describe('Projects', () => {
     expect(calls.filter((entry) => entry.cmd === 'get_thread_latest_version')).toHaveLength(0);
   });
 
-  test('Given latest version lacks thumbnail When older version has preview Then project card reports no current preview', async ({ page }) => {
+  test('Given latest version lacks thumbnail When older version has preview Then project card retains rendered preview', async ({ page }) => {
     const previewImage = `data:image/png;base64,${btoa('older-preview')}`;
     await installProjectSwitcherMocks({
       history: [
@@ -857,7 +871,7 @@ test.describe('Projects', () => {
         },
       ],
       threadPreviews: {
-        'thread-preview': null,
+        'thread-preview': previewImage,
       },
       messagePages: {
         'thread-preview': [
@@ -886,9 +900,29 @@ test.describe('Projects', () => {
 
     const card = page.locator('[data-window-id="projects"] .project-card').filter({ hasText: 'Paged Preview Thread' });
     const preview = card.locator('.preview-frame');
-    await expect(preview).toHaveAttribute('data-preview-state', 'empty');
-    await expect(preview.locator('img')).toHaveCount(0);
+    await expect(preview).toHaveAttribute('data-preview-state', 'ready');
+    await expect(preview.locator('img')).toHaveAttribute('src', previewImage);
+    await expect(card.getByText('NO PREVIEW')).toHaveCount(0);
+  });
+
+  test('Given a visible card cached no preview When background render completes Then card fetches persisted PNG', async ({ page }) => {
+    const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=';
+    await installProjectSwitcherMocks({
+      history: [{ id: 'background', title: 'Background render', summary: '', updatedAt: 1, messages: [],
+        versionCount: 1, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'ready', finalizedAt: null, pendingConfirm: null }],
+      threadPreviews: { background: null },
+    })({ page });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    const card = page.locator('[data-project-id="background"]');
     await expect(card.getByText('NO PREVIEW')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => ((window as any).__PROJECTS_CALLS__ as any[]).filter(call => call.cmd === 'get_thread_preview').length)).toBe(1);
+    await page.evaluate(({ image }) => (window as any).__SET_PROJECT_PREVIEW__('background', image), { image });
+    await expect(card.locator('img')).toHaveAttribute('src', image);
+    // A newer failed/pending render with no new image cannot erase the good card.
+    await page.evaluate(() => (window as any).__SET_PROJECT_PREVIEW__('background', null));
+    await expect.poll(() => page.evaluate(() => ((window as any).__PROJECTS_CALLS__ as any[]).filter(call => call.cmd === 'get_thread_preview').length)).toBe(3);
+    await expect(card.locator('img')).toHaveAttribute('src', image);
   });
 
   test('Given a project starts without preview When preview event arrives Then card replaces NO PREVIEW', async ({ page }) => {

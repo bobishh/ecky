@@ -507,3 +507,15 @@ promote/commit commands are added.
 - A single running build limits throughput. MVP favors predictable state and cost.
 - File artifacts favor local reproducibility over fleet search. A later OTEL
   exporter may index bounded metadata while large payloads remain file-backed.
+
+## Durable version thumbnails
+
+The shared Rust message/runtime persistence boundary creates a small deterministic
+orthographic PNG directly from the attached STL, before pruning older runtime files.
+This covers API, MCP, watcher, parameter and repaired runtimes without a second
+frontend capture scheduler. Existing matching viewport screenshots remain valid;
+changed artifact identity invalidates their old image. Legacy available meshes are
+backfilled before cleanup and on preview reads. Project preview selection falls back
+to the newest stored nonempty image, independently of latest-append head status.
+Missing or malformed legacy meshes never erase an already stored thumbnail. No
+source render, version append or controller transition is triggered by a preview read.

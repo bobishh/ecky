@@ -45,3 +45,28 @@ allowing the active viewport to retain the newest eligible successful render.
 - **THEN** version head is B
 - **AND** viewport may continue showing A
 - **AND** UI and cycle context identify both refs explicitly.
+
+### Requirement: Successful renders retain durable version thumbnails
+
+The shared Rust persistence path SHALL create a geometry-derived PNG for each
+attached successful render before runtime STL cleanup. Thumbnail generation SHALL
+not depend on active thread selection, viewport visibility, or frontend load events.
+A thumbnail SHALL belong to its exact version runtime; attaching a changed runtime
+SHALL replace an obsolete thumbnail. Existing matching viewport images MAY be retained.
+Project cards SHALL show the newest available rendered version thumbnail when newer
+versions are pending, failed, or lack an image. Missing legacy thumbnails SHALL be
+backfilled from available persisted STL without rendering CAD or creating a version.
+
+#### Scenario: Background render survives restart and newer failure
+
+- **GIVEN** two versions render without being loaded into the visible viewport
+- **WHEN** a newer version fails and the app restarts
+- **THEN** both rendered versions retain their own PNG
+- **AND** the project card still displays the latest available rendered thumbnail.
+
+#### Scenario: Legacy preview is recovered without rewriting geometry
+
+- **GIVEN** a historical version lacks a thumbnail but retains its STL
+- **WHEN** its project preview is requested or its STL becomes eligible for cleanup
+- **THEN** Rust derives and persists a PNG from that exact STL
+- **AND** creates no new immutable version and performs no CAD rebuild.

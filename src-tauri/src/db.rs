@@ -2526,6 +2526,63 @@ pub fn message_payload_from_legacy(
     }
 }
 
+// All durable runtime writers share this boundary, including background builds.
+// Create images before STL pruning; viewport capture is optional enrichment only.
+fn ensure_version_thumbnail(
+    conn: &Connection,
+    message_id: &str,
+    bundle: &ArtifactBundle,
+) -> SqlResult<()> {
+    let present = conn
+        .query_row(
+            "SELECT COALESCE(length(trim(image_data)), 0) > 0 FROM messages WHERE id = ?1",
+            [message_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if present || !std::path::Path::new(&bundle.model_stl_path).is_file() {
+        return Ok(());
+    }
+    match crate::version_thumbnail::render_stl(std::path::Path::new(&bundle.model_stl_path)) {
+        Ok(image) => {
+            update_message_image_data(conn, message_id, &image)?;
+        }
+        Err(error) => eprintln!("Version thumbnail {message_id}: {error}"),
+    }
+    Ok(())
+}
+
+fn invalidate_changed_runtime_thumbnail(
+    conn: &Connection,
+    message_id: &str,
+    bundle: &ArtifactBundle,
+) -> SqlResult<()> {
+    let old = conn
+        .query_row(
+            "SELECT artifact_bundle FROM messages WHERE id = ?1",
+            [message_id],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten();
+    let matching = old
+        .and_then(|raw| decode_payload::<ArtifactBundle>(&raw).ok())
+        .is_some_and(|old| {
+            old.model_id == bundle.model_id
+                && old.content_hash == bundle.content_hash
+                && old.artifact_version == bundle.artifact_version
+                && old.model_stl_path == bundle.model_stl_path
+        });
+    if !matching {
+        conn.execute(
+            "UPDATE messages SET image_data = NULL WHERE id = ?1",
+            [message_id],
+        )?;
+    }
+    Ok(())
+}
+
 fn is_managed_runtime_stl(path: &std::path::Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("stl"))
@@ -2573,6 +2630,7 @@ fn prune_non_latest_thread_stls(conn: &Connection, thread_id: &str) -> SqlResult
         let Ok(bundle) = decode_payload::<ArtifactBundle>(&raw_bundle) else {
             continue;
         };
+        ensure_version_thumbnail(conn, &message_id, &bundle)?;
         for raw_path in std::iter::once(bundle.model_stl_path)
             .chain(bundle.viewer_assets.into_iter().map(|asset| asset.path))
         {
@@ -2649,7 +2707,8 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
          WHERE id = ?2",
             params![msg.timestamp as i64, thread_id],
         )?;
-        if msg.artifact_bundle.is_some() {
+        if let Some(bundle) = msg.artifact_bundle.as_ref() {
+            ensure_version_thumbnail(conn, &msg.id, bundle)?;
             prune_non_latest_thread_stls(conn, thread_id)?;
         }
         Ok(())
@@ -3736,6 +3795,9 @@ pub fn update_message_status_and_output(
         version_runtime_binding(message_id, output, artifact_bundle)?;
     conn.execute_batch("SAVEPOINT update_message_payload")?;
     let write_result = (|| {
+        if let Some(bundle) = artifact_bundle {
+            invalidate_changed_runtime_thumbnail(conn, message_id, bundle)?;
+        }
         if let Some(text) = content {
             conn.execute(
             "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, structural_verification = ?6, visual_kind = COALESCE(?7, visual_kind), content = ?8, version_input_digest = ?9, runtime_cache_key = ?10 WHERE id = ?11",
@@ -3778,7 +3840,8 @@ pub fn update_message_status_and_output(
             model_manifest,
             &encoded_payload.projection,
         )?;
-        if artifact_bundle.is_some() {
+        if let Some(bundle) = artifact_bundle {
+            ensure_version_thumbnail(conn, message_id, bundle)?;
             if let Some(thread_id) = get_message_thread_id(conn, message_id)? {
                 prune_non_latest_thread_stls(conn, &thread_id)?;
             }
@@ -4044,26 +4107,41 @@ fn get_previous_thread_preview_for_deleted_state(
 }
 
 pub fn get_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
-    let current = conn
-        .query_row(
-            "
-        SELECT messages.image_data
-        FROM messages
-        JOIN threads ON threads.id = messages.thread_id
-        WHERE messages.thread_id = ?1
-          AND threads.deleted_at IS NULL
-          AND messages.role = 'assistant'
-          AND messages.status != 'discarded'
-          AND (messages.output IS NOT NULL OR messages.artifact_bundle IS NOT NULL)
-          AND messages.deleted_at IS NULL
-        ORDER BY messages.timestamp DESC, messages.rowid DESC
-        LIMIT 1
-        ",
-            [thread_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?;
-    Ok(current.flatten())
+    // Backfill the latest recoverable legacy mesh. Never rebuild CAD on a card read.
+    let mut statement = conn.prepare(
+        "SELECT messages.id, messages.artifact_bundle, messages.image_data
+         FROM messages JOIN threads ON threads.id = messages.thread_id
+         WHERE messages.thread_id = ?1 AND threads.deleted_at IS NULL
+           AND messages.role = 'assistant' AND messages.status != 'discarded'
+           AND messages.deleted_at IS NULL
+           AND (messages.output IS NOT NULL OR messages.artifact_bundle IS NOT NULL)
+         ORDER BY messages.timestamp DESC, messages.rowid DESC",
+    )?;
+    let rows = statement.query_map([thread_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, raw, image) = row?;
+        if let Some(image) = image.filter(|value| !value.trim().is_empty()) {
+            return Ok(Some(image));
+        }
+        if let Some(bundle) = raw.and_then(|raw| decode_payload::<ArtifactBundle>(&raw).ok()) {
+            ensure_version_thumbnail(conn, &id, &bundle)?;
+            let image = conn.query_row(
+                "SELECT image_data FROM messages WHERE id = ?1",
+                [&id],
+                |row| row.get::<_, Option<String>>(0),
+            )?;
+            if image.is_some() {
+                return Ok(image);
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn get_deleted_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
@@ -4272,6 +4350,7 @@ pub fn update_message_artifact_bundle(
         version_runtime_binding(message_id, output.as_ref(), Some(bundle))?;
     conn.execute_batch("SAVEPOINT update_artifact_payload")?;
     let write_result = (|| {
+        invalidate_changed_runtime_thumbnail(conn, message_id, bundle)?;
         conn.execute(
         "UPDATE messages SET artifact_bundle = ?1, version_input_digest = ?2, runtime_cache_key = ?3 WHERE id = ?4",
         params![encoded, version_input_digest, runtime_cache_key, message_id],
@@ -4291,6 +4370,7 @@ pub fn update_message_artifact_bundle(
             "face",
             &bundle.face_targets,
         )?;
+        ensure_version_thumbnail(conn, message_id, bundle)?;
         if let Some(thread_id) = get_message_thread_id(conn, message_id)? {
             prune_non_latest_thread_stls(conn, &thread_id)?;
         }
@@ -6102,7 +6182,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_preview_returns_only_newest_visible_preview_payload() {
+    fn thread_preview_retains_newest_available_rendered_preview() {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
@@ -6139,7 +6219,10 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(get_thread_preview(&conn, thread_id).unwrap(), None);
+        assert_eq!(
+            get_thread_preview(&conn, thread_id).unwrap().as_deref(),
+            Some("data:image/png;base64,preview")
+        );
 
         assert!(delete_thread(&conn, thread_id).unwrap());
         assert_eq!(get_thread_preview(&conn, thread_id).unwrap(), None);
@@ -6813,6 +6896,7 @@ mod tests {
         let temp_db =
             std::env::temp_dir().join(format!("ecky-mcp-fixture-{}.sqlite", uuid::Uuid::new_v4()));
         fs::copy(&fixture_path, &temp_db).expect("copy fixture");
+        migrate_history_payload_storage(&temp_db).expect("migrate legacy fixture copy");
         let conn = init_db(&temp_db).expect("open fixture copy");
 
         let raw_thread_count: i64 = conn

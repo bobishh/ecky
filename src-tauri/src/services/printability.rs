@@ -643,7 +643,7 @@ impl StlEdge {
     }
 }
 
-fn parse_stl_triangles(bytes: &[u8]) -> Result<Vec<[[f32; 3]; 3]>, PrintabilityError> {
+pub(crate) fn parse_stl_triangles(bytes: &[u8]) -> Result<Vec<[[f32; 3]; 3]>, PrintabilityError> {
     if bytes.len() >= 84 {
         let triangle_count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]);
         let expected_binary_len = (triangle_count as usize)

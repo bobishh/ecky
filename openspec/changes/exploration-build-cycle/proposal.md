@@ -111,3 +111,10 @@ This change adds orchestration metadata only. It does not revise those semantics
 - A status/explanation message cannot mutate project source or append a version.
   An inspection message can use bounded reads but cannot write. Only explicit
   modification intent enables authoring tools.
+
+### Durable rendered previews
+
+- Persist a Rust-generated version PNG before STL cleanup for every attached render,
+  including background versions never loaded into the viewport.
+- Recover missing legacy PNGs from existing STL and retain the latest available
+  project thumbnail across newer pending/error versions and app restarts.
