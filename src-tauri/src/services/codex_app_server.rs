@@ -3557,7 +3557,9 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
                             crate::provider_turn::unwrap_user_message(text)
                                 .unwrap_or_else(|| text.to_string())
                         })
-                        .filter(|text| !crate::services::codex_takeover::is_realtime_delegation(text))
+                        .filter(|text| {
+                            !crate::services::codex_takeover::is_realtime_delegation(text)
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     let attachments = item_content

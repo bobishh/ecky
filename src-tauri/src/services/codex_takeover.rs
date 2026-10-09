@@ -626,7 +626,10 @@ pub fn persist_finished_provider_messages(
         .filter(|message| is_finished_provider_message_status(&message.status))
     {
         let content = public_provider_content(&message.role, message.content.clone());
-        if provider == CODEX_PROVIDER_ID && message.role == "user" && is_realtime_delegation(&content) {
+        if provider == CODEX_PROVIDER_ID
+            && message.role == "user"
+            && is_realtime_delegation(&content)
+        {
             continue;
         }
         let changed = tx
@@ -1371,9 +1374,15 @@ mod tests {
     fn realtime_delegation_is_internal_only_for_complete_native_envelopes() {
         assert!(is_realtime_delegation(" \n<realtime_delegation>\n<input>Move mount.</input>\n<transcript_delta>user: Hello</transcript_delta>\n</realtime_delegation>\n"));
         assert!(!is_realtime_delegation("Move mount."));
-        assert!(!is_realtime_delegation("Explain <realtime_delegation><input>text</input></realtime_delegation>"));
-        assert!(!is_realtime_delegation("<realtime_delegation><input>unfinished"));
-        assert!(!is_realtime_delegation("<realtime_delegation>example</realtime_delegation>"));
+        assert!(!is_realtime_delegation(
+            "Explain <realtime_delegation><input>text</input></realtime_delegation>"
+        ));
+        assert!(!is_realtime_delegation(
+            "<realtime_delegation><input>unfinished"
+        ));
+        assert!(!is_realtime_delegation(
+            "<realtime_delegation>example</realtime_delegation>"
+        ));
     }
 
     #[test]

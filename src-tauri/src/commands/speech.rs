@@ -393,11 +393,18 @@ mod tests {
     fn managed_dialogue_never_falls_back_to_nvidia_speech() {
         for connection_type in ["provider:codex", "provider:agy", "mcp"] {
             let mut cfg = config(
-                vec![engine("nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nim-key", true)],
+                vec![engine(
+                    "nim",
+                    "NVIDIA NIM",
+                    "https://integrate.api.nvidia.com/v1",
+                    "nim-key",
+                    true,
+                )],
                 "nim",
             );
             cfg.connection_type = Some(connection_type.to_string());
-            let err = selected_nvidia_speech_engine(&cfg).expect_err("managed dialogue must reject standalone STT");
+            let err = selected_nvidia_speech_engine(&cfg)
+                .expect_err("managed dialogue must reject standalone STT");
             assert!(err.message.contains(connection_type));
             assert!(err.message.contains("not supported"));
         }

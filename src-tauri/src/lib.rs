@@ -40,7 +40,6 @@ pub mod context;
 pub mod context_envelope;
 pub mod contracts;
 pub mod db;
-mod version_thumbnail;
 pub mod displacement;
 pub mod ecky_cad_host;
 pub mod ecky_core_ir;
@@ -94,6 +93,7 @@ pub mod thread_lifecycle;
 pub mod thread_source_binding;
 pub mod topology_target_ids;
 pub mod transport_budget;
+mod version_thumbnail;
 pub mod web_content_recovery;
 
 use serde::{Deserialize, Serialize};
