@@ -12,7 +12,9 @@ pub async fn library_panel_intent(
     app: AppHandle,
 ) -> AppResult<LibraryPanelProjection> {
     match intent {
-        LibraryPanelIntent::LoadComponents => library_panel::load_component_packages(&app),
+        LibraryPanelIntent::LoadComponents => {
+            library_panel::load_component_packages_for_state(&app, state.inner()).await
+        }
         LibraryPanelIntent::InstallPackage { archive_path } => {
             library_panel::install_component_package(&app, &archive_path)
         }

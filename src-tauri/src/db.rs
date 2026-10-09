@@ -1,10 +1,10 @@
 use crate::contracts::{
-    normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, AppError,
-    ArtifactBundle, DeletedMessage, DeletedThreadSummary, DeletedThreadsPage, DesignOutput,
-    DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo,
-    Thread, ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
+    AgentDraft, AppError, ArtifactBundle, DeletedMessage, DeletedThreadSummary, DeletedThreadsPage,
+    DesignOutput, DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest,
+    TargetLeaseInfo, Thread, ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
+    normalize_design_output, upgraded_or_default_genie_traits,
 };
-use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
@@ -18,6 +18,40 @@ struct ThreadMessageRow {
 pub struct LatestSuccessfulTarget {
     pub thread_id: String,
     pub message_id: String,
+}
+
+pub fn latest_successful_component_capture_targets(
+    conn: &Connection,
+) -> SqlResult<Vec<LatestSuccessfulTarget>> {
+    let mut statement = conn.prepare(
+        "SELECT m.thread_id, m.id
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE t.deleted_at IS NULL
+           AND m.deleted_at IS NULL
+           AND m.role = 'assistant'
+           AND m.status = 'success'
+           AND m.output IS NOT NULL
+           AND m.artifact_bundle IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM messages newer
+             WHERE newer.thread_id = m.thread_id
+               AND newer.deleted_at IS NULL
+               AND newer.role = 'assistant'
+               AND newer.status = 'success'
+               AND newer.output IS NOT NULL
+               AND newer.artifact_bundle IS NOT NULL
+               AND (newer.timestamp > m.timestamp OR (newer.timestamp = m.timestamp AND newer.rowid > m.rowid))
+           )
+         ORDER BY m.thread_id",
+    )?;
+    let targets = statement.query_map([], |row| {
+        Ok(LatestSuccessfulTarget {
+            thread_id: row.get(0)?,
+            message_id: row.get(1)?,
+        })
+    })?;
+    targets.collect()
 }
 
 const PAYLOAD_READ_CHUNK_BYTES: usize = 256 * 1024;
@@ -542,7 +576,7 @@ fn scan_dense_indexes(reader: impl Read) -> SqlResult<DenseIndexes> {
             _ => {
                 return Err(sqlite_conversion_error(invalid_json(
                     "invalid JSON object delimiter",
-                )))
+                )));
             }
         }
     }
@@ -1034,7 +1068,7 @@ fn read_indexed_dense_chunk<R: Read + Seek>(
             _ => {
                 return Err(sqlite_conversion_error(invalid_json(
                     "invalid indexed topology delimiter",
-                )))
+                )));
             }
         }
     }
@@ -3024,7 +3058,7 @@ pub fn get_dense_topology_json_page(
         _ => {
             return Err(rusqlite::Error::InvalidParameterName(
                 "Invalid topology column".into(),
-            ))
+            ));
         }
     }
     let field = match json_path {
@@ -3034,7 +3068,7 @@ pub fn get_dense_topology_json_page(
         _ => {
             return Err(rusqlite::Error::InvalidParameterName(
                 "Invalid topology path".into(),
-            ))
+            ));
         }
     };
     let valid = conn
@@ -4812,7 +4846,7 @@ pub fn get_agent_draft_topology_json_page(
         _ => {
             return Err(rusqlite::Error::InvalidParameterName(
                 "Invalid draft topology column".into(),
-            ))
+            ));
         }
     }
     let field = match json_path {
@@ -4822,7 +4856,7 @@ pub fn get_agent_draft_topology_json_page(
         _ => {
             return Err(rusqlite::Error::InvalidParameterName(
                 "Invalid draft topology path".into(),
-            ))
+            ));
         }
     };
     let projection =
@@ -6535,9 +6569,11 @@ mod tests {
         let messages = get_thread_messages(&conn, "pending-thread").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].status, MessageStatus::Error);
-        assert!(messages[0]
-            .content
-            .contains("Request interrupted by app restart before provider response completed"));
+        assert!(
+            messages[0]
+                .content
+                .contains("Request interrupted by app restart before provider response completed")
+        );
     }
 
     #[test]

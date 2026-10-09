@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -3337,7 +3337,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "component_search",
-            "description": "Search the component library by compact header (name, one-liner, param keys, tags, port ids and compatibility types). Header-only: never returns component bodies; use component_get for source.",
+            "description": "Search built-ins, manually extracted components, and latest successful local definitions by compact header (name, params, tags and ports). Backfills latest successful history before returning and includes local source provenance; use component_get for source.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3348,13 +3348,24 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "component_get",
-            "description": "Fetch one library component by name: full copy-inline `define-component` source plus its header.",
+            "description": "Fetch a component by legacy name or stable componentId. Use revisionDigest with componentId to read an exact immutable local revision.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string" }
+                    "name": { "type": "string", "description": "Legacy name lookup for built-ins and manually extracted components." },
+                    "componentId": { "type": "string", "pattern": "^local-[0-9a-f]{64}$", "description": "Stable local component identity returned by component_search." },
+                    "revisionDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Exact immutable revision digest; requires componentId." }
                 },
-                "required": ["name"]
+                "anyOf": [
+                    { "required": ["name"] },
+                    { "required": ["componentId"] }
+                ],
+                "allOf": [
+                    {
+                        "if": { "required": ["revisionDigest"] },
+                        "then": { "required": ["componentId"] }
+                    }
+                ]
             }
         }),
         json!({
@@ -4657,7 +4668,9 @@ fn modern_tool_definitions(ecky_ast_authoring: bool) -> Vec<Value> {
         .collect();
     for tool in &mut tools {
         if tool.get("name").and_then(Value::as_str) == Some("capability_search") {
-            tool["description"] = json!("Summarize and search Ecky tool capability groups. Modern MCP returns a stable full catalog; this tool helps select relevant tools without changing tools/list.");
+            tool["description"] = json!(
+                "Summarize and search Ecky tool capability groups. Modern MCP returns a stable full catalog; this tool helps select relevant tools without changing tools/list."
+            );
         }
         let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) else {
             continue;
@@ -5077,7 +5090,9 @@ async fn dispatch_modern_request(
                     }
                     if tool_name == "capability_search" {
                         value["profile"] = json!(MCP_PROFILE_FULL);
-                        value["hint"] = json!("Modern tools/list is stable and already contains every available schema; use these groups only to choose relevant tools.");
+                        value["hint"] = json!(
+                            "Modern tools/list is stable and already contains every available schema; use these groups only to choose relevant tools."
+                        );
                     }
                     if get_session(&server.state, &context_id).await.is_some() {
                         attach_ecky_context_id(&mut value, &context_id);
@@ -6113,7 +6128,19 @@ async fn dispatch_tool_call(
         "component_search" => {
             let req_args: handlers::ComponentSearchToolRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
-            let response = handlers::handle_component_search(server.app.as_ref(), req_args)?;
+            let backfill = crate::services::library_panel::backfill_latest_component_sources(
+                server.app.as_ref(),
+                &server.state,
+            )
+            .await?;
+            let mut response = handlers::handle_component_search(server.app.as_ref(), req_args)?;
+            for component in &mut response.results {
+                component.thread_title = component
+                    .thread_id
+                    .as_ref()
+                    .and_then(|thread_id| backfill.thread_titles.get(thread_id).cloned());
+            }
+            response.indexing_diagnostics = backfill.diagnostics;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "component_get" => {
@@ -8453,10 +8480,12 @@ mod tests {
             "PreToolUse"
         );
         assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("not bound"));
+        assert!(
+            response["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("not bound")
+        );
 
         state
             .codex_app_server
@@ -8988,6 +9017,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn component_search_backfills_latest_successful_thread_source() {
+        let session_id = "session-component-search-backfill";
+        let server = test_blank_dispatch_server(session_id).await;
+        let source = "(define-component clip ((number width 4)) (box width 2 1))";
+        {
+            let conn = server.state.db.lock().await;
+            db::add_message(
+                &conn,
+                "thread-empty",
+                &Message {
+                    id: "component-search-source".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Saved model".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(ecky_test_design("Source", "V1", source)),
+                    usage: None,
+                    artifact_bundle: Some(ecky_test_bundle("component-search-model")),
+                    model_manifest: None,
+                    structural_verification: None,
+                    agent_origin: None,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                    timestamp: now_secs(),
+                },
+            )
+            .unwrap();
+        }
+
+        let response = dispatch_tool_call_jsonrpc(
+            &server,
+            session_id,
+            "component_search",
+            json!({ "query": "clip" }),
+        )
+        .await;
+        let payload = parse_mcp_tool_payload(&response);
+        assert!(
+            payload["results"]
+                .as_array()
+                .is_some_and(|results| results.iter().any(|result| {
+                    result["name"] == "clip"
+                        && result["origin"] == "local"
+                        && result["threadTitle"] == "Empty Thread"
+                })),
+            "{payload:#}"
+        );
+        assert_eq!(payload["indexingDiagnostics"], json!([]));
+    }
+
+    #[tokio::test]
     async fn exploration_stop_dispatches_cancellation_intent_to_shared_registry() {
         let session_id = "session-exploration-stop";
         let server = test_blank_dispatch_server(session_id).await;
@@ -9056,14 +9136,16 @@ mod tests {
             .expect("provider session");
         assert_eq!(session.client_kind, "provider-mcp-http");
         assert_eq!(session.bound_thread_id.as_deref(), Some("thread-1"));
-        assert!(server
-            .state
-            .mcp_session_registry
-            .with_sessions()
-            .lock()
-            .await
-            .get("old-provider-session")
-            .is_some_and(|session| session.bound_thread_id.is_none()));
+        assert!(
+            server
+                .state
+                .mcp_session_registry
+                .with_sessions()
+                .lock()
+                .await
+                .get("old-provider-session")
+                .is_some_and(|session| session.bound_thread_id.is_none())
+        );
     }
 
     #[test]
@@ -9256,12 +9338,14 @@ mod tests {
             message.id == "user-answer-first"
                 && message.status == crate::contracts::MessageStatus::Working
         }));
-        assert!(server
-            .state
-            .managed_jev_runs
-            .lock()
-            .await
-            .contains_key("managed-answer-first"));
+        assert!(
+            server
+                .state
+                .managed_jev_runs
+                .lock()
+                .await
+                .contains_key("managed-answer-first")
+        );
         assert!(
             provider_answer_first_satisfied_for_session(&server.state, "managed-answer-first")
                 .await
@@ -9277,11 +9361,13 @@ mod tests {
             },
         )
         .await;
-        assert!(available.result.as_ref().expect("tools/list")["tools"]
-            .as_array()
-            .expect("tools")
-            .iter()
-            .any(|tool| tool["name"] == "session_reply_save"));
+        assert!(
+            available.result.as_ref().expect("tools/list")["tools"]
+                .as_array()
+                .expect("tools")
+                .iter()
+                .any(|tool| tool["name"] == "session_reply_save")
+        );
         let final_reply = dispatch_tool_call_jsonrpc(
             &server,
             "managed-answer-first",
@@ -9297,12 +9383,14 @@ mod tests {
             Some(&json!(true)),
             "{final_reply:?}"
         );
-        assert!(!server
-            .state
-            .managed_jev_runs
-            .lock()
-            .await
-            .contains_key("managed-answer-first"));
+        assert!(
+            !server
+                .state
+                .managed_jev_runs
+                .lock()
+                .await
+                .contains_key("managed-answer-first")
+        );
         let messages = {
             let conn = server.state.db.lock().await;
             crate::db::get_thread_messages(&conn, "thread-1").expect("messages")
@@ -9334,13 +9422,15 @@ mod tests {
             )
             .await;
 
-        assert!(provider_tool_definitions_for_request(
-            &state,
-            &stale_uri,
-            modern_tool_definitions(true),
-        )
-        .await
-        .is_empty());
+        assert!(
+            provider_tool_definitions_for_request(
+                &state,
+                &stale_uri,
+                modern_tool_definitions(true),
+            )
+            .await
+            .is_empty()
+        );
         assert!(
             provider_tool_allowed_for_request(&state, &stale_uri, "ecky_ast_set_number")
                 .await
@@ -9373,10 +9463,12 @@ mod tests {
             },
         )
         .await;
-        assert!(listed.result.unwrap()["tools"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            listed.result.unwrap()["tools"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let rejected = dispatch_request(
             &server,
             session_id,
@@ -9388,9 +9480,11 @@ mod tests {
             },
         )
         .await;
-        assert!(serde_json::to_string(&rejected)
-            .unwrap()
-            .contains("rejects MCP tool"));
+        assert!(
+            serde_json::to_string(&rejected)
+                .unwrap()
+                .contains("rejects MCP tool")
+        );
     }
 
     #[tokio::test]
@@ -9612,10 +9706,12 @@ mod tests {
                         .await;
                         let result = response.result.expect("JSON-RPC result");
                         assert_eq!(result["isError"], true);
-                        assert!(result["content"][0]["text"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .contains("No bound MCP session target"));
+                        assert!(
+                            result["content"][0]["text"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .contains("No bound MCP session target")
+                        );
                     });
                 })
                 .expect("spawn worker-stack test")
@@ -9775,10 +9871,12 @@ mod tests {
             assert_ne!(preview_message_id, "msg-1");
             assert_eq!(set_number_payload["editedPath"], path.as_str());
             assert_eq!(set_number_payload["operation"], "replace");
-            assert!(!set_number_payload["artifactDigest"]["modelId"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty());
+            assert!(
+                !set_number_payload["artifactDigest"]["modelId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty()
+            );
 
             let after_payload = parse_mcp_tool_payload(
                 &dispatch_tool_call_jsonrpc(
@@ -9875,10 +9973,12 @@ mod tests {
             let result = response.result.as_ref().expect("json-rpc result");
             assert_eq!(result["isError"], true);
             let err_payload = parse_mcp_tool_payload(&response);
-            assert!(err_payload["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("digest mismatch"));
+            assert!(
+                err_payload["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("digest mismatch")
+            );
         });
     }
 
@@ -10132,6 +10232,50 @@ mod tests {
     }
 
     #[test]
+    fn component_get_schema_accepts_stable_identity_and_revision() {
+        let tool = tool_definitions()
+            .into_iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("component_get"))
+            .expect("component_get tool");
+        let schema = &tool["inputSchema"];
+        assert!(schema["properties"]["componentId"].is_object());
+        assert!(schema["properties"]["revisionDigest"].is_object());
+        assert!(schema["anyOf"].as_array().is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|choice| choice["required"] == json!(["name"]))
+                && choices
+                    .iter()
+                    .any(|choice| choice["required"] == json!(["componentId"]))
+        }));
+        assert!(schema["allOf"].as_array().is_some_and(|rules| {
+            rules.iter().any(|rule| {
+                rule["if"]["required"] == json!(["revisionDigest"])
+                    && rule["then"]["required"] == json!(["componentId"])
+            })
+        }));
+        let resolver = TestPathResolver {
+            root: std::env::temp_dir().join(format!(
+                "ecky-mcp-component-get-contract-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        };
+        let error = handlers::handle_component_get(
+            &resolver,
+            serde_json::from_value(json!({
+                "name": "clip",
+                "revisionDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }))
+            .expect("request parses"),
+        )
+        .expect_err("revision-pinned read requires componentId");
+        assert!(error.message.contains("requires componentId"));
+    }
+
+    #[test]
     fn component_extract_tool_handler_extracts_and_saves_to_library() {
         let resolver = TestPathResolver {
             root: std::env::temp_dir().join(format!(
@@ -10160,9 +10304,11 @@ mod tests {
         )
         .expect("extract");
         assert_eq!(response.name, "bracket");
-        assert!(response
-            .component_source
-            .contains("(define-component bracket"));
+        assert!(
+            response
+                .component_source
+                .contains("(define-component bracket")
+        );
         assert!(response.saved_path.is_some());
 
         let search = handlers::handle_component_search(
@@ -10189,9 +10335,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(tool_names.iter().any(|name| name == "concept_preview_save"));
-        assert!(!tool_names
-            .iter()
-            .any(|name| name == "concept_preview_generate"));
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "concept_preview_generate")
+        );
     }
 
     #[test]
@@ -10261,26 +10409,38 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "target_meta_get"));
         assert!(tool_names.iter().any(|name| name == "target_macro_get"));
         assert!(tool_names.iter().any(|name| name == "macro_buffer_get"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "macro_buffer_replace_range"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "macro_buffer_apply_patch"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "macro_buffer_preview_render"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "macro_buffer_replace_range")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "macro_buffer_apply_patch")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "macro_buffer_preview_render")
+        );
         assert!(tool_names.iter().any(|name| name == "target_detail_get"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "artifact_manifest_get"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "artifact_manifest_get")
+        );
         assert!(tool_names.iter().any(|name| name == "target_get"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "macro_buffer_replace_and_preview"));
-        assert!(!tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_patch_validate"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "macro_buffer_replace_and_preview")
+        );
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_patch_validate")
+        );
     }
 
     #[test]
@@ -10296,10 +10456,12 @@ mod tests {
         assert!(!properties.contains_key("controls"));
         assert!(!properties.contains_key("analysisIdentityDigest"));
         assert!(!properties.contains_key("meshContentDigest"));
-        assert!(!tool["description"]
-            .as_str()
-            .expect("description")
-            .contains("from an immutable fem_mesh_preview artifact"));
+        assert!(
+            !tool["description"]
+                .as_str()
+                .expect("description")
+                .contains("from an immutable fem_mesh_preview artifact")
+        );
     }
 
     #[test]
@@ -10312,40 +10474,60 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "ecky_ast_get"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_inspect"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_get_node"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_patch_validate"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_replace_and_render"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_patch_preview"));
-        assert!(!tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_patch_commit"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_patch_validate")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_replace_and_render")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_patch_preview")
+        );
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_patch_commit")
+        );
         assert!(tool_names.iter().any(|name| name == "ecky_ast_set_number"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_set_string"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_set_select"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_replace_call"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_insert_binding"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_delete_binding"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "ecky_ast_rename_binding_scoped"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_replace_call")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_insert_binding")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_delete_binding")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "ecky_ast_rename_binding_scoped")
+        );
         assert!(!tool_names.iter().any(|name| name == "macro_buffer_get"));
-        assert!(!tool_names
-            .iter()
-            .any(|name| name == "macro_buffer_replace_range"));
-        assert!(!tool_names
-            .iter()
-            .any(|name| name == "macro_buffer_replace_and_preview"));
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "macro_buffer_replace_range")
+        );
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "macro_buffer_replace_and_preview")
+        );
     }
 
     #[test]
@@ -10379,9 +10561,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(tool_names.iter().any(|name| name == "thread_create"));
-        assert!(!tool_names
-            .iter()
-            .any(|name| name == "thread_authoring_context_set"));
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "thread_authoring_context_set")
+        );
     }
 
     #[test]
@@ -10434,9 +10618,10 @@ mod tests {
     fn ecky_ast_set_select_literal_conversion_rejects_non_scalars() {
         let err = ecky_literal_from_json(&json!({"k":"v"})).expect_err("object should fail");
         assert_eq!(err.code, crate::contracts::AppErrorCode::Validation);
-        assert!(err
-            .message
-            .contains("set_select value must be string, number, or boolean"));
+        assert!(
+            err.message
+                .contains("set_select value must be string, number, or boolean")
+        );
     }
 
     #[test]
@@ -10813,12 +10998,16 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "measurement_annotation_save"));
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "measurement_annotation_delete"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "measurement_annotation_save")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "measurement_annotation_delete")
+        );
     }
 
     #[test]
@@ -10839,9 +11028,11 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "printability_transform_recipes_get"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "printability_transform_recipes_get")
+        );
     }
 
     #[test]
@@ -10851,9 +11042,11 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        assert!(tool_names
-            .iter()
-            .any(|name| name == "semantic_transform_preview"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "semantic_transform_preview")
+        );
     }
 
     #[test]
@@ -11090,12 +11283,14 @@ mod tests {
         assert!(!err.message.contains("ecky://guides/authoring-card"));
         assert!(!err.message.contains("ecky://guides/modeling-guidelines"));
         assert!(!err.message.contains("ecky://guides/build123d"));
-        assert!(!err
-            .message
-            .contains("ecky://guides/surface-manifest/build123d"));
-        assert!(!err
-            .message
-            .contains("ecky://guides/surface-reference/build123d"));
+        assert!(
+            !err.message
+                .contains("ecky://guides/surface-manifest/build123d")
+        );
+        assert!(
+            !err.message
+                .contains("ecky://guides/surface-reference/build123d")
+        );
 
         for uri in required_authoring_guide_uris(
             crate::contracts::SourceLanguage::EckyIrV0,
@@ -11297,21 +11492,25 @@ mod tests {
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("target_macro_get"))
             .expect("target_macro_get tool");
-        assert!(target_macro
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("target_macro_get description")
-            .contains("artifactDigest"));
+        assert!(
+            target_macro
+                .get("description")
+                .and_then(Value::as_str)
+                .expect("target_macro_get description")
+                .contains("artifactDigest")
+        );
 
         let macro_buffer = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("macro_buffer_get"))
             .expect("macro_buffer_get tool");
-        assert!(macro_buffer
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("macro_buffer_get description")
-            .contains("artifactDigest"));
+        assert!(
+            macro_buffer
+                .get("description")
+                .and_then(Value::as_str)
+                .expect("macro_buffer_get description")
+                .contains("artifactDigest")
+        );
 
         for name in [
             "params_preview_render",
@@ -11532,18 +11731,24 @@ mod tests {
         ] {
             assert!(ir_guide.contains(expected), "guide missing `{expected}`");
         }
-        assert!(resource_definitions()
-            .into_iter()
-            .any(|resource| resource.get("uri").and_then(Value::as_str)
-                == Some("ecky://guides/ecky-source")));
-        assert!(resource_definitions()
-            .into_iter()
-            .any(|resource| resource.get("uri").and_then(Value::as_str)
-                == Some("ecky://guides/ecky-rust")));
-        assert!(!resource_definitions()
-            .into_iter()
-            .any(|resource| resource.get("uri").and_then(Value::as_str)
-                == Some("ecky://guides/ecky-ir-v0")));
+        assert!(
+            resource_definitions()
+                .into_iter()
+                .any(|resource| resource.get("uri").and_then(Value::as_str)
+                    == Some("ecky://guides/ecky-source"))
+        );
+        assert!(
+            resource_definitions()
+                .into_iter()
+                .any(|resource| resource.get("uri").and_then(Value::as_str)
+                    == Some("ecky://guides/ecky-rust"))
+        );
+        assert!(
+            !resource_definitions()
+                .into_iter()
+                .any(|resource| resource.get("uri").and_then(Value::as_str)
+                    == Some("ecky://guides/ecky-ir-v0"))
+        );
     }
 
     #[test]
@@ -11667,15 +11872,21 @@ mod tests {
             .and_then(Value::as_array)
             .expect("wallPatternModes array");
 
-        assert!(ecky_rust_cad_ops
-            .iter()
-            .any(|op| op.as_str() == Some("wall-pattern")));
-        assert!(ecky_rust_wall_pattern_modes
-            .iter()
-            .any(|mode| mode.as_str() == Some("schwarz-p")));
-        assert!(ecky_rust_wall_pattern_modes
-            .iter()
-            .any(|mode| mode.as_str() == Some("attractor-field")));
+        assert!(
+            ecky_rust_cad_ops
+                .iter()
+                .any(|op| op.as_str() == Some("wall-pattern"))
+        );
+        assert!(
+            ecky_rust_wall_pattern_modes
+                .iter()
+                .any(|mode| mode.as_str() == Some("schwarz-p"))
+        );
+        assert!(
+            ecky_rust_wall_pattern_modes
+                .iter()
+                .any(|mode| mode.as_str() == Some("attractor-field"))
+        );
         assert!(ecky_rust.get("reference").is_none());
         assert_eq!(
             ecky_rust.get("referenceUri").and_then(Value::as_str),
@@ -12338,9 +12549,11 @@ mod tests {
             tools.len() > 15,
             "modern catalogue cannot depend on session state"
         );
-        assert!(tools
-            .iter()
-            .all(|tool| { tool["inputSchema"]["properties"]["eckyContextId"].is_object() }));
+        assert!(
+            tools
+                .iter()
+                .all(|tool| { tool["inputSchema"]["properties"]["eckyContextId"].is_object() })
+        );
 
         let call_response = handle_http_post(
             axum::extract::State(server.clone()),
@@ -12878,10 +13091,12 @@ mod tests {
         let parsed: Value = serde_json::from_str(text).expect("error payload is JSON");
         assert_eq!(parsed["message"], "Provider rejected the request.");
         assert_eq!(parsed["code"], "provider");
-        assert!(parsed["details"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HTTP 429: rate_limit_exceeded"));
+        assert!(
+            parsed["details"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("HTTP 429: rate_limit_exceeded")
+        );
 
         // No generic credential/API-key advice replaces the raw error.
         let lower = text.to_ascii_lowercase();

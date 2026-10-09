@@ -3,8 +3,8 @@ use crate::contracts::{
     MessageStatus, ModelManifest, ModelSourceKind,
 };
 use crate::models::{AppState, PathResolver};
-use crate::services::design::{add_manual_version, AddManualVersionRequest};
-use crate::services::render_snapshot::{build_render_snapshot, RenderSnapshotInput};
+use crate::services::design::{AddManualVersionRequest, add_manual_version};
+use crate::services::render_snapshot::{RenderSnapshotInput, build_render_snapshot};
 use crate::services::session::{build_saved_version_snapshot, write_last_snapshot};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -192,6 +192,17 @@ async fn persist_success(
         Some(&artifact_bundle.model_id),
         Some(message_id),
     )?;
+    if let Err(error) = crate::component_package_runtime::capture_latest_successful_components(
+        app,
+        &conn,
+        &request.thread_id,
+        message_id,
+        &design.macro_code,
+    ) {
+        state.push_log(format!(
+            "Component capture failed for version {message_id}: {error}"
+        ));
+    }
     drop(conn);
     state.emit_history_changed(
         Some(request.thread_id.clone()),

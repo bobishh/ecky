@@ -20,6 +20,283 @@ use crate::ecky_scheme::compiler::{
     collect_free_variables, expr_head_name, expr_identifier, expr_list_items,
 };
 
+/// Captures only authored top-level `define-component` forms. The stored source
+/// includes each component's transitive local definitions in deterministic
+/// order so a library entry remains vendorable after the model changes.
+#[derive(Clone)]
+struct CapturedDefinition {
+    form: String,
+    free: BTreeSet<String>,
+    params: Vec<ComponentHeaderParam>,
+    ports: Vec<ComponentHeaderPort>,
+    is_component: bool,
+}
+
+pub fn extract_defined_components(
+    source: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> AppResult<Vec<ExtractedComponent>> {
+    let Ok(forms) = Parser::parse_without_lowering(source) else {
+        return Ok(Vec::new());
+    };
+    let top_level_names = forms
+        .iter()
+        .filter_map(|form| {
+            let items = expr_list_items(form, "top-level form").ok()?;
+            let head = items.first().and_then(expr_head_name)?;
+            if !matches!(head.as_str(), "define-component" | "define") {
+                return None;
+            }
+            let target = items.get(1)?;
+            if head == "define-component" {
+                expr_identifier(target)
+            } else if let Ok(signature) = expr_list_items(target, "define signature") {
+                signature.first().and_then(expr_identifier)
+            } else {
+                expr_identifier(target)
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let mut definitions = BTreeMap::<String, CapturedDefinition>::new();
+    for form in &forms {
+        let Ok(items) = expr_list_items(form, "top-level form") else {
+            continue;
+        };
+        let Some(head) = items.first().and_then(expr_head_name) else {
+            continue;
+        };
+        if !matches!(head.as_str(), "define-component" | "define") {
+            continue;
+        }
+        let Some(name_expr) = items.get(1) else {
+            continue;
+        };
+        let (Some(name), is_component) = (if head == "define-component" {
+            (expr_identifier(name_expr), true)
+        } else if let Some(signature) = expr_list_items(name_expr, "define signature").ok() {
+            (signature.first().and_then(expr_identifier), false)
+        } else {
+            (expr_identifier(name_expr), false)
+        }) else {
+            continue;
+        };
+        let mut params = Vec::new();
+        let mut bound = BTreeSet::new();
+        let mut free = BTreeSet::new();
+        let body_start = if is_component {
+            3
+        } else if matches!(name_expr, ExprKind::List(_)) {
+            2
+        } else {
+            2
+        };
+        if is_component {
+            if let Some(signature) = items.get(2) {
+                if let Ok(entries) = expr_list_items(signature, "component signature") {
+                    for entry in entries {
+                        let Ok(fields) = expr_list_items(&entry, "component parameter") else {
+                            continue;
+                        };
+                        if fields.len() < 2 {
+                            continue;
+                        }
+                        if let Some(key) = fields.get(1).and_then(expr_identifier) {
+                            bound.insert(key);
+                        }
+                        if let Some(default) = fields.get(2) {
+                            free.extend(collect_free_variables(default, &BTreeSet::new()));
+                        }
+                        params.push(header_param_from_entry_source(&entry.to_string())?);
+                    }
+                }
+            }
+        } else if let Ok(signature) = expr_list_items(name_expr, "define signature") {
+            bound.extend(signature.iter().skip(1).filter_map(expr_identifier));
+        }
+        if is_component {
+            for body in items.iter().skip(body_start) {
+                let Ok(clause) = expr_list_items(body, "component clause") else {
+                    continue;
+                };
+                match clause.first().and_then(expr_head_name).as_deref() {
+                    Some("ports") => {
+                        for port in clause.iter().skip(1) {
+                            if let Ok(fields) = expr_list_items(port, "component port") {
+                                if fields.first().and_then(expr_head_name).as_deref()
+                                    == Some("port")
+                                {
+                                    if let Some(name) = fields.get(1).and_then(expr_identifier) {
+                                        bound.insert(name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some("verify") => {
+                        for declaration in clause.iter().skip(1) {
+                            if let Ok(fields) = expr_list_items(declaration, "verification clause")
+                            {
+                                if fields.first().and_then(expr_head_name).as_deref()
+                                    == Some("metric")
+                                {
+                                    if let Some(name) = fields.get(1).and_then(expr_identifier) {
+                                        bound.insert(name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for body in items.iter().skip(body_start) {
+            let clause_head = expr_list_items(body, "component clause")
+                .ok()
+                .and_then(|clause| clause.first().and_then(expr_head_name));
+            if is_component && matches!(clause_head.as_deref(), Some("ports" | "verify")) {
+                // These clauses declare local port/metric names and contain a
+                // domain-specific vocabulary that the generic Scheme walker
+                // cannot distinguish from source references. Keep only names
+                // that resolve to authored top-level definitions.
+                free.extend(
+                    collect_free_variables(body, &bound)
+                        .into_iter()
+                        .filter(|symbol| top_level_names.contains(symbol)),
+                );
+            } else {
+                free.extend(collect_free_variables(body, &bound));
+            }
+        }
+        free.retain(|symbol| !bound.contains(symbol));
+        let port_clauses = if is_component {
+            items
+                .iter()
+                .skip(body_start)
+                .filter(|item| {
+                    expr_list_items(item, "component clause")
+                        .ok()
+                        .and_then(|clause| clause.first().and_then(expr_head_name))
+                        .as_deref()
+                        == Some("ports")
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        definitions.insert(
+            name,
+            CapturedDefinition {
+                form: form.to_string(),
+                free,
+                params,
+                ports: component_header_ports(&port_clauses)?,
+                is_component,
+            },
+        );
+    }
+
+    let mut output = Vec::new();
+    for (name, definition) in &definitions {
+        if !definition.is_component {
+            continue;
+        }
+        let mut ordered = Vec::new();
+        visit_dependencies(
+            name,
+            &definitions,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+            &mut ordered,
+        )?;
+        let dependencies = ordered
+            .iter()
+            .filter(|dependency| *dependency != name)
+            .cloned()
+            .collect::<Vec<_>>();
+        let component_source = ordered
+            .iter()
+            .filter_map(|dependency| definitions.get(dependency).map(|item| item.form.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let revision_digest = format!("sha256:{:x}", Sha256::digest(component_source.as_bytes()));
+        let component_id = format!(
+            "local-{:x}",
+            Sha256::digest(format!("{thread_id}\0{name}").as_bytes())
+        );
+        let params = definition.params.clone();
+        let header = ComponentHeader {
+            schema_version: 1,
+            name: name.clone(),
+            component_id: Some(component_id),
+            revision_digest: Some(revision_digest.clone()),
+            dependencies,
+            description: None,
+            params,
+            tags: Vec::new(),
+            provenance: ComponentProvenance {
+                project_id: None,
+                thread_id: Some(thread_id.to_string()),
+                message_id: Some(message_id.to_string()),
+                source_digest: revision_digest,
+            },
+            interfaces: Vec::new(),
+            ports: definition.ports.clone(),
+        };
+        output.push(ExtractedComponent {
+            name: name.clone(),
+            component_source,
+            header,
+        });
+    }
+    Ok(output)
+}
+
+fn visit_dependencies(
+    name: &str,
+    definitions: &BTreeMap<String, CapturedDefinition>,
+    visited: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+    ordered: &mut Vec<String>,
+) -> AppResult<()> {
+    if visited.contains(name) {
+        return Ok(());
+    }
+    if !visiting.insert(name.to_string()) {
+        return Err(AppError::validation(format!(
+            "Automatic component capture found a recursive source dependency at `{name}`."
+        )));
+    }
+    let definition = definitions.get(name).ok_or_else(|| {
+        AppError::validation(format!(
+            "Automatic component capture could not resolve source dependency `{name}`."
+        ))
+    })?;
+    let unresolved = definition
+        .free
+        .iter()
+        .filter(|symbol| !definitions.contains_key(*symbol))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+        return Err(AppError::validation(format!(
+            "Automatic capture of component `{name}` has unresolved source dependencies: {}.",
+            unresolved.join(", ")
+        )));
+    }
+    for dependency in &definition.free {
+        if definitions.contains_key(dependency) {
+            visit_dependencies(dependency, definitions, visited, visiting, ordered)?;
+        }
+    }
+    visiting.remove(name);
+    visited.insert(name.to_string());
+    ordered.push(name.to_string());
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ComponentExtractRequest {
     pub source: String,
@@ -58,6 +335,8 @@ pub struct ComponentHeaderPort {
 #[serde(rename_all = "camelCase")]
 pub struct ComponentProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -67,7 +346,15 @@ pub struct ComponentProvenance {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentHeader {
+    #[serde(default)]
+    pub schema_version: u32,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_digest: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
@@ -205,11 +492,16 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         .collect();
 
     let header = ComponentHeader {
+        schema_version: 1,
         name: name.clone(),
+        component_id: None,
+        revision_digest: None,
+        dependencies: Vec::new(),
         description: request.description.clone(),
         params: header_params,
         tags: request.tags.clone(),
         provenance: ComponentProvenance {
+            project_id: None,
             thread_id: request.thread_id.clone(),
             message_id: request.message_id.clone(),
             source_digest: format!("sha256:{:x}", Sha256::digest(request.source.as_bytes())),
@@ -780,9 +1072,11 @@ mod tests {
         let extracted = extract_component(&request(source, "bracket")).expect("extract port");
 
         assert!(extracted.component_source.contains("(ports"));
-        assert!(extracted
-            .component_source
-            .contains(":params ((clearance clearance))"));
+        assert!(
+            extracted
+                .component_source
+                .contains(":params ((clearance clearance))")
+        );
         assert_eq!(extracted.header.ports.len(), 1);
         assert_eq!(extracted.header.ports[0].port_id, "mount");
         assert_eq!(extracted.header.ports[0].type_id, "mechanical.mount.v1");
@@ -814,5 +1108,115 @@ mod tests {
             .expect_err("parent/world port binding blocks extraction");
         assert!(error.message.contains("world-origin"), "{}", error.message);
         assert!(error.message.contains("blocked"), "{}", error.message);
+    }
+
+    #[test]
+    fn automatic_capture_tracks_only_component_and_transitive_helper_closure() {
+        let initial = r#"
+            (define base-width 4)
+            (define (wall width) (box width base-width 2))
+            (define-component cage ((number diameter 70)) (wall diameter))
+            (define unrelated 99)
+            (model (part body (cage :diameter 74)))
+        "#;
+        let spaced = "(define base-width 4) ; comment\n(define (wall width) (box width base-width 2))\n(define-component cage ((number diameter 70)) (wall diameter))\n(define unrelated 99)\n(model (part body (cage :diameter 90)))";
+        let changed = initial.replace("(define base-width 4)", "(define base-width 5)");
+        let first = extract_defined_components(initial, "thread-a", "message-1").unwrap();
+        let same = extract_defined_components(spaced, "thread-a", "message-2").unwrap();
+        let next = extract_defined_components(&changed, "thread-a", "message-3").unwrap();
+        let first_cage = first
+            .iter()
+            .find(|component| component.name == "cage")
+            .unwrap();
+        let same_cage = same
+            .iter()
+            .find(|component| component.name == "cage")
+            .unwrap();
+        let next_cage = next
+            .iter()
+            .find(|component| component.name == "cage")
+            .unwrap();
+
+        assert_eq!(
+            first_cage.header.revision_digest,
+            same_cage.header.revision_digest
+        );
+        assert_ne!(
+            first_cage.header.revision_digest,
+            next_cage.header.revision_digest
+        );
+        assert_eq!(
+            first_cage.header.component_id,
+            next_cage.header.component_id
+        );
+        assert_eq!(first_cage.header.dependencies, vec!["base-width", "wall"]);
+        assert!(
+            first_cage
+                .component_source
+                .contains("(define base-width 4)")
+        );
+        assert_eq!(
+            first_cage.header.params[0].default,
+            Some(serde_json::json!(70.0))
+        );
+        assert!(
+            extract_defined_components(
+                "(model (part ordinary (box 1 2 3)))",
+                "thread-a",
+                "message-4"
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn automatic_capture_does_not_treat_quoted_or_shadowed_symbols_as_dependencies() {
+        let source = r#"
+            (define shadowed 10)
+            (define-component plug ((number shadowed 2))
+              (let ((local 1)) (box shadowed local 3))
+              (verify (tag "shadowed")))
+        "#;
+        let component = extract_defined_components(source, "thread-a", "message-1")
+            .unwrap()
+            .into_iter()
+            .find(|component| component.name == "plug")
+            .unwrap();
+        assert!(component.header.dependencies.is_empty());
+    }
+
+    #[test]
+    fn automatic_capture_tracks_top_level_dependencies_used_in_parameter_defaults() {
+        let source = "(define default-width 14) (define-component adapter ((number width default-width)) (box width 2 3))";
+        let component = extract_defined_components(source, "thread-a", "message-1")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(component.header.dependencies, vec!["default-width"]);
+        assert!(
+            component
+                .component_source
+                .starts_with("(define default-width 14)")
+        );
+    }
+
+    #[test]
+    fn automatic_capture_accepts_component_port_verify_and_build_declarations() {
+        let source = r#"
+          (define-component clip ((number width 4))
+            (ports (port mount :type "mount.v1"
+              :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+            (verify (tag stable)
+              (metric bad-edges (stl non-manifold-edge-count))
+              (expect bad-edges (= 0)))
+            (build (shape body (box width 2 1)) (result body))
+            (box width 2 1))
+        "#;
+        let captured = extract_defined_components(source, "thread-a", "message-a").unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].header.ports[0].port_id, "mount");
+        assert!(captured[0].component_source.contains("(metric bad-edges"));
     }
 }

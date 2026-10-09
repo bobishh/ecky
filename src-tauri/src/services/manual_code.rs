@@ -1,12 +1,12 @@
 use crate::commands::design::{coerce_param_for_field, parse_macro_params};
 use crate::contracts::{
-    infer_macro_dialect_from_code, validate_design_output, validate_model_runtime_bundle, AppError,
-    AppResult, ArtifactBundle, DesignOutput, DesignParams, GeometryBackend, InteractionMode,
-    MessageStatus, ModelManifest, PostProcessingSpec, SourceLanguage, UiField, UiSpec,
+    AppError, AppResult, ArtifactBundle, DesignOutput, DesignParams, GeometryBackend,
+    InteractionMode, MessageStatus, ModelManifest, PostProcessingSpec, SourceLanguage, UiField,
+    UiSpec, infer_macro_dialect_from_code, validate_design_output, validate_model_runtime_bundle,
 };
 use crate::models::{AppState, PathResolver};
-use crate::services::design::{add_manual_version, AddManualVersionRequest};
-use crate::services::render_snapshot::{build_render_snapshot, RenderSnapshotInput};
+use crate::services::design::{AddManualVersionRequest, add_manual_version};
+use crate::services::render_snapshot::{RenderSnapshotInput, build_render_snapshot};
 use crate::services::session::{build_saved_version_snapshot, write_last_snapshot};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -293,7 +293,7 @@ fn requested_design(
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{canonicalize_manual_post_processing, DRAFT_LITHOPHANE_ID_PREFIX};
+    use super::{DRAFT_LITHOPHANE_ID_PREFIX, canonicalize_manual_post_processing};
     use crate::contracts::PostProcessingSpec;
 
     #[test]
@@ -318,9 +318,11 @@ mod tests {
             .expect("canonical post-processing");
 
         assert!(canonical.lithophane_attachments[0].id.starts_with("litho-"));
-        assert!(!canonical.lithophane_attachments[0]
-            .id
-            .starts_with(DRAFT_LITHOPHANE_ID_PREFIX));
+        assert!(
+            !canonical.lithophane_attachments[0]
+                .id
+                .starts_with(DRAFT_LITHOPHANE_ID_PREFIX)
+        );
         assert_eq!(canonical.lithophane_attachments[1].id, "litho-existing");
     }
 }
@@ -526,6 +528,19 @@ async fn attach_outcome(
         artifact_bundle.map(|bundle| bundle.model_id.as_str()),
         Some(message_id),
     )?;
+    if status == MessageStatus::Success && artifact_bundle.is_some() {
+        if let Err(error) = crate::component_package_runtime::capture_latest_successful_components(
+            app,
+            &conn,
+            &request.thread_id,
+            message_id,
+            &design.macro_code,
+        ) {
+            state.push_log(format!(
+                "Component capture failed for version {message_id}: {error}"
+            ));
+        }
+    }
     drop(conn);
     state
         .authoring_actor_registry

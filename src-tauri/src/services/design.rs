@@ -3,10 +3,10 @@ use crate::commands::design::{
 };
 use crate::contracts::infer_macro_dialect_from_code;
 use crate::contracts::{
+    AgentOrigin, AppError, AppResult, ArtifactBundle, DesignOutput, DesignParams, InteractionMode,
+    MacroDialect, Message, MessageRole, MessageStatus, ModelManifest, PostProcessingSpec, UiSpec,
     validate_design_output, validate_design_params, validate_model_manifest,
-    validate_model_runtime_bundle, validate_ui_spec, AgentOrigin, AppError, AppResult,
-    ArtifactBundle, DesignOutput, DesignParams, InteractionMode, MacroDialect, Message,
-    MessageRole, MessageStatus, ModelManifest, PostProcessingSpec, UiSpec,
+    validate_model_runtime_bundle, validate_ui_spec,
 };
 use crate::db;
 use crate::models::{AppState, PathResolver};
@@ -319,6 +319,22 @@ pub async fn add_manual_version(
             model_id,
             Some(&existing.id),
         )?;
+        if status == MessageStatus::Success && artifact_bundle.is_some() {
+            if let Err(error) =
+                crate::component_package_runtime::capture_latest_successful_components(
+                    app,
+                    &db,
+                    &thread_id,
+                    &existing.id,
+                    &output.macro_code,
+                )
+            {
+                state.push_log(format!(
+                    "Component capture failed for version {}: {error}",
+                    existing.id
+                ));
+            }
+        }
         drop(db);
         state
             .authoring_actor_registry
@@ -362,6 +378,22 @@ pub async fn add_manual_version(
         model_id,
         Some(&msg_id),
     )?;
+    if msg.status == MessageStatus::Success && artifact_bundle.is_some() {
+        if let Err(error) = crate::component_package_runtime::capture_latest_successful_components(
+            app,
+            &db,
+            &thread_id,
+            &msg_id,
+            &msg.output
+                .as_ref()
+                .expect("manual version has output")
+                .macro_code,
+        ) {
+            state.push_log(format!(
+                "Component capture failed for version {msg_id}: {error}"
+            ));
+        }
+    }
     drop(db);
     state
         .authoring_actor_registry
@@ -428,11 +460,13 @@ params = {
         assert!(!healed.1.contains_key("stale"));
         assert!(healed.2.added_keys.iter().any(|key| key == "top_conn_left"));
         assert!(healed.2.dropped_keys.iter().any(|key| key == "stale"));
-        assert!(healed
-            .2
-            .carried_keys
-            .iter()
-            .any(|key| key == "top_conn_left"));
+        assert!(
+            healed
+                .2
+                .carried_keys
+                .iter()
+                .any(|key| key == "top_conn_left")
+        );
     }
 
     #[test]
@@ -485,10 +519,12 @@ params = {
         .expect("ecky macro should bypass python parser");
 
         assert_eq!(dialect, MacroDialect::EckyIrV0);
-        assert!(ui_spec
-            .fields
-            .iter()
-            .any(|field| field.key() == "duplo_height_blocks"));
+        assert!(
+            ui_spec
+                .fields
+                .iter()
+                .any(|field| field.key() == "duplo_height_blocks")
+        );
         assert_eq!(
             params.get("duplo_height_blocks"),
             Some(&ParamValue::Number(5.0))

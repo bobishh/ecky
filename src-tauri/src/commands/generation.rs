@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,17 +7,17 @@ use uuid::Uuid;
 
 use crate::context::*;
 use crate::contracts::{
-    validate_design_output, AppError, AppErrorCode, AppResult, ArtifactBundle, Attachment,
-    AttachmentKind, DesignOutput, FinalizeStatus, GenerateDesignOptions, GenerateOutput,
-    IntentDecision, InteractionMode, MacroDialect, Message, MessageRole, MessageStatus,
-    ModelManifest, StructuralVerificationResult, UiSpec, UsageSummary,
+    AppError, AppErrorCode, AppResult, ArtifactBundle, Attachment, AttachmentKind, DesignOutput,
+    FinalizeStatus, GenerateDesignOptions, GenerateOutput, IntentDecision, InteractionMode,
+    MacroDialect, Message, MessageRole, MessageStatus, ModelManifest, StructuralVerificationResult,
+    UiSpec, UsageSummary, validate_design_output,
 };
 use crate::models::AppState;
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::session::{build_saved_version_snapshot, write_last_snapshot};
 use crate::{
-    db, fallback_intent, freecad, llm, persist_thread_summary, persist_user_prompt_references,
-    TECHNICAL_SYSTEM_PROMPT,
+    TECHNICAL_SYSTEM_PROMPT, db, fallback_intent, freecad, llm, persist_thread_summary,
+    persist_user_prompt_references,
 };
 
 /// Per-language documentation appended to the API-mode system prompt.
@@ -1573,6 +1573,23 @@ pub(crate) async fn finalize_generation_core(
 
     if status == FinalizeStatus::Success {
         if let Some(thread_id) = thread_id {
+            if artifact_bundle.is_some() {
+                if let Some(design) = design.as_ref() {
+                    if let Err(error) =
+                        crate::component_package_runtime::capture_latest_successful_components(
+                            app,
+                            &db,
+                            &thread_id,
+                            &message_id,
+                            &design.macro_code,
+                        )
+                    {
+                        state.push_log(format!(
+                            "Component capture failed for version {message_id}: {error}"
+                        ));
+                    }
+                }
+            }
             let title = design
                 .as_ref()
                 .map(|item| item.title.clone())
@@ -2053,10 +2070,12 @@ mod tests {
         )
         .await
         .expect("valid route");
-        assert!(route
-            .unwrap()
-            .model_reason
-            .contains("configured API model retained"));
+        assert!(
+            route
+                .unwrap()
+                .model_reason
+                .contains("configured API model retained")
+        );
 
         let unverified = crate::jev_classifier::MockJevClassifier::fixed(
             crate::jev_classifier::AcceptedRoute::test_route(
@@ -2281,8 +2300,11 @@ mod tests {
         assert!(build123d.contains("VERIFY CLAUSES"));
         assert!(build123d.contains("(verify"));
         assert!(build123d.contains("Clause grammar"));
-        assert!(build123d
-            .contains("Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`"));
+        assert!(
+            build123d.contains(
+                "Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`"
+            )
+        );
         assert!(build123d.contains("(manifest has-model-stl)"));
         assert!(build123d.contains("(manifest part-count)"));
         assert!(build123d.contains("(stl non-manifold-edge-count)"));
@@ -2496,7 +2518,7 @@ mod agent_context_budget_outer_red {
     use super::{
         design_system_prompt, ensure_generation_thread_binding, persist_generation_draft_in_db,
     };
-    use crate::context::{assemble_generation_payload, PromptContext, ResolvedAuthoringContext};
+    use crate::context::{PromptContext, ResolvedAuthoringContext, assemble_generation_payload};
     use crate::context_envelope::GENERATION_CEILING_CHARS;
     use crate::contracts::{
         DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect, Message,
@@ -2716,9 +2738,11 @@ mod agent_context_budget_outer_red {
             std::fs::read_to_string(&binding.source_path).unwrap(),
             crate::thread_source_binding::DEFAULT_THREAD_SOURCE
         );
-        assert!(PathBuf::from(binding.folder_path)
-            .join(crate::project_mirror::PROJECT_MANIFEST_FILE_NAME)
-            .is_file());
+        assert!(
+            PathBuf::from(binding.folder_path)
+                .join(crate::project_mirror::PROJECT_MANIFEST_FILE_NAME)
+                .is_file()
+        );
     }
 
     #[test]

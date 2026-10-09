@@ -2000,6 +2000,13 @@ export type ExternalShapePlaneCrop = { nodeId: number; origin: [number, number, 
 export type ExternalShapeSource = { nodeId: number; partKey: string; path: string; displayName: string; sourceDigest: string; contentDigest: string | null; byteLength: number | null; exists: boolean; planeCrops: ExternalShapePlaneCrop[]; surfaceTrims: ExternalShapeSurfaceTrim[] }
 export type ExternalShapeSurfaceTrim = { nodeId: number; schemaVersion: number; sourceDigest: string; loopAnchors: ExternalShapeSurfaceTrimAnchor[]; keepSeed: ExternalShapeSurfaceTrimAnchor; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode }
 export type ExternalShapeSurfaceTrimAnchor = { triangleIndex: number; barycentric: [number, number, number]; sourcePosition: [number, number, number] | null; sourceNormal: [number, number, number] | null }
+export type ExtractedComponentPortSummary = { portId: string; typeId: string }
+export type ExtractedComponentSearchResult = { name: string;
+/**
+ * Immutable source revision for shipped components. User-extracted
+ * components remain unversioned until they are packaged.
+ */
+version?: string | null; oneLiner: string; paramKeys: string[]; tags: string[]; ports: ExtractedComponentPortSummary[]; componentId?: string | null; revisionDigest?: string | null; threadId?: string | null; threadTitle?: string | null; origin: string }
 export type EyeStyle = "dot" | "bar" | "slant"
 export type FeatureGraph = { nodes: FeatureNode[] }
 export type FeatureNode = { featureId: string; kind: string; label: string; sourceRef?: SourceRef | null; dependencyIds: string[]; outputRefs: FeatureOutputRef[]; ports: FeaturePort[] }
@@ -2079,7 +2086,7 @@ export type JevClassifierConfig = { enabled?: boolean; apiKey?: string }
 export type KeepoutVolumeKind = "box" | "cylinder" | "sphere" | "custom"
 export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null; targetRef?: AuthoringTargetRef | null }
 export type LibraryPanelIntent = { kind: "loadComponents" } | { kind: "installPackage"; archivePath: string } | { kind: "loadFreecad"; query: string; page: number } | { kind: "setFreecadRoot"; root: string; query: string }
-export type LibraryPanelProjection = { kind: "componentPackages"; packageHeaders: ComponentPackageHeader[] } | { kind: "freecadLibrary"; freecadLibraryRoots: string[]; items: FreecadLibraryItem[]; page: number; hasMore: boolean }
+export type LibraryPanelProjection = { kind: "componentPackages"; packageHeaders: ComponentPackageHeader[]; components: ExtractedComponentSearchResult[]; indexingDiagnostics: string[] } | { kind: "freecadLibrary"; freecadLibraryRoots: string[]; items: FreecadLibraryItem[]; page: number; hasMore: boolean }
 export type LithophaneAttachment = { id: string; enabled?: boolean; source: LithophaneAttachmentSource; targetPartId?: string; placement?: LithophanePlacement; relief?: LithophaneRelief; color?: LithophaneColor }
 export type LithophaneAttachmentSource = { kind: "file"; imagePath: string } | { kind: "param"; imageParam: string }
 export type LithophaneColor = { mode?: LithophaneColorMode; channelThicknessMm?: number }

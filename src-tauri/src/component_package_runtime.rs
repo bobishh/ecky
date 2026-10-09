@@ -7,19 +7,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use sha2::{Digest, Sha256};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::contracts::{
-    component_package_header, validate_component_package, validate_component_package_header,
-    validate_design_params, validate_ui_spec, AppError, AppResult, ComponentCoordinateIndexEntry,
-    ComponentDefinition, ComponentPackage, ComponentPackageHeader, ComponentParam,
-    ComponentParamKind, DesignParams, InstalledAssemblyComponentSource, InstalledAssemblySource,
-    InstalledComponentPackage, InstalledComponentSource, PackagePayloadInventory,
+    AppError, AppResult, ComponentCoordinateIndexEntry, ComponentDefinition, ComponentPackage,
+    ComponentPackageHeader, ComponentParam, ComponentParamKind, DesignParams,
+    InstalledAssemblyComponentSource, InstalledAssemblySource, InstalledComponentPackage,
+    InstalledComponentSource, PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION, PackagePayloadInventory,
     PackagePayloadInventoryEntry, ParamValue, ParsedParamsResult, UiField, UiSpec,
-    PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION,
+    component_package_header, validate_component_package, validate_component_package_header,
+    validate_design_params, validate_ui_spec,
 };
 use crate::models::PathResolver;
 
@@ -1371,7 +1371,8 @@ fn publish_validated_payload_locked(
             if found != expected_sidecar {
                 return Err(AppError::validation(format!(
                     "Content-addressed store '{}' has integrity metadata that does not match digest '{}'.",
-                    store_dir.display(), package_digest
+                    store_dir.display(),
+                    package_digest
                 )));
             }
             return Ok(store_dir);
@@ -1900,8 +1901,17 @@ pub fn garbage_collect_component_package_store(
 // `<library>/index/`; these layouts never collide.
 
 pub const EXTRACTED_COMPONENT_SOURCE_FILE_NAME: &str = "component.ecky";
+const AUTO_COMPONENT_LIBRARY_DIR_NAME: &str = "local-captures";
+const AUTO_COMPONENT_LATEST_FILE_NAME: &str = "latest.json";
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoComponentLatest {
+    schema_version: u32,
+    revision_digest: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedComponentSearchResult {
     pub name: String,
@@ -1913,9 +1923,18 @@ pub struct ExtractedComponentSearchResult {
     pub param_keys: Vec<String>,
     pub tags: Vec<String>,
     pub ports: Vec<ExtractedComponentPortSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_title: Option<String>,
+    pub origin: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedComponentPortSummary {
     pub port_id: String,
@@ -1930,6 +1949,10 @@ pub struct ExtractedComponentRecord {
     pub version: Option<String>,
     pub source: String,
     pub header: crate::component_extract::ComponentHeader,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_digest: Option<String>,
 }
 
 pub fn save_extracted_component(
@@ -1964,6 +1987,112 @@ pub fn save_extracted_component(
         ))
     })?;
     Ok(dir)
+}
+
+/// Store successful-source definitions as immutable, thread-scoped revisions.
+/// The latest pointer is replaced atomically only after source and header exist.
+pub fn capture_defined_components(
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    source: &str,
+) -> AppResult<()> {
+    for component in
+        crate::component_extract::extract_defined_components(source, thread_id, message_id)?
+    {
+        let component_id = component.header.component_id.as_deref().ok_or_else(|| {
+            AppError::internal("Automatic component capture has no stable component ID.")
+        })?;
+        let digest = component.header.revision_digest.as_deref().ok_or_else(|| {
+            AppError::internal("Automatic component capture has no revision digest.")
+        })?;
+        let digest_segment = digest.strip_prefix("sha256:").unwrap_or(digest);
+        let identity_dir = extracted_component_library_root(app)?
+            .join(AUTO_COMPONENT_LIBRARY_DIR_NAME)
+            .join(component_id);
+        let revision_dir = identity_dir.join("revisions").join(digest_segment);
+        fs::create_dir_all(&revision_dir).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to create component revision '{}': {err}",
+                revision_dir.display()
+            ))
+        })?;
+        let source_path = revision_dir.join(EXTRACTED_COMPONENT_SOURCE_FILE_NAME);
+        let header_path = revision_dir.join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
+        if !source_path.is_file() || !header_path.is_file() {
+            write_atomic(&source_path, component.component_source.as_bytes())?;
+            let header = serde_json::to_vec_pretty(&component.header).map_err(|err| {
+                AppError::internal(format!("Failed to serialize component header: {err}"))
+            })?;
+            write_atomic(&header_path, &header)?;
+        }
+        read_component_revision(app, component_id, digest)?;
+        let latest_path = identity_dir.join(AUTO_COMPONENT_LATEST_FILE_NAME);
+        let same_latest = fs::read_to_string(&latest_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<AutoComponentLatest>(&raw).ok())
+            .is_some_and(|latest| latest.schema_version == 1 && latest.revision_digest == digest);
+        if !same_latest {
+            let pointer = serde_json::to_vec(&AutoComponentLatest {
+                schema_version: 1,
+                revision_digest: digest.to_string(),
+            })
+            .map_err(|err| {
+                AppError::internal(format!(
+                    "Failed to serialize latest component revision: {err}"
+                ))
+            })?;
+            write_atomic(&latest_path, &pointer)?;
+        }
+    }
+    Ok(())
+}
+
+/// Publish only when this successful version is still latest for its thread.
+/// Callers hold the shared history DB lock across this check and publication so
+/// a later writer cannot be followed by a stale pointer update.
+pub fn capture_latest_successful_components(
+    app: &dyn PathResolver,
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    message_id: &str,
+    source: &str,
+) -> AppResult<()> {
+    let latest = crate::db::latest_successful_component_capture_targets(conn)
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    if latest
+        .iter()
+        .any(|target| target.thread_id == thread_id && target.message_id == message_id)
+    {
+        capture_defined_components(app, thread_id, message_id, source)?;
+    }
+    Ok(())
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::internal("Component library file has no parent directory."))?;
+    fs::create_dir_all(parent).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to create component library directory '{}': {err}",
+            parent.display()
+        ))
+    })?;
+    let temp = parent.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    fs::write(&temp, bytes).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to write component library file '{}': {err}",
+            temp.display()
+        ))
+    })?;
+    fs::rename(&temp, path).map_err(|err| {
+        let _ = fs::remove_file(&temp);
+        AppError::persistence(format!(
+            "Failed to publish component library file '{}': {err}",
+            path.display()
+        ))
+    })
 }
 
 /// Header-only library scan: never reads `component.ecky` bodies.
@@ -2001,6 +2130,11 @@ pub fn search_extracted_components(
                 .map(|tag| (*tag).to_string())
                 .collect(),
             ports: Vec::new(),
+            component_id: None,
+            revision_digest: None,
+            thread_id: None,
+            thread_title: None,
+            origin: "builtin".to_string(),
         });
         if results.len() >= limit {
             return Ok(results);
@@ -2067,9 +2201,125 @@ pub fn search_extracted_components(
                     type_id: port.type_id,
                 })
                 .collect(),
+            component_id: header.component_id.clone(),
+            revision_digest: header.revision_digest.clone(),
+            thread_id: header.provenance.thread_id.clone(),
+            thread_title: None,
+            origin: if header.component_id.is_some() {
+                "local".to_string()
+            } else {
+                "extracted".to_string()
+            },
         });
         if results.len() >= limit {
             break;
+        }
+    }
+    let auto_root = root.join(AUTO_COMPONENT_LIBRARY_DIR_NAME);
+    if results.len() < limit && auto_root.is_dir() {
+        let mut identities = fs::read_dir(&auto_root)
+            .map_err(|err| {
+                AppError::persistence(format!(
+                    "Failed to read component library '{}': {err}",
+                    auto_root.display()
+                ))
+            })?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        identities.sort();
+        for identity_dir in identities {
+            let pointer_path = identity_dir.join(AUTO_COMPONENT_LATEST_FILE_NAME);
+            let Ok(pointer_raw) = fs::read_to_string(&pointer_path) else {
+                continue;
+            };
+            let Ok(pointer) = serde_json::from_str::<AutoComponentLatest>(&pointer_raw) else {
+                continue;
+            };
+            if pointer.schema_version != 1 {
+                continue;
+            }
+            let Some(revision) = valid_component_digest(&pointer.revision_digest) else {
+                continue;
+            };
+            let header_path = identity_dir
+                .join("revisions")
+                .join(revision)
+                .join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
+            let Ok(header_raw) = fs::read_to_string(&header_path) else {
+                continue;
+            };
+            let Ok(header) =
+                serde_json::from_str::<crate::component_extract::ComponentHeader>(&header_raw)
+            else {
+                continue;
+            };
+            if header.component_id.as_deref()
+                != Some(
+                    identity_dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default(),
+                )
+                || header.revision_digest.as_deref() != Some(pointer.revision_digest.as_str())
+            {
+                continue;
+            }
+            let haystack = format!(
+                "{} {} {} {} {} {}",
+                header.name,
+                header.description.clone().unwrap_or_default(),
+                header.tags.join(" "),
+                header
+                    .ports
+                    .iter()
+                    .flat_map(|port| [port.port_id.as_str(), port.type_id.as_str()])
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                header
+                    .params
+                    .iter()
+                    .map(|param| param.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                header.dependencies.join(" ")
+            )
+            .to_lowercase();
+            if !needle.is_empty() && !haystack.contains(&needle) {
+                continue;
+            }
+            let param_keys = header
+                .params
+                .iter()
+                .map(|param| param.key.clone())
+                .collect::<Vec<_>>();
+            let one_liner = header
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("component {} ({})", header.name, param_keys.join(" ")));
+            results.push(ExtractedComponentSearchResult {
+                name: header.name,
+                version: None,
+                one_liner,
+                param_keys,
+                tags: header.tags,
+                ports: header
+                    .ports
+                    .iter()
+                    .map(|port| ExtractedComponentPortSummary {
+                        port_id: port.port_id.clone(),
+                        type_id: port.type_id.clone(),
+                    })
+                    .collect(),
+                component_id: header.component_id,
+                revision_digest: header.revision_digest,
+                thread_id: header.provenance.thread_id,
+                thread_title: None,
+                origin: "local".to_string(),
+            });
+            if results.len() >= limit {
+                break;
+            }
         }
     }
     Ok(results)
@@ -2106,19 +2356,138 @@ pub fn read_extracted_component(
             err
         ))
     })?;
-    let header = serde_json::from_str(&raw_header).map_err(|err| {
-        AppError::persistence(format!(
-            "Component header '{}' is invalid: {}",
-            header_path.display(),
-            err
-        ))
-    })?;
+    let header: crate::component_extract::ComponentHeader = serde_json::from_str(&raw_header)
+        .map_err(|err| {
+            AppError::persistence(format!(
+                "Component header '{}' is invalid: {}",
+                header_path.display(),
+                err
+            ))
+        })?;
     Ok(ExtractedComponentRecord {
         name: name.to_string(),
         version: None,
         source,
+        component_id: header.component_id.clone(),
+        revision_digest: header.revision_digest.clone(),
         header,
     })
+}
+
+pub fn read_component_by_id(
+    app: &dyn PathResolver,
+    component_id: &str,
+    revision_digest: Option<&str>,
+) -> AppResult<ExtractedComponentRecord> {
+    if let Some(revision_digest) = revision_digest {
+        return read_component_revision(app, component_id, revision_digest);
+    }
+    let identity = component_id.strip_prefix("local-").unwrap_or_default();
+    if identity.len() != 64
+        || !identity
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(AppError::validation("Automatic component ID is invalid."));
+    }
+    let identity_dir = extracted_component_library_root(app)?
+        .join(AUTO_COMPONENT_LIBRARY_DIR_NAME)
+        .join(component_id);
+    let pointer_path = identity_dir.join(AUTO_COMPONENT_LATEST_FILE_NAME);
+    let raw = fs::read_to_string(&pointer_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read latest component revision '{}': {err}",
+            pointer_path.display()
+        ))
+    })?;
+    let pointer: AutoComponentLatest = serde_json::from_str(&raw).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse latest component revision '{}': {err}",
+            pointer_path.display()
+        ))
+    })?;
+    if pointer.schema_version != 1 || valid_component_digest(&pointer.revision_digest).is_none() {
+        return Err(AppError::persistence(
+            "Latest component revision pointer has an unsupported schema or invalid digest.",
+        ));
+    }
+    read_component_revision(app, component_id, &pointer.revision_digest)
+}
+
+pub fn read_component_revision(
+    app: &dyn PathResolver,
+    component_id: &str,
+    revision_digest: &str,
+) -> AppResult<ExtractedComponentRecord> {
+    let identity = component_id.strip_prefix("local-").unwrap_or_default();
+    if identity.len() != 64
+        || !identity
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(AppError::validation("Automatic component ID is invalid."));
+    }
+    let digest_segment = valid_component_digest(revision_digest)
+        .ok_or_else(|| AppError::validation("Automatic component revision digest is invalid."))?;
+    let revision_dir = extracted_component_library_root(app)?
+        .join(AUTO_COMPONENT_LIBRARY_DIR_NAME)
+        .join(component_id)
+        .join("revisions")
+        .join(digest_segment);
+    let header_path = revision_dir.join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
+    let header_raw = fs::read_to_string(&header_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read component header '{}': {err}",
+            header_path.display()
+        ))
+    })?;
+    let header: crate::component_extract::ComponentHeader = serde_json::from_str(&header_raw)
+        .map_err(|err| {
+            AppError::parse(format!(
+                "Failed to parse component header '{}': {err}",
+                header_path.display()
+            ))
+        })?;
+    let source_path = revision_dir.join(EXTRACTED_COMPONENT_SOURCE_FILE_NAME);
+    let source = fs::read_to_string(&source_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read component source '{}': {err}",
+            source_path.display()
+        ))
+    })?;
+    if header.component_id.as_deref() != Some(component_id)
+        || header.revision_digest.as_deref() != Some(revision_digest)
+        || semantic_source_digest(&source) != revision_digest
+    {
+        return Err(AppError::persistence(
+            "Automatic component revision does not match its stored identity or digest.",
+        ));
+    }
+    Ok(ExtractedComponentRecord {
+        name: header.name.clone(),
+        version: None,
+        source,
+        component_id: Some(component_id.to_string()),
+        revision_digest: Some(revision_digest.to_string()),
+        header,
+    })
+}
+
+fn valid_component_digest(digest: &str) -> Option<&str> {
+    let hex = digest.strip_prefix("sha256:")?;
+    (hex.len() == 64 && hex.chars().all(|character| character.is_ascii_hexdigit())).then_some(hex)
+}
+
+fn semantic_source_digest(source: &str) -> String {
+    let Ok(forms) = steel_core::parser::parser::Parser::parse_without_lowering(source) else {
+        return String::new();
+    };
+    let canonical = forms
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
 /// Curated, copy-inlineable parametric components shipped with Ecky.
@@ -2137,18 +2506,102 @@ struct BuiltinStdlibComponent {
 }
 
 const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
-    BuiltinStdlibComponent { name: "hex-bolt", version: "1.0.0", one_liner: "ISO-style hex bolt with parametric thread", params: &["d", "length", "pitch"], tags: &["fastener", "bolt", "thread"], source: "(define-component hex-bolt ((number d 8) (number length 30) (number pitch 1.25)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (extrude (regular-polygon 6 (* d 0.58)) (* d 0.65)) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))" },
-    BuiltinStdlibComponent { name: "socket-head-cap-screw", version: "1.0.0", one_liner: "Socket-head cap screw with parametric thread", params: &["d", "length", "pitch"], tags: &["fastener", "screw", "thread"], source: "(define-component socket-head-cap-screw ((number d 6) (number length 24) (number pitch 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (difference (cylinder (* d 0.85) d 48) (cylinder (* d 0.32) (* d 0.45) 6)) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))" },
-    BuiltinStdlibComponent { name: "hex-nut", version: "1.0.0", one_liner: "Hex nut cut with a mating tapped hole", params: &["d", "pitch", "thickness"], tags: &["fastener", "nut", "thread"], source: "(define-component hex-nut ((number d 8) (number pitch 1.25) (number thickness 6.5)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (difference (extrude (regular-polygon 6 (* d 0.58)) thickness) (tapped-hole :radius minor-radius :pitch pitch :depth thread-depth :length (+ thickness 2))))))" },
-    BuiltinStdlibComponent { name: "washer", version: "1.0.0", one_liner: "Flat washer with parametric bore and outside diameter", params: &["inner-d", "outer-d", "thickness"], tags: &["fastener", "washer"], source: "(define-component washer ((number inner-d 8.4) (number outer-d 16) (number thickness 1.6)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) thickness 64) (cylinder (/ inner-d 2) (+ thickness 2) 64)))" },
-    BuiltinStdlibComponent { name: "threaded-rod", version: "1.0.0", one_liner: "Full-length parametric threaded rod", params: &["d", "length", "pitch"], tags: &["fastener", "rod", "thread"], source: "(define-component threaded-rod ((number d 8) (number length 100) (number pitch 1.25)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth))))" },
-    BuiltinStdlibComponent { name: "ball-bearing", version: "1.0.0", one_liner: "608/623/624-style radial bearing family", params: &["bore", "outer-d", "width"], tags: &["bearing", "mechanical", "608", "623", "624"], source: "(define-component ball-bearing ((number bore 8) (number outer-d 22) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) width 96) (cylinder (/ bore 2) (+ width 2) 64)))" },
-    BuiltinStdlibComponent { name: "gt2-pulley", version: "1.0.0", one_liner: "GT2 timing pulley with teeth and bore controls", params: &["teeth", "bore", "width"], tags: &["pulley", "gt2", "motion"], source: "(define-component gt2-pulley ((number teeth 20) (number bore 5) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (+ (* teeth 0.3183) 1) width 96) (cylinder (/ bore 2) (+ width 2) 64)))" },
-    BuiltinStdlibComponent { name: "standoff", version: "1.0.0", one_liner: "Hexagonal PCB standoff with through-hole", params: &["length", "outer-d", "hole-d"], tags: &["standoff", "pcb", "mounting"], source: "(define-component standoff ((number length 12) (number outer-d 6) (number hole-d 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (extrude (regular-polygon 6 (/ outer-d 1.732)) length) (cylinder (/ hole-d 2) (+ length 2) 48)))" },
-    BuiltinStdlibComponent { name: "heat-set-insert-pocket", version: "1.0.0", one_liner: "FDM heat-set insert cavity cutter with lead-in", params: &["bore", "depth", "lead-in"], tags: &["fdm", "insert", "pocket"], source: "(define-component heat-set-insert-pocket ((number bore 4.6) (number depth 6) (number lead-in 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (cylinder (/ bore 2) depth 64) (cone (/ bore 2) (+ (/ bore 2) lead-in) lead-in 64)))" },
-    BuiltinStdlibComponent { name: "corner-bracket", version: "1.0.0", one_liner: "Reinforced right-angle mounting bracket", params: &["leg", "height", "thickness"], tags: &["bracket", "mounting", "corner"], source: "(define-component corner-bracket ((number leg 30) (number height 20) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (box leg thickness height) (box thickness leg height) (translate thickness thickness 0 (wedge (- leg thickness) (- leg thickness) height 0 0 (- leg thickness) height))))" },
-    BuiltinStdlibComponent { name: "l-bracket", version: "1.0.0", one_liner: "Simple parametric L mounting bracket", params: &["leg", "height", "thickness"], tags: &["bracket", "mounting"], source: "(define-component l-bracket ((number leg 30) (number height 20) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (box leg thickness height) (box thickness leg height)))" },
-    BuiltinStdlibComponent { name: "hole-plate", version: "1.0.0", one_liner: "Mounting plate with repeat-union hole grid", params: &["cols", "rows", "pitch", "hole-d", "thickness"], tags: &["plate", "mounting", "grid"], source: "(define-component hole-plate ((number cols 3) (number rows 2) (number pitch 15) (number hole-d 4) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (box (* (+ cols 1) pitch) (* (+ rows 1) pitch) thickness) (repeat-union col cols (translate (* (+ col 1) pitch) (* (/ (+ rows 1) 2) pitch) -1 (cylinder (/ hole-d 2) (+ thickness 2) 48)))))" },
+    BuiltinStdlibComponent {
+        name: "hex-bolt",
+        version: "1.0.0",
+        one_liner: "ISO-style hex bolt with parametric thread",
+        params: &["d", "length", "pitch"],
+        tags: &["fastener", "bolt", "thread"],
+        source: "(define-component hex-bolt ((number d 8) (number length 30) (number pitch 1.25)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (extrude (regular-polygon 6 (* d 0.58)) (* d 0.65)) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))",
+    },
+    BuiltinStdlibComponent {
+        name: "socket-head-cap-screw",
+        version: "1.0.0",
+        one_liner: "Socket-head cap screw with parametric thread",
+        params: &["d", "length", "pitch"],
+        tags: &["fastener", "screw", "thread"],
+        source: "(define-component socket-head-cap-screw ((number d 6) (number length 24) (number pitch 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (difference (cylinder (* d 0.85) d 48) (cylinder (* d 0.32) (* d 0.45) 6)) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))",
+    },
+    BuiltinStdlibComponent {
+        name: "hex-nut",
+        version: "1.0.0",
+        one_liner: "Hex nut cut with a mating tapped hole",
+        params: &["d", "pitch", "thickness"],
+        tags: &["fastener", "nut", "thread"],
+        source: "(define-component hex-nut ((number d 8) (number pitch 1.25) (number thickness 6.5)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (difference (extrude (regular-polygon 6 (* d 0.58)) thickness) (tapped-hole :radius minor-radius :pitch pitch :depth thread-depth :length (+ thickness 2))))))",
+    },
+    BuiltinStdlibComponent {
+        name: "washer",
+        version: "1.0.0",
+        one_liner: "Flat washer with parametric bore and outside diameter",
+        params: &["inner-d", "outer-d", "thickness"],
+        tags: &["fastener", "washer"],
+        source: "(define-component washer ((number inner-d 8.4) (number outer-d 16) (number thickness 1.6)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) thickness 64) (cylinder (/ inner-d 2) (+ thickness 2) 64)))",
+    },
+    BuiltinStdlibComponent {
+        name: "threaded-rod",
+        version: "1.0.0",
+        one_liner: "Full-length parametric threaded rod",
+        params: &["d", "length", "pitch"],
+        tags: &["fastener", "rod", "thread"],
+        source: "(define-component threaded-rod ((number d 8) (number length 100) (number pitch 1.25)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth))))",
+    },
+    BuiltinStdlibComponent {
+        name: "ball-bearing",
+        version: "1.0.0",
+        one_liner: "608/623/624-style radial bearing family",
+        params: &["bore", "outer-d", "width"],
+        tags: &["bearing", "mechanical", "608", "623", "624"],
+        source: "(define-component ball-bearing ((number bore 8) (number outer-d 22) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) width 96) (cylinder (/ bore 2) (+ width 2) 64)))",
+    },
+    BuiltinStdlibComponent {
+        name: "gt2-pulley",
+        version: "1.0.0",
+        one_liner: "GT2 timing pulley with teeth and bore controls",
+        params: &["teeth", "bore", "width"],
+        tags: &["pulley", "gt2", "motion"],
+        source: "(define-component gt2-pulley ((number teeth 20) (number bore 5) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (+ (* teeth 0.3183) 1) width 96) (cylinder (/ bore 2) (+ width 2) 64)))",
+    },
+    BuiltinStdlibComponent {
+        name: "standoff",
+        version: "1.0.0",
+        one_liner: "Hexagonal PCB standoff with through-hole",
+        params: &["length", "outer-d", "hole-d"],
+        tags: &["standoff", "pcb", "mounting"],
+        source: "(define-component standoff ((number length 12) (number outer-d 6) (number hole-d 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (extrude (regular-polygon 6 (/ outer-d 1.732)) length) (cylinder (/ hole-d 2) (+ length 2) 48)))",
+    },
+    BuiltinStdlibComponent {
+        name: "heat-set-insert-pocket",
+        version: "1.0.0",
+        one_liner: "FDM heat-set insert cavity cutter with lead-in",
+        params: &["bore", "depth", "lead-in"],
+        tags: &["fdm", "insert", "pocket"],
+        source: "(define-component heat-set-insert-pocket ((number bore 4.6) (number depth 6) (number lead-in 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (cylinder (/ bore 2) depth 64) (cone (/ bore 2) (+ (/ bore 2) lead-in) lead-in 64)))",
+    },
+    BuiltinStdlibComponent {
+        name: "corner-bracket",
+        version: "1.0.0",
+        one_liner: "Reinforced right-angle mounting bracket",
+        params: &["leg", "height", "thickness"],
+        tags: &["bracket", "mounting", "corner"],
+        source: "(define-component corner-bracket ((number leg 30) (number height 20) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (box leg thickness height) (box thickness leg height) (translate thickness thickness 0 (wedge (- leg thickness) (- leg thickness) height 0 0 (- leg thickness) height))))",
+    },
+    BuiltinStdlibComponent {
+        name: "l-bracket",
+        version: "1.0.0",
+        one_liner: "Simple parametric L mounting bracket",
+        params: &["leg", "height", "thickness"],
+        tags: &["bracket", "mounting"],
+        source: "(define-component l-bracket ((number leg 30) (number height 20) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (box leg thickness height) (box thickness leg height)))",
+    },
+    BuiltinStdlibComponent {
+        name: "hole-plate",
+        version: "1.0.0",
+        one_liner: "Mounting plate with repeat-union hole grid",
+        params: &["cols", "rows", "pitch", "hole-d", "thickness"],
+        tags: &["plate", "mounting", "grid"],
+        source: "(define-component hole-plate ((number cols 3) (number rows 2) (number pitch 15) (number hole-d 4) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (box (* (+ cols 1) pitch) (* (+ rows 1) pitch) thickness) (repeat-union col cols (translate (* (+ col 1) pitch) (* (/ (+ rows 1) 2) pitch) -1 (cylinder (/ hole-d 2) (+ thickness 2) 48)))))",
+    },
 ];
 
 fn builtin_stdlib_component(name: &str) -> Option<&'static BuiltinStdlibComponent> {
@@ -2162,8 +2615,14 @@ fn builtin_stdlib_record(component: &BuiltinStdlibComponent) -> ExtractedCompone
         name: component.name.to_string(),
         version: Some(component.version.to_string()),
         source: component.source.to_string(),
+        component_id: None,
+        revision_digest: None,
         header: crate::component_extract::ComponentHeader {
+            schema_version: 1,
             name: component.name.to_string(),
+            component_id: None,
+            revision_digest: None,
+            dependencies: Vec::new(),
             description: Some(component.one_liner.to_string()),
             params: component
                 .params
@@ -2181,6 +2640,7 @@ fn builtin_stdlib_record(component: &BuiltinStdlibComponent) -> ExtractedCompone
                 .map(|tag| (*tag).to_string())
                 .collect(),
             provenance: crate::component_extract::ComponentProvenance {
+                project_id: None,
                 thread_id: None,
                 message_id: None,
                 source_digest: format!("builtin:{}@{}", component.name, component.version),
@@ -2217,7 +2677,7 @@ fn extracted_component_dir(app: &dyn PathResolver, name: &str) -> AppResult<Path
 #[cfg(test)]
 mod extracted_component_library_tests {
     use super::*;
-    use crate::component_extract::{extract_component, ComponentExtractRequest};
+    use crate::component_extract::{ComponentExtractRequest, extract_component};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestResolver {
@@ -2645,10 +3105,12 @@ mod package_payload_store_tests {
         assert_eq!(installed.package_id, "bike.kit");
         assert_eq!(installed.version, "1.2.0");
         assert!(installed.package_digest.starts_with("sha256:"));
-        assert!(installed
-            .store_dir
-            .join(PACKAGE_INTEGRITY_FILE_NAME)
-            .is_file());
+        assert!(
+            installed
+                .store_dir
+                .join(PACKAGE_INTEGRITY_FILE_NAME)
+                .is_file()
+        );
 
         let indexed = read_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("read index");
         let indexed = indexed.expect("indexed");
@@ -2725,10 +3187,12 @@ mod package_payload_store_tests {
         let removed = remove_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("remove");
         assert!(removed);
         // The payload store survives uninstall (committed locks are GC roots).
-        assert!(installed
-            .store_dir
-            .join(PACKAGE_INTEGRITY_FILE_NAME)
-            .is_file());
+        assert!(
+            installed
+                .store_dir
+                .join(PACKAGE_INTEGRITY_FILE_NAME)
+                .is_file()
+        );
         // Unlocked discovery no longer finds the coordinate.
         let after = read_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("read");
         assert!(after.is_none());
@@ -2956,5 +3420,72 @@ mod package_payload_store_tests {
         );
         drop(second);
         assert!(!pins.pinned_package_digests().contains(&digest));
+    }
+
+    #[test]
+    fn automatic_component_capture_keeps_immutable_thread_scoped_revisions() {
+        let resolver = temp_resolver("auto-capture");
+        let first_source = "(define wall-width 4) (define-component bracket ((number width 12)) (ports (port mount :type \"bracket.mount.v1\" :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1)))) (box width wall-width 2)) (model (part one (bracket :width 20)))";
+        let unchanged_source = "(define wall-width 4) ; ignored\n(define-component bracket ((number width 12)) (ports (port mount :type \"bracket.mount.v1\" :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1)))) (box width wall-width 2)) (model (part one (bracket :width 44)))";
+        let changed_source = first_source.replace("wall-width 4", "wall-width 5");
+        capture_defined_components(&resolver, "thread-one", "message-one", first_source).unwrap();
+        assert!(
+            search_extracted_components(&resolver, "mount", 50)
+                .unwrap()
+                .iter()
+                .any(|component| component.name == "bracket"),
+            "component search should match authored port ids"
+        );
+        assert!(
+            search_extracted_components(&resolver, "bracket.mount.v1", 50)
+                .unwrap()
+                .iter()
+                .any(|component| component.name == "bracket"),
+            "component search should match authored port type ids"
+        );
+        let first = search_extracted_components(&resolver, "bracket", 50)
+            .unwrap()
+            .into_iter()
+            .find(|component| component.origin == "local")
+            .unwrap();
+        let component_id = first.component_id.clone().unwrap();
+        let first_digest = first.revision_digest.clone().unwrap();
+        let latest_path = extracted_component_library_root(&resolver)
+            .unwrap()
+            .join(AUTO_COMPONENT_LIBRARY_DIR_NAME)
+            .join(&component_id)
+            .join(AUTO_COMPONENT_LATEST_FILE_NAME);
+        let pointer_before = fs::read(&latest_path).unwrap();
+
+        capture_defined_components(&resolver, "thread-one", "message-two", unchanged_source)
+            .unwrap();
+        assert_eq!(pointer_before, fs::read(&latest_path).unwrap());
+        let unchanged = read_component_by_id(&resolver, &component_id, None).unwrap();
+        assert_eq!(
+            unchanged.revision_digest.as_deref(),
+            Some(first_digest.as_str())
+        );
+
+        capture_defined_components(&resolver, "thread-one", "message-three", &changed_source)
+            .unwrap();
+        let current = read_component_by_id(&resolver, &component_id, None).unwrap();
+        assert_ne!(
+            current.revision_digest.as_deref(),
+            Some(first_digest.as_str())
+        );
+        let pinned = read_component_by_id(&resolver, &component_id, Some(&first_digest)).unwrap();
+        assert!(pinned.source.contains("wall-width 4"));
+        assert!(current.source.contains("wall-width 5"));
+
+        capture_defined_components(&resolver, "thread-two", "message-four", first_source).unwrap();
+        let identities = search_extracted_components(&resolver, "bracket", 50)
+            .unwrap()
+            .into_iter()
+            .filter(|component| component.origin == "local")
+            .filter_map(|component| component.component_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(identities.len(), 2);
+        assert!(identities.contains(&component_id));
+        assert!(!read_component_by_id(&resolver, &component_id, Some("sha256:bad")).is_ok());
     }
 }

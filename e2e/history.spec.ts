@@ -1134,7 +1134,7 @@ test.describe('Projects', () => {
     await page.getByRole('button', { name: 'LIBRARY' }).click();
     const libraryWindow = page.locator('[data-window-id="library"]');
     await expect(libraryWindow).toBeVisible();
-    await expect(libraryWindow.getByRole('button', { name: 'COMPONENT PACKAGES' })).toBeVisible();
+    await expect(libraryWindow.getByRole('button', { name: 'COMPONENTS' })).toBeVisible();
     await expect(libraryWindow.getByRole('button', { name: 'FREECAD PARTS' })).toBeVisible();
     await expect(libraryWindow.getByRole('button', { name: 'CATALOG' })).toHaveCount(0);
   });

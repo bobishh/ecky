@@ -43,12 +43,18 @@ pub struct ComponentSearchToolRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ComponentSearchToolResponse {
     pub results: Vec<crate::component_package_runtime::ExtractedComponentSearchResult>,
+    pub indexing_diagnostics: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentGetToolRequest {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub component_id: Option<String>,
+    #[serde(default)]
+    pub revision_digest: Option<String>,
 }
 
 /// Copy-inline package import. `source` is the active model source to mutate;
@@ -101,14 +107,36 @@ pub fn handle_component_search(
         req.query.as_deref().unwrap_or(""),
         limit,
     )?;
-    Ok(ComponentSearchToolResponse { results })
+    Ok(ComponentSearchToolResponse {
+        results,
+        indexing_diagnostics: Vec::new(),
+    })
 }
 
 pub fn handle_component_get(
     app: &dyn PathResolver,
     req: ComponentGetToolRequest,
 ) -> AppResult<crate::component_package_runtime::ExtractedComponentRecord> {
-    crate::component_package_runtime::read_extracted_component(app, &req.name)
+    if let Some(component_id) = req.component_id.as_deref() {
+        return crate::component_package_runtime::read_component_by_id(
+            app,
+            component_id,
+            req.revision_digest.as_deref(),
+        );
+    }
+    if req.revision_digest.is_some() {
+        return Err(crate::contracts::AppError::validation(
+            "revisionDigest requires componentId.",
+        ));
+    }
+    let name = req
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| {
+            crate::contracts::AppError::validation("Provide a component name or componentId.")
+        })?;
+    crate::component_package_runtime::read_extracted_component(app, name)
 }
 
 pub fn handle_component_import(

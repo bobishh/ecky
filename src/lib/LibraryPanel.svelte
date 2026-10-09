@@ -7,6 +7,7 @@
   import type {
     ComponentHeader,
     ComponentPackageHeader,
+    ExtractedComponentSearchResult,
     FreecadLibraryItem,
     LibraryPanelProjection,
   } from './tauri/contracts';
@@ -33,6 +34,8 @@
   let loadError = $state<string | null>(null);
 
   let packageHeaders = $state<ComponentPackageHeader[]>([]);
+  let availableComponents = $state<ExtractedComponentSearchResult[]>([]);
+  let indexingDiagnostics = $state<string[]>([]);
   let packagesLoaded = $state(false);
   let packageImportBusy = $state(false);
   let importingComponentId = $state<string | null>(null);
@@ -87,6 +90,20 @@
     ),
   );
 
+  const filteredComponents = $derived(
+    availableComponents.filter((component) =>
+      [
+        component.name,
+        component.oneLiner,
+        ...(component.paramKeys ?? []),
+        ...(component.tags ?? []),
+        ...(component.ports ?? []).flatMap((port) => [port.portId, port.typeId]),
+        component.threadId ?? '',
+        component.threadTitle ?? '',
+      ].join(' ').toLowerCase().includes(searchQuery.toLowerCase()),
+    ),
+  );
+
   const filteredFreecadResults = $derived(
     freecadLibraryResults.filter((item) =>
       [
@@ -113,6 +130,8 @@
       throw new Error(`Library backend returned '${projection.kind}' for component packages.`);
     }
     packageHeaders = projection.packageHeaders;
+    availableComponents = projection.components ?? [];
+    indexingDiagnostics = projection.indexingDiagnostics ?? [];
   }
 
   function projectFreecadLibrary(projection: LibraryPanelProjection) {
@@ -153,7 +172,7 @@
     loadError = null;
     const selected = await open({
       multiple: false,
-      filters: [{ name: 'Ecky Package', extensions: ['ecky', 'zip'] }],
+      filters: [{ name: 'Ecky Package', extensions: ['zip'] }],
     });
     if (typeof selected !== 'string' || !selected.trim()) return;
 
@@ -240,7 +259,7 @@
   <header class="library-header">
     <nav class="library-tabs" aria-label="Library sections">
       <button class:active={activeTab === 'components'} onclick={() => activeTab = 'components'}>
-        COMPONENT PACKAGES
+        COMPONENTS
       </button>
       <button class:active={activeTab === 'freecad'} onclick={() => activeTab = 'freecad'}>
         FREECAD PARTS
@@ -249,6 +268,9 @@
     <div class="library-tools">
       <input class="search-input" type="search" placeholder="Search library..." bind:value={searchQuery} />
       {#if activeTab === 'components'}
+        <button class="secondary-action" onclick={() => packagesLoaded = false} disabled={loading}>
+          REFRESH
+        </button>
         <button class="primary-action" onclick={handleImportPackageArchive} disabled={packageImportBusy}>
           {packageImportBusy ? 'IMPORTING...' : 'IMPORT PACKAGE'}
         </button>
@@ -270,10 +292,40 @@
         <button onclick={retry}>RETRY</button>
       </div>
     {:else if activeTab === 'components'}
-      {#if filteredPackages.length === 0}
-        <div class="state">NO COMPONENT PACKAGES</div>
+      {#if indexingDiagnostics.length}
+        <div class="error-state" role="status" aria-label="Component indexing diagnostics">
+          <strong>COMPONENT INDEXING NEEDS ATTENTION</strong>
+          {#each indexingDiagnostics as diagnostic}<pre>{diagnostic}</pre>{/each}
+        </div>
+      {/if}
+      {#if filteredComponents.length === 0 && filteredPackages.length === 0}
+        <div class="state">{searchQuery.trim() ? 'NO MATCHING COMPONENTS' : 'NO COMPONENTS OR PACKAGES'}</div>
       {:else}
         <div class="library-grid">
+          {#each filteredComponents as component (component.componentId ?? `${component.origin}:${component.name}`)}
+            <article class="library-card available-component-card">
+              <div class="card-title">
+                <h3>{component.name}</h3>
+                <span>{component.origin}</span>
+              </div>
+              <p>{component.oneLiner}</p>
+              {#if component.paramKeys.length}
+                <div class="card-stats">PARAMETERS {component.paramKeys.join(' / ')}</div>
+              {/if}
+              {#if component.revisionDigest}
+                <div class="card-stats">REVISION {component.revisionDigest.slice(0, 19)}</div>
+              {/if}
+              {#if component.version}
+                <div class="card-stats">VERSION {component.version}</div>
+              {/if}
+              {#if component.threadId}
+                <div class="card-stats">SOURCE {component.threadTitle ?? component.threadId} / {component.threadId}</div>
+              {/if}
+              {#if component.tags.length}
+                <div class="tag-list">{#each component.tags as tag}<span>{tag}</span>{/each}</div>
+              {/if}
+            </article>
+          {/each}
           {#each filteredPackages as pkg (pkg.packageId + pkg.version)}
             <article class="library-card">
               <div class="card-title">
@@ -288,7 +340,7 @@
                   aria-expanded={expandedPackageId === `${pkg.packageId}@${pkg.version}`}
                   onclick={() => expandedPackageId = expandedPackageId === `${pkg.packageId}@${pkg.version}` ? null : `${pkg.packageId}@${pkg.version}`}
                 >
-                  COMPONENTS
+                  SHOW {pkg.displayName} COMPONENTS
                 </button>
               {/if}
               {#if expandedPackageId === `${pkg.packageId}@${pkg.version}`}

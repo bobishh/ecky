@@ -169,7 +169,7 @@ pub fn latest_agent_message_for_session(messages: &[Message], session_id: &str) 
 
 pub async fn save_or_update_agent_version_for_session(
     state: &AppState,
-    _app: &dyn PathResolver,
+    app: &dyn PathResolver,
     request: SaveOrUpdateAgentVersionRequest,
 ) -> AppResult<SaveOrUpdateAgentVersionResult> {
     let SaveOrUpdateAgentVersionRequest {
@@ -400,6 +400,22 @@ pub async fn save_or_update_agent_version_for_session(
                 .map_err(|e| AppError::persistence(e.to_string()))?;
         }
 
+        if artifact_bundle.is_some() {
+            if let Err(error) =
+                crate::component_package_runtime::capture_latest_successful_components(
+                    app,
+                    &conn,
+                    &thread_id,
+                    &message_id,
+                    &design_output.macro_code,
+                )
+            {
+                state.push_log(format!(
+                    "Component capture failed for version {message_id}: {error}"
+                ));
+            }
+        }
+
         (message_id, existing_agent_message.is_none())
     };
     push_save_profile(
@@ -411,7 +427,6 @@ pub async fn save_or_update_agent_version_for_session(
         Some(&message_id),
         resolved_model_id.as_deref(),
     );
-
     let next_target = McpTargetRef {
         thread_id: thread_id.clone(),
         message_id: message_id.clone(),

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-type PackageLibraryMockMode = 'ok' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending';
+type PackageLibraryMockMode = 'ok' | 'discovery' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending';
 
 async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMode) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
@@ -182,7 +182,9 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
     mockWindow.__PACKAGE_HEADERS__ = ['ok', 'componentImportError', 'componentImportPending'].includes(mockMode)
       ? [packageHeader]
       : [];
+    mockWindow.__LIBRARY_LOAD_COUNT__ = 0;
     mockWindow.__LAST_PACKAGE_ARCHIVE__ = null;
+    mockWindow.__LAST_PACKAGE_FILTERS__ = null;
     mockWindow.__LAST_COMPONENT_IMPORT__ = null;
     mockWindow.__LEGACY_COMPONENT_IMPORT_CALLED__ = false;
     mockWindow.__RESOLVE_COMPONENT_IMPORT__ = null;
@@ -266,6 +268,7 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
       if (cmd === 'library_panel_intent') {
         const intent = args?.intent;
         if (intent?.kind === 'loadComponents') {
+          mockWindow.__LIBRARY_LOAD_COUNT__ += 1;
           if (mockMode === 'error') {
             throw {
               code: 'persistence',
@@ -273,7 +276,10 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
               details: 'raw package index missing',
             };
           }
-          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__ };
+          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__, components: mockMode === 'discovery' ? [
+            { name: 'hex-bolt', version: '1.0.0', oneLiner: 'Parametric threaded bolt', paramKeys: ['d', 'length'], tags: ['fastener'], ports: [] },
+            { name: 'bottle-cage', oneLiner: 'Saved bicycle bottle cage', paramKeys: ['bottleDiameter'], tags: ['bike'], ports: [] },
+          ] : [] };
         }
         if (intent?.kind === 'installPackage') {
           mockWindow.__LAST_PACKAGE_ARCHIVE__ = intent.archivePath ?? null;
@@ -285,7 +291,7 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
             };
           }
           mockWindow.__PACKAGE_HEADERS__ = [packageHeader];
-          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__ };
+          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__, components: [] };
         }
         throw new Error(`unexpected library panel intent: ${intent?.kind}`);
       }
@@ -310,7 +316,8 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
         return importedResult;
       }
       if (cmd === 'plugin:dialog|open') {
-        return '/mock/bike-bottle-system.ecky';
+        mockWindow.__LAST_PACKAGE_FILTERS__ = args?.options?.filters ?? [];
+        return '/mock/bike-bottle-system.zip';
       }
       return null;
     };
@@ -318,6 +325,24 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
 }
 
 test.describe('Component package library', () => {
+  test('Given saved and builtin components without packages When Components opens Then both appear and search finds their metadata', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discovery');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Reusable component library' }).click();
+    await expect(page.getByRole('heading', { name: 'hex-bolt', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'bottle-cage', exact: true })).toBeVisible();
+    await expect(page.getByText('NO COMPONENT PACKAGES', { exact: true })).toHaveCount(0);
+    await page.getByPlaceholder('Search library...').fill('bottleDiameter');
+    await expect(page.getByRole('heading', { name: 'bottle-cage', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'hex-bolt', exact: true })).toHaveCount(0);
+    await page.getByPlaceholder('Search library...').fill('missing component');
+    await expect(page.getByText('NO MATCHING COMPONENTS', { exact: true })).toBeVisible();
+    await page.getByPlaceholder('Search library...').fill('');
+    await page.getByRole('button', { name: 'REFRESH' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__LIBRARY_LOAD_COUNT__)).toBeGreaterThan(1);
+    await expect(page.getByRole('heading', { name: 'hex-bolt', exact: true })).toBeVisible();
+  });
   test('Given installed packages When Library opens Then concise package facts are visible', async ({ page }) => {
     await installProjectLibraryMocks(page, 'ok');
     await page.goto('/');
@@ -325,7 +350,7 @@ test.describe('Component package library', () => {
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
 
-    await expect(page.getByText('Bike Bottle System')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Bike Bottle System', exact: true })).toBeVisible();
     await expect(page.getByText('bike-bottle-system / 0.1.0')).toBeVisible();
     await expect(page.getByText('2 components')).toBeVisible();
     await expect(page.getByText('2 port types')).toBeVisible();
@@ -350,13 +375,14 @@ test.describe('Component package library', () => {
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
-    await expect(page.getByText('NO COMPONENT PACKAGES')).toBeVisible();
+    await expect(page.getByText('NO COMPONENTS OR PACKAGES')).toBeVisible();
 
     await page.getByRole('button', { name: 'IMPORT PACKAGE' }).click();
 
-    await expect(page.getByText('Bike Bottle System')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Bike Bottle System', exact: true })).toBeVisible();
     await expect(page.getByText('bike-bottle-system / 0.1.0')).toBeVisible();
-    await expect(page.evaluate(() => (window as any).__LAST_PACKAGE_ARCHIVE__)).resolves.toBe('/mock/bike-bottle-system.ecky');
+    await expect(page.evaluate(() => (window as any).__LAST_PACKAGE_ARCHIVE__)).resolves.toBe('/mock/bike-bottle-system.zip');
+    await expect(page.evaluate(() => (window as any).__LAST_PACKAGE_FILTERS__[0]?.extensions)).resolves.toEqual(['zip']);
   });
 
   test('shows raw backend error when package import fails', async ({ page }) => {
@@ -377,7 +403,7 @@ test.describe('Component package library', () => {
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
-    await page.getByRole('button', { name: 'COMPONENTS' }).click();
+    await page.getByRole('button', { name: 'SHOW Bike Bottle System COMPONENTS' }).click();
     await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
 
     await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({
@@ -398,7 +424,7 @@ test.describe('Component package library', () => {
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
-    await page.getByRole('button', { name: 'COMPONENTS' }).click();
+    await page.getByRole('button', { name: 'SHOW Bike Bottle System COMPONENTS' }).click();
     await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
 
     await expect(page.getByText('component import failed')).toBeVisible();
@@ -411,7 +437,7 @@ test.describe('Component package library', () => {
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
-    await page.getByRole('button', { name: 'COMPONENTS' }).click();
+    await page.getByRole('button', { name: 'SHOW Bike Bottle System COMPONENTS' }).click();
     await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
 
     await expect(page.getByRole('button', { name: 'IMPORTING Bottle Cage' })).toBeVisible();

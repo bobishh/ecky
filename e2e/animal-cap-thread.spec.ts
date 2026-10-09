@@ -93,7 +93,7 @@ test('Given the Pug exists in history When Projects and Library open Then it is 
   await page.getByRole('button', { name: 'PROJECTS' }).click();
   await page.getByRole('button', { name: 'LIBRARY' }).click();
   const library = page.locator('[data-window-id="library"]');
-  await expect(library.getByRole('button', { name: 'COMPONENT PACKAGES' })).toBeVisible();
+  await expect(library.getByRole('button', { name: 'COMPONENTS' })).toBeVisible();
   await expect(library.getByRole('button', { name: 'FREECAD PARTS' })).toBeVisible();
   await expect(library.getByRole('button', { name: 'CATALOG' })).toHaveCount(0);
   await expect(library.getByText('Pug Presta Valve Cap')).toHaveCount(0);
