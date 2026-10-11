@@ -357,11 +357,9 @@ mod tests {
             panic!("component projection")
         };
         assert!(indexing_diagnostics.is_empty());
-        assert!(
-            components
-                .iter()
-                .any(|component| component.name == "clip" && component.origin == "local")
-        );
+        assert!(components
+            .iter()
+            .any(|component| component.name == "clip" && component.origin == "local"));
         assert!(!components.iter().any(|component| component.name == "ghost"));
         let conn = state.db.lock().await;
         assert_eq!(

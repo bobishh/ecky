@@ -1,10 +1,10 @@
 use crate::contracts::{
-    AgentDraft, AppError, ArtifactBundle, DeletedMessage, DeletedThreadSummary, DeletedThreadsPage,
-    DesignOutput, DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest,
-    TargetLeaseInfo, Thread, ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
-    normalize_design_output, upgraded_or_default_genie_traits,
+    normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, AppError,
+    ArtifactBundle, DeletedMessage, DeletedThreadSummary, DeletedThreadsPage, DesignOutput,
+    DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo,
+    Thread, ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
 };
-use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
@@ -6569,11 +6569,9 @@ mod tests {
         let messages = get_thread_messages(&conn, "pending-thread").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].status, MessageStatus::Error);
-        assert!(
-            messages[0]
-                .content
-                .contains("Request interrupted by app restart before provider response completed")
-        );
+        assert!(messages[0]
+            .content
+            .contains("Request interrupted by app restart before provider response completed"));
     }
 
     #[test]

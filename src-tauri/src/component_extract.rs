@@ -1072,11 +1072,9 @@ mod tests {
         let extracted = extract_component(&request(source, "bracket")).expect("extract port");
 
         assert!(extracted.component_source.contains("(ports"));
-        assert!(
-            extracted
-                .component_source
-                .contains(":params ((clearance clearance))")
-        );
+        assert!(extracted
+            .component_source
+            .contains(":params ((clearance clearance))"));
         assert_eq!(extracted.header.ports.len(), 1);
         assert_eq!(extracted.header.ports[0].port_id, "mount");
         assert_eq!(extracted.header.ports[0].type_id, "mechanical.mount.v1");
@@ -1150,24 +1148,20 @@ mod tests {
             next_cage.header.component_id
         );
         assert_eq!(first_cage.header.dependencies, vec!["base-width", "wall"]);
-        assert!(
-            first_cage
-                .component_source
-                .contains("(define base-width 4)")
-        );
+        assert!(first_cage
+            .component_source
+            .contains("(define base-width 4)"));
         assert_eq!(
             first_cage.header.params[0].default,
             Some(serde_json::json!(70.0))
         );
-        assert!(
-            extract_defined_components(
-                "(model (part ordinary (box 1 2 3)))",
-                "thread-a",
-                "message-4"
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert!(extract_defined_components(
+            "(model (part ordinary (box 1 2 3)))",
+            "thread-a",
+            "message-4"
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
@@ -1195,11 +1189,9 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(component.header.dependencies, vec!["default-width"]);
-        assert!(
-            component
-                .component_source
-                .starts_with("(define default-width 14)")
-        );
+        assert!(component
+            .component_source
+            .starts_with("(define default-width 14)"));
     }
 
     #[test]

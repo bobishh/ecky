@@ -3,10 +3,10 @@ use crate::commands::design::{
 };
 use crate::contracts::infer_macro_dialect_from_code;
 use crate::contracts::{
-    AgentOrigin, AppError, AppResult, ArtifactBundle, DesignOutput, DesignParams, InteractionMode,
-    MacroDialect, Message, MessageRole, MessageStatus, ModelManifest, PostProcessingSpec, UiSpec,
     validate_design_output, validate_design_params, validate_model_manifest,
-    validate_model_runtime_bundle, validate_ui_spec,
+    validate_model_runtime_bundle, validate_ui_spec, AgentOrigin, AppError, AppResult,
+    ArtifactBundle, DesignOutput, DesignParams, InteractionMode, MacroDialect, Message,
+    MessageRole, MessageStatus, ModelManifest, PostProcessingSpec, UiSpec,
 };
 use crate::db;
 use crate::models::{AppState, PathResolver};
@@ -460,13 +460,11 @@ params = {
         assert!(!healed.1.contains_key("stale"));
         assert!(healed.2.added_keys.iter().any(|key| key == "top_conn_left"));
         assert!(healed.2.dropped_keys.iter().any(|key| key == "stale"));
-        assert!(
-            healed
-                .2
-                .carried_keys
-                .iter()
-                .any(|key| key == "top_conn_left")
-        );
+        assert!(healed
+            .2
+            .carried_keys
+            .iter()
+            .any(|key| key == "top_conn_left"));
     }
 
     #[test]
@@ -519,12 +517,10 @@ params = {
         .expect("ecky macro should bypass python parser");
 
         assert_eq!(dialect, MacroDialect::EckyIrV0);
-        assert!(
-            ui_spec
-                .fields
-                .iter()
-                .any(|field| field.key() == "duplo_height_blocks")
-        );
+        assert!(ui_spec
+            .fields
+            .iter()
+            .any(|field| field.key() == "duplo_height_blocks"));
         assert_eq!(
             params.get("duplo_height_blocks"),
             Some(&ParamValue::Number(5.0))

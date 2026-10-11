@@ -7,19 +7,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use sha2::{Digest, Sha256};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::contracts::{
-    AppError, AppResult, ComponentCoordinateIndexEntry, ComponentDefinition, ComponentPackage,
-    ComponentPackageHeader, ComponentParam, ComponentParamKind, DesignParams,
-    InstalledAssemblyComponentSource, InstalledAssemblySource, InstalledComponentPackage,
-    InstalledComponentSource, PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION, PackagePayloadInventory,
-    PackagePayloadInventoryEntry, ParamValue, ParsedParamsResult, UiField, UiSpec,
     component_package_header, validate_component_package, validate_component_package_header,
-    validate_design_params, validate_ui_spec,
+    validate_design_params, validate_ui_spec, AppError, AppResult, ComponentCoordinateIndexEntry,
+    ComponentDefinition, ComponentPackage, ComponentPackageHeader, ComponentParam,
+    ComponentParamKind, DesignParams, InstalledAssemblyComponentSource, InstalledAssemblySource,
+    InstalledComponentPackage, InstalledComponentSource, PackagePayloadInventory,
+    PackagePayloadInventoryEntry, ParamValue, ParsedParamsResult, UiField, UiSpec,
+    PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION,
 };
 use crate::models::PathResolver;
 
@@ -2677,7 +2677,7 @@ fn extracted_component_dir(app: &dyn PathResolver, name: &str) -> AppResult<Path
 #[cfg(test)]
 mod extracted_component_library_tests {
     use super::*;
-    use crate::component_extract::{ComponentExtractRequest, extract_component};
+    use crate::component_extract::{extract_component, ComponentExtractRequest};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestResolver {
@@ -3105,12 +3105,10 @@ mod package_payload_store_tests {
         assert_eq!(installed.package_id, "bike.kit");
         assert_eq!(installed.version, "1.2.0");
         assert!(installed.package_digest.starts_with("sha256:"));
-        assert!(
-            installed
-                .store_dir
-                .join(PACKAGE_INTEGRITY_FILE_NAME)
-                .is_file()
-        );
+        assert!(installed
+            .store_dir
+            .join(PACKAGE_INTEGRITY_FILE_NAME)
+            .is_file());
 
         let indexed = read_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("read index");
         let indexed = indexed.expect("indexed");
@@ -3187,12 +3185,10 @@ mod package_payload_store_tests {
         let removed = remove_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("remove");
         assert!(removed);
         // The payload store survives uninstall (committed locks are GC roots).
-        assert!(
-            installed
-                .store_dir
-                .join(PACKAGE_INTEGRITY_FILE_NAME)
-                .is_file()
-        );
+        assert!(installed
+            .store_dir
+            .join(PACKAGE_INTEGRITY_FILE_NAME)
+            .is_file());
         // Unlocked discovery no longer finds the coordinate.
         let after = read_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("read");
         assert!(after.is_none());

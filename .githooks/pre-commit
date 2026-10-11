@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root/src-tauri"
+
+if ! cargo fmt --all -- --check; then
+  printf '%s\n' 'Rust formatting failed. Run cargo fmt --all from src-tauri, then stage the changes.' >&2
+  exit 1
+fi

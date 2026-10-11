@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8480,12 +8480,10 @@ mod tests {
             "PreToolUse"
         );
         assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(
-            response["hookSpecificOutput"]["permissionDecisionReason"]
-                .as_str()
-                .unwrap()
-                .contains("not bound")
-        );
+        assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("not bound"));
 
         state
             .codex_app_server
@@ -9136,16 +9134,14 @@ mod tests {
             .expect("provider session");
         assert_eq!(session.client_kind, "provider-mcp-http");
         assert_eq!(session.bound_thread_id.as_deref(), Some("thread-1"));
-        assert!(
-            server
-                .state
-                .mcp_session_registry
-                .with_sessions()
-                .lock()
-                .await
-                .get("old-provider-session")
-                .is_some_and(|session| session.bound_thread_id.is_none())
-        );
+        assert!(server
+            .state
+            .mcp_session_registry
+            .with_sessions()
+            .lock()
+            .await
+            .get("old-provider-session")
+            .is_some_and(|session| session.bound_thread_id.is_none()));
     }
 
     #[test]
@@ -9338,14 +9334,12 @@ mod tests {
             message.id == "user-answer-first"
                 && message.status == crate::contracts::MessageStatus::Working
         }));
-        assert!(
-            server
-                .state
-                .managed_jev_runs
-                .lock()
-                .await
-                .contains_key("managed-answer-first")
-        );
+        assert!(server
+            .state
+            .managed_jev_runs
+            .lock()
+            .await
+            .contains_key("managed-answer-first"));
         assert!(
             provider_answer_first_satisfied_for_session(&server.state, "managed-answer-first")
                 .await
@@ -9361,13 +9355,11 @@ mod tests {
             },
         )
         .await;
-        assert!(
-            available.result.as_ref().expect("tools/list")["tools"]
-                .as_array()
-                .expect("tools")
-                .iter()
-                .any(|tool| tool["name"] == "session_reply_save")
-        );
+        assert!(available.result.as_ref().expect("tools/list")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "session_reply_save"));
         let final_reply = dispatch_tool_call_jsonrpc(
             &server,
             "managed-answer-first",
@@ -9383,14 +9375,12 @@ mod tests {
             Some(&json!(true)),
             "{final_reply:?}"
         );
-        assert!(
-            !server
-                .state
-                .managed_jev_runs
-                .lock()
-                .await
-                .contains_key("managed-answer-first")
-        );
+        assert!(!server
+            .state
+            .managed_jev_runs
+            .lock()
+            .await
+            .contains_key("managed-answer-first"));
         let messages = {
             let conn = server.state.db.lock().await;
             crate::db::get_thread_messages(&conn, "thread-1").expect("messages")
@@ -9422,15 +9412,13 @@ mod tests {
             )
             .await;
 
-        assert!(
-            provider_tool_definitions_for_request(
-                &state,
-                &stale_uri,
-                modern_tool_definitions(true),
-            )
-            .await
-            .is_empty()
-        );
+        assert!(provider_tool_definitions_for_request(
+            &state,
+            &stale_uri,
+            modern_tool_definitions(true),
+        )
+        .await
+        .is_empty());
         assert!(
             provider_tool_allowed_for_request(&state, &stale_uri, "ecky_ast_set_number")
                 .await
@@ -9463,12 +9451,10 @@ mod tests {
             },
         )
         .await;
-        assert!(
-            listed.result.unwrap()["tools"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(listed.result.unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         let rejected = dispatch_request(
             &server,
             session_id,
@@ -9480,11 +9466,9 @@ mod tests {
             },
         )
         .await;
-        assert!(
-            serde_json::to_string(&rejected)
-                .unwrap()
-                .contains("rejects MCP tool")
-        );
+        assert!(serde_json::to_string(&rejected)
+            .unwrap()
+            .contains("rejects MCP tool"));
     }
 
     #[tokio::test]
@@ -9706,12 +9690,10 @@ mod tests {
                         .await;
                         let result = response.result.expect("JSON-RPC result");
                         assert_eq!(result["isError"], true);
-                        assert!(
-                            result["content"][0]["text"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .contains("No bound MCP session target")
-                        );
+                        assert!(result["content"][0]["text"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("No bound MCP session target"));
                     });
                 })
                 .expect("spawn worker-stack test")
@@ -9871,12 +9853,10 @@ mod tests {
             assert_ne!(preview_message_id, "msg-1");
             assert_eq!(set_number_payload["editedPath"], path.as_str());
             assert_eq!(set_number_payload["operation"], "replace");
-            assert!(
-                !set_number_payload["artifactDigest"]["modelId"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .is_empty()
-            );
+            assert!(!set_number_payload["artifactDigest"]["modelId"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty());
 
             let after_payload = parse_mcp_tool_payload(
                 &dispatch_tool_call_jsonrpc(
@@ -9973,12 +9953,10 @@ mod tests {
             let result = response.result.as_ref().expect("json-rpc result");
             assert_eq!(result["isError"], true);
             let err_payload = parse_mcp_tool_payload(&response);
-            assert!(
-                err_payload["message"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("digest mismatch")
-            );
+            assert!(err_payload["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("digest mismatch"));
         });
     }
 
@@ -10304,11 +10282,9 @@ mod tests {
         )
         .expect("extract");
         assert_eq!(response.name, "bracket");
-        assert!(
-            response
-                .component_source
-                .contains("(define-component bracket")
-        );
+        assert!(response
+            .component_source
+            .contains("(define-component bracket"));
         assert!(response.saved_path.is_some());
 
         let search = handlers::handle_component_search(
@@ -10335,11 +10311,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(tool_names.iter().any(|name| name == "concept_preview_save"));
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| name == "concept_preview_generate")
-        );
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "concept_preview_generate"));
     }
 
     #[test]
@@ -10409,38 +10383,26 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "target_meta_get"));
         assert!(tool_names.iter().any(|name| name == "target_macro_get"));
         assert!(tool_names.iter().any(|name| name == "macro_buffer_get"));
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "macro_buffer_replace_range")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "macro_buffer_apply_patch")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "macro_buffer_preview_render")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_replace_range"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_apply_patch"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_preview_render"));
         assert!(tool_names.iter().any(|name| name == "target_detail_get"));
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "artifact_manifest_get")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "artifact_manifest_get"));
         assert!(tool_names.iter().any(|name| name == "target_get"));
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "macro_buffer_replace_and_preview")
-        );
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_patch_validate")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_replace_and_preview"));
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_patch_validate"));
     }
 
     #[test]
@@ -10456,12 +10418,10 @@ mod tests {
         assert!(!properties.contains_key("controls"));
         assert!(!properties.contains_key("analysisIdentityDigest"));
         assert!(!properties.contains_key("meshContentDigest"));
-        assert!(
-            !tool["description"]
-                .as_str()
-                .expect("description")
-                .contains("from an immutable fem_mesh_preview artifact")
-        );
+        assert!(!tool["description"]
+            .as_str()
+            .expect("description")
+            .contains("from an immutable fem_mesh_preview artifact"));
     }
 
     #[test]
@@ -10474,60 +10434,40 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "ecky_ast_get"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_inspect"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_get_node"));
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_patch_validate")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_replace_and_render")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_patch_preview")
-        );
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_patch_commit")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_patch_validate"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_replace_and_render"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_patch_preview"));
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_patch_commit"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_set_number"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_set_string"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_set_select"));
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_replace_call")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_insert_binding")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_delete_binding")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "ecky_ast_rename_binding_scoped")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_replace_call"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_insert_binding"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_delete_binding"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "ecky_ast_rename_binding_scoped"));
         assert!(!tool_names.iter().any(|name| name == "macro_buffer_get"));
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| name == "macro_buffer_replace_range")
-        );
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| name == "macro_buffer_replace_and_preview")
-        );
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_replace_range"));
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "macro_buffer_replace_and_preview"));
     }
 
     #[test]
@@ -10561,11 +10501,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(tool_names.iter().any(|name| name == "thread_create"));
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| name == "thread_authoring_context_set")
-        );
+        assert!(!tool_names
+            .iter()
+            .any(|name| name == "thread_authoring_context_set"));
     }
 
     #[test]
@@ -10618,10 +10556,9 @@ mod tests {
     fn ecky_ast_set_select_literal_conversion_rejects_non_scalars() {
         let err = ecky_literal_from_json(&json!({"k":"v"})).expect_err("object should fail");
         assert_eq!(err.code, crate::contracts::AppErrorCode::Validation);
-        assert!(
-            err.message
-                .contains("set_select value must be string, number, or boolean")
-        );
+        assert!(err
+            .message
+            .contains("set_select value must be string, number, or boolean"));
     }
 
     #[test]
@@ -10998,16 +10935,12 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "measurement_annotation_save")
-        );
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "measurement_annotation_delete")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "measurement_annotation_save"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "measurement_annotation_delete"));
     }
 
     #[test]
@@ -11028,11 +10961,9 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "printability_transform_recipes_get")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "printability_transform_recipes_get"));
     }
 
     #[test]
@@ -11042,11 +10973,9 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
 
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "semantic_transform_preview")
-        );
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "semantic_transform_preview"));
     }
 
     #[test]
@@ -11283,14 +11212,12 @@ mod tests {
         assert!(!err.message.contains("ecky://guides/authoring-card"));
         assert!(!err.message.contains("ecky://guides/modeling-guidelines"));
         assert!(!err.message.contains("ecky://guides/build123d"));
-        assert!(
-            !err.message
-                .contains("ecky://guides/surface-manifest/build123d")
-        );
-        assert!(
-            !err.message
-                .contains("ecky://guides/surface-reference/build123d")
-        );
+        assert!(!err
+            .message
+            .contains("ecky://guides/surface-manifest/build123d"));
+        assert!(!err
+            .message
+            .contains("ecky://guides/surface-reference/build123d"));
 
         for uri in required_authoring_guide_uris(
             crate::contracts::SourceLanguage::EckyIrV0,
@@ -11492,25 +11419,21 @@ mod tests {
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("target_macro_get"))
             .expect("target_macro_get tool");
-        assert!(
-            target_macro
-                .get("description")
-                .and_then(Value::as_str)
-                .expect("target_macro_get description")
-                .contains("artifactDigest")
-        );
+        assert!(target_macro
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("target_macro_get description")
+            .contains("artifactDigest"));
 
         let macro_buffer = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("macro_buffer_get"))
             .expect("macro_buffer_get tool");
-        assert!(
-            macro_buffer
-                .get("description")
-                .and_then(Value::as_str)
-                .expect("macro_buffer_get description")
-                .contains("artifactDigest")
-        );
+        assert!(macro_buffer
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("macro_buffer_get description")
+            .contains("artifactDigest"));
 
         for name in [
             "params_preview_render",
@@ -11731,24 +11654,18 @@ mod tests {
         ] {
             assert!(ir_guide.contains(expected), "guide missing `{expected}`");
         }
-        assert!(
-            resource_definitions()
-                .into_iter()
-                .any(|resource| resource.get("uri").and_then(Value::as_str)
-                    == Some("ecky://guides/ecky-source"))
-        );
-        assert!(
-            resource_definitions()
-                .into_iter()
-                .any(|resource| resource.get("uri").and_then(Value::as_str)
-                    == Some("ecky://guides/ecky-rust"))
-        );
-        assert!(
-            !resource_definitions()
-                .into_iter()
-                .any(|resource| resource.get("uri").and_then(Value::as_str)
-                    == Some("ecky://guides/ecky-ir-v0"))
-        );
+        assert!(resource_definitions()
+            .into_iter()
+            .any(|resource| resource.get("uri").and_then(Value::as_str)
+                == Some("ecky://guides/ecky-source")));
+        assert!(resource_definitions()
+            .into_iter()
+            .any(|resource| resource.get("uri").and_then(Value::as_str)
+                == Some("ecky://guides/ecky-rust")));
+        assert!(!resource_definitions()
+            .into_iter()
+            .any(|resource| resource.get("uri").and_then(Value::as_str)
+                == Some("ecky://guides/ecky-ir-v0")));
     }
 
     #[test]
@@ -11872,21 +11789,15 @@ mod tests {
             .and_then(Value::as_array)
             .expect("wallPatternModes array");
 
-        assert!(
-            ecky_rust_cad_ops
-                .iter()
-                .any(|op| op.as_str() == Some("wall-pattern"))
-        );
-        assert!(
-            ecky_rust_wall_pattern_modes
-                .iter()
-                .any(|mode| mode.as_str() == Some("schwarz-p"))
-        );
-        assert!(
-            ecky_rust_wall_pattern_modes
-                .iter()
-                .any(|mode| mode.as_str() == Some("attractor-field"))
-        );
+        assert!(ecky_rust_cad_ops
+            .iter()
+            .any(|op| op.as_str() == Some("wall-pattern")));
+        assert!(ecky_rust_wall_pattern_modes
+            .iter()
+            .any(|mode| mode.as_str() == Some("schwarz-p")));
+        assert!(ecky_rust_wall_pattern_modes
+            .iter()
+            .any(|mode| mode.as_str() == Some("attractor-field")));
         assert!(ecky_rust.get("reference").is_none());
         assert_eq!(
             ecky_rust.get("referenceUri").and_then(Value::as_str),
@@ -12549,11 +12460,9 @@ mod tests {
             tools.len() > 15,
             "modern catalogue cannot depend on session state"
         );
-        assert!(
-            tools
-                .iter()
-                .all(|tool| { tool["inputSchema"]["properties"]["eckyContextId"].is_object() })
-        );
+        assert!(tools
+            .iter()
+            .all(|tool| { tool["inputSchema"]["properties"]["eckyContextId"].is_object() }));
 
         let call_response = handle_http_post(
             axum::extract::State(server.clone()),
@@ -13091,12 +13000,10 @@ mod tests {
         let parsed: Value = serde_json::from_str(text).expect("error payload is JSON");
         assert_eq!(parsed["message"], "Provider rejected the request.");
         assert_eq!(parsed["code"], "provider");
-        assert!(
-            parsed["details"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("HTTP 429: rate_limit_exceeded")
-        );
+        assert!(parsed["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HTTP 429: rate_limit_exceeded"));
 
         // No generic credential/API-key advice replaces the raw error.
         let lower = text.to_ascii_lowercase();

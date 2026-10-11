@@ -3,8 +3,8 @@ use crate::contracts::{
     MessageStatus, ModelManifest, ModelSourceKind,
 };
 use crate::models::{AppState, PathResolver};
-use crate::services::design::{AddManualVersionRequest, add_manual_version};
-use crate::services::render_snapshot::{RenderSnapshotInput, build_render_snapshot};
+use crate::services::design::{add_manual_version, AddManualVersionRequest};
+use crate::services::render_snapshot::{build_render_snapshot, RenderSnapshotInput};
 use crate::services::session::{build_saved_version_snapshot, write_last_snapshot};
 use serde::{Deserialize, Serialize};
 use specta::Type;
