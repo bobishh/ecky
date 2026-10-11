@@ -74,7 +74,7 @@ pub fn extract_defined_components(
         };
         let (Some(name), is_component) = (if head == "define-component" {
             (expr_identifier(name_expr), true)
-        } else if let Some(signature) = expr_list_items(name_expr, "define signature").ok() {
+        } else if let Ok(signature) = expr_list_items(name_expr, "define signature") {
             (signature.first().and_then(expr_identifier), false)
         } else {
             (expr_identifier(name_expr), false)

@@ -945,13 +945,13 @@ fn codex_runtime_matches_desktop_catalog_before_older_path_cli() {
     }
     let path = std::env::join_paths([path_cli.parent().unwrap()]).unwrap();
     assert_eq!(
-        resolve_codex_executable_from_sources(None, &[desktop.clone()], &path).unwrap(),
+        resolve_codex_executable_from_sources(None, std::slice::from_ref(&desktop), &path).unwrap(),
         desktop
     );
     assert_eq!(
         resolve_codex_executable_from_sources(
             Some(path_cli.to_str().unwrap()),
-            &[desktop.clone()],
+            std::slice::from_ref(&desktop),
             &path
         )
         .unwrap(),

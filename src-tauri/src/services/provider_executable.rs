@@ -78,21 +78,26 @@ pub fn resolve_codex_executable() -> AppResult<ResolvedProviderExecutable> {
         home.as_deref(),
     )
     .ok_or_else(|| AppError::provider("Codex could not build a process PATH."))?;
-    let mut candidates = Vec::new();
     #[cfg(target_os = "macos")]
-    for applications in home
-        .iter()
-        .map(|home| home.join("Applications"))
-        .chain([PathBuf::from("/Applications")])
-    {
-        for app in ["Codex.app", "ChatGPT.app"] {
-            candidates.push(
-                applications
-                    .join(app)
-                    .join("Contents/Resources/codex-cli/bin/codex"),
-            );
+    let candidates = {
+        let mut candidates = Vec::new();
+        for applications in home
+            .iter()
+            .map(|home| home.join("Applications"))
+            .chain([PathBuf::from("/Applications")])
+        {
+            for app in ["Codex.app", "ChatGPT.app"] {
+                candidates.push(
+                    applications
+                        .join(app)
+                        .join("Contents/Resources/codex-cli/bin/codex"),
+                );
+            }
         }
-    }
+        candidates
+    };
+    #[cfg(not(target_os = "macos"))]
+    let candidates: Vec<PathBuf> = Vec::new();
     let override_command = std::env::var("ECKY_CODEX_BIN").ok();
     let path = resolve_codex_executable_from_sources(
         override_command.as_deref(),

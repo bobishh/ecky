@@ -8,3 +8,8 @@ if ! cargo fmt --all -- --check; then
   printf '%s\n' 'Rust formatting failed. Run cargo fmt --all from src-tauri, then stage the changes.' >&2
   exit 1
 fi
+
+if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+  printf '%s\n' 'Rust Clippy failed. Fix the reported warnings before committing.' >&2
+  exit 1
+fi
