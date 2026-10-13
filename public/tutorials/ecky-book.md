@@ -469,4 +469,3 @@ The CLI commands compile and render; they do not execute the authored runtime ve
 For a more demanding mechanism, [the film scanner](/docs/examples/fbc8ca05b0bc-film-scanner.ecky) combines rails, film inserts and a threaded carrier. Inspect shared pitch and clearance before editing a helix. Ordinary source translations affect exports; only `view` offsets are preview-only.
 
 **You can now:** assemble familiar geometry, distinguish scene placement from inspection views, state a measurable requirement, and export a design with an honest account of what was checked. Your next project can be another farm building—or a worm-sized spaceship. Start with a prediction and one new idea.
-

@@ -241,5 +241,5 @@ export function buildLearningMarkdown(chapters: Array<{ title: string; markdown:
       return `## ${chapter.title}\n\n${body}`;
     }),
     '',
-  ].join('\n');
+  ].join('\n').trimEnd() + '\n';
 }
