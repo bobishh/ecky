@@ -44,6 +44,14 @@ The system SHALL create runtime bundles only after successful native OCCT export
 - THEN partial bundle output is removed
 - AND the raw native failure detail is surfaced.
 
+#### Scenario: A completed boolean produces invalid topology
+
+- GIVEN OCCT completes a boolean but a final analytic part fails BRep validation
+- WHEN the native runner prepares exports
+- THEN it fails before writing STEP, STL, or topology artifacts
+- AND the failure identifies the invalid part and suggests inspecting overlaps
+- AND no staged cache transaction is committed as a successful render.
+
 ### Requirement: No dependency removal without proof
 
 The system SHALL keep existing working render paths until native OCCT satisfies

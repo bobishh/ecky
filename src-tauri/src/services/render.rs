@@ -5522,6 +5522,15 @@ exit 5
                 .collect::<Vec<_>>()
         );
 
+        let topology_path = std::path::Path::new(&bundle.model_stl_path)
+            .parent()
+            .expect("native output directory")
+            .join("topology.json");
+        let topology: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(topology_path).expect("hybrid topology report"))
+                .expect("topology JSON");
+        assert_eq!(topology["parts"][0]["brepValid"], true);
+
         std::fs::remove_dir_all(root).unwrap();
     }
 

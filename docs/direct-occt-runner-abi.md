@@ -10,6 +10,13 @@ The contract applies only to
 artifacts:
 `model.step`, `model.stl`, `topology.json`.
 
+Final BRep parts are validated before any export write. A completed OCCT
+boolean is not sufficient proof of valid topology: an invalid part now aborts
+with its part ID and overlap guidance, before artifacts or cache publication.
+Generated boolean results can receive bounded ShapeFix repair at the boolean
+tolerance (1e-5 mm) before validation. Locked STEP imports retain their strict
+validation without implicit import healing.
+
 ## 1) Plan input (`plan.json`)
 
 ### 1.1 Top-level fields

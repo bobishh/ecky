@@ -1,0 +1,15 @@
+(model
+  (params
+    (number bend 24mm :label "Wiggle" :min 12 :max 32 :step 2))
+  (part worm
+    (let* ((spine (bezier-path
+                    (list (list 0 0 6) (list 0 bend 6)
+                          (list 28 bend 6) (list 28 0 6)
+                          (list 28 (- bend) 6) (list 56 (- bend) 6)
+                          (list 56 0 6))))
+           (body (sweep (circle 6mm) spine)))
+      (union body
+        (translate 0 0 6mm (sphere 6mm))
+        (translate 56mm 3mm 8mm (sphere 8mm))
+        (translate 52mm 8mm 14mm (sphere 3mm))
+        (translate 60mm 8mm 14mm (sphere 3mm))))))

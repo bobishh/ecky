@@ -3871,13 +3871,25 @@ bool boolean_result_is_within_unify_budget(const TopoDS_Shape& shape) {
 }
 
 TopoDS_Shape unify_boolean_same_domain(const TopoDS_Shape& shape) {
-    if (!boolean_result_is_within_unify_budget(shape)) return shape;
+    TopoDS_Shape result = shape;
+    if (!BRepCheck_Analyzer(result).IsValid()) {
+        // Generated boolean edges may have inconsistent p-curves, especially
+        // after cutting a solidified mesh. Keep repair within the boolean's
+        // tolerance; final export validation still rejects unrepaired topology.
+        ShapeFix_Shape fix(result);
+        fix.SetPrecision(1.0e-5);
+        fix.SetMaxTolerance(1.0e-5);
+        fix.Perform();
+        const TopoDS_Shape fixed = fix.Shape();
+        if (!fixed.IsNull() && BRepCheck_Analyzer(fixed).IsValid()) result = fixed;
+    }
+    if (!boolean_result_is_within_unify_budget(result)) return result;
     ShapeUpgrade_UnifySameDomain unify(
-        shape, Standard_True, Standard_True, Standard_False);
+        result, Standard_True, Standard_True, Standard_False);
     unify.Build();
     const TopoDS_Shape unified = unify.Shape();
     if (unified.IsNull() || !BRepCheck_Analyzer(unified).IsValid()) {
-        return shape;
+        return result;
     }
     return unified;
 }
@@ -8282,6 +8294,19 @@ int run(int argc, char** argv, ExecutionContext& context) {
     context.set_stage("evaluate-plan");
     const std::vector<ShapeRecord> parts = evaluate_plan(
         plan, cache_root, cache_transaction ? &*cache_transaction : nullptr, context);
+
+    // A completed boolean can still contain invalid topology. Validate final
+    // analytic parts before writing artifacts or committing the cache transaction.
+    context.set_stage("validate-export-parts");
+    for (const ShapeRecord& part : parts) {
+        if (part.kind == ShapeRecord::Kind::Shape &&
+            (part.shape.IsNull() || !BRepCheck_Analyzer(part.shape).IsValid())) {
+            throw EvalError(
+                "Direct OCCT part `" + part.part_id +
+                "` has an invalid BRep; inspect boolean overlaps and coincident surfaces"
+            );
+        }
+    }
 
     fs::create_directories(out_dir);
     const fs::path step_path = out_dir / "model.step";

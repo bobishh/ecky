@@ -64,3 +64,23 @@ fn native_mesh_render_succeeds_from_worker_thread_with_small_stack() {
     assert!(result.is_ok(), "render succeeded: {:?}", result.err());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn native_render_rejects_invalid_boolean_brep_before_exports() {
+    // Given a coincident spherical cap on a sampled sweep, when OCCT's union
+    // returns an invalid BRep, the renderer must fail rather than export it.
+    let root = std::env::temp_dir().join(format!("ecky-invalid-brep-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("test directory");
+    let resolver = TestResolver(root.clone());
+    let result = ecky_cad_lib::services::render::render_cli_ecky(
+        include_str!("fixtures/regressions/worm_coincident_tail.ecky"),
+        &DesignParams::new(),
+        GeometryBackend::EckyRust,
+        None,
+        &resolver,
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let error = result.expect_err("invalid geometry must not be reported as successful");
+    assert!(error.to_string().contains("invalid BRep"), "{error}");
+    assert!(error.to_string().contains("worm"), "{error}");
+}

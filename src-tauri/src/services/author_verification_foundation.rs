@@ -2231,6 +2231,48 @@ mod tests {
     use std::fs;
     use uuid::Uuid;
 
+    #[test]
+    #[ignore = "requires the prepared native OCCT runtime"]
+    fn worm_farm_render_executes_its_authored_verification() {
+        struct FarmResolver(std::path::PathBuf);
+        impl crate::models::PathResolver for FarmResolver {
+            fn app_config_dir(&self) -> std::path::PathBuf {
+                self.0.join("config")
+            }
+            fn app_data_dir(&self) -> std::path::PathBuf {
+                self.0.join("data")
+            }
+            fn resource_path(&self, _: &str) -> Option<std::path::PathBuf> {
+                None
+            }
+        }
+        let root = std::env::temp_dir().join(format!("ecky-farm-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("test directory");
+        let resolver = FarmResolver(root.clone());
+        let source = include_str!("../../../docs/books/ecky-ir/examples/worm-farm/06-farm.ecky");
+        let bundle = crate::services::render::render_cli_ecky(
+            source,
+            &DesignParams::new(),
+            GeometryBackend::EckyRust,
+            None,
+            &resolver,
+        )
+        .expect("render the complete farm");
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("read native manifest");
+        let result = verify_structure_with_author_verification(&bundle, &manifest);
+        let evidence = serde_json::to_string_pretty(&result).expect("verification evidence");
+        println!("{evidence}");
+        let _ = fs::remove_dir_all(root);
+        assert_eq!(result.authored_verify_checks.len(), 1, "{evidence}");
+        assert_eq!(
+            result.authored_verify_checks[0].status,
+            crate::contracts::AuthoredVerifyCheckStatus::Passed,
+            "{evidence}"
+        );
+        assert!(result.passed, "{evidence}");
+    }
+
     fn bounds(
         x_min: f64,
         y_min: f64,
