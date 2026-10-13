@@ -145,11 +145,6 @@ name = "render_ecky_ir_native_occt"
 path = "src/bin/render_ecky_ir_native_occt.rs"
 required-features = ["tooling"]
 
-[[bin]]
-name = "translate_legacy_python_to_ecky_ir"
-path = "src/bin/translate_legacy_python_to_ecky_ir.rs"
-required-features = ["tooling"]
-
 [profile.dev.package.meshopt]
 opt-level = 3
 

@@ -34,8 +34,8 @@ only), and an optional dev CLI. Author tests first (BDD red→green) per task.
 
 ## 3. Dev CLI (optional harness — model/provider comparison)
 
-- [x] 3.1 Bin `cad_to_ecky <input> [--backend] [--model] [--base-url] [--out]`
-  mirroring `translate_legacy_python_to_ecky_ir`'s arg shape. Evidence:
+- [x] 3.1 Bin `cad_to_ecky <input> [--backend] [--model] [--base-url] [--out]`.
+  Evidence:
   `src-tauri/src/bin/cad_to_ecky.rs` parses every named argument;
   `cad_to_ecky_cli::{cli_flags_then_nvidia_then_nim_override_selected_engine_per_field,dump_prompt_respects_backend_flag,dump_prompt_rejects_invalid_arguments}`
   pins flag precedence, backend parsing, and invalid usage.
@@ -133,3 +133,22 @@ The deterministic-emitter prototype and the library-survey script
 kill evidence (0% Array/expression/spreadsheet, 45% PartDesign over 97 mechanical
 parts) is recorded in the proposal. The FreeCAD adapter (task 4.2) is built fresh
 as extraction-only when needed; the LLM owns all Ecky emission.
+
+## 8. Remove the retired Thomas Python converter — 2026-10-12
+
+- [x] Reproduce the registered obsolete CLI target with a failing Cargo metadata check.
+- [x] Delete the Thomas-only Python AST emitter, its module export and tooling CLI target.
+- [x] Delete the Python reference macro and both sets of subprocess parity scripts;
+  update the aggregate parity list and current documentation references.
+- [x] Prove that Cargo metadata retains `cad_to_ecky` and omits the retired target.
+- [x] Run current backend and transpile CLI acceptance suites.
+
+Current `.ecky` ramp fixtures and their compiler/FreeCAD regression tests remain
+active. The removed parity test no longer launches Cargo from inside a test or
+adds a runtime path for an old authored format.
+
+Retirement evidence: Cargo metadata absence check first failed on the registered
+old target, then passed after removal. All 48 backend tests and 13 current
+transpile CLI tests pass. The aggregate FreeCAD parity runner references eight
+existing scripts. No code, tooling script, or current tracker references the
+removed module, macro, or Thomas Python parity runners.

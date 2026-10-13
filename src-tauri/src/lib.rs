@@ -62,7 +62,6 @@ pub mod freecad_library;
 pub mod gmsh_mesher;
 mod image_sampling;
 pub mod jev_classifier;
-pub mod legacy_python_to_ecky_ir;
 pub mod lithophane;
 pub mod llm;
 pub mod llm_context;

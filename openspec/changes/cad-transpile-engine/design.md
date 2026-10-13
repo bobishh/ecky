@@ -62,7 +62,7 @@ consumer gets only its vetted output.
 | Thread version authoring | `macro_preview_render`, `verify_generated_model` |
 | Gate | `verify_generated_model` + authored `(verify …)` |
 | Geometry parity measurement | source → STEP → build123d `import_step` bbox/volume |
-| CLI shape precedent | `src/bin/translate_legacy_python_to_ecky_ir.rs` |
+| CLI entry point | `src/bin/cad_to_ecky.rs` |
 
 ## 5. The translate instruction (the only new prompt text)
 
@@ -108,6 +108,11 @@ could not do. The geometry rules and op catalogue come from the system prompt.
 - **Raw/pseudo-CAD text**: pass through.
 
 Adapters produce text for the model; they never emit Ecky.
+
+Python CAD source is raw foreign text through this same path. The retired
+Thomas-only Python AST emitter has no module, CLI target, reference macro,
+or subprocess parity harness. Current Thomas `.ecky` fixtures remain covered
+by compiler and backend regression tests.
 
 ## 8. Removed prototype
 

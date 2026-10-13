@@ -16,11 +16,6 @@ CHECKS = [
     "check_freecad_plane_location_place.py",
     "check_freecad_path_frame_pose.py",
     "check_freecad_path_frame_up_pose.py",
-    "check_freecad_thomas_body_parity.py",
-    "check_freecad_thomas_grooves_parity.py",
-    "check_freecad_thomas_teeth_parity.py",
-    "check_freecad_thomas_connectors_parity.py",
-    "check_freecad_thomas_ramp_parity.py",
 ]
 
 

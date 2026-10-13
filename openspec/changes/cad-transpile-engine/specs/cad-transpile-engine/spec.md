@@ -124,3 +124,16 @@ reusing the existing authoring and gate path.
 - WHEN the agent processes it
 - THEN it authors a new thread version in Ecky via the existing version path
 - AND that version is subject to the standard verify gate.
+
+### Requirement: No fixture-specific Python conversion path
+
+The application SHALL NOT expose the retired Thomas-only Python AST emitter as
+a module or CLI target. Python CAD input SHALL use the ordinary foreign-text
+transpile path. Current authored `.ecky` fixtures SHALL retain compiler and
+backend regression coverage without executing the removed Python reference.
+
+#### Scenario: Tooling targets exclude the retired converter
+- GIVEN current Cargo package metadata
+- WHEN CLI targets are enumerated
+- THEN `translate_legacy_python_to_ecky_ir` is absent
+- AND `cad_to_ecky` remains registered.
