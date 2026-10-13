@@ -154,6 +154,14 @@ export function syncEckyIrContent(root: string, check = false): void {
     fs.writeFileSync(outputPath, content);
   }
 
+  const { chapters } = readPublishedChapters(root);
+  const bookPath = path.join(root, 'public/tutorials/ecky-book.md');
+  const learningBook = buildLearningMarkdown(chapters, fs.readFileSync(path.join(root, 'docs/books/ecky-ir/introduction.md'), 'utf8'));
+  if (!fs.existsSync(bookPath) || fs.readFileSync(bookPath, 'utf8') !== learningBook) {
+    if (check) drift.push('public/tutorials/ecky-book.md');
+    else fs.writeFileSync(bookPath, learningBook);
+  }
+
   if (drift.length) {
     throw new Error(`Published Ecky content drifted: ${drift.join(', ')}`);
   }
@@ -176,21 +184,37 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
 }
 
 const missionFiles = [
-  ['mission-01-bracket-enclosure', 'level-01-corner-bracket.md'],
-  ['mission-02-bottle-cage-dovetail', 'level-02-bottle-cage-dovetail.md'],
-  ['mission-03-wing-propeller-study', 'level-03-printable-wing-propeller.md'],
-  ['mission-04-gillette-travel-kit', 'level-04-gillette-travel-kit.md'],
-  ['mission-05-iphone-case-fixture', 'level-05-iphone-case-fixture.md'],
-  ['mission-06-film-scanner', 'level-06-film-scanner.md'],
+  ['worm-farm-01', '01-worm.md'],
+  ['worm-farm-02', '02-mushroom-house.md'],
+  ['worm-farm-03', '03-rake.md'],
+  ['worm-farm-04', '04-tractor.md'],
+  ['worm-farm-05', '05-garden.md'],
+  ['worm-farm-06', '06-farm.md'],
 ] as const;
 
-export function readPublishedChapters(root: string, sourceBase = '/docs') {
+export function readPublishedChapters(root: string, sourceBase = '/docs', imageBase = sourceBase) {
   const exampleFiles = new Map<string, Buffer>();
+  const imageFiles = new Map<string, Buffer>();
   const chapters = missionFiles.map(([id, file]) => {
     const contentPath = path.join(root, 'docs', 'books', 'ecky-ir', 'missions', file);
-    const markdown = fs.readFileSync(contentPath, 'utf8').replace(/\[([^\]]+)\]\(([^)]+\.ecky)\)/g, (_, label, relativePath) => {
+    const resolveSource = (relativePath: string) => {
       const sourcePath = path.resolve(path.dirname(contentPath), relativePath);
       if (!sourcePath.startsWith(`${root}${path.sep}`)) throw new Error(`Chapter source outside repository: ${relativePath}`);
+      return sourcePath;
+    };
+    const markdown = fs.readFileSync(contentPath, 'utf8')
+      .replace(/<!-- example: ([^\n]+\.ecky) -->/g, (_, relativePath) =>
+        `\`\`\`scheme\n${fs.readFileSync(resolveSource(relativePath), 'utf8').trim()}\n\`\`\``)
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, label, relativePath) => {
+        const sourcePath = resolveSource(relativePath);
+        const assetRoot = path.join(root, 'docs/books/ecky-ir/assets');
+        if (!sourcePath.startsWith(`${assetRoot}${path.sep}`)) throw new Error(`Chapter image outside book assets: ${relativePath}`);
+        const assetPath = `assets/${path.relative(assetRoot, sourcePath).split(path.sep).join('/')}`;
+        imageFiles.set(assetPath, fs.readFileSync(sourcePath));
+        return `![${label}](${imageBase ? `${imageBase}/` : ''}${assetPath})`;
+      })
+      .replace(/(?<!!)\[([^\]]+)\]\(([^)]+\.ecky)\)/g, (_, label, relativePath) => {
+      const sourcePath = resolveSource(relativePath);
       const bytes = fs.readFileSync(sourcePath);
       const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
       const assetPath = `examples/${hash}-${path.basename(sourcePath)}`;
@@ -201,5 +225,21 @@ export function readPublishedChapters(root: string, sourceBase = '/docs') {
     return { id, sectionSlug: file.replace(/\.md$/, ''), title, markdown, checkpoints: [] };
   });
 
-  return { chapters, exampleFiles };
+  return { chapters, exampleFiles, imageFiles };
+}
+
+export function buildLearningMarkdown(chapters: Array<{ title: string; markdown: string }>, introduction: string): string {
+  return [
+    introduction.trim(),
+    '',
+    ...chapters.map(chapter => {
+      const body = chapter.markdown.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '')
+        .replace(/^# .+\n+/, '')
+        .replace(/^### /gm, '#### ')
+        .replace(/^## /gm, '### ')
+        .replace(/ \{#[a-z0-9-]+\}/g, '');
+      return `## ${chapter.title}\n\n${body}`;
+    }),
+    '',
+  ].join('\n');
 }

@@ -1,0 +1,13 @@
+{
+  "sourcePath": "docs/books/ecky-ir/examples/worm-farm/05-garden.ecky",
+  "sourceSha256": "f16bd0405eea5112ed719eedc4330922bbe83b7bb0a32b24ff07f8df31fc792b",
+  "eckyContentHash": "6b3d03f880df5f129076eac522bfe6faebcc27f05a4b12712958db7f374c358e",
+  "stlBytes": 693784,
+  "pngPath": "docs/books/ecky-ir/assets/worm-farm/05-garden.png",
+  "pngWidth": 960,
+  "pngHeight": 960,
+  "nonBackgroundCoverage": 0.12661566840277777,
+  "renderer": "three-webgl-swiftshader",
+  "backend": "direct-occt",
+  "generatedBy": "scripts/render_ecky_preview_png.mjs"
+}

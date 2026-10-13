@@ -1,6 +1,6 @@
 <script lang="ts">
   import { parseDocsDocument, type DocsSection } from './docs/eckyIrGuide';
-  import tutorialMarkdown from '../../public/tutorials/ecky-campaign.md?raw';
+  import tutorialMarkdown from '../../public/tutorials/ecky-book.md?raw';
 
   type OpenAttemptPayload = {
     code: string;
@@ -31,8 +31,7 @@
   }
 
   function chooseAttemptSnippet(snippets: string[]): string | null {
-    const attemptPattern = /\((?:repeat-)?union\b/;
-    return snippets.find((snippet) => attemptPattern.test(snippet)) ?? snippets[0] ?? null;
+    return snippets.find((snippet) => /(?:^|\n)\(model\b/.test(snippet)) ?? null;
   }
 
   function openAttempt() {
@@ -40,7 +39,7 @@
     const snippetList = extractSnippets(selectedSection.bodyMarkdown);
     const snippet = chooseAttemptSnippet(snippetList);
     if (!snippet) return;
-    const normalizedTitle = selectedSection.title.replace(/^\s*Level\s+\d{1,2}:\s*/i, '');
+    const normalizedTitle = selectedSection.title.replace(/^\s*(?:Level|Chapter)\s+\d{1,2}:\s*/i, '');
     onOpenAttempt?.({
       code: snippet,
       title: normalizedTitle,
@@ -50,8 +49,9 @@
 
 <section class="chapters" aria-label="Ecky campaign chapters">
   <header class="chapters__header">
-    <p>Ecky Campaign</p>
-    <h1>Ecky Campaign</h1>
+    <p>Ecky CAD Book</p>
+    <h1>Worm Farm</h1>
+    {@html campaign.summaryHtml}
   </header>
 
   <div class="chapters__body">
@@ -71,14 +71,13 @@
     <article class="chapters__content">
       {#if selectedSection}
         <h2>{selectedSection.title}</h2>
-        <pre><code>{selectedSection.snippet ?? ''}</code></pre>
         {@html selectedSection.bodyHtml}
         <div class="chapters__actions">
           <button
             type="button"
             class="chapters__attempt"
             onclick={openAttempt}
-            disabled={!selectedSection.snippet}
+            disabled={!selectedSection.snippet || !onOpenAttempt}
           >
             OPEN ATTEMPT IN CODE
           </button>
@@ -92,6 +91,7 @@
 
 <style>
   .chapters {
+    height: 100%;
     min-height: 0;
     display: grid;
     grid-template-rows: auto 1fr;
@@ -171,7 +171,7 @@
     font-size: 22px;
   }
 
-  .chapters__content pre {
+  .chapters__content :global(pre) {
     min-height: 0;
     max-height: 50%;
     overflow: auto;
@@ -180,6 +180,11 @@
     padding: 10px;
     background: #090c14;
     color: #e0e0e0;
+  }
+
+  .chapters__content :global(img) {
+    max-width: 100%;
+    height: auto;
   }
 
   .chapters__content :global(p),

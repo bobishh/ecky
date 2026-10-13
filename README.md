@@ -6,7 +6,7 @@ Models are stored as `.ecky` source: a small modeling language with Lisp-style s
 
 The project is at **0.0.1** and under active development. Expect to build from source, encounter bugs, and see changes to the language and APIs.
 
-[Modeling tutorial](public/tutorials/ecky-campaign.md) · [Language reference](public/docs/ecky-ir.md) · [Website and examples](https://ecky-cad.com/)
+[Illustrated CAD book](docs/books/ecky-ir/missions/01-worm.md) · [Language reference](public/docs/ecky-ir.md) · [Website and examples](https://ecky-cad.com/)
 
 ![Ecky desktop workspace with project cards, a filament-dryer model, editable source, and a Codex conversation](docs/screenshots/ecky-workbench.png)
 
@@ -106,22 +106,36 @@ STEP availability depends on the geometry path; mesh-based results do not necess
 
 ## Documentation and development
 
-The six web chapters live in `docs/books/ecky-ir/missions/*.md`. Both the web
-reader and EPUB use these files and their linked `.ecky` examples. Edit these
-Markdown files for chapter changes. `npm run build:docs-site` packages the exact
-linked sources under `/docs/examples/`; `npm run build:book` produces the EPUB.
+The illustrated **Worm Farm** book builds one small world across six chapters:
+Bézier worm, mushroom house, rake, tractor, garden, then checked assembly.
+Start with [the first chapter](docs/books/ecky-ir/missions/01-worm.md).
+The shared introduction is `docs/books/ecky-ir/introduction.md`; chapter sources
+are `docs/books/ecky-ir/missions/01-worm.md` through `06-farm.md`. Website,
+app Documentation → Chapters, and EPUB read these same Markdown files.
+Complete worked code is inserted from the linked canonical `.ecky` files;
+source-bound native render PNGs live under `docs/books/ecky-ir/assets/worm-farm/`.
 
-The human function reference comes from the appendix in
-`docs/books/ecky-ir/ecky-ir-corpus.md`. Its generated registry appendix is
-projected without compiler metadata or duplicate entries.
-
-
-- [Modeling tutorial](public/tutorials/ecky-campaign.md) — worked examples, starting with a bracket.
-- [Language reference](public/docs/ecky-ir.md) — syntax and modeling operations.
+- [Sources, build graph, and publishing](docs/books/ecky-ir/PUBLISHING.md).
+- [Language reference source](docs/books/ecky-ir/ecky-ir-corpus.md) — precise syntax and extra engineering exercises.
 - [MCP tool reference](skills/ecky-mcp/reference/tools.md) — external-agent integration.
-- [VS Code extension](editors/vscode/README.md) and [Emacs mode](editors/emacs/README.md) — editor support.
-- [Agent and contributor protocol](AGENTS.md) — ownership boundaries, coding conventions, and verification rules.
-- [OpenSpec changes](openspec/changes/) — implementation plans and their status; unfinished proposals are not a list of available features.
+- [VS Code extension](editors/vscode/README.md) and [Emacs mode](editors/emacs/README.md).
+- [Contributor protocol](AGENTS.md) and [OpenSpec changes](openspec/changes/).
+
+`npm run build:farm-assets` refreshes the six actual CAD illustrations, using a
+current CLI and prepared OCCT runtime. `npm run build:book` synchronizes sources
+and packages the app's book, images, downloads and EPUB. `npm run build:docs-site`
+builds the website. `npm run build` refreshes the book before bundling the app.
+`npm run generate:docs` also rebuilds Rust-generated agent prompts and MCP docs.
+
+The older `missions/level-*.md` files retain stable advanced guided workshop
+steps; the corpus's generated `levels/*.md` are extra exercises. They are not
+the beginner book's chapter source.
+
+Ecky's website remains an nginx/Kamal deployment in the sibling infrastructure
+repository. That repository's October 2026 Cloudflare migration explicitly
+excluded Ecky; public routing was checked on 2026-10-13. See the publishing
+runbook for evidence and release instructions. Pushing this repository runs CI;
+it does not publish the website.
 
 Common checks:
 

@@ -13,5 +13,5 @@
       (logistic (logistic-bifurcation-points 8 4 12 10))
       (x (+ 8 (* 0.01 (+ (length jittered) (length grid) (length polar) (length wave)))))
       (y (+ 8 (* 0.01 (+ (length super-point) (length cells)))))
-      (z (+ 4 (* 0.01 (+ (length rossler) (length logistic)))))
+      (z (+ 4 (* 0.01 (+ (length rossler) (length logistic))))))
       (box x y z))))

@@ -4,6 +4,8 @@
 
 **Clear condition:** All four checkpoints compile and the final boolean is one body minus one generated cutter group.
 
+Imagine a tiny umbrella stand for a hedgehog who keeps bringing wet toothpicks indoors. Build its hollow body first, then one drain and one wall cutter. Only repeat a cutter after it demonstrably crosses the wall.
+
 Small examples teach syntax. This project teaches control: preserve one useful
 body while shelling it, closing it, proving a custom cutter, then generating
 dozens of cutters without turning the source into copied geometry.

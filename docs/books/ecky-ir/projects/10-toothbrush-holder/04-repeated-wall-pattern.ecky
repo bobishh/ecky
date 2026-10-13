@@ -17,6 +17,6 @@
            (body (union (difference outer cavity) (difference base_blank drain)))
            (spade_profile (polygon ((0 4.7) (-3.05 1.5) (-3.25 -0.8) (-2.15 -1.95) (-0.55 -3.35) (-1.15 -5.35) (1.15 -5.35) (0.55 -3.35) (2.15 -1.95) (3.25 -0.8) (3.05 1.5))))
            (spade (place (location (plane :origin '(0 0 0)) :rotate '(-90 0 180)) (extrude spade_profile (+ wall_margin (* 2 cutter_margin)))))
-           (front_cutters (repeat-union row 5 (repeat-union column 5 (let* ((angle (+ -48 (* column 24))) (zpos (+ (- (/ height 2) pattern_margin) (* row 13)))) (place (location (plane :origin '(0 0 0)) :rotate (list 0 0 angle)) (translate 0 (- radius wall_margin cutter_margin) zpos spade)))))))
+           (front_cutters (repeat-union row 5 (repeat-union column 5 (let* ((angle (+ -48 (* column 24))) (zpos (+ (- (/ height 2) pattern_margin) (* row 13)))) (place (location (plane :origin '(0 0 0)) :rotate (list 0 0 angle)) (translate 0 (- radius wall_margin cutter_margin) zpos spade))))))
            (cutter_group front_cutters))
       (difference body cutter_group))))

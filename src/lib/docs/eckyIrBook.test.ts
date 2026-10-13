@@ -38,3 +38,11 @@ test('buildEckyIrBook assembles campaign levels into book html', () => {
 function bookMarkdownFixture(): string {
   return fs.readFileSync(fixturePath('public', 'tutorials', 'ecky-campaign.md'), 'utf8');
 }
+
+test('Given repeated reference headings When building one EPUB document Then anchors are unique and links resolve locally', () => {
+  const book = buildEckyIrBook({ docsMarkdown: '# Book\n\n## First\n\n### tag\n\n[first](#tag)\n\n## Second\n\n### tag\n\n[second](#tag)' });
+  const ids = [...book.html.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(ids.length, new Set(ids).size);
+  assert.match(book.chapters[0].bodyHtml, /href="#docs-first-tag"/);
+  assert.match(book.chapters[1].bodyHtml, /href="#docs-second-tag"/);
+});

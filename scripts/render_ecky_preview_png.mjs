@@ -142,8 +142,8 @@ try {
   const dims = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(dims.x, dims.y, dims.z) || 1;
   const scale = 64 / maxDim;
+  mesh.position.copy(center).negate();
   group.scale.setScalar(scale);
-  group.position.copy(center).multiplyScalar(-scale);
   group.rotation.y = ${params.yaw};
   group.rotation.x = ${params.pitch};
   renderer.render(scene, camera);

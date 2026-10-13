@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildEckyIrBook } from '../src/lib/docs/eckyIrBook';
-import { readPublishedChapters, syncEckyIrContent } from './ecky_ir_content';
+import { buildLearningMarkdown, readPublishedChapters, syncEckyIrContent } from './ecky_ir_content';
 import { syncSplitBook } from './ecky_ir_source';
 
 const root = process.cwd();
@@ -21,18 +21,9 @@ const publicDocsDir = path.join(root, 'public', 'docs');
 
 syncEckyIrContent(root);
 syncSplitBook(root);
-const { chapters } = readPublishedChapters(root, 'https://ecky-cad.com/docs');
+const { chapters, exampleFiles } = readPublishedChapters(root, 'https://ecky-cad.com/docs', '');
 const docsMarkdown = [
-  '# Ecky CAD: Models and Language',
-  'Six source walkthroughs, followed by the function reference. Download links open the complete model files.',
-  ...chapters.map((chapter) => {
-    const body = chapter.markdown.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '')
-      .replace(/^# .+\n+/, '')
-      .replace(/^### /gm, '#### ')
-      .replace(/^## /gm, '### ')
-      .replace(/ \{#[a-z0-9-]+\}/g, '');
-    return `## ${chapter.title}\n\n${body}`;
-  }),
+  buildLearningMarkdown(chapters, fs.readFileSync(path.join(root, 'docs/books/ecky-ir/introduction.md'), 'utf8')),
   fs.readFileSync(referenceSourcePath, 'utf8').replace(/^# .+\n/, ''),
 ].join('\n\n');
 
@@ -47,6 +38,11 @@ fs.writeFileSync(htmlPath, book.html);
 copyHtmlAssets(book);
 writeEpub(book);
 publishToPublicDocs(book);
+for (const [relativePath, bytes] of exampleFiles) {
+  const outputPath = path.join(publicDocsDir, relativePath);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, bytes);
+}
 
 console.log(`HTML: ${htmlPath}`);
 console.log(`EPUB: ${epubPath}`);
@@ -153,7 +149,8 @@ function bookPackageOpf(book: ReturnType<typeof buildEckyIrBook>): string {
     <dc:identifier id="bookid">urn:ecky:ir-field-guide</dc:identifier>
     <dc:title>${escapeXml(book.title)}</dc:title>
     <dc:language>en</dc:language>
-    <dc:creator>OpenAI Codex</dc:creator>
+    <dc:creator>Ecky CAD</dc:creator>
+    <meta property="dcterms:modified">${new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')}</meta>
   </metadata>
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav" />

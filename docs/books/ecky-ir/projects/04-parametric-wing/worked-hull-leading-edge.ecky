@@ -25,5 +25,5 @@
       (wing_solid (loft span root_station tip_station))
       (leading_edge_fairing
         (hull (sphere (/ root_thickness 4))
-              (translate 0 0 span (sphere (/ tip_thickness 4)))))
+              (translate 0 0 span (sphere (/ tip_thickness 4))))))
       (union wing_solid leading_edge_fairing))))

@@ -79,6 +79,7 @@ const ALL_CORE_OPERATION_NAMES: &[&str] = &[
     "path-frame",
     "place",
     "clip-box",
+    "clip-plane",
     "compound",
     "meta",
     "build",

@@ -1,0 +1,13 @@
+{
+  "sourcePath": "docs/books/ecky-ir/examples/worm-farm/06-farm.ecky",
+  "sourceSha256": "98a453e6356c8490b944ad96392cbd980320edb4474fed0331c7bf6b09b98021",
+  "eckyContentHash": "eaf6ad510caec57836cd2d3ca4346fa83d62d1caa1b173eb6bda0f544a5b3197",
+  "stlBytes": 2961684,
+  "pngPath": "docs/books/ecky-ir/assets/worm-farm/06-farm.png",
+  "pngWidth": 960,
+  "pngHeight": 960,
+  "nonBackgroundCoverage": 0.12637803819444443,
+  "renderer": "three-webgl-swiftshader",
+  "backend": "direct-occt",
+  "generatedBy": "scripts/render_ecky_preview_png.mjs"
+}

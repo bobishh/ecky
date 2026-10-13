@@ -1,5 +1,9 @@
 # Ecky learning corpus — editorial audit
 
+Historical review. The current illustrated book, source ownership and verified
+deployment instructions are described in [PUBLISHING.md](PUBLISHING.md).
+Do not use the old chapter layout below as the current build graph.
+
 Date: 2026-08-01
 
 Scope:

@@ -4,6 +4,8 @@
 
 **Clear condition:** One parameter change regenerates the pattern; final geometry still exports as a valid solid.
 
+A robot with twelve accessories should not need twelve hand-edited placements. Reuse the rake lesson: prove one shape and one location, then generate the row or path. Inspect the result after changing a count.
+
 These fixtures combine generated cutter lists, deterministic fields, path frames, arrays, and parameter-driven cavities. Focus on how each model separates generation math from final boolean intent.
 
 ### Procedural perforated panel

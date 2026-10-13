@@ -19,7 +19,7 @@
         (list (- rail_height) (- (/ groove_root 2))))))
       (groove_unit (rotate 0 90 0 (extrude groove_profile case_length)))
       (grooves (translate 0 (- (/ case_width 2) 8) 10
-                (linear-array 2 0 (- case_width 16) 0 groove_unit)))
+                (linear-array 2 0 (- case_width 16) 0 groove_unit))))
       (difference case grooves)))
   (part dovetail_lid
     (let* (
@@ -31,5 +31,5 @@
         (list (- rail_height) (- (/ rail_head 2))))))
       (rail_unit (rotate 0 90 0 (extrude rail_profile case_length)))
       (rails (translate 0 (+ 90 (- (/ case_width 2) 8)) 0
-              (linear-array 2 0 (- case_width 16) 0 rail_unit)))
+              (linear-array 2 0 (- case_width 16) 0 rail_unit))))
       (union plate rails))))

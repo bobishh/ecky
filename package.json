@@ -36,7 +36,9 @@
     "test:editors": "node scripts/test_editor_support.mjs && emacs -Q --batch -L editors/emacs -l editors/emacs/test-ecky-mode.el",
     "start": "tsx server/index.ts",
     "prepare": "git config core.hooksPath .githooks",
-    "build:docs-site": "tsx scripts/build_ecky_ir_docs_site.ts"
+    "build:docs-site": "tsx scripts/build_ecky_ir_docs_site.ts",
+    "prebuild": "npm run build:book",
+    "build:farm-assets": "node scripts/render_farm_assets.mjs"
   },
   "dependencies": {
     "@codemirror/lang-python": "^6.2.1",

@@ -5,6 +5,8 @@ title: Loft a wing and repeat a blade
 
 # Loft a wing and repeat a blade
 
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+
 A loft joins cross-sections into a solid. Here two four-point profiles become a wing-shaped study. You will change its span and taper, then read how one blade is repeated around a hub. These examples demonstrate geometry, not tested flying parts.
 
 ## Define the two sections {#stations}
@@ -62,7 +64,7 @@ These are `let*` bindings, not a complete program. Replace the tip profile's cho
 
 [Download taper example](../projects/04-parametric-wing/solution-taper-twist.ecky)
 
-Change `taper_ratio` from 0.6 to 0.45. The derived tip chord becomes 19.8 mm. This older example still declares `tip_chord` for a parameter relation; that control no longer drives the tip geometry. Follow the derived binding when checking the result.
+Change `taper_ratio` from 0.6 to 0.45. The derived tip chord becomes 19.8 mm. Its tip is driven by the derived binding; `taper_ratio` stays between zero and one. There is no independent tip-width control to adjust.
 
 ## Repeat one blade {#propeller-worked}
 

@@ -5,6 +5,8 @@ title: Build a bracket, then an enclosure
 
 # Build a bracket, then an enclosure
 
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+
 A bracket is a useful first model: two boxes overlap, and `union` joins them. You will change its width, separate its two shapes, and see why placement matters before adding holes or a lid.
 
 Save the complete example below as `bracket.ecky` and open it in Ecky. Lengths are in millimetres. The source declares three controls: span, foot depth, and stock thickness.

@@ -38,8 +38,8 @@ Read [README.md](README.md). Global working agreements cover BDD, browser consen
 
 ## Documentation sources
 
-- Chapters: `docs/books/ecky-ir/missions/*.md`; reference source: `docs/books/ecky-ir/ecky-ir-corpus.md`. Edit sources rather than generated copies under `public/`.
-- `npm run sync:book-source` projects reference content; `npm run check:book-source` verifies synchronization. `npm run build:docs-site` packages web docs/examples; `npm run build:book` builds EPUB.
+- Illustrated book: `docs/books/ecky-ir/introduction.md` plus `missions/01-worm.md` through `missions/06-farm.md`. Older `missions/level-*.md` preserve advanced guided workshop steps; reference source: `docs/books/ecky-ir/ecky-ir-corpus.md`. Edit sources rather than generated copies under `public/`.
+- `npm run sync:book-source` projects reference content and the shared app book; `npm run check:book-source` verifies synchronization. `npm run build:docs-site` packages web docs/examples; `npm run build:book` builds EPUB.
 - Components own shell/navigation/search/loading; substantive docs remain file-backed. Verify content, linked examples, and serving path before adding interactive extras.
 
 ## Requested commits

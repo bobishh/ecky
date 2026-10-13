@@ -40,6 +40,29 @@ export function buildEckyIrBook(input: EckyIrBookInput): EckyIrBook {
     })),
   ];
 
+  // Web sections have separate documents; the EPUB puts them all in one.
+  // Namespace heading IDs and resolve fragment links against their own chapter.
+  const globalAnchors = new Map<string, string>();
+  const localAnchors = chapters.map(chapter => {
+    const anchors = new Map<string, string>();
+    const occurrences = new Map<string, number>();
+    chapter.bodyHtml = chapter.bodyHtml.replace(/id="([^"]+)"/g, (_, id: string) => {
+      const count = (occurrences.get(id) ?? 0) + 1;
+      occurrences.set(id, count);
+      const target = `${chapter.id}-${id}${count > 1 ? `-${count}` : ''}`;
+      if (!anchors.has(id)) anchors.set(id, target);
+      if (!globalAnchors.has(id)) globalAnchors.set(id, target);
+      return `id="${target}"`;
+    });
+    return anchors;
+  });
+  chapters.forEach((chapter, index) => {
+    chapter.bodyHtml = chapter.bodyHtml.replace(/href="#([^"]+)"/g, (link, id: string) => {
+      const target = localAnchors[index].get(id) ?? globalAnchors.get(id);
+      return target ? `href="#${target}"` : link;
+    });
+  });
+
   const tocHtml = chapters
     .map((chapter) => `<li><a href="#${chapter.id}">${escapeHtml(chapter.title)}</a></li>`)
     .join('');

@@ -1,4 +1,4 @@
-import { docsHeadingSlug, renderMarkdownFragment } from './eckyIrGuide';
+import { docsHeadingSlug, parseDocsDocument, renderMarkdownFragment } from './eckyIrGuide';
 
 export type StaticChapterCheckpoint = {
   id: string;
@@ -18,6 +18,7 @@ export type StaticChapter = {
 export type ChaptersSiteOptions = {
   basePath: string;
   epubPath: string;
+  introductionMarkdown?: string;
 };
 
 export function buildChaptersSitePages(
@@ -43,12 +44,13 @@ export function buildChaptersIndexHtml(
     <span>Chapter ${String(index + 1).padStart(2, '0')}</span>
     <strong>${escapeHtml(chapter.title)}</strong>
   </a>`).join('');
+  const introduction = parseDocsDocument(options.introductionMarkdown ?? '# Ecky CAD Chapters');
   return documentHtml('Chapters · Ecky CAD', options, `
     <main class="docs-main docs-main--chapters">
       <section class="docs-main__section">
         <p class="docs-main__eyebrow">ECKY CAD / CHAPTERS</p>
-        <h1 class="docs-main__heading">Six practical chapters</h1>
-        <div class="docs-main__body"><p>Start with two boxes and a union. Then work through fits, lofts, a travel case, a phone case, and a film scanner. Each chapter includes code to read and complete .ecky files to open in Ecky. The later chapters are source walkthroughs; begin with chapter 1 if the language is new to you.</p></div>
+        <h1 class="docs-main__heading">${escapeHtml(introduction.title)}</h1>
+        <div class="docs-main__body">${introduction.summaryHtml}</div>
         <nav class="docs-pager docs-pager--chapters" aria-label="Chapters">${cards}</nav>
       </section>
     </main>`);

@@ -1,5 +1,9 @@
 # Ecky IR Field Guide — Revision Plan
 
+Historical review. The current illustrated book, source ownership and verified
+deployment instructions are described in [PUBLISHING.md](PUBLISHING.md).
+Do not use the old chapter layout below as the current build graph.
+
 Plan for reworking the field guide (`docs/books/ecky-ir/`). Lighter than an
 OpenSpec change — this is docs, not code. Work it top to bottom; check boxes as
 you go. Each task is small enough to land in one pass.

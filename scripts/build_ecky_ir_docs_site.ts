@@ -36,10 +36,11 @@ const pages = buildDocsSitePages(doc, {
   epubPath: '/docs/ecky-ir-field-guide.epub',
 });
 
-const { chapters, exampleFiles } = readPublishedChapters(root);
+const { chapters, exampleFiles, imageFiles } = readPublishedChapters(root);
 const chapterPages = buildChaptersSitePages(chapters, {
   basePath: '/docs',
   epubPath: '/docs/ecky-ir-field-guide.epub',
+  introductionMarkdown: fs.readFileSync(path.join(root, 'docs/books/ecky-ir/introduction.md'), 'utf8'),
 });
 for (const [relativePath, html] of chapterPages) pages.set(relativePath, html);
 
@@ -49,7 +50,7 @@ for (const [relativePath, html] of pages) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, html);
 }
-for (const [relativePath, bytes] of exampleFiles) {
+for (const [relativePath, bytes] of [...exampleFiles, ...imageFiles]) {
   const outputPath = path.join(outputDir, relativePath);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, bytes);

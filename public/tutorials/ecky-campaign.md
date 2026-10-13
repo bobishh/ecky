@@ -10,6 +10,12 @@ the dry operation reference lives under `/docs/ecky-ir`.
 
 **Clear condition:** Preview shows one connected L-bracket where the foot and flange overlap, and the source compiles.
 
+These are extra engineering exercises. For the illustrated beginner book,
+start with [Worm Farm](missions/01-worm.md): a Bézier worm grows a farm with a
+house, tools, a tractor and a garden. Return here to apply those ideas to
+practical parts. This bracket is the shelf support for a robot's emergency
+biscuit stash. Its two shapes must overlap; robots cannot eat an invisible join.
+
 A renderable file needs a `model` root, a named `part`, and geometry. The first
 useful part is a **corner bracket**: one horizontal foot and one vertical flange
 that cross at a corner and fuse into a single printable L-shape. Starting with
@@ -73,6 +79,8 @@ they overlap, then join them with one boolean.
 
 **Clear condition:** Every cutter crosses the plate and the exported STL remains one component.
 
+Our robot now wants bolts, not optimism, to hold its biscuit shelf. Think of each cutter as a cookie cutter passing completely through the dough: a cutter that stops inside leaves a blind pocket.
+
 Use `build` when a part needs several boolean stages. Each `shape` names an intermediate result; `result` identifies the final geometry. Names keep cutters and later selectors readable.
 
 ```scheme
@@ -119,6 +127,8 @@ The result is still one part, but the intent stays readable.
 
 **Clear condition:** Changing fit_clearance widens the channel while the rail stays nominal; no second anonymous offset needs editing.
 
+The shelf needs to slide out for crumb patrol. The rail stays nominal; the channel grows by a named clearance. That is the same fit idea as the mushroom roof plug, now with a polygonal cross-section.
+
 A dovetail is a sliding fit between a male rail and a female channel. The two
 parts mate because the channel is slightly larger than the rail, and that
 slight difference **is** the fit. Make the difference one named number and the
@@ -155,6 +165,8 @@ really is; the assembly view is a diagnostic, not a feature of either part.
 **Mission:** Build generated cutters and path-driven attachments from data.
 
 **Clear condition:** One parameter change regenerates the pattern; final geometry still exports as a valid solid.
+
+A robot with twelve accessories should not need twelve hand-edited placements. Reuse the rake lesson: prove one shape and one location, then generate the row or path. Inspect the result after changing a count.
 
 These fixtures combine generated cutter lists, deterministic fields, path frames, arrays, and parameter-driven cavities. Focus on how each model separates generation math from final boolean intent.
 
@@ -260,6 +272,8 @@ The entrances are generated from one parametric chamber count:
 **Mission:** Build a shelled product, prove one custom cutter, then repeat it across curved walls.
 
 **Clear condition:** All four checkpoints compile and the final boolean is one body minus one generated cutter group.
+
+Imagine a tiny umbrella stand for a hedgehog who keeps bringing wet toothpicks indoors. Build its hollow body first, then one drain and one wall cutter. Only repeat a cutter after it demonstrably crosses the wall.
 
 Small examples teach syntax. This project teaches control: preserve one useful
 body while shelling it, closing it, proving a custom cutter, then generating
@@ -403,6 +417,8 @@ top/bottom margins as named bindings.
 **Mission:** Read and modify a production-scale multipart mechanism with named fit relations.
 
 **Clear condition:** A fit parameter changes both mating sides while preview-only placement leaves export geometry unchanged.
+
+This is an advanced mechanism, beyond the farm finish line. Treat it like a camera booth for a very demanding beetle: name each interface, isolate its fit, and resist changing three clearances at once.
 
 The final example is a multi-part film adapter with sliding rail joints and a two-start helicoid. Its base, insert stack, tunnel, cover, and lens carrier share fit dimensions but remain separate printable parts.
 

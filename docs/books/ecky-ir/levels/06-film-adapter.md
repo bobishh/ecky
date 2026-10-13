@@ -4,6 +4,8 @@
 
 **Clear condition:** A fit parameter changes both mating sides while preview-only placement leaves export geometry unchanged.
 
+This is an advanced mechanism, beyond the farm finish line. Treat it like a camera booth for a very demanding beetle: name each interface, isolate its fit, and resist changing three clearances at once.
+
 The final example is a multi-part film adapter with sliding rail joints and a two-start helicoid. Its base, insert stack, tunnel, cover, and lens carrier share fit dimensions but remain separate printable parts.
 
 <!-- render-source: ../examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky -->

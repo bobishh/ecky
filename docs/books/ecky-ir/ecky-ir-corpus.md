@@ -4,6 +4,12 @@ Parenthesized `.ecky` forms compile to a fixed operation set; default rendering 
 
 ## First Solid: Corner Bracket
 
+These are extra engineering exercises. For the illustrated beginner book,
+start with [Worm Farm](missions/01-worm.md): a Bézier worm grows a farm with a
+house, tools, a tractor and a garden. Return here to apply those ideas to
+practical parts. This bracket is the shelf support for a robot's emergency
+biscuit stash. Its two shapes must overlap; robots cannot eat an invisible join.
+
 A renderable file needs a `model` root, a named `part`, and geometry. The first
 useful part is a **corner bracket**: one horizontal foot and one vertical flange
 that cross at a corner and fuse into a single printable L-shape. Starting with
@@ -310,6 +316,8 @@ So `(box 12mm 1cm 1in)` is exactly `(box 12 10 25.4)`, and `(rotate 1.5708rad 0 
 **Unit suffixes convert values; they do not type-check dimensions.** `45deg` in a width slot becomes the number `45`, then the box reads it as 45 mm. Use length suffixes for lengths, angle suffixes for angles, and bare values for counts and ratios.
 
 ## Cut and Join: Mounting Plate
+
+Our robot now wants bolts, not optimism, to hold its biscuit shelf. Think of each cutter as a cookie cutter passing completely through the dough: a cutter that stops inside leaves a blind pocket.
 
 Use `build` when a part needs several boolean stages. Each `shape` names an intermediate result; `result` identifies the final geometry. Names keep cutters and later selectors readable.
 
@@ -631,6 +639,8 @@ spans multiple parts).
 
 ## Physical Fit: Dovetail Rail and Channel
 
+The shelf needs to slide out for crumb patrol. The rail stays nominal; the channel grows by a named clearance. That is the same fit idea as the mushroom roof plug, now with a polygonal cross-section.
+
 A dovetail is a sliding fit between a male rail and a female channel. The two
 parts mate because the channel is slightly larger than the rail, and that
 slight difference **is** the fit. Make the difference one named number and the
@@ -801,6 +811,8 @@ Do not delete a failing verification clause to make a render pass. Fix the model
 
 ## Real Model Patterns: Procedural Cuts and Arrayed Frames
 
+A robot with twelve accessories should not need twelve hand-edited placements. Reuse the rake lesson: prove one shape and one location, then generate the row or path. Inspect the result after changing a count.
+
 These fixtures combine generated cutter lists, deterministic fields, path frames, arrays, and parameter-driven cavities. Focus on how each model separates generation math from final boolean intent.
 
 ### Procedural perforated panel
@@ -902,6 +914,8 @@ The entrances are generated from one parametric chamber count:
 `chamber_cols` drives both cutter count and divider spacing. `col_gap` is derived from `hotel_w` and `chamber_cols`, so openings stay centered when the model is resized.
 
 ## Worked Project: Perforated Toothbrush Holder
+
+Imagine a tiny umbrella stand for a hedgehog who keeps bringing wet toothpicks indoors. Build its hollow body first, then one drain and one wall cutter. Only repeat a cutter after it demonstrably crosses the wall.
 
 Small examples teach syntax. This project teaches control: preserve one useful
 body while shelling it, closing it, proving a custom cutter, then generating
@@ -1042,6 +1056,8 @@ split topology unpredictably. Give cutter depth explicit overrun and keep safe
 top/bottom margins as named bindings.
 
 ## Final Model: Integrated Film Adapter Open Helicoid v9
+
+This is an advanced mechanism, beyond the farm finish line. Treat it like a camera booth for a very demanding beetle: name each interface, isolate its fit, and resist changing three clearances at once.
 
 The final example is a multi-part film adapter with sliding rail joints and a two-start helicoid. Its base, insert stack, tunnel, cover, and lens carrier share fit dimensions but remain separate printable parts.
 
@@ -1323,6 +1339,7 @@ Documented forms and operations. Select a name to open its signature.
 | [`for-union`](#for-union) | Array and Frame Signatures |
 | [`fuse`](#fuse) | Boolean and Transform Signatures |
 | [`grid-array`](#grid-array) | Array and Frame Signatures |
+| [`heightfield`](#heightfield) | Surface and Path Signatures |
 | [`helical-ridge`](#helical-ridge) | Special / Custom Operations |
 | [`import-stl`](#import-stl) | Primitive Signatures |
 | [`intersection`](#intersection) | Boolean and Transform Signatures |
@@ -2297,6 +2314,27 @@ This rotates the block at the origin, then moves it 20 mm along X.
 
 ## Surface and Path Signatures
 
+### `heightfield`
+
+`(heightfield image-path :width w :depth d :relief-height h :base-thickness t [:invert bool])` → native mesh solid.
+
+A raster image can drive a raised landscape. Width, depth, relief height, and
+base thickness are all required and positive. `:invert` reverses the height
+mapping. The image must be a readable staged asset; a missing image is a render
+error, not a flat fallback. FreeCAD interop does not support this operation.
+
+```scheme
+(model
+  (params (image terrain_map ""))
+  (part terrain
+    (heightfield terrain_map :width 40mm :depth 30mm
+      :relief-height 4mm :base-thickness 2mm :invert #f)))
+```
+
+Choose an image for `terrain_map` before rendering. This reference example
+needs that external input; it is not one of the self-contained farm models.
+
+
 ### `extrude`
 
 Extend a planar profile by `distance`, normally along Z for an XY sketch. `:symmetric true` distributes the extrusion about its profile plane.
@@ -2879,6 +2917,7 @@ Additional callable forms and helpers. Entries already explained in the precedin
 | `hammered` | wallPatternMode | `hammered` | mesh/native | Seeded hammered texture using deterministic noise. | `(wall-pattern (:mode hammered :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
 | `hash-signed` | numericHelper | `(hash-signed x y seed)` | freecad, legacy-build123d, mesh/native | Deterministic signed hash value for offsets and jitter. | `(hash-signed ix iy seed)` |
 | `hash01` | numericHelper | `(hash01 x y seed)` | freecad, legacy-build123d, mesh/native | Deterministic hash value in the 0..1 range for procedural variation. | `(hash01 ix iy seed)` |
+| `heightfield` | cadOp | `(heightfield image-path :width w :depth d :relief-height h :base-thickness t [:invert bool])` | mesh/native | Builds a raster heightfield with a positive base and relief height on the native mesh path. | `(heightfield image-path :width 40mm :depth 30mm :relief-height 4mm :base-thickness 2mm :invert #f)` |
 | `helical-ridge` | cadOp | `(helical-ridge :radius r :pitch p :height h :base-width w :crest-width w :depth d [:female #t] [:clearance c] [:lefthand #t])` | freecad, legacy-build123d, mesh/native | Creates a printable trapezoid ridge swept along a cylindrical helix. | `(helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)` |
 | `henon-points` | pointListHelper | `(henon-points count scale)` | freecad, legacy-build123d, mesh/native | Samples deterministic Henon map points. | `(henon-points 100 12)` |
 | `hull` | cadOp | `(hull solid...)` | mesh/native | Convex hull of the child solids as a single closed BREP solid. | `(hull (sphere 6) (translate 30 0 0 (sphere 6)))` |

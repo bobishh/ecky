@@ -3,13 +3,15 @@ import { expect, test } from '@playwright/test';
 test('Given a new reader When following chapter one Then a complete editable example accompanies the explanation', async ({ page, request }, info) => {
   await page.goto('/docs/chapters/');
   await page.getByRole('link', { name: /Chapter 01/ }).click();
-  const example = page.getByRole('link', { name: 'Download connected bracket' });
+  const example = page.getByRole('link', { name: 'Download the complete worm' });
   await expect(example).toBeVisible();
   const source = await request.get((await example.getAttribute('href'))!);
   expect(source.ok()).toBe(true);
-  expect(await source.text()).toContain('(result (union foot flange))');
+  expect(await source.text()).toContain('(body (sweep (circle 6mm) spine))');
   await expect(page.locator('.docs-main pre').first()).toContainText('(model');
-  await expect(page.locator('.docs-main')).toContainText('Change span from 64 to 80');
+  await expect(page.locator('.docs-main')).toContainText('Try');
+  await expect(page.locator('.docs-main figure img')).toBeVisible();
+  expect(await page.locator('.docs-main figure img').evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
   await expect(page.locator('.docs-main')).not.toContainText('{#');
   await expect(page.getByRole('navigation', { name: 'On this page' })).toBeVisible();
   await page.screenshot({ path: info.outputPath('chapter-desktop.png'), fullPage: true });
@@ -43,7 +45,35 @@ test('Given the rewritten chapters When the EPUB is downloaded Then it contains 
   const file = info.outputPath('guide.epub');
   writeFileSync(file, await response.body());
   const content = execFileSync('unzip', ['-p', file, 'OEBPS/content.xhtml'], { encoding: 'utf8' });
-  expect(content).toContain('Build a bracket, then an enclosure');
-  expect(content).toContain('Read the film scanner assembly');
+  expect(content).toContain('A worm with a wiggle');
+  expect(content).toContain('Open the gates, check the farm');
   expect(content).toContain('https://ecky-cad.com/docs/examples/');
+});
+
+
+test('Given a missing model When requesting its download Then server returns a real 404', async ({ request }) => {
+  const response = await request.get('/docs/examples/missing-worm.ecky');
+  expect(response.status()).toBe(404);
+  expect(await response.text()).not.toContain('<html');
+});
+
+test('Given all six chapters When following their assets Then illustrations and exact sources load', async ({ page, request }) => {
+  await page.goto('/docs/chapters/');
+  const urls = await page.locator('nav[aria-label="Chapters"] a').evaluateAll(nodes => nodes.map(n => n.getAttribute('href')!));
+  expect(urls.length).toBe(6);
+  for (const url of urls) {
+    await page.goto(url);
+    const images = page.locator('.docs-main figure img');
+    expect(await images.count()).toBeGreaterThan(0);
+    for (const image of await images.all()) {
+      const response = await request.get((await image.getAttribute('src'))!);
+      expect(response.ok()).toBe(true);
+      expect(response.headers()['content-type']).toContain('image/png');
+    }
+    for (const link of await page.locator('.docs-main a[href$=".ecky"]').all()) {
+      const response = await request.get((await link.getAttribute('href'))!);
+      expect(response.ok()).toBe(true);
+      expect(await response.text()).toContain('(model');
+    }
+  }
 });

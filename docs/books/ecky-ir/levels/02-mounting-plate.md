@@ -4,6 +4,8 @@
 
 **Clear condition:** Every cutter crosses the plate and the exported STL remains one component.
 
+Our robot now wants bolts, not optimism, to hold its biscuit shelf. Think of each cutter as a cookie cutter passing completely through the dough: a cutter that stops inside leaves a blind pocket.
+
 Use `build` when a part needs several boolean stages. Each `shape` names an intermediate result; `result` identifies the final geometry. Names keep cutters and later selectors readable.
 
 ```scheme

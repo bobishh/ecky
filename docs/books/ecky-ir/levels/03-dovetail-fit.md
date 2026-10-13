@@ -4,6 +4,8 @@
 
 **Clear condition:** Changing fit_clearance widens the channel while the rail stays nominal; no second anonymous offset needs editing.
 
+The shelf needs to slide out for crumb patrol. The rail stays nominal; the channel grows by a named clearance. That is the same fit idea as the mushroom roof plug, now with a polygonal cross-section.
+
 A dovetail is a sliding fit between a male rail and a female channel. The two
 parts mate because the channel is slightly larger than the rail, and that
 slight difference **is** the fit. Make the difference one named number and the

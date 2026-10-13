@@ -103,27 +103,29 @@ test('Given workbench dock When focused Code repeats Then inspector closes and r
 test('Given workbench dock When docs opens Then floating docs window renders lessons and closes cleanly', async ({ page }) => {
   await page.goto('/');
 
-  await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'DOCS' }).click();
+  await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Ecky IR docs', exact: true }).click();
   await expect(page.locator('.export-actions').getByRole('button', { name: /CODE/i })).toHaveCount(0);
 
   const docsWindow = page.locator('[data-window-id="docs"]');
   await expect(docsWindow).toBeVisible();
-  await expect(docsWindow.getByRole('heading', { name: 'Ecky Campaign' })).toBeVisible();
-  await expect(docsWindow.getByRole('button', { name: 'Level 01: Corner Bracket' })).toBeVisible();
-  await expect(docsWindow.getByRole('button', { name: 'Level 06: Film Adapter' })).toBeVisible();
+  await expect(docsWindow.getByRole('heading', { name: 'Worm Farm' })).toBeVisible();
+  await expect(docsWindow.getByRole('button', { name: 'Chapter 1: A worm with a wiggle' })).toBeVisible();
+  await expect(docsWindow.getByRole('button', { name: 'Chapter 6: Open the gates, check the farm' })).toBeVisible();
 
-  await docsWindow.getByRole('button', { name: 'Level 01: Corner Bracket' }).click();
-  await expect(docsWindow.getByRole('heading', { name: 'Level 01: Corner Bracket' })).toBeVisible();
+  await docsWindow.getByRole('button', { name: 'Chapter 1: A worm with a wiggle' }).click();
+  await expect(docsWindow.getByRole('heading', { name: 'Chapter 1: A worm with a wiggle' })).toBeVisible();
   await expect(docsWindow.locator('pre').first()).toContainText('(model');
-  // Level 01 (Corner Bracket) is intentionally imageless; its signature lesson is the overlapping union.
+  const illustration = docsWindow.locator('figure img').first();
+  await expect(illustration).toBeVisible();
+  await expect.poll(() => illustration.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
   await expect(docsWindow.locator('pre').filter({ hasText: '(union' }).first()).toBeVisible();
   await docsWindow.getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }).click();
-  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Corner Bracket.ecky' });
+  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A worm with a wiggle.ecky' });
   await expect(codeModal).toBeVisible();
   await expect(codeModal).toHaveClass(/window--focused/);
   await expect(docsWindow).not.toHaveClass(/window--focused/);
   expect(await numericZIndex(codeModal)).toBeGreaterThan(await numericZIndex(docsWindow));
-  await expect(codeModal.locator('.cm-content')).toContainText('(box 40 8 6)');
+  await expect(codeModal.locator('.cm-content')).toContainText('(body (sweep (circle 6mm) spine))');
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toHaveCount(0);
   await expect(codeModal.getByRole('button', { name: 'INSERT VERIFY' })).toBeVisible();
@@ -133,11 +135,11 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(codeModal).toBeHidden();
   await expect(docsWindow).toHaveClass(/window--focused/);
 
-  await docsWindow.getByRole('button', { name: 'Level 05: Perforated Toothbrush Holder' }).click();
-  await expect(docsWindow.getByRole('heading', { name: 'Level 05: Perforated Toothbrush Holder' })).toBeVisible();
+  await docsWindow.getByRole('button', { name: 'Chapter 5: A fence, a carrot, and a reusable recipe' }).click();
+  await expect(docsWindow.getByRole('heading', { name: 'Chapter 5: A fence, a carrot, and a reusable recipe' })).toBeVisible();
   await expect(docsWindow.locator('pre').first()).toContainText('(model');
   await docsWindow.getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }).click();
-  const tutorialModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Perforated Toothbrush Holder.ecky' });
+  const tutorialModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A fence, a carrot, and a reusable recipe.ecky' });
   await expect(tutorialModal).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'COPY CODE' })).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
@@ -155,12 +157,12 @@ test('Given workbench dock When docs opens Then floating docs window renders les
 
 test('Given fresh thread When docs snippet opens in code Then modal can apply as live code', async ({ page }) => {
   await page.goto('/');
-  await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'DOCS' }).click();
+  await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Ecky IR docs', exact: true }).click();
   const docsWindow = page.locator('[data-window-id="docs"]');
-  await docsWindow.getByRole('button', { name: 'Level 01: Corner Bracket' }).click();
+  await docsWindow.getByRole('button', { name: 'Chapter 1: A worm with a wiggle' }).click();
   await docsWindow.getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }).click();
 
-  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Corner Bracket.ecky' });
+  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A worm with a wiggle.ecky' });
   await expect(codeModal).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
 });

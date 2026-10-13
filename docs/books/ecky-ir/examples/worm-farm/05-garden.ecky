@@ -1,0 +1,18 @@
+(define-component fence_post ((number x 0mm) (number height 22mm))
+    (translate x 0 0
+      (union
+        (cylinder 2mm height)
+        (translate 0 0 height (cone 3mm 0mm 5mm)))))
+(model
+  (params (number posts 6 :label "Fence posts" :min 3 :max 9 :step 1))
+
+  (part fence
+    (union
+      (repeat-union i posts (fence_post :x (* i 9mm)))
+      (translate (/ (* (- posts 1) 9mm) 2) 0 8mm
+        (box (+ (* (- posts 1) 9mm) 4mm) 2mm 3mm))
+      (translate (/ (* (- posts 1) 9mm) 2) 0 16mm
+        (box (+ (* (- posts 1) 9mm) 4mm) 2mm 3mm))))
+  (part carrot
+    (translate 20mm -12mm 0
+      (loft 18mm (circle 1mm) (regular-polygon 6 5mm)))))

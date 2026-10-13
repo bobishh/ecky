@@ -30,7 +30,7 @@
                      (<= 4 8) (even? 4) (odd? 3) (list? seed-values)
                      (not (null? seed-values)) (not (empty? seed-values)))
               (clamp (lerp 12 (+ 12 (smoothstep 0 1 0.5)) 0.5) 8 24)
-              hub-floor))
+              hub-floor)))
       (if symmetric-hub
         (box (+ safe-radius (abs (- sum product))) 8 (+ 4 (floor (+ trig units noise limits))))
         (box safe-radius 8 4)))))))

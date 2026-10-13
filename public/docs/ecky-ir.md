@@ -31,6 +31,7 @@ Documented forms and operations. Select a name to open its signature.
 | [`for-union`](#for-union) | Array and Frame Signatures |
 | [`fuse`](#fuse) | Boolean and Transform Signatures |
 | [`grid-array`](#grid-array) | Array and Frame Signatures |
+| [`heightfield`](#heightfield) | Surface and Path Signatures |
 | [`helical-ridge`](#helical-ridge) | Special / Custom Operations |
 | [`import-stl`](#import-stl) | Primitive Signatures |
 | [`intersection`](#intersection) | Boolean and Transform Signatures |
@@ -1004,6 +1005,27 @@ Reflect across the plane perpendicular to the named axis at `offset`. For exampl
 This rotates the block at the origin, then moves it 20 mm along X.
 
 ## Surface and Path Signatures
+
+### `heightfield`
+
+`(heightfield image-path :width w :depth d :relief-height h :base-thickness t [:invert bool])` → native mesh solid.
+
+A raster image can drive a raised landscape. Width, depth, relief height, and
+base thickness are all required and positive. `:invert` reverses the height
+mapping. The image must be a readable staged asset; a missing image is a render
+error, not a flat fallback. FreeCAD interop does not support this operation.
+
+```scheme
+(model
+  (params (image terrain_map ""))
+  (part terrain
+    (heightfield terrain_map :width 40mm :depth 30mm
+      :relief-height 4mm :base-thickness 2mm :invert #f)))
+```
+
+Choose an image for `terrain_map` before rendering. This reference example
+needs that external input; it is not one of the self-contained farm models.
+
 
 ### `extrude`
 

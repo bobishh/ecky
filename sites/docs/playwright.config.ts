@@ -27,7 +27,7 @@ export default defineConfig({
     command: `npm run build:docs-site && npm run build:book && node sites/docs/serve.mjs`,
     url: `${url}/docs/`,
     cwd: repoRoot,
-    reuseExistingServer: true,
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 });

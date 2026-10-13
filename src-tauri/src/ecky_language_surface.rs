@@ -188,6 +188,7 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
 pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &[
     "mesh",
     "polyhedron",
+    "heightfield",
     "protrude",
     "wall-pattern",
     "surface-trim",
@@ -1344,7 +1345,7 @@ fn boolean_reference(name: &str) -> SurfaceReferenceEntry {
 fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEntry {
     let support = if matches!(
         name,
-        "mesh" | "polyhedron" | "protrude" | "wall-pattern" | "mesh-anchor"
+        "mesh" | "polyhedron" | "heightfield" | "protrude" | "wall-pattern" | "mesh-anchor"
     ) {
         "native mesh only; rejected by FreeCAD interop"
     } else if matches!(name, "hull" | "voronoi-cell" | "import-step") {
@@ -1358,6 +1359,7 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "mesh" => ref_entry(name, "cadOp", "(mesh :vertices ((x y z) ...) :triangles ((a b c) ...))", "mesh", "Creates bounded indexed triangle geometry. Open orientable surfaces are allowed; invalid indices, degenerate faces, duplicates, non-manifold edges, or inconsistent winding reject.", true, support, "(mesh :vertices ((0 0 0) (10 0 0) (0 10 0)) :triangles ((0 1 2)))", &["Use zero-based integer triangle indices.", "Open mesh preview may render but remains non-printable until boundary edges are closed."]),
         "polyhedron" => ref_entry(name, "cadOp", "(polyhedron :vertices ((x y z) ...) :triangles ((a b c) ...))", "solid", "Creates one closed orientable indexed triangle solid after deterministic topology validation.", true, support, "(polyhedron :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))", &["Requires zero boundary edges, zero non-manifold edges, consistent winding, one component, and non-zero signed volume."]),
         "protrude" => ref_entry(name, "cadOp", "(protrude image-path height [:width w] [:depth d] [:fit contain|stretch] [:foreground dark|light])", "solid/mesh", "Raises continuous raster foreground coverage above local Z=0. One physical dimension preserves source aspect ratio; two contain and center by default. `:fit stretch` explicitly fills a non-matching box. Transparent pixels remain empty; an internal closure epsilon stays below the authored base plane.", true, support, "(protrude image-path 4 :width 100 :depth 70 :fit contain :foreground dark)", &["At least one of `:width` or `:depth` is required.", "Dark maps alpha*(1-luminance); light maps alpha*luminance.", "Image path must reference a readable staged PNG, JPEG, or WebP asset."]),
+        "heightfield" => ref_entry(name, "cadOp", "(heightfield image-path :width w :depth d :relief-height h :base-thickness t [:invert bool])", "solid/mesh", "Builds a raster heightfield with a positive base and relief height on the native mesh path.", true, support, "(heightfield image-path :width 40mm :depth 30mm :relief-height 4mm :base-thickness 2mm :invert #f)", &["All four dimensions are required, finite and positive.", "Image path must reference a readable staged raster asset.", "FreeCAD interop rejects this native mesh operation."]),
         "mesh-anchor" => ref_entry(name, "cadOp", "(mesh-anchor triangle-index barycentric-0 barycentric-1 barycentric-2)", "surface-trim anchor", "Declares one exact triangle seed used inside a native mesh `surface-trim` path.", true, support, "(mesh-anchor 42 0.2 0.3 0.5)", &["Nested helper for `surface-trim`; not standalone geometry."]),
         "box" => ref_entry(name, "cadOp", "(box x y z :align '(x y z))", "solid", "Creates an axis-aligned rectangular solid.", true, support, "(box 40 20 10 :align '(min center min))", &[]),
         "sphere" => ref_entry(name, "cadOp", "(sphere radius)", "solid", "Creates a sphere.", true, support, "(sphere 12)", &[]),

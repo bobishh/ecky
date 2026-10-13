@@ -4,6 +4,12 @@
 
 **Clear condition:** Preview shows one connected L-bracket where the foot and flange overlap, and the source compiles.
 
+These are extra engineering exercises. For the illustrated beginner book,
+start with [Worm Farm](missions/01-worm.md): a Bézier worm grows a farm with a
+house, tools, a tractor and a garden. Return here to apply those ideas to
+practical parts. This bracket is the shelf support for a robot's emergency
+biscuit stash. Its two shapes must overlap; robots cannot eat an invisible join.
+
 A renderable file needs a `model` root, a named `part`, and geometry. The first
 useful part is a **corner bracket**: one horizontal foot and one vertical flange
 that cross at a corner and fuse into a single printable L-shape. Starting with
